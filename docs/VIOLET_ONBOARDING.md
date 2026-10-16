@@ -16,10 +16,15 @@ name may move to a different label, and only when exactly one usable canonical
 token exists. Update also repairs an unavailable
 `env:VIOLET_SLACK_TOKEN_CASSY_PROXY` in project and user proxy files, including
 unmarked files, when exactly one account bearer reference is registered in a
-production Claude/Codex profile and its credential is usable. Exported tokens
-alone cannot select an account. Multiple registered accounts refuse with
-`ambiguous_violet_credential`; custom refs, custom endpoints, working defaults,
-comments and dispatch policy are preserved. The persisted repair serves both
+active or explicitly configured production Claude/Codex profile and its
+credential is usable. Backup profile directories and exported tokens alone
+cannot select an account. Full update repairs account registrations before
+refreshing project proxies, so one run converges. Multiple registered accounts
+refuse the write with `ambiguous_violet_credential`; absent accounts, malformed,
+symlinked or foreign-owned proxy files produce warnings in update and doctor
+while rules and skills continue syncing. Custom refs, custom endpoints, working
+defaults (including managed runtime selection), comments and dispatch policy
+are preserved. The persisted repair serves both
 `cas violet` and the `cas serve` upstream used by MCP artifact posting. Every
 mapping prints variable names only. `PASS (Cassy launches)` covers `cas claude` and `cas codex`; the
 receipt names references absent from the updater's exported environment. Export

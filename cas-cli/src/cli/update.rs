@@ -1147,6 +1147,10 @@ fn refresh_all_projects_with_user_refresh(
     let discovery = discover_local_projects(current_cas_root);
     let mut receipts = Vec::with_capacity(discovery.projects.len());
 
+    // Account registrations must converge before project proxies choose their
+    // bearer. Keep this phase advisory and run it once for the whole update.
+    let (user_level, user_details) = capture_phase(!cli.json, user_refresh);
+
     for project in &discovery.projects {
         let project = project.clone();
         let cas_root = project.join(".cas");
@@ -1227,8 +1231,6 @@ fn refresh_all_projects_with_user_refresh(
         });
     }
 
-    let (user_level, user_details) =
-        capture_phase(!cli.json, user_refresh);
     print_project_refresh_summary(
         &receipts,
         &user_level,

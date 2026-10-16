@@ -133,9 +133,17 @@ fn cas_8235_update_preserves_custom_refs_and_a_usable_default() {
             capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
         result.unwrap();
         if mode == "unregistered" {
-            assert!(output.contains("missing_registered_violet_credential"), "{output}");
+            assert!(
+                output.contains("missing_registered_violet_credential"),
+                "{output}"
+            );
             // pin: the installed builtin path proves sync progressed past Violet.
-        assert!(root.parent().unwrap().join(".claude/skills/cas-worker/SKILL.md").is_file());
+            assert!(
+                root.parent()
+                    .unwrap()
+                    .join(".claude/skills/cas-worker/SKILL.md")
+                    .is_file()
+            );
         }
         assert_eq!(std::fs::read_to_string(path).unwrap(), original, "{mode}");
         assert!(!output.contains("cas-8235-private-fixture"));
@@ -195,7 +203,8 @@ fn cas_8235_update_uses_private_registered_credential_without_writing_its_value(
     std::fs::write(&path, cas_8235_proxy("env:VIOLET_SLACK_TOKEN_CASSY_PROXY")).unwrap();
     let mut args = update_test_args();
     args.sync = true;
-    let (result, output) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+    let (result, output) =
+        capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
     result.unwrap();
     let written = std::fs::read_to_string(path).unwrap();
     assert!(written.contains("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"));
@@ -213,23 +222,39 @@ fn cas_8235_review_proxy_refusals_warn_and_continue_sync_and_doctor() {
         env.set("CAS_ROOT", &root);
         let user = cmcp_core::config::Scope::User.config_path().unwrap();
         std::fs::create_dir_all(user.parent().unwrap()).unwrap();
-        let original = if mode == "malformed" { "[servers.violet\nauth = 'private-malformed-value'".to_owned() }
-            else { cas_8235_proxy("env:VIOLET_SLACK_TOKEN_CASSY_PROXY") };
+        let original = if mode == "malformed" {
+            "[servers.violet\nauth = 'private-malformed-value'".to_owned()
+        } else {
+            cas_8235_proxy("env:VIOLET_SLACK_TOKEN_CASSY_PROXY")
+        };
         let target = env.home().join("proxy-target.toml");
         if mode == "symlink" {
             std::fs::write(&target, &original).unwrap();
             std::os::unix::fs::symlink(&target, &user).unwrap();
-        } else { std::fs::write(&user, &original).unwrap(); }
-        let mut args = update_test_args(); args.sync = true;
-        let (result, output) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+        } else {
+            std::fs::write(&user, &original).unwrap();
+        }
+        let mut args = update_test_args();
+        args.sync = true;
+        let (result, output) =
+            capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
         result.unwrap();
         assert!(output.contains("warning: Violet"), "{mode}: {output}");
         assert!(!output.contains("private-malformed-value"));
         assert_eq!(std::fs::read_to_string(&user).unwrap(), original);
         // pin: the installed builtin path proves sync progressed past Violet.
-        assert!(root.parent().unwrap().join(".claude/skills/cas-worker/SKILL.md").is_file());
+        assert!(
+            root.parent()
+                .unwrap()
+                .join(".claude/skills/cas-worker/SKILL.md")
+                .is_file()
+        );
         let row = crate::cli::integrate::violet::doctor_row_from_env(None).unwrap();
-        assert_eq!(row.severity, crate::cli::integrate::violet::DoctorSeverity::Warning, "{row:?}");
+        assert_eq!(
+            row.severity,
+            crate::cli::integrate::violet::DoctorSeverity::Warning,
+            "{row:?}"
+        );
         assert!(row.message.contains(&user.display().to_string()), "{row:?}");
         assert!(!row.message.contains("private-malformed-value"));
     }
@@ -244,23 +269,38 @@ fn cas_8235_review_backups_do_not_select_accounts_and_managed_defaults_keep_runt
         env.set("CAS_ROOT", &root);
         let backup = env.home().join(".claude-backup");
         std::fs::create_dir_all(&backup).unwrap();
-        std::fs::write(backup.join(".claude.json"), serde_json::json!({"mcpServers":{"violet":{
+        std::fs::write(
+            backup.join(".claude.json"),
+            serde_json::json!({"mcpServers":{"violet":{
             "url":cas_types::violet_compatibility::violet_hub_url(),
-            "headers":{"Authorization":"Bearer ${VIOLET_SLACK_TOKEN_STALE_BACKUP}"}}}}).to_string()).unwrap();
-        if mode == "generic" { env.set("VIOLET_SLACK_TOKEN", "private-generic"); }
+            "headers":{"Authorization":"Bearer ${VIOLET_SLACK_TOKEN_STALE_BACKUP}"}}}})
+            .to_string(),
+        )
+        .unwrap();
+        if mode == "generic" {
+            env.set("VIOLET_SLACK_TOKEN", "private-generic");
+        }
         if mode == "selector" {
             env.set("VIOLET_SLACK_TOKEN_ENV", "VIOLET_SLACK_TOKEN_SELECTED");
             env.set("VIOLET_SLACK_TOKEN_SELECTED", "private-selected");
         }
         let user = cmcp_core::config::Scope::User.config_path().unwrap();
         std::fs::create_dir_all(user.parent().unwrap()).unwrap();
-        let original = format!("{}{}", if mode == "backup" { "" } else { "# managed\n" }, cas_8235_proxy("env:VIOLET_SLACK_TOKEN_CASSY_PROXY"));
+        let original = format!(
+            "{}{}",
+            if mode == "backup" { "" } else { "# managed\n" },
+            cas_8235_proxy("env:VIOLET_SLACK_TOKEN_CASSY_PROXY")
+        );
         std::fs::write(&user, &original).unwrap();
-        let mut args=update_test_args(); args.sync=true;
+        let mut args = update_test_args();
+        args.sync = true;
         execute(&args, &update_test_cli(true), Some(&root)).unwrap();
         let written = std::fs::read_to_string(&user).unwrap();
-        if mode == "backup" { assert!(written.contains("env:VIOLET_SLACK_TOKEN_SOUNDWAVE")); }
-        else { assert_eq!(written, original, "{mode}"); }
+        if mode == "backup" {
+            assert!(written.contains("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"));
+        } else {
+            assert_eq!(written, original, "{mode}");
+        }
     }
 }
 
@@ -271,7 +311,10 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
     struct Probe;
     impl HubProbe for Probe {
         fn list_tools(&self, _: &cmcp_core::config::ServerConfig) -> ProbeOutcome {
-            ProbeOutcome::Tools { tools: vec!["violet_read".into(), "violet_post".into()], schema_problems: vec![] }
+            ProbeOutcome::Tools {
+                tools: vec!["violet_read".into(), "violet_post".into()],
+                schema_problems: vec![],
+            }
         }
     }
     let mut env = cas_8235_fixture();
@@ -283,40 +326,84 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
     env.set("XDG_CONFIG_HOME", home.join(".config"));
     env.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
     let projects = home.join("projects");
-    let roots: Vec<_> = ["first", "second"].iter().map(|name| {
-        let project = projects.join(name);
-        std::fs::create_dir_all(&project).unwrap();
-        assert!(std::process::Command::new("git").args(["init", "--quiet"]).arg(&project).status().unwrap().success());
-        crate::store::init_cas_dir(&project).unwrap()
-    }).collect();
+    let roots: Vec<_> = ["first", "second"]
+        .iter()
+        .map(|name| {
+            let project = projects.join(name);
+            std::fs::create_dir_all(&project).unwrap();
+            assert!(
+                std::process::Command::new("git")
+                    .args(["init", "--quiet"])
+                    .arg(&project)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            crate::store::init_cas_dir(&project).unwrap()
+        })
+        .collect();
     env.set("CAS_PROJECT_ROOTS", &projects);
     env.set("CAS_ROOT", &roots[0]);
-    let old = cas_types::violet_compatibility::violet_compatibility().legacy_token_prefix.to_owned() + "_CASSY_PROXY";
+    let old = cas_types::violet_compatibility::violet_compatibility()
+        .legacy_token_prefix
+        .to_owned()
+        + "_CASSY_PROXY";
     // pin: the legacy Authorization wire shape is the upgrade fixture input.
-    std::fs::write(home.join(".claude.json"), serde_json::json!({"mcpServers":{"violet":{
+    std::fs::write(
+        home.join(".claude.json"),
+        serde_json::json!({"mcpServers":{"violet":{
         "url":cas_types::violet_compatibility::violet_hub_url(),
-        "headers":{"Authorization":format!("Bearer ${{{old}}}")}}}}).to_string()).unwrap();
+        "headers":{"Authorization":format!("Bearer ${{{old}}}")}}}})
+        .to_string(),
+    )
+    .unwrap();
     let original = cas_8235_proxy("env:VIOLET_SLACK_TOKEN_CASSY_PROXY");
-    for root in &roots { std::fs::write(root.join("proxy.toml"), &original).unwrap(); }
+    for root in &roots {
+        std::fs::write(root.join("proxy.toml"), &original).unwrap();
+    }
     let user = cmcp_core::config::Scope::User.config_path().unwrap();
-    std::fs::create_dir_all(user.parent().unwrap()).unwrap(); std::fs::write(&user, &original).unwrap();
-    let mut args = update_test_args(); args.all_projects=true;
+    std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+    std::fs::write(&user, &original).unwrap();
+    let mut args = update_test_args();
+    args.all_projects = true;
     let cli = update_test_cli(false);
     // Inject only the network probe; run the real user store/builtin phases
     // and the entire native per-project loop, including rules/skills sync.
-    let (result, output) = capture_phase(true, || refresh_all_projects_with_user_refresh(
-        &args, &cli, Some(&roots[0]), None, None, None,
-        || refresh_user_level_store_with_builtins(&args, &cli, || sync_user_builtins_with_violet(&cli,
-            || crate::cli::integrate::violet_retirement::migrate_installed_hub_on_update_with_probe(&Probe))))) ;
+    let (result, output) = capture_phase(true, || {
+        refresh_all_projects_with_user_refresh(
+            &args,
+            &cli,
+            Some(&roots[0]),
+            None,
+            None,
+            None,
+            || {
+                refresh_user_level_store_with_builtins(&args, &cli, || {
+                    sync_user_builtins_with_violet(&cli, || {
+                        crate::cli::integrate::violet_retirement::migrate_installed_hub_on_update_with_probe(&Probe)
+                    })
+                })
+            },
+        )
+    });
     let report = result.unwrap();
     assert_eq!(report.project_count, 2, "{output}");
     assert_eq!(report.failed_count, 0, "{output}");
     for root in &roots {
         let raw = std::fs::read_to_string(root.join("proxy.toml")).unwrap();
         let doc: toml::Value = toml::from_str(&raw).unwrap();
-        assert_eq!(doc["servers"]["violet"]["auth"].as_str(), Some("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"), "{output}");
+        assert_eq!(
+            doc["servers"]["violet"]["auth"].as_str(),
+            Some("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"),
+            "{output}"
+        );
         // pin: the installed builtin path proves sync progressed past Violet.
-        assert!(root.parent().unwrap().join(".claude/skills/cas-worker/SKILL.md").is_file());
+        assert!(
+            root.parent()
+                .unwrap()
+                .join(".claude/skills/cas-worker/SKILL.md")
+                .is_file()
+        );
     }
     assert!(!output.contains("cas-8235-private-fixture"));
 }

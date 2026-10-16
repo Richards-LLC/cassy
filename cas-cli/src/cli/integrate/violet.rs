@@ -3296,7 +3296,11 @@ pub fn doctor_row_from_env(project_proxy: Option<&Path>) -> Option<DoctorRow> {
     if !advisories.is_empty() {
         return Some(DoctorRow {
             severity: DoctorSeverity::Warning,
-            message: advisories.into_iter().map(|(path, reason)| format!("{}: {reason}", path.display())).collect::<Vec<_>>().join("; "),
+            message: advisories
+                .into_iter()
+                .map(|(path, reason)| format!("{}: {reason}", path.display()))
+                .collect::<Vec<_>>()
+                .join("; "),
         });
     }
     let env = ProcessEnv;

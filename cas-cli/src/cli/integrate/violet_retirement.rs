@@ -322,7 +322,10 @@ pub fn retire_project_proxy(path: &Path) -> Result<bool> {
 /// Host-wide update calls it for each discovered project's native sync phase.
 pub fn repair_proxy_credentials_on_update(project_proxy: Option<&Path>) {
     for (path, reason) in proxy_update_advisories(project_proxy, true) {
-        eprintln!("warning: Violet update advisory: {}: {reason}", path.display());
+        eprintln!(
+            "warning: Violet update advisory: {}: {reason}",
+            path.display()
+        );
     }
 }
 
@@ -335,48 +338,83 @@ fn proxy_update_advisories(project_proxy: Option<&Path>, apply: bool) -> Vec<(Pa
     let mut update = None;
     let mut report = ProfileRetirement::default();
     let mut paths = Vec::new();
-    if let Ok(user) = Scope::User.config_path() { paths.push(user); }
+    if let Ok(user) = Scope::User.config_path() {
+        paths.push(user);
+    }
     paths.extend(project_proxy.map(Path::to_path_buf));
-    paths.sort(); paths.dedup();
+    paths.sort();
+    paths.dedup();
     let mut warnings = Vec::new();
     for path in paths {
         // Each file is independent: a bad user proxy cannot strand a healthy
         // project's repair or prevent its rules and skills from syncing.
         let result = (|| -> Result<()> {
-            if !path.try_exists()? { return Ok(()); }
+            match std::fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error.into()),
+                Ok(_) => {}
+            }
             validate_proxy_owner(&path)?;
             let modified = std::fs::metadata(&path)?.modified().ok();
             let raw = ifs::read_capped(&path)?;
-            let mut doc: toml_edit::DocumentMut = raw.parse()
+            let mut doc: toml_edit::DocumentMut = raw
+                .parse()
                 .map_err(|_| anyhow::anyhow!("parsing Violet proxy config {}", path.display()))?;
-            if !default_proxy_auth(&doc) { return Ok(()); }
+            if !default_proxy_auth(&doc) {
+                return Ok(());
+            }
             if update.is_none() {
                 if let Some((path, reason)) = cas_pty::violet_env::warn_credentials_file_for_cli() {
-                    anyhow::bail!("Violet credential repair refused {}: {reason}", path.display());
+                    anyhow::bail!(
+                        "Violet credential repair refused {}: {reason}",
+                        path.display()
+                    );
                 }
-                let home = dirs::home_dir().context("could not determine HOME for Violet migration")?;
-                update = Some(UpdateMigration::new(&home, cas_pty::violet_env::resolved_environment(&[], &[]), &ProxyHubProbe));
+                let home =
+                    dirs::home_dir().context("could not determine HOME for Violet migration")?;
+                update = Some(UpdateMigration::new(
+                    &home,
+                    cas_pty::violet_env::resolved_environment(&[], &[]),
+                    &ProxyHubProbe,
+                ));
             }
             let update = update.as_ref().expect("initialized above");
-            let Some(replacement) = update.proxy_auth_replacement(&doc, &path)? else { return Ok(()); };
+            let Some(replacement) = update.proxy_auth_replacement(&doc, &path)? else {
+                return Ok(());
+            };
             if apply {
-                set_string(&mut doc["servers"][VIOLET_SERVER]["auth"], &format!("env:{replacement}"));
-                anyhow::ensure!(ifs::atomic_write_if_unchanged(&path, &raw, modified, &doc.to_string())?,
-                    "Violet proxy config changed during credential repair at {}; retry cas update", path.display());
-                report.credential_repair(format!("{}: VIOLET_SLACK_TOKEN_CASSY_PROXY → {replacement} (registered account)", path.display()));
+                set_string(
+                    &mut doc["servers"][VIOLET_SERVER]["auth"],
+                    &format!("env:{replacement}"),
+                );
+                anyhow::ensure!(
+                    ifs::atomic_write_if_unchanged(&path, &raw, modified, &doc.to_string())?,
+                    "Violet proxy config changed during credential repair at {}; retry cas update",
+                    path.display()
+                );
+                report.credential_repair(format!(
+                    "{}: VIOLET_SLACK_TOKEN_CASSY_PROXY → {replacement} (registered account)",
+                    path.display()
+                ));
             }
             Ok(())
         })();
-        if let Err(error) = result { warnings.push((path, error.to_string())); }
+        if let Err(error) = result {
+            warnings.push((path, error.to_string()));
+        }
     }
     warnings
 }
 
 fn validate_proxy_owner(path: &Path) -> Result<()> {
     #[cfg(unix)]
-    { validate_proxy_owner_for_uid(path, unsafe { libc::geteuid() })?; }
+    {
+        validate_proxy_owner_for_uid(path, unsafe { libc::geteuid() })?;
+    }
     #[cfg(not(unix))]
-    { std::fs::symlink_metadata(path)?; }
+    {
+        std::fs::symlink_metadata(path)?;
+    }
     Ok(())
 }
 
@@ -384,15 +422,22 @@ fn validate_proxy_owner(path: &Path) -> Result<()> {
 fn validate_proxy_owner_for_uid(path: &Path, current_uid: u32) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     let metadata = std::fs::symlink_metadata(path)?;
-    anyhow::ensure!(metadata.uid() == current_uid,
+    anyhow::ensure!(
+        metadata.uid() == current_uid,
         "foreign_owned_violet_proxy: {} is owned by uid {}, expected uid {}; refusing write",
-        path.display(), metadata.uid(), current_uid);
+        path.display(),
+        metadata.uid(),
+        current_uid
+    );
     Ok(())
 }
 
 fn managed_user_default(doc: &toml_edit::DocumentMut, path: &Path) -> bool {
     Scope::User.config_path().is_ok_and(|user| user == path)
-        && doc.to_string().lines().any(|line| line.trim() == "# managed")
+        && doc
+            .to_string()
+            .lines()
+            .any(|line| line.trim() == "# managed")
         && default_proxy_auth(doc)
 }
 
@@ -410,10 +455,11 @@ fn default_proxy_auth(doc: &toml_edit::DocumentMut) -> bool {
 }
 
 /// Only bearer references at the production hub are account registrations.
-/// Inspect the same HOME/explicit profile roots as the installed-hub migration;
-/// an unrelated exported token or a custom endpoint cannot select an account.
+/// Inspect the active/default and explicitly configured runtime profiles;
+/// backup directories, unrelated exports and custom endpoints cannot select an account.
 fn registered_update_accounts(home: &Path) -> std::collections::BTreeSet<String> {
-    let mut environment = BTreeMap::from([("HOME".to_owned(), home.to_string_lossy().into_owned())]);
+    let mut environment =
+        BTreeMap::from([("HOME".to_owned(), home.to_string_lossy().into_owned())]);
     let mut roots: Vec<_> = home.canonicalize().ok().into_iter().collect();
     for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME"] {
         if let Some(path) = std::env::var_os(key).map(PathBuf::from) {
@@ -423,21 +469,46 @@ fn registered_update_accounts(home: &Path) -> std::collections::BTreeSet<String>
     }
     let mut names = std::collections::BTreeSet::new();
     for harness in ["claude", "codex"] {
-        let (path, references) = cas_pty::violet_env::registration_token_references(harness, &environment);
-        let Ok(Some(path)) = profile_target(&roots, &path) else { continue };
-        let Ok(raw) = ifs::read_capped(&path) else { continue };
-        let production = if harness == "claude" {
-            serde_json::from_str::<serde_json::Value>(&raw).ok()
-                .is_some_and(|doc| doc["mcpServers"][VIOLET_SERVER]["url"].as_str().is_some_and(is_violet_hub_url))
-        } else {
-            raw.parse::<toml_edit::DocumentMut>().ok().is_some_and(|doc|
-                doc.get("mcp_servers").and_then(|s| s.get(VIOLET_SERVER))
-                    .and_then(|entry| entry.get("url")).and_then(|v| v.as_str()).is_some_and(is_violet_hub_url))
+        let (path, references) =
+            cas_pty::violet_env::registration_token_references(harness, &environment);
+        let Ok(Some(path)) = profile_target(&roots, &path) else {
+            continue;
         };
-        if !production { continue; }
-        for token in references.into_iter().map(|name| canonical_violet_credential_name(&name)) {
-            if UpdateMigration::managed_token(&token) && token != "VIOLET_SLACK_TOKEN_CASSY_PROXY"
-                && token.bytes().all(|b| b == b'_' || b.is_ascii_alphanumeric()) {
+        let Ok(raw) = ifs::read_capped(&path) else {
+            continue;
+        };
+        let production = if harness == "claude" {
+            serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .is_some_and(|doc| {
+                    doc["mcpServers"][VIOLET_SERVER]["url"]
+                        .as_str()
+                        .is_some_and(is_violet_hub_url)
+                })
+        } else {
+            raw.parse::<toml_edit::DocumentMut>()
+                .ok()
+                .is_some_and(|doc| {
+                    doc.get("mcp_servers")
+                        .and_then(|s| s.get(VIOLET_SERVER))
+                        .and_then(|entry| entry.get("url"))
+                        .and_then(|v| v.as_str())
+                        .is_some_and(is_violet_hub_url)
+                })
+        };
+        if !production {
+            continue;
+        }
+        for token in references
+            .into_iter()
+            .map(|name| canonical_violet_credential_name(&name))
+        {
+            if UpdateMigration::managed_token(&token)
+                && token != "VIOLET_SLACK_TOKEN_CASSY_PROXY"
+                && token
+                    .bytes()
+                    .all(|b| b == b'_' || b.is_ascii_alphanumeric())
+            {
                 names.insert(token);
             }
         }
@@ -731,30 +802,51 @@ impl<'a> UpdateMigration<'a> {
         }
     }
 
-    fn proxy_auth_replacement(&self, doc: &toml_edit::DocumentMut, path: &Path) -> Result<Option<String>> {
+    fn proxy_auth_replacement(
+        &self,
+        doc: &toml_edit::DocumentMut,
+        path: &Path,
+    ) -> Result<Option<String>> {
         if !default_proxy_auth(doc) || self.usable("VIOLET_SLACK_TOKEN_CASSY_PROXY") {
             return Ok(None);
         }
         // Rewriting a managed default disables its explicit selector/generic
         // fallback. Preserve it whenever the real runtime can already resolve it.
         if managed_user_default(doc, path)
-            && crate::cli::violet_cmd::credentials::managed_token_value().is_ok() {
+            && crate::cli::violet_cmd::credentials::managed_token_value().is_ok()
+        {
             return Ok(None);
         }
         let accounts = registered_update_accounts(&self.home);
-        anyhow::ensure!(accounts.len() <= 1,
+        anyhow::ensure!(
+            accounts.len() <= 1,
             "ambiguous_violet_credential: {}: multiple registered account credentials ({}); no reference changed",
-            path.display(), accounts.iter().cloned().collect::<Vec<_>>().join(", "));
+            path.display(),
+            accounts.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
         let replacement = accounts.first().with_context(|| format!(
             "missing_registered_violet_credential: {}: VIOLET_SLACK_TOKEN_CASSY_PROXY is empty or unset and no account bearer reference is registered; no reference changed", path.display()))?;
         self.value(replacement)?;
         Ok(Some(replacement.clone()))
     }
 
-    fn repair_proxy_auth(&self, doc: &mut toml_edit::DocumentMut, path: &Path, report: &mut ProfileRetirement) -> Result<bool> {
-        let Some(replacement) = self.proxy_auth_replacement(doc, path)? else { return Ok(false) };
-        set_string(&mut doc["servers"][VIOLET_SERVER]["auth"], &format!("env:{replacement}"));
-        report.credential_repair(format!("{}: VIOLET_SLACK_TOKEN_CASSY_PROXY → {replacement} (registered account)", path.display()));
+    fn repair_proxy_auth(
+        &self,
+        doc: &mut toml_edit::DocumentMut,
+        path: &Path,
+        report: &mut ProfileRetirement,
+    ) -> Result<bool> {
+        let Some(replacement) = self.proxy_auth_replacement(doc, path)? else {
+            return Ok(false);
+        };
+        set_string(
+            &mut doc["servers"][VIOLET_SERVER]["auth"],
+            &format!("env:{replacement}"),
+        );
+        report.credential_repair(format!(
+            "{}: VIOLET_SLACK_TOKEN_CASSY_PROXY → {replacement} (registered account)",
+            path.display()
+        ));
         Ok(true)
     }
 
@@ -851,7 +943,9 @@ impl<'a> UpdateMigration<'a> {
         retried: bool,
         before_write: &dyn Fn(&Path),
     ) -> Result<bool> {
-        if format == "proxy" { validate_proxy_owner(path)?; }
+        if format == "proxy" {
+            validate_proxy_owner(path)?;
+        }
         let modified = std::fs::metadata(path)?.modified().ok();
         let raw = ifs::read_capped(path)?;
         if raw.trim().is_empty() {
@@ -897,7 +991,11 @@ impl<'a> UpdateMigration<'a> {
             }
             let managed = raw.lines().any(|line| line.trim() == "# managed");
             let managed_default = managed_user_default(&doc, path);
-            let changed = if managed { retire_proxy_document(&mut doc) | repaired } else { repaired };
+            let changed = if managed {
+                retire_proxy_document(&mut doc) | repaired
+            } else {
+                repaired
+            };
             let Some(entry) = doc
                 .get_mut("servers")
                 .and_then(|s| s.get_mut(VIOLET_SERVER))
@@ -922,8 +1020,11 @@ impl<'a> UpdateMigration<'a> {
                     let replacement = name;
                     referenced.insert(replacement.clone());
                     auth = Some(if managed_default {
-                        crate::cli::violet_cmd::credentials::managed_token_value().map_err(anyhow::Error::new)
-                    } else { self.value(&replacement) });
+                        crate::cli::violet_cmd::credentials::managed_token_value()
+                            .map_err(anyhow::Error::new)
+                    } else {
+                        self.value(&replacement)
+                    });
                 } else if let Some(value) = item.as_str() {
                     auth = Some(Ok(value.into()));
                 }
@@ -1220,7 +1321,11 @@ mod tests {
             let report = migrate_installed_hub_with_probe(&probe).unwrap();
             let written = std::fs::read_to_string(&path).unwrap();
             if !ambiguous && !missing {
-                assert!(written.contains(if managed { "env:VIOLET_SLACK_TOKEN_CASSY_PROXY" } else { "env:VIOLET_SLACK_TOKEN_SOUNDWAVE" }));
+                assert!(written.contains(if managed {
+                    "env:VIOLET_SLACK_TOKEN_CASSY_PROXY"
+                } else {
+                    "env:VIOLET_SLACK_TOKEN_SOUNDWAVE"
+                }));
                 assert!(written.contains("# preserve"));
                 assert!(report.authenticated.contains(&path));
                 if managed {
@@ -1228,7 +1333,9 @@ mod tests {
                     assert!(report.credential_warnings.is_empty());
                 } else {
                     assert!(report.unexported.contains("VIOLET_SLACK_TOKEN_SOUNDWAVE"));
-                    assert!(report.credential_warnings.iter().any(|w| w.contains("VIOLET_SLACK_TOKEN_CASSY_PROXY → VIOLET_SLACK_TOKEN_SOUNDWAVE")));
+                    assert!(report.credential_warnings.iter().any(|w| w.contains(
+                        "VIOLET_SLACK_TOKEN_CASSY_PROXY → VIOLET_SLACK_TOKEN_SOUNDWAVE"
+                    )));
                 }
             } else {
                 assert_eq!(written, original);
@@ -1278,6 +1385,50 @@ mod tests {
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o644
         );
+    }
+
+    #[test]
+    fn cas_8235_review_unmarked_user_proxy_changes_only_auth_and_accepts_header_interpolation() {
+        let (env, probe) = update_fixture();
+        std::fs::write(env.home().join(".claude.json"), serde_json::json!({
+            "mcpServers": {"violet": {"url": violet_hub_url(),
+                "headers": {"Authorization": "Bearer prefix-${VIOLET_SLACK_TOKEN_SOUNDWAVE}-suffix"}}}
+        }).to_string()).unwrap();
+        let path = Scope::User.config_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = format!(
+            "# preserve unmarked URL and policy\nallowlist=['violet.violet_read']\n[servers.violet]\ntransport='http'\nurl='{}'\nauth='env:VIOLET_SLACK_TOKEN_CASSY_PROXY'\n[servers.violet.headers]\nx-vercel-protection-bypass='env:VIOLET_VERCEL_BYPASS'\n",
+            violet_compatibility().legacy_hub_url
+        );
+        std::fs::write(&path, &original).unwrap();
+        let report = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert!(
+            report.authenticated.contains(&path),
+            "{:?}",
+            report.warnings
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original.replace(
+                "'env:VIOLET_SLACK_TOKEN_CASSY_PROXY'",
+                "\"env:VIOLET_SLACK_TOKEN_SOUNDWAVE\""
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cas_8235_review_foreign_proxy_owner_is_refused_before_any_write() {
+        use std::os::unix::fs::MetadataExt;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let path = env.home().join("proxy.toml");
+        let original = "[servers.violet]\nauth='env:VIOLET_SLACK_TOKEN_CASSY_PROXY'\n";
+        std::fs::write(&path, original).unwrap();
+        let uid = std::fs::symlink_metadata(&path).unwrap().uid();
+        validate_proxy_owner_for_uid(&path, uid).unwrap();
+        let error = validate_proxy_owner_for_uid(&path, uid.wrapping_add(1)).unwrap_err();
+        assert!(error.to_string().contains("foreign_owned_violet_proxy"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
     }
 
     fn update_fixture() -> (crate::test_support::TestEnvGuard, UpdateProbe) {

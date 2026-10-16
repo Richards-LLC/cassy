@@ -154,10 +154,16 @@ fn selected_token(
 pub(crate) fn managed_token_value() -> Result<String, VioletError> {
     let base = violet_env::resolved_environment(&[], &[]);
     let selected = selector(&base)?;
-    let native: Vec<_> = ["claude", "codex"].iter()
-        .map(|harness| violet_env::registration_token_references(harness, &base)).collect();
-    let refs: Vec<_> = native.iter().flat_map(|(_, names)| names.iter().cloned())
-        .chain(selected.iter().cloned()).flat_map(|name| violet_credential_names(&name)).collect();
+    let native: Vec<_> = ["claude", "codex"]
+        .iter()
+        .map(|harness| violet_env::registration_token_references(harness, &base))
+        .collect();
+    let refs: Vec<_> = native
+        .iter()
+        .flat_map(|(_, names)| names.iter().cloned())
+        .chain(selected.iter().cloned())
+        .flat_map(|name| violet_credential_names(&name))
+        .collect();
     let env = violet_env::resolved_environment_for_references(&[], &[], &refs);
     selected_token(&env, &native, &[], selected.as_deref())
 }

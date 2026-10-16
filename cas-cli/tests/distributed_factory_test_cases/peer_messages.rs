@@ -1580,3 +1580,30 @@ async fn cas_8063_legacy_deleted_address_notifies_sender_to_resend_without_forwa
 async fn cas_8063_failed_legacy_feedback_keeps_original_retryable() {
     restart_peer_mail(true, true, true).await;
 }
+
+#[tokio::test]
+async fn cas_8063_repair_claim_batch_failure_preserves_other_batches() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages/claim"))
+        .respond_with(|request: &Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let first = body["recipient_agent_ids"][0].as_str().unwrap();
+            if first == "r050" { return ResponseTemplate::new(503); }
+            ResponseTemplate::new(200).set_body_json(json!({"messages":[{
+                "id":first, "project_id":"github.com/acme/widgets", "recipient_agent_id":first,
+                "sender_agent_id":"sender", "sender_name":"sender", "body":"body",
+                "created_at":chrono::Utc::now().to_rfc3339()
+            }],"denied":[]}))
+        })
+        .mount(&server).await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let mailbox = cas::cloud::peer_mailbox::HttpPeerMailbox::new(&endpoint, "test-token");
+        let recipients: Vec<_> = (0..101).map(|i| format!("r{i:03}")).collect();
+        let report = mailbox.claim_report(&["github.com/acme/widgets".into()], &recipients, "consumer")
+            .expect("one failed claim must not discard successful batches");
+        let ids: Vec<_> = report.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["r000", "r100"]);
+    }).await.unwrap();
+}

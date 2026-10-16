@@ -530,3 +530,64 @@ fn cas_8063_retired_routes_require_same_identity_and_no_live_competitor() {
         }
     }
 }
+
+#[test]
+fn cas_8063_repair_different_factory_lineage_stays_ambiguous() {
+    let mut old = peer("same", "box", false);
+    old.agent_id = "old-id".into();
+    old.session = Some("factory-one".into());
+    let mut current = peer("same", "box", true);
+    current.agent_id = "current-id".into();
+    current.session = Some("factory-two".into());
+    let error = resolve_peer_target(&[old, current], "same@box").unwrap_err();
+    assert!(error.contains("old-id") && error.contains("current-id"), "{error}");
+}
+
+#[test]
+fn cas_8063_repair_retirement_claims_are_recent_and_bounded() {
+    let machine = Machine::new();
+    let agents = open_agent_store(&machine.cas).unwrap();
+    for index in 0..120 {
+        let mut old = Agent::new(format!("old-{index:03}"), "same".into());
+        old.role = AgentRole::Supervisor;
+        old.status = AgentStatus::Shutdown;
+        old.machine_id = Some("box".into());
+        old.factory_session = Some("factory-a".into());
+        old.registered_at -= chrono::Duration::days(10);
+        old.last_heartbeat -= chrono::Duration::seconds(index);
+        if index == 0 { old.last_heartbeat -= chrono::Duration::days(8); }
+        agents.register(&old).unwrap();
+    }
+    let mut current = Agent::new("current".into(), "same".into());
+    current.role = AgentRole::Supervisor;
+    current.machine_id = Some("box".into());
+    current.factory_session = Some("factory-a".into());
+    agents.register(&current).unwrap();
+    let mailbox = FakeMailbox::default();
+    machine.deliver(&mailbox);
+    let claims = mailbox.claims.lock().unwrap();
+    assert!(claims[0].len() <= 101, "bounded retired IDs plus current: {}", claims[0].len());
+    assert!(claims[0].iter().any(|id| id == "current"));
+    assert!(!claims[0].iter().any(|id| id == "old-000"), "expired retirement must not be claimed");
+}
+
+#[test]
+fn cas_8063_repair_history_excludes_workers_and_expired_supervisors() {
+    let machine = Machine::new();
+    machine.register("current", "same", AgentRole::Supervisor, "factory-a");
+    let events = crate::store::open_event_store(&machine.cas).unwrap();
+    for (id, role, days) in [("recent", "supervisor", 0), ("expired", "supervisor", 8), ("worker", "worker", 0)] {
+        let mut event = crate::types::Event::new(
+            crate::types::EventType::AgentShutdown, crate::types::EventEntityType::Agent,
+            id, "Agent unregistered: same",
+        ).with_metadata(serde_json::json!({"retired_agent": {
+            "name":"same", "role":role, "machine_id":"box", "factory_session":"factory-a",
+            "registered_at":(chrono::Utc::now()-chrono::Duration::days(10)).to_rfc3339()
+        }}));
+        event.created_at -= chrono::Duration::days(days);
+        events.record(&event).unwrap();
+    }
+    let history = retired_recipients(&machine.cas).unwrap();
+    let ids: Vec<_> = history.verified.iter().map(|old| old.id.as_str()).collect();
+    assert_eq!(ids, ["recent"]);
+}

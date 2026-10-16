@@ -32,14 +32,37 @@ breaking change means a new `v2/`.
 | `external_work--reply_intents.json` | `external_work.reply_intents` | `POST /api/coordination/external-work/{id}/reply-intents` |
 | `reply_intents--dispatch.json` | `reply_intents.dispatch` | `POST /api/coordination/reply-intents/{id}/dispatch` (relay only) |
 
-Cassy authored two files for the Violet tool surfaces (violet_ps#50). Cloud owns
-neither of them. They use the same envelope, with `method: "MCP"` and the tool as
+Cassy authored two **non-deployed proposals** before Violet shipped (violet_ps#50).
+They remain here for provenance, not as the actual Violet wire contract. Cloud
+owns neither. They use the proposed envelope, with `method: "MCP"` and the tool as
 the `path`:
 
 | File | Surface | Tool |
 | --- | --- | --- |
 | `violet_read--external_ref.json` | `violet_read.external_ref` | `violet_read` with `external_ref`: verified thread identity and an identity proof |
 | `violet_post--managed_reply.json` | `violet_post.managed_reply` | `violet_post` with `coordination_operation_id`, `expected_generation` and `request_id` |
+
+Violet shipped PR #53 at `a401a1841f0a9d10f5d157f694d853fe22d497ea`.
+The `violet/` directory vendors its three JSON fixtures and
+[TOOL_CONTRACT.md](violet/TOOL_CONTRACT.md) byte for byte, with source paths and
+SHA-256 pins in `MANIFEST.vendored_violet`. Those JSON fixtures are Violet's
+copies of Cloud observe, reply-intent and dispatch contracts; Violet does not
+publish separate tool JSON fixtures at this ref.
+
+The shipped read result is `{ok:true,schema_version:1,identity:{workspace_id,
+channel_id,root_thread_ts}}`. It does not return the proposed `identity_proof` or
+`thread_identity`. `captured/violet-production-2026-10-16.json` retains the raw
+MCP results from identity-only object/permalink reads and a foreign-workspace
+refusal. These reads fetch no Slack message bodies and perform no post, claim,
+lease or activation. No live managed reply was attempted.
+
+Managed sweep observation is automatic after ordinary `violet_read` calls;
+there is no separate observe tool. Violet's `activity-sweep.ts` schedules the
+trusted relay after the response, and the read receipt provides no observe
+acknowledgement. Cassy must poll authoritative v2 deliveries instead of enqueueing
+channel wakes from that read or treating read success as observe success.
+`violet_post` uses `ok/schema_version:1` and a `coordination` receipt; see the
+vendored tool contract for consumed-intent ordering and unknown outcomes.
 
 `captured/production-2026-10-16.json` holds read-only production probes, taken
 before any fixture was trusted. No event, claim or lock was created or leased.

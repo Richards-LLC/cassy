@@ -3,8 +3,8 @@
   "surface": "violet_post.managed_reply",
   "method": "MCP",
   "path": "violet.violet_post",
-  "spec": "§4 §7",
-  "notes": "Authored by Cassy (cas-b512) for violet_ps#50. A managed ask reply carries the registered reply intent (coordination_operation_id, the reply_intent id from external_work.reply_intents), the claim's expected_generation and a request_id. The hub consumes the intent through Cloud's relay-only reply_intents.dispatch, persists dispatch before calling Slack, and returns the coordination receipt beside the Slack receipt. Omitting the fields on a managed ask thread is refused, not a bypass; unrelated posts keep today's behaviour. <reply text> stands in for message text, which no coordination record stores.",
+  "spec": "\u00a74 \u00a77",
+  "notes": "NON-DEPLOYED CASSY PROPOSAL, retained for provenance only. Do not consume as the Violet wire contract. Shipped Violet PR #53 uses ok/schema_version:1, identity for reads and coordination for replies; see violet/TOOL_CONTRACT.md, MANIFEST.vendored_violet and captured/violet-production-2026-10-16.json. Authored by Cassy (cas-b512) for violet_ps#50. A managed ask reply carries the registered reply intent (coordination_operation_id, the reply_intent id from external_work.reply_intents), the claim's expected_generation and a request_id. The hub consumes the intent through Cloud's relay-only reply_intents.dispatch, persists dispatch before calling Slack, and returns the coordination receipt beside the Slack receipt. Omitting the fields on a managed ask thread is refused, not a bypass; unrelated posts keep today's behaviour. <reply text> stands in for message text, which no coordination record stores.",
   "cases": [
     {
       "name": "managed reply posted once",

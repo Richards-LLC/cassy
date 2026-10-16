@@ -3,8 +3,8 @@
   "surface": "violet_read.external_ref",
   "method": "MCP",
   "path": "violet.violet_read",
-  "spec": "§3 §7",
-  "notes": "Authored by Cassy (cas-b512) for violet_ps#50; Cloud owns no Violet tool surface. The hub resolves an external_ref through its authenticated Slack installation and returns verified thread identity plus an opaque identity proof that Cloud checks against the team installation binding. It never fetches an arbitrary URL and never trusts a supplied thread_ts, workspace name or team id. Responses are the tool result object.",
+  "spec": "\u00a73 \u00a77",
+  "notes": "NON-DEPLOYED CASSY PROPOSAL, retained for provenance only. Do not consume as the Violet wire contract. Shipped Violet PR #53 uses ok/schema_version:1, identity for reads and coordination for replies; see violet/TOOL_CONTRACT.md, MANIFEST.vendored_violet and captured/violet-production-2026-10-16.json. Authored by Cassy (cas-b512) for violet_ps#50; Cloud owns no Violet tool surface. The hub resolves an external_ref through its authenticated Slack installation and returns verified thread identity plus an opaque identity proof that Cloud checks against the team installation binding. It never fetches an arbitrary URL and never trusts a supplied thread_ts, workspace name or team id. Responses are the tool result object.",
   "cases": [
     {
       "name": "root permalink resolves to the verified thread identity",

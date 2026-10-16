@@ -28,9 +28,34 @@
     "files": [
       "violet_post--managed_reply.json",
       "violet_read--external_ref.json"
-    ]
+    ],
+    "note": "Proposals authored before Violet shipped. NOT deployed tool contracts. Actual Violet receipts use ok/schema_version:1 and identity or coordination; see vendored_violet and captures."
   },
   "captured": [
-    "captured/production-2026-10-16.json"
-  ]
+    "captured/production-2026-10-16.json",
+    "captured/violet-production-2026-10-16.json"
+  ],
+  "vendored_violet": {
+    "source": "Richards-LLC/violet_ps",
+    "ref": "a401a1841f0a9d10f5d157f694d853fe22d497ea",
+    "note": "Copied byte for byte from shipped PR #53. The three JSON files are Violet-owned copies of Cloud contracts; tool shape authority is TOOL_CONTRACT.md and read-only captures. No standalone sweep observe tool exists.",
+    "files": {
+      "violet/activity--observe.json": {
+        "path": "apps/violet/tests/fixtures/activity--observe.json",
+        "sha256": "9ed03cda538a370920a579d2c59c9803372a7055f824a490854322a80c62c6f9"
+      },
+      "violet/external_work--reply_intents.json": {
+        "path": "apps/violet/tests/fixtures/coordination/external_work--reply_intents.json",
+        "sha256": "2aa4314928bb89b83b6c12724a38101cfec9038b701e1c9574ccf03ef1eac9ac"
+      },
+      "violet/reply_intents--dispatch.json": {
+        "path": "apps/violet/tests/fixtures/coordination/reply_intents--dispatch.json",
+        "sha256": "4d857cae65f30c2a6ea7487a2a092387010d552a930cd1a4ba2c4ffe0124d4e7"
+      },
+      "violet/TOOL_CONTRACT.md": {
+        "path": "docs/TOOL_CONTRACT.md",
+        "sha256": "2b2b7f3ae836a41582f7dc4642f31a01867264a1a7e640188f72cce5cbed49e6"
+      }
+    }
+  }
 }

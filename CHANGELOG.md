@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.59.0] - 2026-10-16
+
 ### Added — a batch QA mode: one staging walk covers every task in a batch (#1203, cas-d697, cas-5129a)
 
 - With `qa.mode = "batch"`, one non-implementer walks every change in a merged

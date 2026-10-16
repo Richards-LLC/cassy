@@ -58,15 +58,19 @@ The CLI crate wires command surfaces to shared stores and service crates.
 - `cas-cli/src/hub/` and `cas-cli/src/hub/idle_sync.rs` - Commander pairing, operator inbox, idle-store sync, and fleet runtime.
 - `cas-cli/src/daemon/` and `history/` - background maintenance and Git history search.
 - `cas-cli/src/worktree/` and `cas-cli/src/worktree/git/epic_branch.rs` - worktree lifecycle and safe epic-branch setup.
+- `cas-cli/src/hybrid_search/` - lexical, semantic, and code-search composition.
 - `cas-cli/src/factory_build_memory.rs` and `cas-cli/src/factory_target_cache/legacy.rs` - build isolation and per-worker cache lifecycle.
 - `cas-cli/src/hooks/handlers/` - session context, tool policy, event handling, and hook lifecycle.
 - `cas-cli/src/hooks/handlers/handlers_events/worker_denied_tools.rs` - worker command denial policy.
+- `cas-cli/src/hooks/operation_lessons.rs` - hook-observed operational lessons.
+- `cas-cli/src/git_evidence/` - shared Git measurements used by task close gates.
 - `cas-cli/src/issue_reconcile.rs` - task and shipped-delivery references to GitHub issues.
 - `cas-cli/src/qa_batch.rs`, `qa_pass.rs`, and `qa_evidence.rs` - batch receipts, independent QA, and close-time evidence.
 - `cas-cli/src/supervisor_notices.rs` - durable owner-addressed factory notices.
 - `cas-cli/src/migration/migrations/` - numbered SQLite migrations; `m271`-`m277` add worker, QA, and communication-SLO records.
 - `cas-cli/src/store/` - store traits and notification, sync, and layered wrappers.
 - `cas-cli/src/bridge/server/` - HTTP/SSE handlers for `cas bridge serve`.
+- `cas-cli/src/mcp/` - MCP daemon, Unix socket, prompt/resource serving, and tool dispatch.
 - `cas-cli/src/orchestration/`, `notifications/`, and `telemetry/` - coordination and observability plumbing.
 
 ## Factory coordination
@@ -77,6 +81,8 @@ The CLI crate wires command surfaces to shared stores and service crates.
 - `cas-cli/src/ui/factory/daemon/` - PTY-owning daemon and worker lifecycle.
 - `cas-cli/src/ui/factory/daemon/runtime/` - daemon runtime modules and background job dispatch.
 - `cas-cli/src/ui/factory/daemon/runtime/{delivery_probe_jobs,external_wake,factory_jobs,inject_commands,message_attention,poison_sweep_jobs,prompt_queue_jobs,queue_control_jobs,relay_jobs,render_scheduler}.rs` - probes, wakes, queue work, notices, and rendering.
+- `cas-cli/src/ui/factory/daemon/runtime/merge_queue_ejection.rs` - merge-queue ejection behavior and adjacent tests.
+- `cas-cli/src/ui/factory/daemon/runtime/violet_activity.rs` - Cloud-backed Slack activity claims and typed worker wake.
 - `cas-cli/src/ui/factory/daemon/runtime/fixtures/` - recorded CI and merge-queue inputs for runtime tests.
 - `cas-cli/src/ui/factory/server_registry/` and `{boot,client,protocol,session}.rs` - registered servers, startup, transport, and session state.
 - `crates/cas-factory/src/` - provider/lane routing, task specs, probes, directors, configuration, and sessions.

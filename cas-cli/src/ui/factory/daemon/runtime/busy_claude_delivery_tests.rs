@@ -57,6 +57,15 @@ async fn busy_claude_worker_pane(daemon: &mut FactoryDaemon) {
 /// boundary, not dropped, and the worker's next tool call can surface it.
 #[tokio::test]
 async fn a_declined_wake_still_writes_the_teams_copy_and_leaves_the_row_for_the_tool_boundary() {
+    exercise_held_copy(false).await;
+}
+
+#[tokio::test]
+async fn cas_1ba0_failed_deferral_stamp_warns_supervisor_and_keeps_the_teams_copy() {
+    exercise_held_copy(true).await;
+}
+
+async fn exercise_held_copy(fail_stamp: bool) {
     let root = tempfile::tempdir().unwrap();
     let claude_config = root.path().join("claude-config");
     // The live team tree a running factory has (a missing one falls back to PTY).
@@ -84,6 +93,12 @@ async fn a_declined_wake_still_writes_the_teams_copy_and_leaves_the_row_for_the_
     let id = queue
         .enqueue_with_session("supervisor", WORKER, decision, SESSION)
         .unwrap();
+    if fail_stamp {
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_deferral BEFORE UPDATE OF deferred_inbox_at ON prompt_queue
+            WHEN NEW.deferred_inbox_at IS NOT NULL
+            BEGIN SELECT RAISE(FAIL, 'deferral stamp fixture failure'); END;").unwrap();
+    }
     daemon.process_prompt_queue().await.unwrap();
 
     let row = queue.queued_prompt(id).unwrap().unwrap();
@@ -106,6 +121,20 @@ async fn a_declined_wake_still_writes_the_teams_copy_and_leaves_the_row_for_the_
         written.contains(&format!("[cas #{id} ")),
         "the Teams inbox write must not wait on the silence gate: {written:?}\nfiles: {tree:?}\nreport: {report:?}"
     );
+
+    if fail_stamp {
+        assert!(queue.deferred_inbox_state(id).unwrap().is_none());
+        let notices = queue.peek_all(20).unwrap().into_iter()
+            .filter(|row| row.target == daemon.app.supervisor_name()).collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1, "a failed stamp must be supervisor-visible");
+        assert!(notices[0].prompt.contains(&format!("notification_id={id}")));
+        assert!(notices[0].prompt.contains("tool-boundary surfacing unavailable"));
+        assert!(notices[0].prompt.contains("turn boundary"));
+        assert_eq!(notices[0].factory_session.as_deref(), Some(SESSION));
+        assert!(queue.surface_unseen_for_recipient_delivered_after(WORKER, Some(SESSION), 10, turn_started_at).unwrap().is_empty(),
+            "failed deferral remains safe: only the Teams copy can surface");
+        return;
+    }
 
     let surfaced = queue
         .surface_unseen_for_recipient_delivered_after(WORKER, Some(SESSION), 10, turn_started_at)

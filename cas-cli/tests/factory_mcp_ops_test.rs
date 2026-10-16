@@ -7966,6 +7966,31 @@ async fn test_coordination_message_returned_notification_id_drives_status_query(
 /// (both in the JSON payload and the human-readable line), and the JSON
 /// must be well-formed (parseable) so scripted callers can consume it.
 #[tokio::test]
+async fn cas_1ba0_message_status_distinguishes_held_inbox_from_composer_retry() {
+    let env = FactoryTestEnv::new();
+    let queue = env.prompt_queue();
+    for held_copy in [true, false] {
+        let id = queue.enqueue("supervisor", "swift-fox", "decision").unwrap();
+        queue.record_pending_reason(id, cas_store::PendingReason::GatedNotReady, Some("same detail in both cases")).unwrap();
+        if held_copy {
+            queue.record_deferred_inbox(id, 123).unwrap();
+        }
+        let mut req = coord_msg("message_status", "swift-fox", "unused", None);
+        req.notification_id = Some(id);
+        let text = get_text(&env.service.coordination(Parameters(req)).await.unwrap());
+        if held_copy {
+            assert!(text.contains("held inbox:"), "{text}");
+            assert!(text.contains("next tool call or turn start"), "{text}");
+            assert!(!text.contains("retry budget"), "{text}");
+        } else {
+            assert!(text.contains("delivery retry:"), "{text}");
+            assert!(text.contains("900s retry budget"), "{text}");
+            assert!(!text.contains("next tool call"), "{text}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_message_status_exposes_undelivered_after() {
     let _guard = EnvGuard::set(&[
         ("CAS_AGENT_ROLE", "supervisor"),

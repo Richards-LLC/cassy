@@ -110,6 +110,9 @@ pub(crate) fn still_unread(
     if !same_message(&row, old) || row.acked_at.is_some() {
         return Some(false);
     }
+    if queue.recipient_action_satisfies_alarm(old.id).ok()? {
+        return Some(false);
+    }
     let report = queue.message_delivery_report(old.id).ok()??;
     Some(
         report.confirmed_at.is_none()

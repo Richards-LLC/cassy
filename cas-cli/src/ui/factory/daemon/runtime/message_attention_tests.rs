@@ -783,3 +783,316 @@ fn gh_1196_cancelled_task_no_longer_needs_attention() {
         "a task cancelled after #{id} retires its alarm"
     );
 }
+
+// A handed-off Codex row can lack a usable transcript binding. The watchdog
+// must distinguish later authored action from transport alone (cas-0cdaa).
+fn handed_off_row(f: &Fixture, source: &str, target: &str) -> i64 {
+    let agents = open_agent_store(&f.cas_dir).unwrap();
+    let mut worker = agents.get("worker-id").unwrap();
+    worker.cc_session_id = Some("codex-worker-synthetic-session".into());
+    worker.metadata.insert("worker_cli".into(), "codex".into());
+    let account = f.root.path().join("unbound-codex");
+    std::fs::create_dir_all(&account).unwrap();
+    worker.metadata.insert(
+        "worker_account_dir".into(),
+        account.to_string_lossy().into(),
+    );
+    worker
+        .metadata
+        .insert("clone_path".into(), f.root.path().to_string_lossy().into());
+    agents.register(&worker).unwrap();
+    let id = f.aged(
+        source,
+        target,
+        "Review passed; wait for CI and merge notification",
+    );
+    assert!(f.queue.claim_recipient_transport(id, target).unwrap());
+    f.queue.mark_transport_delivered(id).unwrap();
+    // Give the fixture a stable ordering without sleeping or depending on
+    // SQLite's sub-millisecond timestamp precision.
+    rusqlite::Connection::open(f.cas_dir.join("cas.db"))
+        .unwrap()
+        .execute(
+            "UPDATE prompt_queue SET transport_delivered_at=? WHERE id=?",
+            rusqlite::params![
+                (chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339(),
+                id
+            ],
+        )
+        .unwrap();
+    id
+}
+
+fn authored_outbound(f: &Fixture, origin: &cas_store::QueueOrigin) -> i64 {
+    f.queue
+        .enqueue_urgent_with_outcome(
+            "worker",
+            SUPERVISOR,
+            "Recorded the decision; waiting for the merge",
+            Some(SESSION),
+            Some("status"),
+            Some(cas_store::NotificationPriority::Normal),
+            false,
+            Some(origin),
+        )
+        .unwrap()
+        .id()
+}
+
+#[test]
+fn cas_0cdaa_recipient_authored_reply_retires_both_watchdog_alarms() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let id = handed_off_row(&f, "supervisor", "worker");
+    authored_outbound(
+        &f,
+        &cas_store::QueueOrigin::RegisteredAgent {
+            agent_id: "worker-id".into(),
+        },
+    );
+    assert!(
+        f.scan().is_empty(),
+        "later recipient-authored reply must retire both unread alarms"
+    );
+    let report = f.queue.message_delivery_report(id).unwrap().unwrap();
+    assert!(
+        report.confirmed_at.is_none(),
+        "alarm retirement must not invent message acknowledgement"
+    );
+    let slos = cas_store::communication_slo::read_session(&f.cas_dir, SESSION, chrono::Utc::now())
+        .unwrap();
+    assert_eq!(slos.false_abandon, 0);
+    assert_eq!(slos.duplicate_body_reads, 0);
+}
+
+#[test]
+fn cas_0cdaa_recipient_task_note_retires_both_watchdog_alarms() {
+    let _env = env();
+    let mut f = Fixture::new();
+    handed_off_row(&f, "supervisor", "worker");
+    let event = Event::new(
+        EventType::TaskNoteAdded,
+        EventEntityType::Task,
+        "cas-0cdaa",
+        "Decision recorded; waiting for CI before re-closing",
+    )
+    .with_session("worker-id");
+    crate::store::open_event_store(&f.cas_dir)
+        .unwrap()
+        .record(&event)
+        .unwrap();
+    assert!(
+        f.scan().is_empty(),
+        "recipient's later task note is implicit action evidence"
+    );
+}
+
+#[test]
+fn cas_0cdaa_self_reminder_never_raises_sender_or_supervisor_alarm() {
+    let _env = env();
+    let mut f = Fixture::new();
+    handed_off_row(&f, "worker", "worker");
+    assert!(
+        f.scan().is_empty(),
+        "self-addressed reminder is not a stalled inter-agent delivery"
+    );
+}
+
+#[test]
+fn cas_0cdaa_transport_without_recipient_action_still_alerts_once() {
+    let _env = env();
+    let mut f = Fixture::new();
+    handed_off_row(&f, "supervisor", "worker");
+    let first = f.scan();
+    assert!(
+        !first.is_empty(),
+        "transport alone must not disarm the watchdog"
+    );
+    let again = f.scan();
+    assert_eq!(
+        again.len(),
+        first.len(),
+        "the genuine unread episode alerts once"
+    );
+}
+
+#[test]
+fn cas_0cdaa_daemon_outbound_is_not_recipient_action() {
+    let _env = env();
+    let mut f = Fixture::new();
+    handed_off_row(&f, "supervisor", "worker");
+    authored_outbound(&f, &cas_store::QueueOrigin::Daemon);
+    assert!(
+        !f.scan().is_empty(),
+        "daemon reminder carrying a worker source is not authored activity"
+    );
+}
+
+#[test]
+fn cas_0cdaa_pre_handoff_outbound_does_not_retire_unread_alarm() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let id = handed_off_row(&f, "supervisor", "worker");
+    let outbound = authored_outbound(
+        &f,
+        &cas_store::QueueOrigin::RegisteredAgent {
+            agent_id: "worker-id".into(),
+        },
+    );
+    rusqlite::Connection::open(f.cas_dir.join("cas.db"))
+        .unwrap()
+        .execute(
+            "UPDATE prompt_queue SET created_at=? WHERE id=?",
+            rusqlite::params![
+                (chrono::Utc::now() - chrono::Duration::seconds(700)).to_rfc3339(),
+                outbound
+            ],
+        )
+        .unwrap();
+    assert!(
+        !f.scan().is_empty(),
+        "outbound before handoff cannot have reacted to the message"
+    );
+    assert!(
+        f.queue
+            .message_delivery_report(id)
+            .unwrap()
+            .unwrap()
+            .confirmed_at
+            .is_none()
+    );
+}
+
+#[test]
+fn cas_0cdaa_another_authors_note_cannot_retire_recipient_alarm() {
+    let _env = env();
+    let mut f = Fixture::new();
+    handed_off_row(&f, "supervisor", "worker");
+    let event = Event::new(
+        EventType::TaskNoteAdded,
+        EventEntityType::Task,
+        "cas-0cdaa",
+        "Someone else made progress",
+    )
+    .with_session("another-worker-id");
+    crate::store::open_event_store(&f.cas_dir)
+        .unwrap()
+        .record(&event)
+        .unwrap();
+    assert!(
+        !f.scan().is_empty(),
+        "only the addressed recipient's authenticated action counts"
+    );
+}
+
+#[test]
+fn cas_0cdaa_action_after_scan_cancels_durable_sender_bounce() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let id = handed_off_row(&f, "supervisor", "worker");
+    let context = message_attention::AttentionInputs::from_daemon(&f.daemon);
+    let candidates = super::super::poison_sweep_jobs::read_bounces(
+        &context,
+        &HashMap::new(),
+        cas_mux::SupervisorCli::Codex,
+    );
+    assert!(candidates.iter().any(|candidate| candidate.row.id == id));
+    authored_outbound(
+        &f,
+        &cas_store::QueueOrigin::RegisteredAgent {
+            agent_id: "worker-id".into(),
+        },
+    );
+    let bounce = f
+        .queue
+        .enqueue_delivery_stalled_bounce(id, SESSION, "stale scan", "stale alarm")
+        .unwrap();
+    assert!(
+        bounce.is_none(),
+        "atomic bounce write must revalidate recipient action after the scan"
+    );
+    assert!(f.scan().is_empty());
+}
+
+#[test]
+fn cas_0cdaa_forged_outbound_source_is_not_recipient_action() {
+    let _env = env();
+    let mut f = Fixture::new();
+    handed_off_row(&f, "supervisor", "worker");
+    authored_outbound(
+        &f,
+        &cas_store::QueueOrigin::RegisteredAgent {
+            agent_id: "different-worker-id".into(),
+        },
+    );
+    assert!(
+        !f.scan().is_empty(),
+        "worker source text cannot replace authenticated actor identity"
+    );
+}
+
+#[test]
+fn cas_0cdaa_real_task_claim_and_release_retire_watchdog_alarms() {
+    let _env = env();
+    for release in [false, true] {
+        let mut f = Fixture::new();
+        crate::store::open_task_store_local(&f.cas_dir)
+            .unwrap()
+            .add(&Task::new("cas-0cdaa".into(), "Message decision work".into()))
+            .unwrap();
+        let agents = open_agent_store(&f.cas_dir).unwrap();
+        if release {
+            agents
+                .try_claim("cas-0cdaa", "worker-id", 1800, None)
+                .unwrap();
+        }
+        if release {
+            // The existing lease predates the message; only its later release
+            // may satisfy this case, not the setup claim.
+            rusqlite::Connection::open(f.cas_dir.join("cas.db"))
+                .unwrap()
+                .execute(
+                    "UPDATE task_lease_history SET timestamp=? WHERE task_id='cas-0cdaa' AND event_type='claimed'",
+                    [(chrono::Utc::now() - chrono::Duration::seconds(1200)).to_rfc3339()],
+                )
+                .unwrap();
+        }
+        handed_off_row(&f, "supervisor", "worker");
+        if release {
+            agents.release_lease("cas-0cdaa", "worker-id").unwrap();
+        } else {
+            agents
+                .try_claim("cas-0cdaa", "worker-id", 1800, None)
+                .unwrap();
+        }
+        assert!(
+            f.scan().is_empty(),
+            "real recipient task transition satisfies the alarm; release={release}"
+        );
+    }
+}
+
+#[test]
+fn cas_0cdaa_unrelated_supervisor_activity_keeps_unread_alarm() {
+    let _env = env();
+    let mut f = Fixture::new();
+    handed_off_row(&f, "worker", SUPERVISOR);
+    f.queue
+        .enqueue_urgent_with_outcome(
+            "supervisor",
+            "worker",
+            "A different task update",
+            Some(SESSION),
+            Some("status"),
+            Some(cas_store::NotificationPriority::Normal),
+            false,
+            Some(&cas_store::QueueOrigin::RegisteredAgent {
+                agent_id: format!("{SUPERVISOR}-id"),
+            }),
+        )
+        .unwrap();
+    assert!(
+        !f.scan().is_empty(),
+        "worker action fallback must not hide unread deliveries to the supervisor"
+    );
+}

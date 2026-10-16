@@ -2395,6 +2395,14 @@ pub trait PromptQueueStore: Send + Sync {
         since: DateTime<Utc>,
     ) -> Result<bool>;
 
+    /// Retire an unread alarm after a handed-off row's worker performs
+    /// authenticated work, or for a self-addressed reminder. This is attention
+    /// evidence only: it never writes a read receipt or acknowledgement.
+    /// Unknown adapters keep the alarm eligible.
+    fn recipient_action_satisfies_alarm(&self, _prompt_id: i64) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Find direct messages that are still unread past their priority threshold.
     fn delivery_stalled_candidates(
         &self,
@@ -4535,6 +4543,58 @@ impl SqlitePromptQueueStore {
     }
 }
 
+/// Metadata-only evidence shared by the watchdog read and atomic bounce write.
+/// A daemon reminder bearing a worker's name is not recipient-authored work.
+fn recipient_action_satisfies_alarm_on_conn(conn: &Connection, prompt_id: i64) -> Result<bool> {
+    let exists = |name: &str| -> Result<bool> {
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+            [name],
+            |row| row.get(0),
+        )?)
+    };
+    let mut action = String::new();
+    if exists("agents")? {
+        let mut evidence = vec![
+            "EXISTS (SELECT 1 FROM prompt_queue outbound
+                WHERE outbound.origin_kind = 'registered_agent'
+                  AND outbound.origin_agent_id = recipient.id
+                  AND outbound.factory_session = q.factory_session
+                  AND lower(outbound.source) <> lower(outbound.target)
+                  AND julianday(outbound.created_at) > julianday(q.transport_delivered_at))"
+                .to_string(),
+        ];
+        if exists("events")? {
+            evidence.push(
+                "EXISTS (SELECT 1 FROM events note
+                WHERE note.event_type = 'task_note_added' AND note.session_id = recipient.id
+                  AND julianday(note.created_at) > julianday(q.transport_delivered_at))"
+                    .into(),
+            );
+        }
+        if exists("task_lease_history")? {
+            evidence.push(
+                "EXISTS (SELECT 1 FROM task_lease_history lease
+                WHERE lease.agent_id = recipient.id AND lease.event_type IN ('claimed', 'released')
+                  AND julianday(lease.timestamp) > julianday(q.transport_delivered_at))"
+                    .into(),
+            );
+        }
+        action = format!("OR (q.transport_delivered_at IS NOT NULL AND EXISTS (
+            SELECT 1 FROM agents recipient
+             WHERE recipient.factory_session = q.factory_session
+               AND recipient.role = 'worker' AND recipient.name = q.target
+               AND ({})))", evidence.join(" OR "));
+    }
+    Ok(conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM prompt_queue q WHERE q.id = ?
+            AND (lower(q.source) = lower(q.target) {action}))"
+        ),
+        [prompt_id],
+        |row| row.get(0),
+    )?)
+}
 /// cas-e829: a Commander turn (`target = 'operator'`) belongs to the session
 /// that wrote it. Live delivery and history both select on
 /// `factory_session`, so a row without one could never be delivered and
@@ -5687,6 +5747,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         )?)
     }
 
+    fn recipient_action_satisfies_alarm(&self, prompt_id: i64) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        recipient_action_satisfies_alarm_on_conn(&conn, prompt_id)
+    }
+
     fn delivery_stalled_candidates(
         &self,
         factory_session: &str,
@@ -5752,6 +5817,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
              FROM prompt_queue q
              WHERE q.target <> 'all_workers'
                AND q.source <> 'all_workers'
+               AND lower(q.source) <> lower(q.target)
                AND NOT (lower(q.target) = 'operator' AND (
                    COALESCE(q.kind, '') IN ('answer', 'status', 'receipt')
                    OR COALESCE(q.dedupe_key, '') LIKE 'commander-mirror:%'
@@ -5810,6 +5876,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            if recipient_action_satisfies_alarm_on_conn(&tx, prompt_id)? {
+                return Ok(None);
+            }
             let stale_cutoff =
                 (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
             let original = tx
@@ -5818,6 +5887,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                      WHERE q.id = ?
                        AND q.target <> 'all_workers'
                        AND q.source <> 'all_workers'
+                       AND lower(q.source) <> lower(q.target)
                        AND NOT (lower(q.target) = 'operator' AND (
                            COALESCE(q.kind, '') IN ('answer', 'status', 'receipt')
                            OR COALESCE(q.dedupe_key, '') LIKE 'commander-mirror:%'

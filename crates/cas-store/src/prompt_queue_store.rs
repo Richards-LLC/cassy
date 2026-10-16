@@ -196,6 +196,9 @@ enum TransportEligibility {
     PolledBefore(chrono::DateTime<Utc>),
     /// cas-6ccb: the ids an `inbox_poll` names, whatever their receipt.
     NamedRead,
+    /// cas-bf890: unread [`NOTICE_DIGEST_KIND`] rows with no transport
+    /// marker (the daemon never transports them).
+    NoticeDigest,
 }
 
 /// cas-6ccb (GH #1215): eligibility for [`TransportEligibility::PolledBefore`];
@@ -246,6 +249,27 @@ pub fn fits_hook_surface(prompt: &str) -> bool {
     hook_surface_cost(prompt) <= HOOK_SURFACE_BUDGET_CHARS
 }
 
+/// cas-bf890 (GH #1215 §3): the `kind` CAS stamps on a low-value system
+/// notice (with `origin_kind = 'daemon'`, so no caller can claim it). Such a
+/// row never gets a transport of its own: the daemon does not select it, so it
+/// never writes a Teams pointer or types into a pane, and the rendering hook
+/// drains skip it. One [`HookDrain::NoticeDigest`] drain per turn shows every
+/// one as a single digest line instead. `inbox_poll` still reads them whole.
+pub const NOTICE_DIGEST_KIND: &str = "notice_digest";
+
+/// cas-bf890: the predicate for [`NOTICE_DIGEST_KIND`] rows over an unaliased
+/// `prompt_queue`, for the daemon's selection.
+const NOT_NOTICE_DIGEST_SQL: &str = "AND NOT (COALESCE(origin_kind, '') = 'daemon' \
+     AND COALESCE(kind, '') = 'notice_digest')";
+
+/// cas-bf890: [`NOT_NOTICE_DIGEST_SQL`] over the hook drains' `q` alias.
+const NOT_NOTICE_DIGEST_Q_SQL: &str = "AND NOT (COALESCE(q.origin_kind, '') = 'daemon' \
+     AND COALESCE(q.kind, '') = 'notice_digest')";
+
+/// cas-bf890: only [`NOTICE_DIGEST_KIND`] rows, over the `q` alias.
+const ONLY_NOTICE_DIGEST_Q_SQL: &str = "AND COALESCE(q.origin_kind, '') = 'daemon' \
+     AND COALESCE(q.kind, '') = 'notice_digest'";
+
 /// cas-1f0c: which rows a budgeted hook drain may take; the hook variants of
 /// [`TransportEligibility`].
 #[derive(Debug, Clone, Copy)]
@@ -261,6 +285,10 @@ pub enum HookDrain<'a> {
     /// Rows polled with `inbox_poll` before this turn start and never
     /// acknowledged (cas-6ccb, GH #1215): shown once more.
     PolledBefore(DateTime<Utc>),
+    /// cas-bf890: the unread [`NOTICE_DIGEST_KIND`] rows, which no other hook
+    /// drain takes. Not charged to the body budget: the caller renders them
+    /// as one digest line, not in full.
+    NoticeDigest,
 }
 
 /// cas-1f0c: the result of a budgeted hook drain.
@@ -4054,21 +4082,23 @@ impl SqlitePromptQueueStore {
         use std::collections::{BTreeMap, BTreeSet};
 
         // GH #1196: Commander and agent abandonments are separate episodes.
-        let mut groups: BTreeMap<(String, Option<String>, bool), Vec<AbandonedSenderNotice>> =
-            BTreeMap::new();
+        // cas-bf890: so are a supervisor's notices about ended recipients.
+        let mut groups: BTreeMap<
+            (String, Option<String>, bool, bool),
+            Vec<AbandonedSenderNotice>,
+        > = BTreeMap::new();
         for id in prompt_ids {
             if let Some(notice) = Self::abandoned_sender_notice_in_tx(tx, *id)? {
+                let operator = is_operator_target(&notice.target);
+                let digest = !operator
+                    && Self::abandonment_is_digest_in_tx(tx, &notice.sender, &notice.target)?;
                 groups
-                    .entry((
-                        notice.sender.clone(),
-                        notice.session.clone(),
-                        is_operator_target(&notice.target),
-                    ))
+                    .entry((notice.sender.clone(), notice.session.clone(), operator, digest))
                     .or_default()
                     .push(notice);
             }
         }
-        for ((sender, session, operator), mut notices) in groups {
+        for ((sender, session, operator, digest), mut notices) in groups {
             notices.sort_by_key(|notice| notice.prompt_id);
             // Keep the established single-message wording when a sender has
             // only one expired message in this sweep.
@@ -4111,6 +4141,7 @@ impl SqlitePromptQueueStore {
                 &format!("{} messages to {targets} abandoned", notices.len()),
                 &format!("delivery-abandoned:batch:{ids}"),
                 operator,
+                digest,
                 notices.len() as u64,
             )?;
         }
@@ -4162,6 +4193,43 @@ impl SqlitePromptQueueStore {
         Ok(("supervisor".to_string(), None))
     }
 
+    /// cas-bf890 (GH #1215 §3): whether the notice that `target` never got
+    /// a message belongs in `notice_recipient`'s digest rather than its
+    /// inbox. Both must hold:
+    ///
+    /// - the notice goes to a supervisor (the logical `supervisor` alias, or
+    ///   a registered agent with the supervisor role);
+    /// - the target has ended: no active or idle agent carries its name. A
+    ///   dead or retired worker, or one from an earlier session, cannot be
+    ///   helped by a resend, so the notice is a record, not an action.
+    ///
+    /// A target that is still live failed for some other reason and keeps
+    /// its ordinary delivery, as do the logical `supervisor`, `all_workers`
+    /// and operator targets. Without an agent registry nothing is known, and
+    /// nothing changes.
+    fn abandonment_is_digest_in_tx(
+        tx: &Connection,
+        notice_recipient: &str,
+        target: &str,
+    ) -> Result<bool> {
+        if is_operator_target(target)
+            || target.eq_ignore_ascii_case("supervisor")
+            || target.eq_ignore_ascii_case("all_workers")
+            || !agents_table_exists(tx)?
+        {
+            return Ok(false);
+        }
+        Ok(tx.query_row(
+            "SELECT (?1 = 'supervisor' OR EXISTS (
+                        SELECT 1 FROM agents WHERE name = ?1 AND role = 'supervisor'))
+                AND NOT EXISTS (
+                        SELECT 1 FROM agents
+                         WHERE name = ?2 COLLATE NOCASE AND status IN ('active', 'idle'))",
+            params![notice_recipient, target],
+            |row| row.get::<_, bool>(0),
+        )?)
+    }
+
     fn insert_abandonment_notice_in_tx(
         tx: &Connection,
         sender: &str,
@@ -4172,6 +4240,8 @@ impl SqlitePromptQueueStore {
     ) -> Result<()> {
         let notice =
             format!("Message {message_id} to {recipient} was abandoned as undeliverable: {reason}");
+        let operator = is_operator_target(recipient);
+        let digest = !operator && Self::abandonment_is_digest_in_tx(tx, sender, recipient)?;
         Self::insert_abandonment_body_in_tx(
             tx,
             sender,
@@ -4179,7 +4249,8 @@ impl SqlitePromptQueueStore {
             &notice,
             &format!("Message {message_id} to {recipient} abandoned"),
             &format!("delivery-abandoned:{message_id}"),
-            is_operator_target(recipient),
+            operator,
+            digest,
             1,
         )
     }
@@ -4202,6 +4273,13 @@ impl SqlitePromptQueueStore {
     ///   (`message_status`) and say nothing more this hour;
     /// - agent class, notice read: insert a fresh notice. Undelivered work for
     ///   an agent always needs action, so it is never silenced.
+    ///
+    /// cas-bf890: `digest` notices (a supervisor's, about an ended recipient,
+    /// see [`Self::abandonment_is_digest_in_tx`]) form a third class, folded
+    /// on the same terms as the agent class but stamped
+    /// [`NOTICE_DIGEST_KIND`], so they reach the supervisor only in the
+    /// per-turn digest line and never as a transport of their own.
+    #[allow(clippy::too_many_arguments)]
     fn insert_abandonment_body_in_tx(
         tx: &Connection,
         sender: &str,
@@ -4210,6 +4288,7 @@ impl SqlitePromptQueueStore {
         summary: &str,
         dedupe_key: &str,
         operator: bool,
+        digest: bool,
         message_count: u64,
     ) -> Result<()> {
         let now = Utc::now();
@@ -4219,14 +4298,22 @@ impl SqlitePromptQueueStore {
                 dedupe_key.replacen("delivery-abandoned:", "delivery-abandoned-operator:", 1),
                 "delivery-abandoned-operator-update:",
             )
+        } else if digest {
+            (
+                dedupe_key.replacen("delivery-abandoned:", "delivery-abandoned-ended:", 1),
+                "",
+            )
         } else {
             (dedupe_key.to_string(), "")
         };
         let class_pattern = if operator {
             "delivery-abandoned-operator%"
+        } else if digest {
+            "delivery-abandoned-ended:%"
         } else {
             "delivery-abandoned:%"
         };
+        let kind = digest.then_some(NOTICE_DIGEST_KIND);
         let episode: Vec<(i64, String, String, bool)> = {
             let mut statement = tx.prepare(
                 "SELECT q.id, COALESCE(q.dedupe_key, ''), q.prompt,
@@ -4281,9 +4368,9 @@ impl SqlitePromptQueueStore {
         };
         tx.execute(
             "INSERT OR IGNORE INTO prompt_queue
-                (source, target, prompt, created_at, factory_session, summary, priority, urgent, origin_kind, dedupe_key)
-             VALUES ('delivery-watchdog', ?, ?, ?, ?, ?, 1, 0, 'daemon', ?)",
-            params![sender, notice, now.to_rfc3339(), session, summary, dedupe_key],
+                (source, target, prompt, created_at, factory_session, summary, priority, urgent, origin_kind, dedupe_key, kind)
+             VALUES ('delivery-watchdog', ?, ?, ?, ?, ?, 1, 0, 'daemon', ?, ?)",
+            params![sender, notice, now.to_rfc3339(), session, summary, dedupe_key, kind],
         )?;
         Ok(())
     }
@@ -4673,6 +4760,9 @@ impl SqlitePromptQueueStore {
         }
 
         let now = Utc::now().to_rfc3339();
+        // cas-bf890: digest notices are never selected for transport, so no
+        // Teams pointer or pane write ever wakes a recipient for one; the
+        // turn's hook shows them as one digest line (`HookDrain::NoticeDigest`).
         // cas-d047 (GH #69): a row this old was never consumed by anyone;
         // delivering it now would hand a live worker an instruction from a
         // session that ended long ago. Withheld here even before the sweep
@@ -4694,6 +4784,7 @@ impl SqlitePromptQueueStore {
                        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                        AND created_at >= ?
                        {NOT_ALREADY_CONSUMED_SQL}
+                       {NOT_NOTICE_DIGEST_SQL}
                        AND target IN ({})
                  )
                  ORDER BY priority ASC, cas_target_rn ASC, id ASC
@@ -4752,6 +4843,7 @@ impl SqlitePromptQueueStore {
                    AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                    AND created_at >= ?
                    {NOT_ALREADY_CONSUMED_SQL}
+                       {NOT_NOTICE_DIGEST_SQL}
                    AND factory_session = ?
                    AND target IN ({})
              )
@@ -4785,6 +4877,7 @@ impl SqlitePromptQueueStore {
                        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                        AND created_at >= ?
                        {NOT_ALREADY_CONSUMED_SQL}
+                       {NOT_NOTICE_DIGEST_SQL}
                        AND factory_session IS NULL
                        AND target IN ({})
                  )
@@ -6321,7 +6414,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             HookDrain::DeliveredAfter(at) => (TransportEligibility::After(at), &[][..], limit),
             HookDrain::WakeNamed(ids) => (TransportEligibility::WakeNamed, ids, limit.min(ids.len())),
             HookDrain::PolledBefore(at) => (TransportEligibility::PolledBefore(at), &[][..], limit),
+            HookDrain::NoticeDigest => (TransportEligibility::NoticeDigest, &[][..], limit),
         };
+        let budget = (!matches!(drain, HookDrain::NoticeDigest)).then_some(budget_chars);
         let (rows, over_budget) = self.drain_unseen_for_recipient_budgeted(
             recipient,
             factory_session,
@@ -6330,7 +6425,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             None,
             transport,
             ids,
-            Some(budget_chars),
+            budget,
         )?;
         Ok(BudgetedSurface { rows, over_budget })
     }
@@ -8901,6 +8996,16 @@ impl SqlitePromptQueueStore {
             } else {
                 ""
             };
+            // cas-bf890: digest notices render only through their own drain,
+            // as one line; every other rendering drain skips them, so they
+            // never take a body slot from a message that needs reading.
+            let digest_sql = if matches!(transport, TransportEligibility::NoticeDigest) {
+                ONLY_NOTICE_DIGEST_Q_SQL
+            } else if source == SurfacingSource::HookSurfaced {
+                NOT_NOTICE_DIGEST_Q_SQL
+            } else {
+                ""
+            };
             // cas-6853: a broadcast reaches only its real audience.
             let audience_sql = broadcast_audience_sql(recipient, agents_table_exists(&conn)?);
             // cas-1f0c: once a Teams body fallback carries the row, no hook
@@ -8930,6 +9035,7 @@ impl SqlitePromptQueueStore {
                 TransportEligibility::WakeNamed => WAKE_NAMED_RECEIPT_SQL,
                 TransportEligibility::PolledBefore(_) => POLLED_UNACKED_RECEIPT_SQL,
                 TransportEligibility::NamedRead => NAMED_READ_RECEIPT_SQL,
+                TransportEligibility::NoticeDigest => UNSEEN_RECIPIENT_RECEIPT_SQL,
             };
             // The receipt clause precedes every other bound predicate, so its
             // parameters follow the join's recipient. `After` (cas-a1ed) and
@@ -9004,6 +9110,7 @@ impl SqlitePromptQueueStore {
                            {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                            {deliverable_sql}
                            {daemon_nudge_sql}
+                           {digest_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {audience_sql}
                            {fallback_sql}
@@ -9050,6 +9157,7 @@ impl SqlitePromptQueueStore {
                            {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                            {deliverable_sql}
                            {daemon_nudge_sql}
+                           {digest_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            {audience_sql}
                            {fallback_sql}
@@ -18901,5 +19009,202 @@ mod cas_1bc7_tests {
         let (temp, store) = store();
         let _held = foreign_writer(temp.path());
         within_budget(|| store.init()).expect("init with nothing to upgrade writes nothing");
+    }
+}
+
+/// cas-bf890 (GH #1215 §3): abandonment notices about a recipient that has
+/// ended reach the supervisor only as a digest line, never as a transport of
+/// their own. The class is stamped by the producer on the row, so the daemon
+/// selection and the hook drains read one predicate.
+#[cfg(test)]
+mod cas_bf890_notice_digest_tests {
+    use super::*;
+
+    const SESSION: &str = "sess-bf890";
+
+    fn store() -> (tempfile::TempDir, SqlitePromptQueueStore) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        (temp, store)
+    }
+
+    fn register(store: &SqlitePromptQueueStore, name: &str, role: &str, status: &str, session: &str) {
+        let conn = store.conn.lock().unwrap();
+        conn.execute_batch(crate::AGENT_SCHEMA).unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO agents (id, name, role, status, factory_session, registered_at, last_heartbeat)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![format!("id-{name}-{session}"), name, role, status, session, now, now],
+        )
+        .unwrap();
+    }
+
+    /// The sender's message to `target` expires undelivered; returns the id of
+    /// the abandonment notice CAS wrote back to the sender.
+    fn abandon_to(store: &SqlitePromptQueueStore, sender: &str, target: &str) -> i64 {
+        let before: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM prompt_queue WHERE source = 'delivery-watchdog'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let id = store.enqueue_with_session(sender, target, "do the thing", SESSION).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                params![(Utc::now() - chrono::Duration::days(2)).to_rfc3339(), id],
+            )
+            .unwrap();
+        }
+        assert_eq!(store.abandon_pending_older_than(900).unwrap(), 1);
+        // A new notice row, or the unread episode row it folded into.
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT MAX(id) FROM prompt_queue WHERE source = 'delivery-watchdog'
+              AND (id > ?1 OR instr(prompt, ?2) > 0)",
+            params![before, format!("Message {id} to {target}")],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .unwrap()
+        .expect("an abandonment notice")
+    }
+
+    fn kind_of(store: &SqlitePromptQueueStore, id: i64) -> Option<String> {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row("SELECT kind FROM prompt_queue WHERE id = ?", params![id], |row| row.get(0))
+            .unwrap()
+    }
+
+    fn selected(store: &SqlitePromptQueueStore) -> Vec<i64> {
+        store
+            .peek_for_targets(&["supervisor", "lead-sup"], Some(SESSION), 50)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
+    fn drain(store: &SqlitePromptQueueStore, drain: HookDrain<'_>) -> Vec<i64> {
+        store
+            .surface_for_recipient_within_budget(
+                "supervisor",
+                Some(SESSION),
+                drain,
+                50,
+                HOOK_SURFACE_BUDGET_CHARS,
+            )
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
+    /// Acceptance 2: an abandoned message to a recipient from an earlier
+    /// session never wakes the supervisor. The daemon never selects the
+    /// notice (no Teams pointer, no pane write), and the rendering drains
+    /// leave it to the digest.
+    #[test]
+    fn notice_about_an_ended_recipient_is_never_transported_only_digested() {
+        let (_temp, store) = store();
+        register(&store, "lead-sup", "supervisor", "active", SESSION);
+        register(&store, "old-worker", "worker", "shutdown", "sess-earlier");
+        let notice = abandon_to(&store, "supervisor", "old-worker");
+
+        assert_eq!(kind_of(&store, notice).as_deref(), Some(NOTICE_DIGEST_KIND));
+        assert!(!selected(&store).contains(&notice), "the daemon must never select it");
+        assert!(drain(&store, HookDrain::Unseen).is_empty());
+        assert!(drain(&store, HookDrain::WithoutTransport).is_empty());
+        assert_eq!(drain(&store, HookDrain::NoticeDigest), vec![notice]);
+        // Shown once: the digest receipt retires it.
+        assert!(drain(&store, HookDrain::NoticeDigest).is_empty());
+    }
+
+    /// `inbox_poll` still reads a digest notice whole.
+    #[test]
+    fn inbox_poll_still_reads_a_digest_notice() {
+        let (_temp, store) = store();
+        register(&store, "lead-sup", "supervisor", "active", SESSION);
+        let notice = abandon_to(&store, "supervisor", "never-registered");
+        assert_eq!(kind_of(&store, notice).as_deref(), Some(NOTICE_DIGEST_KIND));
+        let polled = store.poll_unseen_for_recipient("supervisor", Some(SESSION), 10).unwrap();
+        assert_eq!(polled.iter().map(|row| row.id).collect::<Vec<_>>(), vec![notice]);
+        assert!(polled[0].prompt.contains("never-registered"));
+    }
+
+    /// Control: a message to a recipient that is still live failed for some
+    /// other reason. That needs action, so it keeps its ordinary delivery.
+    #[test]
+    fn notice_about_a_live_recipient_keeps_its_ordinary_delivery() {
+        let (_temp, store) = store();
+        register(&store, "lead-sup", "supervisor", "active", SESSION);
+        register(&store, "busy-worker", "worker", "active", SESSION);
+        let notice = abandon_to(&store, "supervisor", "busy-worker");
+
+        assert_eq!(kind_of(&store, notice), None);
+        assert!(selected(&store).contains(&notice));
+        assert!(drain(&store, HookDrain::NoticeDigest).is_empty());
+        assert_eq!(drain(&store, HookDrain::Unseen), vec![notice]);
+    }
+
+    /// The two classes never fold into one episode row: an actionable notice
+    /// must not hide inside a digest row, nor the reverse.
+    #[test]
+    fn ended_and_live_notices_fold_into_separate_episodes() {
+        let (_temp, store) = store();
+        register(&store, "lead-sup", "supervisor", "active", SESSION);
+        register(&store, "busy-worker", "worker", "idle", SESSION);
+        let first_ended = abandon_to(&store, "supervisor", "gone-a");
+        let live = abandon_to(&store, "supervisor", "busy-worker");
+        let second_ended = abandon_to(&store, "supervisor", "gone-b");
+
+        assert_ne!(live, first_ended);
+        assert_eq!(second_ended, first_ended, "ended notices fold into one digest row");
+        assert_eq!(kind_of(&store, live), None);
+        let digest = store.queued_prompt(first_ended).unwrap().unwrap();
+        assert!(digest.prompt.contains("gone-a") && digest.prompt.contains("gone-b"));
+        assert!(!digest.prompt.contains("busy-worker"));
+    }
+
+    /// Scope: a worker's own abandonment notices are not the supervisor
+    /// inbox; they keep their ordinary delivery.
+    #[test]
+    fn a_workers_notice_is_not_digested() {
+        let (_temp, store) = store();
+        register(&store, "lead-sup", "supervisor", "active", SESSION);
+        register(&store, "sender-worker", "worker", "active", SESSION);
+        let notice = abandon_to(&store, "sender-worker", "gone-c");
+        assert_eq!(kind_of(&store, notice), None);
+    }
+
+    /// Acceptance 3 (store half): typed wake rows are never digest rows. The
+    /// daemon still selects them and the turn-start drain still renders them.
+    #[test]
+    fn typed_wake_rows_keep_selection_and_rendering() {
+        let (_temp, store) = store();
+        register(&store, "lead-sup", "supervisor", "active", SESSION);
+        let lifecycle = store
+            .enqueue_with_session(
+                "lifecycle-wake:7",
+                "supervisor",
+                "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-1\">MERGE</task-lifecycle>",
+                SESSION,
+            )
+            .unwrap();
+        let blocker = store
+            .enqueue_with_session("busy-worker", "supervisor", "<cas-blocker>stuck</cas-blocker>", SESSION)
+            .unwrap();
+        let ended = abandon_to(&store, "supervisor", "gone-d");
+        let picked = selected(&store);
+        assert!(picked.contains(&lifecycle) && picked.contains(&blocker) && !picked.contains(&ended));
+        let rendered = drain(&store, HookDrain::Unseen);
+        assert_eq!(rendered, vec![lifecycle, blocker]);
+        assert_eq!(drain(&store, HookDrain::NoticeDigest), vec![ended]);
     }
 }

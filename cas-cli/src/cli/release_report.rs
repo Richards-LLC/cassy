@@ -14,7 +14,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Utc};
 use clap::Args;
 use regex::Regex;
 use serde::Serialize;
@@ -1841,9 +1841,9 @@ fn assemble_markdown(
             pr.number,
             window
                 .opened
-                .map(|opened| format!(" ({})", opened.format("%H:%M:%SZ")))
+                .map(|opened| format!(" ({})", eastern_time(opened)))
                 .unwrap_or_default(),
-            window.closes.format("%H:%M:%SZ")
+            eastern_time(window.closes)
         )),
         _ => method.push(
             "No merged release PR was found, so every referenced closed issue counts.".to_string(),
@@ -1901,7 +1901,11 @@ fn assemble_markdown(
             issue.number,
             issue.url,
             escape_table(&issue.title),
-            issue.closed_at.as_deref().unwrap_or("unavailable"),
+            issue
+                .closed_at
+                .as_deref()
+                .map(eastern_date_time_text)
+                .unwrap_or_else(|| "unavailable".to_string()),
             issue.theme
         ));
     }
@@ -1953,7 +1957,10 @@ fn assemble_markdown(
         output.push_str("| No published assets | unavailable | unavailable |\n");
     }
     output.push_str("\n## Evidence and scope\n\n");
-    output.push_str(&format!("Retrieved: {}.\n\n", sources.retrieved_at));
+    output.push_str(&format!(
+        "Retrieved: {}.\n\n",
+        eastern_date_time_text(&sources.retrieved_at)
+    ));
     output.push_str(&format!("{}\n\n", source_refs));
     output.push_str(
         "Each change is placed in a product area by the words in its title, then its text; a change that matches no area is listed under Other. Correct an area in the Change map table before rendering.\n\n",
@@ -1965,7 +1972,7 @@ fn assemble_markdown(
                 .as_deref()
                 .map(|url| format!("<{url}>"))
                 .unwrap_or_else(|| format!("#{}", pr.number)),
-            pr.merged_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            eastern_date_time(pr.merged_at)
         ));
     }
     if let Some((path, _)) = &sources.release_notes {
@@ -2130,7 +2137,7 @@ fn source_reference_line(sources: &AcquiredSources, tag: &str, project_root: &Pa
         format!(
             "Source: {}; retrieved {}.",
             refs.join(", "),
-            sources.retrieved_at
+            eastern_date_time_text(&sources.retrieved_at)
         )
     }
 }
@@ -2931,17 +2938,54 @@ fn date_from_timestamp(value: &str) -> Option<String> {
         })
 }
 
+/// The operator reads clock times in US Eastern, 12-hour form ("1:04 AM ET").
+/// Eastern daylight time (UTC-4) runs from the second Sunday in March at
+/// 2:00 AM EST (07:00 UTC) to the first Sunday in November at 2:00 AM EDT
+/// (06:00 UTC); standard time (UTC-5) covers the rest of the year. Machine
+/// fields (front matter, JSON, receipts) stay in UTC ISO-8601.
+fn eastern(instant: DateTime<Utc>) -> DateTime<FixedOffset> {
+    let year = instant.year();
+    let nth_sunday = |month: u32, nth: i64| {
+        let first = NaiveDate::from_ymd_opt(year, month, 1).expect("valid month start");
+        let to_sunday = (7 - first.weekday().num_days_from_sunday() as i64) % 7;
+        first + chrono::Duration::days(to_sunday + 7 * (nth - 1))
+    };
+    let daylight_from = nth_sunday(3, 2).and_hms_opt(7, 0, 0).expect("valid time").and_utc();
+    let daylight_until = nth_sunday(11, 1).and_hms_opt(6, 0, 0).expect("valid time").and_utc();
+    let hours = if instant >= daylight_from && instant < daylight_until {
+        -4
+    } else {
+        -5
+    };
+    instant.with_timezone(&FixedOffset::east_opt(hours * 3600).expect("valid offset"))
+}
+
+/// `1:04 AM ET`
+fn eastern_time(instant: DateTime<Utc>) -> String {
+    eastern(instant).format("%-I:%M %p ET").to_string()
+}
+
+/// `16 October 2026 · 1:04 AM ET`, dated in Eastern time.
+fn eastern_date_time(instant: DateTime<Utc>) -> String {
+    format!(
+        "{} · {}",
+        eastern(instant).format("%-d %B %Y"),
+        eastern_time(instant)
+    )
+}
+
+/// An RFC 3339 timestamp as Eastern date and time; other text is kept.
+fn eastern_date_time_text(value: &str) -> String {
+    parse_utc(Some(value))
+        .map(eastern_date_time)
+        .unwrap_or_else(|| value.to_string())
+}
+
 fn format_publication_line(value: &str) -> String {
-    DateTime::parse_from_rfc3339(value)
-        .map(|timestamp| {
-            let timestamp = timestamp.with_timezone(&Utc);
-            format!(
-                "Published {} · {} UTC",
-                timestamp.format("%-d %B %Y"),
-                timestamp.format("%H:%M")
-            )
-        })
-        .unwrap_or_else(|_| format!("Published {value}"))
+    match parse_utc(Some(value)) {
+        Some(published) => format!("Published {}", eastern_date_time(published)),
+        None => format!("Published {value}"),
+    }
 }
 
 fn format_verdict(value: &str) -> String {
@@ -3566,7 +3610,7 @@ Dev reply
 
         assert_eq!(
             format_publication_line("2026-09-09T16:51:40Z"),
-            "Published 9 September 2026 · 16:51 UTC"
+            "Published 9 September 2026 · 12:51 PM ET"
         );
     }
 
@@ -3699,6 +3743,32 @@ Was: reports lacked evidence. Now: reports include verification evidence.
         assert_eq!(normalize_version("v3.20.0").unwrap(), "3.20.0");
         assert!(normalize_version("../secret").is_err());
         assert!(normalize_version("v").is_err());
+    }
+
+    /// cas-5389: human-facing times are Eastern 12-hour, EDT in October and
+    /// EST in January, switching at 2:00 AM local on the US DST Sundays.
+    #[test]
+    fn eastern_times_follow_us_daylight_saving() {
+        let at = |value: &str| parse_utc(Some(value)).expect("timestamp");
+        assert_eq!(eastern_time(at("2026-10-16T05:04:14Z")), "1:04 AM ET");
+        assert_eq!(eastern_time(at("2026-01-15T17:30:00Z")), "12:30 PM ET");
+        assert_eq!(
+            eastern_date_time(at("2027-01-05T03:15:00Z")),
+            "4 January 2027 · 10:15 PM ET"
+        );
+        // The Eastern date can differ from the UTC date.
+        assert_eq!(
+            format_publication_line("2026-10-15T01:34:05Z"),
+            "Published 14 October 2026 · 9:34 PM ET"
+        );
+        // 8 March 2026: 1:59 AM EST, then 3:00 AM EDT.
+        assert_eq!(eastern_time(at("2026-03-08T06:59:00Z")), "1:59 AM ET");
+        assert_eq!(eastern_time(at("2026-03-08T07:00:00Z")), "3:00 AM ET");
+        // 1 November 2026: 1:59 AM EDT, then 1:00 AM EST.
+        assert_eq!(eastern_time(at("2026-11-01T05:59:00Z")), "1:59 AM ET");
+        assert_eq!(eastern_time(at("2026-11-01T06:00:00Z")), "1:00 AM ET");
+        // Non-timestamp text passes through unchanged.
+        assert_eq!(eastern_date_time_text("unavailable"), "unavailable");
     }
 
     /// cas-7860: page one counts shipped changes by area, in plain titles,

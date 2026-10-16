@@ -68,6 +68,6 @@ Save the postable draft as `docs/release-notes/<date>-<topic>-slack.md`
 (date `YYYY-MM-DD`, topic kebab-case) before posting.
 
 Immediately after posting, before ending the task or turn, annotate that saved
-draft with a `## POSTED` block containing the UTC timestamp, channel, and a
+draft with a `## POSTED` block containing the Eastern 12-hour posting time (for example `9:45 AM ET`), channel, and a
 permalink for every top-level post and reply. This is the searchable receipt
 that the announcement happened.

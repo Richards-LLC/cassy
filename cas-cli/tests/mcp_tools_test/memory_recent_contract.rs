@@ -49,7 +49,11 @@ async fn recent_declares_and_applies_stable_id_tie_break() {
     let second_id = extract_entry_id(&extract_text(second))
         .expect("second entry id")
         .to_string();
-    assert!(second_id > first_id, "fixture IDs must be ascending");
+    // Memory IDs are opaque; creation order does not imply lexical order.
+    assert_ne!(first_id, second_id, "fixtures must have distinct IDs");
+    let mut expected_ids = [first_id.as_str(), second_id.as_str()];
+    expected_ids.sort_unstable();
+    let [lower_id, higher_id] = expected_ids;
 
     let conn = Connection::open(temp.path().join(".cas/cas.db"))
         .expect("test store database should be reachable");
@@ -70,8 +74,8 @@ async fn recent_declares_and_applies_stable_id_tie_break() {
         "recent response must state its ordering contract: {text}"
     );
     assert!(
-        text.find(&format!("[{second_id}]")).unwrap()
-            < text.find(&format!("[{first_id}]")).unwrap(),
+        text.find(&format!("[{higher_id}]")).unwrap()
+            < text.find(&format!("[{lower_id}]")).unwrap(),
         "equal recent timestamps must be ordered by descending id: {text}"
     );
 }

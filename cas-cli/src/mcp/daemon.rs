@@ -937,18 +937,27 @@ impl EmbeddedDaemon {
         #[cfg(not(unix))]
         let cc_pid = std::process::id();
 
-        if let Ok(store) = open_agent_store(&self.config.cas_root) {
-            if let Ok(Some(agent)) = store.get_by_pid(cc_pid) {
+        let expected_owner = self.agent_id.read().await.clone();
+        if let Ok(store) = open_agent_store(&self.config.cas_root)
+            && let Ok(Some(agent)) = store.get_by_pid(cc_pid)
+            && !crate::cloud::shutdown::is_ended(&self.config.cas_root, &agent).unwrap_or(true)
+        {
+            let mut pid_sessions = self.pid_sessions.write().await;
+            let mut owner = self.agent_id.write().await;
+            // PID adoption has stronger authority than MCP bootstrap, while a
+            // concurrent hook's session mapping/owner still takes precedence.
+            if owner.as_ref() == expected_owner.as_ref()
+                && pid_sessions.get(&cc_pid).is_none_or(|id| id == &agent.id)
+            {
                 eprintln!(
                     "[Cassy] Adopting pre-registered agent: {} (registered via fallback)",
                     agent.id
                 );
-                // Populate pid_sessions so GetSession queries work
-                {
-                    let mut pid_sessions = self.pid_sessions.write().await;
-                    pid_sessions.insert(cc_pid, agent.id.clone());
-                }
-                self.set_agent_id(agent.id).await;
+                pid_sessions.insert(cc_pid, agent.id.clone());
+                *owner = Some(agent.id.clone());
+                drop(owner);
+                drop(pid_sessions);
+                self.kick_cloud_presence(agent.id).await;
             }
         }
 

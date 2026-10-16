@@ -251,8 +251,9 @@ async fn cas_031e_superseded_message_discards_its_held_probe_result() {
 
 #[tokio::test]
 async fn cas_cc89_whole_poison_sweep_runs_under_enforced_daemon_step() {
-    let _env = crate::test_support::TestEnvGuard::temp_home();
-    let (_temp, mut daemon, queue, row) = fixture(false);
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let (temp, mut daemon, queue, row) = fixture(false);
+    let inbox = setup_pointer(&mut daemon, queue.as_ref(), row, temp.path(), &mut env).await;
     let root = daemon.app.cas_dir().to_path_buf();
     let old = chrono::Utc::now() - chrono::Duration::minutes(31);
     rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
@@ -273,13 +274,28 @@ async fn cas_cc89_whole_poison_sweep_runs_under_enforced_daemon_step() {
         }
         let notices: Vec<_> = queue.peek_all(30).unwrap().into_iter()
             .filter(|row| row.source == "delivery-watchdog").collect();
-        if !notices.is_empty() {
+        let body_delivered = std::fs::read_to_string(&inbox).ok().and_then(|text|
+            serde_json::from_str::<Vec<super::super::teams::InboxMessage>>(&text).ok())
+            .is_some_and(|messages| messages.iter().any(|message| message.text.contains("original message")));
+        if !notices.is_empty() && body_delivered {
             assert_eq!(notices.len(), 1, "one durable sender bounce");
             break;
         }
         assert!(Instant::now() < deadline, "full sweep never bounced the unread message");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    // Replay the actual complete step; durable claims/episode markers must
+    // leave exactly one body and one bounce after outstanding work settles.
+    for _ in 0..5 {
+        {
+            let (_attachment, _enforce) = loop_watchdog::enforced_daemon_step(&progress, loop_watchdog::LoopPhase::PromptQueue);
+            daemon.run_prompt_poison_sweep(queue.as_ref(), &targets).await;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(queue.peek_all(30).unwrap().iter().filter(|row| row.source == "delivery-watchdog").count(), 1);
+    let messages: Vec<super::super::teams::InboxMessage> = serde_json::from_str(&std::fs::read_to_string(inbox).unwrap()).unwrap();
+    assert_eq!(messages.len(), 2, "one pointer and one full body");
     assert_eq!(cas_store::lane_guard::thread_violations(), before);
     assert!(daemon.queue_jobs.drain_for_shutdown(&root, Duration::from_secs(3)));
 }
@@ -296,4 +312,165 @@ fn cas_cc89_old_completion_read_panics_under_enforcement_control() {
     super::super::delivery_probe_jobs::recipient_turn_completion_after_io(
         daemon.app.cas_dir(), "worker-a", chrono::Utc::now(),
     );
+}
+
+
+fn hold_lane(daemon: &mut FactoryDaemon, lane: jobs::Lane) -> std::sync::mpsc::Sender<()> {
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    daemon.queue_jobs.submit_external(jobs::JobSpec {
+        kind: "PoisonHold", key: format!("PoisonHold:{lane:?}"), lane,
+        criticality: jobs::Criticality::Critical, generation: 1,
+        budget: Duration::from_millis(100),
+    }, move || {
+        let _ = entered_tx.send(());
+        let _ = release_rx.recv();
+        Box::new(())
+    });
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    release_tx
+}
+
+async fn setup_pointer(daemon: &mut FactoryDaemon, queue: &dyn cas_store::PromptQueueStore,
+    row: i64, project: &std::path::Path, guard: &mut crate::test_support::TestEnvGuard) -> std::path::PathBuf
+{
+    let config_dir = guard.home().join(".claude");
+    guard.set("CLAUDE_CONFIG_DIR", &config_dir);
+    let teams = super::super::teams::TeamsManager::new(&daemon.session_name);
+    teams.init_team_config(&["worker-a".into()], project, &std::collections::HashMap::new(), "lead-session").unwrap();
+    daemon.teams = Some(teams);
+    let original = queue.queued_prompt(row).unwrap().unwrap();
+    daemon.deliver_queued_to_worker("worker-a", "supervisor", &format!("[cas #{row} supervisor-authored 0s first]\n\n{}", original.prompt),
+        None, row, &original.prompt).await.unwrap();
+    assert!(queue.claim_recipient_transport(row, "worker-a").unwrap());
+    rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db")).unwrap().execute(
+        "UPDATE prompt_queue_recipient_seen SET seen_at=? WHERE prompt_id=?",
+        rusqlite::params![(chrono::Utc::now()-chrono::Duration::minutes(4)).to_rfc3339(), row],
+    ).unwrap();
+    config_dir.join("teams").join(&daemon.session_name).join("inboxes/worker-a.json")
+}
+
+#[tokio::test]
+async fn cas_cc89_pointer_failure_releases_claim_and_retry_delivers_once() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let (temp, mut daemon, queue, row) = fixture(false);
+    let inbox = setup_pointer(&mut daemon, queue.as_ref(), row, temp.path(), &mut env).await;
+    // A real filesystem failure at the inbox boundary, not a fake job result.
+    std::fs::remove_file(&inbox).unwrap();
+    std::fs::create_dir(&inbox).unwrap();
+    let root = daemon.app.cas_dir().to_path_buf();
+    daemon.queue_jobs = prompt_queue_jobs::QueueJobs::start_with_private_writer(root.clone(), None);
+    daemon.fallback_unsurfaced_teams_pointers(queue.as_ref()).await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        daemon.drain_relay_jobs();
+        if !daemon.relay_jobs.reading(super::super::relay_jobs::Relay::TeamsPointers)
+            && daemon.queue_jobs.poison_jobs.pointers.is_empty() { break; }
+        assert!(Instant::now() < deadline, "failed pointer phase never released");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(!queue.teams_body_fallback_claimed(row, "worker-a").unwrap());
+    std::fs::remove_dir(&inbox).unwrap();
+    daemon.fallback_unsurfaced_teams_pointers(queue.as_ref()).await;
+    loop {
+        daemon.drain_relay_jobs();
+        if !daemon.relay_jobs.reading(super::super::relay_jobs::Relay::TeamsPointers)
+            && daemon.queue_jobs.poison_jobs.pointers.is_empty() { break; }
+        assert!(Instant::now() < deadline, "retry never delivered");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(queue.teams_body_fallback_claimed(row, "worker-a").unwrap());
+    daemon.fallback_unsurfaced_teams_pointers(queue.as_ref()).await;
+    while daemon.relay_jobs.reading(super::super::relay_jobs::Relay::TeamsPointers) {
+        daemon.drain_relay_jobs();
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let messages: Vec<super::super::teams::InboxMessage> = serde_json::from_str(&std::fs::read_to_string(inbox).unwrap()).unwrap();
+    assert_eq!(messages.len(), 1, "retry and rescan must not duplicate body");
+    assert!(messages[0].text.contains(&queue.queued_prompt(row).unwrap().unwrap().prompt));
+    assert!(daemon.queue_jobs.drain_for_shutdown(&root, Duration::from_secs(3)));
+}
+
+#[tokio::test]
+async fn cas_cc89_idle_validation_discards_acked_replaced_and_dead_rows() {
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    for change in ["ack", "replace", "death"] {
+        let (_temp, mut daemon, queue, row) = fixture(false);
+        let root = daemon.app.cas_dir().to_path_buf();
+        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+            "UPDATE prompt_queue SET created_at=? WHERE id=?",
+            rusqlite::params![(chrono::Utc::now()-chrono::Duration::minutes(11)).to_rfc3339(), row],
+        ).unwrap();
+        daemon.pane_silent_since.insert("worker-a".into(), Instant::now()-Duration::from_secs(660));
+        daemon.queue_jobs = prompt_queue_jobs::QueueJobs::start_with_private_writer(root.clone(), None);
+        let release = hold_lane(&mut daemon, jobs::Lane::External);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        daemon.relay_idle_unacked_messages(queue.as_ref());
+        while !daemon.relay_jobs.writing(&format!("idle-check:{row}")) {
+            daemon.drain_relay_jobs();
+            assert!(Instant::now() < deadline, "validation never reached the held lane");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        match change {
+            "ack" => queue.ack(row).unwrap(),
+            "replace" => { rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+                "UPDATE prompt_queue SET prompt=? WHERE id=?", rusqlite::params!["replacement message", row],
+            ).unwrap(); }
+            "death" => { daemon.dead_workers.insert("worker-a".into()); }
+            _ => unreachable!(),
+        }
+        release.send(()).unwrap();
+        let progress = loop_watchdog::LoopProgress::new();
+        loop {
+            {
+                let (_attachment, _enforce) = loop_watchdog::enforced_daemon_step(&progress, loop_watchdog::LoopPhase::PromptQueue);
+                daemon.drain_relay_jobs();
+            }
+            if !daemon.relay_jobs.writing(&format!("idle-check:{row}"))
+                && !daemon.relay_jobs.writing(&format!("idle-unacked:{row}")) { break; }
+            assert!(Instant::now() < deadline, "held validation never reported");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(queue.peek_all(30).unwrap().iter().filter(|candidate| candidate.id != row).count(), 0,
+            "old idle alarm must not survive {change}");
+        assert!(daemon.queue_jobs.drain_for_shutdown(&root, Duration::from_secs(3)));
+    }
+}
+
+#[tokio::test]
+async fn cas_cc89_slow_flag_revalidation_does_not_hold_the_store_writer() {
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let (_temp, mut daemon, queue, row) = fixture(false);
+    let root = daemon.app.cas_dir().to_path_buf();
+    daemon.normal_delivery_probes.get_mut(&row).unwrap().nudge_sent_at = Some(Instant::now()-NORMAL_DELIVERY_OBSERVE_WINDOW);
+    daemon.queue_jobs = prompt_queue_jobs::QueueJobs::start_with_private_writer(root.clone(), None);
+    let release = hold_lane(&mut daemon, jobs::Lane::External);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+        if daemon.relay_jobs.writing(&format!("normal-flag-validate:{row}")) { break; }
+        assert!(Instant::now() < deadline, "flag revalidation never reached the held lane");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let (written_tx, written_rx) = std::sync::mpsc::channel();
+    let path = root.clone();
+    daemon.queue_jobs.submit_external(jobs::JobSpec {
+        kind: "PoisonWriterControl", key: "PoisonWriterControl".into(), lane: jobs::Lane::Write,
+        criticality: jobs::Criticality::Critical, generation: 1, budget: Duration::from_millis(100),
+    }, move || {
+        let id = crate::store::open_prompt_queue_store(&path).unwrap().enqueue("control", "observer", "writer progress").unwrap();
+        let _ = written_tx.send(id);
+        Box::new(())
+    });
+    let id = written_rx.recv_timeout(Duration::from_secs(2)).expect("store writer was held by validation");
+    assert!(queue.queued_prompt(id).unwrap().is_some());
+    assert!(daemon.normal_delivery_probes.contains_key(&row), "validation is still held");
+    release.send(()).unwrap();
+    while daemon.normal_delivery_probes.contains_key(&row) {
+        daemon.drain_relay_jobs();
+        assert!(Instant::now() < deadline, "released flag never settled");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(daemon.queue_jobs.drain_for_shutdown(&root, Duration::from_secs(3)));
 }

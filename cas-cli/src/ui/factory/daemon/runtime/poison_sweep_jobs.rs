@@ -24,6 +24,13 @@ impl PoisonJobs {
         self.epochs.entry(pane.to_string())
             .or_insert_with(|| Arc::new(AtomicBool::new(true))).clone()
     }
+    pub(crate) fn prune_epochs(&mut self, names: &HashSet<String>) {
+        self.epochs.retain(|name, live| {
+            let keep = names.contains(name) || self.pointers.values().any(|p| p.work.recipient == *name);
+            if !keep { live.store(false, Ordering::Release); }
+            keep
+        });
+    }
     pub(crate) fn forget_pane(&mut self, pane: &str) {
         self.generation = self.generation.wrapping_add(1);
         if let Some(live) = self.epochs.remove(pane) {

@@ -4445,6 +4445,12 @@ impl FactoryDaemon {
         use super::relay_jobs::RelayOutput;
         if generation != self.queue_jobs.poison_jobs.generation
             || context != message_attention::AttentionInputs::from_daemon(self) { return; }
+        let mut names: std::collections::HashSet<String> = self.app.worker_names().iter().cloned().collect();
+        names.extend(rows.iter().map(|candidate| candidate.row.target.clone()));
+        names.extend(self.normal_delivery_probes.values().map(|probe| probe.pane.clone()));
+        names.insert("supervisor".into());
+        names.insert(self.app.supervisor_name().to_string());
+        self.queue_jobs.poison_jobs.prune_epochs(&names);
         let supervisor = self.app.supervisor_name().to_string();
         let unread: Vec<_> = rows.iter().filter(|candidate| candidate.row.target.eq_ignore_ascii_case(&supervisor)
             && !crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(&candidate.row.source))

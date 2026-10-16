@@ -453,6 +453,23 @@ pub(crate) fn normalize_external_target_branch(target: &str) -> &str {
         .unwrap_or(target)
 }
 
+/// Select the first usable alias, shared by reminder creation and execution.
+/// A present but empty or malformed preferred key must not hide a valid alias.
+pub(crate) fn external_filter_string(
+    filter: &serde_json::Value,
+    names: &[&str],
+) -> Option<String> {
+    let object = filter.as_object()?;
+    names.iter().find_map(|name| {
+        object
+            .get(*name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
+            .map(str::to_string)
+    })
+}
+
 /// Parse the stable JSON contract accepted by `coordination.remind` for an
 /// external condition. Keep this strict so a typo remains pending and visible
 /// rather than silently becoming an always-true wake.
@@ -460,41 +477,22 @@ pub(crate) fn parse_external_wake_condition(
     event_type: &str,
     filter: &serde_json::Value,
 ) -> Result<ExternalWakeCondition, String> {
-    let object = filter
+    filter
         .as_object()
         .ok_or_else(|| "external remind_filter must be a JSON object".to_string())?;
     let string_field = |name: &str| {
-        object
-            .get(name)
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
-            .map(str::to_string)
+        external_filter_string(filter, &[name])
             .ok_or_else(|| format!("external remind_filter requires non-empty string field {name:?}"))
     };
 
     match event_type {
         EXTERNAL_BRANCH_CONTAINED_EVENT => {
-            let commit = object
-                .get("commit")
-                .or_else(|| object.get("branch_tip"))
-                .or_else(|| object.get("branch"))
-                // GH #1207: `sha`, the key ci_completed uses for the same commit.
-                .or_else(|| object.get("sha"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
-                .map(str::to_string)
+            // `sha` names the commit for ci_completed and branch containment.
+            let commit = external_filter_string(filter, &["commit", "branch_tip", "branch", "sha"])
                 .ok_or_else(|| {
                     "branch_contained_in remind_filter requires string field `commit` (or `branch_tip`/`branch`/`sha`)".to_string()
                 })?;
-            let target_branch = object
-                .get("target_branch")
-                .or_else(|| object.get("target"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
-                .map(str::to_string)
+            let target_branch = external_filter_string(filter, &["target_branch", "target"])
                 .ok_or_else(|| {
                     "branch_contained_in remind_filter requires string field `target_branch`".to_string()
                 })?;

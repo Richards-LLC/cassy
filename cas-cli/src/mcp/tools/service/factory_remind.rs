@@ -2,7 +2,9 @@ use crate::mcp::tools::service::imports::*;
 
 const EXTERNAL_BRANCH_CONTAINED_EVENT: &str = "branch_contained_in";
 const EXTERNAL_TAG_EXISTS_EVENT: &str = "tag_exists";
-use crate::ui::factory::daemon::runtime::ci_watch::EXTERNAL_CI_COMPLETED_EVENT;
+use crate::ui::factory::daemon::runtime::ci_watch::{
+    EXTERNAL_CI_COMPLETED_EVENT, external_filter_string,
+};
 
 /// GH #1208: default lifetime of an external (`branch_contained_in`,
 /// `tag_exists`, `ci_completed`) reminder when `remind_ttl_secs` is omitted.
@@ -42,21 +44,6 @@ fn is_external_reminder_event(event_type: &str) -> bool {
         event_type,
         EXTERNAL_BRANCH_CONTAINED_EVENT | EXTERNAL_TAG_EXISTS_EVENT | EXTERNAL_CI_COMPLETED_EVENT
     )
-}
-
-fn external_filter_string(
-    filter: &serde_json::Value,
-    names: &[&str],
-) -> Option<String> {
-    let object = filter.as_object()?;
-    names.iter().find_map(|name| {
-        object
-            .get(*name)
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
-            .map(str::to_string)
-    })
 }
 
 /// GH #1207: the `remind_filter` contract of one external event. `required`
@@ -835,6 +822,45 @@ fn ended_reminder_desc(reminder: &cas_store::Reminder) -> String {
 #[cfg(test)]
 mod tests {
     use super::validate_external_reminder;
+
+    #[test]
+    fn cas_3349_validated_aliases_are_parseable() {
+        use crate::ui::factory::daemon::runtime::ci_watch::{
+            ExternalWakeCondition, parse_external_wake_condition,
+        };
+
+        // A malformed preferred key must not hide a usable legacy alias.
+        for invalid in [serde_json::json!(""), serde_json::json!(" \t"),
+            serde_json::json!(null), serde_json::json!(17), serde_json::json!("two refs")]
+        {
+            for commit_key in ["branch_tip", "branch", "sha"] {
+                let filter = serde_json::json!({
+                    "commit": invalid,
+                    commit_key: "abc123",
+                    "target_branch": invalid,
+                    "target": "origin/main",
+                });
+                validate_external_reminder("branch_contained_in", Some(&filter), true, 0)
+                    .expect("valid aliases are accepted at creation");
+                assert_eq!(
+                    parse_external_wake_condition("branch_contained_in", &filter),
+                    Ok(ExternalWakeCondition::BranchContained {
+                        commit: "abc123".into(),
+                        target_branch: "main".into(),
+                    }),
+                    "accepted reminder must be executable: {filter}"
+                );
+            }
+            let filter = serde_json::json!({"commit": invalid, "target_branch": "main"});
+            assert!(validate_external_reminder("branch_contained_in", Some(&filter), true, 0).is_err());
+            assert!(parse_external_wake_condition("branch_contained_in", &filter).is_err());
+        }
+        let filter = serde_json::json!({"commit": "first", "branch_tip": "second", "target_branch": "main", "target": "staging"});
+        assert_eq!(
+            parse_external_wake_condition("branch_contained_in", &filter),
+            Ok(ExternalWakeCondition::BranchContained { commit: "first".into(), target_branch: "main".into() })
+        );
+    }
 
     #[test]
     fn ended_reminders_say_why_they_will_not_fire() {

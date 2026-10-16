@@ -3084,7 +3084,8 @@ impl FactoryDaemon {
         // ones that never reported are re-checked here, as the inject loop
         // did before cas-223f.
         let (rechecked, unchecked) = director_refresh
-            .drain_deliverability(&mut self.queue_jobs, Duration::from_secs(2));
+            .drain_deliverability(&mut self.queue_jobs, Duration::from_secs(2))
+            .await;
         for batch in rechecked {
             let super::factory_jobs::DeliverabilityBatch {
                 prompts,
@@ -3314,6 +3315,17 @@ impl FactoryDaemon {
         if let Some(load) = refresh.take_director_read(&mut self.queue_jobs) {
             refreshed = true;
             let applied = crate::ui::factory::app::timed_refresh_step("apply director read", || self.app.apply_director_refresh(load));
+            // cas-3b16: a changed supervisor-stall tracker is written to the
+            // session metadata on the store worker, not on the loop.
+            if let Some((path, tracker)) = self.app.take_supervisor_stall_write() {
+                store_worker.submit("supervisor stall metric", move || {
+                    if let Err(error) =
+                        crate::ui::factory::app::persist_session_metadata_supervisor_stall_at(&path, &tracker)
+                    {
+                        tracing::warn!(%error, "failed to persist supervisor stall metric");
+                    }
+                });
+            }
             let requests = self.app.take_worker_health_requests();
             for (worker, task) in refresh.submit_health_probes(&self.app, &mut self.queue_jobs, requests) {
                 self.app.clear_worker_health_probe(&worker, &task);
@@ -3433,7 +3445,7 @@ impl FactoryDaemon {
     /// and run the refresh follow-up (epic transitions, reminders, cloud
     /// state, inbox retraction). Runs once per applied director read.
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    async fn deliver_director_events(
+    pub(super) async fn deliver_director_events(
         &mut self,
         refresh: &mut super::director_refresh::DirectorRefresh,
         events: Vec<crate::ui::factory::director::DirectorEvent>,
@@ -3545,10 +3557,15 @@ impl FactoryDaemon {
         // (a retractable alert, or a taskless-worker alert that drops once the
         // worker is assigned) waits for a fresh read as a `RevalidateFresh`
         // job, after this tick's epic merges. The whole batch waits with it
-        // so prompts keep their order.
-        if prompts
-            .iter()
-            .any(crate::ui::factory::app::prompt_needs_fresh_recheck)
+        // so prompts keep their order. cas-3b16 (C2 review round 1, L7): so
+        // does a later batch while an earlier one still waits; re-checks
+        // share one key and finish in submission order, and a batch with
+        // nothing to re-check reads nothing.
+        if !prompts.is_empty()
+            && (refresh.has_pending_deliverability()
+                || prompts
+                    .iter()
+                    .any(crate::ui::factory::app::prompt_needs_fresh_recheck))
         {
             match refresh.start_deliverability_check(
                 &self.app,

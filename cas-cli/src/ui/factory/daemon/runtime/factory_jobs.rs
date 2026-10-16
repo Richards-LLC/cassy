@@ -7,8 +7,8 @@
 //! | Kind | Lane | Budget | What moved off the loop |
 //! |---|---|---|---|
 //! | `DirectorSnapshot` | read | 250 ms | the two-second director read, plus the supervisor-stall delivery evidence (git, gh, task store, QA passes) |
-//! | `RevalidateFresh` | read | 250 ms | the delivery read after detection (with idle-worker liveness) and the inject loop's final re-check |
-//! | `WorkerHealthProbe` | blocking | 100 ms | stall confirmation: worker resolution, `/proc` scan, transcript reads |
+//! | `RevalidateFresh` | read | 250 ms | the delivery read after detection and the inject loop's final re-check |
+//! | `WorkerHealthProbe` | blocking | 100 ms | stall confirmation (worker resolution, `/proc` scan, transcript reads), and the idle-worker liveness observed with each delivery read (cas-3b16) |
 //! | `ReminderScan` | write (StoreWorker) | 100 ms | reminder expiry, due reads and firing |
 //! | `CiStatus` | external | 10 s | the git half of the supervisor-stall evidence: delivery tips, lane CI via `gh`, merged state |
 //!
@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use super::jobs::{Criticality, JobSpec, Lane};
 use crate::ui::factory::app::delivery_evidence::GitEvidenceMap;
-use crate::ui::factory::app::{DeliveryInputs, DirectorRefreshLoad};
+use crate::ui::factory::app::{DeliveryInputs, DirectorRefreshLoad, IdleLivenessMap};
 use crate::ui::factory::director::{DirectorEvent, Prompt, WorkerHealthReport};
 
 pub(crate) const DIRECTOR_SNAPSHOT: &str = "DirectorSnapshot";
@@ -47,6 +47,8 @@ pub(crate) const DELIVERY_READ_KEY: &str = "RevalidateFresh:director:delivery";
 pub(crate) const DELIVERABILITY_KEY: &str = "RevalidateFresh:director:deliverability";
 pub(crate) const REMINDER_SCAN_KEY: &str = "ReminderScan:director";
 pub(crate) const CI_STATUS_KEY: &str = "CiStatus:director";
+/// The idle-worker liveness observed with a delivery read (cas-3b16).
+pub(crate) const IDLE_LIVENESS_KEY: &str = "WorkerHealthProbe:director:idle";
 
 /// A director snapshot: replaceable by the next one.
 pub(crate) fn director_snapshot_spec(generation: u64) -> JobSpec {
@@ -101,6 +103,22 @@ pub(crate) fn worker_health_spec(worker: &str, task: &str, generation: u64) -> J
     }
 }
 
+/// The liveness of the workers a delivery read's `WorkerIdle` events name:
+/// agent store, config, transcripts and a `/proc` scan, so it runs on the
+/// blocking lane beside the read, never on the read lane (cas-3b16, C2
+/// review round 2, L2). It rides with detected events, so it is never
+/// dropped.
+pub(crate) fn idle_liveness_spec(generation: u64) -> JobSpec {
+    JobSpec {
+        kind: WORKER_HEALTH_PROBE,
+        key: IDLE_LIVENESS_KEY.to_string(),
+        lane: Lane::Blocking,
+        criticality: Criticality::Critical,
+        generation,
+        budget: WORKER_HEALTH_PROBE_BUDGET,
+    }
+}
+
 /// A reminder pass. One carrying director events, external observations or
 /// CI wakes is critical (those are edges, consumed once). A pass with only
 /// time reminders is refresh work: the next pass sees the same due rows.
@@ -147,6 +165,7 @@ pub(crate) struct DeliverabilityBatch {
 pub(crate) enum FactoryJobOutput {
     DirectorSnapshot(DirectorRefreshLoad),
     Delivery(Vec<DirectorEvent>, DeliveryInputs),
+    IdleLiveness(IdleLivenessMap),
     Deliverability(DeliverabilityBatch),
     WorkerHealth(WorkerHealthReport),
     ReminderScan,

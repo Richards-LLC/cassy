@@ -1160,6 +1160,68 @@ fn record_terminal_spawn_state(
     });
 }
 
+/// Red-first stub (cas-d741).
+const CAS_D741_RED_STUB: bool = true;
+
+/// cas-d741: a spawn that fails in provisioning ends its request row
+/// `failed` with the reason, so worker_status names it FAILED instead of
+/// leaving it "queued — UNCONFIRMED" with the cause only in the session log.
+/// The audit line's own row write is best effort and is lost under a spent
+/// pass budget (GH #1165), so the terminal state and, if the direct notice
+/// fails, the supervisor notice go through the store worker as well.
+pub(super) fn report_provision_failure(
+    cas_dir: &std::path::Path,
+    factory_session: &str,
+    supervisor_name: &str,
+    request_id: Option<i64>,
+    worker_name: &str,
+    detail: &str,
+) {
+    append_spawn_audit(
+        cas_dir,
+        factory_session,
+        request_id,
+        Some(worker_name),
+        "provision",
+        "failed",
+        detail,
+    );
+    if let Some(request_id) = request_id.filter(|_| !CAS_D741_RED_STUB) {
+        record_terminal_spawn_state(
+            cas_dir,
+            request_id,
+            cas_store::SpawnLifecycleState::Failed,
+            Some(worker_name),
+            detail,
+        );
+    }
+    let notified = enqueue_spawn_outcome_notice(
+        cas_dir,
+        supervisor_name,
+        factory_session,
+        request_id,
+        worker_name,
+        "provision",
+        false,
+        detail,
+    );
+    if notified.is_err() && !CAS_D741_RED_STUB {
+        let request = request_id
+            .map(|id| format!("request {id}"))
+            .unwrap_or_else(|| "a direct spawn".to_string());
+        notify_supervisor_or_defer(
+            cas_dir,
+            supervisor_name,
+            factory_session,
+            format!("Worker spawn failed: {worker_name}"),
+            format!(
+                "Factory spawn {request} for worker '{worker_name}' failed in provisioning: \
+                 {detail}"
+            ),
+        );
+    }
+}
+
 /// Queue a director notice to the supervisor that must not be lost to a spent
 /// store budget: tried now, deferred to the store worker otherwise
 /// (cas-00d5, cas-981e). A failed enqueue inserts nothing, so a retry cannot
@@ -9711,25 +9773,13 @@ impl FactoryDaemon {
                         );
                     }
                     self.app.set_error(format!("Failed to spawn worker: {e}"));
-                    let detail = e.to_string();
-                    append_spawn_audit(
+                    report_provision_failure(
                         self.app.cas_dir(),
                         &self.session_name,
-                        request_id,
-                        Some(&pending_name),
-                        "provision",
-                        "failed",
-                        &detail,
-                    );
-                    let _ = enqueue_spawn_outcome_notice(
-                        self.app.cas_dir(),
                         self.app.supervisor_name(),
-                        &self.session_name,
                         request_id,
                         &pending_name,
-                        "provision",
-                        false,
-                        &detail,
+                        &e.to_string(),
                     );
                 }
                 Err(e) => {
@@ -9745,25 +9795,13 @@ impl FactoryDaemon {
                         );
                     }
                     self.app.set_error(format!("Spawn task panicked: {e}"));
-                    let detail = e.to_string();
-                    append_spawn_audit(
+                    report_provision_failure(
                         self.app.cas_dir(),
                         &self.session_name,
-                        request_id,
-                        Some(&pending_name),
-                        "provision",
-                        "failed",
-                        &detail,
-                    );
-                    let _ = enqueue_spawn_outcome_notice(
-                        self.app.cas_dir(),
                         self.app.supervisor_name(),
-                        &self.session_name,
                         request_id,
                         &pending_name,
-                        "provision",
-                        false,
-                        &detail,
+                        &e.to_string(),
                     );
                 }
             }

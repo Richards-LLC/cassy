@@ -2329,7 +2329,7 @@ impl FactoryApp {
                 let existing: std::collections::HashSet<&str> = self
                     .worker_names
                     .iter()
-                    .chain(self.crash_cleanups_pending.iter())
+                    .chain(self.crash_cleanups_pending.keys())
                     .map(String::as_str)
                     .collect();
                 let mut candidate = generate_unique(1)[0].clone();
@@ -2850,7 +2850,7 @@ impl FactoryApp {
     pub fn mark_worker_crashed_in_memory(&mut self, name: &str) -> CrashCleanup {
         // cas-58a3 review H1: the name stays reserved until its cleanup is
         // applied (or abandoned), so no respawn shares its scope or worktree.
-        self.crash_cleanups_pending.insert(name.to_string());
+        *self.crash_cleanups_pending.entry(name.to_string()).or_default() += 1;
         // Remove from worker tracking
         self.worker_names.retain(|n| n != name);
 
@@ -2885,19 +2885,31 @@ impl FactoryApp {
     /// cas-58a3 review H1: whether `name`'s crash cleanup is still pending.
     /// Respawn and named spawn treat such a name as busy.
     pub fn crash_cleanup_pending(&self, name: &str) -> bool {
-        self.crash_cleanups_pending.contains(name)
+        self.crash_cleanups_pending.contains_key(name)
     }
 
     /// cas-58a3 review H1: release a name whose crash cleanup will never be
     /// applied (it was given up), so the name can be spawned again.
     pub fn abandon_crash_cleanup(&mut self, name: &str) {
-        self.crash_cleanups_pending.remove(name);
+        self.release_crash_cleanup(name);
+    }
+
+    /// cas-58a3 review L-a: one cleanup of `name` finished. The name stays
+    /// reserved while another crash cleanup of the same worker is pending
+    /// (a second exit of a respawn that raced the first cleanup).
+    fn release_crash_cleanup(&mut self, name: &str) {
+        if let Some(count) = self.crash_cleanups_pending.get_mut(name) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.crash_cleanups_pending.remove(name);
+            }
+        }
     }
 
     /// cas-58a3: the loop half after [`crash_cleanup_io`] reports: forget a
     /// reclaimed worktree, and surface a preserved or failed one.
     pub fn apply_crash_cleanup(&mut self, name: &str, outcome: CrashCleanupOutcome) {
-        self.crash_cleanups_pending.remove(name);
+        self.release_crash_cleanup(name);
         match outcome.worktree {
             None | Some(Ok(RemoveOutcome::NotTracked)) => {}
             Some(Ok(RemoveOutcome::Removed)) => {

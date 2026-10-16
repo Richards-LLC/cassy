@@ -1175,7 +1175,7 @@ pub struct FactoryApp {
     /// cas-58a3 review H1: crashed workers whose reap and worktree cleanup
     /// have not been applied yet. Their names stay reserved, so a respawn
     /// never reuses the cgroup scope or worktree the late cleanup acts on.
-    crash_cleanups_pending: std::collections::HashSet<String>,
+    crash_cleanups_pending: std::collections::HashMap<String, usize>,
     /// Index of the currently selected worker tab (0-based, used in tabbed mode)
     pub selected_worker_tab: usize,
     /// Use tabbed worker view instead of side-by-side (config preference)

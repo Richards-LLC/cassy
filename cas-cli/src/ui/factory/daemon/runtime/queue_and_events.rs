@@ -10752,7 +10752,9 @@ impl FactoryDaemon {
         if let Some(name) = reuses
             && self.app.crash_cleanup_pending(name)
         {
-            tracing::info!(
+            // cas-58a3 review L-c: this repeats every tick until the cleanup
+            // applies, so it is debug, not info.
+            tracing::debug!(
                 worker = %name,
                 "cas-58a3: spawn requeued until the crashed worker's cleanup is applied"
             );

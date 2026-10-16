@@ -1187,7 +1187,45 @@ async fn cas_58a3_a_respawn_waits_for_the_crashed_workers_cleanup() {
     }
     assert!(daemon.relay_jobs.crash_cleanups.is_empty());
     assert!(daemon.app.snapshot_worker_spawn(Some("relay-worker"), false, None).is_ok(), "released");
+    // The requeued respawn now runs instead of waiting again. (This test
+    // daemon has no harness, so the relaunch itself fails; what matters is
+    // that it was attempted, not refused as still cleaning.)
+    daemon.app.clear_error();
+    daemon.process_pending_spawns().await;
+    assert!(
+        !daemon
+            .pending_spawns
+            .iter()
+            .any(|spawn| matches!(spawn, super::super::PendingSpawn::Respawn(name) if name == "relay-worker")),
+        "the respawn was taken once the cleanup applied"
+    );
+    assert!(
+        daemon
+            .app
+            .error_message
+            .as_deref()
+            .is_none_or(|error| !error.contains("still being cleaned up")),
+        "the respawn ran past the reservation: {:?}",
+        daemon.app.error_message
+    );
     settle_relays(&mut daemon).await;
+}
+
+/// cas-58a3 review L-a: two crash cleanups of the same worker (the boot
+/// failure path and the PTY exit both mark it) each hold the name; the first
+/// to finish does not release it while the second is still pending.
+#[test]
+fn cas_58a3_a_name_stays_reserved_while_another_cleanup_of_it_is_pending() {
+    use crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanupOutcome;
+    let (_dir, cas_dir) = project_with_worker();
+    let mut app = crate::ui::factory::app::FactoryApp::for_test_at(cas_dir);
+    app.add_worker_name_for_test("relay-worker");
+    let _first = app.mark_worker_crashed_in_memory("relay-worker");
+    let _second = app.mark_worker_crashed_in_memory("relay-worker");
+    app.apply_crash_cleanup("relay-worker", CrashCleanupOutcome { worktree: None });
+    assert!(app.crash_cleanup_pending("relay-worker"), "the second cleanup still holds it");
+    app.abandon_crash_cleanup("relay-worker");
+    assert!(!app.crash_cleanup_pending("relay-worker"), "released after the last one");
 }
 
 /// cas-58a3 review M1: a death record job that panics still lets the crashed

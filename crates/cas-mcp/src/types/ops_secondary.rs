@@ -743,6 +743,11 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub dry_run: Option<bool>,
 
+    /// Explicitly opt into deleting durable task artifacts.
+    #[schemars(description = "gc_cleanup only: opt into durable artifact deletion (off by default; also requires force=true and dry_run=false). Closed-task retention and reference guards still apply.")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub artifacts: Option<bool>,
+
     /// Clear the pinned epic focus for focus_epic
     #[schemars(description = "Clear the pinned epic focus (focus_epic only)")]
     #[serde(default, deserialize_with = "deser::option_bool")]
@@ -1436,6 +1441,11 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub dry_run: Option<bool>,
 
+    /// Explicitly opt into deleting durable task artifacts.
+    #[schemars(description = "gc_cleanup only: opt into durable artifact deletion (off by default; also requires force=true and dry_run=false). Closed-task retention and reference guards still apply.")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub artifacts: Option<bool>,
+
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
@@ -1583,6 +1593,7 @@ impl CoordinationRequest {
             force: self.force,
             reason: self.reason.clone(),
             dry_run: self.dry_run,
+            artifacts: self.artifacts,
             clear: self.clear,
             branch: self.branch.clone(),
             older_than_secs: self.older_than_secs,

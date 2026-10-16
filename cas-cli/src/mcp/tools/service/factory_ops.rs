@@ -7215,12 +7215,12 @@ impl CasService {
             config.factory().artifacts_root.as_deref(),
         ));
         // Durable receipts are deleted only after their task is closed, and
-        // only through the same explicit destructive gate as cache reclamation.
+        // only through a separate artifact opt-in plus the destructive gate.
         // Unknown directories are inventory-only: an operator must review them.
         let artifact_cleanup = factory_artifact_cleanup(
             &artifact_root,
             &closed_task_ids,
-            target_cache_mutation_authorized,
+            target_cache_mutation_authorized && req.artifacts.unwrap_or(false),
         );
         let target_cache_result = {
             let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
@@ -7386,7 +7386,7 @@ impl FactoryArtifactInventory {
         if let Some(error) = &self.error {
             out.push_str(&format!("  - artifact inventory unavailable: {error}\n"));
         } else if self.dry_run && !self.closed.is_empty() {
-            out.push_str("  Reclaim closed-task artifacts with gc_cleanup force=true dry_run=false. Strays are never auto-deleted.\n");
+            out.push_str("  Durable artifact deletion is off by default; artifacts=true is a separate opt-in requiring force=true dry_run=false. Strays are never auto-deleted.\n");
         } else if self.removed > 0 {
             out.push_str(&format!(
                 "  Closed-task artifact directories removed: {}\n",

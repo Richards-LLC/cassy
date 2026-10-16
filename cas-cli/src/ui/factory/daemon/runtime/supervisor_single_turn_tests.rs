@@ -5,12 +5,16 @@ use std::time::{Duration, Instant};
 
 // PTY preflight reads ambient PATH. Re-exec with a private harmless cas;
 // changing PATH globally would race other tests and depend on the host runtime.
-fn fixture_child(test: &str) -> bool {
+pub(super) fn fixture_child(test: &str) -> bool {
     if std::env::var_os("CAS_SINGLE_TURN_CHILD").is_some() {
         return true;
     }
     let cas = crate::test_support::fake_cas_on_path();
-    let name = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
+    let name = if test.starts_with("ui::") {
+        test.to_string()
+    } else {
+        format!("{}::{test}", module_path!().split_once("::").unwrap().1)
+    };
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &name, "--nocapture"])
         .env("PATH", cas.path())
@@ -26,7 +30,7 @@ fn fixture_child(test: &str) -> bool {
     false
 }
 
-async fn fixture() -> (tempfile::TempDir, FactoryDaemon) {
+pub(super) async fn fixture() -> (tempfile::TempDir, FactoryDaemon) {
     let root = tempfile::tempdir().unwrap();
     let cas = crate::store::init_cas_dir(root.path()).unwrap();
     let mut daemon = super::provisioning_tests::daemon(&cas);
@@ -111,7 +115,7 @@ fn event(daemon: &FactoryDaemon, body: &str) -> i64 {
 }
 const BODY: &str = "<ci-red-run branch=\"factory/test\" head_sha=\"abc\" run_id=\"42\">CI failed; review the lane.</ci-red-run>";
 
-fn teams_messages(daemon: &FactoryDaemon) -> Vec<serde_json::Value> {
+pub(super) fn teams_messages(daemon: &FactoryDaemon) -> Vec<serde_json::Value> {
     let path = daemon
         .teams
         .as_ref()

@@ -72,6 +72,14 @@ database at a guessed path. Writable prompt-queue opens remove a regular empty
 files, symlinks and sidecar-backed artifacts remain untouched for investigation.
 Read-only queue opens never perform this cleanup.
 
+A parked task can merge its pushed delivery while its worker checkout holds
+uncommitted work for a later task. With `cleanup=false`, `worktree_merge` checks
+that the local source and a fresh origin fetch both equal the parked anchor,
+then merges that immutable commit in an isolated checkout. Its receipt names
+the pushed ref and states that the worker checkout was left untouched.
+Unpushed or mismatched tips retain the dirty-checkout refusal; cleanup requests
+retain the existing protection against deleting uncommitted work.
+
 ## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client
@@ -130,6 +138,52 @@ the alias first, then run `cas cloud project --adopt-aliases`,
 `cas cloud sync`. Otherwise, retire the local duplicate. Retrying alone cannot
 repair remote ownership; alias adoption rewrites local task provenance and
 does not move Cloud rows.
+
+## Cloud cleanup and rate limits
+
+SessionEnd writes an atomic intent under `.cas/cloud_shutdown/` before deleting
+the local agent. Hooks make no HTTP requests. The embedded daemon drains intents
+at session startup and on its off-loop presence heartbeat, including when it has
+no owned active agent. If no daemon starts, cleanup waits for the next daemon.
+Intents are keyed by agent, harness session and registration timestamp. Presence
+requests share a nonblocking read lease; shutdown takes the exclusive lease.
+A resumed session with a newer registration and a matching harness session
+supersedes older cleanup, including legacy intents, and its own SessionEnd
+creates separate cleanup. Each intent records the ended registration timestamp;
+a real SessionStart advances a fenced incarnation even when failed local cleanup,
+revival or automatic registration left the row active. Automatic MCP reinsertion
+after `/clear` remains fenced without a session id, regardless of PID ancestry.
+Shutdown checks supersession without the network lease and takes the exclusive
+lease only for due work. Presence shares parsed fences within each pass and
+refreshes them after acquiring its lease when the intent directory changes.
+A listing failure fails closed for an unknown harness session; known sessions
+can still check their direct fences. Cleanup re-reads pending work before writing
+so a stale pass cannot recreate retired files or overwrite a completion. Startup
+replies without waiting for Cloud work; concurrent startup requests coalesce by
+agent and are drained after the current presence pass. A panicked presence pass
+can be restarted by the next kick. A retained ended row advances its registration
+timestamp only on a harness SessionStart. A resumed
+incarnation resets old presence backoff, and superseded cleanup disappears from
+health even before its scheduled retry.
+
+Shutdown, claim release and peer ACK retry HTTP 429 up to three attempts within
+five seconds (or a caller's shorter budget). `Retry-After` seconds and HTTP dates
+are respected up to 15 minutes; absent or invalid values use 200 ms then 400 ms
+backoff. A delay
+outside the HTTP budget returns a named rate-limit failure. Durable shutdown
+intents and the mailbox poller preserve longer server delays across later passes;
+mailbox health remains current while waiting for that scheduled retry. Within a
+mailbox pass, later claim chunks, ACKs and metadata requests share the cooldown;
+already claimed messages remain eligible for local admission and later ACK.
+
+Presence and worker status show pending cleanup and its cause even after the
+agent row is gone. After 24 hours a failed intent expires and stops retrying.
+The daemon retains its agent id and cause under `.cas/cloud_shutdown/expired/`
+before pruning the work item. Inspect these records alongside Cloud presence;
+removing a diagnostic does not perform shutdown. Successful intents stop
+appearing in health immediately and retain an incarnation fence until their
+24-hour retention ends. Completed-only passes need no store or network lease.
+Intents contain no tokens or arbitrary agent metadata.
 
 ## Project issue repository reads
 

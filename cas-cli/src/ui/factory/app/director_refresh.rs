@@ -27,7 +27,8 @@ use cas_factory::SourceChangesInfo;
 
 use super::delivery_evidence::{CiStatusRequest, GitEvidenceMap, ParkedFactsMap, StallEvidenceRequest};
 use super::{
-    CasDbFingerprint, FactoryApp, SessionProgressRead, merge_director_data_preserving_git,
+    CasDbFingerprint, FactoryApp, SessionEpicFocus, SessionProgressRead,
+    merge_director_data_preserving_git, preferred_epic_focus_from_session_metadata_named,
     session_progress_named, unfiltered_snapshot_from,
 };
 use crate::mcp::tools::service::worker_liveness::Observation;
@@ -64,6 +65,12 @@ pub(crate) struct DirectorRefreshRequest {
     /// Transcripts of the stall candidates whose cached verdict a write
     /// invalidates (cas-3b16: stat here, not on the loop).
     transcript_paths: Vec<PathBuf>,
+    /// The session whose epic focus a full read resolves (`CAS_FACTORY_SESSION`,
+    /// captured on the loop; cas-4491f: the metadata is read here).
+    focus_session: Option<String>,
+    /// The worker panes, whose registry liveness (a `/proc` check per
+    /// agent) a full read classifies (cas-4491f).
+    worker_names: Vec<String>,
 }
 
 /// The result of a director refresh read.
@@ -77,6 +84,15 @@ pub(crate) struct DirectorRefreshLoad {
     /// The session metadata, read with the snapshot.
     session: Option<SessionProgressRead>,
     transcript_fingerprints: TranscriptFingerprints,
+    /// Unless the tick was unchanged (cas-4491f): the session's epic focus
+    /// and every registered agent, for session mappings and phantom panes.
+    /// `None` when unread or unreadable.
+    focus: Option<SessionEpicFocus>,
+    all_agents: Option<Vec<cas_types::Agent>>,
+    /// With a full read: the worker panes whose registry rows are all
+    /// non-live (cas-e98e), classified here because liveness checks each
+    /// agent's process.
+    phantom_workers: Option<Vec<String>>,
 }
 
 impl DirectorRefreshLoad {
@@ -122,6 +138,39 @@ impl DirectorRefreshRequest {
             _ => None,
         };
         let facts = self.stall.as_ref().map(|stall| stall.facts(fresh, stores));
+        // Everything but an unchanged tick applies the focus and the agents.
+        let full_read = !matches!(director, DirectorLoad::Unchanged);
+        let focus = full_read.then(|| {
+            self.focus_session
+                .as_deref()
+                .map(preferred_epic_focus_from_session_metadata_named)
+                .unwrap_or_default()
+        });
+        let all_agents = if full_read {
+            match stores {
+                Some(stores) => cas_store::AgentStore::list(&stores.agent_store, None).ok(),
+                None => crate::store::open_agent_store(&self.cas_dir)
+                    .ok()
+                    .and_then(|store| store.list(None).ok()),
+            }
+        } else {
+            None
+        };
+        let phantom_workers = match (&director, all_agents.as_deref()) {
+            (DirectorLoad::Loaded(Ok(_)), Some(agents)) => Some(
+                self.worker_names
+                    .iter()
+                    .filter(|name| {
+                        !crate::mcp::tools::service::agent_liveness::should_keep_worker_pane(
+                            name,
+                            agents.iter(),
+                        )
+                    })
+                    .cloned()
+                    .collect(),
+            ),
+            _ => None,
+        };
         DirectorRefreshLoad {
             fingerprint,
             git_due: self.git_due,
@@ -134,6 +183,9 @@ impl DirectorRefreshRequest {
                 .iter()
                 .map(|path| (path.clone(), transcript_fingerprint(path)))
                 .collect(),
+            focus,
+            all_agents,
+            phantom_workers,
         }
     }
 }
@@ -295,6 +347,142 @@ pub(crate) fn prompt_needs_fresh_recheck(prompt: &Prompt) -> bool {
         || prompt.drop_if_worker_assigned.is_some()
 }
 
+/// Whether a director prompt needs anything read before transport: a fresh
+/// re-check ([`prompt_needs_fresh_recheck`]), or an assignment wake whose
+/// task state is read at the transport boundary (GH #682, cas-2b0b). The
+/// daemon reads both in the `RevalidateFresh` job, never on the loop
+/// (cas-4491f).
+pub(crate) fn prompt_needs_inject_read(prompt: &Prompt) -> bool {
+    prompt_needs_fresh_recheck(prompt)
+        || (prompt.stall_nudge_task.is_none()
+            && crate::prompt_revalidation::assignment_solicited_task_id(&prompt.text).is_some())
+}
+
+/// What the transport-boundary read found for an assignment wake
+/// (cas-4491f: read in the `RevalidateFresh` job).
+#[derive(Debug, Clone, Default)]
+pub(crate) enum AssignmentRead {
+    /// Not an assignment wake.
+    #[default]
+    NotAssignment,
+    /// The task moved on for this recipient (GH #682, cas-2b0b): suppress.
+    Stale(String, cas_types::TaskStatus),
+    /// The task, for the durable assignment row.
+    Task(Box<cas_types::Task>),
+    /// The task could not be read: uncertainty delivers directly.
+    Unavailable,
+    /// Not read at all: the re-check that would have read it failed or
+    /// timed out. The full read, the stale check and the assignment row then
+    /// happen on the store worker (cas-4491f review M4, GH #682).
+    Unread,
+}
+
+/// What [`resolve_unread_assignment`] did with an assignment wake whose task
+/// was never read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnreadAssignmentOutcome {
+    /// Not an assignment wake: deliver it as usual.
+    NotAssignment,
+    /// The task moved on for this recipient: suppressed (GH #682).
+    Suppressed,
+    /// The durable assignment row carries the wake.
+    AssignmentRow,
+    /// The assignment policy writes no row (the task is gated, or its
+    /// worker is not live), as on the read path.
+    Declined,
+    /// The task or its row could not be written; the wake went to the
+    /// durable prompt queue instead.
+    Queued,
+    /// Nothing could carry the wake.
+    Lost,
+}
+
+/// An assignment wake whose re-check never read its task (cas-4491f review
+/// M4): read it now, suppress a stale one, and hand a live one to the
+/// durable assignment row, as the inject path does after a successful
+/// re-check. Blocks on the stores, so the daemon runs it on its store
+/// worker.
+pub(crate) fn resolve_unread_assignment(
+    cas_dir: &std::path::Path,
+    factory_session: &str,
+    prompt: &Prompt,
+) -> UnreadAssignmentOutcome {
+    let queue_it = || {
+        match crate::ui::factory::daemon::runtime::delivery::enqueue_director_prompt(
+            cas_dir,
+            factory_session,
+            &prompt.target,
+            &prompt.text,
+        ) {
+            Ok(_) => UnreadAssignmentOutcome::Queued,
+            Err(error) => {
+                tracing::warn!(%error, target_agent = %prompt.target, "assignment wake could not be queued; it may be lost");
+                UnreadAssignmentOutcome::Lost
+            }
+        }
+    };
+    match AssignmentRead::read(cas_dir, None, prompt) {
+        AssignmentRead::NotAssignment => UnreadAssignmentOutcome::NotAssignment,
+        AssignmentRead::Stale(task_id, status) => {
+            tracing::info!(
+                target: "cas::coordination",
+                stage = "suppress_terminal_assignment",
+                target_agent = %prompt.target,
+                task_id = %task_id,
+                status = %status,
+                "cas-2b0b: suppressed a direct assignment for a terminal task"
+            );
+            UnreadAssignmentOutcome::Suppressed
+        }
+        AssignmentRead::Task(task) => match crate::task_assignment::enqueue(cas_dir, &task) {
+            Ok(Some(_)) => UnreadAssignmentOutcome::AssignmentRow,
+            Ok(None) => UnreadAssignmentOutcome::Declined,
+            Err(error) => {
+                tracing::warn!(%error, "assignment enqueue failed; queueing the director wake instead");
+                queue_it()
+            }
+        },
+        // Unreadable even now: the durable queue delivers it with retries.
+        AssignmentRead::Unavailable | AssignmentRead::Unread => queue_it(),
+    }
+}
+
+impl AssignmentRead {
+    /// Read the assignment state `prompt` solicits. Blocks on the task
+    /// store; `stores` is the read lane's connection.
+    pub(crate) fn read(
+        cas_dir: &std::path::Path,
+        stores: Option<&DirectorStores>,
+        prompt: &Prompt,
+    ) -> Self {
+        if prompt.stall_nudge_task.is_some() {
+            return Self::NotAssignment;
+        }
+        let Some(task_id) = crate::prompt_revalidation::assignment_solicited_task_id(&prompt.text)
+        else {
+            return Self::NotAssignment;
+        };
+        let task = match stores {
+            Some(stores) => cas_store::TaskStore::get(&stores.task_store, &task_id).ok(),
+            None => crate::store::open_task_store_local(cas_dir)
+                .ok()
+                .and_then(|store| store.get(&task_id).ok()),
+        };
+        let Some(task) = task else {
+            return Self::Unavailable;
+        };
+        match crate::prompt_revalidation::assignment_stale_task(
+            &prompt.text,
+            task.status,
+            task.assignee.as_deref(),
+            &prompt.target,
+        ) {
+            Some((task_id, status)) => Self::Stale(task_id, status),
+            None => Self::Task(Box::new(task)),
+        }
+    }
+}
+
 /// The inject loop's final re-check (`RevalidateFresh`): one fresh read for a
 /// batch of prompts, taken after the tick's epic merges.
 #[derive(Debug, Clone)]
@@ -331,6 +519,18 @@ impl DeliverabilityRequest {
                         )
                     })
             })
+            .collect()
+    }
+
+    /// Each prompt's assignment state (cas-4491f). Runs on any thread.
+    pub(crate) fn read_assignments(
+        &self,
+        stores: Option<&DirectorStores>,
+        prompts: &[Prompt],
+    ) -> Vec<AssignmentRead> {
+        prompts
+            .iter()
+            .map(|prompt| AssignmentRead::read(&self.cas_dir, stores, prompt))
             .collect()
     }
 }
@@ -383,6 +583,8 @@ impl FactoryApp {
             stall: self.stall_evidence_request(),
             session: self.factory_session.clone(),
             transcript_paths: self.event_detector.stall_transcript_paths(),
+            focus_session: std::env::var("CAS_FACTORY_SESSION").ok(),
+            worker_names: self.worker_names.clone(),
         }
     }
 
@@ -520,15 +722,22 @@ impl FactoryApp {
         self.last_db_fingerprint = Some(load.fingerprint);
         self.last_refresh = Instant::now();
 
-        // Sync session_id → pane_name mappings from agent store
-        timed("session mappings", || self.sync_session_mappings());
-        timed("epic focus", || self.apply_session_metadata_focus());
+        // cas-4491f: the agents and the epic focus arrived with the snapshot
+        // job; nothing here reads a store or a file.
+        // Sync session_id → pane_name mappings from the registered agents.
+        if let Some(agents) = load.all_agents.as_deref() {
+            timed("session mappings", || self.sync_session_mappings_from(agents));
+        }
+        if let Some(focus) = load.focus {
+            timed("epic focus", || self.apply_epic_focus(focus));
+        }
         timed("worker holds", || self.apply_snapshot_worker_holds());
 
         // cas-e98e AC3: drop phantom worker panes when registry says the
-        // worker is no longer supervision-live.
-        if db_changed {
-            timed("phantom panes", || self.reconcile_phantom_worker_panes());
+        // worker is no longer supervision-live. Their teardown requests are
+        // queued off the loop.
+        if db_changed && let Some(phantoms) = load.phantom_workers {
+            timed("phantom panes", || self.reconcile_phantom_worker_panes_from(phantoms));
         }
 
         // Detect state changes against the UNFILTERED snapshot (cas-dbbe), and

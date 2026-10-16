@@ -89,7 +89,13 @@ struct ReadHook {
     gate: Option<Arc<ReadGate>>,
     #[cfg(test)]
     panics: bool,
+    /// Only the idle-worker liveness job dies (cas-4491f).
+    #[cfg(test)]
+    liveness_panics: bool,
 }
+
+/// The [`ReadHook::run`] name of the idle-worker liveness job.
+const IDLE_LIVENESS_JOB: &str = "idle-worker liveness";
 
 impl ReadHook {
     fn run(&self, what: &str) {
@@ -102,6 +108,10 @@ impl ReadHook {
                 gate.wait();
             }
             assert!(!self.panics, "test: the {what} died");
+            assert!(
+                !(self.liveness_panics && what == IDLE_LIVENESS_JOB),
+                "test: the {what} died"
+            );
         }
         let _ = what;
     }
@@ -182,6 +192,12 @@ impl PendingDeliverability {
     /// Deliver every prompt: the re-check never reported.
     fn uncertain(self) -> DeliverabilityBatch {
         DeliverabilityBatch {
+            // Review M4: never read, so read on the store worker, never
+            // delivered without its stale check.
+            assignments: vec![
+                crate::ui::factory::app::AssignmentRead::Unread;
+                self.prompts.len()
+            ],
             prompts: self.prompts.into_iter().map(|prompt| (prompt, true)).collect(),
             events: self.events,
             refresh_started: self.refresh_started,
@@ -221,6 +237,10 @@ pub(crate) struct DirectorRefresh {
     ci_status: Slot<GitEvidenceMap>,
     /// Consecutive delivery reads that came back without fresh data.
     failed_delivery_reads: u32,
+    /// A snapshot was asked for while one, or a delivery read and its
+    /// liveness job, was in flight. It runs as soon as they finish; several
+    /// such requests coalesce into one (cas-4491f, C2b review L4).
+    refresh_requested: bool,
     /// Test hook: give up in-flight jobs after this instead of
     /// [`factory_jobs::in_flight_timeout`].
     #[cfg(test)]
@@ -252,6 +272,7 @@ impl DirectorRefresh {
             health_failed: Vec::new(),
             ci_status: Slot::default(),
             failed_delivery_reads: 0,
+            refresh_requested: false,
             #[cfg(test)]
             timeout_override: None,
             hook: ReadHook::default(),
@@ -272,6 +293,13 @@ impl DirectorRefresh {
     #[cfg(test)]
     pub(crate) fn set_panicking_reads(&mut self, panics: bool) {
         self.hook.panics = panics;
+    }
+
+    /// Model an idle-worker liveness job that dies without a result.
+    #[cfg(test)]
+    pub(crate) fn with_failing_liveness(mut self) -> Self {
+        self.hook.liveness_panics = true;
+        self
     }
 
     /// Model a slow store: every read sleeps `delay` first.
@@ -316,7 +344,8 @@ impl DirectorRefresh {
     /// completions too and takes only external ones.
     fn poll(&mut self, jobs: &mut QueueJobs) {
         jobs.apply_completions();
-        for result in jobs.take_external_completions() {
+        // cas-4491f: the relays' results are theirs.
+        for result in jobs.take_external_completions_where(|kind| !super::relay_jobs::is_relay_kind(kind)) {
             self.accept(result);
         }
         self.expire();
@@ -557,6 +586,7 @@ impl DirectorRefresh {
     pub(crate) fn has_finished(&mut self, jobs: &mut QueueJobs) -> bool {
         self.poll(jobs);
         (!self.delivery_backlog.is_empty() && !self.delivery_busy())
+            || (self.refresh_requested && !self.director.busy() && !self.delivery_busy())
             || self.director.ready.is_some()
             || self.delivery_ready()
             || self.ci_status.ready.is_some()
@@ -566,13 +596,16 @@ impl DirectorRefresh {
     }
 
     /// Start a director snapshot unless one is already in flight. A delivery
-    /// read in flight also defers it, so its events are delivered before the
-    /// next detection.
+    /// read in flight (with its liveness job) also defers it, so its events
+    /// are delivered before the next detection. A deferred request is never
+    /// dropped: it runs once they finish ([`Self::refresh_requested`]).
     pub(crate) fn start_director_read(&mut self, app: &FactoryApp, jobs: &mut QueueJobs) {
         self.poll(jobs);
         if self.director.busy() || self.delivery_busy() {
+            self.refresh_requested = true;
             return;
         }
+        self.refresh_requested = false;
         let request: DirectorRefreshRequest = app.director_refresh_request();
         let hook = self.hook.clone();
         let generation = self.next_generation();
@@ -622,6 +655,11 @@ impl DirectorRefresh {
                 false
             }
         }
+    }
+
+    /// A snapshot asked for while busy, still waiting to start.
+    pub(crate) fn refresh_requested(&self) -> bool {
+        self.refresh_requested
     }
 
     pub(crate) fn take_director_read(&mut self, jobs: &mut QueueJobs) -> Option<DirectorRefreshLoad> {
@@ -699,7 +737,7 @@ impl DirectorRefresh {
         let hook = self.hook.clone();
         self.idle_liveness.start(generation);
         let submitted = jobs.submit_external(factory_jobs::idle_liveness_spec(generation), move || {
-            hook.run("idle-worker liveness");
+            hook.run(IDLE_LIVENESS_JOB);
             Box::new(FactoryJobOutput::IdleLiveness(request.read()))
         });
         if !matches!(submitted, Submitted::Queued | Submitted::QueuedBehindKey) {
@@ -810,7 +848,10 @@ impl DirectorRefresh {
             move |stores: Option<&DirectorStores>| {
                 hook.run("prompt re-check");
                 let verdicts = request.read(stores, &prompts);
+                // cas-4491f: assignment wakes read their task here too.
+                let assignments = request.read_assignments(stores, &prompts);
                 Box::new(FactoryJobOutput::Deliverability(DeliverabilityBatch {
+                    assignments,
                     prompts: prompts.into_iter().zip(verdicts).collect(),
                     events,
                     refresh_started,

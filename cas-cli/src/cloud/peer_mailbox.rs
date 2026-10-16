@@ -14,6 +14,7 @@
 
 use std::path::Path;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -684,6 +685,8 @@ pub struct DeliveryReport {
     pub errors: Vec<String>,
     /// Bounded historical recovery can warn without disabling current mail.
     pub warnings: Vec<String>,
+    /// Server-directed delay that outlives this tick's bounded HTTP retries.
+    pub retry_after: Option<Duration>,
 }
 
 /// Claim this session's peer messages and admit each once.
@@ -1094,6 +1097,7 @@ pub fn http_mailbox(cas_root: &Path) -> Option<HttpPeerMailbox> {
 pub struct HttpPeerMailbox {
     endpoint: String,
     token: String,
+    retry_at: std::sync::Arc<std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
 }
 
 /// Never prints the bearer token (cas-144c).
@@ -1111,6 +1115,7 @@ impl HttpPeerMailbox {
         Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
+            retry_at: Default::default(),
         }
     }
 }
@@ -1128,19 +1133,69 @@ impl HttpPeerMailbox {
             Ok(response) => response
                 .into_json()
                 .map_err(|error| format!("{what}: unreadable response: {error}")),
-            Err(ureq::Error::Status(code, response)) => Err(format!(
-                "{what} refused ({code}): {}",
-                response.into_string().unwrap_or_default()
-            )),
-            Err(ureq::Error::Transport(error)) => Err(format!("{what}: network error: {error}")),
+            Err(error) => Err(super::rate_limit::Failure::from_http(what, error).cause),
         }
     }
 
     fn post(&self, suffix: &str, body: serde_json::Value) -> Result<ureq::Response, ureq::Error> {
-        ureq::post(&self.url(suffix))
-            .timeout(MAILBOX_TIMEOUT)
-            .set("Authorization", &format!("Bearer {}", self.token))
-            .send_json(body)
+        self.post_with_timeout(suffix, body, MAILBOX_TIMEOUT)
+    }
+
+    /// Later chunks and ACKs share the server cooldown. A local refusal
+    /// retains earlier claimed bodies and gives retries the remaining delay.
+    fn cooldown(&self) -> Option<ureq::Error> {
+        let delay = self.retry_after()?;
+        let seconds = delay
+            .as_secs()
+            .saturating_add(u64::from(delay.subsec_nanos() != 0));
+        let response = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: {seconds}\r\nContent-Length: 0\r\n\r\n"
+        )
+        .parse::<ureq::Response>()
+        .expect("static rate-limit response with integer header");
+        Some(ureq::Error::Status(429, response))
+    }
+
+    fn observe(
+        &self,
+        result: Result<ureq::Response, ureq::Error>,
+    ) -> Result<ureq::Response, ureq::Error> {
+        if let Err(ureq::Error::Status(429, ref response)) = result
+            && let Some(delay) = super::rate_limit::retry_after(response)
+        {
+            let until = chrono::Duration::from_std(delay)
+                .ok()
+                .and_then(|delay| chrono::Utc::now().checked_add_signed(delay))
+                .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::seconds(
+                    super::rate_limit::MAX_RETRY_AFTER.as_secs() as i64));
+            let mut current = self.retry_at.lock().expect("mailbox retry clock");
+            *current = Some(current.map_or(until, |previous| previous.max(until)));
+        }
+        result
+    }
+
+    fn post_with_timeout(
+        &self,
+        suffix: &str,
+        body: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<ureq::Response, ureq::Error> {
+        if let Some(error) = self.cooldown() {
+            return Err(error);
+        }
+        self.observe(
+            ureq::post(&self.url(suffix))
+                .timeout(timeout)
+                .set("Authorization", &format!("Bearer {}", self.token))
+                .send_json(body),
+        )
+    }
+
+    pub(crate) fn retry_after(&self) -> Option<Duration> {
+        self.retry_at
+            .lock()
+            .expect("mailbox retry clock")
+            .and_then(|until| (until - chrono::Utc::now()).to_std().ok())
     }
 }
 
@@ -1172,6 +1227,9 @@ impl PeerMailbox for HttpPeerMailbox {
         project_id: &str,
         sender_ids: &[String],
     ) -> std::collections::HashMap<String, String> {
+        if self.retry_after().is_some() {
+            return std::collections::HashMap::new();
+        }
         let response = ureq::get(&format!("{}/api/agents", self.endpoint))
             .timeout(MAILBOX_TIMEOUT)
             .set("Authorization", &format!("Bearer {}", self.token))
@@ -1264,10 +1322,13 @@ impl PeerMailbox for HttpPeerMailbox {
                 .collect();
             let response: AckResponse = Self::read(
                 "peer message ack",
-                self.post(
-                    "/ack",
-                    serde_json::json!({"consumer_id":consumer_id,"acks":items}),
-                ),
+                super::rate_limit::call(MAILBOX_TIMEOUT, |left| {
+                    self.post_with_timeout(
+                        "/ack",
+                        serde_json::json!({"consumer_id":consumer_id,"acks":items}),
+                        left,
+                    )
+                }),
             )?;
             if response.results.len() != batch.len() {
                 return Err("peer message ack: incomplete per-item receipt".into());
@@ -1293,6 +1354,7 @@ impl PeerMailbox for HttpPeerMailbox {
                             Err(error)=>errors.push(format!("peer message ack {id} refused (409): {error}")),
                         }
                     }
+                    429 => errors.push(format!("peer message ack {id}: rate limited (429)")),
                     code => errors.push(format!("peer message ack {id} refused ({code})")),
                 }
             }
@@ -1305,12 +1367,17 @@ impl PeerMailbox for HttpPeerMailbox {
     }
 
     fn status(&self, id: &str) -> Result<PeerMessageStatus, String> {
+        if let Some(error) = self.cooldown() {
+            return Err(super::rate_limit::Failure::from_http("peer message status", error).cause);
+        }
         Self::read(
             "peer message status",
-            ureq::get(&self.url(&format!("/{id}")))
-                .timeout(MAILBOX_TIMEOUT)
-                .set("Authorization", &format!("Bearer {}", self.token))
-                .call(),
+            self.observe(
+                ureq::get(&self.url(&format!("/{id}")))
+                    .timeout(MAILBOX_TIMEOUT)
+                    .set("Authorization", &format!("Bearer {}", self.token))
+                    .call(),
+            ),
         )
     }
 }

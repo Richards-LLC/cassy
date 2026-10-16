@@ -31,6 +31,7 @@ pub const PRESENCE_DIR: &str = "cloud_presence";
 /// Per-request cap for presence calls, so a slow cloud never holds a
 /// heartbeat tick for the coordinator's default thirty seconds.
 pub const PRESENCE_TIMEOUT: Duration = Duration::from_secs(10);
+const SESSION_ENDED_CAUSE: &str = "session ended; cloud shutdown pending or completed";
 /// Backoff after the second consecutive failure; it doubles from here.
 pub const BACKOFF_BASE_SECS: i64 = 30;
 /// Longest wait between two registration attempts.
@@ -243,25 +244,72 @@ pub fn register_now(
     agent: &Agent,
     now: DateTime<Utc>,
 ) -> PresenceRecord {
-    let previous = load(cas_root, &agent.id);
+    register_with_shutdown(
+        coordinator,
+        cas_root,
+        agent,
+        now,
+        &mut super::shutdown::Snapshot::load(cas_root),
+    )
+}
+
+fn register_with_shutdown(
+    coordinator: &CloudCoordinator,
+    cas_root: &Path,
+    agent: &Agent,
+    now: DateTime<Utc>,
+    shutdown: &mut super::shutdown::Snapshot,
+) -> PresenceRecord {
+    let _lease = match super::shutdown::presence_lease(cas_root) {
+        Ok(Some(lease)) => lease,
+        Ok(None) => {
+            return failing(
+                load(cas_root, &agent.id).as_ref(),
+                &agent.id,
+                "cloud presence busy; retry on next heartbeat".into(),
+                now,
+            );
+        }
+        Err(error) => {
+            return failing(
+                load(cas_root, &agent.id).as_ref(),
+                &agent.id,
+                format!("cloud presence lease: {error}"),
+                now,
+            );
+        }
+    };
+    shutdown.refresh_after_lease(cas_root);
+    let cause = match shutdown.is_ended(cas_root, agent, now) {
+        Ok(false) => None,
+        Ok(true) => Some(SESSION_ENDED_CAUSE.into()),
+        Err(error) => Some(error),
+    };
+    if let Some(cause) = cause {
+        let record = failing(None, &agent.id, cause, now);
+        save(cas_root, &record);
+        return record;
+    }
+    let previous =
+        load(cas_root, &agent.id).filter(|record| record.last_attempt_at >= agent.registered_at);
     let focus = current_focus(agent);
     let branch = current_branch(cas_root, agent);
     let mut coordinator = coordinator.clone().with_timeout(PRESENCE_TIMEOUT);
-    let record = match coordinator.register_with_presence(agent, focus.as_deref(), branch.as_deref())
-    {
-        Ok(_) => PresenceRecord {
-            agent_id: agent.id.clone(),
-            state: PresenceState::Registered,
-            cause: None,
-            failures: 0,
-            last_attempt_at: now,
-            registered_at: Some(now),
-            next_retry_at: None,
-            focus,
-            branch,
-        },
-        Err(error) => failing(previous.as_ref(), &agent.id, error.to_string(), now),
-    };
+    let record =
+        match coordinator.register_with_presence(agent, focus.as_deref(), branch.as_deref()) {
+            Ok(_) => PresenceRecord {
+                agent_id: agent.id.clone(),
+                state: PresenceState::Registered,
+                cause: None,
+                failures: 0,
+                last_attempt_at: now,
+                registered_at: Some(now),
+                next_retry_at: None,
+                focus,
+                branch,
+            },
+            Err(error) => failing(previous.as_ref(), &agent.id, error.to_string(), now),
+        };
     save(cas_root, &record);
     record
 }
@@ -277,6 +325,9 @@ pub fn ensure_registered(
     match load(cas_root, &agent.id) {
         Some(record)
             if record.state == PresenceState::Registered
+                && record
+                    .registered_at
+                    .is_some_and(|at| at >= agent.registered_at)
                 && record.focus == current_focus(agent)
                 && record.branch == current_branch(cas_root, agent) =>
         {
@@ -305,23 +356,89 @@ pub fn tick(
     agent: &Agent,
     now: DateTime<Utc>,
 ) -> TickAction {
+    tick_with_shutdown(
+        coordinator,
+        cas_root,
+        agent,
+        now,
+        &mut super::shutdown::Snapshot::load(cas_root),
+    )
+}
+
+pub(crate) fn tick_with_shutdown(
+    coordinator: &CloudCoordinator,
+    cas_root: &Path,
+    agent: &Agent,
+    now: DateTime<Utc>,
+    shutdown: &mut super::shutdown::Snapshot,
+) -> TickAction {
+    match shutdown.is_ended(cas_root, agent, now) {
+        Ok(true) => return TickAction::Waiting,
+        Ok(false) => {}
+        Err(cause) => {
+            save(
+                cas_root,
+                &failing(
+                    load(cas_root, &agent.id).as_ref(),
+                    &agent.id,
+                    cause.clone(),
+                    now,
+                ),
+            );
+            return TickAction::Failed(cause);
+        }
+    }
     let outcome = |record: PresenceRecord, ok: TickAction| match record.state {
         PresenceState::Registered => ok,
+        PresenceState::Failing if record.cause.as_deref() == Some(SESSION_ENDED_CAUSE) => {
+            TickAction::Waiting
+        }
         PresenceState::Failing => TickAction::Failed(record.cause.unwrap_or_default()),
     };
     let Some(record) = load(cas_root, &agent.id) else {
-        return outcome(register_now(coordinator, cas_root, agent, now), TickAction::Registered);
+        return outcome(
+            register_with_shutdown(coordinator, cas_root, agent, now, shutdown),
+            TickAction::Registered,
+        );
     };
+    if record.last_attempt_at < agent.registered_at
+        || (record
+            .registered_at
+            .is_none_or(|at| at < agent.registered_at)
+            && record.state == PresenceState::Registered)
+    {
+        return outcome(
+            register_with_shutdown(coordinator, cas_root, agent, now, shutdown),
+            TickAction::Registered,
+        );
+    }
     if record.state == PresenceState::Failing {
         if record.next_retry_at.is_some_and(|at| at > now) {
             return TickAction::Waiting;
         }
-        return outcome(register_now(coordinator, cas_root, agent, now), TickAction::Registered);
+        return outcome(
+            register_with_shutdown(coordinator, cas_root, agent, now, shutdown),
+            TickAction::Registered,
+        );
     }
     let focus = current_focus(agent);
     let branch = current_branch(cas_root, agent);
     let metadata = heartbeat_metadata(coordinator, agent, focus.as_deref(), branch.as_deref());
-    match coordinator.heartbeat_presence(&agent.id, Some(&metadata)) {
+    let heartbeat = {
+        let _lease = match super::shutdown::presence_lease(cas_root) {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return TickAction::Waiting,
+            Err(error) => return TickAction::Failed(format!("cloud presence lease: {error}")),
+        };
+        shutdown.refresh_after_lease(cas_root);
+        match shutdown.is_ended(cas_root, agent, now) {
+            Ok(true) => return TickAction::Waiting,
+            Ok(false) => {}
+            Err(cause) => return TickAction::Failed(cause),
+        }
+        coordinator.heartbeat_presence(&agent.id, Some(&metadata))
+    };
+    match heartbeat {
         Ok(_) => {
             if record.focus != focus || record.branch != branch {
                 save(
@@ -337,7 +454,7 @@ pub fn tick(
             TickAction::Heartbeat
         }
         Err(HeartbeatError::NotRegistered { .. }) => outcome(
-            register_now(coordinator, cas_root, agent, now),
+            register_with_shutdown(coordinator, cas_root, agent, now, shutdown),
             TickAction::Reregistered,
         ),
         Err(HeartbeatError::Failed(error)) => {
@@ -419,7 +536,8 @@ pub fn wrap_line(text: &str) -> String {
     let mut line = String::new();
     for word in text.split_whitespace() {
         let indent = if out.is_empty() { 0 } else { 2 };
-        if !line.is_empty() && indent + line.chars().count() + 1 + word.chars().count() > WRAP_COLUMNS
+        if !line.is_empty()
+            && indent + line.chars().count() + 1 + word.chars().count() > WRAP_COLUMNS
         {
             if !out.is_empty() {
                 out.push_str("  ");
@@ -521,9 +639,18 @@ mod tests {
             line.starts_with("Cloud presence: failing: Failed to register agent (503)"),
             "{line}"
         );
-        assert!(line.contains("2 failed attempts, next retry in 30s."), "{line}");
-        assert!(line.contains("Peers cannot see this agent until it registers."), "{line}");
-        assert!(line.lines().all(|l| l.chars().count() <= WRAP_COLUMNS + 2), "{line}");
+        assert!(
+            line.contains("2 failed attempts, next retry in 30s."),
+            "{line}"
+        );
+        assert!(
+            line.contains("Peers cannot see this agent until it registers."),
+            "{line}"
+        );
+        assert!(
+            line.lines().all(|l| l.chars().count() <= WRAP_COLUMNS + 2),
+            "{line}"
+        );
         let registered = PresenceRecord {
             state: PresenceState::Registered,
             cause: None,
@@ -547,7 +674,10 @@ mod tests {
         let wrapped = wrap_line(text);
         let lines: Vec<&str> = wrapped.lines().collect();
         assert!(lines.len() > 1, "{wrapped}");
-        assert!(lines.iter().all(|l| l.chars().count() <= WRAP_COLUMNS), "{wrapped}");
+        assert!(
+            lines.iter().all(|l| l.chars().count() <= WRAP_COLUMNS),
+            "{wrapped}"
+        );
         assert!(lines[1..].iter().all(|l| l.starts_with("  ")), "{wrapped}");
         let rejoined: Vec<&str> = wrapped.split_whitespace().collect();
         assert_eq!(rejoined, text.split_whitespace().collect::<Vec<_>>());
@@ -566,15 +696,133 @@ mod tests {
         let gitdir = repo.join(".git/worktrees/wt");
         std::fs::create_dir_all(&gitdir).unwrap();
         std::fs::create_dir_all(&worktree).unwrap();
-        std::fs::write(gitdir.join("HEAD"), "ref: refs/heads/factory/fierce-cheetah-73\n").unwrap();
-        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        std::fs::write(
+            gitdir.join("HEAD"),
+            "ref: refs/heads/factory/fierce-cheetah-73\n",
+        )
+        .unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
         assert_eq!(
             checked_out_branch(&worktree).as_deref(),
             Some("factory/fierce-cheetah-73")
         );
 
-        std::fs::write(gitdir.join("HEAD"), "0123456789abcdef0123456789abcdef01234567\n").unwrap();
-        assert_eq!(checked_out_branch(&worktree), None, "detached HEAD has no branch");
+        std::fs::write(
+            gitdir.join("HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        assert_eq!(
+            checked_out_branch(&worktree),
+            None,
+            "detached HEAD has no branch"
+        );
         assert_eq!(checked_out_branch(dir.path()), None, "not a checkout");
+    }
+}
+
+#[cfg(test)]
+mod round5_tests {
+    use super::*;
+    use crate::store::init_cas_dir;
+    use crate::test_support::TestEnvGuard;
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn late_fence(mode: &str) {
+        let env = TestEnvGuard::temp_home();
+        let root = init_cas_dir(env.home()).unwrap();
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let mut agent = Agent::new("late-fence".into(), "late-fence".into());
+        agent.cc_session_id = Some("same".into());
+        let now = Utc::now();
+        if mode == "heartbeat" {
+            save(
+                &root,
+                &PresenceRecord {
+                    agent_id: agent.id.clone(),
+                    state: PresenceState::Registered,
+                    cause: None,
+                    failures: 0,
+                    last_attempt_at: now,
+                    registered_at: Some(now),
+                    next_retry_at: None,
+                    focus: None,
+                    branch: None,
+                },
+            );
+        }
+        // Start with an existing directory generation: enqueue must exercise
+        // the changed-generation comparison, rather than the None fallback.
+        drop(super::super::shutdown::presence_lease(&root).unwrap().unwrap());
+        let mut snapshot = super::super::shutdown::Snapshot::load(&root);
+        super::super::shutdown::enqueue(&root, &agent, "same", &server.uri()).unwrap();
+        let endpoint = server.uri();
+        let mode = mode.to_string();
+        let (action, record) = tokio::task::spawn_blocking(move || {
+            let client = CloudCoordinator::new(CloudConfig {
+                endpoint,
+                token: Some("test-token".into()),
+                ..Default::default()
+            })
+            .unwrap();
+            if mode == "register" {
+                (
+                    None,
+                    Some(register_with_shutdown(
+                        &client,
+                        &root,
+                        &agent,
+                        now,
+                        &mut snapshot,
+                    )),
+                )
+            } else {
+                (
+                    Some(tick_with_shutdown(
+                        &client,
+                        &root,
+                        &agent,
+                        now,
+                        &mut snapshot,
+                    )),
+                    None,
+                )
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "stale snapshot must not resurrect Cloud presence"
+        );
+        if let Some(action) = action {
+            assert_eq!(action, TickAction::Waiting);
+        }
+        if let Some(record) = record {
+            assert_eq!(record.state, PresenceState::Failing);
+            assert!(record.cause.unwrap().contains("session ended"));
+        }
+    }
+
+    #[tokio::test]
+    async fn cas_4ac8_round5_late_fence_blocks_first_registration() {
+        late_fence("tick").await;
+    }
+    #[tokio::test]
+    async fn cas_4ac8_round5_late_fence_blocks_heartbeat() {
+        late_fence("heartbeat").await;
+    }
+    #[tokio::test]
+    async fn cas_4ac8_round5_late_fence_blocks_direct_registration() {
+        late_fence("register").await;
     }
 }

@@ -369,10 +369,10 @@ fn agent_and_event_reads_stay_in_budget_while_the_connection_is_held_cas_ee9ab()
 /// `git fetch` per reminder inline, here at least 5 × 400 ms. The fetches
 /// still happen, on the scanner thread, and their failures back off.
 ///
-/// cas-3b16 (C2 review round 1, L8): the pass is bounded by one fetch
-/// (400 ms), not the 100 ms pass limit. An inline fetch costs at least that by
-/// construction, so the bound catches the regression without depending on how
-/// fast this host runs the rest of the pass; pass latency receipts are C6's.
+/// cas-4491f (C2b review L1): the pass runs on the control lane, where every
+/// git command, store access, `/proc` scan or transcript read is counted
+/// (`lane_guard`); the test asserts that count stays zero instead of timing
+/// the pass. Pass latency receipts are C6's.
 ///
 /// spec-4c5b §7 gate test (C2, cas-223f): the pass touches no store at all.
 /// Reminder expiry, the due read and firing run as a `ReminderScan` job on
@@ -380,8 +380,6 @@ fn agent_and_event_reads_stay_in_budget_while_the_connection_is_held_cas_ee9ab()
 #[tokio::test]
 async fn flv2_external_reminders_never_on_lane() {
     const EXTERNAL_REMINDERS: usize = 5;
-    /// What one fetch against the test origin costs (`sleep 0.4`).
-    const ONE_FETCH: Duration = Duration::from_millis(400);
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
     let project = dir.path();
@@ -452,15 +450,17 @@ async fn flv2_external_reminders_never_on_lane() {
         super::prompt_queue_jobs::QueueJobs::start(cas_dir.clone(), daemon.app.project_scope());
     assert_eq!(daemon.app.project_path(), project);
     let violations = wait_budget::store_access_violations();
-    let started = Instant::now();
+    let lane_violations = cas_store::lane_guard::thread_violations();
     {
         let _forbid = wait_budget::forbid_store_access();
+        let _control = cas_store::lane_guard::enter_lane(cas_store::lane_guard::Lane::Control);
         daemon.process_reminders(&[]);
     }
-    let pass = started.elapsed();
-    assert!(
-        pass < ONE_FETCH,
-        "reminders step took {pass:?} with {EXTERNAL_REMINDERS} pending external reminders: a fetch ran on the loop"
+    assert_eq!(
+        cas_store::lane_guard::thread_violations(),
+        lane_violations,
+        "the reminder pass ran blocking work on the loop with {EXTERNAL_REMINDERS} pending external reminders: {:?}",
+        cas_store::lane_guard::last_thread_violation()
     );
     assert_eq!(
         wait_budget::store_access_violations(),
@@ -495,12 +495,12 @@ async fn flv2_external_reminders_never_on_lane() {
     assert_eq!(reminders.get_event_reminders("branch_contained_in").unwrap().len(), EXTERNAL_REMINDERS);
 
     // A second pass inside the interval neither waits nor starts a scan.
-    let started = Instant::now();
     {
         let _forbid = wait_budget::forbid_store_access();
+        let _control = cas_store::lane_guard::enter_lane(cas_store::lane_guard::Lane::Control);
         daemon.process_reminders(&[]);
     }
-    assert!(started.elapsed() < ONE_FETCH);
+    assert_eq!(cas_store::lane_guard::thread_violations(), lane_violations);
     assert_eq!(wait_budget::store_access_violations(), violations);
     assert!(daemon.external_wake.wait_for_scan(Duration::ZERO).is_none());
 }

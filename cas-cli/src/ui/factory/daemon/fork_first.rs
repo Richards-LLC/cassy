@@ -575,6 +575,7 @@ impl DaemonInitPhase {
             open_operator_notices: std::collections::HashMap::new(),
             last_permission_request_scan: None,
             reported_permission_requests: std::collections::HashSet::new(),
+            relay_jobs: Default::default(),
             last_commander_mirror_scan: None,
             queue_jobs,
         reported_auth_failed_workers: std::collections::HashMap::new(),

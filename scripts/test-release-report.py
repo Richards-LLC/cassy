@@ -10,6 +10,70 @@ SPEC = importlib.util.spec_from_file_location('release_renderer', ROOT / 'cas-cl
 renderer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(renderer)
 EXEMPLAR = (ROOT / 'docs/release-reports/2026-09-08-v3.19.0.md').read_text()
+BY_AREA = '''---
+version: 9.99.1
+date: 2026-10-16
+areas: ["Sessions", "Tasks and merges"]
+---
+
+# Orchard v9.99.1
+
+Published 16 October 2026 · 13:04 UTC
+
+Typing no longer competes with cleanup.
+
+## Change map
+
+3 changes shipped: 2 in Sessions and 1 in Tasks and merges.
+
+One dot is one change listed in the v9.99.1 CHANGELOG. Dots count changes, not their size or importance.
+
+| Area | Changes | What changed |
+| --- | ---: | --- |
+| Sessions | 2 | Typing during cleanup; Peer ownership board |
+| Tasks and merges | 1 | Loaded-proof receipts |
+| Total | 3 | 2 areas |
+
+Source: CHANGELOG.
+
+## Release at a glance
+
+| Measure | Value | Definition |
+| --- | ---: | --- |
+| Changes shipped | 3 | 1 added, 2 fixed |
+| GitHub issues closed | 2 | Closed from PR #1 opening to 15 min after merge |
+
+No manual interventions.
+
+## What you can do now
+
+### Sessions
+
+#### Typing during cleanup
+
+Was: typing could stall.
+
+Now: it does not.
+
+## Under the hood
+
+No developer changes.
+
+## Fixes ledger
+
+| Issue | Title | Closed | Area |
+| --- | --- | --- | --- |
+| [#1215](https://example.org/issues/1215) | Peer report | 2026-10-16T13:03:40Z | Sessions |
+| [#1222](https://example.org/issues/1222) | Receipts | 2026-10-16T13:03:41Z | Tasks and merges |
+
+## Install
+
+Use the release archive.
+
+## Evidence and scope
+
+Source: release assets.
+'''
 
 
 class ReleaseRendererTests(unittest.TestCase):
@@ -123,7 +187,34 @@ Source: release assets.
         output = renderer.render(source)
         self.assertIn('data-total="0"', output)
         self.assertNotIn('data-issue="', output)
+        self.assertNotIn('data-surface="Install"', output)
+        self.assertNotIn('no listed issues', output)
         self.assertIn('No user changes.', output)
+
+    def test_changes_by_area_lead_page_one_with_issues_secondary(self):
+        output = renderer.render(BY_AREA)
+        hero = output[output.index('data-section="hero"'):output.index('data-section="glance"')]
+        self.assertEqual(hero.count('data-change="'), 3)
+        self.assertIn('data-area="Sessions" data-count="2"', hero)
+        self.assertIn('<title>Typing during cleanup</title>', hero)
+        self.assertIn('2 GitHub issues closed with this release', hero)
+        self.assertNotIn('data-issue="', hero)
+        self.assertIn('GitHub issues closed with this release · 2', output)
+        glance = output[output.index('data-section="glance"'):output.index('data-section="users"')]
+        self.assertLess(glance.index('id="map-data"'), glance.index('class="stats"'))
+        for jargon in ('issue-bearing', 'verified closure', 'closure stitch', 'no listed issues'):
+            self.assertNotIn(jargon, output.lower())
+
+    def test_changes_by_area_rejects_zero_rows_and_miscounts(self):
+        for bad in (BY_AREA.replace('| Sessions | 2 | Typing during cleanup; Peer ownership board |',
+                                    '| Sessions | 2 | Typing during cleanup; Peer ownership board |\n| Commander | 0 | Nothing |'),
+                    BY_AREA.replace('| Sessions | 2 |', '| Sessions | 3 |')):
+            with self.subTest(bad=bad[-40:]), self.assertRaises(ValueError):
+                renderer.render(bad)
+
+    def test_changes_by_area_ledger_needs_unique_issues(self):
+        with self.assertRaisesRegex(ValueError, 'fixes ledger'):
+            renderer.render(BY_AREA.replace('[#1222]', '[#1215]'))
 
 
 if __name__ == '__main__':

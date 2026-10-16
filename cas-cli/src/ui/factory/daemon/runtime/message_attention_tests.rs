@@ -783,3 +783,103 @@ fn gh_1196_cancelled_task_no_longer_needs_attention() {
         "a task cancelled after #{id} retires its alarm"
     );
 }
+
+// A handed-off Codex row can lack a usable transcript binding. The watchdog
+// must distinguish later authored action from transport alone (cas-0cdaa).
+fn handed_off_row(f: &Fixture, source: &str, target: &str) -> i64 {
+    let id = f.aged(source, target, "Review passed; wait for CI and merge notification");
+    assert!(f.queue.claim_recipient_transport(id, target).unwrap());
+    f.queue.mark_transport_delivered(id).unwrap();
+    // Give the fixture a stable ordering without sleeping or depending on
+    // SQLite's sub-millisecond timestamp precision.
+    rusqlite::Connection::open(f.cas_dir.join("cas.db"))
+        .unwrap()
+        .execute(
+            "UPDATE prompt_queue SET transport_delivered_at=? WHERE id=?",
+            rusqlite::params![
+                (chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339(),
+                id
+            ],
+        )
+        .unwrap();
+    id
+}
+
+fn authored_outbound(f: &Fixture, origin: &cas_store::QueueOrigin) -> i64 {
+    f.queue
+        .enqueue_urgent_with_outcome(
+            "worker", SUPERVISOR, "Recorded the decision; waiting for the merge", Some(SESSION),
+            Some("status"), Some(cas_store::NotificationPriority::Normal), false, Some(origin),
+        )
+        .unwrap()
+        .id()
+}
+
+#[test]
+fn cas_0cdaa_recipient_authored_reply_retires_both_watchdog_alarms() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let id = handed_off_row(&f, "supervisor", "worker");
+    authored_outbound(&f, &cas_store::QueueOrigin::RegisteredAgent { agent_id: "worker-id".into() });
+    assert!(f.scan().is_empty(), "later recipient-authored reply must retire both unread alarms");
+    let report = f.queue.message_delivery_report(id).unwrap().unwrap();
+    assert!(report.confirmed_at.is_none(), "alarm retirement must not invent message acknowledgement");
+    let slos = cas_store::communication_slo::read_session(&f.cas_dir, SESSION, chrono::Utc::now()).unwrap();
+    assert_eq!(slos.false_abandon, 0);
+    assert_eq!(slos.duplicate_body_reads, 0);
+}
+
+#[test]
+fn cas_0cdaa_recipient_task_note_retires_both_watchdog_alarms() {
+    let _env = env();
+    let mut f = Fixture::new();
+    handed_off_row(&f, "supervisor", "worker");
+    let event = Event::new(
+        EventType::TaskNoteAdded, EventEntityType::Task, "cas-0cdaa",
+        "Decision recorded; waiting for CI before re-closing",
+    ).with_session("worker-id");
+    crate::store::open_event_store(&f.cas_dir).unwrap().record(&event).unwrap();
+    assert!(f.scan().is_empty(), "recipient's later task note is implicit action evidence");
+}
+
+#[test]
+fn cas_0cdaa_self_reminder_never_raises_sender_or_supervisor_alarm() {
+    let _env = env();
+    let mut f = Fixture::new();
+    handed_off_row(&f, "worker", "worker");
+    assert!(f.scan().is_empty(), "self-addressed reminder is not a stalled inter-agent delivery");
+}
+
+#[test]
+fn cas_0cdaa_transport_without_recipient_action_still_alerts_once() {
+    let _env = env();
+    let mut f = Fixture::new();
+    handed_off_row(&f, "supervisor", "worker");
+    let first = f.scan();
+    assert!(!first.is_empty(), "transport alone must not disarm the watchdog");
+    let again = f.scan();
+    assert_eq!(again.len(), first.len(), "the genuine unread episode alerts once");
+}
+
+#[test]
+fn cas_0cdaa_daemon_outbound_is_not_recipient_action() {
+    let _env = env();
+    let mut f = Fixture::new();
+    handed_off_row(&f, "supervisor", "worker");
+    authored_outbound(&f, &cas_store::QueueOrigin::Daemon);
+    assert!(!f.scan().is_empty(), "daemon reminder carrying a worker source is not authored activity");
+}
+
+#[test]
+fn cas_0cdaa_pre_handoff_outbound_does_not_retire_unread_alarm() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let id = handed_off_row(&f, "supervisor", "worker");
+    let outbound = authored_outbound(&f, &cas_store::QueueOrigin::RegisteredAgent { agent_id: "worker-id".into() });
+    rusqlite::Connection::open(f.cas_dir.join("cas.db")).unwrap().execute(
+        "UPDATE prompt_queue SET created_at=? WHERE id=?",
+        rusqlite::params![(chrono::Utc::now() - chrono::Duration::seconds(700)).to_rfc3339(), outbound],
+    ).unwrap();
+    assert!(!f.scan().is_empty(), "outbound before handoff cannot have reacted to the message");
+    assert!(f.queue.message_delivery_report(id).unwrap().unwrap().confirmed_at.is_none());
+}

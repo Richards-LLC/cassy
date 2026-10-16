@@ -24,10 +24,11 @@ use std::path::{Path, PathBuf};
 pub const TARGETS_DIR: &str = "targets";
 /// Directory under a project's scratch namespace holding target baselines.
 pub const BUILD_CACHE_DIR: &str = "build-cache";
-/// Directory under a project's scratch namespace that is the release scratch
-/// base: release-gate archives and every assembly clone and its target
-/// (cas-baa8). It shares the build-cache's filesystem, so clone seeding can
-/// hard-link the baseline.
+/// Directory under a project's scratch namespace holding release scratch:
+/// its `base` is the release scratch base, and release-gate archives and every
+/// assembly clone with its target are created beside that base (cas-baa8).
+/// It shares the build-cache's filesystem, so clone seeding can hard-link the
+/// baseline.
 pub const RELEASE_GATE_DIR: &str = "release-gate";
 
 /// `<label>-<sha256>` namespace for one Cassy store. The label is the store's
@@ -75,9 +76,9 @@ pub fn build_cache_dir(scratch_root: Option<&Path>, cas_dir: &Path) -> PathBuf {
 /// Unset has no answer here: the release resolver keeps deriving a base on
 /// the checkout's filesystem.
 pub fn release_gate_base(scratch_root: &Path, cas_dir: &Path) -> PathBuf {
-    // cas-baa8 red: stubbed until the relocation lands.
-    let _ = scratch_root;
-    cas_dir.join("merge-sweeps")
+    project_scratch_dir(scratch_root, cas_dir)
+        .join(RELEASE_GATE_DIR)
+        .join("base")
 }
 
 /// A managed worker checkout is a direct child of `<cas_dir>/worktrees`.
@@ -159,9 +160,9 @@ mod tests {
         let root = Path::new("/mnt/rewind/cas");
         let cas = Path::new("/srv/repo/.cas");
         let project = root.join(project_key(cas));
-        assert_eq!(release_gate_base(root, cas), project.join("release-gate"));
+        assert_eq!(release_gate_base(root, cas), project.join("release-gate/base"));
         assert_eq!(
-            release_gate_base(root, cas).parent(),
+            release_gate_base(root, cas).parent().and_then(Path::parent),
             build_cache_dir(Some(root), cas).parent()
         );
     }

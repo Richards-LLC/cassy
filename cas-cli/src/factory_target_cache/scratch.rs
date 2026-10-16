@@ -47,6 +47,10 @@ fn release_scratch_args(cas_root: &Path, repo: &Path, clean: bool) -> Vec<std::f
         "--cache".into(),
         cas_root.join("merge-sweeps/assembly-target").into(),
     ];
+    if let Some(base) = crate::factory_scratch::release_gate_base(cas_root) {
+        args.push("--base".into());
+        args.push(base.into());
+    }
     args.push(if clean { "clean" } else { "report" }.into());
     args
 }
@@ -71,7 +75,7 @@ mod tests {
         let set = release_scratch_args(&cas, dir.path(), true);
         let base = scratch
             .join(cas_types::factory_scratch::project_key(&cas))
-            .join("release-gate");
+            .join("release-gate/base");
         let at = set.iter().position(|arg| arg == "--base").expect("--base passed");
         assert_eq!(std::path::Path::new(&set[at + 1]), base);
         assert_eq!(set.last().unwrap(), "clean");

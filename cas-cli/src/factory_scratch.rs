@@ -50,9 +50,8 @@ pub(crate) fn build_cache_dir(cas_dir: &Path) -> PathBuf {
 /// archives and assembly clones with their targets. `None` when unset, so the
 /// release resolver keeps its checkout-filesystem base.
 pub(crate) fn release_gate_base(cas_dir: &Path) -> Option<PathBuf> {
-    // cas-baa8 red: stubbed until the relocation lands.
-    let _ = cas_dir;
-    None
+    configured_scratch_root(cas_dir)
+        .map(|root| cas_types::factory_scratch::release_gate_base(&root, cas_dir))
 }
 
 /// One regenerable cache that `factory.scratch_root` relocated.
@@ -67,14 +66,84 @@ pub(crate) struct RelocatedCache {
 /// Every relocated cache under this project's scratch directory; empty when
 /// the root is unset (cas-baa8).
 pub(crate) fn relocated_caches(cas_dir: &Path) -> Vec<RelocatedCache> {
-    let _ = cas_dir;
-    Vec::new()
+    use cas_types::factory_scratch::{BUILD_CACHE_DIR, RELEASE_GATE_DIR, TARGETS_DIR};
+    let Some(root) = configured_scratch_root(cas_dir) else {
+        return Vec::new();
+    };
+    let project = cas_types::factory_scratch::project_scratch_dir(&root, cas_dir);
+    let cache = |label: String, path: PathBuf| RelocatedCache {
+        bytes: tree_bytes(&path),
+        label,
+        path,
+    };
+    let mut caches = Vec::new();
+    let build_cache = project.join(BUILD_CACHE_DIR);
+    if build_cache.is_dir() {
+        caches.push(cache(BUILD_CACHE_DIR.to_string(), build_cache));
+    }
+    let mut targets: Vec<PathBuf> = std::fs::read_dir(project.join(TARGETS_DIR))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    targets.sort();
+    for target in targets {
+        let name = target.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        caches.push(cache(format!("target {name}"), target));
+    }
+    let release_gate = project.join(RELEASE_GATE_DIR);
+    if release_gate.is_dir() {
+        caches.push(cache(RELEASE_GATE_DIR.to_string(), release_gate));
+    }
+    caches
+}
+
+/// Apparent bytes of every regular file under `path`; symlinks are not
+/// followed, so a link out of the scratch root is never counted.
+fn tree_bytes(path: &Path) -> u64 {
+    walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|meta| meta.len())
+        .sum()
 }
 
 /// The `gc_report` section naming the relocated caches. Read-only.
 pub(crate) fn render_relocated(cas_dir: &Path) -> String {
-    let _ = relocated_caches(cas_dir);
-    String::new()
+    let caches = relocated_caches(cas_dir);
+    let Some(root) = configured_scratch_root(cas_dir) else {
+        return String::new();
+    };
+    let total: u64 = caches.iter().map(|cache| cache.bytes).sum();
+    let mut out = format!(
+        "\nScratch root caches (factory.scratch_root {}): {} total\n",
+        root.display(),
+        bytes_label(total)
+    );
+    if caches.is_empty() {
+        out.push_str("  none yet\n");
+    }
+    for cache in &caches {
+        out.push_str(&format!(
+            "  {}: {} ({})\n",
+            cache.label,
+            cache.path.display(),
+            bytes_label(cache.bytes)
+        ));
+    }
+    out.push_str("  gc_cleanup reclaims in-tree worker targets only; retirement and park-time pruning cover relocated ones.\n");
+    out
+}
+
+fn bytes_label(bytes: u64) -> String {
+    format!("{bytes} bytes")
 }
 
 /// True when `target` is not the checkout's in-tree `target/`.
@@ -215,7 +284,7 @@ mod tests {
         write("targets/worker-1/debug/lib.rlib", 20);
         write("targets/worker-2/debug/lib.rlib", 30);
         write("release-gate/assembly-clone-x/repo/target/f", 5);
-        assert_eq!(release_gate_base(&cas), Some(project.join("release-gate")));
+        assert_eq!(release_gate_base(&cas), Some(project.join("release-gate/base")));
         let caches = relocated_caches(&cas);
         let summary: Vec<(&str, u64)> =
             caches.iter().map(|cache| (cache.label.as_str(), cache.bytes)).collect();

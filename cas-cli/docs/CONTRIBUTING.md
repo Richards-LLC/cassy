@@ -1489,8 +1489,9 @@ Retirement and park-time pruning cover relocated worker targets.
 
 The release scratch base follows the same root (cas-baa8).
 `scripts/release_env.py` resolves it first, as
-`<scratch_root>/<project-key>/release-gate`. Every release-gate archive and
-assembly clone lives there, including each clone's `repo/target`. This base may
+`<scratch_root>/<project-key>/release-gate/base`. Every release-gate archive and
+assembly clone sits beside that base in `release-gate/`, including each clone's
+`repo/target`. This base may
 sit on a different device from the checkout, but it must share the scratch
 root's filesystem: assembly clones hard-link the baseline from
 `<project-key>/build-cache`, which `scripts/proof_target.py` now reads from the

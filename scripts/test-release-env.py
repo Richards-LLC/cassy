@@ -180,7 +180,7 @@ class FactoryScratchRoot(Fixture):
         self.host = FakeHost({self.home: 1, self.rewind: 2})
         self.env["CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT"] = ""
         self.key = release_env.project_key(self.checkout / ".cas")
-        self.base = self.scratch / self.key / "release-gate"
+        self.base = self.scratch / self.key / "release-gate/base"
 
     def resolve(self, **kwargs):
         return release_env.resolve_scratch(self.checkout, self.env, host=self.host, durable=True, **kwargs)

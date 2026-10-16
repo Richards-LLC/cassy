@@ -1621,8 +1621,8 @@ grep -qF 'filesystem boundary' <<<"$output" && ok 'scratch-base names a cross-de
 factory_scratch="$tmp/factory-scratch"
 mkdir -p "$factory_scratch"
 factory_key="$(cd "$repo" && python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, "scripts"); import release_env; print(release_env.project_key(Path(".cas").absolute()))')"
-mkdir -p "$factory_scratch/$factory_key"
-output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$factory_scratch/$factory_key/release-gate" \
+mkdir -p "$factory_scratch/$factory_key/release-gate"
+output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$factory_scratch/$factory_key/release-gate/base" \
     CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT="$factory_scratch" \
     CAS_RELEASE_GATE_CHECKOUT_DEVICE=11 CAS_RELEASE_GATE_SCRATCH_DEVICE=22 \
     "$repo/scripts/release-gate.sh" 9.99.7 --only scratch-base 2>&1 || true)"

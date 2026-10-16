@@ -6547,6 +6547,8 @@ impl CasService {
         }
         out.push_str(&orphan_processes.render());
         out.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, false));
+        // cas-baa8: caches factory.scratch_root moved off the checkout.
+        out.push_str(&crate::factory_scratch::render_relocated(&self.inner.cas_root));
         out.push_str(&artifact_report.render());
         // GH #704: leaked disposable roots under $TMPDIR filled a 32 GB tmpfs
         // and broke every live session's shell output. Name them here, with

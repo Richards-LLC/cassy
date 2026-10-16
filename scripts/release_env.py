@@ -10,7 +10,7 @@ Zig: $ZIG; the checkout's .context/zig/zig; the main checkout's (symlinked in
 with --link-zig); `zig` on PATH. Otherwise the fix is ./scripts/bootstrap-zig.sh.
 
 Scratch base: an exported CAS_RELEASE_GATE_HOME_DIR;
-<factory.scratch_root>/<project-key>/release-gate; <staging.scratch_root>/
+<factory.scratch_root>/<project-key>/release-gate/base; <staging.scratch_root>/
 cas-release-gate; <mount>/cas/scratch/cas-release-gate;
 <mount>/cas-release-gate/base; the platform default; cas-release-gate beside the
 checkout. A candidate counts only when its parent is an existing writable
@@ -304,10 +304,11 @@ def resolve_scratch(checkout: Path, env=os.environ, *, durable: bool = False, cr
     else:
         candidates = []
         if project is not None:
-            # The project directory is created beside its targets and build-cache.
+            # Created beside the project's targets and build-cache; archives and
+            # assembly clones are siblings of the base, inside release-gate/.
             if project.parent.is_dir() and os.access(project.parent, os.W_OK | os.X_OK):
-                project.mkdir(exist_ok=True)
-            candidates.append((project / RELEASE_GATE_DIR, "factory.scratch_root"))
+                (project / RELEASE_GATE_DIR).mkdir(parents=True, exist_ok=True)
+            candidates.append((project / RELEASE_GATE_DIR / "base", "factory.scratch_root"))
         scratch_root = staging_scratch_root(checkout, env)
         if scratch_root:
             candidates.append((Path(scratch_root) / "cas-release-gate", "staging.scratch_root"))

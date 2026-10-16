@@ -455,3 +455,65 @@ async fn batch_qa_explicit_request_remains_available_cas_d697() {
         .is_err()
     );
 }
+
+#[tokio::test]
+async fn batch_qa_debt_survives_disabled_gate_cas_d697() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    fx.unmerge();
+    let park = fx.close("cas-bq01").await;
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::AwaitingMerge,
+        "{park}"
+    );
+    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
+    fx.reconfigure("mode='batch'\nevidence_gate=false");
+    let refused = fx.close("cas-bq01").await;
+    assert_ne!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::Closed,
+        "{refused}"
+    );
+    assert!(
+        refused.contains("deferred evidence at its batch park"),
+        "{refused}"
+    );
+}
+
+#[tokio::test]
+async fn batch_qa_receipt_preserves_skip_marker_gate_cas_d697() {
+    let mut env = TestEnvGuard::temp_home();
+    let mut fx = fixture(&mut env);
+    fx.unmerge();
+    let test = fx.repo.join("hub-web/e2e/spacing.spec.ts");
+    std::fs::create_dir_all(test.parent().unwrap()).unwrap();
+    std::fs::write(&test, "test.only('spacing', async () => {});\n").unwrap();
+    git(&fx.repo, &["add", "hub-web/e2e/spacing.spec.ts"]);
+    git(&fx.repo, &["commit", "-qm", "cas-bq01: spacing test"]);
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get("cas-bq01").unwrap();
+    task.deliverables.factory_branch_anchor = Some(git(&fx.repo, &["rev-parse", "HEAD"]));
+    tasks.update(&task).unwrap();
+    let before = fx.close("cas-bq01").await;
+    assert!(before.contains("adds test skip/focus markers"), "{before}");
+    assert!(!cas_store::has_qa_batch_deferral(&fx.repo.join(".cas"), "cas-bq01").unwrap());
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(
+        &fx.repo,
+        &[
+            "merge",
+            "--no-ff",
+            "-qm",
+            "staging batch",
+            "factory/test-agent",
+        ],
+    );
+    fx.staging = git(&fx.repo, &["rev-parse", "HEAD"]);
+    git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
+    fx.record().await;
+    let after = fx.close("cas-bq01").await;
+    assert!(after.contains("adds test skip/focus markers"), "{after}");
+    assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed);
+}

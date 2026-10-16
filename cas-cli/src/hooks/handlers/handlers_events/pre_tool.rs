@@ -6544,6 +6544,62 @@ mod workspace_contract_tests {
     }
 
     #[test]
+    fn cas_f99e_config_read_shape_is_exact_and_direct() {
+        for command in ["cas config get factory.write_roots", "cas config get ordinary.key"] {
+            let mention = format!("{command}; echo grant-write");
+            assert_eq!(operator_policy_command_denial(&mention), None, "{command}");
+        }
+        let commands = [
+            "env cas config get ordinary.key",
+            "timeout 1 cas config get ordinary.key",
+            "MODE=value cas config get ordinary.key",
+            "cas config list", "cas config describe ordinary.key",
+            "cas config search ordinary.key", "cas config docs",
+            "cas zz-not-a-subcommand ordinary.key",
+            "cas --zz-not-a-flag config get ordinary.key",
+            "cas config get ordinary.key --zz-not-a-flag",
+            "cas config get --zz-not-a-flag",
+            "cas config get", "cas config get ordinary.key extra",
+        ];
+        let admitted: Vec<_> = commands.into_iter()
+            .filter(|command| operator_policy_command_denial(&format!("{command}; echo grant-write")).is_none()).collect();
+        assert!(admitted.is_empty(), "only direct exact config reads qualify: {admitted:?}");
+    }
+
+    #[test]
+    fn cas_f99e_xargs_search_is_grep_only() {
+        for command in [
+            "find docs -name '*.md' | xargs grep -n grant-write",
+            "xargs -0 -r -n 2 -P 1 grep -n grant-write docs",
+            "rg -n grant-write docs/guide.md",
+        ] {
+            assert_eq!(operator_policy_command_denial(command), None, "{command}");
+        }
+        let commands = ["xargs rg -n grant-write docs", "xargs grep --zz-not-a-flag grant-write"];
+        let admitted: Vec<_> = commands.into_iter().filter(|command| operator_policy_command_denial(command).is_none()).collect();
+        assert!(admitted.is_empty(), "only allowlisted grep qualifies after xargs: {admitted:?}");
+    }
+
+    #[test]
+    fn cas_f99e_policy_readers_require_bare_command_words() {
+        for command in ["grep -n grant-write docs/guide.md", "cat -n docs/grant-write.md",
+            "git log --oneline --grep grant-write", "awk '/grant-write/' docs/guide.md"] {
+            assert_eq!(operator_policy_command_denial(command), None, "{command}");
+        }
+        let commands = [
+            "/usr/bin/grep -n grant-write docs", "./grep -n grant-write docs",
+            "tools/cat -n grant-write.md", "./git log --grep grant-write",
+            "./awk '/grant-write/' docs", "./find docs -name '*grant-write*'",
+            "./jq .grant_write_events grant-write.json",
+            "./cas config get ordinary.key; echo grant-write",
+            "./xargs grep -n grant-write docs", "xargs ./grep -n grant-write docs",
+            "./grep --zz-not-a-flag grant-write docs",
+        ];
+        let admitted: Vec<_> = commands.into_iter().filter(|command| operator_policy_command_denial(command).is_none()).collect();
+        assert!(admitted.is_empty(), "path-qualified command words do not qualify: {admitted:?}");
+    }
+
+    #[test]
     fn cas_3b2f_policy_mentions_require_positive_tool_flags() {
         let allowed = [
             "grep -rn grant-write docs",

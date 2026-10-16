@@ -327,10 +327,12 @@ fn cas_639c_claimed_reply_routes_to_existing_thread_watch_owner_before_ack() {
     );
     assert_eq!(relay.outcome(&format!("slack:T0123:C1:{}", ts(25))), None);
     let saved = WatchBook::read(&fx.watch_path).unwrap();
-    assert_eq!(
-        saved.watches.iter().find(|w| w.factory_session == "owner"),
-        Some(&original)
-    );
+    let mut expected = original;
+    expected.last_human_at = at(25);
+    expected
+        .seen_keys
+        .push_back(format!("slack:T0123:C1:{}", ts(25)));
+    assert_eq!(saved.watch("C1", "owner"), Some(&expected));
     *relay.fail_ack.borrow_mut() = false;
     relay.set_now(at(200));
     let replay = claimant.poll_once(&relay, &fx.queue, false, at(200));
@@ -506,10 +508,12 @@ fn cas_639c_foreign_admission_updates_only_known_thread_activity() {
     let after = WatchBook::read(&fx.watch_path).unwrap();
     assert_eq!(after.watches.len(), before.watches.len());
     for original in &before.watches {
-        let updated = after.watch(&original.channel_id, &original.factory_session).unwrap();
+        let updated = after
+            .watch(&original.channel_id, &original.factory_session)
+            .unwrap();
         if original.factory_session == "owner" && original.channel_id == "C1" {
             assert_eq!(updated.last_human_at, at(3595));
-            assert_eq!(updated.cursor_ts, Some(ts(3595)));
+            assert_eq!(updated.cursor_ts, original.cursor_ts);
             assert!(updated.has_seen(&format!("slack:T0123:C1:{}", ts(3595))));
             assert_eq!(updated.started_at, original.started_at);
             assert_eq!(updated.stopped_at, original.stopped_at);
@@ -520,6 +524,42 @@ fn cas_639c_foreign_admission_updates_only_known_thread_activity() {
             assert_eq!(updated, original);
         }
     }
+}
+
+#[test]
+fn cas_639c_failed_durable_enqueue_does_not_update_or_ack_owner_activity() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut owner = fx.wake("owner", t0());
+    relay.publish(mention("C1", 0));
+    owner.poll_once(&relay, &fx.queue, true, at(10));
+    let original = WatchBook::read(&fx.watch_path)
+        .unwrap()
+        .watch("C1", "owner")
+        .unwrap()
+        .clone();
+    let mut claimant = fx.wake("claimant", at(20));
+    let db = rusqlite::Connection::open(fx._temp.path().join("cas.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER cas_639c_fail_enqueue BEFORE INSERT ON prompt_queue BEGIN SELECT RAISE(FAIL, 'injected enqueue failure'); END;").unwrap();
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 25, 0, "U2"));
+    let report = claimant.poll_once(&relay, &fx.queue, false, at(30));
+    assert!(!report.errors.is_empty());
+    assert_eq!((report.wakes, report.held), (0, 1));
+    assert_eq!(relay.outcome(&format!("slack:T0123:C1:{}", ts(25))), None);
+    assert_eq!(
+        WatchBook::read(&fx.watch_path)
+            .unwrap()
+            .watch("C1", "owner"),
+        Some(&original)
+    );
+    db.execute_batch("DROP TRIGGER cas_639c_fail_enqueue;")
+        .unwrap();
+    let retry = claimant.poll_once(&relay, &fx.queue, false, at(40));
+    assert_eq!((retry.wakes, retry.admitted, retry.held), (1, 1, 0));
+    assert_eq!(
+        relay.outcome(&format!("slack:T0123:C1:{}", ts(25))),
+        Some(AckOutcome::Admitted)
+    );
 }
 
 /// AC: claim/ack is idempotent across daemon restarts. The ack is lost, the

@@ -216,8 +216,9 @@ have everyone update their credentials file and restart their clients and
 ## Factory channel watches
 
 Factory sessions on the same clone share the Violet watch book, with separate
-watch entries for each session and channel. A daemon saves only its own watch
-set under a lock; starting a second session leaves live peer watches intact.
+watch entries for each session and channel. A daemon reloads state and updates
+its own watch set under a lock; starting a second session leaves live peer
+watches intact.
 Watches are stopped for another session only when its daemon metadata confirms
 that the daemon is gone. Missing or unreadable metadata is kept conservatively.
 
@@ -225,6 +226,11 @@ Activity on a thread already recorded in a watch goes to that watch's owning
 session, even when another session claims it from Cloud. Unknown threads retain
 the claiming session's normal behavior. This is local watch routing; it does
 not add outgoing-post tracking or Cloud thread claims.
+
+After enqueueing a known owner's reply, the claimant may refresh that watch's
+activity timestamp and dedupe keys under the same lock. It does not start or
+stop the owner's watches, alter other watches, or advance the channel-wide
+read cursor past unread messages on other threads.
 
 An enabled wake consumer started before Cloud login retries credentials on its
 15-second tick. Run `cas login`; the factory daemon does not need a restart.

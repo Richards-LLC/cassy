@@ -426,10 +426,9 @@ impl WatchBook {
         }
     }
 
-    /// Merge only this daemon's session under a clone-wide lock. Reading the
-    /// latest file here prevents a stale in-memory book from erasing a peer's
-    /// newer watch or stop; the lock also serializes the atomic rename's temp.
-    fn save_session(&self, path: &Path, factory_session: &str) -> Result<(), String> {
+    /// Serialize clone-wide read/modify/write operations. Cloud requests run
+    /// outside this lock; it protects only local enqueue and watch persistence.
+    fn lock(path: &Path) -> Result<std::fs::File, String> {
         let parent = path.parent().ok_or("watch path has no parent")?;
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
         let lock = std::fs::OpenOptions::new()
@@ -440,30 +439,17 @@ impl WatchBook {
             .open(path.with_extension("lock"))
             .map_err(|e| format!("open Violet watch lock: {e}"))?;
         fs2::FileExt::lock_exclusive(&lock).map_err(|e| format!("lock Violet watches: {e}"))?;
-        let mut latest: Self = match std::fs::read(path) {
+        Ok(lock)
+    }
+
+    fn read_for_update(path: &Path) -> Result<Self, String> {
+        match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| {
                 "could not parse existing Violet watch book; refusing overwrite".to_string()
-            })?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
-            Err(error) => return Err(format!("read Violet watches: {error}")),
-        };
-        latest
-            .watches
-            .retain(|watch| watch.factory_session != factory_session);
-        latest.watches.extend(
-            self.watches
-                .iter()
-                .filter(|watch| watch.factory_session == factory_session)
-                .cloned(),
-        );
-        latest
-            .learned_bot_user_ids
-            .extend(self.learned_bot_user_ids.iter().cloned());
-        if self.relay.last_claim_at > latest.relay.last_claim_at {
-            latest.relay = self.relay.clone();
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(format!("read Violet watches: {error}")),
         }
-        latest.prune_dead_sessions(factory_session, Utc::now());
-        latest.save(path)
     }
 
     /// Read the book as stored, without ending other sessions' watches. For
@@ -472,7 +458,7 @@ impl WatchBook {
         serde_json::from_slice(&std::fs::read(path).ok()?).ok()
     }
 
-    pub(crate) fn save(&self, path: &Path) -> Result<(), String> {
+    fn save(&self, path: &Path) -> Result<(), String> {
         let parent = path.parent().ok_or("watch path has no parent")?;
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
         let tmp = path.with_extension("json.tmp");
@@ -590,7 +576,7 @@ impl VioletWake {
         now: DateTime<Utc>,
     ) -> Self {
         let book = WatchBook::load(&watch_path, &factory_session, now);
-        let wake = Self {
+        Self {
             project_id,
             alias_class,
             consumer_id,
@@ -600,14 +586,7 @@ impl VioletWake {
             book,
             held: BTreeMap::new(),
             last_channel_wake: HashMap::new(),
-        };
-        if let Err(error) = wake
-            .book
-            .save_session(&wake.watch_path, &wake.factory_session)
-        {
-            tracing::warn!(%error, "could not record ended Violet watches");
         }
-        wake
     }
 
     #[cfg(test)]
@@ -615,22 +594,11 @@ impl VioletWake {
         &self.book
     }
 
-    fn refresh_peers(&mut self, now: DateTime<Utc>) {
-        let mut latest = WatchBook::load(&self.watch_path, &self.factory_session, now);
-        latest
-            .watches
-            .retain(|watch| watch.factory_session != self.factory_session);
-        latest.watches.extend(
-            self.book
-                .watches
-                .iter()
-                .filter(|watch| watch.factory_session == self.factory_session)
-                .cloned(),
-        );
-        self.book.watches = latest.watches;
-        self.book
-            .learned_bot_user_ids
-            .extend(latest.learned_bot_user_ids);
+    fn reload_locked(&mut self, now: DateTime<Utc>) -> Result<std::fs::File, String> {
+        let lock = WatchBook::lock(&self.watch_path)?;
+        self.book = WatchBook::read_for_update(&self.watch_path)?;
+        self.book.prune_dead_sessions(&self.factory_session, now);
+        Ok(lock)
     }
 
     fn is_bot(&self, user: Option<&str>) -> bool {
@@ -688,9 +656,17 @@ impl VioletWake {
             Err(error) => report.errors.push(format!("claim: {error}")),
         }
         // A peer may open a thread watch while the Cloud request is in flight.
-        self.refresh_peers(now);
+        let book_lock = match self.reload_locked(now) {
+            Ok(lock) => lock,
+            Err(error) => {
+                report.errors.push(error);
+                report.held = self.held.len();
+                return report;
+            }
+        };
         self.admit_held(queue, supervisor_live, now, &mut acks, &mut report);
         report.held = self.held.len();
+        drop(book_lock);
         for batch in acks.chunks(ACK_BATCH) {
             match relay.ack(&self.consumer_id, batch) {
                 Ok(results) => {
@@ -709,6 +685,13 @@ impl VioletWake {
 
     /// cas-a897: keep the tick's result where status readers can see it.
     fn record_relay_health(&mut self, report: &PollReport, now: DateTime<Utc>) {
+        let _lock = match self.reload_locked(now) {
+            Ok(lock) => lock,
+            Err(error) => {
+                tracing::warn!(%error, "could not reload Violet relay health");
+                return;
+            }
+        };
         let health = &mut self.book.relay;
         health.last_claim_at = Some(now);
         if report.errors.is_empty() {
@@ -722,10 +705,7 @@ impl VioletWake {
             let error = report.errors.join("; ");
             health.last_error = Some(error.chars().take(RELAY_ERROR_CAP).collect());
         }
-        if let Err(error) = self
-            .book
-            .save_session(&self.watch_path, &self.factory_session)
-        {
+        if let Err(error) = self.book.save(&self.watch_path) {
             tracing::warn!(%error, "could not record Violet relay health");
         }
     }
@@ -880,9 +860,33 @@ impl VioletWake {
             &format!("violet-activity:{}", first.dedupe_key),
         )?;
 
-        // Route durably before ack, without editing the owning daemon's watch.
-        // Queue idempotency covers a lost ack even when a peer claimed it.
+        // The poll caller holds the clone lock. Only after durable enqueue may
+        // a foreign admission refresh this known watch's activity and dedupe.
+        // It never changes watch membership, roots, or start/stop state.
         if factory_session != self.factory_session {
+            for envelope in envelopes {
+                let watch = self
+                    .book
+                    .watches
+                    .iter_mut()
+                    .find(|watch| {
+                        watch.factory_session == factory_session
+                            && watch.channel_id == envelope.channel.id
+                            && watch.is_active()
+                            && (watch
+                                .watched_thread_roots
+                                .contains(&envelope.message.thread_ts)
+                                || watch
+                                    .violet_thread_roots
+                                    .contains(&envelope.message.thread_ts))
+                    })
+                    .ok_or("known Violet thread owner disappeared during admission")?;
+                watch.remember(envelope.dedupe_key.clone());
+                watch.last_human_at = watch.last_human_at.max(envelope.occurred_at);
+                // cursor_ts is channel-wide. Leave it alone so this reply
+                // cannot skip unread messages on the owner's other threads.
+            }
+            self.book.save(&self.watch_path)?;
             return Ok(created);
         }
 
@@ -900,8 +904,7 @@ impl VioletWake {
                 watch.violet_thread_roots.insert(envelope.message.thread_ts.clone());
             }
         }
-        self.book
-            .save_session(&self.watch_path, &self.factory_session)?;
+        self.book.save(&self.watch_path)?;
         Ok(created)
     }
 
@@ -958,6 +961,13 @@ impl VioletWake {
     /// Stop every watch idle for [`IDLE_STOP_SECS`], with one inbox-only line
     /// each for the supervisor. Returns the stopped channel names.
     pub(crate) fn stop_idle(&mut self, queue: &dyn PromptQueueStore, now: DateTime<Utc>) -> Vec<String> {
+        let _lock = match self.reload_locked(now) {
+            Ok(lock) => lock,
+            Err(error) => {
+                tracing::warn!(%error, "could not reload Violet watches for idle stop");
+                return Vec::new();
+            }
+        };
         let mut stopped = Vec::new();
         for watch in self
             .book
@@ -973,10 +983,7 @@ impl VioletWake {
         if stopped.is_empty() {
             return Vec::new();
         }
-        if let Err(error) = self
-            .book
-            .save_session(&self.watch_path, &self.factory_session)
-        {
+        if let Err(error) = self.book.save(&self.watch_path) {
             tracing::warn!(%error, "could not save stopped Violet watches");
         }
         stopped
@@ -1033,7 +1040,13 @@ impl VioletWake {
         read: Result<SweepRead, String>,
         now: DateTime<Utc>,
     ) -> SweepOutcome {
-        self.refresh_peers(now);
+        let _lock = match self.reload_locked(now) {
+            Ok(lock) => lock,
+            Err(error) => {
+                tracing::warn!(%error, "could not reload Violet watches for sweep");
+                return SweepOutcome::Quiet;
+            }
+        };
         let Some(index) = self.book.watches.iter().position(|w| {
             w.channel_id == channel_id && w.is_active() && w.factory_session == self.factory_session
         }) else {
@@ -1052,9 +1065,7 @@ impl VioletWake {
                 if stopped {
                     watch.stop("read_error", now);
                 }
-                let _ = self
-                    .book
-                    .save_session(&self.watch_path, &self.factory_session);
+                let _ = self.book.save(&self.watch_path);
                 tracing::warn!(channel = %name, %error, stopped, "Violet watch sweep failed");
                 if stopped {
                     let note = format!(
@@ -1138,9 +1149,7 @@ impl VioletWake {
                     tracing::warn!(%error, channel = %channel_name, "could not queue Violet sweep wake");
                     let watch = &mut self.book.watches[index];
                     watch.last_sweep_at = Some(now);
-                    let _ = self
-                        .book
-                        .save_session(&self.watch_path, &self.factory_session);
+                    let _ = self.book.save(&self.watch_path);
                     return SweepOutcome::Quiet;
                 }
             }
@@ -1164,10 +1173,7 @@ impl VioletWake {
             self.last_channel_wake
                 .insert((self.factory_session.clone(), channel), now);
         }
-        if let Err(error) = self
-            .book
-            .save_session(&self.watch_path, &self.factory_session)
-        {
+        if let Err(error) = self.book.save(&self.watch_path) {
             tracing::warn!(%error, "could not save Violet watch after sweep");
         }
         if woke {

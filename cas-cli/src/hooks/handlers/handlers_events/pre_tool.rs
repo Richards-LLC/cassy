@@ -2477,19 +2477,45 @@ fn factory_shell_tokens_with_literals(command: &str) -> (Vec<ShellToken>, Vec<bo
 /// Return shell statements with heredoc bodies and comments removed. Quoted
 /// arguments remain one word, so a formatter name in a script string cannot be
 /// mistaken for the executable command.
+///
+/// cas-b7a1: a `$(…)` that is an argument of a resolved command does not end
+/// that command. Its body is a statement of its own, and the words after its
+/// `)` stay in the enclosing statement (`echo $(cat f) sed -i x c` runs `echo`).
+/// A substitution that may become the command (first word, after an
+/// assignment or a wrapper such as `env` or `timeout`), a group or subshell,
+/// and an unmatched `)` (a `case` pattern) still end the statement as before.
 pub(super) fn shell_statement_words(command: &str) -> Vec<Vec<String>> {
     let shell_command = shell_command_without_heredoc_bodies(command);
     let tokens = factory_shell_tokens(&shell_command);
     let mut statements = Vec::new();
-    let mut words = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    // One entry per open `(`: the enclosing statement an argument
+    // substitution returns to, or `None` when `)` starts a new statement.
+    let mut open: Vec<Option<Vec<String>>> = Vec::new();
     for token in tokens {
         match token {
             ShellToken::Word(word) => words.push(word),
-            ShellToken::Operator(';')
-            | ShellToken::Operator('|')
-            | ShellToken::Operator('&')
-            | ShellToken::Operator('(')
-            | ShellToken::Operator(')') => {
+            ShellToken::Operator('(') => {
+                let argument_substitution = words.last().is_some_and(|word| word.ends_with('$'))
+                    && unwrapped_command_index(&words).is_some_and(|index| index + 1 < words.len());
+                if argument_substitution {
+                    open.push(Some(std::mem::take(&mut words)));
+                } else {
+                    if !words.is_empty() {
+                        statements.push(std::mem::take(&mut words));
+                    }
+                    open.push(None);
+                }
+            }
+            ShellToken::Operator(')') => {
+                if !words.is_empty() {
+                    statements.push(std::mem::take(&mut words));
+                }
+                if let Some(Some(enclosing)) = open.pop() {
+                    words = enclosing;
+                }
+            }
+            ShellToken::Operator(';') | ShellToken::Operator('|') | ShellToken::Operator('&') => {
                 if !words.is_empty() {
                     statements.push(std::mem::take(&mut words));
                 }
@@ -2499,6 +2525,12 @@ pub(super) fn shell_statement_words(command: &str) -> Vec<Vec<String>> {
     }
     if !words.is_empty() {
         statements.push(words);
+    }
+    // An unclosed argument substitution still reports its enclosing words.
+    for enclosing in open.into_iter().flatten().rev() {
+        if !enclosing.is_empty() {
+            statements.push(enclosing);
+        }
     }
     statements
 }

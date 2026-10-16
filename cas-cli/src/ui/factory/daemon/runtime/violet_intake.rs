@@ -277,3 +277,6 @@ pub(crate) mod recovery;
 
 #[path = "violet_binding_evidence.rs"]
 pub(crate) mod activation;
+
+#[path = "violet_cloud.rs"]
+pub(crate) mod cloud;

@@ -542,6 +542,10 @@ impl HttpCloudCoordinationPort {
         }
     }
 
+    pub(crate) fn get(&self, _path: &str, _query: &[(&str, &str)], _timeout: Duration) -> Result<Value, RemoteError> {
+        Err(RemoteError::unavailable("coordination GET is not implemented"))
+    }
+
     fn decode_response(response: ureq::Response) -> Result<Value, RemoteError> {
         response
             .into_json()

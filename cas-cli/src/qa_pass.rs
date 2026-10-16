@@ -123,11 +123,17 @@ pub fn user_facing_reasons(
     {
         return QaEligibility { reasons };
     }
-    if !journeys.is_empty() {
+    let rendered_paths: Vec<String> = surface_paths.iter()
+        .filter(|path| first_user_facing_path(std::slice::from_ref(*path), &qa.api_paths).is_none())
+        .cloned().collect();
+    if !journeys.is_empty() && (changed_paths.is_none() || !rendered_paths.is_empty()) {
         reasons.push(format!("journeys:{}", journeys.join(",")));
     }
-    if let Some((path, glob)) = first_user_facing_path(&surface_paths, &qa.user_facing_paths) {
+    if let Some((path, glob)) = first_user_facing_path(&rendered_paths, &qa.user_facing_paths) {
         reasons.push(format!("path:{path} ({glob})"));
+    }
+    if let Some((path, glob)) = first_user_facing_path(&surface_paths, &qa.api_paths) {
+        reasons.push(format!("api:{path} ({glob})"));
     }
     if !task.demo_statement.trim().is_empty() {
         reasons.push("demo_statement".to_string());
@@ -866,14 +872,49 @@ pub fn render_epic_qa_section(cas_root: &Path, children: &[Task]) -> String {
     format!("\n\nIndependent QA:\n{}\n", lines.join("\n"))
 }
 
-/// Check the independent round's evidence bundle (cas-c3b8 contract v1)
-/// beside its ledger: `bundle.json` with `producer: "independent-qa"`, the
-/// delivery's task id, and `head_sha` equal to the reviewed tip. Returns the
-/// bundle path, or why it cannot back a verdict.
-///
-/// cas-5488 (GH #1152): the visual-QA pass claim backs an approval only. A
-/// rejection asserts no pass, so the bounds comparison never blocks it; a
-/// reviewer who found a real defect can always record it.
+/// API-only reasons need HTTP evidence, including when a broad catalog matches.
+pub(crate) fn api_only_reasons(reasons: &[String]) -> bool {
+    reasons.iter().any(|reason| reason.starts_with("api:"))
+        && !reasons.iter().any(|reason| reason.starts_with("path:") || reason.starts_with("journeys:"))
+}
+
+pub(crate) fn validate_round_evidence(
+    cas_root: &Path,
+    ledger_path: &Path,
+    pass: &QaPass,
+    verdict: cas_types::QaVerdict,
+) -> Result<(&'static str, std::path::PathBuf), String> {
+    let qa = crate::config::Config::load(cas_root).map_err(|e| e.to_string())?.qa();
+    if !qa.api_paths.is_empty() {
+        let store = crate::store::open_task_store_local(cas_root).map_err(|e| e.to_string())?;
+        let task = store.get(&pass.task_id).map_err(|e| e.to_string())?;
+        let repo = github_gate::task_repo(cas_root, &task);
+        let parent = store.get_parent_epic(&task.id).ok().flatten().and_then(|epic| epic.branch);
+        let target = task.deliverables.work_target.as_ref().map(|target| target.target_branch.as_str())
+            .or(parent.as_deref()).unwrap_or("main");
+        if let Ok(paths) = changed_paths_for_delivery(&repo, target, &pass.bound_head)
+            && api_only_reasons(&user_facing_reasons(&task, &qa, Some(&paths), &[]).reasons)
+        {
+            if ledger_path.file_name() != Some(std::ffi::OsStr::new("LEDGER.md")) {
+                return Err("API ledger_path must name LEDGER.md".into());
+            }
+            let ctx = crate::qa_evidence::EvidenceContext {
+                task_id: &task.id,
+                task_artifacts_dir: ledger_path.parent().ok_or("API ledger has no parent")?,
+                repo: &repo, delivered_head: &pass.bound_head, notes: "",
+                deployed_origins: &qa.deployed_origins,
+            };
+            if verdict == cas_types::QaVerdict::Approved {
+                crate::qa_evidence::validate_ledger(&ctx).map_err(|e| e.problem)?;
+            }
+            let transcript = crate::qa_evidence::validate_api_evidence(&ctx).map_err(|e| e.problem)?;
+            return Ok(("api-evidence:", transcript));
+        }
+    }
+    validate_round_bundle(ledger_path, pass, verdict).map(|path| ("qa-bundle:", path))
+}
+
+/// Bind an independent web bundle to the round. Rejections need no visual pass.
 pub fn validate_round_bundle(
     ledger_path: &Path,
     pass: &QaPass,
@@ -1326,6 +1367,22 @@ pub fn qa_task_description(
     ledger_dir: &Path,
     parent_branch: &str,
 ) -> String {
+    if api_only_reasons(reasons) {
+        return format!(
+            "Independent API QA for {} @{} (base {parent_branch}; round {}).\n\
+             Implementer: {}; deadline: {}. Review exactly this build, never edit it.\n\
+             Follow cas-qa-craft's API path and cas-tdd, Fewest tests: one HTTP capture per changed status/refusal.\n\
+             Run the real server build or configured deployed sandbox with project credentials.\n\
+             Evidence: {}/LEDGER.md is the request/status/body transcript; contracts.diff compares vendored fixtures.\n\
+             Record build/deployment provenance, redact credentials, reset sandbox writes and confirm no smoke rows remain.\n\
+             These two artifacts suffice; visual evidence applies only to rendered output.\n\
+             Approve only exercised acceptance criteria; reject delivery regressions, record pre-existing findings separately.\n\
+             {}\nRecord {{prefix}}verification action=qa_record task_id={} status=approved|rejected summary=\"...\" ledger_path={}/LEDGER.md. Recording closes this QA task.",
+            delivery.id, pass.bound_head, pass.round, pass.implementer_agent_id,
+            pass.deadline_at.to_rfc3339(), ledger_dir.display(), crate::builtins::TOOL_NAMING_LINE,
+            delivery.id, ledger_dir.display(),
+        );
+    }
     let demo = if delivery.demo_statement.trim().is_empty() {
         "(none — derive the user goal from the delivery title and diff)".to_string()
     } else {

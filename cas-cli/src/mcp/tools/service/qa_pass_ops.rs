@@ -94,7 +94,7 @@ impl CasService {
         })?;
         // The verdict must be backed by the round's evidence bundle, built
         // against exactly the tip under review (cas-c3b8 contract v1).
-        let bundle = crate::qa_pass::validate_round_bundle(std::path::Path::new(ledger_path), &claimed, verdict)
+        let (citation, bundle) = crate::qa_pass::validate_round_evidence(&cas_root, std::path::Path::new(ledger_path), &claimed, verdict)
             .map_err(|reason| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {reason}")))?;
         let pass = cas_store::resolve_qa_pass(
             &cas_root,
@@ -114,7 +114,7 @@ impl CasService {
         // implementer cites its own (`note_type=platform_proof`).
         if let Ok(store) = self.inner.open_task_store() {
             let note = format!(
-                "[{}] 🧪 PLATFORM_PROOF qa-bundle: {} (independent QA round {}, {})",
+                "[{}] 🧪 PLATFORM_PROOF {citation} {} (independent QA round {}, {})",
                 now.format("%Y-%m-%d %H:%M"),
                 bundle.display(),
                 pass.round,

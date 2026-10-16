@@ -405,6 +405,10 @@ pub struct QaConfig {
     #[serde(default = "default_user_facing_paths")]
     pub user_facing_paths: Vec<String>,
 
+    /// Non-rendered API/server paths; HTTP transcript and contract diff QA.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_paths: Vec<String>,
+
     /// cas-619f: minutes one independent QA round may take before it times
     /// out and the supervisor must redispatch or waive.
     #[serde(default = "default_pass_timeout_mins")]
@@ -531,6 +535,7 @@ impl Default for QaConfig {
             terminal_render_paths: default_terminal_render_paths(),
             terminal_interaction_paths: default_terminal_interaction_paths(),
             user_facing_paths: default_user_facing_paths(),
+            api_paths: Vec::new(),
             pass_timeout_mins: default_pass_timeout_mins(),
             max_rounds: default_max_rounds(),
             github_status: false,

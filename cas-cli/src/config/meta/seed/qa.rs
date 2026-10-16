@@ -218,6 +218,20 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
     });
 
     registry.register(ConfigMeta {
+        key: "qa.api_paths",
+        section: "qa",
+        name: "API QA Paths",
+        description: "Comma-separated globs for API and server-only code with no rendered output. Matches trigger HTTP transcript and vendored contract diff QA instead of visual evidence, including server-only TSX. Other rendered paths in a mixed delivery still require a web bundle.",
+        value_type: ConfigType::StringList,
+        default: "",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["qa", "api", "http", "contract", "server", "paths"],
+        use_cases: &["Select app/api/**/route.ts and lib/server/**", "Keep rendered components out of API-only globs"],
+    });
+
+    registry.register(ConfigMeta {
         key: "qa.pass_timeout_mins",
         section: "qa",
         name: "QA Pass Timeout",

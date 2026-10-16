@@ -1,18 +1,35 @@
-# Playwright evidence bundle
+# QA evidence by surface
 
-Every web or hub cell of a `demo_statement` task produces this bundle. CLI-only
-cells keep terminal captures in the ledger instead. The APIs below were checked
-against `@playwright/test` 1.63.0 on 2026-09-23 and arrived between 1.59 and
-1.63; pin `^1.63`. On an older Playwright, the bundle row is `NOT EXERCISED`:
-never substitute weaker evidence and call it PASS.
+## API surfaces
+
+`qa.api_paths` selects non-rendered API/server code, including server-only TSX;
+keep rendered components out of these globs. Follow [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests):
+one transcript per changed status/error code, including refusal cases. The only
+required artifacts are `LEDGER.md` (the transcript itself) and `contracts.diff`
+(captured comparison against vendored contract fixtures, empty when they agree).
+Use the task artifact directory, or the independent round's ledger directory.
+Record `head_sha: <delivered SHA>` and `origin: <HTTP origin>` in the transcript,
+a PASS/real-build ledger row for approval, then `request: <METHOD> <absolute URL>`,
+`status: <numeric code>` and `body: <captured response>` for each cell.
+Exercise the real server build (for example `next build` then `next start`), or
+an origin in `qa.deployed_origins` with project-provided sandbox credentials.
+For deployed runs, add `deployed_sha: <SHA>` covering this delivery and
+`deployment_proof: <version endpoint response naming that SHA>` inline.
+Redact entire auth/cookie values; record sandbox reset and verified zero smoke
+rows inline. API-only evidence needs no screenshots, trace or `bundle.json`;
+mixed rendered changes still require the web bundle below.
+
+## Playwright evidence bundle
+
+Rendered web/hub cells use this bundle with `@playwright/test` `^1.63`.
+Older Playwright means `NOT EXERCISED`. CLI cells use terminal captures.
 
 ## Layout
 
 The bundle lives at `~/.cas/artifacts/<project-key>/<task-id>/qa/`. `LEDGER.md` stays one
 level up. An independent QA round uses `independent-qa/round-<n>/` and a
 journey uses `journeys/<journey-id>/`, each with the same shape and its own
-`bundle.json`. Extra files are allowed; a validator reads only what
-`bundle.json` lists.
+`bundle.json`.
 
 | `files` key | name | required |
 | --- | --- | --- |
@@ -108,7 +125,8 @@ while iterating, with `scripts/journey-eval.sh <task-artifact-dir>` (default
 affected, four workers) or `--affected <base>`. Close and QA do not require a
 journey receipt.
 
-With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
+The merge queue owns full-suite proof; without one, CI or supervisor assembly
+proves the exact default-branch tip. Workers run targeted tests. Reuse receipts.
 Workers produce affected-journey evidence; independent QA consumes matching
 receipts before running missing checks (see [independent-pass.md](independent-pass.md)).
 The hook denies factory worker and QA full or unfiltered runs. A failure control may rerun the failing
@@ -141,15 +159,6 @@ export default defineConfig({
   },
 });
 ```
-
-The `snapshots` keys do the following:
-
-- `dom` keeps the DOM and network for every action.
-- `aria` writes an aria tree before and after each action.
-- `screen` writes a PNG before and after each action.
-
-The same object works in library code:
-`context.tracing.start({ snapshots: { dom: true, aria: true, screen: true }, sources: true })`.
 
 The evidence trace is always the test runner's own `trace.zip`. Close counts
 assertions from its `test.trace`, which records every assertion's outcome and

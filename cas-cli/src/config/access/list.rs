@@ -330,6 +330,7 @@ impl Config {
             ),
             ("qa.mode".to_string(), qa.mode.to_string()),
             ("qa.evidence_gate".to_string(), qa.evidence_gate.to_string()),
+            ("qa.api_paths".to_string(), qa.api_paths.join(",")),
             (
                 "qa.terminal_render_paths".to_string(),
                 qa.terminal_render_paths.join(","),

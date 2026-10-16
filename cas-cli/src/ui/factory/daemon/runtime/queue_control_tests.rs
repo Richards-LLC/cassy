@@ -145,6 +145,11 @@ async fn assert_replacement_gets_fresh_grace(action: Option<PendingSpawn>) {
                 .prepared_wake_evidence("worker-a")
                 .awaiting_first_prompt
         );
+        assert!(
+            daemon
+                .prepared_wake_evidence("worker-b")
+                .awaiting_first_prompt
+        );
         daemon.queue_jobs.prompt_preparation.wake_clock = Some(
             first
                 + chrono::Duration::from_std(CLAUDE_FIRST_PROMPT_GRACE).unwrap()

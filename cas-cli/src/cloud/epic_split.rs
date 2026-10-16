@@ -435,7 +435,7 @@ fn claim_share(
             // still this side's.
             Acquire::LocalHolder(_) => {}
             Acquire::StalePeer(hold) => warnings.push(format!(
-                "{id}: {}'s claim {}; Cassy Cloud still lists them until it expires the claim",
+                "{id}: {}'s claim {}; Cloud recovery was not confirmed",
                 hold.describe(),
                 hold.stale_reason(Utc::now())
             )),

@@ -237,7 +237,9 @@ pub(crate) fn exclude_project_agents(
         .into_iter()
         .map(|agent| agent.id)
         .collect();
-    peers.retain(|peer| !local_ids.contains(&peer.agent_id));
+    let retired = super::peer_claims::retired_local_agents(cas_root);
+    peers.retain(|peer| !local_ids.contains(&peer.agent_id)
+        && !retired.get(&peer.agent_id).is_some_and(|ended| peer.last_heartbeat <= ended.ended_at));
     Ok(())
 }
 

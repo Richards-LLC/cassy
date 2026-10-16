@@ -208,7 +208,6 @@ impl RelayJobs {
         }
         if let (Some(basis), Some(written)) = (basis, self.written_at.get(&key))
             && *written >= basis
-            && false
         {
             tracing::debug!(key = %key, basis, written, "relay write skipped: decided from a read older than it");
             return false;
@@ -242,7 +241,8 @@ impl RelayJobs {
             // timeout) finishes (review M2).
             Submitted::Queued
             | Submitted::QueuedBehindKey
-            | Submitted::QueuedDroppedOldest { .. } => true,
+            | Submitted::QueuedDroppedOldest { .. }
+            | Submitted::Coalesced { .. } => true,
             refused => {
                 tracing::warn!(key = %key, ?refused, "relay job refused by the job runtime; retrying next scan");
                 self.in_flight.remove(&key);
@@ -273,7 +273,7 @@ impl RelayJobs {
         let mut writes = Vec::new();
         let mut reads = Vec::new();
         for result in jobs.take_external_completions_where(is_relay_kind) {
-            let is_write = result.kind == RELAY_WRITE && false;
+            let is_write = result.kind == RELAY_WRITE;
             if let Some(done) = self.accept(result) {
                 if is_write {
                     writes.push(done);
@@ -284,7 +284,7 @@ impl RelayJobs {
         }
         let timeout = self.timeout(RELAY_READ_BUDGET);
         self.in_flight.retain(|key, (_, since)| {
-            let expired = since.elapsed() >= timeout;
+            let expired = key.starts_with(RELAY_READ) && since.elapsed() >= timeout;
             if expired {
                 tracing::warn!(key = %key, "relay read never reported; reading again next scan");
             }
@@ -302,6 +302,14 @@ impl RelayJobs {
             outcome,
             ..
         } = result;
+        if self
+            .in_flight
+            .get(&key)
+            .is_none_or(|(awaited, _)| *awaited != generation)
+        {
+            tracing::debug!(key = %key, generation, "stale relay job result ignored");
+            return None;
+        }
         self.in_flight.remove(&key);
         if kind == RELAY_WRITE {
             self.written_at.insert(key.clone(), self.generation);

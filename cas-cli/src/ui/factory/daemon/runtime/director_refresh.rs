@@ -195,7 +195,7 @@ impl PendingDeliverability {
             // Review M4: never read, so read on the store worker, never
             // delivered without its stale check.
             assignments: vec![
-                crate::ui::factory::app::AssignmentRead::Unavailable;
+                crate::ui::factory::app::AssignmentRead::Unread;
                 self.prompts.len()
             ],
             prompts: self.prompts.into_iter().map(|prompt| (prompt, true)).collect(),

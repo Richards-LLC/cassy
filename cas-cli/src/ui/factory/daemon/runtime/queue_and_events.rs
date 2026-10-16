@@ -3969,12 +3969,14 @@ impl FactoryDaemon {
             .filter(|state| !state.resolved)
             .map(|state| state.alert_id)
             .collect();
-        let _ = asked;
-        let resolved: Vec<(i64, i64)> = self
-            .open_operator_notices
+        let resolved: Vec<(i64, i64)> = asked
             .iter()
-            .filter(|(alert_id, _)| !open.contains(alert_id))
-            .map(|(alert_id, subject)| (*alert_id, *subject))
+            .filter(|alert_id| !open.contains(alert_id))
+            .filter_map(|alert_id| {
+                self.open_operator_notices
+                    .get(alert_id)
+                    .map(|subject| (*alert_id, *subject))
+            })
             .collect();
         for (alert_id, subject) in resolved {
             self.open_operator_notices.remove(&alert_id);

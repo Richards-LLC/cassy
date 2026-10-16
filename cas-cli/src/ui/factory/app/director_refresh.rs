@@ -418,9 +418,6 @@ pub(crate) fn resolve_unread_assignment(
             }
         }
     };
-    if true {
-        return queue_it();
-    }
     match AssignmentRead::read(cas_dir, None, prompt) {
         AssignmentRead::NotAssignment => UnreadAssignmentOutcome::NotAssignment,
         AssignmentRead::Stale(task_id, status) => {

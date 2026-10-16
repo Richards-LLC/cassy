@@ -100,15 +100,50 @@ fn requires_terminal_qa(paths: &[String], qa: &crate::config::QaConfig) -> bool 
     if qa.terminal_render_paths.is_empty() {
         return false;
     }
-    let cli = ["**/cli/**".to_string()];
-    paths.iter().filter(|path| !is_non_surface_path(path)).any(|path| {
-        let one = std::slice::from_ref(path);
-        // Existing config files can retain the older default output globs,
-        // without **/cli/**. Do not let an input exemption hide CLI output.
-        first_user_facing_path(one, &cli).is_some()
-            || (first_user_facing_path(one, &qa.terminal_render_paths).is_some()
-                && first_user_facing_path(one, &qa.terminal_interaction_paths).is_none())
-    })
+    // Older generated configs stored filename guesses such as *render*.
+    // Those match PDF/HTML renderers and server logs too (GH #1212). Upgrade
+    // only the two known complete default lists; custom paths are declarations
+    // of terminal surfaces and retain their configured meaning.
+    let old_defaults = [
+        "**/ui/**",
+        "**/tui/**",
+        "**/*render*",
+        "**/*output*",
+        "**/*theme*",
+        "**/*progress*",
+    ];
+    let old_default_list = old_defaults
+        .iter()
+        .all(|glob| qa.terminal_render_paths.iter().any(|path| path == glob))
+        && qa
+            .terminal_render_paths
+            .iter()
+            .all(|path| path == "**/cli/**" || old_defaults.contains(&path.as_str()));
+    let render_paths = if old_default_list {
+        std::borrow::Cow::Owned(crate::config::default_terminal_render_paths())
+    } else {
+        std::borrow::Cow::Borrowed(&qa.terminal_render_paths)
+    };
+    let required_output = [
+        "**/cli/**".to_string(),
+        "**/cas-mux/src/render.rs".to_string(),
+        "**/cas-mux/src/pane/style.rs".to_string(),
+        "**/cas-mux/src/pane/snapshot.rs".to_string(),
+    ];
+    paths
+        .iter()
+        .filter(|path| !is_non_surface_path(path))
+        .any(|path| {
+            let one = std::slice::from_ref(path);
+            // Existing config files can retain the older default output globs,
+            // without **/cli/**. A blanket cas-mux interaction glob likewise
+            // must not hide dedicated drawing/styles behind an input exemption.
+            // pane/mod.rs is mixed input/geometry code: its live interaction
+            // still needs the real-build ledger rather than a stdout capture.
+            first_user_facing_path(one, &required_output).is_some()
+                || (first_user_facing_path(one, &render_paths).is_some()
+                    && first_user_facing_path(one, &qa.terminal_interaction_paths).is_none())
+        })
 }
 
 /// Run the gate. `Ok(notes)` carries decision-note lines to record on close;
@@ -335,6 +370,8 @@ mod tests {
         let factory = vec!["cas-cli/src/ui/factory/daemon/runtime/output.rs".into()];
         assert!(!requires_terminal_qa(&factory, &qa));
         assert!(requires_terminal_qa(&["src/ui/status.rs".into()], &qa));
+        assert!(!requires_terminal_qa(&["src/theme.rs".into()], &qa));
+        qa.terminal_render_paths.push("src/theme.rs".into());
         assert!(requires_terminal_qa(&["src/theme.rs".into()], &qa));
         qa.terminal_interaction_paths.clear();
         assert!(requires_terminal_qa(&factory, &qa));
@@ -346,6 +383,74 @@ mod tests {
         assert!(!requires_terminal_qa(&["tests/cli/output_test.rs".into()], &qa));
         qa.terminal_render_paths.clear();
         assert!(!requires_terminal_qa(&["src/cli/status.rs".into()], &qa));
+    }
+
+    #[test]
+    fn terminal_surface_defaults_and_declared_paths_cas_2de9() {
+        let old = vec![
+            "**/ui/**",
+            "**/tui/**",
+            "**/*render*",
+            "**/*output*",
+            "**/*theme*",
+            "**/*progress*",
+        ];
+        let mut with_cli = old.clone();
+        with_cli.push("**/cli/**");
+        for configured in [
+            crate::config::default_terminal_render_paths(),
+            old.into_iter().map(String::from).collect(),
+            with_cli.into_iter().map(String::from).collect(),
+        ] {
+            let mut qa = crate::config::QaConfig::default();
+            qa.terminal_render_paths = configured;
+            for path in [
+                "src/contracts/pdf.renderer.ts",
+                "src/services/output.service.ts",
+                "src/theme.rs",
+                "src/progress.rs",
+                "src/service.ts",
+                "tests/cli/status.rs",
+            ] {
+                assert!(!requires_terminal_qa(&[path.into()], &qa), "{path}: {qa:?}");
+            }
+            for path in [
+                "src/cli/status.rs",
+                "src/tui/status.rs",
+                "src/ui/status.rs",
+                "src/doctor.rs",
+                "src/doctor/output.rs",
+                "src/terminal/report.py",
+                "crates/cas-mux/src/render.rs",
+                "crates/cas-mux/src/pane/style.rs",
+                "crates/cas-mux/src/pane/snapshot.rs",
+                "crates/ghostty_vt/src/lib.rs",
+                "crates/ghostty_vt_sys/src/lib.rs",
+                "crates/cas-diffs/src/widget.rs",
+                "crates/cas-diffs/src/highlight.rs",
+            ] {
+                assert!(requires_terminal_qa(&[path.into()], &qa), "{path}: {qa:?}");
+            }
+            for input in [
+                "crates/cas-mux/src/input_stream.rs",
+                "crates/cas-mux/src/pty.rs",
+                "crates/cas-mux/src/pane/mod.rs",
+            ] {
+                assert!(!requires_terminal_qa(&[input.into()], &qa));
+            }
+            qa.terminal_render_paths = vec!["src/shared/status.rs".into()];
+            assert!(requires_terminal_qa(&["src/shared/status.rs".into()], &qa));
+            assert!(!requires_terminal_qa(
+                &["src/contracts/pdf.renderer.ts".into()],
+                &qa
+            ));
+            qa.terminal_render_paths.clear();
+            assert!(!requires_terminal_qa(&["src/cli/status.rs".into()], &qa));
+            assert!(!requires_terminal_qa(
+                &["crates/cas-mux/src/render.rs".into()],
+                &qa
+            ));
+        }
     }
 
     fn git(repo: &Path, args: &[&str]) -> String {

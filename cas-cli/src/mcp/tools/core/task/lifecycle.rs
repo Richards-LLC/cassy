@@ -1153,6 +1153,29 @@ impl CasCore {
         } else {
             None
         };
+        // cas-dd56: a task that names its issue in the title records it as
+        // external_ref, so issue reconciliation can tell when the fix has
+        // shipped. A no-code task's external_ref is its proof artifact, so it
+        // only gets the hint.
+        let issue_hint = crate::issue_reconcile::external_ref_hint(
+            &req.title,
+            req.description.as_deref().unwrap_or(""),
+            req.external_ref.as_deref(),
+            crate::github_issue_attach::default_repo_for(&self.cas_root).as_deref(),
+        );
+        let issue_hint = match issue_hint {
+            crate::issue_reconcile::ExternalRefHint::Set { issue, .. }
+                if execution_note.as_deref() == Some("no-code") =>
+            {
+                crate::issue_reconcile::ExternalRefHint::Suggest { issues: vec![issue] }
+            }
+            hint => hint,
+        };
+        let external_ref = match &issue_hint {
+            crate::issue_reconcile::ExternalRefHint::Set { url, .. } => Some(url.clone()),
+            _ => req.external_ref,
+        };
+        let issue_hint_note = crate::issue_reconcile::external_ref_hint_note(&issue_hint);
         let task = Task {
             id: id.clone(),
             scope: crate::types::Scope::Project, // MCP tasks are project-scoped
@@ -1177,7 +1200,7 @@ impl CasCore {
             closed_at: None,
             close_reason: None,
             terminal_outcome: None,
-            external_ref: req.external_ref,
+            external_ref,
             content_hash: None,
             branch: None,
             deliverables: crate::types::TaskDeliverables {
@@ -1253,7 +1276,8 @@ impl CasCore {
                     &task.description,
                 ))
                 .unwrap_or_default()
-            + default_target_warning.as_deref().unwrap_or_default();
+            + default_target_warning.as_deref().unwrap_or_default()
+            + &issue_hint_note;
 
         if let Ok(search) = self.open_search_index() {
             let _ = search.index_task(&task);
@@ -3953,6 +3977,69 @@ mod related_recall_response_tests {
         for filler in ["the", "you", "see", "next", "before"] {
             assert!(!terms.contains(&filler), "{filler} in {query}");
         }
+    }
+
+    /// cas-dd56 item 1: a task whose title names its issue records it as
+    /// external_ref; prose mentions only produce a hint.
+    #[tokio::test]
+    async fn task_create_records_the_title_issue_as_external_ref_cas_dd56() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_NAME", Some("issue-ref-test")),
+            ("CAS_SESSION_ID", Some("issue-ref-test")),
+        ]);
+        let temp = TempDir::new().expect("temp project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let find = |title: &str| {
+            core.open_task_store()
+                .expect("open task store")
+                .list(None)
+                .expect("list tasks")
+                .into_iter()
+                .find(|task| task.title == title)
+                .expect("created task")
+        };
+
+        let response = text(
+            core.cas_task_create(Parameters(described_task_request(
+                "Richards-LLC/cassy#1216: epic create ignores target_branch",
+                "Children land on an auto lane.",
+            )))
+            .await
+            .expect("create titled task"),
+        );
+        assert_eq!(
+            find("Richards-LLC/cassy#1216: epic create ignores target_branch")
+                .external_ref
+                .as_deref(),
+            Some("https://github.com/Richards-LLC/cassy/issues/1216")
+        );
+        assert!(response.contains("external_ref set to https://github.com/Richards-LLC/cassy/issues/1216"), "{response}");
+
+        let response = text(
+            core.cas_task_create(Parameters(described_task_request(
+                "Render scheduler caps output frames",
+                "Fixes Richards-LLC/cassy#1210.",
+            )))
+            .await
+            .expect("create prose task"),
+        );
+        assert_eq!(find("Render scheduler caps output frames").external_ref, None);
+        assert!(
+            response.contains("cites Richards-LLC/cassy#1210 but has no external_ref"),
+            "{response}"
+        );
+
+        let mut explicit = described_task_request(
+            "Richards-LLC/cassy#1171: explicit ref wins",
+            "",
+        );
+        explicit.external_ref = Some("https://example.test/ticket/7".into());
+        let response = text(core.cas_task_create(Parameters(explicit)).await.expect("create"));
+        assert_eq!(
+            find("Richards-LLC/cassy#1171: explicit ref wins").external_ref.as_deref(),
+            Some("https://example.test/ticket/7")
+        );
+        assert!(!response.contains("🔗"), "{response}");
     }
 
     #[tokio::test]

@@ -100,72 +100,88 @@ fn age_delivered(daemon: &FactoryDaemon, queue: &dyn cas_store::PromptQueueStore
         .unwrap();
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn cas_f265_idle_supervisor_reminder_wakes_once_even_with_recent_checkpoint() {
-    if !child("cas_f265_idle_supervisor_reminder_wakes_once_even_with_recent_checkpoint") {
-        return;
-    }
+/// CI-event and local time reminders take the same single-turn path.
+async fn idle_supervisor_reminder_wakes_once(ci: bool) {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    // CI-event and local time reminders take the same single-turn path.
-    for ci in [true, false] {
-        let (root, mut daemon) = fixture().await;
-        // The last completed turn can leave fresh registry activity and heartbeats
-        // while the pane is now idle. Reminder wakes must not wait for their expiry.
-        let mut event = cas_types::Event::new(
-            cas_types::EventType::TaskNoteAdded,
-            cas_types::EventEntityType::Task,
-            "cas-epic",
-            "Waiting for CI; last checkpoint",
-        )
-        .with_session("single-sup");
-        event.created_at = chrono::Utc::now() - chrono::Duration::seconds(90);
-        crate::store::open_event_store(daemon.app.cas_dir()).unwrap().record(&event).unwrap();
-        daemon.app.refresh_data().unwrap();
-        let agent = daemon.app.director_data().agents.iter().find(|a| a.id == "single-sup").unwrap();
-        assert!(agent.latest_activity.is_some());
-        assert!(agent.last_heartbeat.is_some_and(|at| (chrono::Utc::now() - at).num_seconds() < 60));
-        let (_, body) = dispatch(&mut daemon, ci, false);
-        daemon.process_prompt_queue().await.unwrap();
-        let typed = typed_once(&root, &daemon, &body).await;
-        daemon.process_prompt_queue().await.unwrap();
-        assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap(), typed, "ci={ci}");
+    let (root, mut daemon) = fixture().await;
+    // The last completed turn can leave fresh registry activity and heartbeats
+    // while the pane is now idle. Reminder wakes must not wait for their expiry.
+    let mut event = cas_types::Event::new(
+        cas_types::EventType::TaskNoteAdded,
+        cas_types::EventEntityType::Task,
+        "cas-epic",
+        "Waiting for CI; last checkpoint",
+    )
+    .with_session("single-sup");
+    event.created_at = chrono::Utc::now() - chrono::Duration::seconds(90);
+    crate::store::open_event_store(daemon.app.cas_dir()).unwrap().record(&event).unwrap();
+    daemon.app.refresh_data().unwrap();
+    let agent = daemon.app.director_data().agents.iter().find(|a| a.id == "single-sup").unwrap();
+    assert!(agent.latest_activity.is_some());
+    assert!(agent.last_heartbeat.is_some_and(|at| (chrono::Utc::now() - at).num_seconds() < 60));
+    let (_, body) = dispatch(&mut daemon, ci, false);
+    daemon.process_prompt_queue().await.unwrap();
+    let typed = typed_once(&root, &daemon, &body).await;
+    daemon.process_prompt_queue().await.unwrap();
+    assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap(), typed, "ci={ci}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_f265_idle_supervisor_ci_reminder_wakes_once_even_with_recent_checkpoint() {
+    if child("cas_f265_idle_supervisor_ci_reminder_wakes_once_even_with_recent_checkpoint") {
+        idle_supervisor_reminder_wakes_once(true).await;
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cas_f265_busy_self_reminder_never_becomes_an_abandoned_relay() {
-    if !child("cas_f265_busy_self_reminder_never_becomes_an_abandoned_relay") {
-        return;
+async fn cas_f265_idle_supervisor_time_reminder_wakes_once_even_with_recent_checkpoint() {
+    if child("cas_f265_idle_supervisor_time_reminder_wakes_once_even_with_recent_checkpoint") {
+        idle_supervisor_reminder_wakes_once(false).await;
     }
+}
+
+/// Also when the reminder's owner is a replaced supervisor (takeover).
+async fn busy_self_reminder_is_never_abandoned(takeover: bool) {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    // Also when the reminder's owner is a replaced supervisor (takeover).
-    for takeover in [false, true] {
-        let (root, mut daemon) = fixture().await;
-        let (id, body) = dispatch(&mut daemon, true, takeover);
-        let name = daemon.app.supervisor_name().to_string();
-        daemon.pane_silent_since.insert(name.clone(), Instant::now());
-        daemon.lifecycle_redelivery_counts.insert(id, LIFECYCLE_MAX_RENUDGE_ATTEMPTS);
-        daemon.process_prompt_queue().await.unwrap();
-        let queue = open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
-        let report = queue.message_delivery_report(id).unwrap().unwrap();
-        assert_ne!(
-            report.stage,
-            cas_store::DeliveryStage::Abandoned,
-            "takeover={takeover}: a self reminder is not a failed inter-agent relay: {report:?}"
-        );
-        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none(), "retain reminder for next turn");
-        assert!(report.confirmed_at.is_none());
-        assert!(teams_messages(&daemon).is_empty());
-        assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
-        assert_eq!(queue.peek_all(20).unwrap().len(), 1, "no abandon/escalation notice");
-        // Advance the existing durable park without sleeping for its two minutes.
-        rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db"))
-            .unwrap()
-            .execute("UPDATE prompt_queue SET next_attempt_at=NULL WHERE id=?", [id])
-            .unwrap();
-        daemon.pane_silent_since.insert(name, Instant::now() - Duration::from_secs(600));
-        daemon.process_prompt_queue().await.unwrap();
-        typed_once(&root, &daemon, &body).await;
+    let (root, mut daemon) = fixture().await;
+    let (id, body) = dispatch(&mut daemon, true, takeover);
+    let name = daemon.app.supervisor_name().to_string();
+    daemon.pane_silent_since.insert(name.clone(), Instant::now());
+    daemon.lifecycle_redelivery_counts.insert(id, LIFECYCLE_MAX_RENUDGE_ATTEMPTS);
+    daemon.process_prompt_queue().await.unwrap();
+    let queue = open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    let report = queue.message_delivery_report(id).unwrap().unwrap();
+    assert_ne!(
+        report.stage,
+        cas_store::DeliveryStage::Abandoned,
+        "takeover={takeover}: a self reminder is not a failed inter-agent relay: {report:?}"
+    );
+    assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none(), "retain reminder for next turn");
+    assert!(report.confirmed_at.is_none());
+    assert!(teams_messages(&daemon).is_empty());
+    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+    assert_eq!(queue.peek_all(20).unwrap().len(), 1, "no abandon/escalation notice");
+    // Advance the existing durable park without sleeping for its two minutes.
+    rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db"))
+        .unwrap()
+        .execute("UPDATE prompt_queue SET next_attempt_at=NULL WHERE id=?", [id])
+        .unwrap();
+    daemon.pane_silent_since.insert(name, Instant::now() - Duration::from_secs(600));
+    daemon.process_prompt_queue().await.unwrap();
+    typed_once(&root, &daemon, &body).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_f265_busy_self_reminder_never_becomes_an_abandoned_relay() {
+    if child("cas_f265_busy_self_reminder_never_becomes_an_abandoned_relay") {
+        busy_self_reminder_is_never_abandoned(false).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_f265_replaced_owner_self_reminder_never_becomes_an_abandoned_relay() {
+    if child("cas_f265_replaced_owner_self_reminder_never_becomes_an_abandoned_relay") {
+        busy_self_reminder_is_never_abandoned(true).await;
     }
 }
 

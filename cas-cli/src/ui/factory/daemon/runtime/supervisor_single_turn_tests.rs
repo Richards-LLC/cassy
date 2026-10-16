@@ -265,30 +265,34 @@ async fn cas_3f90_fyi_and_forged_wake_stay_quiet_and_readable() {
     assert!(rows.iter().any(|row| row.id == forged));
 }
 
+/// A body over the hook budget, or one that fits alone but not with row
+/// framing, takes the Teams relay with the body untruncated.
+async fn over_budget_event_relays_the_whole_body(padding: String, fits_alone: bool) {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_root, mut daemon) = fixture().await;
+    let body = BODY.replace("review the lane.", &format!("review the lane.{padding}"));
+    assert_eq!(cas_store::fits_hook_surface(&body), fits_alone);
+    let id = event(&daemon, &body);
+    daemon.process_prompt_queue().await.unwrap();
+    let inbox = teams_messages(&daemon);
+    assert_eq!(inbox.len(), 1);
+    assert!(inbox[0]["text"].as_str().unwrap().contains(&body), "body must not be truncated");
+    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_some());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn cas_3f90_over_hook_budget_event_relays_the_whole_body() {
-    if !fixture_child("cas_3f90_over_hook_budget_event_relays_the_whole_body") {
-        return;
+    if fixture_child("cas_3f90_over_hook_budget_event_relays_the_whole_body") {
+        over_budget_event_relays_the_whole_body("detail".repeat(cas_store::HOOK_SURFACE_BUDGET_CHARS), false).await;
     }
-    // A body over the hook budget, and one that fits alone but not with row
-    // framing: both take the Teams relay with the body untruncated.
-    let framed = cas_store::HOOK_SURFACE_BUDGET_CHARS - cas_store::HOOK_SURFACE_ROW_OVERHEAD_CHARS - BODY.len();
-    for (case, padding, fits_alone) in [
-        ("oversized", "detail".repeat(cas_store::HOOK_SURFACE_BUDGET_CHARS), false),
-        ("framing over cap", "x".repeat(framed), true),
-    ] {
-        // A fresh home per case: the Teams inbox lives under HOME.
-        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-        let (_root, mut daemon) = fixture().await;
-        let body = BODY.replace("review the lane.", &format!("review the lane.{padding}"));
-        assert_eq!(cas_store::fits_hook_surface(&body), fits_alone, "{case}");
-        let id = event(&daemon, &body);
-        daemon.process_prompt_queue().await.unwrap();
-        let inbox = teams_messages(&daemon);
-        assert_eq!(inbox.len(), 1, "{case}");
-        assert!(inbox[0]["text"].as_str().unwrap().contains(&body), "{case}: body must not be truncated");
-        let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
-        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_some(), "{case}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_3f90_framing_over_cap_event_relays_the_whole_body() {
+    if fixture_child("cas_3f90_framing_over_cap_event_relays_the_whole_body") {
+        let framed = cas_store::HOOK_SURFACE_BUDGET_CHARS - cas_store::HOOK_SURFACE_ROW_OVERHEAD_CHARS - BODY.len();
+        over_budget_event_relays_the_whole_body("x".repeat(framed), true).await;
     }
 }
 

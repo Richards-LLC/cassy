@@ -113,11 +113,8 @@ async fn exhausted_message(body: String, summary: &str, context: &[&str]) {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn cas_af23_exhausted_action_message_keeps_its_task_and_guidance() {
-    if !child("cas_af23_exhausted_action_message_keeps_its_task_and_guidance") {
-        return;
-    }
+/// The task id comes from the summary, the envelope, or nowhere (fails open).
+fn af23_case(index: usize) -> (String, &'static str, &'static [&'static str]) {
     let merge = MergeRequestEnvelope {
         task_id: "cas-af23".into(),
         branch_tip: "delivery-tip".into(),
@@ -129,8 +126,7 @@ async fn cas_af23_exhausted_action_message_keeps_its_task_and_guidance() {
         source_freshness_unavailable: None,
     };
     let recovery = "cas-af23 verification timed out; supervisor recovery required.";
-    // The task id comes from the summary, the envelope, or nowhere (fails open).
-    let cases: [(String, &str, &[&str]); 5] = [
+    let mut cases: [(String, &str, &[&str]); 5] = [
         (
             attach_merge_request_envelope("Merge delivery-tip into epic/v46 for cas-af23; then re-close.", &merge),
             "green delivery awaits review",
@@ -149,9 +145,29 @@ async fn cas_af23_exhausted_action_message_keeps_its_task_and_guidance() {
             &["task unspecified"],
         ),
     ];
-    for (body, summary, context) in cases {
-        exhausted_message(body, summary, context).await;
-    }
+    std::mem::take(&mut cases[index])
+}
+
+// One test per case: each builds a ~5s daemon fixture, so nextest runs them
+// in parallel instead of serially inside one table.
+macro_rules! af23_exhausted {
+    ($($name:ident => $index:expr),* $(,)?) => {$(
+        #[tokio::test(flavor = "current_thread")]
+        async fn $name() {
+            if child(stringify!($name)) {
+                let (body, summary, context) = af23_case($index);
+                exhausted_message(body, summary, context).await;
+            }
+        }
+    )*};
+}
+
+af23_exhausted! {
+    cas_af23_exhausted_merge_request_keeps_its_task_and_guidance => 0,
+    cas_af23_exhausted_status_names_its_task_in_the_summary => 1,
+    cas_af23_exhausted_status_names_its_task_in_the_envelope => 2,
+    cas_af23_exhausted_blocker_keeps_its_task => 3,
+    cas_af23_exhausted_unknown_task_blocker_fails_open => 4,
 }
 
 #[tokio::test]

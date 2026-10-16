@@ -14,7 +14,12 @@ their own. While the run is live, the harness samples:
 * waits on `task-sync-intents.lock` (and its per-task stripes) from
   `/proc/locks`, as in the GH #1165 field evidence;
 * the factory daemon loop: `.cas/factory-daemon/<session>.loop.json` plus the
-  loop thread's kernel wait channel.
+  loop thread's kernel wait channel;
+* with `--synthetic-writers` (factory loop v2 C6, cas-9db0b), worker panes
+  that print at GH #1210's codex rates (38, 63 and 236 writes/s), and a
+  key-to-echo probe that types into the quiet supervisor pane over the
+  daemon's GUI socket and times the echo frame;
+* the host's /proc/loadavg, so a receipt taken on a loaded host says so.
 
 It writes a JSON receipt and a Markdown summary, and asserts the SLOs. The
 exit status is 0 when every SLO holds, 1 when one is violated and 2 when the
@@ -39,8 +44,10 @@ Stdlib only; Linux only (it reads /proc).
 from __future__ import annotations
 
 import argparse
+import collections
 import datetime as dt
 import glob
+import hashlib
 import json
 import os
 import random
@@ -63,6 +70,14 @@ SLO_LOOP_PASS_P99_MS = 100.0  # factory daemon loop pass p99
 HEADLESS_SLEEP_SECS = 0.5  # daemon idle sleep with no clients attached
 CALL_TIMEOUT_SECS = 120.0  # harness-side give-up for one call
 LOCK_WAIT_REPORT_SECS = 0.4  # matches the GH #1165 threshold
+SLO_KEY_TO_ECHO_P99_MS = 50.0  # factory loop v2 §7 key -> echo p99
+ECHO_TIMEOUT_SECS = 5.0  # a probe without an echo by then counts as this slow
+# Factory loop v2 §7 receipt names (spec 2026-10-15-factory-loop-v2.md).
+RECEIPT_CONTROL_PASS = "flv2_control_pass_p99_under_100ms_with_16_agents"
+RECEIPT_KEY_TO_ECHO = "flv2_key_to_echo_p99_under_50ms_under_load"
+# Keys the probe types; none of them appears in a kill-line echo.
+PROBE_KEYS = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+KILL_LINE = 0x15  # ^U, so the quiet pane's line never fills
 
 # Every child process, so an interrupted run leaves nothing behind.
 CHILDREN: list[subprocess.Popen] = []
@@ -190,15 +205,14 @@ def prepare_run(args: argparse.Namespace, run_dir: Path) -> dict:
             probe_file.write_text(text)
             probes[flag] = probe_file
         stub = fake_bin / name
-        stub.write_text(
-            "#!/bin/sh\n"
-            "for arg in \"$@\"; do\n"
-            f"  case \"$arg\" in --help|-h) cat '{probes['--help']}'; exit 0;;\n"
-            f"    --version|-v) cat '{probes['--version']}'; exit 0;; esac\n"
-            "done\n"
-            "exec sleep 100000\n"
-        )
+        stub.write_text(stub_script(probes["--help"], probes["--version"], fake_bin,
+                                    args.synthetic_writers))
         stub.chmod(0o755)
+    if args.synthetic_writers:
+        (fake_bin / "writer-rates").write_text(
+            "".join(f"{rate:g}\n" for rate in args.synthetic_writers))
+        (fake_bin / "writer-slots").mkdir(exist_ok=True)
+        (fake_bin / "synthetic-writer.py").write_text(SYNTHETIC_WRITER)
 
     return {
         "home": home,
@@ -207,6 +221,73 @@ def prepare_run(args: argparse.Namespace, run_dir: Path) -> dict:
         "fake_bin": fake_bin,
         "session": session,
     }
+
+
+# A codex-like status line rewritten in place at a fixed rate (GH #1210).
+# Each write carries its sequence number, so the harness can count the
+# writes that reached it.
+SYNTHETIC_WRITER = r"""
+import os, sys, time
+rates_file, slots, label = sys.argv[1], sys.argv[2], sys.argv[3]
+# Claim the first free rate with an exclusive create, and log the claim
+# (or its absence) so a receipt can show which process wrote at which rate.
+rate = None
+for index, line in enumerate(open(rates_file).read().split()):
+    try:
+        os.close(os.open(os.path.join(slots, str(index)), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        continue
+    rate = float(line)
+    break
+with open(os.path.join(slots, "claims.log"), "a") as log:
+    log.write("%d %d %s %s %s\n" % (os.getpid(), os.getppid(), label, rate, os.ttyname(0)))
+if rate is None:
+    while True:
+        time.sleep(3600)
+interval, out = 1.0 / rate, sys.stdout.buffer
+spinner = "|/-\\"
+n, due = 0, time.monotonic()
+while True:
+    n += 1
+    out.write(("\r\x1b[2K%s %s write %d (%g/s)" % (spinner[n % 4], label, n, rate)).encode())
+    if n % 200 == 0:
+        out.write(b"\r\n")
+    out.flush()
+    due += interval
+    pause = due - time.monotonic()
+    if pause > 0:
+        time.sleep(pause)
+    elif pause < -1.0:
+        due = time.monotonic()
+"""
+
+
+def stub_script(help_file: Path, version_file: Path, fake_bin: Path,
+                writer_rates: list[float] | None) -> str:
+    """The stub agent CLI the daemon launches.
+
+    It answers the daemon's `--help` and `--version` probes. A worker pane
+    (a terminal on stdin and `CAS_AGENT_ROLE=worker`) claims the next free
+    synthetic writer rate, when the run has any, and prints at that rate.
+    Every other pane, the supervisor's included, sleeps: its terminal still
+    echoes typed keys, which the key-to-echo probe times.
+    """
+    lines = [
+        "#!/bin/sh",
+        "for arg in \"$@\"; do",
+        f"  case \"$arg\" in --help|-h) cat '{help_file}'; exit 0;;",
+        f"    --version|-v) cat '{version_file}'; exit 0;; esac",
+        "done",
+    ]
+    if writer_rates:
+        lines += [
+            "if [ -t 0 ] && [ \"$CAS_AGENT_ROLE\" = worker ]; then",
+            f"  exec python3 -I '{fake_bin / 'synthetic-writer.py'}' '{fake_bin / 'writer-rates'}' "
+            f"'{fake_bin / 'writer-slots'}' \"${{CAS_AGENT_NAME:-worker}}\"",
+            "fi",
+        ]
+    lines.append("exec sleep 100000")
+    return "\n".join(lines) + "\n"
 
 
 def set_code_index(config: Path, enabled: bool) -> None:
@@ -412,6 +493,7 @@ class Agent(threading.Thread):
         self.own_task: str | None = None
         self.client: McpClient | None = None
         self.boot_secs: float | None = None
+        self.boot_failures: list[str] = []
         self.error: str | None = None
 
     def record(self, tool, action, started, latency, ok, detail):
@@ -425,6 +507,45 @@ class Agent(threading.Thread):
                 "ok": ok,
                 "detail": "" if ok else detail[:200],
             })
+
+    def boot(self, env: dict, log_dir: Path) -> None:
+        """Start `cas serve` and create the agent's task.
+
+        A serve that exits during boot is restarted, up to `--boot-retries`
+        times, so a receipt keeps its configured agent count. Each failure is
+        recorded in the receipt (`agent_boot_failures`), so a boot bug stays
+        visible instead of silently thinning the load.
+        """
+        attempts = 1 + max(0, self.args.boot_retries)
+        for attempt in range(attempts):
+            try:
+                started = now()
+                self.client = McpClient(self.args.cas_bin, self.env["project"], env,
+                                        log_dir / f"{self.name_}.stderr")
+                self.client.initialize(CALL_TIMEOUT_SECS)
+                self.boot_secs = now() - started
+                ok, text = self.timed_call("task", "create", {
+                    "action": "create",
+                    "title": f"Load harness work item for {self.name_}",
+                    "description": "Synthetic task owned by one load-harness agent.",
+                    "task_type": "chore",
+                    "risk": "none",
+                    "priority": 3,
+                })
+                if self.client.proc.poll() is not None:
+                    raise RuntimeError(f"cas serve exited ({self.client.proc.returncode})")
+                match = re.search(r"\b(cas-[0-9a-f]{4,6})\b", text)
+                if ok and match:
+                    self.own_task = match.group(1)
+                return
+            except (RuntimeError, TimeoutError, OSError) as error:
+                self.boot_failures.append(f"{type(error).__name__}: {error}")
+                if self.client is not None:
+                    self.client.close()
+                    self.client = None
+                if attempt + 1 == attempts:
+                    raise
+                time.sleep(1.0)
 
     def timed_call(self, tool: str, action: str, arguments: dict) -> tuple[bool, str]:
         started = now()
@@ -488,22 +609,7 @@ class Agent(threading.Thread):
         log_dir = Path(self.args.run_dir) / "serve-logs"
         log_dir.mkdir(exist_ok=True)
         try:
-            started = now()
-            self.client = McpClient(self.args.cas_bin, self.env["project"], env,
-                                    log_dir / f"{self.name_}.stderr")
-            self.client.initialize(CALL_TIMEOUT_SECS)
-            self.boot_secs = now() - started
-            ok, text = self.timed_call("task", "create", {
-                "action": "create",
-                "title": f"Load harness work item for {self.name_}",
-                "description": "Synthetic task owned by one load-harness agent.",
-                "task_type": "chore",
-                "risk": "none",
-                "priority": 3,
-            })
-            match = re.search(r"\b(cas-[0-9a-f]{4,6})\b", text)
-            if ok and match:
-                self.own_task = match.group(1)
+            self.boot(env, log_dir)
             workload = [entry for entry in WORKLOAD
                         if f"{entry[1]}.{entry[2]}" not in self.args.exclude]
             weights = [w for w, _, _ in workload]
@@ -672,6 +778,304 @@ class DaemonSampler(threading.Thread):
                 except (OSError, ValueError):
                     pass
             self.stop.wait(self.wchan_interval)
+
+
+def read_loadavg() -> dict | None:
+    """`/proc/loadavg` as numbers, or None when it cannot be read."""
+    try:
+        fields = Path("/proc/loadavg").read_text().split()
+        return {"load1": float(fields[0]), "load5": float(fields[1]),
+                "load15": float(fields[2]), "at": utc_now()}
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+class LoadSampler(threading.Thread):
+    """The host's load average through the run (factory loop v2 C6).
+
+    Receipts are wall-clock measurements on a shared host; the load average
+    taken alongside says how loaded that host was.
+    """
+
+    def __init__(self, stop: threading.Event, interval: float = 5.0):
+        super().__init__(daemon=True, name="load-sampler")
+        self.stop = stop
+        self.interval = interval
+        self.samples: list[dict] = []
+
+    def run(self) -> None:
+        while True:
+            sample = read_loadavg()
+            if sample is not None:
+                self.samples.append(sample)
+            if self.stop.wait(self.interval):
+                break
+        sample = read_loadavg()
+        if sample is not None:
+            self.samples.append(sample)
+
+
+def summarize_load(samples: list[dict]) -> dict:
+    """Start, middle and end load averages plus the 1-minute range."""
+    if not samples:
+        return {"samples": 0}
+    load1 = [s["load1"] for s in samples]
+    return {
+        "samples": len(samples),
+        "cpus": os.cpu_count(),
+        "start": samples[0],
+        "middle": samples[len(samples) // 2],
+        "end": samples[-1],
+        "load1_min": min(load1),
+        "load1_max": max(load1),
+        "load1_mean": round(statistics.fmean(load1), 2),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Key-to-echo probe (factory loop v2 C6)
+# ---------------------------------------------------------------------------
+
+
+def encode_frame(message) -> bytes:
+    """The daemon's GUI framing: a 4-byte big-endian length, then JSON."""
+    body = json.dumps(message).encode()
+    return len(body).to_bytes(4, "big") + body
+
+
+class FrameDecoder:
+    """Splits the daemon's length-prefixed JSON frames out of a byte stream."""
+
+    def __init__(self) -> None:
+        self.buffer = bytearray()
+
+    def feed(self, data: bytes) -> list:
+        self.buffer.extend(data)
+        messages = []
+        while len(self.buffer) >= 4:
+            length = int.from_bytes(self.buffer[:4], "big")
+            if len(self.buffer) < 4 + length:
+                break
+            body = bytes(self.buffer[4:4 + length])
+            del self.buffer[:4 + length]
+            try:
+                messages.append(json.loads(body))
+            except ValueError:
+                continue
+        return messages
+
+
+def pane_output(message) -> tuple[str, bytes] | None:
+    """`(pane_id, data)` of an `Output` frame, else None."""
+    if not isinstance(message, dict) or "Output" not in message:
+        return None
+    output = message["Output"]
+    try:
+        return output["pane_id"], bytes(output["data"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def supervisor_pane(welcome) -> str | None:
+    """The supervisor pane's id from the daemon's `Welcome` frame."""
+    try:
+        panes = welcome["Welcome"]["state"]["panes"]
+    except (KeyError, TypeError):
+        return None
+    for pane in panes:
+        if pane.get("kind") == "Supervisor":
+            return pane.get("id")
+    return None
+
+
+# `<label> write <n> (<rate>/s)`, as the synthetic writer prints it.
+WRITE_SEQ = re.compile(rb"(\S+) write (\d+) \(([\d.]+)/s\)")
+
+
+class EchoProbe(threading.Thread):
+    """Types one key at a time into the quiet supervisor pane and times its echo.
+
+    The probe is a GUI client of the daemon, as Commander and the desktop app
+    are. A key goes out as an `Input` frame; its latency is the time until an
+    `Output` frame for the same pane carries it back (the pane's terminal
+    echo). After each echo a ^U clears the line. The same connection receives
+    the synthetic writers' output, so their delivered write rates are
+    counted from the sequence numbers they print.
+    """
+
+    def __init__(self, socket_path: Path, stop: threading.Event, interval: float,
+                 timeout: float = ECHO_TIMEOUT_SECS):
+        super().__init__(daemon=True, name="echo-probe")
+        self.socket_path = socket_path
+        self.stop = stop
+        self.interval = interval
+        self.timeout = timeout
+        self.pane: str | None = None
+        self.latencies_ms: list[float] = []
+        self.timeouts = 0
+        self.error: str | None = None
+        self.writers: dict[str, dict] = {}
+        self.measuring = threading.Event()
+        self._cond = threading.Condition()
+        self._echoed: set[int] = set()
+        self._sock = None
+
+    def _reader(self) -> None:
+        decoder = FrameDecoder()
+        while True:
+            try:
+                data = self._sock.recv(65536)
+            except OSError:
+                break
+            if not data:
+                break
+            arrived = now()
+            for message in decoder.feed(data):
+                if self.pane is None and isinstance(message, dict) and "Welcome" in message:
+                    with self._cond:
+                        self.pane = supervisor_pane(message) or ""
+                        self._cond.notify_all()
+                    continue
+                output = pane_output(message)
+                if output is None:
+                    continue
+                pane_id, payload = output
+                if pane_id == self.pane:
+                    with self._cond:
+                        self._echoed.update(payload)
+                        self._cond.notify_all()
+                    continue
+                if not self.measuring.is_set():
+                    continue
+                # Keyed by the writer's own label, not the pane id: a pane
+                # that is renamed or mirrored must not count a writer twice.
+                for label, seq, rate in WRITE_SEQ.findall(payload):
+                    key = label.decode(errors="replace")
+                    entry = self.writers.setdefault(
+                        key, {"first_at": arrived, "first_seq": int(seq), "frames": 0,
+                              "rate": float(rate), "panes": set()})
+                    entry["last_at"] = arrived
+                    entry["last_seq"] = int(seq)
+                    entry["frames"] += 1
+                    entry["panes"].add(pane_id)
+
+    def _connect(self) -> None:
+        import socket as socket_module
+
+        deadline = now() + 60
+        while True:
+            sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+            try:
+                sock.connect(str(self.socket_path))
+                self._sock = sock
+                return
+            except OSError as error:
+                sock.close()
+                if now() > deadline or self.stop.is_set():
+                    raise RuntimeError(f"GUI socket {self.socket_path}: {error}") from error
+                time.sleep(0.5)
+
+    def _send_key(self, key: int) -> bool:
+        try:
+            self._sock.sendall(encode_frame({"Input": {"pane_id": self.pane, "data": [key]}}))
+            return True
+        except OSError as error:
+            self.error = f"send: {error}"
+            return False
+
+    def run(self) -> None:
+        try:
+            self._connect()
+        except RuntimeError as error:
+            self.error = str(error)
+            return
+        threading.Thread(target=self._reader, daemon=True, name="echo-reader").start()
+        with self._cond:
+            self._cond.wait_for(lambda: self.pane is not None, timeout=30)
+        if not self.pane:
+            self.error = "no supervisor pane in the daemon's Welcome"
+            return
+        index = 0
+        while not self.stop.is_set():
+            key = PROBE_KEYS[index % len(PROBE_KEYS)]
+            index += 1
+            with self._cond:
+                self._echoed.discard(key)
+            sent = now()
+            if not self._send_key(key):
+                return
+            with self._cond:
+                echoed = self._cond.wait_for(lambda: key in self._echoed, timeout=self.timeout)
+            latency_ms = (now() - sent) * 1000
+            if self.measuring.is_set():
+                if echoed:
+                    self.latencies_ms.append(latency_ms)
+                else:
+                    self.timeouts += 1
+                    self.latencies_ms.append(self.timeout * 1000)
+            if not self._send_key(KILL_LINE):
+                return
+            self.stop.wait(self.interval)
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+
+def summarize_echo(probe: EchoProbe | None) -> dict:
+    if probe is None:
+        return {"enabled": False}
+    lat = probe.latencies_ms
+    return {
+        "enabled": True,
+        "pane": probe.pane,
+        "error": probe.error,
+        "probes": len(lat),
+        "timeouts": probe.timeouts,
+        "timeout_ms": probe.timeout * 1000,
+        "p50_ms": round(percentile(lat, 50), 2) if lat else None,
+        "p99_ms": round(percentile(lat, 99), 2) if lat else None,
+        "max_ms": round(max(lat), 2) if lat else None,
+        "over_50ms": sum(1 for ms in lat if ms >= SLO_KEY_TO_ECHO_P99_MS),
+    }
+
+
+def read_writer_claims(slots: Path) -> list[dict]:
+    """Which process claimed which writer rate (from the writers' own log)."""
+    claims = []
+    try:
+        lines = (slots / "claims.log").read_text().splitlines()
+    except OSError:
+        return claims
+    for line in lines:
+        fields = line.split()
+        if len(fields) == 5:
+            claims.append({"pid": int(fields[0]), "ppid": int(fields[1]), "label": fields[2],
+                           "rate": None if fields[3] == "None" else float(fields[3]),
+                           "tty": fields[4]})
+    return claims
+
+
+def summarize_writers(probe: EchoProbe | None, rates: list[float] | None) -> dict:
+    """Configured writer rates against the write rates that reached a client."""
+    observed = []
+    if probe is not None:
+        for label, entry in sorted(probe.writers.items()):
+            span = entry.get("last_at", entry["first_at"]) - entry["first_at"]
+            writes = entry.get("last_seq", entry["first_seq"]) - entry["first_seq"]
+            observed.append({
+                "pane": label,
+                "panes": sorted(entry["panes"]),
+                "configured_writes_per_sec": entry["rate"],
+                "frames": entry["frames"],
+                "writes_per_sec": round(writes / span, 1) if span > 0 else None,
+            })
+    # A multiset: two writers configured at one rate need two writers seen.
+    missing = sorted((collections.Counter(rates or [])
+                      - collections.Counter(row["configured_writes_per_sec"] for row in observed)
+                      ).elements())
+    return {"configured_writes_per_sec": list(rates or []), "observed": observed,
+            "missing_writes_per_sec": missing, "complete": not missing}
 
 
 def parse_ts(value: str) -> dt.datetime:
@@ -887,7 +1291,8 @@ def start_daemon(args, env, log_path: Path) -> subprocess.Popen:
     log = open(log_path, "ab")
     proc = subprocess.Popen(
         [args.cas_bin, "factory", "daemon", "--session", env["session"], "--cwd",
-         str(env["project"]), "--workers", "0", "--no-worktrees", "--no-phone-home",
+         str(env["project"]), "--workers", str(len(args.synthetic_writers or [])),
+         "--no-worktrees", "--no-phone-home",
          "--foreground", "--supervisor-name", "load-supervisor"],
         cwd=env["project"],
         env=daemon_env,
@@ -934,7 +1339,8 @@ def summarize_calls(results: list[dict]) -> dict:
     return out
 
 
-def evaluate_slos(calls: list[dict], daemon: dict, lock_episodes: list[dict]) -> list[dict]:
+def evaluate_slos(calls: list[dict], daemon: dict, lock_episodes: list[dict],
+                  echo: dict | None = None) -> list[dict]:
     # Per-task stripe waits (task-sync-intents.d/NN.lock) are same-task
     # serialization and are reported, not judged; the shared lease is judged.
     global_waits = sum(1 for e in lock_episodes if e["lock"] == "task-sync-intents.lock")
@@ -959,7 +1365,84 @@ def evaluate_slos(calls: list[dict], daemon: dict, lock_episodes: list[dict]) ->
         met = daemon.get("status_samples", 0) > 0 and daemon.get("alive_at_end", False) and within
         slos.append({"slo": "daemon loop pass p99 < 100 ms", "observed": observed, "met": met,
                      "basis": daemon.get("verdict_basis")})
+    if echo and echo.get("enabled"):
+        observed = echo.get("p99_ms")
+        met = (echo.get("error") is None and echo.get("probes", 0) > 0
+               and observed is not None and observed < SLO_KEY_TO_ECHO_P99_MS)
+        slos.append({"slo": "key -> echo p99 < 50 ms", "observed": observed, "met": met,
+                     "basis": f"{echo.get('probes', 0)} probes over the GUI socket; "
+                              f"{echo.get('timeouts', 0)} timeouts counted as "
+                              f"{echo.get('timeout_ms')} ms"})
     return slos
+
+
+def live_agents(receipt: dict) -> int:
+    """Agents that ran the whole phase: an agent that failed is not load."""
+    return receipt["agents"] - len(receipt.get("agent_errors") or {})
+
+
+def file_sha256(path: str) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def flv2_receipts(receipt: dict) -> list[dict]:
+    """Factory loop v2 §7 receipt rows (C6, cas-9db0b).
+
+    Receipts are reference-host measurements, not merge gates. Each row
+    carries the host load average taken during the run, because the
+    factory hosts are shared.
+    """
+    rows = []
+    load = receipt.get("host_load", {})
+    live = live_agents(receipt)
+    context = {
+        "agents": receipt["agents"],
+        "live_agents": live,
+        "agent_boot_failures": sum(len(v) for v in (receipt.get("agent_boot_failures") or {}).values()),
+        "cas_bin": receipt.get("cas_bin"),
+        "cas_bin_sha256": receipt.get("cas_bin_sha256"),
+        "cas_version": receipt.get("cas_version"),
+        "synthetic_writers": receipt.get("synthetic_writers", {}).get(
+            "configured_writes_per_sec", []),
+        "background_writers": receipt["background_writers"]["writers"],
+        "host_load1": {key: load.get(key) for key in ("load1_min", "load1_mean", "load1_max")},
+        "cpus": load.get("cpus"),
+    }
+    daemon = receipt["daemon"]
+    if daemon.get("enabled"):
+        within = daemon.get("pass_p99_under_100ms")
+        rows.append({
+            "receipt": RECEIPT_CONTROL_PASS,
+            "budget": "control pass p99 < 100 ms",
+            "observed_ms": daemon.get("pass_p99_ms"),
+            "passes_over_100ms": daemon.get("reported", {}).get("passes_over_100ms"),
+            "timed_passes": daemon.get("reported", {}).get("timed_passes"),
+            "met": bool(within) and live >= 16,
+            **context,
+        })
+    echo = receipt.get("key_to_echo", {})
+    if echo.get("enabled"):
+        rows.append({
+            "receipt": RECEIPT_KEY_TO_ECHO,
+            "budget": "key -> echo p99 < 50 ms",
+            "observed_ms": echo.get("p99_ms"),
+            "probes": echo.get("probes"),
+            "timeouts": echo.get("timeouts"),
+            "met": (echo.get("error") is None and echo.get("p99_ms") is not None
+                    and echo["p99_ms"] < SLO_KEY_TO_ECHO_P99_MS
+                    and live >= 16 and bool(context["synthetic_writers"])
+                    and receipt.get("synthetic_writers", {}).get("complete", False)),
+            "writers_missing": receipt.get("synthetic_writers", {}).get("missing_writes_per_sec"),
+            **context,
+        })
+    return rows
 
 
 def fmt(value, unit="") -> str:
@@ -1022,6 +1505,7 @@ def write_markdown(receipt: dict, path: Path) -> None:
                          f"{rep['passes_over_100ms']} ({fmt(rep['fraction_over_100ms'])}); "
                          f"worst window p99 {fmt(rep['worst_window_p99_ms'], ' ms')}; "
                          f"max {fmt(rep['max_pass_ms'], ' ms')}")
+    lines += markdown_flv2(receipt)
     control = receipt.get("no_pressure")
     if control:
         all_calls = control["calls"].get("_all", {})
@@ -1037,10 +1521,53 @@ def write_markdown(receipt: dict, path: Path) -> None:
                   f"{control['sqlite_busy']['total']}",
                   f"- Daemon pass p99 {fmt(control['daemon'].get('pass_p99_ms'), ' ms')} "
                   f"({control['daemon'].get('verdict_basis')})"]
+        lines += markdown_flv2(control)
     agents = receipt["agent_errors"]
     if agents:
         lines += ["", "## Agent failures", ""] + [f"- {name}: {err}" for name, err in agents.items()]
     path.write_text("\n".join(lines) + "\n")
+
+
+def markdown_flv2(receipt: dict) -> list[str]:
+    """Host load, synthetic writers, key-to-echo and the §7 receipt rows."""
+    lines = []
+    load = receipt.get("host_load") or {}
+    if load.get("samples"):
+        lines += ["", "### Host load (/proc/loadavg)", "",
+                  f"- {load['samples']} samples on {load.get('cpus')} CPUs; 1-min load "
+                  f"{load['load1_min']}–{load['load1_max']} (mean {load['load1_mean']}); "
+                  f"start {load['start']['load1']}, middle {load['middle']['load1']}, "
+                  f"end {load['end']['load1']}"]
+    writers = receipt.get("synthetic_writers") or {}
+    if writers.get("configured_writes_per_sec"):
+        observed = ", ".join(
+            f"{row['pane']} {fmt(row['writes_per_sec'])}/s ({row['frames']} frames)"
+            for row in writers.get("observed", [])) or "none observed"
+        lines += ["", "### Synthetic PTY writers", "",
+                  f"- Configured {writers['configured_writes_per_sec']} writes/s; "
+                  f"delivered to the GUI client: {observed}"
+                  + ("" if writers.get("complete", True) else
+                     f"; **missing** {writers.get('missing_writes_per_sec')} writes/s")]
+    echo = receipt.get("key_to_echo") or {}
+    if echo.get("enabled"):
+        lines += ["", "### Key -> echo (GUI socket, supervisor pane)", "",
+                  f"- Probes {echo.get('probes')}; timeouts {echo.get('timeouts')}; "
+                  f"p50 {fmt(echo.get('p50_ms'), ' ms')}; p99 {fmt(echo.get('p99_ms'), ' ms')}; "
+                  f"max {fmt(echo.get('max_ms'), ' ms')}; >= 50 ms {echo.get('over_50ms')}"
+                  + (f"; error: {echo['error']}" if echo.get("error") else "")]
+    rows = receipt.get("flv2_receipts") or []
+    if rows:
+        lines += ["", "### Factory loop v2 receipts", "",
+                  f"- Binary `{rows[0].get('cas_bin')}` sha256 `{rows[0].get('cas_bin_sha256')}`", "",
+                  "| Receipt | Budget | Observed | Met | Host load1 (min/mean/max) |",
+                  "|---|---|---|---|---|"]
+        for row in rows:
+            host = row["host_load1"]
+            lines.append(f"| `{row['receipt']}` ({row['live_agents']}/{row['agents']} agents live) "
+                         f"| {row['budget']} | {fmt(row['observed_ms'], ' ms')} "
+                         f"| {'yes' if row['met'] else '**no**'} | {host.get('load1_min')}/"
+                         f"{host.get('load1_mean')}/{host.get('load1_max')} on {row['cpus']} CPUs |")
+    return lines
 
 
 def harness_commit() -> str:
@@ -1085,6 +1612,8 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
     stop = threading.Event()
     lock_sampler = LockSampler(env["cas_dir"], args.lock_interval, stop)
     lock_sampler.start()
+    load_sampler = LoadSampler(stop)
+    load_sampler.start()
 
     daemon_proc = None
     daemon_sampler = None
@@ -1095,6 +1624,12 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
         daemon_sampler.start()
         time.sleep(args.daemon_warmup)
 
+    echo_probe = None
+    if args.daemon and args.echo_probe:
+        echo_probe = EchoProbe(env["home"] / ".cas" / f"factory-{env['session']}.gui.sock", stop,
+                               args.echo_interval)
+        echo_probe.start()
+
     writers = [BackgroundWriter(i, env["cas_dir"] / "cas.db", args.bg_hold_ms, args.bg_gap_ms, stop)
                for i in range(args.bg_writers)]
     for writer in writers:
@@ -1103,6 +1638,8 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
     results: list[dict] = []
     results_lock = threading.Lock()
     args.t0 = now()
+    if echo_probe is not None:
+        echo_probe.measuring.set()
     t0_wall = time.time()
     started_at = utc_now()
     stop_at = args.t0 + args.duration
@@ -1119,6 +1656,9 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
     for writer in writers:
         writer.join(timeout=30)
     lock_sampler.join(timeout=10)
+    load_sampler.join(timeout=10)
+    if echo_probe is not None:
+        echo_probe.join(timeout=ECHO_TIMEOUT_SECS + 5)
     if daemon_sampler is not None:
         daemon_sampler.join(timeout=10)
     stop_process_group(daemon_proc)
@@ -1132,6 +1672,7 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
         "label": args.label,
         "cas_bin": args.cas_bin,
         "cas_version": cas_version(args.cas_bin),
+        "cas_bin_sha256": file_sha256(shutil.which(args.cas_bin) or args.cas_bin),
         "harness_commit": harness_commit(),
         "started_at": started_at,
         "finished_at": utc_now(),
@@ -1159,6 +1700,7 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
         },
         "agent_boot_secs": {a.name_: round(a.boot_secs, 2) if a.boot_secs else None for a in agents},
         "agent_errors": {a.name_: a.error for a in agents if a.error},
+        "agent_boot_failures": {a.name_: a.boot_failures for a in agents if a.boot_failures},
         "calls": calls,
         "lock_waits": {
             "count": len(waits),
@@ -1170,9 +1712,15 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
         },
         "sqlite_busy": count_busy_warnings(env["cas_dir"], t0_wall),
         "daemon": daemon,
+        "host_load": summarize_load(load_sampler.samples),
+        "writer_claims": read_writer_claims(env["fake_bin"] / "writer-slots"),
+        "synthetic_writers": summarize_writers(echo_probe, args.synthetic_writers),
+        "key_to_echo": summarize_echo(echo_probe),
     }
-    receipt["slos"] = evaluate_slos(results, daemon, lock_sampler.episodes)
+    receipt["slos"] = evaluate_slos(results, daemon, lock_sampler.episodes,
+                                    receipt["key_to_echo"])
     receipt["slos_met"] = all(s["met"] for s in receipt["slos"])
+    receipt["flv2_receipts"] = flv2_receipts(receipt)
     if not args.keep_scratch:
         for suffix in ("cas.db", "cas.db-wal", "cas.db-shm"):
             path = env["cas_dir"] / suffix
@@ -1184,7 +1732,9 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
 def control_summary(receipt: dict) -> dict:
     """The no-pressure control phase, kept compact inside the main receipt."""
     keep = ("started_at", "finished_at", "run_dir", "background_writers", "calls", "slos",
-            "slos_met", "sqlite_busy", "agent_errors")
+            "slos_met", "sqlite_busy", "agent_errors", "agent_boot_failures", "host_load",
+            "synthetic_writers", "writer_claims",
+            "key_to_echo", "flv2_receipts", "agents")
     summary = {key: receipt[key] for key in keep}
     summary["lock_waits"] = {k: v for k, v in receipt["lock_waits"].items() if k != "episodes"}
     summary["daemon"] = {k: v for k, v in receipt["daemon"].items() if k != "longest_in_pass"}
@@ -1219,13 +1769,30 @@ def run(args: argparse.Namespace) -> int:
     for slo in receipt["slos"]:
         print(f"[load] {'PASS' if slo['met'] else 'FAIL'} {slo['slo']}: observed {slo['observed']}",
               flush=True)
+    for row in receipt.get("flv2_receipts", []):
+        print(f"[load] receipt {row['receipt']}: observed {row['observed_ms']} ms; "
+              f"{'met' if row['met'] else 'NOT met'}; host load1 {row['host_load1']}", flush=True)
     if "no_pressure" in receipt:
+        for row in receipt["no_pressure"].get("flv2_receipts", []):
+            print(f"[load] control receipt {row['receipt']}: observed {row['observed_ms']} ms; "
+                  f"{'met' if row['met'] else 'NOT met'}", flush=True)
         for slo in receipt["no_pressure"]["slos"]:
             print(f"[load] control {'PASS' if slo['met'] else 'FAIL'} {slo['slo']}: "
                   f"observed {slo['observed']}", flush=True)
     if not results:
         return 2
     return 0 if receipt["slos_met"] else 1
+
+
+def parse_rates(text: str) -> list[float]:
+    """`38,63,236` -> [38.0, 63.0, 236.0]; every rate must be positive."""
+    try:
+        rates = [float(part) for part in text.split(",") if part.strip()]
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"not a rate list: {text}") from error
+    if not rates or any(rate <= 0 for rate in rates):
+        raise argparse.ArgumentTypeError(f"rates must be positive: {text}")
+    return rates
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1271,6 +1838,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--control", action=argparse.BooleanOptionalAction, default=True,
                         help="after a run with background pressure, record a no-pressure "
                              "control phase in the same receipt")
+    parser.add_argument("--synthetic-writers", type=parse_rates, default=None, metavar="RATES",
+                        help="comma-separated writes/s, one worker pane per rate (factory loop "
+                             "v2 C6; GH #1210's codex rates are 38,63,236)")
+    parser.add_argument("--echo-probe", action=argparse.BooleanOptionalAction, default=True,
+                        help="time key -> echo on the supervisor pane over the GUI socket")
+    parser.add_argument("--echo-interval", type=float, default=0.1,
+                        help="seconds between key-to-echo probes")
+    parser.add_argument("--boot-retries", type=int, default=2,
+                        help="restart an agent whose cas serve exits during boot this many "
+                             "times; failures are recorded in the receipt")
     parser.add_argument("--keep-scratch", action="store_true",
                         help="keep the scratch database copy after the run")
     args = parser.parse_args(argv)

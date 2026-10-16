@@ -181,7 +181,16 @@ async fn flv2_inject_path_claims_in_two_phases_with_no_lane_violation() {
     ready_claude_worker(&mut daemon).await;
     let id = enqueue_urgent(&cas_dir, "urgent redirect C4A-LANES");
 
-    let lane = lane_guard::enter_lane(Lane::Control);
+    // C6 (cas-9db0b, review M2): the lane is held as `run` holds it for the
+    // inject and queue pass: the loop's report-mode attachment with its
+    // `enforce_here` scope, enforced violations set to panic.
+    let progress = super::loop_watchdog::LoopProgress::new();
+    let lane = super::loop_watchdog::enforced_daemon_step(
+        &progress,
+        super::loop_watchdog::LoopPhase::PromptQueue,
+    );
+    assert_eq!(lane_guard::current_lane(), Some(Lane::Control));
+    assert_eq!(lane_guard::current_mode(), Some(lane_guard::GuardMode::Enforce));
     let before = lane_guard::thread_violations();
     let started = Instant::now();
     let mut pass = 0usize;
@@ -192,6 +201,9 @@ async fn flv2_inject_path_claims_in_two_phases_with_no_lane_violation() {
     while started.elapsed() < Duration::from_secs(8) {
         pass += 1;
         let at = Instant::now();
+        // The pass as `run` drives it inside the enforced scope.
+        daemon.app.mux.flush_deferred_injections().await;
+        daemon.advance_urgent_injects().await;
         daemon.process_prompt_queue().await.unwrap();
         slowest = slowest.max(at.elapsed());
         if claim_pass.is_none() && daemon.queue_jobs.has_claim(id, WORKER) {
@@ -355,7 +367,7 @@ fn provenance_is_written_off_the_lane_before_the_submit() {
     use cas_store::lane_guard::{self, Lane};
     let root = tempfile::tempdir().unwrap();
     let payload = {
-        let _lane = lane_guard::enter_lane(Lane::Control);
+        let _lane = super::loop_watchdog::enforce_test_lane(Lane::Control);
         super::delivery::prepare_pty_machine_delivery(
             root.path(),
             "gated-worker",

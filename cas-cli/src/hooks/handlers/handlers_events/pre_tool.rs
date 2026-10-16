@@ -4233,9 +4233,12 @@ fn wrapper_value_options(wrapper: &str) -> &'static [&'static str] {
     match wrapper {
         "timeout" => &["-s", "--signal", "-k", "--kill-after"],
         "nice" => &["-n", "--adjustment"],
+        // cas-b7b2: GNU `--eof`, `--max-lines` and `--replace` take an
+        // optional value that can only be attached (`--replace=X`); as bare
+        // words they are flags, and the next word is the command.
         "xargs" => &[
             "-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a", "--max-args", "--max-procs",
-            "--delimiter", "--arg-file", "--max-lines", "--replace", "--eof",
+            "--delimiter", "--arg-file", "--max-chars", "--process-slot-var",
         ],
         "stdbuf" => &["-i", "-o", "-e", "--input", "--output", "--error"],
         "ionice" => &["-c", "-n", "-p", "-P", "-u", "--class", "--classdata"],
@@ -4334,13 +4337,26 @@ fn runs_substitution(words: &[String]) -> bool {
 /// non-read-only statement).
 fn read_only_statement(words: &[String]) -> bool {
     let Some(index) = unwrapped_command_index(words) else {
-        return true;
+        // cas-b7b2: a statement of bare assignments changes the environment
+        // later statements run with (PATH, or anything under `set -a`).
+        return !words.iter().any(|word| {
+            word.split_once('=')
+                .is_some_and(|(name, _)| is_shell_variable_name(name))
+        });
     };
     let args = &words[index + 1..];
     match shell_word_basename(&words[index]) {
         "grep" | "egrep" | "fgrep" | "rg" | "ag" | "ack" | "cat" | "less" | "more" | "head"
         | "tail" | "wc" | "sort" | "uniq" | "cut" | "ls" | "echo" | "printf" | "cd" | "pwd"
-        | "true" | "false" | "test" | "[" | "set" => true,
+        | "true" | "false" | "test" | "[" => true,
+        // cas-b7b2: `set` is read-only unless it turns on allexport, which
+        // exports every later assignment.
+        "set" => !args.iter().any(|arg| {
+            arg == "allexport"
+                || ((arg.starts_with('-') || arg.starts_with('+'))
+                    && !arg.starts_with("--")
+                    && arg[1..].contains('a'))
+        }),
         "git" => args
             .iter()
             .find(|arg| !arg.starts_with('-'))
@@ -4358,28 +4374,47 @@ fn read_only_statement(words: &[String]) -> bool {
         // configured pager, browser or alias can run a command from what
         // looks like `gh <noun> view`, and that cannot be proved from the
         // statement text.
-        "awk" | "gawk" | "mawk" | "nawk" => {
-            plain_command_prefix(&words[..index]) && read_only_awk(args)
-        }
-        "find" => plain_command_prefix(&words[..index]) && read_only_find(args),
-        "jq" => plain_command_prefix(&words[..index]),
+        // Security round 2: only as a direct invocation. Under xargs the
+        // hook cannot see the arguments stdin supplies (a find expression,
+        // or the awk program in replace mode).
+        "awk" | "gawk" | "mawk" | "nawk" => index == 0 && read_only_awk(args),
+        "find" => index == 0 && read_only_find(args),
+        "jq" => index == 0 && read_only_jq(args),
         _ => false,
     }
 }
 
-/// cas-b7b2: the words before an allowlisted command carry no environment
-/// assignment and no wrapper that sets or clears environment or changes
-/// user. Only the plain `xargs` that pipelines use is accepted; anything
-/// else fails closed.
-fn plain_command_prefix(prefix: &[String]) -> bool {
-    let Some((first, rest)) = prefix.split_first() else {
-        return true;
-    };
-    shell_word_basename(first) == "xargs"
-        && rest.iter().all(|word| {
-            !word.contains('=')
-                && !matches!(shell_word_basename(word), "env" | "sudo" | "doas" | "su" | "runuser")
-        })
+/// cas-b7b2: a jq run with only known flags (security round 2, L1). Module
+/// search paths, program and data files, and positional-argument modes fail
+/// closed. jq has no way to run a command or write a file itself.
+fn read_only_jq(args: &[String]) -> bool {
+    const FLAGS: &[&str] = &[
+        "-r", "-j", "-c", "-n", "-s", "-e", "-S", "-C", "-M", "-a", "-R", "--raw-output",
+        "--join-output", "--compact-output", "--null-input", "--slurp", "--exit-status",
+        "--sort-keys", "--color-output", "--monochrome-output", "--ascii-output",
+        "--raw-input", "--tab", "--stream", "--seq",
+    ];
+    let mut index = 0;
+    while let Some(word) = args.get(index) {
+        let word = word.as_str();
+        index += match word {
+            "--indent" => 2,
+            "--arg" | "--argjson" => 3,
+            "--" => break,
+            _ if FLAGS.contains(&word) => 1,
+            // Combined short flags such as `-rc`.
+            _ if word.len() > 2
+                && word.starts_with('-')
+                && !word.starts_with("--")
+                && word[1..].chars().all(|flag| "rjcnseSCMaR".contains(flag)) =>
+            {
+                1
+            }
+            _ if word.starts_with('-') => return false,
+            _ => 1,
+        };
+    }
+    true
 }
 
 /// cas-b7b2: an awk run that only reads and prints, by a POSITIVE

@@ -152,9 +152,50 @@ pub(crate) fn add_interruption_note(task: &mut crate::types::Task, agent_id: &st
 /// Note: Agents are registered with their session_id, so we use session_id
 /// as the agent_id for lookup and cleanup.
 /// PID → session mapping is handled by the daemon via socket events.
+/// The reasonless form, for callers with no harness SessionEnd payload.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn cleanup_agent_leases(
     cas_root: &std::path::Path,
     session_id: &str,
+) -> Option<Vec<String>> {
+    cleanup_agent_leases_for_end(cas_root, session_id, None)
+}
+
+/// Whether a harness SessionEnd only replaced the conversation: Claude Code
+/// reports `reason: "clear"` for `/clear`, after which the same process
+/// starts a new session and keeps running (cas-e9fc).
+fn conversation_reset(end_reason: Option<&str>) -> bool {
+    end_reason.is_some_and(|reason| reason.trim().eq_ignore_ascii_case("clear"))
+}
+
+/// Whether the row was pointed at a newer harness session after `ended`
+/// was read: a SessionStart or clear_context rebind won the race.
+fn rebound_since(
+    agent_store: &dyn crate::store::AgentStore,
+    agent_id: &str,
+    ended: &str,
+) -> bool {
+    agent_store.get(agent_id).ok().is_some_and(|current| {
+        current
+            .cc_session_id
+            .as_deref()
+            .is_some_and(|session| session != ended)
+    })
+}
+
+/// [`cleanup_agent_leases`] with the harness's SessionEnd reason.
+///
+/// cas-e9fc: `/clear` ends a Claude worker's conversation but not its process.
+/// Claude emits the old SessionEnd and the new SessionStart together, usually
+/// before clear_context has recorded the new session on the row; tearing the
+/// worker down here released its task lease and deleted the row the new
+/// SessionStart had just rebound, leaving a running, unregistered worker. A
+/// worker's `/clear` SessionEnd therefore keeps its identity, leases and
+/// worktree; the next SessionStart rebinds the row by its live PID and name.
+pub(crate) fn cleanup_agent_leases_for_end(
+    cas_root: &std::path::Path,
+    session_id: &str,
+    end_reason: Option<&str>,
 ) -> Option<Vec<String>> {
     let agent_store = open_agent_store(cas_root).ok()?;
 
@@ -184,6 +225,15 @@ pub(crate) fn cleanup_agent_leases(
         );
         return Some(Vec::new());
     }
+    if conversation_reset(end_reason) && agent.role == crate::types::AgentRole::Worker {
+        tracing::info!(
+            ended_session = %session_id,
+            agent_id = %agent.id,
+            agent_name = %agent.name,
+            "Preserving worker across /clear: its process keeps running and the next SessionStart rebinds this row"
+        );
+        return Some(Vec::new());
+    }
 
     if let Err(error) = crate::supervisor_notices::orphan_epics(cas_root, &agent) {
         tracing::error!(agent_id = %agent.id, %error, "SessionEnd epic orphan notice failed; preserving identity for recovery");
@@ -204,6 +254,14 @@ pub(crate) fn cleanup_agent_leases(
         return None;
     }
 
+    // A harness that reports no reason can still race a rebind: re-read the
+    // row before releasing anything, and leave a rebound worker alone.
+    if rebound_since(agent_store.as_ref(), &agent.id, session_id) {
+        tracing::info!(ended_session = %session_id, agent_id = %agent.id,
+            "Preserving agent rebound during SessionEnd; the queued cloud shutdown is superseded");
+        return Some(Vec::new());
+    }
+
     // Gracefully shutdown the agent and get list of released task IDs
     let interrupted_task_ids = agent_store
         .list_agent_leases(&agent.id)
@@ -221,7 +279,13 @@ pub(crate) fn cleanup_agent_leases(
     // Clear working epics for this agent (session is ending)
     let _ = agent_store.clear_working_epics(&agent.id);
 
-    // Unregister the agent (delete from database)
+    // Unregister the agent (delete from database), unless a rebind landed
+    // while its leases were being released.
+    if rebound_since(agent_store.as_ref(), &agent.id, session_id) {
+        tracing::warn!(ended_session = %session_id, agent_id = %agent.id,
+            "Agent rebound during SessionEnd after its leases were released; keeping the row");
+        return Some(released_task_ids);
+    }
     let unregister = agent_store.unregister(&agent.id);
     if let Err(error) = &unregister {
         tracing::error!(agent_id = %agent.id, %error,

@@ -77,9 +77,14 @@ pub fn execute(args: &LimitsArgs, cli: &Cli) -> anyhow::Result<()> {
 fn collect_limits() -> LimitsReport {
     let home = dirs::home_dir().unwrap_or_default();
     let mut accounts = Vec::new();
-    accounts.push(collect_claude("claude-main", &home.join(".claude")));
-    accounts.push(collect_claude("claude-alt", &home.join(".claude-alt")));
-    accounts.push(collect_codex(&home.join(".codex")));
+    // cas-e1f4: every account directory, named ones included, not just the
+    // default and alt.
+    for (provider, label, dir) in account_dirs(&home) {
+        accounts.push(match provider {
+            crate::accounts::Provider::Claude => collect_claude(&label, &dir),
+            crate::accounts::Provider::Codex => collect_codex(&label, &dir),
+        });
+    }
     accounts.push(collect_exa());
     LimitsReport { accounts }
 }
@@ -147,12 +152,12 @@ fn collect_claude(account: &str, config_dir: &Path) -> AccountLimit {
     }
 }
 
-fn collect_codex(root: &Path) -> AccountLimit {
+fn collect_codex(account: &str, root: &Path) -> AccountLimit {
     let Some((plan, windows)) = latest_codex_limits(root) else {
-        return unavailable("codex", "codex", "absent", "no rollout rate_limits found");
+        return unavailable(account, "codex", "absent", "no rollout rate_limits found");
     };
     AccountLimit {
-        account: "codex".to_string(),
+        account: account.to_string(),
         provider: "codex".to_string(),
         plan,
         state: "active".to_string(),
@@ -160,6 +165,88 @@ fn collect_codex(root: &Path) -> AccountLimit {
         windows,
         detail: None,
     }
+}
+
+/// Every Claude and Codex account directory with its report label:
+/// `claude-main`, `claude-alt` and `codex` for the defaults, else
+/// `<provider>-<name>`.
+fn account_dirs(home: &Path) -> Vec<(crate::accounts::Provider, String, std::path::PathBuf)> {
+    let mut found = Vec::new();
+    for provider in crate::accounts::Provider::ALL {
+        for account in crate::accounts::discover(provider, home).unwrap_or_default() {
+            let label = match account.label.as_str() {
+                ".claude" => "claude-main".to_string(),
+                ".claude-alt" => "claude-alt".to_string(),
+                ".codex" => "codex".to_string(),
+                other => format!("{}-{}", provider.name(), other.trim_start_matches(provider.prefix())),
+            };
+            found.push((provider, label, account.path));
+        }
+    }
+    found
+}
+
+/// One line of live usage for an account picker (cas-e1f4): `limit hit,
+/// resets <time>` when a window is used up, else the busiest windows.
+pub(crate) fn usage_summary(provider: crate::accounts::Provider, dir: &Path) -> Option<String> {
+    let limit = match provider {
+        crate::accounts::Provider::Claude => collect_claude("account", dir),
+        crate::accounts::Provider::Codex => collect_codex("account", dir),
+    };
+    summarize(&limit)
+}
+
+fn summarize(limit: &AccountLimit) -> Option<String> {
+    let windows: Vec<&LimitWindow> = limit
+        .windows
+        .iter()
+        .filter(|window| window.used_percent.is_some() && window.name != "extra usage")
+        .collect();
+    if let Some(full) = windows
+        .iter()
+        .filter(|window| window.used_percent.is_some_and(|used| used >= 100.0))
+        .max_by(|a, b| a.reset_at.cmp(&b.reset_at))
+    {
+        return Some(match &full.reset_at {
+            Some(reset) => format!("{} limit hit, resets {reset}", full.name),
+            None => format!("{} limit hit", full.name),
+        });
+    }
+    let parts: Vec<String> = windows
+        .iter()
+        .map(|window| format!("{} {:.0}%", window.name, window.used_percent.unwrap_or(0.0)))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// [`usage_summary`] for several accounts at once, each on its own thread;
+/// whatever has not answered by `deadline` is left out.
+pub(crate) fn usage_summaries(
+    provider: crate::accounts::Provider,
+    accounts: Vec<(String, std::path::PathBuf)>,
+    deadline: std::time::Duration,
+) -> std::collections::HashMap<String, String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    for (name, dir) in accounts {
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            if let Some(summary) = usage_summary(provider, &dir) {
+                let _ = sender.send((name, summary));
+            }
+        });
+    }
+    drop(sender);
+    let until = std::time::Instant::now() + deadline;
+    let mut summaries = std::collections::HashMap::new();
+    while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+        match receiver.recv_timeout(left) {
+            Ok((name, summary)) => {
+                summaries.insert(name, summary);
+            }
+            Err(_) => break,
+        }
+    }
+    summaries
 }
 
 fn collect_exa() -> AccountLimit {
@@ -458,6 +545,41 @@ mod tests {
             vec!["5h", "weekly opus", "extra usage"]
         );
         assert_eq!(windows[2].spend_dollars, Some(12.5));
+    }
+
+    #[test]
+    fn cas_e1f4_picker_summary_marks_a_used_up_window_with_its_reset() {
+        let window = |name: &str, used: f64, reset: Option<&str>| LimitWindow {
+            name: name.into(),
+            used_percent: Some(used),
+            reset_at: reset.map(str::to_string),
+            spend_dollars: None,
+        };
+        let limit = |windows| AccountLimit {
+            account: "a".into(),
+            provider: "claude".into(),
+            plan: None,
+            state: "active".into(),
+            source: "live".into(),
+            windows,
+            detail: None,
+        };
+        // pin: the picker's usage wording.
+        assert_eq!(
+            summarize(&limit(vec![
+                window("5h", 100.0, Some("2026-10-16 15:00 EDT")),
+                window("weekly", 40.0, None)
+            ]))
+            .as_deref(),
+            Some("5h limit hit, resets 2026-10-16 15:00 EDT")
+        );
+        // pin: the busiest windows when nothing is used up.
+        assert_eq!(
+            summarize(&limit(vec![window("5h", 42.4, None), window("weekly", 82.0, None)]))
+                .as_deref(),
+            Some("5h 42%, weekly 82%")
+        );
+        assert_eq!(summarize(&limit(Vec::new())), None);
     }
 
     #[test]

@@ -323,7 +323,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - The "Write to a supervisor" button opens a thread straight away.
 - Attention and machine problems live in the desktop rail and are hidden on a phone.
-- The supervisor pane's host beside the thread is hidden, inert and out of the accessibility tree: it never widens the conversation or takes a hit, and Raw output opens over it as a bottom sheet whose Close returns focus to Raw output, in light and dark (cas-ff3d, cas-0546).
+- The thread is the only thing in its stage: no pane host, terminal or canvas sits beside it, nothing widens the conversation or takes its hit, and Raw output opens over it as a bottom sheet whose Close returns focus to Raw output, in light and dark (cas-ff3d, cas-0546, cas-f285).
 
 ### HUB-J10 · Switch to dark and keep reading
 
@@ -573,16 +573,16 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` at 1280 with two paired machines, a live cas-src conversation open, on a device whose pairing may force a take (hub-admin); parts at 390 light, 390 dark and 1280 dark, the light phone without hub-admin
 - **Goal:** I stop what the supervisor is doing, or read what its terminal shows, without leaving the conversation, from the keyboard alone
-- **Touches:** `hub-web/src/conversation-shell.ts`, `hub-web/src/transcript-view.ts`, `hub-web/src/connection-state-view.ts`, `hub-web/src/connection.ts`, `hub-web/src/early-thread.ts`
+- **Touches:** `hub-web/src/conversation-shell.ts`, `hub-web/src/transcript-view.ts`, `hub-web/src/raw-output.ts`, `hub-web/src/connection-state-view.ts`, `hub-web/src/connection.ts`, `hub-web/src/early-thread.ts`
 - **Suite:** `hub-web/e2e/journeys/interrupt-raw-output.journey.ts`: one main test and three part tests marked `journeyPart` (390 light, 390 dark, 1280 dark), receipts under `journeys/HUB-J18/parts/<part>/`
 - **Gaps:** the hub double records the InterruptPane frame and models another device's lease (refused unless forced by hub-admin, as hub/auth.rs does); that the supervisor's pane really stops is proven by the hub's Rust tests
 
 #### Steps
 
-1. Open a conversation; only the thread shows — the header carries Raw output and "Interrupt the cas-src supervisor" (visible "Interrupt"), both available; the supervisor's pane surface is attached beside the thread but hidden, inert and out of the accessibility tree; no control, palette command or text names a terminal view
-2. Interrupt the supervisor from the keyboard — Tab from the list search reaches Interrupt without stopping in the hidden pane; Enter sends one InterruptPane for the supervisor pane, the toast says "Interrupted the cas-src supervisor.", and focus stays on Interrupt
+1. Open a conversation; only the thread shows — the header carries Raw output and "Interrupt the cas-src supervisor" (visible "Interrupt"), both available; no pane host, terminal or canvas stands beside the thread (cas-f285); no control, palette command or text names a terminal view
+2. Interrupt the supervisor from the keyboard — Tab from the list search reaches Interrupt without stopping in a terminal; Enter sends one InterruptPane for the supervisor pane, the toast says "Interrupted the cas-src supervisor.", and focus stays on Interrupt
 3. Take control from another device to interrupt — with Studio iPad in control, Interrupt forces the take and says so: "Took control from Studio iPad. Interrupted the cas-src supervisor."
-4. Read the raw output from the keyboard — Enter on Raw output opens the "Raw output" drawer, described as read-only, with the supervisor's text ("The supervisor is ready."); it takes no text and typing in it sends nothing; Escape closes it and returns focus to Raw output
+4. Read the raw output from the keyboard — Enter on Raw output opens the "Raw output" drawer, described as read-only, with the supervisor's text ("The supervisor is ready.") read from the daemon's rendered rows; it takes no text and typing in it sends nothing; Escape closes it and returns focus to Raw output
 
 #### Expected experience
 

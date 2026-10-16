@@ -174,6 +174,10 @@ impl Config {
                     .unwrap_or_else(|| FACTORY_ARTIFACTS_ROOT_DEFAULT.to_string()),
             ),
             (
+                "factory.scratch_root".to_string(),
+                factory.scratch_root.clone().unwrap_or_default(),
+            ),
+            (
                 "factory.message_max_chars".to_string(),
                 factory.message_max_chars.to_string(),
             ),

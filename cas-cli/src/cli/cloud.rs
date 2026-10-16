@@ -2233,7 +2233,7 @@ pub(crate) fn status_pull_watermarks(
     };
     let team = match project_id {
         Some(project_id) => {
-            queue.get_metadata(&format!("last_team_pull_at_{team_id}_{project_id}"))?
+            queue.get_metadata(&pull_watermark_key(Some(team_id), project_id))?
         }
         None => None,
     }
@@ -2245,6 +2245,15 @@ pub(crate) fn status_pull_watermarks(
             format!("{personal} (team-linked: personal scope is not pulled)"),
         ),
     ])
+}
+
+/// The content pull scope used by sync, status and destructive purge safety.
+/// A team-linked project's personal watermark is historical, not a fallback.
+fn pull_watermark_key(team_id: Option<&str>, project_id: &str) -> String {
+    match team_id {
+        Some(team) => format!("last_team_pull_at_{team}_{project_id}"),
+        None => "last_pull_at".to_string(),
+    }
 }
 
 /// [`status_pull_watermarks`] for this checkout's configured scope.
@@ -5632,7 +5641,7 @@ fn execute_team_memories(
 // PURGE-FOREIGN - Remove foreign-project entities and re-pull
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Default age (in days) beyond which `last_pull_at` is considered stale and a
+/// Default age (in days) beyond which the active pull scope is considered stale and a
 /// destructive purge is refused. A purge on a machine that has not pulled
 /// recently re-pulls an out-of-date snapshot over freshly deleted local rows.
 pub const PURGE_STALE_THRESHOLD_DAYS: i64 = 7;
@@ -6234,7 +6243,7 @@ pub enum PurgeRefusal {
         age_days: i64,
         threshold_days: i64,
     },
-    /// `last_pull_at` exists but cannot be parsed — treated as unknown, and
+    /// The active pull timestamp exists but cannot be parsed — treated as unknown, and
     /// unknown is not safe.
     UnreadablePullTimestamp { last_pull_at: String },
     /// Local rows are still queued for push: deleting them loses work the
@@ -6252,7 +6261,7 @@ impl PurgeRefusal {
     pub fn reason(&self) -> String {
         match self {
             PurgeRefusal::NeverPulled => {
-                "no successful cloud pull recorded (last_pull_at is unset) \
+                "no successful cloud pull recorded for the active sync scope \
 — a purge would delete local rows and re-pull from an unverified baseline"
                     .to_string()
             }
@@ -6266,7 +6275,7 @@ threshold is {threshold_days} days — the re-pull would restore an out-of-date 
 everything deleted since"
             ),
             PurgeRefusal::UnreadablePullTimestamp { last_pull_at } => format!(
-                "cannot read last_pull_at ({last_pull_at:?}); sync freshness is unknown and \
+                "cannot read the active pull timestamp ({last_pull_at:?}); sync freshness is unknown and \
 unknown is not safe for a destructive purge"
             ),
             PurgeRefusal::UnpushedRows { pending, sample } => format!(
@@ -6725,6 +6734,8 @@ fn inspect_purge_state(
     allow_majority_foreign: bool,
     include_unknown: bool,
 ) -> anyhow::Result<PurgeInspection> {
+    use rusqlite::OptionalExtension;
+
     let db_path = cas_root.join("cas.db");
     let conn = rusqlite::Connection::open(&db_path)?;
     // Use doctor's cross-DB classifier so a legacy backfill that stamped
@@ -6739,13 +6750,19 @@ fn inspect_purge_state(
         include_unknown,
     )?;
     let proven_rule_count = count_proven_attributed_rules(&conn, &analysis.delete_set)?;
+    // cas-7e38: team-linked sync writes only the team+project watermark.
+    // Never let a frozen (or freshly unrelated) personal pull authorize this
+    // scope. Missing keys remain unknown; config/schema/read failures abort.
+    let cloud = CloudConfig::load_from_cas_dir(cas_root)?;
+    cloud.validate_team_only().map_err(anyhow::Error::msg)?;
+    let key = pull_watermark_key(cloud.active_team_id().as_deref(), project_id);
     let last_pull_at: Option<String> = conn
         .query_row(
-            "SELECT value FROM sync_metadata WHERE key = 'last_pull_at'",
-            [],
+            "SELECT value FROM sync_metadata WHERE key = ?1",
+            [&key],
             |r| r.get(0),
         )
-        .ok();
+        .optional()?;
     let pending = queued_changes_outside_purge(&conn, &analysis.delete_set)?;
     // The concrete delete set already exempts intentional replica cleanup.
     // Every remaining queue row survives the purge; its count is information,
@@ -9798,6 +9815,146 @@ mod purge_foreign_safety_tests {
         )
         .unwrap();
         (env, cas_root, conn)
+    }
+
+    #[test]
+    fn cas_7e38_fresh_active_team_pull_ignores_frozen_personal_watermark() {
+        for team_only in [false, true] {
+            let (_env, root, conn) = purge_queue_fixture();
+            let mut cloud = CloudConfig::default();
+            cloud.set_team("team-1", "fixture");
+            cloud.team_only = team_only;
+            cloud.save_to_cas_dir(&root).unwrap();
+            conn.execute(
+                "UPDATE sync_metadata SET value = '2020-01-01T00:00:00Z'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-1_test-project', ?1)",
+                [chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            let inspection =
+                inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
+            assert!(
+                inspection.refusals.is_empty(),
+                "fresh team scope must be safe (team_only={team_only}): {:?}",
+                inspection.refusals
+            );
+        }
+    }
+
+    #[test]
+    fn cas_7e38_fresh_personal_or_other_scope_cannot_mask_bad_team_freshness() {
+        for (active_value, expected) in [
+            (None, "never_pulled"),
+            (Some("2020-01-01T00:00:00Z"), "stale_pull"),
+            (Some("not-a-timestamp"), "unreadable_pull_timestamp"),
+        ] {
+            let (_env, root, conn) = purge_queue_fixture();
+            let mut cloud = CloudConfig::default();
+            cloud.set_team("team-1", "fixture");
+            cloud.save_to_cas_dir(&root).unwrap();
+            for key in [
+                "last_team_pull_at_team-2_test-project",
+                "last_team_pull_at_team-1_other-project",
+            ] {
+                conn.execute(
+                    "INSERT INTO sync_metadata VALUES (?1, ?2)",
+                    [key, &chrono::Utc::now().to_rfc3339()],
+                )
+                .unwrap();
+            }
+            if let Some(value) = active_value {
+                conn.execute("INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-1_test-project', ?1)", [value]).unwrap();
+            }
+            let inspection =
+                inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
+            assert_eq!(
+                inspection.refusals.len(),
+                1,
+                "active={active_value:?}: {:?}",
+                inspection.refusals
+            );
+            assert_eq!(inspection.refusals[0].code(), expected);
+        }
+    }
+
+    #[test]
+    fn cas_7e38_personal_and_team_opt_out_keep_personal_freshness() {
+        for opted_out in [false, true] {
+            let (_env, root, conn) = purge_queue_fixture();
+            let mut cloud = CloudConfig::default();
+            if opted_out {
+                cloud.set_team("team-1", "fixture");
+                cloud.team_auto_promote = Some(false);
+            }
+            cloud.save_to_cas_dir(&root).unwrap();
+            conn.execute(
+                "UPDATE sync_metadata SET value = '2020-01-01T00:00:00Z'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-1_test-project', ?1)",
+                [chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            let inspection =
+                inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
+            assert_eq!(inspection.refusals[0].code(), "stale_pull");
+        }
+    }
+
+    #[test]
+    fn cas_7e38_opted_in_user_default_team_is_the_active_scope() {
+        let (env, root, conn) = purge_queue_fixture();
+        let mut user = CloudConfig::default();
+        user.default_team_id = Some("team-default".into());
+        user.save_to_cas_dir(&env.home().join(".cas")).unwrap();
+        let mut cloud = CloudConfig::default();
+        cloud.team_auto_promote = Some(true);
+        cloud.save_to_cas_dir(&root).unwrap();
+        conn.execute(
+            "UPDATE sync_metadata SET value = '2020-01-01T00:00:00Z'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-default_test-project', ?1)",
+            [chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        let inspection = inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
+        assert!(inspection.refusals.is_empty(), "{:?}", inspection.refusals);
+    }
+
+    #[test]
+    fn cas_7e38_invalid_scope_and_metadata_reads_abort_before_purge() {
+        for sql in [
+            "DROP TABLE sync_metadata",
+            "UPDATE sync_metadata SET value = X'FF'",
+        ] {
+            let (_env, root, conn) = purge_queue_fixture();
+            conn.execute_batch(sql).unwrap();
+            assert!(inspect_purge_state(&root, "test-project", 3, 7, false, false).is_err());
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM tasks", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                3
+            );
+        }
+        let (_env, root, _conn) = purge_queue_fixture();
+        let mut cloud = CloudConfig::default();
+        cloud.team_only = true;
+        cloud.save_to_cas_dir(&root).unwrap();
+        let error = inspect_purge_state(&root, "test-project", 3, 7, false, false)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("no active team"), "{error}");
+        std::fs::write(root.join("cloud.json"), "not-json").unwrap();
+        assert!(inspect_purge_state(&root, "test-project", 3, 7, false, false).is_err());
     }
 
     #[test]

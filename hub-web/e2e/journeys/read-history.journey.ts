@@ -89,7 +89,7 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     // The pointer now rests on the thread: its surface stays the cream canvas,
     // not brightened to white by the main-action button hover (journey F11).
     await log.hover();
-    await expect(page.locator("#pane-grid .conversation-thread-slot")).toHaveCSS("filter", "none");
+    await expect(page.locator("#conversation-stage .conversation-thread-slot")).toHaveCSS("filter", "none");
     expect(hub.historyRequests.at(-1)).toMatchObject({ before: 20 });
   });
 

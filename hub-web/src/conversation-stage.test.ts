@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationList, type ConversationRow } from "./conversation-list";
-import { arrangeConversationShell, conversationAttentionBadge, createPaneHost, ensureConversationStage, rawOutputDrawerMarkup } from "./conversation-shell";
+import { arrangeConversationShell, conversationAttentionBadge, ensureConversationStage, rawOutputDrawerMarkup } from "./conversation-shell";
 import { ConversationView } from "./conversation-view";
 import { contextSections, syncContextRail, waitingOnOperator } from "./context-rail";
 import { createAttentionItem, machineEventAttention } from "./attention";
@@ -17,85 +17,45 @@ const styles = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "style
 /** The open conversation's shell with an empty grid in its pane slot, as render() builds it. */
 function openShell(): HTMLElement {
   const grid = document.createElement("section");
-  grid.id = "pane-grid";
-  grid.className = "pane-grid";
+  grid.id = "conversation-stage";
+  grid.className = "conversation-stage";
   grid.innerHTML = '<div class="empty"></div>';
   document.body.replaceChildren(arrangeConversationShell(document, { selected: true, supervisor: "patient-pelican-9", projectDir: "/projects/cas-src", host: "Atlas · Linux", machineId: "atlas-linux", loaded: true, paired: true }, { grid }));
   return grid;
 }
 
-/** A pane card with what the Ghostty surface mounts: a canvas, its input and scrollbar. */
-function mountSurface(host: HTMLElement): HTMLElement {
-  host.innerHTML = '<section class="pane" data-pane-id="supervisor"><div class="terminal-mount"><canvas class="t3-ghostty-canvas"></canvas><textarea class="t3-ghostty-input" aria-label="Terminal input"></textarea><div class="t3-ghostty-scrollbar" role="scrollbar" tabindex="0"></div></div></section>';
-  return host.querySelector<HTMLElement>(".terminal-mount")!;
-}
-
-describe("the hidden pane host renders nothing (cas-0546 condition 1)", () => {
+describe("the thread mounts straight into the stage (cas-f285)", () => {
   beforeEach(() => { document.head.replaceChildren(); document.body.replaceChildren(); });
 
-  it("is hidden, inert and out of the accessibility tree from the moment it is made", () => {
-    const host = createPaneHost(document);
-    expect(host.hidden).toBe(true);
-    expect(host.hasAttribute("inert")).toBe(true);
-    expect(host.getAttribute("aria-hidden")).toBe("true");
-  });
-
-  it("keeps the thread in its own visible slot, never inside or behind the host", () => {
+  it("puts the thread in the stage's own visible slot, with no pane host or terminal beside it", () => {
     const grid = openShell();
-    const { slot, host } = ensureConversationStage(grid);
-    mountSurface(host);
+    const slot = ensureConversationStage(grid);
     const view = new ConversationView(document, new ConversationHistory(), { supervisor: "patient-pelican-9", project: "cas-src", header: false });
     slot.append(view.element);
     view.update();
 
-    // The thread and the host are siblings in the grid: neither contains the other.
     expect(slot.parentElement).toBe(grid);
-    expect(host.parentElement).toBe(grid);
-    expect(host.contains(view.element)).toBe(false);
-    expect(view.element.contains(host)).toBe(false);
+    expect([...grid.children]).toEqual([slot]);
     expect(slot.contains(view.element)).toBe(true);
     // Nothing hidden, inert or aria-hidden sits above the thread.
     expect(view.element.closest("[hidden], [inert], [aria-hidden='true']")).toBeNull();
-    // The surface's own controls are unreachable: inert, hidden, not in the tree.
-    for (const control of host.querySelectorAll<HTMLElement>("textarea, [tabindex]")) {
-      expect(control.closest("[inert]")).toBe(host);
-      expect(control.closest("[aria-hidden='true']")).toBe(host);
-    }
-    // A heartbeat re-run keeps the same nodes: the thread is never remounted.
-    expect(ensureConversationStage(grid)).toEqual({ slot, host });
+    // No pane card, terminal mount or canvas anywhere in the shell.
+    expect(document.querySelector(".pane-host, .pane, .terminal-mount, canvas")).toBeNull();
+    // A heartbeat re-run keeps the same node: the thread is never remounted.
+    expect(ensureConversationStage(grid)).toBe(slot);
     expect(slot.contains(view.element)).toBe(true);
   });
 
-  it("is display:none in the stylesheet, even if its hidden attribute were lost", () => {
-    const rule = /\.pane-host,\s*\.pane-host\[hidden\]\s*\{[^}]*\}/.exec(styles)?.[0];
-    expect(rule).toBeDefined();
-    expect(rule).toMatch(/display:\s*none\s*!important/);
-    // !important, so no later rule (a phone block, a print block) can lay it
-    // out; jsdom's cascade does not model !important, so that half is the
-    // regex above.
-    const style = document.createElement("style");
-    style.textContent = rule!;
-    document.head.append(style);
-    const grid = openShell();
-    const { slot, host } = ensureConversationStage(grid);
-    expect(getComputedStyle(host).display).toBe("none");
-    host.hidden = false;
-    expect(getComputedStyle(host).display).toBe("none");
-    // Every other place the stylesheet names the host keeps it hidden.
-    for (const match of styles.matchAll(/([^{}]*\.pane-host[^{}]*)\{([^}]*)\}/g)) {
-      expect(match[2], match[1]).not.toMatch(/display:\s*(?!none\b)[a-z]/);
-    }
-    expect(getComputedStyle(slot).display).not.toBe("none");
+  it("keeps no stylesheet rule for a pane host", () => {
+    expect(styles).not.toMatch(/\.pane-host\b/);
+    expect(getComputedStyle(ensureConversationStage(openShell())).display).not.toBe("none");
   });
 
   it("has no Terminal markup left around the thread", () => {
     const grid = openShell();
     ensureConversationStage(grid);
     const shell = document.querySelector<HTMLElement>(".conversation-shell")!;
-    expect(shell.querySelector(".shell, .machine-rail, .session-header, #talk-supervisor, #conversation-terminal, #conversation-return, .mode-badge, #lease, .primary-pane-slot, .pane-header")).toBeNull();
-    // The thread's slot is visible; the panes exist only inside the host.
-    expect(shell.querySelectorAll(".pane-host")).toHaveLength(1);
-    expect([...shell.querySelectorAll(".pane")].every((pane) => pane.closest(".pane-host") !== null)).toBe(true);
+    expect(shell.querySelector(".shell, .machine-rail, .session-header, #talk-supervisor, #conversation-terminal, #conversation-return, .mode-badge, #lease, .primary-pane-slot, .pane-header, #pane-grid")).toBeNull();
   });
 });
 

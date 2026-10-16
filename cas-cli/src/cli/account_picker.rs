@@ -37,6 +37,8 @@ pub(crate) struct Profile {
     pub(crate) directory: PathBuf,
     pub(crate) login_state: LoginState,
     pub(crate) active: bool,
+    /// Live usage for the picker, e.g. `5h limit hit, resets 15:00` (cas-e1f4).
+    pub(crate) usage: Option<String>,
 }
 
 /// Sibling directories that share a profile prefix without being accounts.
@@ -149,6 +151,7 @@ fn profile_for(
         login_state: login_state_for(name, &directory),
         active: active_dir.map_or(name == main_name, |active| active == directory),
         directory,
+        usage: None,
     }
 }
 
@@ -204,10 +207,15 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
         .map(|profile| ProfileChoice::Existing {
             name: profile.name.clone(),
             label: format!(
-                "{} — {}{}",
+                "{} — {}{}{}",
                 profile.name,
                 login_state_label(profile.login_state),
-                if profile.active { ", active" } else { "" }
+                if profile.active { ", active" } else { "" },
+                profile
+                    .usage
+                    .as_deref()
+                    .map(|usage| format!(": {usage}"))
+                    .unwrap_or_default()
             ),
         })
         .collect();
@@ -496,12 +504,14 @@ mod tests {
                 directory: PathBuf::from("/tmp/.codex"),
                 login_state: LoginState::LoggedIn,
                 active: true,
+                usage: None,
             },
             Profile {
                 name: "alt".to_string(),
                 directory: PathBuf::from("/tmp/.codex-alt"),
                 login_state: LoginState::Unknown,
                 active: false,
+                usage: None,
             },
         ];
 
@@ -522,12 +532,14 @@ mod tests {
                 directory: PathBuf::from("/tmp/.codex"),
                 login_state: LoginState::LoggedOut,
                 active: true,
+                usage: None,
             },
             Profile {
                 name: "alt".to_string(),
                 directory: PathBuf::from("/tmp/.codex-alt"),
                 login_state: LoginState::Unknown,
                 active: false,
+                usage: None,
             },
         ];
 

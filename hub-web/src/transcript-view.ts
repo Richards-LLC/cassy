@@ -1,20 +1,20 @@
-import type { GhosttyRow } from "./terminal/ghostty/core";
 import {
   shouldFollowTail,
   shouldPageScrollback,
   transcriptLineKey,
   transcriptLines,
   type TranscriptLine,
+  type TranscriptRow,
   type TranscriptTheme,
 } from "./transcript";
 
 /**
- * The pane's grid, as the transcript needs to see it. Implemented by the
- * Ghostty surface; kept as an interface so the reading view can be driven from
- * a test or a fixture without a WASM terminal.
+ * The pane's rows, as the transcript needs to see them. Implemented by the Raw
+ * output source (raw-output.ts); kept as an interface so the reading view can
+ * be driven from a test or a fixture.
  */
 export interface TranscriptSource {
-  rows(): readonly GhosttyRow[];
+  rows(): readonly TranscriptRow[];
   theme(): TranscriptTheme;
   hasScrollbackAbove(): boolean;
   scrollRows(delta: number): void;

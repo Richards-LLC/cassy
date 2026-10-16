@@ -1,0 +1,86 @@
+{
+  "contract": "cassy.coordination/v1",
+  "surface": "violet_activity.ack_v2",
+  "method": "POST",
+  "path": "/api/violet/activity/ack",
+  "spec": "§5 §7",
+  "cases": [
+    {
+      "name": "durable admission and a failed enqueue",
+      "request": {
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "acks": [
+            {
+              "delivery_id": "0000de2a-1111-4111-8111-00000000de2a",
+              "lease_token": "0001ea5e-1111-4111-8111-00000001ea5e",
+              "delivery_generation": 1,
+              "outcome": "admitted"
+            },
+            {
+              "delivery_id": "0000de1a-1111-4111-8111-00000000de1a",
+              "lease_token": "0001ea5f-1111-4111-8111-00000001ea5f",
+              "delivery_generation": 1,
+              "outcome": "released"
+            },
+            {
+              "delivery_id": "0000de99-1111-4111-8111-00000000de99",
+              "lease_token": "0001ea60-1111-4111-8111-00000001ea60",
+              "delivery_generation": 1,
+              "outcome": "admitted"
+            },
+            {
+              "delivery_id": "0000de1b-1111-4111-8111-00000000de1b",
+              "lease_token": "0001ea61-1111-4111-8111-00000001ea61",
+              "delivery_generation": 1,
+              "outcome": "admitted"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Per-delivery results follow.",
+          "results": [
+            {
+              "delivery_id": "0000de2a-1111-4111-8111-00000000de2a",
+              "code": "completed",
+              "status": "admitted"
+            },
+            {
+              "delivery_id": "0000de1a-1111-4111-8111-00000000de1a",
+              "code": "completed",
+              "status": "pending"
+            },
+            {
+              "delivery_id": "0000de99-1111-4111-8111-00000000de99",
+              "code": "not_found",
+              "status": null
+            },
+            {
+              "delivery_id": "0000de1b-1111-4111-8111-00000000de1b",
+              "code": "stale_generation",
+              "status": "leased"
+            }
+          ],
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "none"
+          }
+        }
+      }
+    }
+  ]
+}

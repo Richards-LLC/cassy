@@ -125,7 +125,10 @@ export type Outage = {
   sockets?: "stall" | "close";
 };
 
-const PANE_TEXT = "The supervisor is ready.\r\n";
+/** The supervisor pane's rendered rows, as the daemon pages them to Raw output (cas-f285). */
+const PANE_ROWS = ["The supervisor is ready."];
+/** The daemon generation every journey pane is read at. */
+const PANE_EPOCH = 1_788_970_165_000;
 /** The real hub's operator text for `upstream_unavailable` (hub/server.rs). */
 const UPSTREAM_UNAVAILABLE_MESSAGE = "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again.";
 type InstallationRow = { machine: string; device_id: string; credential_id: string; credential_generation: number; credential: string; scopes: string[]; device_label: string; operator_label: string; controller_origin: string; public_key_jwk: JsonWebKey; revoked_at: string | null };
@@ -1098,9 +1101,10 @@ export class HubDouble {
     return {
       Welcome: {
         state: { panes: [{ id: "supervisor", kind: "Supervisor", title: session, focused: true, exited: false }], cols: 100, rows: 28 },
-        scrollback: { supervisor: [[...new TextEncoder().encode(PANE_TEXT)]] },
         protocol_version: 3,
-        capabilities: ["conversation_history"],
+        capabilities: ["conversation_history", "paged_scrollback"],
+        // cas-f285: the pane's rows are paged, not replayed as bytes.
+        pane_bootstrap: [{ pane_id: "supervisor", epoch: PANE_EPOCH, cols: 100, rows: 28, scrollback_start_row: 0, scrollback_end_row: PANE_ROWS.length }],
       },
     };
   }
@@ -1174,6 +1178,15 @@ export class HubDouble {
         ...(typeof m.in_reply_to === "number" ? { in_reply_to: m.in_reply_to } : {}),
       });
       this.waiters.splice(0).forEach((wake) => wake());
+    }
+    if (message.ScrollbackRequest) {
+      // The daemon's bounded page of rendered rows (ws_client.rs ScrollbackRequest).
+      const request = message.ScrollbackRequest as { pane_id: string; generation: number; start_row: number; count: number };
+      const rows = PANE_ROWS.slice(request.start_row, request.start_row + Math.min(request.count, 200))
+        .map((text, index) => ({ screen_row: request.start_row + index, text, style_runs: [{ text, fg: [0, 0, 0], bg: [0, 0, 0], flags: 0 }] }));
+      ws.send(JSON.stringify(request.generation === PANE_EPOCH && request.pane_id === "supervisor"
+        ? { ScrollbackPage: { pane_id: request.pane_id, generation: request.generation, start_row: request.start_row, next_row: rows.length > 0 ? request.start_row + rows.length : null, rows } }
+        : { Error: { message: `scrollback generation expired for pane '${request.pane_id}'` } }));
     }
     if (message.ConversationHistoryRequest) {
       const request = message.ConversationHistoryRequest;

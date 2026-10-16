@@ -623,10 +623,10 @@ describe('conversation evidence', () => {
     const app = document.createElement('div');
     const template = document.createElement('template');
     template.innerHTML = '<div class="message"><h2><label for="message-text">Talk to x</label></h2><textarea id="message-text" placeholder="old"></textarea><div class="composer-actions"><button id="message-mic" type="button" aria-label="Start listening" aria-pressed="false"><svg class="mic-glyph" aria-hidden="true"></svg></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p></div>';
-    const grid = document.createElement('section'); grid.id = 'pane-grid';
+    const grid = document.createElement('section'); grid.id = 'conversation-stage';
     const attention = document.createElement('section'); attention.id = 'attention-panel'; attention.hidden = true;
     app.append(arrangeConversationShell(document, { selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', machineId: 'atlas-linux', loaded: true, paired: true }, { grid, composer: template.content.firstElementChild as HTMLElement, attention }));
-    expect(app.querySelector('#conversation-pane-slot > #pane-grid')).toBe(grid);
+    expect(app.querySelector('#conversation-pane-slot > #conversation-stage')).toBe(grid);
     expect(app.querySelector<HTMLElement>('#conversation-attention-slot > #attention-panel')?.hidden).toBe(false);
     const composer = app.querySelector<HTMLElement>('#conversation-composer-slot > .message.conversation-composer')!;
     expect(composer).not.toBeNull();

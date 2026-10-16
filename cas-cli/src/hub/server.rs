@@ -23,7 +23,7 @@ use super::{
     PairingExchangeError, ProxyFrame, ProxyFrameKind, Scope, SessionCatalog, SessionReadModel,
     TransportSecurity, ViewerRecvError, required_scope,
 };
-use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution, PaneSizeAuthority};
+use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution};
 
 const MACHINE_PROTOCOL_VERSION: u32 = 2;
 const MACHINE_PROTOCOL_MAGIC: &[u8; 4] = b"CAS2";
@@ -105,12 +105,6 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route("/commander/app.css", get(commander_stylesheet))
         .route("/commander/favicon.svg", get(commander_favicon))
         .merge(commander_brand_routes())
-        .route("/commander/ghostty-vt.wasm", get(commander_ghostty_wasm))
-        .route(
-            "/commander/ghostty-write-pty.wasm",
-            get(commander_ghostty_write_wasm),
-        )
-        .route("/commander/symbols.woff2", get(commander_symbols_font))
         .route("/v1/health", get(health::<R>).options(preflight::<R>))
         .route("/v1/auth/pairing/protocol", post(installation_protocol::<R>).options(preflight::<R>))
         .route(
@@ -360,27 +354,6 @@ fn commander_brand_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
         })
 }
 
-async fn commander_ghostty_wasm() -> Response {
-    commander_asset(
-        include_bytes!("../../../hub-web/dist/ghostty-vt.wasm"),
-        "application/wasm",
-    )
-}
-
-async fn commander_ghostty_write_wasm() -> Response {
-    commander_asset(
-        include_bytes!("../../../hub-web/dist/ghostty-write-pty.wasm"),
-        "application/wasm",
-    )
-}
-
-async fn commander_symbols_font() -> Response {
-    commander_asset(
-        include_bytes!("../../../hub-web/dist/symbols.woff2"),
-        "font/woff2",
-    )
-}
-
 /// cas-9b7d: the one reviewed cloud operator inbox API source in the hub's
 /// CSP connect-src (production origin, operator path prefix only).
 #[cfg(test)]
@@ -417,7 +390,7 @@ async fn security_headers(
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(concat!(
-            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
             "https://petra-stella-cloud.vercel.app/api/operator/",
             "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; manifest-src 'self'"
         )),
@@ -844,7 +817,7 @@ async fn sessions<R: SessionReadModel>(
                 schema_version: super::HUB_SCHEMA_VERSION,
                 freshness_threshold_secs:
                     crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS,
-                sessions: supervisor_sessions(sessions, query.workers, query.dormant),
+                sessions: supervisor_sessions(sessions, query.dormant),
             })
             .into_response(),
             &headers,
@@ -2466,10 +2439,6 @@ struct AttachQuery {
     panes: String,
     #[serde(default)]
     ticket: String,
-    /// Off by default: worker panes are hidden and never streamed unless the
-    /// viewer asks with `workers=1` (cas-6261).
-    #[serde(default, deserialize_with = "flag")]
-    workers: bool,
 }
 
 /// Accepts `1`, `true`, `yes`, or `on` as an enabled query flag.
@@ -2483,32 +2452,24 @@ fn flag<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Er
 
 #[derive(Debug, Deserialize, Default)]
 struct SessionsQuery {
-    #[serde(default, deserialize_with = "flag")]
-    workers: bool,
     /// Dormant sessions are hidden by default, but remain discoverable for
     /// recovery when the Commander explicitly asks to show them.
     #[serde(default, deserialize_with = "flag")]
     dormant: bool,
 }
 
-/// The default catalog lists every fresh supervisor-led session, including
-/// sessions whose live supervisor has not spawned workers yet. The two
-/// visibility controls are independent: `workers=1` includes live worker-only
-/// rows, while `dormant=1` includes sessions whose supervisor is not live.
-pub(crate) fn supervisor_sessions(
-    sessions: Vec<HubSession>,
-    reveal_workers: bool,
-    reveal_dormant: bool,
-) -> Vec<HubSession> {
-    if reveal_workers && reveal_dormant {
-        return sessions;
-    }
+/// The catalog lists every fresh supervisor-led session, including sessions
+/// whose live supervisor has not spawned workers yet; `dormant=1` adds sessions
+/// whose supervisor is not live. A row with no supervisor is never listed:
+/// Commander has no one to talk to there (cas-f285 retired `workers=1`, which
+/// only the removed Terminal view's "Show workers" sent).
+pub(crate) fn supervisor_sessions(sessions: Vec<HubSession>, reveal_dormant: bool) -> Vec<HubSession> {
     sessions
         .into_iter()
         .filter(|session| {
             reveal_dormant || (!session.dormant && session.liveness == super::DaemonLiveness::Live)
         })
-        .filter(|session| reveal_workers || !session.supervisor.trim().is_empty())
+        .filter(|session| !session.supervisor.trim().is_empty())
         .collect()
 }
 
@@ -2572,7 +2533,6 @@ async fn attach<R: SessionReadModel>(
                 panes,
                 daemon_identity,
                 socket_auth,
-                query.workers,
             )
         })
         .into_response()
@@ -2586,7 +2546,6 @@ async fn proxy_socket(
     panes: Vec<String>,
     daemon_identity: Option<super::DaemonIdentity>,
     auth: Option<(AuthStore, AuthContext)>,
-    reveal_workers: bool,
 ) {
     let Ok(mut viewer) = connector
         .attach(&session, port, panes, daemon_identity)
@@ -2594,7 +2553,7 @@ async fn proxy_socket(
     else {
         return;
     };
-    let mut worker_gate = super::WorkerGate::new(reveal_workers);
+    let mut worker_gate = super::WorkerGate::new();
     let (mut sink, mut source) = socket.split();
     // MessageQueued and ConversationHistory have no socket field: retain the
     // authenticated submitter's correlation id so only that socket receives
@@ -2628,7 +2587,6 @@ async fn proxy_socket(
                         continue;
                     }
                     trace_conversation_history_relay(&session, &frame.bytes);
-                    audit_refused_pane_resize(&auth, &session, &frame.bytes);
                     if sink.send(Message::Binary(frame.bytes.into())).await.is_err() {
                         break;
                     }
@@ -2734,9 +2692,7 @@ async fn handle_client_message(
     let now = chrono::Utc::now();
     let read_message = is_pane_read_message(&message);
     store.ensure_active_context(context, now)?;
-    let allowed = if matches!(message, ClientMessage::ResizePane { .. }) {
-        store.may_resize_panes(context, session, now)?
-    } else if read_message {
+    let allowed = if read_message {
         context.has(Scope::PaneRead)
     } else {
         context.has(scope) && store.has_active_lease(context, session, now)?
@@ -3297,62 +3253,12 @@ struct MachineClientEnvelope {
     subscribe: bool,
     #[serde(default)]
     panes: Vec<String>,
-    /// Off by default (cas-6261): worker panes stay hidden on this stream.
-    #[serde(default)]
-    workers: bool,
     #[serde(default)]
     session: Option<String>,
     #[serde(default)]
     message: Option<serde_json::Value>,
     #[serde(default)]
     ping: Option<u64>,
-}
-
-/// A daemon reply saying the operator's local dashboard owns this pane's
-/// geometry, so the viewer's `ResizePane` was refused (cas-37f8).
-///
-/// The prefix check keeps this off the hot relay path: `DaemonMessage` is an
-/// externally tagged enum, so only a `PaneSize` frame is ever parsed.
-pub(super) fn refused_pane_resize(bytes: &[u8]) -> Option<(String, u16, u16)> {
-    if !bytes.starts_with(br#"{"PaneSize""#) {
-        return None;
-    }
-    match serde_json::from_slice::<DaemonMessage>(bytes).ok()? {
-        DaemonMessage::PaneSize {
-            pane_id,
-            cols,
-            rows,
-            authority: PaneSizeAuthority::LocalDashboard,
-        } => Some((pane_id, cols, rows)),
-        _ => None,
-    }
-}
-
-/// Record a refused viewer resize in the hub audit log, attributed to the
-/// device that asked for it.
-fn audit_refused_pane_resize(auth: &Option<(AuthStore, AuthContext)>, session: &str, bytes: &[u8]) {
-    let Some((store, context)) = auth.as_ref() else {
-        return;
-    };
-    let Some((pane_id, cols, rows)) = refused_pane_resize(bytes) else {
-        return;
-    };
-    tracing::info!(
-        session,
-        pane = %pane_id,
-        cols,
-        rows,
-        device = %context.device_label,
-        "refused a Commander viewer's pane resize: the local dashboard owns this geometry"
-    );
-    let _ = store.audit(
-        Some(context),
-        "refused",
-        "websocket_pane_resize",
-        Some(Scope::PaneRead),
-        Some(session),
-        chrono::Utc::now(),
-    );
 }
 
 /// Every authenticated viewer of the session sees the operator conversation.
@@ -3655,7 +3561,6 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         continue;
                     }
                     trace_conversation_history_relay(&session, &frame.bytes);
-                    audit_refused_pane_resize(&auth, &session, &frame.bytes);
                     let result = match machine_binary_frame(&session, &frame) {
                         Ok(Some(bytes)) => sink.send(Message::Binary(bytes.into())).await,
                         Ok(None) => {
@@ -3741,7 +3646,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         };
                         let tx = outbound_tx.clone();
                         let task_session = session.clone();
-                        let mut worker_gate = super::WorkerGate::new(envelope.workers);
+                        let mut worker_gate = super::WorkerGate::new();
                         let handle = tokio::spawn(async move {
                             loop {
                                 match viewer.recv().await {
@@ -4406,12 +4311,12 @@ mod catalog_visibility_tests {
         missing.name = "missing".into();
         missing.liveness = super::super::DaemonLiveness::MissingEndpoint;
         let all = vec![live, dead, empty, missing];
-        let visible = supervisor_sessions(all.clone(), false, false);
+        let visible = supervisor_sessions(all.clone(), false);
         assert_eq!(
             visible.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
             vec!["live", "empty"]
         );
-        assert_eq!(supervisor_sessions(all, false, true).len(), 4);
+        assert_eq!(supervisor_sessions(all, true).len(), 4);
     }
 }
 

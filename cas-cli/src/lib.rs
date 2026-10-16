@@ -21,6 +21,7 @@ compile_error!(
 );
 
 // Core modules
+pub mod accounts;
 pub mod agent_id;
 pub(crate) mod ai_enrichment;
 pub(crate) mod ambient_recall;
@@ -54,6 +55,7 @@ pub mod factory_daemon_health;
 pub mod factory_session_scope;
 pub mod factory_supervisor_overlap;
 pub(crate) mod supervisor_notices;
+pub(crate) mod factory_scratch;
 pub mod factory_target_cache;
 pub mod fs_space;
 pub mod gh_graphql;
@@ -83,6 +85,8 @@ pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;
 pub(crate) mod task_assignment;
 pub mod qa_pass;
+/// cas-e8d1 (GH #1233): open work the record says is done.
+pub(crate) mod backlog_hygiene;
 pub(crate) mod qa_batch;
 pub(crate) mod review_body;
 pub mod retrieval_eval;

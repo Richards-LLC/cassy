@@ -742,12 +742,22 @@ pub const TASK_EXECUTION_STATE_MAX_BYTES: usize = 16 * 1024;
 const TASK_EXECUTION_STATE_MAX_STRING_BYTES: usize = 2 * 1024;
 const TASK_EXECUTION_STATE_MAX_ARRAY_ITEMS: usize = 256;
 
+/// Explicit non-dependency reason a blocked task must remain held.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskBlockedHold {
+    pub reason: String,
+    pub who: String,
+    pub when: DateTime<Utc>,
+}
+
 const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
     "phase",
     "receipts",
     "files_touched",
     "decisions",
     "next_step",
+    "blocked_hold",
 ];
 
 /// Apply and validate one structured task execution-state merge patch.
@@ -861,6 +871,19 @@ fn validate_task_execution_state_field(field: &str, value: &Value) -> Result<(),
                 }
             }
             Ok(())
+        }
+        "blocked_hold" => {
+            let hold: TaskBlockedHold = serde_json::from_value(value.clone()).map_err(|error| {
+                format!("execution state field 'blocked_hold' is invalid: {error}")
+            })?;
+            if hold.reason.trim().is_empty() {
+                return Err("execution state field 'blocked_hold.reason' must not be empty".into());
+            }
+            if hold.who.trim().is_empty() {
+                return Err("execution state field 'blocked_hold.who' must not be empty".into());
+            }
+            validate_state_string("blocked_hold.reason", &Value::String(hold.reason))?;
+            validate_state_string("blocked_hold.who", &Value::String(hold.who))
         }
         _ => unreachable!("field checked against TASK_EXECUTION_STATE_FIELDS"),
     }
@@ -1408,6 +1431,46 @@ mod tests {
             ["with,commas", "rules"]
         );
         assert!(proof_targets_to_string(&[" ".into()]).is_none());
+    }
+
+    #[test]
+    fn task_execution_state_validates_and_clears_structured_blocked_holds() {
+        let hold = serde_json::json!({
+            "reason": "Wait for operator decision",
+            "who": "agent-123",
+            "when": "2026-10-16T15:00:00Z"
+        });
+        let state = merge_task_execution_state_patch(
+            &serde_json::json!({}),
+            &serde_json::json!({"blocked_hold": hold}),
+        )
+        .expect("valid structured hold should be accepted");
+        assert_eq!(
+            state["blocked_hold"]["reason"],
+            "Wait for operator decision"
+        );
+        assert!(validate_task_execution_state(&state).is_ok());
+
+        let cleared =
+            merge_task_execution_state_patch(&state, &serde_json::json!({"blocked_hold": null}))
+                .expect("null patch should clear the hold");
+        assert!(cleared.get("blocked_hold").is_none());
+
+        for invalid in [
+            serde_json::json!({"reason": " ", "who": "agent-123", "when": "2026-10-16T15:00:00Z"}),
+            serde_json::json!({"reason": "hold", "who": " ", "when": "2026-10-16T15:00:00Z"}),
+            serde_json::json!({"reason": "hold", "who": "agent-123", "when": "yesterday"}),
+            serde_json::json!({"reason": "hold", "who": "agent-123", "when": "2026-10-16T15:00:00Z", "extra": true}),
+        ] {
+            assert!(
+                merge_task_execution_state_patch(
+                    &serde_json::json!({}),
+                    &serde_json::json!({"blocked_hold": invalid}),
+                )
+                .is_err(),
+                "invalid hold should be rejected"
+            );
+        }
     }
 
     #[test]

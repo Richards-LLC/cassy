@@ -431,6 +431,54 @@ pub(crate) fn worker_cli_from_agent(agent: &cas_types::Agent) -> cas_mux::Superv
         .unwrap_or(cas_mux::SupervisorCli::Claude)
 }
 
+/// How a confirmed context reset was recorded on the worker's row (cas-e9fc).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ResetRegistration {
+    /// The row names the new session (it may already have been rebound).
+    Recorded,
+    /// The row exists but the new session id could not be written.
+    Unrecorded(String),
+    /// The row was gone; Cassy re-registered the worker under its name.
+    Restored,
+    /// The row was gone and could not be re-registered.
+    RestoreFailed(String),
+}
+
+/// Record a confirmed context reset on the worker's row as it is now, never
+/// from the pre-reset copy: the new conversation's SessionStart may have
+/// rebound the row already. If the row is gone (the process kept running but
+/// its registration did not survive), re-register the worker under the same
+/// name so messages and shutdown_workers reach it again (cas-e9fc AC3).
+pub(crate) fn record_reset_registration(
+    store: &dyn crate::store::AgentStore,
+    pre_reset: &cas_types::Agent,
+    new_session: &str,
+) -> ResetRegistration {
+    match store.get(&pre_reset.id) {
+        Ok(mut current) => {
+            if current.cc_session_id.as_deref() == Some(new_session) {
+                return ResetRegistration::Recorded;
+            }
+            current.cc_session_id = Some(new_session.to_string());
+            match store.update(&current) {
+                Ok(()) => ResetRegistration::Recorded,
+                Err(error) => ResetRegistration::Unrecorded(error.to_string()),
+            }
+        }
+        Err(cas_store::StoreError::NotFound(_)) => {
+            let mut restored = pre_reset.clone();
+            restored.cc_session_id = Some(new_session.to_string());
+            restored.status = cas_types::AgentStatus::Active;
+            restored.last_heartbeat = chrono::Utc::now();
+            match store.register(&restored) {
+                Ok(()) => ResetRegistration::Restored,
+                Err(error) => ResetRegistration::RestoreFailed(error.to_string()),
+            }
+        }
+        Err(error) => ResetRegistration::Unrecorded(error.to_string()),
+    }
+}
+
 /// First 8 characters of a session UUID — enough to compare two sessions at a
 /// glance without wrapping the line (cas-dffe).
 fn short_session(session_id: &str) -> &str {
@@ -4618,7 +4666,14 @@ impl CasService {
                     task.assignee.as_deref() == Some(agent.name.as_str())
                         || task.assignee.as_deref() == Some(agent.id.as_str())
                 });
-                let worktree_status = collect_worker_worktree_status(&self.inner.cas_root, agent, held_task);
+                let worktree_status = collect_worker_worktree_status_with_timeout(
+                    &self.inner.cas_root,
+                    agent,
+                    held_task,
+                    std::time::Duration::from_secs(2),
+                    std::path::Path::new("gh"),
+                )
+                .await;
                 let clone_path = worktree_status.clone_path;
                 let clone_info = worktree_status.clone_info;
                 // cas-844bf: git introspection — branch/HEAD/ahead-behind/dirty/PR
@@ -5749,6 +5804,9 @@ impl CasService {
         // enough (GH #145).
         let deadline = std::time::Instant::now() + reset::confirmation_timeout();
         let mut confirmed: Vec<(String, reset::ContextResetEvidence, String)> = Vec::new();
+        // cas-e9fc: resets whose worker row was gone once the new session
+        // appeared, and whether Cassy could restore the registration.
+        let mut lost: Vec<(String, reset::ContextResetEvidence, Result<(), String>)> = Vec::new();
         let mut outstanding: Vec<PendingReset> = pending;
         while !outstanding.is_empty() && std::time::Instant::now() < deadline {
             tokio::time::sleep(reset::CONFIRMATION_POLL).await;
@@ -5763,17 +5821,26 @@ impl CasService {
                         // Point Cassy's transcript resolution at the live session
                         // so worker_status/worker_activity/is-wedged stop
                         // reading the pre-reset file (AC4).
-                        let mut updated = item.agent.clone();
-                        updated.cc_session_id = Some(evidence.session_id.clone());
-                        if let Err(e) = agent_store.update(&updated) {
-                            tracing::warn!(
-                                agent = %item.agent.name,
-                                error = %e,
-                                "cas-dffe: context reset confirmed but recording the new session \
-                                 id failed; worker_status will keep resolving the old transcript"
-                            );
+                        match record_reset_registration(agent_store.as_ref(), &item.agent, &evidence.session_id) {
+                            ResetRegistration::Recorded => {
+                                confirmed.push((item.agent.name.clone(), evidence, previous));
+                            }
+                            ResetRegistration::Unrecorded(error) => {
+                                tracing::warn!(
+                                    agent = %item.agent.name,
+                                    %error,
+                                    "cas-dffe: context reset confirmed but recording the new session \
+                                     id failed; worker_status will keep resolving the old transcript"
+                                );
+                                confirmed.push((item.agent.name.clone(), evidence, previous));
+                            }
+                            ResetRegistration::Restored => {
+                                lost.push((item.agent.name.clone(), evidence, Ok(())));
+                            }
+                            ResetRegistration::RestoreFailed(error) => {
+                                lost.push((item.agent.name.clone(), evidence, Err(error)));
+                            }
                         }
-                        confirmed.push((item.agent.name.clone(), evidence, previous));
                         false
                     }
                     None => true,
@@ -5807,11 +5874,29 @@ impl CasService {
                     .join(", "),
             ));
         }
+        for (name, evidence, outcome) in &lost {
+            match outcome {
+                Ok(()) => output.push_str(&format!(
+                    "❌ {name}: context reset landed (new session {}), but the worker's registration \
+                     was gone afterwards. Cassy restored it under the same name, so messages and \
+                     shutdown_workers reach it again; its task leases may have been released, so \
+                     check its assignment with worker_status before relying on it.\n",
+                    short_session(&evidence.session_id),
+                )),
+                Err(error) => output.push_str(&format!(
+                    "❌ {name}: context reset landed (new session {}), but the worker's registration \
+                     was gone afterwards and could not be restored ({error}). Its process is still \
+                     running unregistered: stop it (ps for --agent-name {name}) and spawn_workers \
+                     the same name with its task.\n",
+                    short_session(&evidence.session_id),
+                )),
+            }
+        }
         for refusal in &refusals {
             output.push_str(&format!("❌ {refusal}\n"));
         }
 
-        if !outstanding.is_empty() || !refusals.is_empty() {
+        if !outstanding.is_empty() || !refusals.is_empty() || !lost.is_empty() {
             // Never report success for a reset that was not observed.
             return Err(Self::error(ErrorCode::INTERNAL_ERROR, output));
         }
@@ -7792,16 +7877,93 @@ fn collect_worker_worktree_status(
     agent: &cas_types::Agent,
     task: Option<&cas_types::Task>,
 ) -> WorkerWorktreeStatus {
+    collect_worker_worktree_status_with_gh(cas_root, agent, task, std::path::Path::new("gh"))
+}
+
+fn collect_worker_worktree_status_with_gh(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+    task: Option<&cas_types::Task>,
+    gh_program: &std::path::Path,
+) -> WorkerWorktreeStatus {
     match resolve_worker_clone_path(cas_root, agent) {
         WorkerClonePathResolve::Ready(path) => {
             let clone_path = path.display().to_string();
-            let mut gs = collect_worker_git_status(&path);
+            let mut gs = collect_worker_git_status_with_gh(&path, gh_program);
             if let Some(task) = task {
-                apply_task_delivery_git_status(&path, task, &agent.name, &mut gs);
+                apply_task_delivery_git_status_with_gh(
+                    &path,
+                    task,
+                    &agent.name,
+                    &mut gs,
+                    gh_program,
+                );
             }
             WorkerWorktreeStatus {
                 clone_info: format!("\n    Clone: {clone_path}"),
                 git_info: format_worker_git_status(&gs),
+                clone_path: Some(clone_path),
+            }
+        }
+        WorkerClonePathResolve::NotOnDisk { candidate, .. } => {
+            let missing_path = candidate.display().to_string();
+            WorkerWorktreeStatus {
+                clone_info: format!("\n    Clone: {missing_path} [missing-worktree]"),
+                git_info: "\n    git: missing-worktree".to_string(),
+                clone_path: Some(missing_path),
+            }
+        }
+    }
+}
+
+async fn collect_worker_worktree_status_with_timeout(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+    task: Option<&cas_types::Task>,
+    timeout: std::time::Duration,
+    gh_program: &std::path::Path,
+) -> WorkerWorktreeStatus {
+    let fallback = worker_worktree_status_timeout_fallback(cas_root, agent);
+    let failure_fallback =
+        worker_worktree_status_fallback(cas_root, agent, "status lookup failed");
+    let cas_root = cas_root.to_path_buf();
+    let agent = agent.clone();
+    let task = task.cloned();
+    let gh_program = gh_program.to_path_buf();
+    let worktree_status = tokio::task::spawn_blocking(move || {
+        collect_worker_worktree_status_with_gh(
+            &cas_root,
+            &agent,
+            task.as_ref(),
+            &gh_program,
+        )
+    });
+
+    match tokio::time::timeout(timeout, worktree_status).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(_)) => failure_fallback,
+        Err(_) => fallback,
+    }
+}
+
+fn worker_worktree_status_timeout_fallback(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+) -> WorkerWorktreeStatus {
+    worker_worktree_status_fallback(cas_root, agent, "status lookup timed out")
+}
+
+fn worker_worktree_status_fallback(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+    reason: &'static str,
+) -> WorkerWorktreeStatus {
+    match resolve_worker_clone_path(cas_root, agent) {
+        WorkerClonePathResolve::Ready(path) => {
+            let clone_path = path.display().to_string();
+            WorkerWorktreeStatus {
+                clone_info: format!("\n    Clone: {clone_path}"),
+                git_info: format!("\n    git: {reason}\n    PR: unknown ({reason})"),
                 clone_path: Some(clone_path),
             }
         }
@@ -7823,6 +7985,22 @@ fn apply_task_delivery_git_status(
     task: &cas_types::Task,
     worker: &str,
     status: &mut WorkerGitStatus,
+) {
+    apply_task_delivery_git_status_with_gh(
+        repo,
+        task,
+        worker,
+        status,
+        std::path::Path::new("gh"),
+    );
+}
+
+fn apply_task_delivery_git_status_with_gh(
+    repo: &std::path::Path,
+    task: &cas_types::Task,
+    worker: &str,
+    status: &mut WorkerGitStatus,
+    gh_program: &std::path::Path,
 ) {
     let branch = task.deliverables.parked_branch.clone().unwrap_or_else(|| {
         crate::mcp::tools::core::task::lifecycle::close_ops::close_measured_factory_branch(
@@ -7855,7 +8033,7 @@ fn apply_task_delivery_git_status(
     } else {
         "none".to_string()
     };
-    status.pr_url = collect_worker_pr_url(repo, &status.branch, &status.pushed_ref, std::path::Path::new("gh"));
+    status.pr_url = collect_worker_pr_url(repo, &status.branch, &status.pushed_ref, gh_program);
 }
 
 /// Gather the live dirty-worktree floor for `worker_activity`.
@@ -10878,10 +11056,9 @@ impl std::fmt::Display for WorkerPrUrl {
 /// duplicating the collector.
 ///
 /// NOTE: This is a synchronous, blocking function that shells out to `git`
-/// and, optionally, `gh`.  It is intended to be called from within
-/// `factory_worker_status` (which is `async` but performs several other
-/// blocking operations already).  Callers in a strict async context should
-/// wrap in `tokio::task::spawn_blocking` if needed.
+/// and, optionally, `gh`. `factory_worker_status` calls it through
+/// `tokio::task::spawn_blocking` and bounds the wait; other strict async callers
+/// should do the same.
 pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> WorkerGitStatus {
     collect_worker_git_status_with_gh(worktree_path, std::path::Path::new("gh"))
 }
@@ -11854,6 +12031,48 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-e9fc AC3: a confirmed clear_context records the new session on the
+    /// row as it is now (keeping a SessionStart rebind), and a worker whose row
+    /// vanished is re-registered under its name, never left a silent orphan.
+    #[test]
+    fn cas_e9fc_reset_registration_keeps_or_restores_the_worker_row() {
+        let project = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let store = crate::store::open_agent_store(&root).unwrap();
+        let mut worker = cas_types::Agent::new_with_role(
+            "cd08c932-old".into(),
+            "smooth-robin-87".into(),
+            cas_types::AgentRole::Worker,
+        );
+        worker.cc_session_id = Some("cd08c932-old".into());
+        worker.pid = Some(4242);
+        store.register(&worker).unwrap();
+
+        // A SessionStart rebind changed the PID; recording keeps it.
+        let mut rebound = store.get(&worker.id).unwrap();
+        rebound.pid = Some(5151);
+        store.update(&rebound).unwrap();
+        assert_eq!(
+            record_reset_registration(store.as_ref(), &worker, "34398e29-new"),
+            ResetRegistration::Recorded
+        );
+        let current = store.get(&worker.id).unwrap();
+        assert_eq!(current.cc_session_id.as_deref(), Some("34398e29-new"));
+        assert_eq!(current.pid, Some(5151), "the stale pre-reset copy never overwrites the row");
+
+        // The row vanished while the process kept running: restored, by name.
+        store.unregister(&worker.id).unwrap();
+        assert_eq!(
+            record_reset_registration(store.as_ref(), &worker, "34398e29-new"),
+            ResetRegistration::Restored
+        );
+        let restored = store.get(&worker.id).unwrap();
+        assert_eq!(restored.name, "smooth-robin-87");
+        assert_eq!(restored.role, cas_types::AgentRole::Worker);
+        assert_eq!(restored.status, cas_types::AgentStatus::Active);
+        assert_eq!(restored.cc_session_id.as_deref(), Some("34398e29-new"));
+    }
 
     #[test]
     fn cas_6eec_stall_evidence_counts_only_the_workers_scoped_edits_and_commits() {
@@ -18167,6 +18386,44 @@ effort = "high"
         assert!(
             !rendered.contains("PR: none"),
             "failed gh lookup must not masquerade as no PR: {rendered}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_status_git_collection_times_out_when_gh_stalls() {
+        let tmp = setup_git_repo_with_pushed_factory_branch("slow-gh-worker");
+        let gh = write_gh_stub(tmp.path(), "#!/bin/sh\nsleep 1\n");
+        let mut agent = cas_types::Agent::new_with_role(
+            "slow-gh-session".to_string(),
+            "slow-gh-worker".to_string(),
+            AgentRole::Worker,
+        );
+        agent.metadata.insert(
+            "clone_path".to_string(),
+            tmp.path().to_string_lossy().to_string(),
+        );
+
+        let started = std::time::Instant::now();
+        let status = collect_worker_worktree_status_with_timeout(
+            tmp.path(),
+            &agent,
+            None,
+            std::time::Duration::from_millis(100),
+            &gh,
+        )
+        .await;
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(750),
+            "a slow gh subprocess must not hold up the worker_status poll: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(status.clone_path.as_deref(), Some(tmp.path().to_string_lossy().as_ref()));
+        assert!(status.git_info.contains("status lookup timed out"), "{status:?}");
+        assert!(
+            status.git_info.contains("PR: unknown (status lookup timed out)"),
+            "timeout must not claim a successful empty PR query: {status:?}"
         );
     }
 

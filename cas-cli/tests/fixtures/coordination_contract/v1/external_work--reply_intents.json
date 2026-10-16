@@ -1,0 +1,168 @@
+{
+  "contract": "cassy.coordination/v1",
+  "surface": "external_work.reply_intents",
+  "method": "POST",
+  "path": "/api/coordination/external-work/{id}/reply-intents",
+  "spec": "§4 §7",
+  "cases": [
+    {
+      "name": "registered",
+      "request": {
+        "path_params": {
+          "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000061-2222-4222-8222-000000000061",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "expected_generation": 1,
+          "occurrence_id": "00000cc2-1111-4111-8111-000000000cc2"
+        }
+      },
+      "response": {
+        "status": 201,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Reply intent registered for generation 1; Violet may dispatch it once.",
+          "receipt": {
+            "operation_id": "00000b61-1111-4111-8111-000000000b61",
+            "request_id": "00000061-2222-4222-8222-000000000061",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "registration_id": "reg-supervisor-alpha-01",
+              "label": "alpha (laptop)",
+              "is_caller": true
+            },
+            "generation": 1,
+            "expires_at": "2026-10-16T14:05:00.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "proceed",
+            "reply_intent": {
+              "id": "00007e91-1111-4111-8111-000000007e91",
+              "status": "registered",
+              "claim_generation": 1,
+              "occurrence_id": "00000cc2-1111-4111-8111-000000000cc2"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "stale pre-claim wake cannot reply",
+      "request": {
+        "path_params": {
+          "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000064-2222-4222-8222-000000000064",
+          "actor": {
+            "registration_id": "reg-supervisor-beta-07"
+          },
+          "expected_generation": 0
+        }
+      },
+      "response": {
+        "status": 409,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "stale_generation",
+          "guidance": "You do not hold the current claim. Do not reply.",
+          "reason": "not_owner",
+          "receipt": {
+            "operation_id": "00000b64-1111-4111-8111-000000000b64",
+            "request_id": "00000064-2222-4222-8222-000000000064",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "registration_id": "reg-supervisor-alpha-01",
+              "label": "alpha (laptop)",
+              "is_caller": false
+            },
+            "generation": 1,
+            "expires_at": "2026-10-16T14:05:00.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "wait_for_owner"
+          }
+        }
+      }
+    },
+    {
+      "name": "unresolved reply pins the thread",
+      "request": {
+        "path_params": {
+          "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000065-2222-4222-8222-000000000065",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "expected_generation": 1
+        }
+      },
+      "response": {
+        "status": 409,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "rejected",
+          "guidance": "An earlier reply on this thread has an unknown outcome; reconcile it first.",
+          "reason": "reply_unresolved",
+          "receipt": {
+            "operation_id": "00000b65-1111-4111-8111-000000000b65",
+            "request_id": "00000065-2222-4222-8222-000000000065",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "registration_id": "reg-supervisor-alpha-01",
+              "label": "alpha (laptop)",
+              "is_caller": true
+            },
+            "generation": 1,
+            "expires_at": "2026-10-16T14:05:00.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "reconcile"
+          }
+        }
+      }
+    }
+  ]
+}

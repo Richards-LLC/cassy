@@ -44,6 +44,7 @@ watchdog_cancel_run() {
     elif ! gh api --method POST "repos/$WATCHDOG_REPOSITORY/actions/runs/$run_id/cancel" >/dev/null; then
         # A run can complete after its final status read.  Do not abandon the
         # sweep merely because GitHub rejects that now-stale cancellation.
-        printf 'unable to cancel run=%s; it may already be complete\n' "$run_id" >&2
+        printf 'warning: cancel failed run=%s call=POST repos/%s/actions/runs/%s/cancel; continuing sweep\n' \
+            "$run_id" "$WATCHDOG_REPOSITORY" "$run_id" >&2
     fi
 }

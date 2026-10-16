@@ -335,6 +335,18 @@ const COMMANDER_BRAND_ASSETS: &[(&str, &[u8], &str)] = &[
         include_bytes!("../../../hub-web/dist/manifest.webmanifest"),
         "application/manifest+json",
     ),
+    // cas-4427: Commander's own UI and mono faces (hub-web/src/fonts.css), so
+    // every host renders Inter and JetBrains Mono rather than a fallback.
+    (
+        "/commander/inter.woff2",
+        include_bytes!("../../../hub-web/dist/inter.woff2"),
+        "font/woff2",
+    ),
+    (
+        "/commander/jetbrains-mono.woff2",
+        include_bytes!("../../../hub-web/dist/jetbrains-mono.woff2"),
+        "font/woff2",
+    ),
 ];
 
 fn commander_brand_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {

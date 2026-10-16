@@ -683,6 +683,9 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
             "text/css; charset=utf-8",
             &b"/* Cassy Cloud design tokens"[..],
         ),
+        // cas-4427: Commander's own UI and mono faces, self-hosted.
+        ("/commander/inter.woff2", "font/woff2", &b"wOF2"[..]),
+        ("/commander/jetbrains-mono.woff2", "font/woff2", &b"wOF2"[..]),
     ] {
         let asset = app
             .clone()

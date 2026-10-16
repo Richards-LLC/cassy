@@ -264,7 +264,7 @@ impl NeonClient for LiveNeonClient {
 }
 
 // ---------------------------------------------------------------------------
-// MCP response parsers (fixture-testable, transport-independent).
+// JSON parsers with legacy MCP-envelope compatibility; no live transport.
 //
 // All four `parse_*` functions follow the same shape as
 // vercel::parse_list_projects: peel off the MCP envelope (`{ content: [{
@@ -275,7 +275,7 @@ impl NeonClient for LiveNeonClient {
 // as Err so verify can distinguish "transport error" from "drift".
 // ---------------------------------------------------------------------------
 
-/// Parse `mcp__neon__list_organizations` into a vec of [`NeonOrg`].
+/// Parse organization-list JSON (including legacy MCP envelopes).
 ///
 /// Tolerated shapes:
 /// - `{ "organizations": [...] }` (canonical)
@@ -296,7 +296,7 @@ pub fn parse_list_organizations(value: &serde_json::Value) -> Result<Vec<NeonOrg
                 anyhow!(
                     "list_organizations: response had no `organizations` array. \
                      cas-36fd0 dropped speculative tolerance for `orgs` and \
-                     unrecognized wrapper keys; if Neon's MCP rolled out a new \
+                     unrecognized wrapper keys; if Neon rolled out a new \
                      shape, please file a bug with this payload: {inner}"
                 )
             })?,
@@ -313,7 +313,7 @@ pub fn parse_list_organizations(value: &serde_json::Value) -> Result<Vec<NeonOrg
     Ok(out)
 }
 
-/// Parse `mcp__neon__list_projects` into a vec of [`NeonProject`].
+/// Parse project-list JSON (including legacy MCP envelopes).
 ///
 /// Tolerated shapes:
 /// - `{ "projects": [...] }` (canonical)
@@ -334,7 +334,7 @@ pub fn parse_list_projects(value: &serde_json::Value) -> Result<Vec<NeonProject>
                 anyhow!(
                     "list_projects: response had no `projects` array. cas-36fd0 \
                      dropped speculative tolerance for `data` and unrecognized \
-                     wrapper keys; if Neon's MCP rolled out a new shape, please \
+                     wrapper keys; if Neon rolled out a new shape, please \
                      file a bug with this payload: {inner}"
                 )
             })?,
@@ -351,7 +351,7 @@ pub fn parse_list_projects(value: &serde_json::Value) -> Result<Vec<NeonProject>
     Ok(out)
 }
 
-/// Parse `mcp__neon__describe_project` into a [`NeonProjectDetail`].
+/// Parse legacy project-detail JSON into a [`NeonProjectDetail`].
 ///
 /// Canonical shape:
 /// ```ignore
@@ -425,7 +425,7 @@ pub fn parse_describe_project(value: &serde_json::Value) -> Result<NeonProjectDe
     })
 }
 
-/// Parse `mcp__neon__describe_branch` into a presence bool.
+/// Parse legacy branch-detail JSON into a presence bool.
 ///
 /// Authoritative absence vs transport blip is load-bearing here: verify
 /// routes the two to `IntegrationStatus::Stale` (drift) and

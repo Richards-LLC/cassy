@@ -103,6 +103,35 @@ pub(crate) enum DeathRelay {
     /// event is still recorded, but the supervisor hears about it once, in
     /// the shutdown receipt, not as one Critical alarm per worker.
     Requested,
+    /// cas-26c8 (spec-6194 P2.6, ct2_p2_died_together_folds): an unexpected
+    /// death whose relay the daemon holds until the death-correlation window
+    /// closes. A lone death is then relayed with [`relay_worker_death`]; a
+    /// group folds into one `workers_died_together` relay.
+    Deferred,
+}
+
+/// cas-26c8: recover a worker whose death relay the caller defers. Returns
+/// the recovery summary only when a death was actually recorded (not a live
+/// successor or a still-running process), for a later
+/// [`relay_worker_death`] or folded group relay.
+pub(crate) fn recover_worker_deferring_relay(
+    cas_root: &Path,
+    agent_store: &dyn AgentStore,
+    agent: &Agent,
+    held_task_ids: &[String],
+    reason: &str,
+    exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
+) -> Option<OrphanRecoverySummary> {
+    let (summary, died) = recover_worker_inner(
+        cas_root,
+        agent_store,
+        agent,
+        held_task_ids,
+        reason,
+        exit,
+        DeathRelay::Deferred,
+    );
+    (died && agent.role == AgentRole::Worker).then_some(summary)
 }
 
 /// [`recover_worker_vanished`] for a worker stopped by a supervisor request
@@ -134,6 +163,19 @@ pub(crate) fn recover_worker(
     exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
     relay: DeathRelay,
 ) -> OrphanRecoverySummary {
+    recover_worker_inner(cas_root, agent_store, agent, held_task_ids, reason, exit, relay).0
+}
+
+/// [`recover_worker`], also saying whether a death was recorded.
+fn recover_worker_inner(
+    cas_root: &Path,
+    agent_store: &dyn AgentStore,
+    agent: &Agent,
+    held_task_ids: &[String],
+    reason: &str,
+    exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
+    relay: DeathRelay,
+) -> (OrphanRecoverySummary, bool) {
     let mut summary = OrphanRecoverySummary {
         held_task_ids: held_task_ids.to_vec(),
         ..Default::default()
@@ -145,7 +187,7 @@ pub(crate) fn recover_worker(
             emit_worker_died_signals_with_exit(
                 cas_root, agent_store, agent, &summary, reason, exit, relay,
             );
-            return summary;
+            return (summary, true);
         }
     };
 
@@ -155,7 +197,7 @@ pub(crate) fn recover_worker(
     // live row.
     if let Some(live) = live_successor(agent_store, agent) {
         rehome_leases_to_live_successor(&task_store, agent_store, agent, &live, held_task_ids);
-        return summary;
+        return (summary, false);
     }
 
     let mut candidate_ids: Vec<String> = held_task_ids.to_vec();
@@ -181,7 +223,7 @@ pub(crate) fn recover_worker(
     // never report it dead merely because timers lapsed under CPU starvation.
     if agent.role == AgentRole::Worker && super::agent_liveness::agent_process_is_alive(agent) {
         keep_live_worker_leases(cas_root, &task_store, agent_store, agent, &candidate_ids);
-        return summary;
+        return (summary, false);
     }
 
     for task_id in &candidate_ids {
@@ -193,7 +235,7 @@ pub(crate) fn recover_worker(
     emit_worker_died_signals_with_exit(
         cas_root, agent_store, agent, &summary, reason, exit, relay,
     );
-    summary
+    (summary, true)
 }
 
 /// Recover tasks whose leases just expired, but only when the holder is dead
@@ -457,19 +499,7 @@ fn emit_worker_died_signals_with_exit(
 
     let held = summary.held_task_ids.join(",");
     let recovered = summary.recovered_task_ids.join(",");
-    let payload = serde_json::json!({
-        "worker_id": agent.id,
-        "worker_name": agent.name,
-        "held_tasks": summary.held_task_ids,
-        "recovered_tasks": summary.recovered_task_ids,
-        "reason": reason,
-        "last_heartbeat": agent.last_heartbeat.to_rfc3339(),
-        "factory_session": agent.factory_session,
-        // cas-2ffe (GH #915): why the harness process ended, when observed.
-        "exit_code": exit.and_then(|exit| exit.exit_code),
-        "exit_signal": exit.and_then(|exit| exit.exit_signal.clone()),
-        "exit_tail": exit.and_then(|exit| exit.output_tail.clone()),
-    });
+    let payload = worker_died_payload(agent, summary, reason, exit);
 
     // Activity feed event.
     if let Ok(event_store) = open_event_store(cas_root) {
@@ -493,10 +523,39 @@ fn emit_worker_died_signals_with_exit(
     }
 
     // cas-b06f: a requested stop is reported once, by the shutdown receipt.
-    if relay == DeathRelay::Requested {
+    // cas-26c8: a deferred death is relayed once its correlation window closes.
+    if relay != DeathRelay::Alarm {
         return;
     }
+    relay_worker_death_payload(cas_root, agent_store, agent, summary, reason, exit, &payload);
+}
 
+/// cas-26c8: the per-worker Critical `worker_died` relay for a death recorded
+/// with [`DeathRelay::Deferred`] that turned out to be a lone death.
+pub(crate) fn relay_worker_death(
+    cas_root: &Path,
+    agent_store: &dyn AgentStore,
+    agent: &Agent,
+    summary: &OrphanRecoverySummary,
+    reason: &str,
+    exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
+) {
+    if agent.role != AgentRole::Worker {
+        return;
+    }
+    let payload = worker_died_payload(agent, summary, reason, exit);
+    relay_worker_death_payload(cas_root, agent_store, agent, summary, reason, exit, &payload);
+}
+
+fn relay_worker_death_payload(
+    cas_root: &Path,
+    agent_store: &dyn AgentStore,
+    agent: &Agent,
+    summary: &OrphanRecoverySummary,
+    reason: &str,
+    exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
+    payload: &serde_json::Value,
+) {
     // Supervisor queue — critical priority.
     let supervisors = match agent_store.list(None) {
         Ok(agents) => agents
@@ -537,6 +596,27 @@ fn emit_worker_died_signals_with_exit(
             );
         }
     }
+}
+
+fn worker_died_payload(
+    agent: &Agent,
+    summary: &OrphanRecoverySummary,
+    reason: &str,
+    exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "worker_id": agent.id,
+        "worker_name": agent.name,
+        "held_tasks": summary.held_task_ids,
+        "recovered_tasks": summary.recovered_task_ids,
+        "reason": reason,
+        "last_heartbeat": agent.last_heartbeat.to_rfc3339(),
+        "factory_session": agent.factory_session,
+        // cas-2ffe (GH #915): why the harness process ended, when observed.
+        "exit_code": exit.and_then(|exit| exit.exit_code),
+        "exit_signal": exit.and_then(|exit| exit.exit_signal.clone()),
+        "exit_tail": exit.and_then(|exit| exit.output_tail.clone()),
+    })
 }
 
 /// Identity of ONE death of ONE agent (cas-3dcb, GH #168).

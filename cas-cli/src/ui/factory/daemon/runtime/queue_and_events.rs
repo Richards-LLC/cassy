@@ -214,6 +214,9 @@ fn worker_exit_cause(
     }
 }
 
+/// Red-first stub (cas-26c8).
+const CAS_26C8_RED_STUB: bool = true;
+
 /// Deaths closer together than this are one incident (cas-2ffe, GH #915):
 /// three Codex workers exited with code 0 within 1.2 s of each other.
 pub(super) const WORKER_DEATH_CORRELATION_WINDOW: std::time::Duration =
@@ -225,6 +228,19 @@ pub(crate) struct ObservedWorkerExit {
     pub at: chrono::DateTime<chrono::Utc>,
     pub worker: String,
     pub status: String,
+    /// cas-26c8: the recorded death whose supervisor relay waits for the
+    /// correlation window, so a group folds into one relay.
+    pub death: Option<DeferredWorkerDeath>,
+}
+
+/// cas-26c8: everything the per-worker `worker_died` relay needs, held until
+/// the death-correlation window closes.
+#[derive(Debug, Clone)]
+pub(crate) struct DeferredWorkerDeath {
+    pub agent: cas_types::Agent,
+    pub summary: crate::mcp::tools::service::orphan_recovery::OrphanRecoverySummary,
+    pub reason: String,
+    pub exit: crate::prompt_revalidation::WorkerExitCause,
 }
 
 /// The first group of at least two exits that fall within `window` of the
@@ -5119,28 +5135,33 @@ impl FactoryDaemon {
         // request stood) is that request taking effect, not an unexpected
         // death: no Critical alarm and no workers_died_together group.
         let requested_stop = self.dead_workers.contains(worker_name);
-        if !requested_stop {
-            self.recent_worker_exits.push(ObservedWorkerExit {
-                at: chrono::Utc::now(),
-                worker: worker_name.to_string(),
-                status: exit_cause.status(),
-            });
-        }
 
         // A registered worker can still be a dead harness whose MCP child
         // answered first. Mark the durable agent stale before removing the
         // pane so task leases are parked and worker_status cannot retain the
         // transcript-backed active row.
-        self.mark_registered_worker_stale(
+        //
+        // cas-26c8 (ct2_p2_died_together_folds): an unexpected death's relay
+        // waits for the correlation window, so workers that die together
+        // reach the supervisor as one folded relay, not N plus a group.
+        let death = self.mark_registered_worker_stale(
             worker_name,
             &exit_cause.status(),
             Some(&exit_cause),
             if requested_stop {
                 crate::mcp::tools::service::orphan_recovery::DeathRelay::Requested
             } else {
-                crate::mcp::tools::service::orphan_recovery::DeathRelay::Alarm
+                crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred
             },
         );
+        if !requested_stop {
+            self.recent_worker_exits.push(ObservedWorkerExit {
+                at: chrono::Utc::now(),
+                worker: worker_name.to_string(),
+                status: exit_cause.status(),
+                death,
+            });
+        }
         self.app.mark_worker_crashed(worker_name).await;
         self.dead_workers.insert(worker_name.to_string());
 
@@ -5198,9 +5219,9 @@ impl FactoryDaemon {
         reason: &str,
         exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
         relay: crate::mcp::tools::service::orphan_recovery::DeathRelay,
-    ) {
+    ) -> Option<DeferredWorkerDeath> {
         let Ok(agent_store) = open_agent_store(self.app.cas_dir()) else {
-            return;
+            return None;
         };
         let cached = self
             .app
@@ -5244,6 +5265,22 @@ impl FactoryDaemon {
             .map(|lease| lease.task_id)
             .collect::<Vec<_>>();
         let _ = agent_store.mark_stale(&agent.id);
+        if relay == crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred {
+            return crate::mcp::tools::service::orphan_recovery::recover_worker_deferring_relay(
+                self.app.cas_dir(),
+                agent_store.as_ref(),
+                &agent,
+                &held,
+                reason,
+                exit,
+            )
+            .map(|summary| DeferredWorkerDeath {
+                agent,
+                summary,
+                reason: reason.to_string(),
+                exit: exit.cloned().unwrap_or_default(),
+            });
+        }
         crate::mcp::tools::service::orphan_recovery::recover_worker(
             self.app.cas_dir(),
             agent_store.as_ref(),
@@ -5253,6 +5290,7 @@ impl FactoryDaemon {
             exit,
             relay,
         );
+        None
     }
 
     /// cas-2ffe (GH #915): several harnesses exiting within
@@ -12340,6 +12378,7 @@ mod tests {
             at: t0 + chrono::Duration::milliseconds(offset_ms),
             worker: worker.to_string(),
             status: "exited with code 0".to_string(),
+            death: None,
         };
         let exits = vec![
             exit("codex-a", 0),

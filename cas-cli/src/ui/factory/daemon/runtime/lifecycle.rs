@@ -244,11 +244,42 @@ pub(super) fn enqueue_correlated_worker_deaths_relay(
         .map(|exit| format!("{} ({})", exit.worker, exit.status))
         .collect::<Vec<_>>()
         .join("; ");
+    // cas-26c8 (ct2_p2_died_together_folds): this relay replaces the
+    // per-worker worker_died relays, so each worker's tasks and cleaned tail
+    // (12 lines / 600 chars, clean_death_tail) are listed here.
+    let entries = group
+        .iter()
+        .map(|exit| {
+            let Some(death) = exit.death.as_ref() else {
+                return format!("- {} ({})", exit.worker, exit.status);
+            };
+            let list = |ids: &[String]| {
+                if ids.is_empty() { "none".to_string() } else { ids.join(", ") }
+            };
+            let tail = death
+                .exit
+                .output_tail
+                .as_deref()
+                .map(|tail| {
+                    let quoted = tail.lines().map(|line| format!("    > {line}")).collect::<Vec<_>>();
+                    format!("\n  last output:\n{}", quoted.join("\n"))
+                })
+                .unwrap_or_default();
+            format!(
+                "- {} ({}): held tasks {}; parked {}{tail}",
+                exit.worker,
+                exit.status,
+                list(&death.summary.held_task_ids),
+                list(&death.summary.recovered_task_ids),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let detail = format!(
         "{count} worker harnesses exited within {spread_ms} ms of each other, starting {start}: \
          {workers}. Treat this as one incident with a shared cause (host, harness binary, \
-         account or network) before respawning; each worker's own worker-died relay lists \
-         the tasks it parked.",
+         account or network) before respawning. This relay replaces the per-worker \
+         worker-died relays:\n{entries}",
         count = group.len(),
         start = first.at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     );
@@ -936,11 +967,18 @@ fn enqueue_worker_attention_relay_detail_with_key(
         "occurrence": occurrence,
     })
     .to_string();
+    // cas-26c8: a folded multi-worker death replaces Critical worker_died
+    // relays, so it keeps their priority.
+    let priority = if kind == "workers_died_together" {
+        NotificationPriority::Critical
+    } else {
+        NotificationPriority::High
+    };
     let notification_id = match supervisor_queue.notify_idempotent(
         &supervisor.id,
         kind,
         &payload,
-        NotificationPriority::High,
+        priority,
         &key,
     ) {
         Ok(NotifyIdempotentResult::Created(id)) => id,
@@ -996,7 +1034,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
         &body,
         supervisor.session.as_deref(),
         Some(&format!("{kind}: {worker}")),
-        Some(NotificationPriority::High),
+        Some(priority),
         &format!("worker-attention-outbox:{notification_id}"),
         Some(&cas_store::QueueOrigin::Daemon),
     ) {
@@ -1442,6 +1480,7 @@ mod worker_attention_tests {
                 at: t0 + chrono::Duration::milliseconds(600 * index as i64),
                 worker: (*worker).to_string(),
                 status: "exited with code 0".to_string(),
+                death: None,
             })
             .collect::<Vec<_>>();
 
@@ -1462,6 +1501,102 @@ mod worker_attention_tests {
         for worker in ["codex-a", "codex-b", "codex-c"] {
             assert!(prompt.contains(&format!("{worker} (exited with code 0)")), "{prompt}");
         }
+    }
+
+    /// cas-26c8 (spec-6194 P2.6, ct2_p2_died_together_folds): workers that die
+    /// unexpectedly together reach the supervisor as ONE Critical relay with
+    /// one entry per worker (tasks and cleaned tail), not N worker_died relays
+    /// plus a workers_died_together relay. A lone death is unchanged: one
+    /// worker_died relay.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ct2_p2_died_together_folds() {
+        use crate::mcp::tools::service::orphan_recovery::recover_worker_deferring_relay;
+        use super::super::queue_and_events::{DeferredWorkerDeath, ObservedWorkerExit};
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "provision-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "provision-test");
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let t0 = chrono::Utc::now() - chrono::Duration::seconds(30);
+        let died = |name: &str, offset_ms: i64| {
+            let mut worker = Agent::new(format!("{name}-id"), name.to_string());
+            worker.role = AgentRole::Worker;
+            worker.status = AgentStatus::Active;
+            worker.factory_session = Some("provision-test".to_string());
+            agents.register(&worker).unwrap();
+            let exit = crate::prompt_revalidation::WorkerExitCause {
+                exit_code: Some(0),
+                exit_signal: None,
+                output_tail: Some(format!("{name} last line")),
+            };
+            let summary = recover_worker_deferring_relay(
+                &cas_dir,
+                agents.as_ref(),
+                &worker,
+                &[],
+                "exited with code 0",
+                Some(&exit),
+            )
+            .expect("an unexpected death is recorded with its relay held");
+            ObservedWorkerExit {
+                at: t0 + chrono::Duration::milliseconds(offset_ms),
+                worker: name.to_string(),
+                status: exit.status(),
+                death: Some(DeferredWorkerDeath {
+                    agent: worker,
+                    summary,
+                    reason: "exited with code 0".to_string(),
+                    exit,
+                }),
+            }
+        };
+        let notices = || {
+            crate::store::open_supervisor_queue_store(&cas_dir)
+                .unwrap()
+                .list_pending("supervisor-id")
+                .unwrap()
+        };
+        assert!(notices().is_empty(), "a held death has not relayed yet");
+
+        daemon.recent_worker_exits = vec![died("codex-a", 0), died("codex-b", 700), died("codex-c", 1_200)];
+        daemon.relay_correlated_worker_deaths();
+        let rows = notices();
+        let kinds: Vec<&str> = rows.iter().map(|row| row.event_type.as_str()).collect();
+        assert_eq!(kinds, ["workers_died_together"], "one folded relay, no per-worker relays");
+        assert_eq!(rows[0].priority, cas_store::NotificationPriority::Critical);
+        let prompts = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(20)
+            .unwrap();
+        // pin: the AC is exactly one supervisor wake for the whole group.
+        assert_eq!(prompts.len(), 1, "one wake: {prompts:?}");
+        let body = &prompts[0].prompt;
+        for worker in ["codex-a", "codex-b", "codex-c"] {
+            let entry = format!("- {worker} (exited with code 0)");
+            let tail = format!("> {worker} last line");
+            // pin: one entry per worker naming its exit status (the folded per-worker relay).
+            assert!(body.contains(&entry), "{body}");
+            // pin: each entry quotes that worker's cleaned output tail.
+            assert!(body.contains(&tail), "each entry carries the worker's cleaned tail: {body}");
+        }
+        assert!(daemon.recent_worker_exits.is_empty());
+
+        daemon.recent_worker_exits = vec![died("codex-d", 0)];
+        daemon.relay_correlated_worker_deaths();
+        let rows = notices();
+        let lone: Vec<_> = rows.iter().filter(|row| row.event_type == "worker_died").collect();
+        assert_eq!(lone.len(), 1, "a lone death relays as before: {rows:?}");
+        assert!(lone[0].payload.contains("codex-d"), "{}", lone[0].payload);
+        assert_eq!(lone[0].priority, cas_store::NotificationPriority::Critical);
+        assert_eq!(
+            rows.iter().filter(|row| row.event_type == "workers_died_together").count(),
+            1,
+            "a lone death adds no group relay"
+        );
     }
 
     /// cas-4143: a parked teammate permission request becomes one durable

@@ -340,7 +340,6 @@ async fn daemon_provisioning_deadline_retires_only_stalled_generation() {
 /// the session log. The supervisor is still told.
 #[test]
 fn provisioning_failure_marks_the_spawn_request_failed_with_its_reason_cas_d741() {
-    use cas_store::SpawnQueueStore;
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();

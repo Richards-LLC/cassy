@@ -271,8 +271,8 @@ factory session, epic focus, active task claims, live workers and registered
 branches. `peer=<name>` or `peer=<name>@<machine>` selects one supervisor and
 implies detail. `json=true` returns the full report without truncation.
 The terminal equivalent is `cas peers --detail`, with `--peer <name>` and
-`--json` accepting the same filters and output contract. Presence appears first,
-then peers or details, then the mailbox footer. JSON carries the typed
+`--json` accepting the same filters and output contract. The outcome and peer
+count appear first, followed by owner-grouped work and presence/mailbox receipts. JSON carries the typed
 `cloud_presence` record, `cloud_presence_message`, and `mailbox_status` too.
 Agent pagination echoes the returned `next_sort_cursor` with the other cursors.
 
@@ -311,13 +311,33 @@ Cloud locks are private to one user account: a team peer on another account show
 `Claims not visible (different account)` and worker tasks as `not visible`.
 If the caller's account identity is unknown, the report says so. JSON includes
 `claims_visibility`, `user_id`, `team_id` and `project_id`; an empty claims array
-is authoritative only when visibility is `same_account`. The viewer account
+is authoritative only when visibility is `same_account` and `claims_status.state`
+is `ready`. A failed lock read is `unavailable`, not an empty inventory. The viewer account
 comes from the token-owned agent list, independently of caller session lookup.
 Operator CLI identity uses the same session/ancestor-PID lookup as status.
 Peer discovery also excludes every agent registered in this project's local
 agent store, so a plain terminal never counts this clone's supervisors as peers.
-The view fits 72 columns, in this order: caller presence, peers and their work,
-recorded epic splits, then mailbox health. JSON exposes `epic_splits` separately
+The detail view fits 72 columns and shows each peer's worktree and scratch roots,
+claim-owned epics and target branches, linked task status/owner/claim, observed
+PR URLs and head SHAs, workers by machine, and existing waiting-merge records
+(`awaiting_merge`, `parked_delivery`, `open_epic_pr`, `merge_queue`). A parked
+assignment remains an observation after its lease is released; ambiguous names
+never associate a delivery with a machine. Ownership comes only from active
+claims. Each section carries its own state and observation time; private work,
+stale snapshots, unavailable records and unknown PR details remain explicit.
+The default scratch base is shared and labelled accordingly.
+
+PR details reuse the existing bounded CI watcher poll, persisted on its blocking
+job and published by the existing background presence worker. No extra GitHub
+call runs on the control loop. Older peers without published observations show
+`unavailable`, and heartbeat renewal never makes an old PR snapshot fresh. PR
+snapshots cap at 100 records/32 KiB and label truncation; branch names never
+invent PR details. Per-peer splits come from the peer's existing local split
+records. The report is read-only: it shows conflicts but does not prevent them,
+register remote workers locally, or include Slack threads/asks.
+
+Presence and local recorded epic splits follow the peer work, then mailbox
+health. JSON exposes `epic_splits` separately
 from the health-only `mailbox_status`. Each split retains its stored `state` and
 an effective `display_state` (`expired` for a lapsed pending proposal), its task
 shares, peer, reason, expiry and decision time.

@@ -3367,6 +3367,12 @@ impl FactoryDaemon {
                             &previously_queued,
                             &previously_armed,
                         )?;
+                        // Reuse this existing bounded background read. Presence
+                        // publishes the local snapshot; the control loop does
+                        // no inventory I/O and adds no GitHub request.
+                        crate::cloud::peers_detail::save_pr_snapshot(
+                            &watch_cas_dir, std::mem::take(&mut queue_poll.observed_prs), chrono::Utc::now(),
+                        );
                         // cas-fd0a: name each ejection's failing job for the
                         // wake. GitHub calls stay on this blocking task
                         // (GH #1165).
@@ -4390,6 +4396,7 @@ impl FactoryDaemon {
         // cas-d2a2: queue stamps run on the StoreWorker through the queue
         // job lanes; drain the lanes first so no critical stamp is still
         // waiting on a lane while the StoreWorker reports idle (jobs.rs).
+        let pointers_idle = self.finish_pointer_jobs_for_shutdown(timeout);
         let queue_cas_dir = self.app.cas_dir().to_path_buf();
         if !self.queue_jobs.drain_for_shutdown(&queue_cas_dir, timeout) {
             tracing::warn!("prompt-queue job lanes still busy at shutdown");
@@ -4403,7 +4410,7 @@ impl FactoryDaemon {
                 "factory store worker still busy at shutdown"
             );
         }
-        idle
+        idle && pointers_idle
     }
 
     /// Hand the latest epic-focus write to the store worker (cas-5e72).

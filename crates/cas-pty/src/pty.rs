@@ -1357,6 +1357,9 @@ impl PtyConfig {
         }
 
         let mut args = vec!["--dangerously-skip-permissions".to_string()];
+        if claude_supports_flag("--name") {
+            args.extend(["--name".into(), name.into()]);
+        }
         if claude_supports_chrome_flag() {
             args.push("--chrome".to_string());
         } else {
@@ -2076,62 +2079,51 @@ fn push_codex_mcp_server_args(
     }
 }
 
-/// Returns `true` when the installed `claude` CLI supports the `--effort` flag.
-///
-/// Probes by spawning `claude --help` once and scanning its output for
-/// `--effort`. The result is cached in a `OnceLock` for the lifetime of the
-/// process — subsequent calls return the cached value immediately.
-///
-/// **Conservative failure mode**: if `claude` is not on PATH, or the probe
-/// subprocess fails for any reason, returns `false`. The caller should then
-/// skip injecting `--effort` rather than risk a silent crash on unsupported
-/// CLI versions (cas-6ee8).
-///
-/// **Test/CI override**: set the `CAS_FACTORY_EFFORT_SUPPORTED` env var to
-/// `"1"` (force supported) or `"0"` (force unsupported) to bypass the probe
-/// entirely. This prevents `OnceLock` state from leaking across tests.
-pub(crate) fn claude_supports_effort_flag() -> bool {
+/// Exact option support from one successful, cached `claude --help` probe.
+/// A failed probe advertises no capabilities. The comma/whitespace-separated
+/// override is for deterministic tests; an empty value means none supported.
+pub fn claude_supports_flag(flag: &str) -> bool {
+    use std::collections::BTreeSet;
     use std::sync::OnceLock;
-    static CACHE: OnceLock<bool> = OnceLock::new();
-
-    // Allow test / CI environments to bypass the probe via env var override.
-    match std::env::var("CAS_FACTORY_EFFORT_SUPPORTED").as_deref() {
-        Ok("1") => return true,
-        Ok("0") => return false,
-        _ => {}
+    if let Ok(flags) = std::env::var("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS") {
+        return claude_help_options(&flags).contains(flag);
     }
-
-    *CACHE.get_or_init(|| {
+    static OPTIONS: OnceLock<BTreeSet<String>> = OnceLock::new();
+    OPTIONS.get_or_init(|| {
         let Ok(output) = std::process::Command::new("claude").arg("--help").output() else {
-            return false;
+            return BTreeSet::new();
         };
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        stdout.contains("--effort") || stderr.contains("--effort")
-    })
+        if !output.status.success() {
+            return BTreeSet::new();
+        }
+        claude_help_options(&format!("{}\n{}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)))
+    }).contains(flag)
+}
+
+fn claude_help_options(help: &str) -> std::collections::BTreeSet<String> {
+    help.split(|character: char| character.is_whitespace() || character == ',')
+        .filter(|token| token.starts_with("--") && token.len() > 2)
+        .map(str::to_owned)
+        .collect()
+}
+
+pub(crate) fn claude_supports_effort_flag() -> bool {
+    match std::env::var("CAS_FACTORY_EFFORT_SUPPORTED").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => claude_supports_flag("--effort"),
+    }
 }
 
 /// Whether the installed Claude CLI accepts `--chrome`. Shared by factory
-/// panes and the `cas claude --bare` launcher. The cached `claude --help`
-/// result fails closed; `CAS_FACTORY_CHROME_SUPPORTED=1|0` overrides it in tests.
+/// panes and the `cas claude --bare` launcher; preserves the test override.
 pub fn claude_supports_chrome_flag() -> bool {
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<bool> = OnceLock::new();
-
     match std::env::var("CAS_FACTORY_CHROME_SUPPORTED").as_deref() {
-        Ok("1") => return true,
-        Ok("0") => return false,
-        _ => {}
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => claude_supports_flag("--chrome"),
     }
-
-    *CACHE.get_or_init(|| {
-        let Ok(output) = std::process::Command::new("claude").arg("--help").output() else {
-            return false;
-        };
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        stdout.contains("--chrome") || stderr.contains("--chrome")
-    })
 }
 
 /// Resolve `cas` using the child's PATH, with the same last-override and

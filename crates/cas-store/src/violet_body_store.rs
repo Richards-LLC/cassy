@@ -128,7 +128,28 @@ impl SqliteVioletAdmissionStore {
     pub fn confirm_body_dispatch(
         &self, job: &VioletConsumptionJob, current_instance: &str, response: &str,
     ) -> Result<bool> {
+        let response_value: serde_json::Value = serde_json::from_str(response)
+            .map_err(|e|StoreError::Other(e.to_string()))?;
+        let delivery = &response_value["receipt"]["delivery"];
+        if response_value["schema"] != "cassy.coordination/v1"
+            || response_value["code"] != "completed"
+            || response_value["receipt"]["request_id"].as_str() != Some(job.request_id.as_str())
+            || delivery["id"].as_str() != Some(job.delivery_id.as_str())
+            || delivery["registration_id"].as_str() != Some(job.registration_id.as_str())
+            || delivery["delivery_generation"].as_i64() != Some(job.delivery_generation)
+            || delivery["consumption"].as_str() != Some(job.state.as_str())
+            || delivery["status"] != "admitted"
+        {
+            return Err(StoreError::Other("consumption receipt does not match the frozen request".into()));
+        }
         crate::shared_db::with_immediate_write_txn_pooled(&self.queue.conn, |tx| {
+            let identity_matches: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM violet_admissions
+                WHERE delivery_id=?1 AND project_id=?2 AND occurrence_id=?3 AND reader_slot_id=?4)",
+                params![job.delivery_id,job.project_id,delivery["occurrence_id"].as_str(),
+                    delivery["reader_slot_id"].as_str()], |r|r.get(0))?;
+            if !identity_matches {
+                return Err(StoreError::Other("consumption receipt has foreign occurrence/reader identity".into()));
+            }
             let matching = tx.execute("UPDATE violet_consumption_outbox SET response_json=?2
                 WHERE request_id=?1 AND input_digest=?3 AND input_json=?4",
                 params![job.request_id,response,job.input_digest,job.input_json])?;
@@ -145,6 +166,62 @@ impl SqliteVioletAdmissionStore {
                       AND a.factory_session=violet_body_permits.factory_session
                       AND a.recipient=violet_body_permits.recipient)",
                 params![job.delivery_id,job.registration_id,job.delivery_generation,current_instance,job.request_id])? == 1)
+        })
+    }
+
+    /// Immutable requests survive process death and failed/lost acknowledgements.
+    /// Background callers retry these exact bytes and UUIDs; an old instance's
+    /// response can settle its outbox entry but can never arm the new instance.
+    pub fn due_consumption_jobs(&self, registration: &str, project: &str, now_ms: i64) -> Result<Vec<VioletConsumptionJob>> {
+        let conn = crate::shared_db::lock_connection(&self.queue.conn)?;
+        let mut stmt = conn.prepare(&format!("SELECT {JOB_COLUMNS} FROM violet_consumption_outbox
+            WHERE registration_id=?1 AND project_id=?2 AND response_json IS NULL AND retry_at<=?3
+            ORDER BY rowid LIMIT 25"))?;
+        Ok(stmt.query_map(params![registration,project,now_ms],job_from_row)?
+            .collect::<std::result::Result<Vec<_>,_>>()?)
+    }
+
+    pub fn defer_consumption_job(&self, job: &VioletConsumptionJob, retry_at: i64) -> Result<()> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.queue.conn)?;
+            conn.execute("UPDATE violet_consumption_outbox SET retry_at=?2,attempts=attempts+1
+                WHERE request_id=?1 AND response_json IS NULL AND input_digest=?3 AND input_json=?4",
+                params![job.request_id,retry_at,job.input_digest,job.input_json])?;
+            Ok(())
+        })
+    }
+
+    /// Snapshot local model-side surfacing separately from transport handoff.
+    /// Queued and uncertain asks never manufacture consumed evidence.
+    pub fn prepare_consumed_receipts(&self, registration: &str, project: &str, instance: &str,
+        request_id: impl Fn() -> String) -> Result<usize> {
+        crate::shared_db::with_immediate_write_txn_pooled(&self.queue.conn, |tx| {
+            let rows: Vec<(String,i64)> = {
+                let mut stmt = tx.prepare("SELECT a.delivery_id,a.delivery_generation FROM violet_admissions a
+                    JOIN prompt_queue q ON q.id=a.prompt_id
+                    WHERE a.registration_id=?1 AND a.project_id=?2 AND a.ack_pending=0
+                      AND ((q.acked_at IS NOT NULL AND q.acked_via='explicit_ack') OR EXISTS(
+                        SELECT 1 FROM prompt_queue_recipient_seen s WHERE s.prompt_id=q.id
+                          AND s.recipient=a.recipient AND s.source IN ('hook_surfaced','inbox_poll','observed_wake')))
+                      AND NOT EXISTS(SELECT 1 FROM violet_consumption_outbox o
+                        WHERE o.delivery_id=a.delivery_id AND o.delivery_generation=a.delivery_generation AND o.state='consumed')
+                    ORDER BY a.rowid LIMIT 25")?;
+                stmt.query_map(params![registration,project], |r|Ok((r.get(0)?,r.get(1)?)))?
+                    .collect::<std::result::Result<Vec<_>,_>>()?
+            };
+            for (delivery,generation) in &rows {
+                let id = request_id();
+                let input = serde_json::json!({"schema":"cassy.coordination/v1", "request_id":id,
+                    "actor":{"registration_id":registration},"delivery_generation":generation,
+                    "state":"consumed","observed_at":Utc::now().to_rfc3339()}).to_string();
+                let digest = format!("{:x}", Sha256::digest(input.as_bytes()));
+                tx.execute("INSERT INTO violet_consumption_outbox
+                    (request_id,delivery_id,registration_id,project_id,delivery_generation,instance_id,state,input_json,input_digest)
+                    VALUES (?1,?2,?3,?4,?5,?6,'consumed',?7,?8)",
+                    params![id,delivery,registration,project,generation,instance,input,digest])?;
+                tx.execute("UPDATE violet_admissions SET consumption='consumed' WHERE delivery_id=?1",[delivery])?;
+            }
+            Ok(rows.len())
         })
     }
 

@@ -40,8 +40,8 @@ async fn cas_9efb_merge_ci_probe_runs_on_external_lane_without_blocking_control(
         let ready = refresh.take_delivery_read(&mut daemon.queue_jobs);
         slowest = slowest.max(pass.elapsed());
         external_seen |= daemon.queue_jobs.job_lanes().unwrap().lane_stats().into_iter().any(|stats| {
-            stats.lane == super::super::jobs::Lane::External && stats.running.is_some_and(|job| {
-                job.key == super::super::factory_jobs::DELIVERY_READ_KEY
+            stats.running.is_some_and(|job| {
+                job.lane == super::super::jobs::Lane::External && job.key == super::super::factory_jobs::DELIVERY_READ_KEY
             })
         });
         if let Some(ready) = ready { break ready; }

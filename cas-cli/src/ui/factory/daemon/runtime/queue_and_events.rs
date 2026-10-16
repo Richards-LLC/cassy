@@ -17429,36 +17429,28 @@ mod wake_recipient_regressions_gh1101 {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
         let id = queue
             .enqueue("supervisor", "worker", "fix findings")
             .unwrap();
+        // cas-786a6: the decline is a QueueStamp (inline here) and its count
+        // comes from the snapshot the caller passes.
+        let mut decline = |daemon: &mut FactoryDaemon, tool| {
+            let prior = queue.wake_gate_state(id).ok();
+            daemon.stamp_worker_wake_decline(id, "worker", prior, WakeDecision::deny("busy"), tool)
+        };
         for _ in 0..4 {
-            record_worker_wake_decline(
-                queue.as_ref(),
-                id,
-                WakeDecision::deny("busy"),
-                ToolCallEvidence::InFlight,
-            )
-            .unwrap();
+            decline(&mut daemon, ToolCallEvidence::InFlight);
         }
         assert_eq!(queue.wake_gate_state(id).unwrap(), (0, None));
         for tool in [ToolCallEvidence::Idle, ToolCallEvidence::Unknown] {
-            record_worker_wake_decline(queue.as_ref(), id, WakeDecision::deny("busy"), tool)
-                .unwrap();
+            decline(&mut daemon, tool);
         }
         assert_eq!(queue.wake_gate_state(id).unwrap().0, 2);
         let saved = queue.wake_gate_state(id).unwrap();
-        assert!(
-            record_worker_wake_decline(
-                queue.as_ref(),
-                id,
-                WakeDecision::deny("busy"),
-                ToolCallEvidence::InFlight
-            )
-            .unwrap()
-            .is_none()
-        );
+        assert!(decline(&mut daemon, ToolCallEvidence::InFlight).is_none());
         assert_eq!(queue.wake_gate_state(id).unwrap(), saved);
+        assert_eq!(decline(&mut daemon, ToolCallEvidence::Idle), Some(3));
     }
 
     #[test]

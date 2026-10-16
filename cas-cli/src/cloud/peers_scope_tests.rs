@@ -233,7 +233,7 @@ fn cas_d58d_same_repo_scope_key_is_registered_operator_only_and_validated() {
             .iter()
             .any(|(key, value)| key == "peers.same_repo_scope" && value == "own")
     );
-    let registry = crate::config::meta::registry::registry();
+    let registry = crate::config::registry();
     let meta = registry.get("peers.same_repo_scope").expect("registered");
     assert_eq!(meta.default, "team");
     assert!(crate::config::operator_policy::is_operator_only_config_key("peers.same_repo_scope"));

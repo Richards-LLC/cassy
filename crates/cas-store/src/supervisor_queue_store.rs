@@ -882,7 +882,8 @@ mod tests {
             } => {}
             other => panic!("expected AlreadyExists prompt_delivered=true, got {other:?}"),
         }
-        assert_eq!(store.pending_count("sup-a").unwrap(), 1);
+        // cas-5871: a delivered outbox row is consumed, not pending forever.
+        assert_eq!(store.pending_count("sup-a").unwrap(), 0);
         // Different session key is a separate event (isolation).
         store
             .notify_idempotent(

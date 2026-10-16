@@ -107,10 +107,11 @@ impl SpawnIngress {
             {
                 self.ready.push_back(result);
             } else if !matches!(result.outcome, Ok(ExternalOutcome::Done(_))) {
-                self.ready.push_back(Err(format!(
-                    "critical spawn poll did not complete: {:?}",
-                    result.outcome
-                )));
+                let detail = match result.outcome {
+                    Err(error) => format!("critical spawn poll panicked: {}", error.message),
+                    _ => "critical spawn poll was dropped".into(),
+                };
+                self.ready.push_back(Err(detail));
             }
         }
     }

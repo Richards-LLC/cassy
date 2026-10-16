@@ -86,7 +86,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("message", "Body chars (configurable defaults): 1200; blocker/merge 2500; task notes 1500. Over-cap operator/Commander refused; supervisor to agent spills to artifact."),
     ("urgent", "Interrupt recipient and inject next; discards in-flight work."),
     ("blocker", "Blocker escalation; wakes idle supervisor."),
-    ("merge_request", "Merge request for parked task_id."),
+    ("merge_request", "Parked task_id merge request."),
     ("in_reply_to", "notification_id of direct message answered."),
     ("kind", "answer|status|receipt|ask|blocker; worker status/ready wakes supervisor."),
     ("attachment", "Published artifact id for a Commander turn."),
@@ -95,12 +95,12 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("sticky", "Broadcast: late joiners get it."),
     ("task_id", "Parked task for merge_request; remind: bind to task."),
     // cas-6ccb: polled rows can resurface once until acknowledged.
-    ("notification_id", "message_ack/message_status: the notification id. inbox_poll: read it even if transport holds it; polled rows not acked reappear once."),
+    ("notification_id", "message_ack/message_status: its id. inbox_poll: read it even if transport holds it; polled rows not acked reappear once."),
     ("limit", "inbox_poll: max rows."),
     ("name", "register/session_start: agent name."),
     ("agent_type", "register/session_start: primary, sub_agent, worker or ci."),
     ("parent_id", "register/session_start: parent agent id."),
-    ("session_id", "register/session_start/session_end: harness session id."),
+    ("session_id", "register/session_start/session_end: harness id."),
     ("remind_message", "Required reminder text; message kind=ask: default taken at deadline."),
     ("remind_delay_secs", "Delay seconds; message kind=ask: deadline."),
     ("remind_event", "task_completed, task_blocked, worker_idle, epic_completed; branch_contained_in, tag_exists, ci_completed require cross_session=true."),
@@ -108,7 +108,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("remind_id", "remind_cancel: reminder id."),
     ("remind_ttl_secs", "TTL seconds: default 3600; external default 604800 (7 days); 0=never."),
     ("cross_session", "remind: survive session end and task close."),
-    ("scope", "peers: all = your account's supervisors in every project."),
+    ("scope", "peers: all=account-wide."),
 ];
 
 /// Messaging and reminder parameters the supervisor `factory` tool does not

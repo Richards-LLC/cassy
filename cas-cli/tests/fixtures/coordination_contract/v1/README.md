@@ -44,6 +44,7 @@ the `path`:
 `captured/production-2026-10-16.json` holds read-only production probes, taken
 before any fixture was trusted. No event, claim or lock was created or leased.
 They show three things:
+
 - The coordination routes answer in `cassy.coordination/v1` with the full
   receipt.
 - The v1 activity claim and ack are unchanged: `{events, denied}` and

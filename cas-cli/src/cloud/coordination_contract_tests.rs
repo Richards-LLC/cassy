@@ -114,6 +114,7 @@ fn every_fixture_is_a_v1_surface_with_stable_codes_and_full_receipts() {
             let Some(code) = payload.get("code") else {
                 continue;
             };
+            // pin: the schema string is the wire protocol's version identity.
             assert_eq!(payload["schema"], CONTRACT, "{label}: schema");
             serde_json::from_value::<CoordinationCode>(code.clone())
                 .unwrap_or_else(|_| panic!("{label}: unknown code {code}"));

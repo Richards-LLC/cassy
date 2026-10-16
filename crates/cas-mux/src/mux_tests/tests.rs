@@ -3558,7 +3558,16 @@ async fn urgent_inject_is_a_per_pane_state_machine() {
     );
 
     tokio::time::sleep(floor).await;
-    let done = mux.advance_injects().await;
+    // The payload is queued on this advance; its write receipt reports on
+    // this or a following one.
+    let mut done = mux.advance_injects().await;
+    for _ in 0..50 {
+        if !done.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        done = mux.advance_injects().await;
+    }
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].ticket, ticket);
     assert_eq!(done[0].result.as_ref().unwrap(), &InjectOutcome::Delivered);
@@ -3664,13 +3673,14 @@ async fn operator_input_during_the_settle_is_held_until_the_payload_is_submitted
         .unwrap();
     assert!(mux.input_held("held"));
     tokio::time::sleep(floor).await;
-    let done = mux.advance_injects().await;
-    let done = if done.is_empty() {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        mux.advance_injects().await
-    } else {
-        done
-    };
+    let mut done = mux.advance_injects().await;
+    for _ in 0..50 {
+        if !done.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        done = mux.advance_injects().await;
+    }
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].result.as_ref().unwrap(), &InjectOutcome::Delivered);
     // The submit CR follows 150 ms later; held input waits for it.

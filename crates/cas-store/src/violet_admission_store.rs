@@ -284,6 +284,48 @@ mod tests {
         stale.registration_id = "racing-successor".into();
         assert!(store.adopt_unread(&stale).is_err());
     }
+
+    #[test]
+    fn cas_c423_store_rebind_rolls_back_both_routes_and_refuses_transport_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let row = input();
+        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        let first = store.admit(&row).unwrap();
+        let binding = successor(&row);
+        let db = Connection::open(root.path().join("cas.db")).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER fail_rebind BEFORE UPDATE OF registration_id ON violet_admissions
+            BEGIN SELECT RAISE(ABORT, 'rebind write failed'); END;",
+        )
+        .unwrap();
+        let error = store.adopt_unread(&binding).unwrap_err().to_string();
+        assert!(error.contains("rebind write failed"), "{error}");
+        let state: (String, String) = db
+            .query_row(
+                "SELECT q.target,a.registration_id FROM violet_admissions a
+            JOIN prompt_queue q ON a.prompt_id=q.id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (row.recipient.clone(), row.registration_id));
+        db.execute_batch("DROP TRIGGER fail_rebind").unwrap();
+        let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+        queue.mark_transport_delivered(first.prompt_id).unwrap();
+        let error = store.adopt_unread(&binding).unwrap_err().to_string();
+        assert!(error.contains("consumption recovery"), "{error}");
+        assert!(
+            queue
+                .peek_unseen_for_recipient(&binding.recipient, Some(&binding.factory_session), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            queue.peek_all(10).unwrap().len(),
+            0,
+            "transport uncertainty does not replay the ask"
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

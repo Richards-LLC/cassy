@@ -1949,7 +1949,7 @@ impl WorkerSpawnContext {
                                 notices.push(notice);
                             }
                         } else {
-                            notices.push(format!("EPIC BASE REFRESH SKIPPED: '{parent_branch}' recorded parent '{parent}' does not resolve locally or on origin; using the existing epic tip unchanged."));
+                            notices.push(format!("EPIC BASE REFRESH SKIPPED: '{parent_branch}' recorded parent '{parent}' has no resolvable local or cached origin ref; using the existing epic tip unchanged."));
                         }
                     }
                     if !existing_remote {

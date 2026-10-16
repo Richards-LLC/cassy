@@ -36,7 +36,8 @@ impl GitOperations {
     /// First use, rather than creation, publishes an epic. An absent remote
     /// is verified by ls-remote, never inferred from a failed fetch/cache miss.
     /// Creation uses an empty expected-old lease; an existing remote is never
-    /// overwritten by this operation.
+    /// overwritten by this operation. No recorded parent (`None`) means
+    /// publish the existing local tip as-is; never infer a trunk refresh.
     pub(crate) fn ensure_epic_published(
         &self,
         branch: &str,

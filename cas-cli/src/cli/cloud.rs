@@ -2233,7 +2233,7 @@ pub(crate) fn status_pull_watermarks(
     };
     let team = match project_id {
         Some(project_id) => {
-            queue.get_metadata(&format!("last_team_pull_at_{team_id}_{project_id}"))?
+            queue.get_metadata(&pull_watermark_key(Some(team_id), project_id))?
         }
         None => None,
     }
@@ -2245,6 +2245,15 @@ pub(crate) fn status_pull_watermarks(
             format!("{personal} (team-linked: personal scope is not pulled)"),
         ),
     ])
+}
+
+/// The content pull scope used by sync, status and destructive purge safety.
+/// A team-linked project's personal watermark is historical, not a fallback.
+fn pull_watermark_key(team_id: Option<&str>, project_id: &str) -> String {
+    match team_id {
+        Some(team) => format!("last_team_pull_at_{team}_{project_id}"),
+        None => "last_pull_at".to_string(),
+    }
 }
 
 /// [`status_pull_watermarks`] for this checkout's configured scope.
@@ -5632,7 +5641,7 @@ fn execute_team_memories(
 // PURGE-FOREIGN - Remove foreign-project entities and re-pull
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Default age (in days) beyond which `last_pull_at` is considered stale and a
+/// Default age (in days) beyond which the active pull scope is considered stale and a
 /// destructive purge is refused. A purge on a machine that has not pulled
 /// recently re-pulls an out-of-date snapshot over freshly deleted local rows.
 pub const PURGE_STALE_THRESHOLD_DAYS: i64 = 7;
@@ -6234,7 +6243,7 @@ pub enum PurgeRefusal {
         age_days: i64,
         threshold_days: i64,
     },
-    /// `last_pull_at` exists but cannot be parsed — treated as unknown, and
+    /// The active pull timestamp exists but cannot be parsed — treated as unknown, and
     /// unknown is not safe.
     UnreadablePullTimestamp { last_pull_at: String },
     /// Local rows are still queued for push: deleting them loses work the
@@ -6252,7 +6261,7 @@ impl PurgeRefusal {
     pub fn reason(&self) -> String {
         match self {
             PurgeRefusal::NeverPulled => {
-                "no successful cloud pull recorded (last_pull_at is unset) \
+                "no successful cloud pull recorded for the active sync scope \
 — a purge would delete local rows and re-pull from an unverified baseline"
                     .to_string()
             }
@@ -6266,7 +6275,7 @@ threshold is {threshold_days} days — the re-pull would restore an out-of-date 
 everything deleted since"
             ),
             PurgeRefusal::UnreadablePullTimestamp { last_pull_at } => format!(
-                "cannot read last_pull_at ({last_pull_at:?}); sync freshness is unknown and \
+                "cannot read the active pull timestamp ({last_pull_at:?}); sync freshness is unknown and \
 unknown is not safe for a destructive purge"
             ),
             PurgeRefusal::UnpushedRows { pending, sample } => format!(
@@ -6725,6 +6734,8 @@ fn inspect_purge_state(
     allow_majority_foreign: bool,
     include_unknown: bool,
 ) -> anyhow::Result<PurgeInspection> {
+    use rusqlite::OptionalExtension;
+
     let db_path = cas_root.join("cas.db");
     let conn = rusqlite::Connection::open(&db_path)?;
     // Use doctor's cross-DB classifier so a legacy backfill that stamped
@@ -6739,13 +6750,19 @@ fn inspect_purge_state(
         include_unknown,
     )?;
     let proven_rule_count = count_proven_attributed_rules(&conn, &analysis.delete_set)?;
+    // cas-7e38: team-linked sync writes only the team+project watermark.
+    // Never let a frozen (or freshly unrelated) personal pull authorize this
+    // scope. Missing keys remain unknown; config/schema/read failures abort.
+    let cloud = CloudConfig::load_from_cas_dir(cas_root)?;
+    cloud.validate_team_only().map_err(anyhow::Error::msg)?;
+    let key = pull_watermark_key(cloud.active_team_id().as_deref(), project_id);
     let last_pull_at: Option<String> = conn
         .query_row(
-            "SELECT value FROM sync_metadata WHERE key = 'last_pull_at'",
-            [],
+            "SELECT value FROM sync_metadata WHERE key = ?1",
+            [&key],
             |r| r.get(0),
         )
-        .ok();
+        .optional()?;
     let pending = queued_changes_outside_purge(&conn, &analysis.delete_set)?;
     // The concrete delete set already exempts intentional replica cleanup.
     // Every remaining queue row survives the purge; its count is information,

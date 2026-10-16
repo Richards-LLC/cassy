@@ -166,7 +166,7 @@ fn cas_7f60_dead_owner_is_adoptable_with_evidence() {
     use cas_types::AgentStatus::*;
     let now = Utc::now();
     let agents = vec![
-        agent("id-dead", "old-sup", Shutdown, 7_200),
+        agent("id-dead", "old-sup", Shutdown, 7_300),
         agent("id-crashed", "crashed-sup", Active, 3 * 3_600),
         agent("id-live", "live-sup", Active, 30),
         agent("id-slow", "slow-sup", Active, 600),
@@ -288,18 +288,23 @@ async fn close_finished_epic(child_on_main: bool) -> HandlerClose {
         "reason": "all children terminal; content shipped to main",
     }))
     .unwrap();
-    let response = service.task(Parameters(request)).await.unwrap();
-    let text = response
-        .content
-        .iter()
-        .filter_map(|content| match &content.raw {
-            rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let (is_error, text) = match service.task(Parameters(request)).await {
+        Ok(response) => (
+            response.is_error == Some(true),
+            response
+                .content
+                .iter()
+                .filter_map(|content| match &content.raw {
+                    rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        Err(error) => (true, error.message.to_string()),
+    };
     HandlerClose {
-        is_error: response.is_error == Some(true),
+        is_error,
         text,
         task: store.get(&epic.id).unwrap(),
     }

@@ -119,9 +119,6 @@ enum ReusedFactoryBranchStart {
     },
 }
 
-/// Red-first stub (cas-7ce6).
-const CAS_7CE6_RED_STUB: bool = true;
-
 /// cas-7ce6: keep a parked tip on its own per-task delivery branch, unless a
 /// branch of that name already points somewhere else.
 fn keep_parked_delivery_branch(
@@ -130,9 +127,6 @@ fn keep_parked_delivery_branch(
     task_id: &str,
     tip: &str,
 ) -> Option<String> {
-    if CAS_7CE6_RED_STUB {
-        return None;
-    }
     let branch = format!("{worker_branch}-{task_id}");
     let git = GitOperations::new(worktree_path.to_path_buf());
     match git.resolve_commit(&format!("refs/heads/{branch}")) {

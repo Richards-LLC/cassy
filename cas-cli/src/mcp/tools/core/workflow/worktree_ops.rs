@@ -1267,9 +1267,6 @@ fn system_b_merge_source(id: &str, task_id: Option<&str>) -> (String, String) {
     (token.to_string(), format!("factory/{token}"))
 }
 
-/// Red-first stub (cas-7ce6).
-const CAS_7CE6_RED_STUB: bool = true;
-
 /// cas-7ce6: the branch that holds a parked task's reviewed `anchor`.
 ///
 /// - `Ok(None)`: merge `source` as asked.
@@ -1289,9 +1286,6 @@ fn parked_merge_source(
     task_id: &str,
     anchor: &str,
 ) -> Result<Option<String>, String> {
-    if CAS_7CE6_RED_STUB {
-        return Ok(None);
-    }
     let (Some(tip), Some(anchor_sha)) = (git.resolve_commit(source), git.resolve_commit(anchor))
     else {
         return Ok(None);

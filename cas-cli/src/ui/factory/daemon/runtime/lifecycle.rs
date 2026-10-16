@@ -1788,7 +1788,9 @@ mod worker_attention_tests {
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 2, "each contained delivery gets one notice, even as the queue changes");
         for row in rows {
+            // pin: the supervisor's delivered instruction must request close, not another merge (GH #1225).
             assert!(row.prompt.contains("awaiting worker close"));
+            // pin: a contained delivery must never receive the executable merge-now instruction (GH #1225).
             assert!(!row.prompt.contains("merge the ready delivery branch(es)"));
         }
     }

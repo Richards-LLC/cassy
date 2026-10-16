@@ -7204,30 +7204,56 @@ impl CasService {
             target_cache_mutation_authorized,
         );
         let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
+        let artifact_authorized = target_cache_mutation_authorized && req.artifacts.unwrap_or(false);
         let tasks = crate::store::open_task_store(&self.inner.cas_root)
             .map_err(|error| error.to_string())
-            .and_then(|store| store.list(None).map_err(|error| error.to_string()));
-        let closed_task_ids = tasks.as_ref().map(|tasks| tasks.iter()
-            .filter(|task| task.status == cas_types::TaskStatus::Closed)
-            .map(|task| task.id.clone()).collect()).unwrap_or_default();
-        let artifact_root = crate::config::project_factory_artifacts_root(&self.inner.cas_root, &crate::config::resolved_factory_artifacts_root(
-            config.factory().artifacts_root.as_deref(),
-        ));
+            .and_then(|store| {
+                store
+                    .list(if artifact_authorized {
+                        None
+                    } else {
+                        Some(cas_types::TaskStatus::Closed)
+                    })
+                    .map_err(|error| error.to_string())
+            });
+        let closed_task_ids = tasks
+            .as_ref()
+            .map(|tasks| {
+                tasks
+                    .iter()
+                    .filter(|task| task.status == cas_types::TaskStatus::Closed)
+                    .map(|task| task.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let artifact_root = crate::config::project_factory_artifacts_root(
+            &self.inner.cas_root,
+            &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()),
+        );
         // Artifact deletion is separate from process/cache cleanup. Unknown
         // close dates or reference evidence must preserve durable receipts.
-        let artifact_authorized = target_cache_mutation_authorized && req.artifacts.unwrap_or(false);
         let eligible = if artifact_authorized {
-            tasks.as_ref().map_err(|error| error.to_string()).and_then(|tasks|
-                eligible_artifact_tasks(&self.inner.cas_root, tasks, chrono::Utc::now()))
+            tasks
+                .as_ref()
+                .map_err(|error| error.clone())
+                .and_then(|tasks| {
+                    eligible_artifact_tasks(&self.inner.cas_root, tasks, chrono::Utc::now())
+                })
         } else {
             Ok(Default::default())
         };
         let artifact_cleanup = match eligible {
             Ok(eligible) => factory_artifact_cleanup(
-                &artifact_root, &closed_task_ids, artifact_authorized, &eligible),
+                &artifact_root,
+                &closed_task_ids,
+                artifact_authorized,
+                &eligible,
+            ),
             Err(error) => {
                 let mut inventory = factory_artifact_inventory(artifact_root, &closed_task_ids);
-                inventory.error = Some(format!("retention/reference evidence unavailable; preserved all artifacts: {error}"));
+                inventory.error = Some(format!(
+                    "retention/reference evidence unavailable; preserved all artifacts: {error}"
+                ));
                 inventory
             }
         };

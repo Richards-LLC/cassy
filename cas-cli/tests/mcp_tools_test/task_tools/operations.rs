@@ -3534,7 +3534,7 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
     let close_text = extract_text(close);
     assert!(
         close_text.contains(&dependent_id)
-            && close_text.contains("operator resolves Slack ownership"),
+            && close_text.contains("operator to resolve Slack ownership"),
         "close must surface the remaining hold and its reason: {close_text}"
     );
     assert!(

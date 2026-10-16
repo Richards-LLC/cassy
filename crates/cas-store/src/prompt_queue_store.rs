@@ -8955,6 +8955,71 @@ mod tests {
         );
     }
 
+    /// A same-name worker can change harness between attempts. A held Claude
+    /// inbox marker must not make the next PTY claim eligible for hook takeover.
+    #[test]
+    fn cas_1ba0_fresh_transport_claim_retires_a_previous_inbox_deferral() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-1ba0";
+        for token_api in [false, true] {
+            let id = store
+                .enqueue_with_session("supervisor", "worker-1", "decision", session)
+                .unwrap();
+            assert!(store.claim_recipient_transport(id, "worker-1").unwrap());
+            store.record_deferred_inbox(id, 123).unwrap();
+            store.release_recipient_transport(id, "worker-1").unwrap();
+            if token_api {
+                assert!(
+                    store
+                        .claim_recipient_transport_token(id, "worker-1")
+                        .unwrap()
+                        .is_some()
+                );
+            } else {
+                assert!(store.claim_recipient_transport(id, "worker-1").unwrap());
+            }
+            assert!(
+                store.deferred_inbox_state(id).unwrap().is_none(),
+                "new inject retires the old held copy"
+            );
+            assert!(
+                store
+                    .surface_unseen_for_recipient_without_transport_delivery(
+                        "worker-1",
+                        Some(session),
+                        10
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                store
+                    .surface_unseen_for_recipient_delivered_after(
+                        "worker-1",
+                        Some(session),
+                        10,
+                        Utc::now() - chrono::Duration::minutes(5)
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
+            // A new Teams write may defer again; only that new handoff is eligible.
+            store.record_deferred_inbox(id, 456).unwrap();
+            assert_eq!(store.deferred_inbox_state(id).unwrap().unwrap().1, 456);
+            assert_eq!(
+                store
+                    .surface_unseen_for_recipient_without_transport_delivery(
+                        "worker-1",
+                        Some(session),
+                        10
+                    )
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
     /// cas-a1ed review H1: a claim whose body is being typed into the pane is
     /// not a held Teams copy. The daemon claims, PTY-injects (a Codex
     /// recipient, or an urgent interrupt to Claude) and stamps Delivered

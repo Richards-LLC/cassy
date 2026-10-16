@@ -822,7 +822,11 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Peers(args) => peers::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Limits(args) => limits::execute(args, cli),
         Commands::Accounts(args) => accounts::execute(args, cli),
-        Commands::StatusLine(args) => statusline::execute(args, cli, require_cas_root(cas_root)?),
+        // cas-e1f4: outside a Cassy project the line still names the account.
+        Commands::StatusLine(args) => match cas_root {
+            Some(root) => statusline::execute(args, cli, root),
+            None => statusline::execute_account_only(args),
+        },
         Commands::Hook(args) => hook::execute(args, cli),
         Commands::Auth(cmd) => auth::execute(cmd, cli),
         Commands::Login(args) => auth::execute(&AuthCommands::Login(args.clone()), cli),

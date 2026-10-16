@@ -183,17 +183,53 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
         "Usage: cas claude <profile> [factory-args...]\n\nDetected Claude profiles:\n",
     );
 
-    for profile in profiles {
+    for profile in with_usage(profiles) {
         let login = login_state_label(profile.login_state);
         let active = if profile.active { " (active)" } else { "" };
+        let usage = profile
+            .usage
+            .as_deref()
+            .map(|usage| format!(" · {usage}"))
+            .unwrap_or_default();
         output.push_str(&format!(
-            "  {} — {} ({login}){active}\n",
+            "  {} — {} ({login}){active}{usage}\n",
             profile.name,
             profile.directory.display(),
         ));
     }
+    output.push_str(
+        "\nHit a usage limit? Switch in one step: cas claude <profile> (resume with --bare --continue).\n",
+    );
 
     Ok(output)
+}
+
+/// Live usage per logged-in account, fetched in parallel for at most four
+/// seconds, so the picker can mark an account whose limit is used up
+/// (cas-e1f4).
+fn with_usage(mut profiles: Vec<Profile>) -> Vec<Profile> {
+    let accounts = profiles
+        .iter()
+        .filter(|profile| profile.login_state != LoginState::LoggedOut)
+        .map(|profile| (profile.name.clone(), profile.directory.clone()))
+        .collect();
+    let usage = super::limits::usage_summaries(
+        crate::accounts::Provider::Claude,
+        accounts,
+        Duration::from_secs(4),
+    );
+    for profile in &mut profiles {
+        profile.usage = usage.get(&profile.name).cloned();
+    }
+    profiles
+}
+
+/// `<dir> (<email>)` for the launch line, or just the directory.
+fn account_line(home: &Path, profile_dir: &Path) -> String {
+    match crate::accounts::Provider::Claude.login_email(home, profile_dir) {
+        Some(email) => format!("{} ({email})", profile_dir.display()),
+        None => profile_dir.display().to_string(),
+    }
 }
 
 /// Bind a Claude subprocess to one profile's config and credential store.
@@ -253,13 +289,22 @@ fn create_and_log_in_new_profile(home: &Path, profile: &str) -> Result<String> {
         )
     })?;
 
-    let seeding = seed_profile_dir(
-        &home.join(".claude"),
-        &profile_dir,
-        &SHARED_PROFILE_ENTRIES,
-        &PRIVATE_PROFILE_ENTRIES,
-    )?;
-    report_seeding(&seeding, "~/.claude");
+    // cas-e1f4: once accounts share a base folder, a new account links to
+    // it; before that, it is seeded from ~/.claude as it always was.
+    if crate::accounts::Provider::Claude.base_dir(home).is_dir() {
+        let linked =
+            crate::accounts::link_new_account(crate::accounts::Provider::Claude, home, &profile_dir)?;
+        eprintln!("Linked shared config from ~/.cas/claude-base: {}", linked.join(", "));
+        eprintln!("Credentials and account identity remain private to this profile.");
+    } else {
+        let seeding = seed_profile_dir(
+            &home.join(".claude"),
+            &profile_dir,
+            &SHARED_PROFILE_ENTRIES,
+            &PRIVATE_PROFILE_ENTRIES,
+        )?;
+        report_seeding(&seeding, "~/.claude");
+    }
 
     eprintln!(
         "Logging in Claude account config: {}",
@@ -430,10 +475,14 @@ pub fn apply_profile_env(args: &ClaudeArgs) -> Result<()> {
                 io::stdin().is_terminal(),
                 io::stdout().is_terminal(),
             ) {
+                let profiles = with_usage(profiles);
                 prompt_for_profile(&home, &profiles)?
             } else {
                 // Non-interactive, or only one account exists: leave the
-                // ambient environment exactly as the caller set it.
+                // ambient environment exactly as the caller set it, but say
+                // which account that is (cas-e1f4).
+                let ambient = active_dir.clone().unwrap_or_else(|| home.join(".claude"));
+                eprintln!("Claude account (ambient): {}", account_line(&home, &ambient));
                 return Ok(());
             }
         }
@@ -441,7 +490,7 @@ pub fn apply_profile_env(args: &ClaudeArgs) -> Result<()> {
 
     let profile_dir = resolve_profile_dir(&home, &profile);
     warn_about_profile_state(&profile, &profile_dir);
-    eprintln!("Using Claude account config: {}", profile_dir.display());
+    eprintln!("Using Claude account config: {}", account_line(&home, &profile_dir));
 
     set_profile_env(&profile, &profile_dir);
     // `execute_bare` runs later in the same process; record the choice so the

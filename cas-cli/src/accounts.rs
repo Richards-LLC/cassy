@@ -154,6 +154,26 @@ fn codex_email(path: &Path) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
+/// The login email of the Claude account a process runs as (cas-e1f4):
+/// `<config_dir>/.claude.json` when `CLAUDE_CONFIG_DIR` is set, else Claude
+/// Code's default `~/.claude.json`.
+pub fn active_claude_email(home: &Path, config_dir: Option<&Path>) -> Option<String> {
+    match config_dir.filter(|dir| !dir.as_os_str().is_empty()) {
+        Some(dir) => claude_email(&dir.join(".claude.json")),
+        None => claude_email(&home.join(".claude.json")),
+    }
+}
+
+/// The login email of the Codex home a process runs as: `$CODEX_HOME`, else
+/// `~/.codex`.
+pub fn active_codex_email(home: &Path, codex_home: Option<&Path>) -> Option<String> {
+    let dir = codex_home
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.join(".codex"));
+    codex_email(&dir.join("auth.json"))
+}
+
 /// One account directory found under the home directory.
 #[derive(Debug, Clone, Serialize)]
 pub struct AccountDir {

@@ -232,9 +232,38 @@ pub fn execute(args: &StatusLineArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
         println!("{}", serde_json::to_string(&data)?);
     } else {
         let line = format_status_line(&data, args.no_color, args.minimal);
-        writeln!(io::stdout(), "{line}")?;
+        // cas-e1f4: always show which account this session uses.
+        let account = dirs::home_dir().and_then(|home| {
+            let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from);
+            crate::accounts::active_claude_email(&home, config_dir.as_deref())
+        });
+        match account {
+            Some(email) if args.no_color => writeln!(io::stdout(), "{email} | {line}")?,
+            Some(email) => writeln!(
+                io::stdout(),
+                "{}{email}{} | {line}",
+                colors::CYAN,
+                colors::RESET
+            )?,
+            None => writeln!(io::stdout(), "{line}")?,
+        }
     }
 
+    Ok(())
+}
+
+/// The status line outside a Cassy project: just the account, when known.
+pub fn execute_account_only(args: &StatusLineArgs) -> anyhow::Result<()> {
+    if args.json {
+        return Ok(());
+    }
+    let account = dirs::home_dir().and_then(|home| {
+        let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from);
+        crate::accounts::active_claude_email(&home, config_dir.as_deref())
+    });
+    if let Some(email) = account {
+        writeln!(io::stdout(), "{email}")?;
+    }
     Ok(())
 }
 

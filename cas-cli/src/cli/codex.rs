@@ -192,17 +192,50 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
     let mut output =
         String::from("Usage: cas codex <profile> [factory-args...]\n\nDetected Codex profiles:\n");
 
-    for profile in profiles {
+    for profile in with_usage(profiles) {
         let login = super::account_picker::login_state_label(profile.login_state);
         let active = if profile.active { " (active)" } else { "" };
+        let usage = profile
+            .usage
+            .as_deref()
+            .map(|usage| format!(" · {usage}"))
+            .unwrap_or_default();
         output.push_str(&format!(
-            "  {} — {} ({login}){active}\n",
+            "  {} — {} ({login}){active}{usage}\n",
             profile.name,
             profile.directory.display(),
         ));
     }
+    output.push_str("\nHit a usage limit? Switch in one step: cas codex <profile>.\n");
 
     Ok(output)
+}
+
+/// Usage per logged-in Codex home from its latest rollout, for the picker
+/// (cas-e1f4).
+fn with_usage(mut profiles: Vec<super::account_picker::Profile>) -> Vec<super::account_picker::Profile> {
+    let accounts = profiles
+        .iter()
+        .filter(|profile| profile.login_state != super::account_picker::LoginState::LoggedOut)
+        .map(|profile| (profile.name.clone(), profile.directory.clone()))
+        .collect();
+    let usage = super::limits::usage_summaries(
+        crate::accounts::Provider::Codex,
+        accounts,
+        std::time::Duration::from_secs(4),
+    );
+    for profile in &mut profiles {
+        profile.usage = usage.get(&profile.name).cloned();
+    }
+    profiles
+}
+
+/// `<home> (<email>)` for the launch line, or just the home.
+fn account_line(home: &Path, profile_dir: &Path) -> String {
+    match crate::accounts::Provider::Codex.login_email(home, profile_dir) {
+        Some(email) => format!("{} ({email})", profile_dir.display()),
+        None => profile_dir.display().to_string(),
+    }
 }
 
 /// Bind a codex subprocess to one profile's home.
@@ -240,6 +273,26 @@ fn prompt_for_profile(home: &Path, profiles: &[Profile]) -> Result<String> {
     }
 }
 
+/// cas-e1f4: a new Codex home links to the shared base once one exists;
+/// before that, it is seeded from ~/.codex as it always was.
+fn seed_new_codex_profile(home: &Path, profile_dir: &Path) -> Result<()> {
+    use crate::accounts::Provider;
+    if Provider::Codex.base_dir(home).is_dir() {
+        let linked = crate::accounts::link_new_account(Provider::Codex, home, profile_dir)?;
+        eprintln!("Linked shared config from ~/.cas/codex-base: {}", linked.join(", "));
+        eprintln!("Credentials and account identity remain private to this profile.");
+        return Ok(());
+    }
+    let report = seed_profile_dir(
+        &home.join(".codex"),
+        profile_dir,
+        SHARED_PROFILE_ENTRIES,
+        PRIVATE_PROFILE_ENTRIES,
+    )?;
+    report_seeding(&report, "~/.codex");
+    Ok(())
+}
+
 /// Create, seed and sign in a brand new codex account, then return its profile
 /// name so the caller can launch on it immediately.
 fn new_login(home: &Path, profile: &str) -> Result<String> {
@@ -251,13 +304,7 @@ fn new_login(home: &Path, profile: &str) -> Result<String> {
         )
     })?;
 
-    let report = seed_profile_dir(
-        &home.join(".codex"),
-        &profile_dir,
-        SHARED_PROFILE_ENTRIES,
-        PRIVATE_PROFILE_ENTRIES,
-    )?;
-    report_seeding(&report, "~/.codex");
+    seed_new_codex_profile(home, &profile_dir)?;
     eprintln!("Signing in Codex account home: {}", profile_dir.display());
 
     // Deliberately `status()` rather than `exec()`: this runs inside the launch
@@ -389,10 +436,14 @@ pub fn apply_profile_env(args: &CodexArgs) -> Result<()> {
                 io::stdin().is_terminal(),
                 io::stdout().is_terminal(),
             ) {
+                let profiles = with_usage(profiles);
                 prompt_for_profile(&home, &profiles)?
             } else {
                 // Non-interactive, or only one account exists: leave the
-                // ambient environment exactly as the caller set it.
+                // ambient environment exactly as the caller set it, but say
+                // which account that is (cas-e1f4).
+                let ambient = active_dir.clone().unwrap_or_else(|| home.join(".codex"));
+                eprintln!("Codex account (ambient): {}", account_line(&home, &ambient));
                 return Ok(());
             }
         }
@@ -400,7 +451,7 @@ pub fn apply_profile_env(args: &CodexArgs) -> Result<()> {
 
     let profile_dir = resolve_profile_dir(&home, &profile);
     let login_state = probe_login_state(&profile, &profile_dir);
-    eprintln!("Using Codex account home: {}", profile_dir.display());
+    eprintln!("Using Codex account home: {}", account_line(&home, &profile_dir));
 
     if args.profile().is_some()
         && should_offer_login_for_explicit_profile(
@@ -540,16 +591,9 @@ fn execute_command(command: &CodexCommand) -> Result<()> {
             eprintln!("Logging in Codex account home: {}", profile_dir.display());
 
             if profile != "main" {
-                let report = seed_profile_dir(
-                    &home.join(".codex"),
-                    &profile_dir,
-                    SHARED_PROFILE_ENTRIES,
-                    PRIVATE_PROFILE_ENTRIES,
-                )
-                .with_context(|| {
+                seed_new_codex_profile(&home, &profile_dir).with_context(|| {
                     format!("could not seed Codex profile {}", profile_dir.display())
                 })?;
-                report_seeding(&report, "~/.codex");
             }
 
             let login_args = std::iter::once(OsString::from("login"))

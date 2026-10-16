@@ -711,6 +711,25 @@ impl StatusBar {
         }
     }
 
+    /// The account a Codex home names: `~/.codex-<name>` → `<name>`; the
+    /// default home (or none) → `main`; anything else stays visibly custom.
+    fn codex_profile_from_home(home: Option<&str>) -> String {
+        let Some(home) = home.map(str::trim).filter(|home| !home.is_empty()) else {
+            return "main".to_string();
+        };
+        let path = Self::expand_claude_selector(home);
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned());
+        match name.as_deref() {
+            Some(".codex") => "main".to_string(),
+            Some(name) => name
+                .strip_prefix(".codex-")
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| Self::custom_claude_label(home)),
+            None => Self::custom_claude_label(home),
+        }
+    }
+
     /// Return the profile for the focused Claude harness, if one is focused.
     ///
     /// A worker without an explicit config-dir override inherits the factory
@@ -718,6 +737,20 @@ impl StatusBar {
     /// director panes intentionally have no Claude account badge.
     fn focused_claude_profile(app: &FactoryApp) -> Option<String> {
         let pane = app.mux.focused()?;
+        // cas-e1f4: a Codex pane shows its account too, from its CODEX_HOME.
+        if pane.harness() == SupervisorCli::Codex {
+            let home = match pane.kind() {
+                PaneKind::Worker => {
+                    let spec = app.mux.effective_worker_spec(pane.id(), None);
+                    spec.config_dir
+                        .or(spec.requester_config_dir)
+                        .or_else(|| std::env::var("CODEX_HOME").ok())
+                }
+                PaneKind::Supervisor => std::env::var("CODEX_HOME").ok(),
+                PaneKind::Director | PaneKind::Shell => return None,
+            };
+            return Some(Self::codex_profile_from_home(home.as_deref()));
+        }
         if pane.harness() != SupervisorCli::Claude {
             return None;
         }
@@ -1060,6 +1093,17 @@ mod tests {
 
     fn running_version_label() -> String {
         format!("Cassy v{}", env!("CARGO_PKG_VERSION"))
+    }
+
+    #[test]
+    fn cas_e1f4_codex_pane_badge_names_its_account_home() {
+        assert_eq!(StatusBar::codex_profile_from_home(None), "main");
+        assert_eq!(StatusBar::codex_profile_from_home(Some("~/.codex")), "main");
+        assert_eq!(
+            StatusBar::codex_profile_from_home(Some("/home/u/.codex-p@x.com")),
+            "p@x.com"
+        );
+        assert!(StatusBar::codex_profile_from_home(Some("/srv/codex")).starts_with("custom:"));
     }
 
     #[test]

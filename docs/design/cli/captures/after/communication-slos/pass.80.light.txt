@@ -1,0 +1,36 @@
+doctor found safe automatic fixes; apply now? [y/N]
+⚠ 4 warnings · 30 ok · 1 info · pass · 3.59.0
+────────────────────────────────────────────────────────────────────────────────
+Host          ✓ registered project roots
+  ⚠ host  host: 3 findings — see `cas doctor --host`
+Store         ✓ cas directory  ✓ prompt hook  ✓ database  ✓ schema  ✓ tables
+              ✓ entry store  ✓ memory stats  ✓ memory decay  ✓ rules  ✓ tasks
+              ✓ cloud team-only
+Indexes       ✓ legacy search index  ✓ symbol index  ✓ code index copies
+              ✓ embedding drain  ✓ embeddings
+  ⚠ search index        Index not found at
+                        [SANDBOX]/pass/.cas/index/tantivy-v15.
+                        Will be created on first search; Run a search to build …
+  ⚠ code history index  cannot check code history index: not a git repository:
+                        [SANDBOX]/pass (fatal: not a git
+                        repository (or any parent up to mount point /) Stopping…
+Cloud         ✓ supervisor relay  ✓ delivery retries  ✓ canonical id
+              ✓ cloud sync queue  ✓ cross-project rows
+  ✓ communication SLOs
+    PASS communication: 0 breach(es); session fixture-session
+    PASS false-abandon: 0 (target 0)
+    PASS operator relay receipts: 100.0% (1/1, target 100%)
+    PASS duplicate body reads: 0 (target 0)
+    PASS director nudges: 0.500/hour (target <=1/hour)
+    PASS gated-without-outcome: 0 (target 0)
+    Nudges: 1 / 2.000 worker-hours
+Config        ✓ SessionStart budget  ✓ configuration  ✓ MCP stdio upstreams
+              ✓ MCP upstream reachability  ✓ sync target  ✓ mcp config
+  ⚠ issue repositories  issues.repo unset; no usable GitHub origin; set `cas
+                        config set issues.repo owner/repo` |
+                        cassy=Richards-LLC/cassy | violet=Richards-LLC/violet_p…
+  ℹ shipped issues      skipped: no GitHub repository resolved for this project
+Integrations  ✓ integrations
+
+30 ok · 1 info · 4 warnings · 0 errors · 283ms
+cas doctor --verbose for timings and full messages

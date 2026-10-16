@@ -121,21 +121,24 @@ pub(crate) fn write_normal_flag(
     if !live.load(Ordering::Acquire) {
         return false;
     }
-    let fresh = read_normal_probe(cas_dir, session, row_id, probe.clone(), None, live.clone());
-    if fresh.activity == RecipientActivity::Found
-        || fresh.evidence == NormalDeliveryTurnEvidence::TurnStarted
-    {
-        return true;
-    }
-    if fresh.activity == RecipientActivity::Unknown
-        || fresh.evidence == NormalDeliveryTurnEvidence::RecipientBusy
-        || !live.load(Ordering::Acquire)
-    {
-        return false;
-    }
     let Ok(queue) = crate::store::open_prompt_queue_store(cas_dir) else {
         return false;
     };
+    let Ok(current) = queue.queued_prompt(row_id) else {
+        return false;
+    };
+    // An acknowledged, removed or replaced original needs no health incident.
+    let Some(row) = current else {
+        return true;
+    };
+    if row.prompt != probe.prompt || row.target != probe.target {
+        return true;
+    }
+    match super::poison_sweep_jobs::still_unread(queue.as_ref(), &row) {
+        Some(false) => return true,
+        None => return false,
+        Some(true) => {}
+    }
     let detail = normal_delivery_watchdog_flag_detail(evidence);
     if let Err(error) =
         queue.record_wake_attempt(row_id, cas_store::WakeAttempt::Failed, Some(&detail))
@@ -188,31 +191,49 @@ pub(crate) fn read_idle_unread(context: &AttentionInputs, supervisor: &str) -> V
         })
         .collect()
 }
-pub(crate) fn write_idle_unread(
+pub(crate) fn validate_idle_unread(
     context: &AttentionInputs,
-    supervisor: &str,
     candidate: IdleCandidate,
-) {
+) -> Option<IdleCandidate> {
     let Ok(queue) = crate::store::open_prompt_queue_store(&context.cas_dir) else {
-        return;
+        return None;
     };
-    let old = candidate.row;
+    let old = &candidate.row;
     let Ok(Some(row)) = queue.queued_prompt(old.id) else {
-        return;
+        return None;
     };
     if row.created_at != old.created_at
         || row.target != old.target
         || row.prompt != old.prompt
         || row.factory_session != old.factory_session
     {
-        return;
+        return None;
     }
     if context
         .decisions(queue.as_ref(), std::slice::from_ref(&row))
         .get(&row.id)
         != Some(&MessageAttention::Needed)
     {
-        return;
+        return None;
+    }
+    Some(candidate)
+}
+
+pub(crate) fn write_idle_unread(
+    context: &AttentionInputs,
+    supervisor: &str,
+    candidate: IdleCandidate,
+    live: &Arc<AtomicBool>,
+) -> bool {
+    if !live.load(Ordering::Acquire) {
+        return false;
+    }
+    let Ok(queue) = crate::store::open_prompt_queue_store(&context.cas_dir) else {
+        return false;
+    };
+    let row = candidate.row;
+    if super::poison_sweep_jobs::still_unread(queue.as_ref(), &row) != Some(true) {
+        return false;
     }
     let summary: String = row
         .summary
@@ -247,10 +268,12 @@ pub(crate) fn write_idle_unread(
             tracing::warn!(target: "cas::coordination", stage = "idle_unacked_relayed",
                 message_id = row.id, relay_id, target_agent = %row.target,
                 "cas-913c: relayed an unread message on an idle worker to the supervisor");
+            true
         }
-        Ok(cas_store::EnqueueIdempotentResult::AlreadyExists(_)) => {}
+        Ok(cas_store::EnqueueIdempotentResult::AlreadyExists(_)) => true,
         Err(error) => {
-            tracing::warn!(message_id=row.id, %error, "cas-913c: failed to relay an unread message on an idle worker")
+            tracing::warn!(message_id=row.id, %error, "cas-913c: failed to relay an unread message on an idle worker");
+            false
         }
     }
 }

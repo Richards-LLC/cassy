@@ -7,6 +7,39 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.60.0] - 2026-10-16
+
+### Fixed
+
+- **Typing during cleanup** — Was: poison cleanup still performed slow reads
+  and file work on the input loop. → Now: the whole sweep runs off that loop,
+  so typing no longer competes with that cleanup step.
+- **Loaded-proof receipts** — Was: a number could be borrowed from a neighbouring
+  field, and valid `-j16 x3` receipts were refused. → Now: each number belongs to
+  its own field; `-j16`, `--jobs 16` and bound `x3` forms are accepted, while an
+  explicit run count below three still refuses the receipt.
+
+### Added
+
+- **Peer ownership board** — Was: `cas peers --detail` showed presence without
+  enough context to see who owned work. → Now: it and `--json` show each
+  supervisor and machine's split, tasks with owner and claim, PRs and head SHAs,
+  workers, waiting merges, and worktree and scratch roots. Private, stale and
+  unknown sections are labelled; the read-only board does not prevent conflicts.
+
+### Tests
+
+- **Repeated proof-scope retarget** — Was: there was no regression proof for
+  retargeting a parked delivery twice to a remote-only target. → Now: the real
+  close handler is checked to refuse unmerged work as `MERGE REQUIRED`, without
+  announcing completion; the production guard is unchanged.
+
+### Documentation
+
+- **3.59.0 release report** — Was: the published release lacked its standalone
+  report bundle. → Now: its Markdown, brief, HTML, PDF and visual QA receipt are
+  committed under `docs/release-reports/`.
+
 ## [3.59.0] - 2026-10-16
 
 ### Added — a batch QA mode: one staging walk covers every task in a batch (#1203, cas-d697, cas-5129a)

@@ -12,6 +12,11 @@ use crate::error::CasError;
 use crate::store::TaskStore;
 use crate::types::{LeaseStatus, TaskLease};
 
+#[path = "peers_detail_work.rs"]
+mod work;
+pub use work::{ObservationStatus, PeerPr, PeerSplit, PeerTask, PeerWork, WaitingMerge};
+pub(crate) use work::{presence_agent, save_pr_snapshot};
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerClaim {
     pub task_id: String,
@@ -35,10 +40,16 @@ pub struct PeerWorker {
     pub branch: Option<String>,
     pub heartbeat_age_secs: i64,
     pub claims: Vec<PeerClaim>,
+    pub machine: String,
+    pub observed_at: DateTime<Utc>,
+    pub worktree_root: Option<String>,
+    pub scratch_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerDetail {
+    pub outcome: String,
+    pub owner: String,
     pub supervisor: Peer,
     pub user_id: Option<String>,
     pub team_id: Option<String>,
@@ -49,6 +60,8 @@ pub struct PeerDetail {
     pub claims: Vec<PeerClaim>,
     /// Live workers only, within the peer's machine and factory session.
     pub workers: Vec<PeerWorker>,
+    #[serde(flatten)]
+    pub work: PeerWork,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -86,15 +99,16 @@ pub struct PeerEpicSplit {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerReport {
+    pub status: String,
+    pub observed_at: DateTime<Utc>,
+    pub limitations: Vec<String>,
     pub cloud_presence: Option<super::presence::PresenceRecord>,
     pub cloud_presence_message: String,
     pub mailbox_status: String,
+    pub epic_splits_status: ObservationStatus,
     pub epic_splits: Vec<PeerEpicSplit>,
-    #[serde(skip)]
-    pub(crate) epic_splits_message: String,
     pub canonical_id: Option<String>,
     pub detail: bool,
-    pub status: String,
     pub peers: Vec<PeerDetail>,
     pub error: Option<String>,
 }
@@ -104,7 +118,20 @@ impl PeerReport {
         let mut mailbox_status = String::new();
         peers::append_mailbox_health(cas_root, self_id, &mut mailbox_status);
         let now = Utc::now();
-        let epic_splits = cas_store::list_epic_splits(cas_root)
+        let splits = cas_store::list_epic_splits(cas_root);
+        let epic_splits_status = ObservationStatus::at(
+            if splits.is_ok() {
+                "ready"
+            } else {
+                "unavailable"
+            },
+            Some(now),
+            splits
+                .as_ref()
+                .err()
+                .map(|_| "local split records unavailable"),
+        );
+        let epic_splits = splits
             .unwrap_or_default()
             .into_iter()
             .map(|split| PeerEpicSplit {
@@ -123,11 +150,16 @@ impl PeerReport {
             })
             .collect();
         Self {
+            observed_at: now,
+            limitations: vec![
+                "Read-only: shows conflicts; does not prevent them.".into(),
+                "Remote names are observations, not local spawn targets.".into(),
+            ],
             cloud_presence: self_id.and_then(|id| super::presence::load(cas_root, id)),
             cloud_presence_message: peers::presence_line(cas_root, self_id),
             mailbox_status,
+            epic_splits_status,
             epic_splits,
-            epic_splits_message: super::epic_split::render_splits(cas_root),
             canonical_id: super::resolve_canonical_id(cas_root),
             detail,
             status: "ready".into(),
@@ -229,10 +261,17 @@ pub fn assemble_peer_details(
                 .iter()
                 .filter(|_| visibility == ClaimsVisibility::SameAccount)
                 .filter(|lock| lock.status == LeaseStatus::Active && lock.expires_at > now)
-                .filter(|lock| agents.iter().find(|agent| agent.id == lock.agent_id)
-                    .is_some_and(|agent| agent.status != "shutdown"
-                        && ((now - lock.renewed_at).num_seconds() <= peers::PEER_LIVE_SECS
-                            || heartbeat_age(agent, now).is_some_and(|age| age <= peers::PEER_LIVE_SECS))))
+                .filter(|lock| {
+                    agents
+                        .iter()
+                        .find(|agent| agent.id == lock.agent_id)
+                        .is_some_and(|agent| {
+                            agent.status != "shutdown"
+                                && ((now - lock.renewed_at).num_seconds() <= peers::PEER_LIVE_SECS
+                                    || heartbeat_age(agent, now)
+                                        .is_some_and(|age| age <= peers::PEER_LIVE_SECS))
+                        })
+                })
                 .filter(|lock| {
                     lock.agent_id == supervisor.agent_id
                         || members.iter().any(|m| m.id == lock.agent_id)
@@ -269,6 +308,10 @@ pub fn assemble_peer_details(
                             status: agent.status.clone(),
                             branch: meta(agent, "branch").map(str::to_string),
                             heartbeat_age_secs: age,
+                            machine: supervisor.machine.clone(),
+                            observed_at: now - chrono::Duration::seconds(age),
+                            worktree_root: meta(agent, "clone_path").map(str::to_string),
+                            scratch_root: meta(agent, "scratch_root").map(str::to_string),
                             claims: claims
                                 .iter()
                                 .filter(|c| c.agent_id == agent.id)
@@ -283,7 +326,10 @@ pub fn assemble_peer_details(
                 .find(|a| a.id == supervisor.agent_id)
                 .and_then(|a| meta(a, "branch"))
                 .map(str::to_string);
-            PeerDetail {
+            let mut detail = PeerDetail {
+                outcome: if supervisor.live { "live" } else { "stale" }.into(),
+                owner: supervisor.name.clone(),
+                work: PeerWork::new(&supervisor, owner, visibility, now),
                 supervisor,
                 user_id: owner.and_then(|a| a.user_id.clone()),
                 team_id: owner.and_then(|a| a.team_id.clone()),
@@ -292,7 +338,9 @@ pub fn assemble_peer_details(
                 branch,
                 claims,
                 workers,
-            }
+            };
+            work::inventory(&mut detail, owner, tasks, agents, aliases, now);
+            detail
         })
         .collect()
 }
@@ -326,7 +374,14 @@ pub fn discover_peer_report(
     let coordinator = super::CloudCoordinator::new(config.clone())?
         .with_canonical_id(Some(repo.to_string()))
         .with_timeout(peers::DISCOVERY_TIMEOUT);
-    let agents = coordinator.list_agent_infos()?;
+    let agents = match coordinator.list_agent_infos() {
+        Ok(agents) => agents,
+        Err(error) => {
+            report.status = "lookup_failed".into();
+            report.error = Some(error.to_string());
+            return Ok(report);
+        }
+    };
     // Without project= the server returns only agents owned by this token.
     // Never infer account authority from a project-visible self row: it may
     // be absent (operator CLI) or belong to another team member.
@@ -363,25 +418,46 @@ pub fn discover_peer_report(
                 agents.iter().find(|a| a.id == peer.agent_id),
             ) == ClaimsVisibility::SameAccount
         }) {
-            coordinator.list_locks()?
+            coordinator.list_locks()
         } else {
-            Vec::new()
+            Ok(Vec::new())
         };
         // Awareness must not run the cloud outbox's repair-on-open writer.
         let tasks = crate::store::open_task_store_local(cas_root)?;
         report.peers = assemble_peer_details(
             supervisors,
             &agents,
-            &locks,
+            locks.as_deref().unwrap_or_default(),
             &aliases,
             tasks.as_ref(),
             viewer_user_id,
             now,
         );
+        if let Err(error) = locks {
+            report.status = "partial".into();
+            for peer in &mut report.peers {
+                if peer.claims_visibility == ClaimsVisibility::SameAccount {
+                    peer.work.claims_status.state = "unavailable".into();
+                    peer.work.claims_status.reason = Some(error.to_string());
+                    peer.work.tasks_status = peer.work.claims_status.clone();
+                }
+            }
+        }
     } else {
         report.peers = supervisors
             .into_iter()
             .map(|supervisor| PeerDetail {
+                outcome: if supervisor.live { "live" } else { "stale" }.into(),
+                owner: supervisor.name.clone(),
+                work: PeerWork::new(
+                    &supervisor,
+                    agents.iter().find(|a| a.id == supervisor.agent_id),
+                    claims_visibility(
+                        viewer_user_id,
+                        agents.iter().find(|a| a.id == supervisor.agent_id),
+                    ),
+                    now,
+                ),
                 user_id: agents
                     .iter()
                     .find(|a| a.id == supervisor.agent_id)
@@ -451,9 +527,6 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
         }
         out.push('\n');
     };
-    for presence_line in report.cloud_presence_message.lines() {
-        line(presence_line.to_string());
-    }
     if let Some(error) = &report.error {
         line(format!("[WARN] Peers unavailable: {}", report.status));
         line(format!("  {error}"));
@@ -461,7 +534,12 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
         let live = report.peers.iter().filter(|p| p.supervisor.live).count();
         let count = report.peers.len();
         line(format!(
-            "[OK] {count} peer supervisor{} | {live} live",
+            "[{}] {count} peer supervisor{} | {live} live",
+            if report.status == "partial" {
+                "WARN"
+            } else {
+                "OK"
+            },
             if count == 1 { "" } else { "s" }
         ));
         line(format!(
@@ -473,11 +551,7 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
         }
         for detail in &report.peers {
             let peer = &detail.supervisor;
-            line(format!(
-                "{} [{}]",
-                peer.name,
-                if peer.live { "live" } else { "stale" }
-            ));
+            line(format!("[{}] Owner {}", detail.outcome, detail.owner));
             line(format!("  Machine {}", peer.machine));
             line(format!(
                 "  Session {}",
@@ -491,33 +565,39 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
             if !report.detail {
                 continue;
             }
+            work::render_work(&detail.work, &mut line);
             line(format!(
                 "  Branch  {}",
                 detail.branch.as_deref().unwrap_or("unknown")
             ));
             match detail.claims_visibility {
+                ClaimsVisibility::SameAccount if detail.work.claims_status.state == "ready" => {
+                    line(format!(
+                        "  Claims  {} observed | age since renewal (s)",
+                        detail.claims.len()
+                    ))
+                }
                 ClaimsVisibility::SameAccount => line(format!(
-                    "  Claims  {} | age since renewal (s)",
-                    detail.claims.len()
+                    "  Claims {} (inventory unknown)",
+                    detail.work.claims_status.state
                 )),
                 ClaimsVisibility::DifferentAccount => {
-                    line("  Claims not visible (different account)".into())
+                    line("  Claims not visible (different account): private work".into())
                 }
                 ClaimsVisibility::Unknown => line("  Claims not visible (account unknown)".into()),
             }
             for claim in &detail.claims {
                 line(format!(
-                    "    {:>5} {} [{}]",
-                    claim.age_secs,
-                    claim.task_id,
+                    "    [{}] Owner {}",
                     claim
                         .status
                         .as_deref()
-                        .unwrap_or("claimed; title not synced")
+                        .unwrap_or("claimed; title not synced"),
+                    claim.agent_name.as_deref().unwrap_or("unknown agent")
                 ));
                 line(format!(
-                    "          Owner {}",
-                    claim.agent_name.as_deref().unwrap_or("unknown agent")
+                    "      {} | renewal age {}s",
+                    claim.task_id, claim.age_secs
                 ));
                 if let Some(title) = &claim.title {
                     line(format!("          {title}"));
@@ -529,6 +609,19 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
             ));
             for worker in &detail.workers {
                 line(format!("    {} [{}]", worker.name, worker.status));
+                line(format!("      Machine {}", worker.machine));
+                line(format!(
+                    "      Observed {}",
+                    worker.observed_at.to_rfc3339()
+                ));
+                line(format!(
+                    "      Worktree {}",
+                    worker.worktree_root.as_deref().unwrap_or("unknown")
+                ));
+                line(format!(
+                    "      Scratch {}",
+                    worker.scratch_root.as_deref().unwrap_or("unknown")
+                ));
                 line(format!(
                     "      Branch {}",
                     worker.branch.as_deref().unwrap_or("unknown")
@@ -540,6 +633,9 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                     .collect::<Vec<_>>()
                     .join(", ");
                 let task_label = match detail.claims_visibility {
+                    ClaimsVisibility::SameAccount if detail.work.claims_status.state != "ready" => {
+                        "unknown"
+                    }
                     ClaimsVisibility::SameAccount if task_ids.is_empty() => "none",
                     ClaimsVisibility::SameAccount => &task_ids,
                     _ => "not visible",
@@ -548,8 +644,50 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
             }
         }
     }
-    for split_line in report.epic_splits_message.lines() {
-        line(split_line.to_string());
+    if report.detail {
+        for limitation in &report.limitations {
+            line(limitation.clone());
+        }
+        line(format!("Observed {}", report.observed_at.to_rfc3339()));
+    }
+    for presence_line in report.cloud_presence_message.lines() {
+        line(presence_line.to_string());
+    }
+    if report.detail {
+        line(format!(
+            "Local splits {} at {}",
+            report.epic_splits_status.state,
+            report
+                .epic_splits_status
+                .observed_at
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_else(|| "unknown".into())
+        ));
+        for split in &report.epic_splits {
+            line(format!(
+                "  {} [{}] epic {}",
+                split.id, split.display_state, split.epic_id
+            ));
+            line(format!(
+                "    Peer {}@{} | {}",
+                split.peer_name, split.peer_machine, split.direction
+            ));
+            line(format!("    Stored state {}", split.state));
+            line(format!("    Mine {}", split.mine.join(", ")));
+            line(format!("    Theirs {}", split.theirs.join(", ")));
+            line(format!(
+                "    Reason {}",
+                split.reason.as_deref().unwrap_or("unknown")
+            ));
+            line(format!("    Expires {}", split.expires_at.to_rfc3339()));
+            line(format!(
+                "    Decided {}",
+                split
+                    .decided_at
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_else(|| "unknown".into())
+            ));
+        }
     }
     for mailbox_line in report.mailbox_status.lines() {
         line(mailbox_line.to_string());

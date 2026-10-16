@@ -40,6 +40,7 @@ pub mod shared_db;
 pub mod wait_budget;
 
 mod agent_store;
+pub mod communication_slo;
 mod code_index_purge;
 mod code_store;
 mod code_vector_store;

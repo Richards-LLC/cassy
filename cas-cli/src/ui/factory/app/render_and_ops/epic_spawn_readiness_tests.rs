@@ -781,6 +781,7 @@ fn cas_bfa1_round4_quarantined_epic_cannot_authorize_publication() {
     with_fixture(|f| {
         f.advance_parent();
         let queue = crate::cloud::SyncQueue::open(&f.root).unwrap();
+        queue.init().unwrap();
         queue
             .quarantine_row(
                 crate::cloud::QUARANTINE_TASK,

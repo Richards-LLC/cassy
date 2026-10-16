@@ -72,6 +72,51 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+// Read the effective rules (including nested/global ignores) without touching
+// the index. A project exception is a conflict, not permission to override it.
+fn ignore_conflicts(root: &Path, paths: &[String]) -> Result<Vec<String>> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "check-ignore",
+            "--no-index",
+            "--verbose",
+            "--non-matching",
+            "-z",
+            "--stdin",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut input = Vec::new();
+    for path in paths {
+        input.extend_from_slice(path.trim_start_matches('/').as_bytes());
+        input.push(0);
+    }
+    child.stdin.take().unwrap().write_all(&input)?;
+    let output = child.wait_with_output()?;
+    if !matches!(output.status.code(), Some(0 | 1)) {
+        bail!(
+            "cannot inspect managed ignore rules: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(output
+        .stdout
+        .split(|b| *b == 0)
+        .collect::<Vec<_>>()
+        .chunks_exact(4)
+        .filter(|row| row[2].starts_with(b"!"))
+        .map(|row| String::from_utf8_lossy(row[0]).to_string())
+        .collect())
+}
+
+fn cassy_command(command: &str) -> bool {
+    command.starts_with("cas ") || command.starts_with("CAS_HOOK_HARNESS=codex cas ")
+}
+
 fn text(bytes: &[u8]) -> Result<&str> {
     Ok(std::str::from_utf8(bytes)?)
 }
@@ -247,6 +292,16 @@ impl Reconcile {
             );
         }
         let paths = ignored_paths(root, harnesses);
+        conflicts.extend(ignore_conflicts(root, &paths)?);
+        let committed: BTreeMap<_, _> = index
+            .keys()
+            .map(|path| {
+                (
+                    path.clone(),
+                    git(root, &["show", &format!("HEAD:{path}")]).unwrap_or_default(),
+                )
+            })
+            .collect();
         let mut candidates: BTreeSet<String> = paths
             .iter()
             .filter(|p| !p.ends_with('/'))
@@ -269,6 +324,7 @@ impl Reconcile {
             }
             let working = std::fs::read(&absolute).ok();
             let indexed = index.get(&path).map(|(_, b)| b);
+            let baseline = committed.get(&path);
             if let Some(bytes) = &working {
                 if builtins::project_managed_body(&path)
                     && !text(bytes).is_ok_and(builtins::is_managed_by_cas)
@@ -277,7 +333,7 @@ impl Reconcile {
                     conflicts.push(path.clone());
                 }
                 if (cassy_body(&path, bytes) || ignored(&path, &paths))
-                    && indexed.is_some_and(|b| b != bytes)
+                    && baseline.is_some_and(|b| b != bytes)
                     && !builtins::matches_shipped_project_file(&path, bytes)
                     && bytes != crate::cli::init::CAS_SKILL.as_bytes()
                     && bytes != format!("{}\n", crate::cli::init::build_agents_section()).as_bytes()
@@ -294,7 +350,7 @@ impl Reconcile {
                     match block(text(bytes)?, a, b) {
                         Err(_) => conflicts.push(path.clone()),
                         Ok(Some(local)) if path == ".gitignore" && indexed.is_some() => {
-                            let prior = block(text(indexed.unwrap())?, a, b)?;
+                            let prior = block(text(baseline.unwrap())?, a, b)?;
                             if prior != Some(local)
                                 && local.lines().any(|line| {
                                     let line = line.trim();
@@ -307,7 +363,7 @@ impl Reconcile {
                             }
                         }
                         Ok(local) if path != ".gitignore" && indexed.is_some() => {
-                            let prior = block(text(indexed.unwrap())?, a, b)?;
+                            let prior = block(text(baseline.unwrap())?, a, b)?;
                             let expected = if path == "CLAUDE.md" {
                                 crate::cli::init::build_cas_section()
                             } else {
@@ -372,9 +428,9 @@ impl Reconcile {
                 let Some(Some(bytes)) = before.get(*path) else {
                     continue;
                 };
-                let indexed = index
+                let indexed = committed
                     .get(*path)
-                    .map(|(_, b)| b.as_slice())
+                    .map(|b| b.as_slice())
                     .unwrap_or_default();
                 let local = owned_fragment(path, bytes)?;
                 if local != owned_fragment(path, indexed)? {
@@ -647,7 +703,7 @@ fn owned_fragment(path: &str, bytes: &[u8]) -> Result<String> {
                             hooks.iter().any(|h| {
                                 h.get("command")
                                     .and_then(|c| c.as_str())
-                                    .is_some_and(|c| c.starts_with("cas "))
+                                    .is_some_and(cassy_command)
                             })
                         })
                 })
@@ -663,7 +719,7 @@ fn owned_fragment(path: &str, bytes: &[u8]) -> Result<String> {
     }
     if v.pointer("/statusLine/command")
         .and_then(|v| v.as_str())
-        .is_some_and(|c| c.starts_with("cas "))
+        .is_some_and(cassy_command)
     {
         owned.insert("statusLine".into(), v["statusLine"].clone());
     }

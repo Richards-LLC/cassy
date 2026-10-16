@@ -2010,6 +2010,7 @@ fn cas_6718_drifted_project(home: &Path) -> PathBuf {
             ".claude/workflows/cas-code-review.js",
             "// managed_by: cas\n// retired\n",
         ),
+        (".codex/hooks.json", r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo project-codex-hook"},{"type":"command","command":"cas hook PreToolUse"}]}]}}"#),
         ("README.md", "Project content\n"),
         (
             ".claude/skills/cas-personal/SKILL.md",
@@ -2091,6 +2092,8 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
             .unwrap()
             .starts_with("# Project Codex preferences\n")
     );
+    let hooks: serde_json::Value = serde_json::from_slice(&std::fs::read(project.join(".codex/hooks.json")).unwrap()).unwrap();
+    assert!(hooks["hooks"]["PreToolUse"].as_array().unwrap().iter().any(|g| g["hooks"][0]["command"] == "echo project-codex-hook"));
     let first = cas_6718_git(&project, &["rev-parse", "HEAD"]);
     execute(&args, &update_test_cli(true), Some(&root)).unwrap();
     assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), first);
@@ -2153,15 +2156,16 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
             .join(".claude/skills/cas-personal/SKILL.md")
             .is_file()
     );
-    // Conflicting ignore preferences and malformed blocks leave files/index untouched.
+    // Ignore exceptions and staged edits to owned text are both preflight conflicts.
     for (path, suffix) in [
         (".gitignore", "\n!/AGENTS.md\n"),
-        ("CLAUDE.md", "\n<!-- CAS:BEGIN - This section is managed by CAS. Do not edit manually. -->\n"),
+        ("CLAUDE.md", "manual managed edit"),
     ] {
         let file = project.join(path);
         let original = std::fs::read_to_string(&file).unwrap();
-        let conflicted = format!("{original}{suffix}");
+        let conflicted = if path == "CLAUDE.md" { original.replace("@AGENTS.md", suffix) } else { format!("{original}{suffix}") };
         std::fs::write(&file, &conflicted).unwrap();
+        if path == "CLAUDE.md" { cas_6718_git(&project, &["add", path]); }
         let index = cas_6718_git(&project, &["ls-files", "--stage"]);
         let (result, output) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
         result.unwrap();

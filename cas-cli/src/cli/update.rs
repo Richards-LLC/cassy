@@ -4258,7 +4258,7 @@ fn report_managed_files(cli: &Cli, report: &crate::cli::project_files::Report) -
                 report.conflicts.len()
             )
         } else if report.outcome == "staged" {
-            "Managed files: staged; commit pending (other changes are staged)".to_string()
+            "Managed files: staged; commit pending (index already had staged changes)".to_string()
         } else {
             format!(
                 "Managed files: {} ({} untracked, {} staged)",

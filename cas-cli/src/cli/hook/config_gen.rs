@@ -944,19 +944,12 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
         // form. Remove either before adding the canonical entry so an upgrade
         // never leaves two registrations for the same Codex event.
         let legacy_command = format!("cas hook {event}");
-        groups.retain(|group| {
-            !group
-                .get("hooks")
-                .and_then(|handlers| handlers.as_array())
-                .is_some_and(|handlers| {
-                    handlers.iter().any(|handler| {
-                        matches!(
-                            handler.get("command").and_then(|value| value.as_str()),
-                            Some(existing) if existing == command || existing == legacy_command
-                        )
-                    })
-                })
-        });
+        for group in groups.iter_mut() {
+            if let Some(handlers) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                handlers.retain(|handler| !matches!(handler.get("command").and_then(|v| v.as_str()), Some(existing) if existing == command || existing == legacy_command));
+            }
+        }
+        groups.retain(|group| !group.get("hooks").and_then(|h| h.as_array()).is_some_and(Vec::is_empty));
         groups.push(serde_json::json!({
             "matcher": codex_hook_matcher(event),
             "hooks": [{

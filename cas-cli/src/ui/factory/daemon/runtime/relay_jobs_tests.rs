@@ -146,7 +146,9 @@ fn due_external_work_service(
     let journal = SqliteRequestJournal::open(cas_dir).unwrap();
     let request_id = "00000081-2222-4222-8222-000000000081".to_string();
     journal.prepare(&request_id, "release_claim", &serde_json::json!({
-        "resource_id":"00000b01-1111-4111-8111-000000000b01", "expected_generation":1
+        "resource_id":"00000b01-1111-4111-8111-000000000b01", "expected_generation":1,
+        "project_id":"github.com/richards-llc/cassy",
+        "actor":{"registration_id":"reg-supervisor-alpha-01"}
     })).unwrap();
     journal.set_wire_request(&request_id, &serde_json::json!({
         "request_id":request_id.clone(), "expected_generation":1

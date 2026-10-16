@@ -10,49 +10,7 @@ pub fn daemonize(config: DaemonConfig) -> anyhow::Result<()> {
 
     // Build command with all config options
     let mut cmd = Command::new(exe);
-    cmd.arg("factory")
-        .arg("daemon")
-        .arg("--session")
-        .arg(&config.session_name)
-        .arg("--cwd")
-        .arg(&config.factory_config.cwd)
-        .arg("--workers")
-        .arg(config.factory_config.workers.to_string())
-        .arg("--supervisor-cli")
-        .arg(config.factory_config.supervisor_cli.backend().name())
-        .arg("--worker-cli")
-        .arg(config.factory_config.worker_cli.backend().name())
-        .arg("--foreground");
-
-    if config.boot_progress {
-        cmd.arg("--boot-progress");
-    }
-
-    if let Some(ref supervisor_name) = config.factory_config.supervisor_name {
-        cmd.arg("--supervisor-name").arg(supervisor_name);
-    }
-
-    for worker_name in &config.factory_config.worker_names {
-        cmd.arg("--worker-name").arg(worker_name);
-    }
-
-    // Pass worktree settings
-    if !config.factory_config.enable_worktrees {
-        cmd.arg("--no-worktrees");
-    }
-    if let Some(ref worktree_root) = config.factory_config.worktree_root {
-        cmd.arg("--worktree-root").arg(worktree_root);
-    }
-
-    // Pass notification settings
-    if config.factory_config.notify.enabled {
-        cmd.arg("--notify");
-    }
-
-    // Pass phone-home setting
-    if !config.phone_home {
-        cmd.arg("--no-phone-home");
-    }
+    cmd.args(daemon_relaunch_args(&config));
 
     // Spawn daemon process (redirect stderr to log file for debugging)
     let log_path = daemon_log_path(&config.session_name);
@@ -68,6 +26,58 @@ pub fn daemonize(config: DaemonConfig) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// The `cas factory daemon …` arguments that relaunch this factory as a
+/// subprocess daemon (the macOS path, where forking a multi-threaded process
+/// before exec can crash). Everything the parent resolved must survive the
+/// re-exec, because the child resolves its configuration again from these
+/// arguments.
+pub(crate) fn daemon_relaunch_args(config: &DaemonConfig) -> Vec<std::ffi::OsString> {
+    let factory = &config.factory_config;
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "factory".into(),
+        "daemon".into(),
+        "--session".into(),
+        config.session_name.clone().into(),
+        "--cwd".into(),
+        factory.cwd.clone().into_os_string(),
+        "--workers".into(),
+        factory.workers.to_string().into(),
+        "--supervisor-cli".into(),
+        factory.supervisor_cli.backend().name().into(),
+        "--worker-cli".into(),
+        factory.worker_cli.backend().name().into(),
+        "--foreground".into(),
+    ];
+    if config.boot_progress {
+        args.push("--boot-progress".into());
+    }
+    if let Some(ref supervisor_name) = factory.supervisor_name {
+        args.push("--supervisor-name".into());
+        args.push(supervisor_name.clone().into());
+    }
+    for worker_name in &factory.worker_names {
+        args.push("--worker-name".into());
+        args.push(worker_name.clone().into());
+    }
+    // Pass worktree settings
+    if !factory.enable_worktrees {
+        args.push("--no-worktrees".into());
+    }
+    if let Some(ref worktree_root) = factory.worktree_root {
+        args.push("--worktree-root".into());
+        args.push(worktree_root.clone().into_os_string());
+    }
+    // Pass notification settings
+    if factory.notify.enabled {
+        args.push("--notify".into());
+    }
+    // Pass phone-home setting
+    if !config.phone_home {
+        args.push("--no-phone-home".into());
+    }
+    args
 }
 
 #[cfg(not(unix))]
@@ -472,6 +482,116 @@ pub(super) fn install_panic_hook(path: std::path::PathBuf) {
 
 #[cfg(test)]
 mod tests {
+
+    fn relaunch_config() -> DaemonConfig {
+        let mut factory = FactoryConfig::default();
+        factory.workers = 2;
+        factory.worker_names = vec!["alice".into(), "bob".into()];
+        factory.supervisor_name = Some("lead".into());
+        factory.resolved_worker_specs = vec![
+            cas_mux::WorkerSpec {
+                name: Some("alice".into()),
+                cli: cas_mux::SupervisorCli::Codex,
+                model: Some("gpt-5.5-codex".into()),
+                effort: Some(cas_mux::Effort::XHigh),
+                config_dir: Some("/tmp/codex-home-a".into()),
+                requester_config_dir: None,
+                requester_secure_storage_dir: None,
+            },
+            cas_mux::WorkerSpec {
+                name: Some("bob".into()),
+                cli: cas_mux::SupervisorCli::Claude,
+                model: Some("claude-opus-5-5".into()),
+                effort: Some(cas_mux::Effort::Medium),
+                config_dir: None,
+                requester_config_dir: None,
+                requester_secure_storage_dir: None,
+            },
+        ];
+        factory.resolved_supervisor_spec = Some(cas_mux::WorkerSpec {
+            name: Some("lead".into()),
+            cli: cas_mux::SupervisorCli::Claude,
+            model: Some("claude-fable-5".into()),
+            effort: Some(cas_mux::Effort::Max),
+            config_dir: None,
+            requester_config_dir: None,
+            requester_secure_storage_dir: None,
+        });
+        DaemonConfig {
+            session_name: "proj-bright-owl-1".into(),
+            factory_config: factory,
+            foreground: true,
+            boot_progress: true,
+            phone_home: true,
+        }
+    }
+
+    fn flag_values(args: &[std::ffi::OsString], flag: &str) -> Vec<String> {
+        args.windows(2)
+            .filter(|pair| pair[0] == flag)
+            .map(|pair| pair[1].to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// cas-a5c0 (cas-2992 item 2): the macOS subprocess relaunch carries the
+    /// resolved worker and supervisor specs, so a `--worker-spec` override
+    /// (cli, model, effort, account dir) is not silently lost on re-exec. The
+    /// arguments parse as `cas factory daemon`, and resolving them again
+    /// yields the specs the parent resolved.
+    #[test]
+    fn subprocess_relaunch_carries_resolved_specs_cas_a5c0() {
+        use clap::Parser;
+        let config = relaunch_config();
+        let args = daemon_relaunch_args(&config);
+
+        let mut argv: Vec<std::ffi::OsString> = vec!["cas".into()];
+        argv.extend(args.iter().cloned());
+        crate::cli::Cli::try_parse_from(argv).expect("relaunch arguments parse as `cas factory daemon`");
+
+        let worker_jsons = flag_values(&args, "--worker-spec-json");
+        assert_eq!(worker_jsons.len(), 2, "{args:?}");
+        let missing = std::path::PathBuf::from("/nonexistent/cas-a5c0/config.toml");
+        let sources = cas_factory::spec_resolver::ConfigSources {
+            worker_spec_jsons: worker_jsons,
+            user_config: Some(missing.clone()),
+            project_config: Some(missing.clone()),
+            ..Default::default()
+        };
+        let resolved = cas_factory::spec_resolver::resolve_specs(2, sources).unwrap();
+        for (got, want) in resolved.iter().zip(&config.factory_config.resolved_worker_specs) {
+            assert_eq!(
+                (&got.name, got.cli, &got.model, got.effort, &got.config_dir),
+                (&want.name, want.cli, &want.model, want.effort, &want.config_dir)
+            );
+        }
+
+        let supervisor_json = flag_values(&args, "--supervisor-spec-json");
+        assert_eq!(supervisor_json.len(), 1, "{args:?}");
+        let sources = cas_factory::spec_resolver::ConfigSources {
+            supervisor_spec_json: supervisor_json.into_iter().next(),
+            user_config: Some(missing.clone()),
+            project_config: Some(missing),
+            ..Default::default()
+        };
+        let supervisor = cas_factory::spec_resolver::resolve_supervisor_spec(sources).unwrap();
+        let want = config.factory_config.resolved_supervisor_spec.as_ref().unwrap();
+        assert_eq!(
+            (supervisor.cli, &supervisor.model, supervisor.effort),
+            (want.cli, &want.model, want.effort)
+        );
+    }
+
+    /// A factory with no resolved specs relaunches exactly as before.
+    #[test]
+    fn subprocess_relaunch_without_specs_adds_no_spec_flags_cas_a5c0() {
+        let mut config = relaunch_config();
+        config.factory_config.resolved_worker_specs.clear();
+        config.factory_config.resolved_supervisor_spec = None;
+        let args = daemon_relaunch_args(&config);
+        assert!(flag_values(&args, "--worker-spec-json").is_empty());
+        assert!(flag_values(&args, "--supervisor-spec-json").is_empty());
+        assert_eq!(flag_values(&args, "--worker-name"), vec!["alice", "bob"]);
+    }
 
     /// cas-65cce: both daemon fork paths close idle shared_db connections
     /// immediately before fork(), so no child inherits a pooled SQLite handle.

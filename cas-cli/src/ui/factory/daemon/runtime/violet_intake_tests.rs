@@ -59,6 +59,112 @@ fn context() -> OperationContext {
 }
 
 #[test]
+fn cas_c423_successor_poll_reuses_unacknowledged_admission_with_new_lease() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+    let mut response = claim_fixture();
+    let original: LeasedDelivery =
+        serde_json::from_value(response["deliveries"][0].clone()).unwrap();
+    let first = store
+        .admit(&admission_input(&original, &context(), "old-session", "old-reader").unwrap())
+        .unwrap();
+    let successor = OperationContext {
+        registration_id: "reg-successor".into(),
+        ..context()
+    };
+    response["deliveries"][0]["delivery"]["registration_id"] = json!(successor.registration_id);
+    response["deliveries"][0]["lease_token"] = json!("successor-lease");
+    let relay = Relay {
+        response: RefCell::new(response),
+        acks: RefCell::new(vec![]),
+        fail_ack: false,
+        database: Some(root.path().join("cas.db")),
+        ack_response: None,
+    };
+    let report = poll_once(&relay, &store, &successor, "new-session", "new-reader");
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert_eq!((report.admitted, report.created), (1, 0));
+    let acks = relay.acks.borrow();
+    assert_eq!(acks.len(), 1);
+    assert_eq!(
+        acks[0]["actor"]["registration_id"],
+        successor.registration_id
+    );
+    assert_eq!(acks[0]["acks"][0]["lease_token"], "successor-lease");
+    let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+    let rows = queue.peek_all(20).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, first.prompt_id);
+    assert!(
+        store
+            .pending_lease_fences(&context().project_id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn cas_c423_poll_snapshots_lease_fence_before_remote_claim() {
+    struct RacingRelay<'a> {
+        store: &'a SqliteVioletAdmissionStore,
+        old_response: Value,
+        successor_input: VioletAdmissionInput,
+    }
+    impl ActivityDeliveryPort for RacingRelay<'_> {
+        fn claim(&self, _: &Value, _: Duration) -> Result<Value, RemoteError> {
+            // A second process takes over while the predecessor's request is in
+            // flight. The predecessor then receives its delayed old lease.
+            let fence = self
+                .store
+                .pending_lease_fences(&context().project_id)
+                .unwrap();
+            self.store
+                .adopt_lease(&fence[0], &self.successor_input)
+                .unwrap();
+            Ok(self.old_response.clone())
+        }
+        fn acknowledge(&self, _: &Value, _: Duration) -> Result<Value, RemoteError> {
+            panic!("the old actor must not acknowledge the successor's admission")
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+    let old_response = claim_fixture();
+    let old: LeasedDelivery =
+        serde_json::from_value(old_response["deliveries"][0].clone()).unwrap();
+    let mut successor_input =
+        admission_input(&old, &context(), "old-session", "old-reader").unwrap();
+    let first = store.admit(&successor_input).unwrap();
+    successor_input.registration_id = "reg-successor".into();
+    successor_input.factory_session = "new-session".into();
+    successor_input.recipient = "new-reader".into();
+    successor_input.lease_token = "successor-lease".into();
+    let relay = RacingRelay {
+        store: &store,
+        old_response,
+        successor_input,
+    };
+    let report = poll_once(&relay, &store, &context(), "old-session", "old-reader");
+    assert_eq!(report.admitted, 0, "{report:?}");
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert!(
+        store
+            .pending_acknowledgements(&context().registration_id, &context().project_id)
+            .unwrap()
+            .is_empty()
+    );
+    let pending = store
+        .pending_acknowledgements("reg-successor", &context().project_id)
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].lease_token, "successor-lease");
+    let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+    let rows = queue.peek_all(20).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, first.prompt_id);
+}
+
+#[test]
 fn cas_c423_duplicate_poll_lost_ack_and_two_readers_keep_one_admission_each() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();

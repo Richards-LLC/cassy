@@ -428,7 +428,28 @@ pub(crate) struct PromptPreparation {
 }
 
 impl PromptPreparation {
-    pub(crate) fn forget_pane(&mut self, _pane: &str) {}
+    /// A new process reusing this pane must not inherit its predecessor's
+    /// grace, observations, or registration authority. Keep any owned batch
+    /// pending, but reject old in-flight observations and read it again.
+    pub(crate) fn forget_pane(&mut self, pane: &str) {
+        self.unknown_first_seen.get_mut().remove(pane);
+        for inputs in [
+            self.current.as_mut(),
+            self.ready.as_mut(),
+            self.fallback.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            inputs.recipients.remove(pane);
+            inputs
+                .agents
+                .retain(|agent| !agent.name.eq_ignore_ascii_case(pane));
+        }
+        self.in_flight = None;
+        self.last_submitted = None;
+        self.unusable_reads = 0;
+    }
 
     pub(crate) fn wake_now(&self) -> chrono::DateTime<chrono::Utc> {
         #[cfg(test)]

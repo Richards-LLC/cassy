@@ -114,6 +114,8 @@ async fn assert_replacement_gets_fresh_grace(action: Option<PendingSpawn>) {
     let queue = crate::store::open_prompt_queue_store(&root).unwrap();
     let id = queue.enqueue("supervisor", "worker-a", "decision").unwrap();
     let mut daemon = super::super::provisioning_tests::daemon(&root);
+    // Respawn refuses an already-active roster entry before any PTY launch.
+    daemon.app.add_worker_name_for_test("worker-a");
     let mut jobs = QueueJobs::inline();
     let mut preparation = PromptPreparation::default();
     let first = chrono::Utc::now();
@@ -155,7 +157,7 @@ async fn assert_replacement_gets_fresh_grace(action: Option<PendingSpawn>) {
         );
     }
     if let Some(action) = action {
-        // Missing worker / invalid recipe prevent a real harness launch. The
+        // Active worker / invalid recipe prevent a real harness launch. The
         // production handler still crosses its pane replacement boundary.
         daemon.pending_spawns.push_back(action);
         daemon.process_pending_spawns().await;
@@ -171,6 +173,12 @@ async fn assert_replacement_gets_fresh_grace(action: Option<PendingSpawn>) {
             .prepared_wake_evidence("worker-a")
             .awaiting_first_prompt,
         "reused pane must receive fresh boot grace, not the expired snapshot's sighting"
+    );
+    assert!(
+        !daemon
+            .prepared_wake_evidence("worker-b")
+            .awaiting_first_prompt,
+        "forgetting one pane must not renew another pane's expired grace"
     );
 }
 

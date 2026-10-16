@@ -5239,6 +5239,7 @@ impl FactoryDaemon {
             });
         }
         self.app.mark_worker_crashed(worker_name).await;
+        self.queue_jobs.prompt_preparation.forget_pane(worker_name);
         self.dead_workers.insert(worker_name.to_string());
 
         self.app
@@ -5703,6 +5704,7 @@ impl FactoryDaemon {
                 self.app.mark_worker_crashed(&worker).await;
                 self.dead_workers.insert(worker.clone());
                 self.pane_buffers.remove(&worker);
+                self.queue_jobs.prompt_preparation.forget_pane(&worker);
                 self.app
                     .set_error(format!("Worker '{worker}' failed during harness boot"));
                 self.app.notifier().notify_crash(&worker, &detail);
@@ -10082,6 +10084,7 @@ impl FactoryDaemon {
                         task_id_for_finish,
                     ) {
                         Ok(name) => {
+                            self.queue_jobs.prompt_preparation.forget_pane(&name);
                             if let Some(seed_receipt) = seed_receipt.as_deref() {
                                 crate::ui::factory::app::queue_worker_target_seed_notice(
                                     self.app.cas_dir(),
@@ -10608,6 +10611,7 @@ impl FactoryDaemon {
                     // cas-c1a2: the stopped session's output must never be
                     // quoted for a later worker reusing this name.
                     self.pane_buffers.remove(name);
+                    self.queue_jobs.prompt_preparation.forget_pane(name);
                     // Remove shut-down workers from native Agent Teams
                     if let Some(ref teams) = self.teams {
                         let _ = teams.remove_member(name);
@@ -10620,6 +10624,7 @@ impl FactoryDaemon {
                 // cas-c1a2: the relaunch reuses the pane name; start its
                 // buffer empty so diagnostics quote the new process only.
                 self.pane_buffers.remove(&name);
+                self.queue_jobs.prompt_preparation.forget_pane(&name);
                 // Build per-worker Teams config for the respawned worker
                 let teams_config = self.teams.as_ref().map(|t| {
                     use super::teams::TeamsManager;
@@ -10670,6 +10675,7 @@ impl FactoryDaemon {
                 // this, its register-timeout detail quoted the previous
                 // session's transcript and hid what the new Codex printed.
                 self.pane_buffers.remove(&name);
+                self.queue_jobs.prompt_preparation.forget_pane(&name);
                 let teams_config = self.teams.as_ref().map(|t| {
                     use super::teams::TeamsManager;
                     let color_idx = self.app.worker_names().len();
@@ -10806,6 +10812,7 @@ impl FactoryDaemon {
                 let cwd = self.app.project_path().to_path_buf();
                 match self.app.mux.add_shell(&name, cwd, shell.as_deref()) {
                     Ok(_) => {
+                        self.queue_jobs.prompt_preparation.forget_pane(&name);
                         tracing::info!("Shell pane '{}' spawned", name);
                         self.gui_notify_pane_added(&name, cas_mux::PaneKind::Shell);
                     }
@@ -10818,6 +10825,7 @@ impl FactoryDaemon {
             }
             PendingSpawn::KillShell { name } => match self.app.mux.remove_shell(&name) {
                 Ok(()) => {
+                    self.queue_jobs.prompt_preparation.forget_pane(&name);
                     tracing::info!("Shell pane '{}' killed", name);
                     self.gui_notify_pane_removed(&name);
                 }

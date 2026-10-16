@@ -107,6 +107,11 @@ and oversized full-body Teams delivery retain their existing paths. A transport
 write is provisional; only the existing per-recipient rendering/poll receipts
 retire a body from the unread view. Already-held Teams copies retain their
 legacy wake recovery; timed pointer-to-body fallback applies to workers.
+Fired reminders use the same path and pane/tool/composer vetoes; a recent
+completed checkpoint plus continuing heartbeats does not postpone an idle
+supervisor's reminder. Self reminders that exhaust a wake budget stay readable
+and retry after the existing park interval, without inter-agent abandonment or
+unread escalation.
 
 Recipient drains revalidate typed lifecycle relays against the task's current
 terminal state before recording surfacing or spending the hook body budget.

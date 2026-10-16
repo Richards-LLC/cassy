@@ -59,6 +59,9 @@ fn fire_supervisor_reminder(daemon: &FactoryDaemon, message: &str) -> i64 {
 /// agent name, and the real queue pass wakes the idle supervisor pane.
 #[tokio::test(flavor = "current_thread")]
 async fn a_fired_reminder_wakes_an_idle_supervisor_pane_cas_835e() {
+    if !super::supervisor_single_turn_tests::fixture_child(
+        "ui::factory::daemon::runtime::reminder_wake_tests::a_fired_reminder_wakes_an_idle_supervisor_pane_cas_835e",
+    ) { return; }
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (_root, mut daemon) = super::peer_mailbox_wake_tests::peer_fixture().await;
     let id = fire_supervisor_reminder(&daemon, "check CI 38834844173 and merge cas-d5ab");

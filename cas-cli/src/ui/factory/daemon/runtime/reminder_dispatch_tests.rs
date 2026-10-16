@@ -158,7 +158,7 @@ async fn cas_f265_busy_self_reminder_never_becomes_an_abandoned_relay() {
     }
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (root, mut daemon) = fixture().await;
-    let (id, _) = dispatch(&mut daemon, true, false);
+    let (id, body) = dispatch(&mut daemon, true, false);
     daemon
         .pane_silent_since
         .insert(daemon.app.supervisor_name().to_string(), Instant::now());
@@ -185,6 +185,32 @@ async fn cas_f265_busy_self_reminder_never_becomes_an_abandoned_relay() {
     assert!(report.confirmed_at.is_none());
     assert!(teams_messages(&daemon).is_empty());
     assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+    assert_eq!(
+        queue.peek_all(20).unwrap().len(),
+        1,
+        "no abandon/escalation notice"
+    );
+    // Advance the existing durable park without sleeping for its two minutes.
+    rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db"))
+        .unwrap()
+        .execute(
+            "UPDATE prompt_queue SET next_attempt_at=NULL WHERE id=?",
+            [id],
+        )
+        .unwrap();
+    daemon.pane_silent_since.insert(
+        daemon.app.supervisor_name().to_string(),
+        Instant::now() - Duration::from_secs(600),
+    );
+    daemon.process_prompt_queue().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+    assert!(
+        typed.contains(&body),
+        "a later idle pane must recover its wake: {typed:?}"
+    );
+    assert_eq!(typed.matches('\r').count(), 1);
+    assert!(teams_messages(&daemon).is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -232,6 +258,16 @@ async fn cas_f265_cross_session_self_reminder_has_no_unread_or_stall_alarm() {
             .confirmed_at
             .is_none()
     );
+    let mut sender = cas_types::Agent::new_with_role(
+        "other-id".into(),
+        "another-agent".into(),
+        cas_types::AgentRole::Worker,
+    );
+    sender.factory_session = Some(daemon.session_name.clone());
+    open_agent_store(daemon.app.cas_dir())
+        .unwrap()
+        .register(&sender)
+        .unwrap();
     let other = queue
         .enqueue_with_session(
             "another-agent",
@@ -262,5 +298,131 @@ async fn cas_f265_cross_session_self_reminder_has_no_unread_or_stall_alarm() {
     assert!(
         !real_notices.is_empty(),
         "the same watchdog scan must still flag genuinely unread inter-agent mail"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_f265_busy_supervisor_reads_reminder_once_at_next_turn() {
+    if !child("cas_f265_busy_supervisor_reads_reminder_once_at_next_turn") {
+        return;
+    }
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    let (id, body) = dispatch(&mut daemon, true, false);
+    daemon
+        .pane_silent_since
+        .insert(daemon.app.supervisor_name().to_string(), Instant::now());
+    daemon.process_prompt_queue().await.unwrap();
+    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    env.set("CAS_AGENT_NAME", daemon.app.supervisor_name());
+    env.set("CAS_FACTORY_SESSION", &daemon.session_name);
+    env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
+    let mut hook = cas_core::hooks::types::HookInput {
+        session_id: "busy-reminder-supervisor".into(),
+        cwd: root.path().to_string_lossy().into_owned(),
+        hook_event_name: "UserPromptSubmit".into(),
+        user_prompt: Some("Next turn after completing work".into()),
+        prompt_id: Some("next-turn".into()),
+        agent_role: Some("supervisor".into()),
+        ..Default::default()
+    };
+    let first =
+        crate::hooks::handlers::handle_user_prompt_submit(&hook, Some(daemon.app.cas_dir()))
+            .unwrap();
+    assert_eq!(
+        first
+            .user_prompt_context()
+            .unwrap_or_default()
+            .matches(&body)
+            .count(),
+        1
+    );
+    hook.prompt_id = Some("later-turn".into());
+    let later =
+        crate::hooks::handlers::handle_user_prompt_submit(&hook, Some(daemon.app.cas_dir()))
+            .unwrap();
+    assert!(
+        !later
+            .user_prompt_context()
+            .unwrap_or_default()
+            .contains(&body)
+    );
+    let queue = open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    assert_eq!(
+        queue
+            .recipient_receipt(id, daemon.app.supervisor_name())
+            .unwrap(),
+        Some(cas_store::SurfacingSource::HookSurfaced)
+    );
+    daemon.process_prompt_queue().await.unwrap();
+    assert!(teams_messages(&daemon).is_empty());
+    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_f265_reminder_keeps_every_pane_veto_and_requires_known_recipient() {
+    if !child("cas_f265_reminder_keeps_every_pane_veto_and_requires_known_recipient") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_root, mut daemon) = fixture().await;
+    let (_, body) = dispatch(&mut daemon, true, false);
+    let name = daemon.app.supervisor_name();
+    let mut data = daemon.app.director_data().clone();
+    let agent = data
+        .agents
+        .iter_mut()
+        .find(|agent| agent.name == name)
+        .unwrap();
+    agent.last_heartbeat = Some(chrono::Utc::now());
+    agent.latest_activity = Some(("last checkpoint".into(), chrono::Utc::now()));
+    let safe = PaneWakeState {
+        composer_dirty: false,
+        ready_for_injection: true,
+        silent_for: Some(Duration::from_secs(600)),
+        tool_call: ToolCallEvidence::Idle,
+    };
+    let decide = |data: &crate::ui::factory::director::DirectorData, pane, sender| {
+        FactoryDaemon::supervisor_wake_decision(
+            data,
+            name,
+            name,
+            sender,
+            name,
+            &body,
+            pane,
+            chrono::Utc::now(),
+        )
+    };
+    assert!(decide(&data, safe, &WakeSender::Daemon).allowed);
+    for pane in [
+        PaneWakeState {
+            composer_dirty: true,
+            ..safe
+        },
+        PaneWakeState {
+            ready_for_injection: false,
+            ..safe
+        },
+        PaneWakeState {
+            tool_call: ToolCallEvidence::InFlight,
+            ..safe
+        },
+        PaneWakeState {
+            silent_for: Some(Duration::ZERO),
+            ..safe
+        },
+    ] {
+        assert!(
+            !decide(&data, pane, &WakeSender::Daemon).allowed,
+            "{pane:?}"
+        );
+    }
+    assert!(!decide(&data, safe, &WakeSender::Unattributed).allowed);
+    data.agents.clear();
+    assert!(
+        !decide(&data, safe, &WakeSender::Daemon).allowed,
+        "missing registry state is not proof of idle"
     );
 }

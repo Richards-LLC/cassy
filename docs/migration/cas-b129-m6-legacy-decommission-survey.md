@@ -237,19 +237,48 @@ Legend: **R** = remove-now, **L** = still load-bearing during transition,
 | 4 | `hybrid.rs:599` "dead local semantic stub" + weight allocation | §1 — misidentified; the line is the code boost, the semantic channel is live cloud machinery, the weight renormalization is a bug fix. | **K** |
 | 5 | `HybridSearch::set_knowledge_store` `:356`, `set_knowledge_store_from_path` `:361`, `has_knowledge_store` `:367`, the `knowledge_scores` channel `:527, 551, 613, 646-664, 756` | Zero/production-zero callers (§2.2) — but this is **destination-system scaffolding**, the exact wiring the single-read flip needs. Deleting it removes the thing §5.2 is about. | **K** |
 | 6 | `set_semantic_channel` `:376`, `set_semantic_channel_from_config` `:382`, `semantic::open_semantic_channel` | Same: unreached cloud wiring for the knowledge-side semantic channel, not superseded legacy. | **K** |
-| 7 | `HybridSearch::open_full` `:323`, `has_reranker()` `:873` | Zero callers; `open_full`'s own doc says it is "now equivalent to `open_with_graph`". Genuinely dead, but they are search-API vestiges rather than memory paths superseded by knowledge — removing them belongs to a search-cleanup task with its own test pass. | **D** |
-| 8 | `crates/cas-core/src/search/{index_ops,query_ops,scorer,metrics}.rs` | `cas-cli` defines its own `SearchIndex` and `search_unified` and imports only `cas_core::search::temporal` (`hybrid_search/mod.rs:64`). Likely a dead duplicate of the same shape as #3, but it has internal cross-references inside `cas-core` that this task did not exhaustively verify. Not removed on an unverified theory. | **D** |
-| 9 | `cleanup_vector_files` `cas-cli/src/main.rs:269-296`, called `:263` | A one-shot janitor for removed local-embedding artifacts (`vectors.hnsw`, `models/`) that runs on **every** startup. Real cleanup candidate after a release window; unrelated to the knowledge migration. | **D** |
-| 10 | Deprecated no-op embedding params `mcp/tools/types/system.rs:44, 51`; `crates/cas-mcp/src/types/ops_secondary.rs:217, 224` | Documented as ignored; removing them is an MCP schema change with client-compat implications. | **D** |
+| 7 | `HybridSearch::open_full`, `has_reranker()` | **Removed 2026-10-16 (cas-de46).** Whole-repo symbol search found only the definitions; history shows the same delegation to `open_with_graph` and constant `false` since initial public commit `1b7889bea` (2026-03-11). Live `open`, `open_with_graph`, channel wiring and search remain. Named hybrid-search/scorer tests cover the retained path. | **R** |
+| 8 | `crates/cas-core/src/search/{index_ops,query_ops,scorer,metrics}.rs` | **Already removed 2026-08-30 (cas-7edc), commit `77561b75f65570071ee9819a392bad12304c0299`.** History records deletion of the four modules and their exports. Current module/export and consumer searches confirm the remaining temporal primitives and task-artifact identifiers are live; no duplicate search implementation remains to delete. | **R** |
+| 9 | `cleanup_vector_files` in `cas-cli/src/main.rs` | **Removed 2026-10-16 (cas-de46).** The janitor itself was called on every startup, but no producer or retrieval consumer of its legacy `vectors.hnsw`, `vectors.meta.json` or model files remains. Already present in initial public commit `1b7889bea`; release tag `v2.0.0` (2026-04-12, `162c5be18`) shipped it 187 days before this review, and `v3.60.0` still did. Release window satisfied. Real CLI startup preservation fixture covers removal. | **R** |
+| 10 | Deprecated embedding params in `mcp/tools/types/system.rs` and `crates/cas-mcp/src/types/ops_secondary.rs` | **Re-deferred 2026-10-16 (cas-de46): retain through 3.x.** `missing_only` is ignored, but `embeddings` still selects BM25 reindexing and emits a skipped-embeddings response (`core/system.rs::cas_reindex`); both fields remain advertised and forwarded by the consolidated system tool. Removing them requires an announced versioned MCP schema/client migration and an explicit decision for embeddings-only requests. No safe client migration has been established. | **D** |
 | 11 | 14 orphan migration files under `cas-cli/src/migration/migrations/` (`m035_entries_add_visibility`, `m036_entries_add_owner_id`, `m037_entries_idx_team_id`, `m061`–`m063`, `m082`–`m084`, `m125`–`m128`) | Never declared in `migration/migrations/mod.rs` (which declares only `m034_entries_add_team_id:42` and `m038_entries_add_last_reviewed:43` in that range) and never registered in the `MIGRATION` list at `:236-237`. Confirmed against the live schema: `entries` has `team_id` and `share` but **no `visibility`, no `owner_id`**. This is the root cause of finding #6 in the M1 inventory ("`share` vs `team_id` split-brain"). Dead, but a team-sharing concern, not a memory→knowledge one. | **D** |
 | 12 | `store.list_pinned()`, `merge_entries`/`store.list()`, `HybridContextScorer`, `memory` MCP get/list/recent/remember, MCP resources & prompts, statusline, `DocType::Entry` hydration | §2.4 | **L** |
 | 13 | `cas memory share`/`unshare`, `cas memory-migrate`, `cas retrieval-parity` | Team sharing is orthogonal to retrieval; the other two are the migration's own instrumentation and its rollback path. | **K** |
 | 14 | `cas-cli/src/consolidation/` | Live: `daemon/decay.rs:82` calls `consolidate_all`, scheduled from `daemon/maintenance.rs`. Operates on legacy entries, which remain. | **L** |
 | 15 | `.claude/CODEMAP.md`, `docs/PRODUCT_OVERVIEW.md` and their four gates | §3 | **K** |
 
-Everything in **R** is removed by this task. Nothing in **L** is touched.
-Everything in **D** is written up as a follow-up rather than acted on, per the
-repo's "don't ship a fix on a plausible-but-unconfirmed theory" rule.
+The original M6 **R** rows (#1–#3) were removed by cas-7909. Rows #7–#10
+now reflect the dated cas-de46 follow-up above. Nothing in **L** is touched.
+The remaining **D** rows stay deferred with their stated prerequisites.
+
+### 4.1 Follow-up verification and compatibility decision — 2026-10-16
+
+cas-de46 rechecked code and history before deleting anything. `rg` across
+`cas-cli` and `crates` found no callers of `open_full` or `has_reranker`; `git log
+-S` and the initial public tree confirm both were already vestiges. The current
+cas-core search module and crate exports retain only temporal search and durable
+artifact identifiers; `77561b75f` removed the duplicate modules and exports.
+
+For #9, the old janitor was reachable, so its removal is justified by retirement
+of its inputs rather than by a claim that the janitor had no callers. Exact
+artifact-name/path searches found only the janitor, doctor observations and
+legacy error guidance, with no producer or retrieval consumer. The release
+window is bounded by shipped tags, not an assumed removal date before public
+history. Ordinary startup now leaves any remaining files for the owner to
+manage; log retention remains active and cloud search is unchanged.
+
+For #10, the compatibility window is the remainder of 3.x. No field or schema
+is changed here. Revisit removal only with an announced versioned MCP contract,
+a client migration/check matrix and defined behavior for
+`embeddings=true,bm25=false`. Today that request skips BM25 and reports cloud-only
+embeddings; treating the flag as an inert field and deleting it would silently
+change this behavior. Existing request deserialization tests remain applicable.
+
+The named verification covers hybrid search and the production context scorer,
+retained cas-core temporal search, legacy reindex request compatibility, and a
+real CLI fixture that checks startup preserves both retired vector files and a
+nested model file byte-for-byte. Capped compile checks and fast release-gate rows
+are recorded with exact results in cas-de46's task evidence.
 
 ---
 
@@ -337,5 +366,6 @@ Nothing else. No flat file, no live read path, no config, no gate.
 Follow-ups filed: §5.1 parity-harness global resolution as cas-96ae; §5.3
 knowledge retrieval-quality measurement as cas-d075; §4 #11 unregistered
 migrations as cas-0955 — the last of which also explains a standing finding in
-the M1 inventory (`share` vs `team_id` split-brain). The remaining deferred dead
-code, §4 #7–#10, is written up here but unfiled and still open.
+the M1 inventory (`share` vs `team_id` split-brain). The §4 #7–#10 follow-up is cas-de46: #7 and #9 are removed, #8 was already
+removed by cas-7edc, and #10 remains explicitly deferred under the dated
+compatibility decision in §4.1.

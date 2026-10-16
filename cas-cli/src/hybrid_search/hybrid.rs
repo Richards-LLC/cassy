@@ -393,14 +393,6 @@ impl HybridSearch {
         Ok(search)
     }
 
-    /// Open hybrid search with graph retriever enabled
-    ///
-    /// Note: Local reranker has been removed and is now cloud-only.
-    /// This is now equivalent to `open_with_graph`.
-    pub fn open_full(cas_dir: &Path) -> Result<Self> {
-        Self::open_with_graph(cas_dir)
-    }
-
     /// Set the graph retriever (requires entity store)
     pub fn set_graph_retriever(&mut self, entity_store: Arc<dyn EntityStore>) {
         self.graph_retriever = Some(GraphRetriever::with_defaults(entity_store));
@@ -1048,14 +1040,6 @@ impl HybridSearch {
         self.bm25_index.reindex(entries)?;
 
         Ok(())
-    }
-
-    /// Check if reranker is available
-    ///
-    /// Note: Local reranking has been removed and is now cloud-only.
-    /// Always returns false.
-    pub fn has_reranker(&self) -> bool {
-        false
     }
 
     /// Check if graph retriever is available

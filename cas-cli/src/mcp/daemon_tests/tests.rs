@@ -176,6 +176,7 @@ fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
         .expect("register original worker");
 
     let (resolved, reused) = register_session_start_agent(
+        &cas_root,
         agent_store.as_ref(),
         "fresh-session-after-urgent-interrupt",
         Some("strong-bear-44"),
@@ -224,7 +225,10 @@ fn context_reset_rebind_preserves_worker_name_and_lease_for_claude_and_codex() {
         let old_session = format!("{worker_cli}-old-session");
         let new_session = format!("{worker_cli}-post-clear-session");
         task_store
-            .add(&Task::new("cas-742-lease".to_string(), "reset lease".to_string()))
+            .add(&Task::new(
+                "cas-742-lease".to_string(),
+                "reset lease".to_string(),
+            ))
             .expect("seed lease task");
 
         let mut original = Agent::new(old_session.clone(), "patient-lion-85".to_string());
@@ -257,6 +261,7 @@ fn context_reset_rebind_preserves_worker_name_and_lease_for_claude_and_codex() {
         );
 
         let (resolved, reused) = register_session_start_agent(
+            &cas_root,
             agent_store.as_ref(),
             &new_session,
             None,
@@ -323,6 +328,7 @@ fn supervisor_hook_registration_persists_role_and_resolves_owner() {
     let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
 
     let (supervisor, reused) = register_session_start_agent(
+        &cas_root,
         agent_store.as_ref(),
         "supervisor-hook-session",
         Some("lively-supervisor-11"),

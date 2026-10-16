@@ -716,6 +716,46 @@ describe("a reader scrolling away from the tail is never pinned back (cas-6a9b)"
     expect(jump.hidden).toBe(false);
   });
 
+  // cas-100f (HUB-J4 in the 3.58 merge queue): the reader scrolled up to
+  // Load earlier, and before the browser dispatched that scroll's event a
+  // render ran (the 5 s session heartbeat). It still saw the thread as
+  // following its tail, read the unseen position as a re-mount's reset and
+  // pinned the reader back to the newest turn.
+  it("when a render runs before the reader's scroll event is dispatched", () => {
+    const flush = frames();
+    const { history, view, jump } = longThread();
+    const content = { height: 1400 };
+    layout(view, content);
+    for (let turn = 1; turn <= 14; turn += 1) history.reply(reply(turn, "answer", `Build step ${turn} of 14`), at(10, turn));
+    view.update();
+    flush(); flush();
+    expect(view.element.scrollTop).toBe(1200);
+    view.element.scrollTop = 0;
+    view.update();
+    expect(view.element.scrollTop, "the render leaves the reader where they scrolled").toBe(0);
+    view.element.dispatchEvent(new Event("scroll"));
+    flush(); flush();
+    expect(view.element.scrollTop).toBe(0);
+    expect(jump.hidden).toBe(false);
+  });
+
+  // A re-mount's reset has no scroll event at all: the thread that was
+  // following its tail goes back to it in the next frame, before it paints.
+  it("but a following thread put back at its top with no scroll event goes back to its tail", () => {
+    const flush = frames();
+    const { history, view, jump } = longThread();
+    const content = { height: 1400 };
+    layout(view, content);
+    for (let turn = 1; turn <= 14; turn += 1) history.reply(reply(turn, "answer", `Build step ${turn} of 14`), at(10, turn));
+    view.update();
+    flush(); flush();
+    view.element.scrollTop = 0;
+    view.update();
+    flush();
+    expect(view.element.scrollTop).toBe(1200);
+    expect(jump.hidden).toBe(true);
+  });
+
   // What the guards are for still holds: a layout scroll that leaves the
   // reader at the tail (content shrank and the box clamped) keeps following.
   it("but layout that keeps the reader at the tail keeps following", () => {

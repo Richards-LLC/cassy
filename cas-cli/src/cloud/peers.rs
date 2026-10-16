@@ -307,11 +307,10 @@ pub(crate) fn presence_line(cas_root: &Path, self_id: Option<&str>) -> String {
             )
         );
     }
-    let Some(self_id) = self_id else {
-        return String::new();
-    };
+    let shutdown = crate::cloud::shutdown::health(cas_root, Utc::now());
+    let Some(self_id) = self_id else { return shutdown; };
     let record = crate::cloud::presence::load(cas_root, self_id);
-    crate::cloud::presence::render_line(record.as_ref(), Utc::now())
+    format!("{}{shutdown}", crate::cloud::presence::render_line(record.as_ref(), Utc::now()))
 }
 
 fn peers_discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {

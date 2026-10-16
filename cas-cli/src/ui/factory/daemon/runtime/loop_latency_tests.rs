@@ -246,6 +246,65 @@ async fn input_forwarding_exchange_and_draw_touch_no_store() {
     );
 }
 
+/// C6 review M2 (cas-9db0b): the daemon enforces on its client-input and
+/// PTY-exchange steps (`lane_guard::enforce_here` in `FactoryDaemon::run`).
+/// Keys typed on the client socket reach a real PTY and its echo is drained,
+/// with the lane held exactly as `run` holds it and enforced violations set
+/// to panic: no blocking call, no store access.
+#[tokio::test]
+async fn flv2_input_and_pty_exchange_run_enforced() {
+    let (_dir, cas_dir) = logged_in_project();
+    let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    daemon.listener.set_nonblocking(true).unwrap();
+    super::inject_command_tests::ready_claude_worker(&mut daemon).await;
+    assert!(daemon.app.mux.focus("worker-a"));
+    let mut client = UnixStream::connect(cas_dir.join("test.sock")).unwrap();
+    let progress = super::loop_watchdog::LoopProgress::new();
+    fn daemon_bytes(daemon: &FactoryDaemon) -> u64 {
+        daemon.app.mux.pane_bytes_received("worker-a").unwrap_or(0)
+    }
+
+    let before_lane = cas_store::lane_guard::thread_violations();
+    let before_store = wait_budget::store_access_violations();
+    let echo_before = daemon_bytes(&daemon);
+    let mut exchanged = 0usize;
+    for keys in [&b"c6-echo"[..], b"\x1b[D", b"\x1b[C"] {
+        client.write_all(keys).unwrap();
+        let started = Instant::now();
+        loop {
+            let (attachment, enforced) = super::loop_watchdog::enforced_daemon_step(
+                &progress,
+                super::loop_watchdog::LoopPhase::ClientInput,
+            );
+            assert_eq!(
+                cas_store::lane_guard::current_mode(),
+                Some(cas_store::lane_guard::GuardMode::Enforce)
+            );
+            let _forbid = wait_budget::forbid_store_access();
+            daemon.accept_clients().unwrap();
+            daemon.process_client_input().await.unwrap();
+            exchanged += daemon.exchange_terminal(&progress).await;
+            drop(enforced);
+            drop(attachment);
+            if daemon_bytes(&daemon) > echo_before || started.elapsed() > Duration::from_secs(5) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    assert!(
+        daemon_bytes(&daemon) > echo_before && exchanged > 0,
+        "the typed keys echoed through the PTY exchange"
+    );
+    assert_eq!(
+        cas_store::lane_guard::thread_violations(),
+        before_lane,
+        "{:?}",
+        cas_store::lane_guard::last_thread_violation()
+    );
+    assert_eq!(wait_budget::store_access_violations(), before_store);
+}
+
 #[test]
 fn a_task_sync_mutation_under_a_foreign_sqlite_write_lock_stays_in_budget() {
     // Only SQLite is held: the mutation takes its task-sync lease and stripe,
@@ -505,65 +564,106 @@ async fn flv2_external_reminders_never_on_lane() {
     assert!(daemon.external_wake.wait_for_scan(Duration::ZERO).is_none());
 }
 
-/// Factory loop v2 §6.6 (cas-6931), report mode: a store open, a `git`
-/// command, a `/proc` scan and a transcript read on the io or control lane
-/// are each reported against their call site, and run as before. Off a lane
-/// they are not reported. C6 flips the guard to enforce.
+/// Factory loop v2 §6.6 (cas-6931; enforce mode C6, cas-9db0b): a store
+/// open, a `git` command, a `/proc` scan and a transcript read on an
+/// enforcing io or control lane each trip the assertion, naming the call,
+/// lane, step and site. Off a lane nothing is reported. The daemon loop's
+/// own lane (`LoopProgress::attach`) stays in report mode until C2c
+/// (cas-4491f): there the same calls are reported per site with their step
+/// and run as before.
 #[test]
 fn flv2_no_blocking_call_on_lanes() {
     use crate::cli::factory::wedged::{self, ProcessTable as _};
-    use cas_store::lane_guard::{self, BlockingKind, Lane};
+    use cas_store::lane_guard::{self, BlockingKind, GuardMode, Lane};
 
     let (dir, cas_dir) = logged_in_project();
     let transcript = dir.path().join("transcript.jsonl");
     std::fs::write(&transcript, "{\"type\":\"assistant\"}\n").unwrap();
+    let calls: [(BlockingKind, &dyn Fn()); 4] = [
+        (BlockingKind::Store, &|| {
+            crate::store::open_agent_store(&cas_dir)
+                .unwrap()
+                .list(None)
+                .unwrap();
+        }),
+        (BlockingKind::Command, &|| {
+            let _ = crate::git_evidence::git_text(dir.path(), &["rev-parse", "--git-dir"]);
+        }),
+        (BlockingKind::Proc, &|| {
+            let _ = wedged::RealProcessTable.pids();
+        }),
+        (BlockingKind::Transcript, &|| {
+            let _ = wedged::transcript_has_in_flight_tool_call(
+                &transcript,
+                cas_mux::SupervisorCli::Claude,
+            );
+        }),
+    ];
     let blocking_calls = || {
         let mut kinds = Vec::new();
-        let mut note = |kind: BlockingKind, before: u64| {
+        for (kind, call) in &calls {
+            let before = lane_guard::thread_violations();
+            call();
             if lane_guard::thread_violations() > before {
-                kinds.push(kind);
+                kinds.push(*kind);
             }
-        };
-        let before = lane_guard::thread_violations();
-        crate::store::open_agent_store(&cas_dir)
-            .unwrap()
-            .list(None)
-            .unwrap();
-        note(BlockingKind::Store, before);
-        let before = lane_guard::thread_violations();
-        let _ = crate::git_evidence::git_text(dir.path(), &["rev-parse", "--git-dir"]);
-        note(BlockingKind::Command, before);
-        let before = lane_guard::thread_violations();
-        let _ = wedged::RealProcessTable.pids();
-        note(BlockingKind::Proc, before);
-        let before = lane_guard::thread_violations();
-        let _ = wedged::transcript_has_in_flight_tool_call(
-            &transcript,
-            cas_mux::SupervisorCli::Claude,
-        );
-        note(BlockingKind::Transcript, before);
+        }
         kinds
     };
 
     assert!(blocking_calls().is_empty(), "off a lane nothing is reported");
+    for lane in [Lane::Io, Lane::Control] {
+        for (kind, call) in &calls {
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _lane = super::loop_watchdog::enforce_test_lane(lane);
+                lane_guard::set_step("flv2 enforce probe");
+                call();
+            }));
+            let payload = caught.expect_err("an enforced lane trips on a blocking call");
+            let message = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_default();
+            // The call that tripped is this kind's own, on this lane.
+            let (tripped_lane, tripped_kind, what) =
+                lane_guard::last_thread_violation().expect("the tripping call is recorded");
+            assert_eq!((tripped_lane, tripped_kind), (lane, *kind), "{message}");
+            assert!(
+                message.starts_with(&format!(
+                    "blocking {} call `{what}` on the {} lane in step `flv2 enforce probe` at ",
+                    kind.name(),
+                    lane.name()
+                )),
+                "{kind:?} on {lane:?}: {message}"
+            );
+            assert_eq!(lane_guard::current_lane(), None, "the lane unwinds");
+        }
+    }
+
+    // The daemon loop's lane reports: every kind is counted and runs.
     let every_kind = vec![
         BlockingKind::Store,
         BlockingKind::Command,
         BlockingKind::Proc,
         BlockingKind::Transcript,
     ];
-    for lane in [Lane::Io, Lane::Control] {
-        let _lane = lane_guard::enter_lane(lane);
-        assert_eq!(blocking_calls(), every_kind, "on the {lane:?} lane");
+    let progress = super::loop_watchdog::LoopProgress::new();
+    {
+        let _lane = progress.attach(super::loop_watchdog::Lane::Control);
+        assert_eq!(lane_guard::current_mode(), Some(GuardMode::Report));
+        progress.enter(super::loop_watchdog::LoopPhase::ClientInput);
+        assert_eq!(blocking_calls(), every_kind, "on the io lane");
+        progress.enter(super::loop_watchdog::LoopPhase::PromptQueue);
+        assert_eq!(blocking_calls(), every_kind, "on the control lane");
         assert_eq!(
             lane_guard::last_thread_violation().map(|last| last.0),
-            Some(lane)
+            Some(Lane::Control)
         );
     }
+    assert_eq!(lane_guard::current_lane(), None);
 
     // The daemon loop attaches its thread as the control lane; io steps
     // switch it to io and back.
-    let progress = super::loop_watchdog::LoopProgress::new();
     {
         let _lane = progress.attach(super::loop_watchdog::Lane::Control);
         assert_eq!(lane_guard::current_lane(), Some(Lane::Control));
@@ -584,4 +684,13 @@ fn flv2_no_blocking_call_on_lanes() {
             status.lane_violation_sites
         );
     }
+    // Each site names the loop step it ran in (C6), e.g. the prompt queue.
+    assert!(
+        status
+            .lane_violation_sites
+            .iter()
+            .any(|site| site.starts_with("control/transcript") && site.contains(" in prompt queue (x")),
+        "{:?}",
+        status.lane_violation_sites
+    );
 }

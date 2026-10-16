@@ -213,6 +213,54 @@ have everyone update their credentials file and restart their clients and
 
 ---
 
+## Factory channel watches
+
+From 3.59, factory sessions on the same clone share
+`.cas/violet/watches.v2.json` (format version 2), with separate watch entries for
+each session and channel. Each mutation reloads state under a shared lock.
+Starting a second session leaves live peer watches intact. Clean shutdown stops
+its own watches without waiting for an in-flight Cloud request; that tick
+finishes retirement. The last runtime handle also retires watches on early
+returns. After a successful session listing, a deleted metadata receipt
+also retires the old session's watches; unreadable listings or an existing but
+incomplete receipt do not prove a live daemon is gone.
+
+The first authenticated use migrates `violet/watches.json` into the v2 book
+without changing the legacy file. Doctor and factory status can read legacy
+health until the v2 file exists, without writing or migrating either file. A
+present but invalid or unsupported v2 book never falls back to legacy health.
+Later daemon starts use only the v2 book. Daemons
+from 3.58 and older keep their own legacy watches until upgraded; upgrade and
+restart every daemon on a clone for coordinated watch behavior. Older binaries
+cannot overwrite the v2 path, and v2 readers refuse future format versions.
+
+Activity on a thread already recorded in a watch goes to that watch's owning
+session, even when another session claims it from Cloud. The first durable wake
+on an unknown thread claims that root under the lock, so later readers and
+replies use one owner. This is local watch routing; it does not add outgoing-post
+tracking or Cloud thread claims.
+
+After enqueueing a known owner's reply, the claimant may refresh that watch's
+activity timestamp and bounded dedupe keys for that thread under the same lock.
+Each thread keeps up to 200 peer-admitted keys, matching the normal dedupe
+window. A busy thread cannot evict the owner's keys for other threads. The owner
+keeps at most 200 recent thread roots per channel, discarding the oldest roots
+and their peer keys together; activity on an older root then follows the
+unknown-thread rule. Stopping a watch clears its roots and peer keys, and
+reopening starts a fresh ownership set. Admission does
+not start or stop the owner's watches, alter other watches, or advance the channel-wide
+read cursor past unread messages on other threads.
+
+Without Cloud credentials, ticks create no watch book or claim-failure finding.
+An enabled consumer checks credentials on its 15-second tick; after `cas login`
+the factory daemon starts receiving without a restart.
+
+A corrupt native book is durably quarantined as `watches.v2.json.corrupt`
+(numbered if necessary), then replaced with fresh state. Doctor names the
+quarantine. Inspect and archive or remove that file after review to clear the
+finding. A corrupt legacy file is left unchanged, with a quarantine copy;
+recovery never writes an older daemon's file.
+
 ## Consumer test channel
 
 Use `#cas-scratch` (`C0BUZEB4H3M`) for consumer validation of the hub tools. Keep

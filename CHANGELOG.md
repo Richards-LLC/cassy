@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.58.0] - 2026-10-16
+
+### Fixed — Commander keeps your place when you load earlier turns (cas-100f)
+
+- Scrolling up to read earlier turns no longer snaps back to the newest
+  message when the 5-second heartbeat redraws the transcript. The tail pin now
+  waits one animation frame and re-checks the reader's position first.
+
 ### Fixed — busy Claude workers see supervisor messages at their next tool call (#1223, cas-a1ed, cas-1ba0)
 
 - The silence gate now holds only the terminal nudge. A held copy surfaces at

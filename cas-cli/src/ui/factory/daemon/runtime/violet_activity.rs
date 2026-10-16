@@ -65,6 +65,10 @@ const LEASE_SECS: u32 = 120;
 /// Cloud accepts at most 50 acknowledgements per request.
 const ACK_BATCH: usize = 50;
 const SEEN_KEYS_CAP: usize = 200;
+const FOREIGN_KEYS_PER_THREAD: usize = SEEN_KEYS_CAP;
+/// Keep recent ownership bounded even when activity extends a watch forever.
+const THREAD_ROOTS_CAP: usize = 200;
+const WATCH_BOOK_VERSION: u32 = 2;
 /// Events listed individually in one wake; the rest are counted.
 const WAKE_LIST_CAP: usize = 10;
 /// Consecutive `violet_read` failures that stop a watch.
@@ -298,10 +302,17 @@ pub(crate) struct ChannelWatch {
     /// The last [`SEEN_KEYS_CAP`] admitted `slack:{team}:{channel}:{ts}` keys.
     #[serde(default)]
     pub seen_keys: VecDeque<String>,
+    /// Peer admissions cannot evict this owner's keys for other threads.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub foreign_seen_keys: BTreeMap<String, VecDeque<String>>,
     /// Roots of threads Violet started, from `thread_reply` events. Their
     /// author is the Violet bot, which is how a sweep learns its user id.
     #[serde(default)]
     pub violet_thread_roots: BTreeSet<String>,
+    /// Thread roots explicitly watched by this session (including mentions).
+    /// Kept separate from bot-authored roots used to learn Violet's user id.
+    #[serde(default)]
+    pub watched_thread_roots: BTreeSet<String>,
     #[serde(default)]
     pub read_failures: u32,
     #[serde(default)]
@@ -321,6 +332,50 @@ impl ChannelWatch {
 
     fn has_seen(&self, key: &str) -> bool {
         self.seen_keys.iter().any(|seen| seen == key)
+            || self
+                .foreign_seen_keys
+                .values()
+                .any(|keys| keys.iter().any(|seen| seen == key))
+    }
+
+    fn remember_foreign(&mut self, thread: &str, key: String) {
+        let keys = self.foreign_seen_keys.entry(thread.to_owned()).or_default();
+        if !keys.contains(&key) {
+            keys.push_back(key);
+        }
+        while keys.len() > FOREIGN_KEYS_PER_THREAD {
+            keys.pop_front();
+        }
+    }
+
+    /// Only the owner calls this while mutating its own watch. Peer admission
+    /// changes one already-known thread's bucket, never another thread's state.
+    fn bound_thread_state(&mut self) {
+        let mut roots: Vec<_> = self
+            .watched_thread_roots
+            .union(&self.violet_thread_roots)
+            .cloned()
+            .collect();
+        roots.sort_by_key(|root| slack_ts_instant(root));
+        let remove = roots.len().saturating_sub(THREAD_ROOTS_CAP);
+        for root in roots.into_iter().take(remove) {
+            self.watched_thread_roots.remove(&root);
+            self.violet_thread_roots.remove(&root);
+        }
+        self.foreign_seen_keys.retain(|root, _| {
+            self.watched_thread_roots.contains(root) || self.violet_thread_roots.contains(root)
+        });
+        for keys in self.foreign_seen_keys.values_mut() {
+            while keys.len() > FOREIGN_KEYS_PER_THREAD {
+                keys.pop_front();
+            }
+        }
+    }
+
+    fn clear_thread_state(&mut self) {
+        self.watched_thread_roots.clear();
+        self.violet_thread_roots.clear();
+        self.foreign_seen_keys.clear();
     }
 
     fn remember(&mut self, key: String) {
@@ -342,6 +397,7 @@ impl ChannelWatch {
     fn stop(&mut self, reason: &str, now: DateTime<Utc>) {
         self.stopped_at = Some(now);
         self.stop_reason = Some(reason.to_string());
+        self.clear_thread_state();
     }
 
     fn message_key(&self, ts: &str) -> String {
@@ -354,8 +410,10 @@ impl ChannelWatch {
 }
 
 /// Persistent watch state, one JSON file per project checkout.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct WatchBook {
+    #[serde(default = "watch_book_version")]
+    pub format_version: u32,
     #[serde(default)]
     pub watches: Vec<ChannelWatch>,
     /// Violet bot user ids learned from the roots of threads Violet started.
@@ -365,6 +423,29 @@ pub(crate) struct WatchBook {
     /// `cas factory status` and `cas doctor`.
     #[serde(default)]
     pub relay: RelayHealth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantined_book: Option<PathBuf>,
+}
+
+fn watch_book_version() -> u32 {
+    WATCH_BOOK_VERSION
+}
+
+impl Default for WatchBook {
+    fn default() -> Self {
+        Self {
+            format_version: WATCH_BOOK_VERSION,
+            watches: Vec::new(),
+            learned_bot_user_ids: BTreeSet::new(),
+            relay: RelayHealth::default(),
+            quarantined_book: None,
+        }
+    }
+}
+
+enum BookDecodeError {
+    Corrupt,
+    Unsupported(u64),
 }
 
 /// How the claim loop against the Cloud relay is doing.
@@ -390,46 +471,219 @@ const RELAY_ERROR_CAP: usize = 240;
 
 impl WatchBook {
     pub(crate) fn path(cas_dir: &Path) -> PathBuf {
-        cas_dir.join("violet").join("watches.json")
+        cas_dir.join("violet").join("watches.v2.json")
     }
 
-    /// Load the book for `factory_session`. An active watch left by another
-    /// session ended with that session.
+    /// Read peer state without treating another session as an ended session.
     pub(crate) fn load(path: &Path, factory_session: &str, now: DateTime<Utc>) -> Self {
         let mut book: Self = std::fs::read(path)
             .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .and_then(|bytes| Self::decode(&bytes).ok())
             .unwrap_or_default();
-        for watch in &mut book.watches {
-            if watch.is_active() && watch.factory_session != factory_session {
+        book.prune_dead_sessions(factory_session, now);
+        book
+    }
+
+    fn prune_dead_sessions(&mut self, factory_session: &str, now: DateTime<Utc>) {
+        let Ok(sessions) =
+            crate::ui::factory::session::SessionManager::new().list_sessions_read_only()
+        else {
+            return;
+        };
+        let listed: BTreeMap<_, _> = sessions
+            .into_iter()
+            .map(|session| (session.name, session.is_running))
+            .collect();
+        for watch in &mut self.watches {
+            let gone = match listed.get(&watch.factory_session) {
+                Some(running) => !running,
+                // The listing skips malformed receipts; an existing receipt
+                // is ambiguous (including during a concurrent metadata write).
+                None => crate::ui::factory::session::metadata_path(&watch.factory_session)
+                    .try_exists()
+                    .is_ok_and(|exists| !exists),
+            };
+            if watch.is_active() && watch.factory_session != factory_session && gone {
                 watch.stop("session_end", now);
             }
         }
-        book
+    }
+
+    /// Serialize clone-wide read/modify/write operations. Cloud requests run
+    /// outside this lock; it protects only local enqueue and watch persistence.
+    fn lock(path: &Path) -> Result<std::fs::File, String> {
+        let parent = path.parent().ok_or("watch path has no parent")?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("lock"))
+            .map_err(|e| format!("open Violet watch lock: {e}"))?;
+        fs2::FileExt::lock_exclusive(&lock).map_err(|e| format!("lock Violet watches: {e}"))?;
+        Ok(lock)
+    }
+
+    fn read_for_update(path: &Path) -> Result<Self, String> {
+        let (bytes, legacy) = match std::fs::read(path) {
+            Ok(bytes) => (bytes, false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A crash/write failure after quarantine must not import the
+                // old binary's legacy state again on the recovery retry.
+                let prefix = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                let quarantine =
+                    std::fs::read_dir(path.parent().ok_or("watch path has no parent")?)
+                        .map_err(|e| e.to_string())?
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .find(|entry| {
+                            entry
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| {
+                                    name.starts_with(prefix) && name.ends_with(".corrupt")
+                                })
+                        });
+                if let Some(quarantine) = quarantine {
+                    let book = Self {
+                        quarantined_book: Some(quarantine),
+                        ..Self::default()
+                    };
+                    book.save(path)?;
+                    return Ok(book);
+                }
+                let legacy = path.with_file_name("watches.json");
+                match std::fs::read(&legacy) {
+                    Ok(bytes) => (bytes, true),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(Self::default());
+                    }
+                    Err(error) => return Err(format!("read legacy Violet watches: {error}")),
+                }
+            }
+            Err(error) => return Err(format!("read Violet watches: {error}")),
+        };
+        match Self::decode(&bytes) {
+            Ok(book) => {
+                if legacy {
+                    book.save(path)?;
+                }
+                Ok(book)
+            }
+            Err(BookDecodeError::Unsupported(version)) => Err(format!(
+                "unsupported Violet watch book version {version}; supported through {WATCH_BOOK_VERSION}; no state changed"
+            )),
+            Err(BookDecodeError::Corrupt) => {
+                let mut quarantine = path.with_extension("json.corrupt");
+                let mut suffix = 0;
+                while quarantine.exists() {
+                    suffix += 1;
+                    quarantine = path.with_extension(format!("json.{suffix}.corrupt"));
+                }
+                if legacy {
+                    // Never rename or write the legacy file: old daemons own it.
+                    use std::io::Write;
+                    let mut copy = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&quarantine)
+                        .map_err(|e| e.to_string())?;
+                    copy.write_all(&bytes).map_err(|e| e.to_string())?;
+                    copy.sync_all().map_err(|e| e.to_string())?;
+                } else {
+                    std::fs::File::open(path)
+                        .and_then(|file| file.sync_all())
+                        .map_err(|e| e.to_string())?;
+                    std::fs::rename(path, &quarantine).map_err(|e| e.to_string())?;
+                }
+                sync_watch_directory(path)?;
+                let book = Self {
+                    quarantined_book: Some(quarantine),
+                    ..Self::default()
+                };
+                book.save(path)?;
+                Ok(book)
+            }
+        }
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, BookDecodeError> {
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| BookDecodeError::Corrupt)?;
+        let version = value
+            .get("format_version")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if version > u64::from(WATCH_BOOK_VERSION) {
+            return Err(BookDecodeError::Unsupported(version));
+        }
+        let mut book: Self = serde_json::from_value(value).map_err(|_| BookDecodeError::Corrupt)?;
+        book.format_version = WATCH_BOOK_VERSION;
+        Ok(book)
     }
 
     /// Read the book as stored, without ending other sessions' watches. For
     /// status readers; `None` when no daemon has written one.
     pub(crate) fn read(path: &Path) -> Option<Self> {
-        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+        Self::decode(&std::fs::read(path).ok()?).ok()
     }
 
-    pub(crate) fn save(&self, path: &Path) -> Result<(), String> {
+    fn save(&self, path: &Path) -> Result<(), String> {
+        use std::io::Write;
+        if self.format_version > WATCH_BOOK_VERSION {
+            return Err(format!(
+                "unsupported Violet watch book version {}",
+                self.format_version
+            ));
+        }
         let parent = path.parent().ok_or("watch path has no parent")?;
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
         let tmp = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
+        let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        file.write_all(&bytes)
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))?;
+        sync_watch_directory(path)
     }
 
-    fn watch(&self, channel_id: &str) -> Option<&ChannelWatch> {
-        self.watches.iter().find(|w| w.channel_id == channel_id)
+    fn watch(&self, channel_id: &str, factory_session: &str) -> Option<&ChannelWatch> {
+        self.watches
+            .iter()
+            .find(|w| w.channel_id == channel_id && w.factory_session == factory_session)
+    }
+
+    fn thread_owner(&self, channel: &str, thread: &str) -> Option<&str> {
+        self.active()
+            .filter(|watch| {
+                watch.channel_id == channel
+                    && (watch.watched_thread_roots.contains(thread)
+                        || watch.violet_thread_roots.contains(thread))
+            })
+            .min_by(|a, b| {
+                a.started_at
+                    .cmp(&b.started_at)
+                    .then(a.factory_session.cmp(&b.factory_session))
+            })
+            .map(|watch| watch.factory_session.as_str())
     }
 
     pub(crate) fn active(&self) -> impl Iterator<Item = &ChannelWatch> {
         self.watches.iter().filter(|w| w.is_active())
     }
+}
+
+fn sync_watch_directory(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    std::fs::File::open(path.parent().ok_or("watch path has no parent")?)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +755,7 @@ pub(crate) struct VioletWake {
     configured_bot_user_ids: BTreeSet<String>,
     book: WatchBook,
     held: BTreeMap<String, HeldEvent>,
-    last_channel_wake: HashMap<String, DateTime<Utc>>,
+    last_channel_wake: HashMap<(String, String), DateTime<Utc>>,
 }
 
 impl VioletWake {
@@ -515,7 +769,7 @@ impl VioletWake {
         now: DateTime<Utc>,
     ) -> Self {
         let book = WatchBook::load(&watch_path, &factory_session, now);
-        let wake = Self {
+        Self {
             project_id,
             alias_class,
             consumer_id,
@@ -525,16 +779,27 @@ impl VioletWake {
             book,
             held: BTreeMap::new(),
             last_channel_wake: HashMap::new(),
-        };
-        if let Err(error) = wake.book.save(&wake.watch_path) {
-            tracing::warn!(%error, "could not record ended Violet watches");
         }
-        wake
     }
 
     #[cfg(test)]
     pub(crate) fn book(&self) -> &WatchBook {
         &self.book
+    }
+
+    fn reload_locked(&mut self, now: DateTime<Utc>) -> Result<std::fs::File, String> {
+        let lock = WatchBook::lock(&self.watch_path)?;
+        self.book = WatchBook::read_for_update(&self.watch_path)?;
+        self.book.prune_dead_sessions(&self.factory_session, now);
+        for watch in self
+            .book
+            .watches
+            .iter_mut()
+            .filter(|watch| watch.factory_session == self.factory_session)
+        {
+            watch.bound_thread_state();
+        }
+        Ok(lock)
     }
 
     fn is_bot(&self, user: Option<&str>) -> bool {
@@ -591,8 +856,18 @@ impl VioletWake {
             }
             Err(error) => report.errors.push(format!("claim: {error}")),
         }
+        // A peer may open a thread watch while the Cloud request is in flight.
+        let book_lock = match self.reload_locked(now) {
+            Ok(lock) => lock,
+            Err(error) => {
+                report.errors.push(error);
+                report.held = self.held.len();
+                return report;
+            }
+        };
         self.admit_held(queue, supervisor_live, now, &mut acks, &mut report);
         report.held = self.held.len();
+        drop(book_lock);
         for batch in acks.chunks(ACK_BATCH) {
             match relay.ack(&self.consumer_id, batch) {
                 Ok(results) => {
@@ -611,6 +886,13 @@ impl VioletWake {
 
     /// cas-a897: keep the tick's result where status readers can see it.
     fn record_relay_health(&mut self, report: &PollReport, now: DateTime<Utc>) {
+        let _lock = match self.reload_locked(now) {
+            Ok(lock) => lock,
+            Err(error) => {
+                tracing::warn!(%error, "could not reload Violet relay health");
+                return;
+            }
+        };
         let health = &mut self.book.relay;
         health.last_claim_at = Some(now);
         if report.errors.is_empty() {
@@ -666,8 +948,12 @@ impl VioletWake {
             .held
             .iter()
             .filter(|(_, held)| {
+                let owner = self
+                    .book
+                    .thread_owner(&held.envelope.channel.id, &held.envelope.message.thread_ts)
+                    .unwrap_or(&self.factory_session);
                 self.book
-                    .watch(&held.envelope.channel.id)
+                    .watch(&held.envelope.channel.id, owner)
                     .is_some_and(|w| w.has_seen(&held.envelope.dedupe_key))
             })
             .map(|(id, _)| id.clone())
@@ -682,7 +968,12 @@ impl VioletWake {
             let expired: Vec<String> = self
                 .held
                 .iter()
-                .filter(|(_, held)| (now - held.first_seen).num_seconds() >= NO_SUPERVISOR_HOLD_SECS)
+                .filter(|(_, held)| {
+                    self.book
+                        .thread_owner(&held.envelope.channel.id, &held.envelope.message.thread_ts)
+                        .is_none_or(|owner| owner == self.factory_session)
+                        && (now - held.first_seen).num_seconds() >= NO_SUPERVISOR_HOLD_SECS
+                })
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in expired {
@@ -690,17 +981,26 @@ impl VioletWake {
                 acks.push(Ack { id, outcome: AckOutcome::NoSupervisor });
                 report.no_supervisor += 1;
             }
-            return;
         }
 
-        let mut by_channel: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut by_channel: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
         for (id, held) in &self.held {
-            by_channel.entry(held.envelope.channel.id.clone()).or_default().push(id.clone());
+            let owner = self
+                .book
+                .thread_owner(&held.envelope.channel.id, &held.envelope.message.thread_ts)
+                .unwrap_or(&self.factory_session);
+            if !supervisor_live && owner == self.factory_session {
+                continue;
+            }
+            by_channel
+                .entry((owner.to_string(), held.envelope.channel.id.clone()))
+                .or_default()
+                .push(id.clone());
         }
-        for (channel, ids) in by_channel {
+        for (channel_key, ids) in by_channel {
             if self
                 .last_channel_wake
-                .get(&channel)
+                .get(&channel_key)
                 .is_some_and(|last| (now - *last).num_seconds() < CHANNEL_WAKE_GAP_SECS)
             {
                 continue;
@@ -708,12 +1008,12 @@ impl VioletWake {
             let mut envelopes: Vec<ActivityEnvelope> =
                 ids.iter().map(|id| self.held[id].envelope.clone()).collect();
             envelopes.sort_by(|a, b| a.occurred_at.cmp(&b.occurred_at).then(a.message.ts.cmp(&b.message.ts)));
-            match self.admit_channel(queue, &envelopes, now) {
+            match self.admit_channel(queue, &envelopes, &channel_key.0, now) {
                 Ok(created) => {
                     if created {
                         report.wakes += 1;
                     }
-                    self.last_channel_wake.insert(channel, now);
+                    self.last_channel_wake.insert(channel_key, now);
                     for id in ids {
                         self.held.remove(&id);
                         acks.push(Ack { id, outcome: AckOutcome::Admitted });
@@ -732,6 +1032,7 @@ impl VioletWake {
         &mut self,
         queue: &dyn PromptQueueStore,
         envelopes: &[ActivityEnvelope],
+        factory_session: &str,
         now: DateTime<Utc>,
     ) -> Result<bool, String> {
         let first = envelopes.first().ok_or("no events to admit")?;
@@ -753,15 +1054,48 @@ impl VioletWake {
         let prompt = violet_activity_envelope(&first.channel.id, &first.channel.name, kind, &items);
         let created = enqueue_wake(
             queue,
-            &self.factory_session,
+            factory_session,
             &first.channel.id,
             &first.channel.name,
             &prompt,
             &format!("violet-activity:{}", first.dedupe_key),
         )?;
 
+        // The poll caller holds the clone lock. Only after durable enqueue may
+        // a foreign admission refresh this known watch's activity and dedupe.
+        // It never changes watch membership, roots, or start/stop state.
+        if factory_session != self.factory_session {
+            for envelope in envelopes {
+                let watch = self
+                    .book
+                    .watches
+                    .iter_mut()
+                    .find(|watch| {
+                        watch.factory_session == factory_session
+                            && watch.channel_id == envelope.channel.id
+                            && watch.is_active()
+                            && (watch
+                                .watched_thread_roots
+                                .contains(&envelope.message.thread_ts)
+                                || watch
+                                    .violet_thread_roots
+                                    .contains(&envelope.message.thread_ts))
+                    })
+                    .ok_or("known Violet thread owner disappeared during admission")?;
+                watch.remember_foreign(&envelope.message.thread_ts, envelope.dedupe_key.clone());
+                watch.last_human_at = watch.last_human_at.max(envelope.occurred_at);
+                // cursor_ts is channel-wide. Leave it alone so this reply
+                // cannot skip unread messages on the owner's other threads.
+            }
+            self.book.save(&self.watch_path)?;
+            return Ok(created);
+        }
+
         let watch = self.open_watch(first, now);
         for envelope in envelopes {
+            watch
+                .watched_thread_roots
+                .insert(envelope.message.thread_ts.clone());
             watch.remember(envelope.dedupe_key.clone());
             watch.advance_cursor(&envelope.message.ts);
             if envelope.occurred_at > watch.last_human_at {
@@ -771,6 +1105,7 @@ impl VioletWake {
                 watch.violet_thread_roots.insert(envelope.message.thread_ts.clone());
             }
         }
+        watch.bound_thread_state();
         self.book.save(&self.watch_path)?;
         Ok(created)
     }
@@ -781,7 +1116,7 @@ impl VioletWake {
             .book
             .watches
             .iter()
-            .position(|w| w.channel_id == envelope.channel.id)
+            .position(|w| w.channel_id == envelope.channel.id && w.factory_session == session)
         {
             Some(index) => index,
             None => {
@@ -796,7 +1131,9 @@ impl VioletWake {
                     last_sweep_at: None,
                     cursor_ts: None,
                     seen_keys: VecDeque::new(),
+                    foreign_seen_keys: BTreeMap::new(),
                     violet_thread_roots: BTreeSet::new(),
+                    watched_thread_roots: BTreeSet::new(),
                     read_failures: 0,
                     stopped_at: None,
                     stop_reason: None,
@@ -807,7 +1144,8 @@ impl VioletWake {
         };
         let watch = &mut self.book.watches[index];
         if !watch.is_active() || watch.factory_session != session {
-            // Reopen: a fresh hour and a fresh sweep cadence.
+            // Reopen: a fresh hour, sweep cadence and thread ownership set.
+            watch.clear_thread_state();
             watch.started_at = now;
             watch.last_human_at = envelope.occurred_at;
             watch.last_sweep_at = None;
@@ -827,8 +1165,20 @@ impl VioletWake {
     /// Stop every watch idle for [`IDLE_STOP_SECS`], with one inbox-only line
     /// each for the supervisor. Returns the stopped channel names.
     pub(crate) fn stop_idle(&mut self, queue: &dyn PromptQueueStore, now: DateTime<Utc>) -> Vec<String> {
+        let _lock = match self.reload_locked(now) {
+            Ok(lock) => lock,
+            Err(error) => {
+                tracing::warn!(%error, "could not reload Violet watches for idle stop");
+                return Vec::new();
+            }
+        };
         let mut stopped = Vec::new();
-        for watch in self.book.watches.iter_mut().filter(|w| w.is_active()) {
+        for watch in self
+            .book
+            .watches
+            .iter_mut()
+            .filter(|w| w.is_active() && w.factory_session == self.factory_session)
+        {
             if (now - watch.last_human_at).num_seconds() >= IDLE_STOP_SECS {
                 watch.stop("idle", now);
                 stopped.push((watch.channel_id.clone(), watch.channel_name.clone(), watch.started_at));
@@ -849,7 +1199,11 @@ impl VioletWake {
                     &self.factory_session,
                     &channel_id,
                     &note,
-                    &format!("violet-watch-stopped:{channel_id}:{}", started_at.timestamp()),
+                    &format!(
+                        "violet-watch-stopped:{}:{channel_id}:{}",
+                        self.factory_session,
+                        started_at.timestamp()
+                    ),
                 ) {
                     tracing::warn!(%error, "could not record Violet watch stop");
                 }
@@ -858,10 +1212,30 @@ impl VioletWake {
             .collect()
     }
 
+    fn end_session(&mut self, now: DateTime<Utc>) -> Result<usize, String> {
+        // A logged-out daemon with no native state must not migrate/create it.
+        if !self.watch_path.try_exists().map_err(|e| e.to_string())? {
+            return Ok(0);
+        }
+        let _lock = self.reload_locked(now)?;
+        let mut stopped = 0;
+        for watch in &mut self.book.watches {
+            if watch.factory_session == self.factory_session && watch.is_active() {
+                watch.stop("session_end", now);
+                stopped += 1;
+            }
+        }
+        if stopped > 0 {
+            self.book.save(&self.watch_path)?;
+        }
+        Ok(stopped)
+    }
+
     /// Active watches whose sweep is due.
     pub(crate) fn due_sweeps(&self, now: DateTime<Utc>) -> Vec<SweepRequest> {
         self.book
             .active()
+            .filter(|watch| watch.factory_session == self.factory_session)
             .filter(|w| {
                 let since_last = w.last_sweep_at.unwrap_or(w.started_at);
                 (now - since_last).num_seconds() >= SWEEP_INTERVAL_SECS
@@ -889,12 +1263,16 @@ impl VioletWake {
         read: Result<SweepRead, String>,
         now: DateTime<Utc>,
     ) -> SweepOutcome {
-        let Some(index) = self
-            .book
-            .watches
-            .iter()
-            .position(|w| w.channel_id == channel_id && w.is_active())
-        else {
+        let _lock = match self.reload_locked(now) {
+            Ok(lock) => lock,
+            Err(error) => {
+                tracing::warn!(%error, "could not reload Violet watches for sweep");
+                return SweepOutcome::Quiet;
+            }
+        };
+        let Some(index) = self.book.watches.iter().position(|w| {
+            w.channel_id == channel_id && w.is_active() && w.factory_session == self.factory_session
+        }) else {
             return SweepOutcome::NotWatched;
         };
         let read = match read {
@@ -921,7 +1299,11 @@ impl VioletWake {
                         &self.factory_session,
                         channel_id,
                         &note,
-                        &format!("violet-watch-stopped:{channel_id}:{}", started.timestamp()),
+                        &format!(
+                            "violet-watch-stopped:{}:{channel_id}:{}",
+                            self.factory_session,
+                            started.timestamp()
+                        ),
                     );
                 }
                 return SweepOutcome::ReadFailed { stopped };
@@ -949,6 +1331,11 @@ impl VioletWake {
             .messages
             .iter()
             .filter(|m| !self.is_bot(m.user.as_deref()))
+            .filter(|m| {
+                self.book
+                    .thread_owner(channel_id, &m.thread_ts)
+                    .is_none_or(|owner| owner == self.factory_session)
+            })
             .filter(|m| !watch.has_seen(&watch.message_key(&m.ts)))
             .collect();
         fresh.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.ts.cmp(&b.ts)));
@@ -965,16 +1352,30 @@ impl VioletWake {
             .collect();
         let newest_human = fresh.iter().map(|m| m.created_at).max();
         let keys: Vec<String> = fresh.iter().map(|m| watch.message_key(&m.ts)).collect();
-        let newest_ts = read.messages.iter().map(|m| m.ts.as_str()).fold(None, |best: Option<&str>, ts| {
-            if slack_ts_after(ts, best) { Some(ts) } else { best }
-        }).map(str::to_string);
+        let roots: BTreeSet<String> = fresh
+            .iter()
+            .map(|message| message.thread_ts.clone())
+            .collect();
+        let newest_ts = read
+            .messages
+            .iter()
+            .map(|m| m.ts.as_str())
+            .fold(None, |best: Option<&str>, ts| {
+                if slack_ts_after(ts, best) {
+                    Some(ts)
+                } else {
+                    best
+                }
+            })
+            .map(str::to_string);
         let (channel_name, channel) = (watch.channel_name.clone(), watch.channel_id.clone());
 
         let mut woke = false;
         if !items.is_empty() {
             let prompt = violet_activity_envelope(&channel, &channel_name, "sweep", &items);
             let key = format!(
-                "violet-sweep:{channel}:{}",
+                "violet-sweep:{}:{channel}:{}",
+                self.factory_session,
                 items.last().map(|i| i.message_ts.as_str()).unwrap_or_default()
             );
             match enqueue_wake(queue, &self.factory_session, &channel, &channel_name, &prompt, &key) {
@@ -991,6 +1392,10 @@ impl VioletWake {
         }
 
         let watch = &mut self.book.watches[index];
+        // The durable enqueue above is the first-wake claim of any new roots.
+        // The clone lock makes later sweeps/claims route to this one session.
+        watch.watched_thread_roots.extend(roots);
+        watch.bound_thread_state();
         watch.last_sweep_at = Some(now);
         watch.read_failures = 0;
         for key in keys {
@@ -1005,7 +1410,8 @@ impl VioletWake {
             watch.advance_cursor(&ts);
         }
         if woke {
-            self.last_channel_wake.insert(channel, now);
+            self.last_channel_wake
+                .insert((self.factory_session.clone(), channel), now);
         }
         if let Err(error) = self.book.save(&self.watch_path) {
             tracing::warn!(%error, "could not save Violet watch after sweep");
@@ -1062,6 +1468,7 @@ pub(crate) struct VioletWatchStatus {
     pub active: Vec<WatchLine>,
     pub stopped_recent: Vec<StoppedLine>,
     pub relay: RelayHealth,
+    pub quarantined_book: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1070,9 +1477,17 @@ pub(crate) enum WatchHealth {
     Warning,
 }
 
-/// Read `<cas_dir>/violet/watches.json`. `None` when push-wake never ran here.
+/// Prefer native v2 state; before migration, read legacy health without writing.
+/// A present but unreadable/unsupported native book never revives legacy state.
 pub(crate) fn watch_status(cas_dir: &Path, now: DateTime<Utc>) -> Option<VioletWatchStatus> {
-    let book = WatchBook::read(&WatchBook::path(cas_dir))?;
+    let path = WatchBook::path(cas_dir);
+    let book = match std::fs::read(&path) {
+        Ok(bytes) => WatchBook::decode(&bytes).ok()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            WatchBook::read(&path.with_file_name("watches.json"))?
+        }
+        Err(_) => return None,
+    };
     let secs = |at: DateTime<Utc>| (now - at).num_seconds().max(0);
     let active = book
         .active()
@@ -1101,7 +1516,12 @@ pub(crate) fn watch_status(cas_dir: &Path, now: DateTime<Utc>) -> Option<VioletW
             detail: watch.last_read_error.clone(),
         })
         .collect();
-    Some(VioletWatchStatus { active, stopped_recent, relay: book.relay })
+    Some(VioletWatchStatus {
+        active,
+        stopped_recent,
+        relay: book.relay,
+        quarantined_book: book.quarantined_book,
+    })
 }
 
 /// `90` → `1m`, `5400` → `1h 30m`.
@@ -1167,6 +1587,15 @@ impl VioletWatchStatus {
 
     /// Doctor's verdict on the claim loop and its watches.
     pub(crate) fn doctor(&self, now: DateTime<Utc>) -> (WatchHealth, String) {
+        if let Some(path) = self.quarantined_book.as_ref().filter(|path| path.exists()) {
+            return (
+                WatchHealth::Warning,
+                format!(
+                    "corrupt Violet watch book recovered; quarantined at {}. Inspect and archive/remove the quarantine after review",
+                    path.display()
+                ),
+            );
+        }
         let relay = &self.relay;
         let claim_age = relay.last_claim_at.map(|at| (now - at).num_seconds().max(0));
         if relay.consecutive_errors >= FAILING_CLAIMS {
@@ -1613,18 +2042,28 @@ pub(crate) fn supervisor_presence(cas_dir: &Path, supervisor_name: &str) -> Opti
         .map(|agent| SupervisorPresence { agent_id: agent.id })
 }
 
-/// Everything the daemon needs to run the consumer, resolved once at start.
+/// Session state exists before login; Cloud credentials resolve on each tick.
 pub(crate) struct VioletWakeRuntime {
     pub state: std::sync::Arc<std::sync::Mutex<VioletWake>>,
-    pub relay: std::sync::Arc<CloudActivityRelay>,
     pub cas_dir: PathBuf,
     pub factory_session: String,
     pub supervisor_name: String,
+    stopping: std::sync::atomic::AtomicBool,
+}
+
+// The daemon lifecycle owns this runtime via Arc. Last-handle teardown also
+// retires watches on early returns, before the session receipt disappears.
+impl Drop for VioletWakeRuntime {
+    fn drop(&mut self) {
+        if let Err(error) = self.stop_blocking() {
+            tracing::warn!(%error, "could not stop dropped Violet session watches");
+        }
+    }
 }
 
 impl VioletWakeRuntime {
-    /// `None` when push-wake is disabled, Cloud is not logged in, or the
-    /// project has no canonical id. Each reason is logged once.
+    /// `None` when push-wake is disabled or the project has no canonical id.
+    /// Login is a retry state, so a later `cas login` needs no daemon restart.
     pub(crate) fn start(cas_dir: &Path, factory_session: &str, supervisor_name: &str) -> Option<Self> {
         let config = crate::config::Config::load(cas_dir).unwrap_or_default();
         let slack = config.slack.clone().unwrap_or_default();
@@ -1632,11 +2071,6 @@ impl VioletWakeRuntime {
             tracing::info!("Violet push-wake disabled (slack.wake_enabled=false)");
             return None;
         }
-        let cloud = crate::cloud::CloudConfig::load_effective();
-        let Some(relay) = CloudActivityRelay::from_cloud_config(&cloud) else {
-            tracing::info!("Violet push-wake skipped: not logged in to Cassy Cloud");
-            return None;
-        };
         let Some(project_id) = crate::cloud::resolve_canonical_id(cas_dir) else {
             tracing::info!("Violet push-wake skipped: project has no canonical id");
             return None;
@@ -1657,19 +2091,31 @@ impl VioletWakeRuntime {
             slack.violet_bot_user_ids(),
             Utc::now(),
         );
-        tracing::info!(project = %project_id, "Violet push-wake claiming Slack activity from Cloud");
+        tracing::info!(project = %project_id, "Violet push-wake ready; Cloud credentials checked each tick");
         Some(Self {
             state: std::sync::Arc::new(std::sync::Mutex::new(state)),
-            relay: std::sync::Arc::new(relay),
             cas_dir: cas_dir.to_path_buf(),
             factory_session: factory_session.to_string(),
             supervisor_name: supervisor_name.to_string(),
+            stopping: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
     /// One blocking tick: claim and admit, stop idle watches, and return the
     /// sweeps now due plus the live supervisor (for the sweep caller).
-    pub(crate) fn tick_blocking(&self) -> (PollReport, Vec<SweepRequest>, Option<SupervisorPresence>) {
+    pub(crate) fn tick_blocking(
+        &self,
+    ) -> (PollReport, Vec<SweepRequest>, Option<SupervisorPresence>) {
+        if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            if let Err(error) = self.stop_blocking() {
+                tracing::warn!(%error, "could not finish Violet session stop");
+            }
+            return (PollReport::default(), Vec::new(), None);
+        }
+        let cloud = crate::cloud::CloudConfig::load_effective();
+        let Some(relay) = CloudActivityRelay::from_cloud_config(&cloud) else {
+            return (PollReport::default(), Vec::new(), None);
+        };
         let now = Utc::now();
         let presence = supervisor_presence(&self.cas_dir, &self.supervisor_name);
         let Ok(queue) = crate::store::open_prompt_queue_store(&self.cas_dir) else {
@@ -1680,7 +2126,19 @@ impl VioletWakeRuntime {
             return (report, Vec::new(), presence);
         };
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let report = state.poll_once(self.relay.as_ref(), queue.as_ref(), presence.is_some(), now);
+        if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = state.end_session(now);
+            return (PollReport::default(), Vec::new(), None);
+        }
+        let report = state.poll_once(&relay, queue.as_ref(), presence.is_some(), now);
+        // Shutdown never waits for this tick's HTTP calls. The in-flight tick
+        // owns the deferred stop and must finish it before releasing state.
+        if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            if let Err(error) = state.end_session(Utc::now()) {
+                tracing::warn!(%error, "could not finish Violet session stop");
+            }
+            return (report, Vec::new(), None);
+        }
         let stopped = state.stop_idle(queue.as_ref(), now);
         if !stopped.is_empty() {
             tracing::info!(channels = ?stopped, "Violet channel watches stopped after 1 h idle");
@@ -1688,6 +2146,18 @@ impl VioletWakeRuntime {
         // Sweeps run only with a live supervisor to read the result.
         let sweeps = if presence.is_some() { state.due_sweeps(now) } else { Vec::new() };
         (report, sweeps, presence)
+    }
+
+    pub(crate) fn stop_blocking(&self) -> Result<usize, String> {
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::Release);
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            // The flag makes the in-flight or next tick finish retirement.
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(0),
+        };
+        state.end_session(Utc::now())
     }
 
     /// Run the due sweeps: read through Violet, then apply the results.

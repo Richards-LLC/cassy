@@ -266,12 +266,12 @@ silently reintroduce fixed bugs.
 
 ## Peer work awareness
 
-`coordination action=peers detail=true` shows each peer supervisor's machine,
-factory session, epic focus, active task claims, live workers and registered
-branches. `peer=<name>` or `peer=<name>@<machine>` selects one supervisor and
-implies detail. `json=true` returns the full report without truncation.
-The terminal equivalent is `cas peers --detail`, with `--peer <name>` and
-`--json` accepting the same filters and output contract. The outcome and peer
+`cas peers --detail` shows each peer supervisor's machine, factory session,
+epic focus, active task claims, live workers and registered branches.
+`--peer <name>` or `--peer <name>@<machine>` selects one supervisor and implies
+detail. `--json` returns the full report without truncation. From an agent,
+`coordination action=peers` lists the same supervisors without the detail;
+its claims and workers view is not on the published coordination surface. The outcome and peer
 count appear first, followed by owner-grouped work and presence/mailbox receipts. JSON carries the typed
 `cloud_presence` record, `cloud_presence_message`, and `mailbox_status` too.
 Agent pagination echoes the returned `next_sort_cursor` with the other cursors.

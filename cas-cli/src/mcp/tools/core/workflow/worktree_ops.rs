@@ -3665,6 +3665,43 @@ impl CasCore {
             } else {
                 None
             };
+            // cas-a131: a heads-up to other live supervisors delivering into
+            // this target. Fire and forget: the merge never waits for it.
+            if let Ok(caller_id) = self.get_agent_id()
+                && let Some(caller) = self
+                    .open_agent_store()
+                    .ok()
+                    .and_then(|agents| agents.get(&caller_id).ok())
+                    .filter(|agent| agent.role == cas_types::AgentRole::Supervisor)
+            {
+                let tip = parked_anchor
+                    .map(str::to_string)
+                    .or_else(|| manager.git().resolve_commit(&worktree.branch));
+                if let Some(tip) = tip {
+                    let (root, target, source) =
+                        (cas_root.clone(), worktree.parent_branch.clone(), worktree.branch.clone());
+                    let task = task_id.map(str::to_string);
+                    let merger = format!(
+                        "{}@{}",
+                        caller.name,
+                        crate::cloud::peers::machine_label_for(&cas_root)
+                    );
+                    std::thread::spawn(move || {
+                        let outcome = crate::cloud::peer_merge::announce_merge(
+                            &root,
+                            &caller.id,
+                            &crate::cloud::peer_merge::MergeIntent {
+                                target: &target,
+                                source: &source,
+                                task_id: task.as_deref(),
+                                tip: &tip,
+                                merger: &merger,
+                            },
+                        );
+                        tracing::debug!(?outcome, %target, %source, "cas-a131 merge-intent note");
+                    });
+                }
+            }
             let merge_result = if let Some(anchor) = dirty_pushed_anchor {
                 let result = manager.merge_pushed_delivery_preserving_worktree(&mut worktree, anchor);
                 if result.is_ok() {

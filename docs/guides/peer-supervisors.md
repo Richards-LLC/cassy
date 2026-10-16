@@ -236,6 +236,34 @@ claim runs out. When A closes or releases the task, B can start it. Use
 `force=true` only after the holder agrees. A claim nobody is renewing does not
 block: the start proceeds on the local lease and says `⚠️  STALE PEER CLAIM`.
 
+### Merging into the same branch
+
+Two supervisors may merge into the same branch. They coordinate and agree;
+Cassy never locks, fences or refuses a merge for them. Two helpers inform:
+
+- **About-to-merge note.** When a supervisor starts `worktree_merge` into a
+  target branch, every other live supervisor of this project whose factory runs
+  on that branch gets one peer message, before the merge starts:
+  `About to merge factory/<worker> (<task>) @ <tip> into <target>, by
+  <name>@<machine>.` It respects `peers.same_repo_scope` and is sent once per
+  merged tip; a retried merge does not send it again. The merge never waits for
+  it.
+- **Same-file overlap warning.** `cas peers` and the session-start peer block
+  warn when one of your in-flight worktree branches and a peer worker's branch
+  change the same files on the way into the same target:
+
+  ```text
+  [WARN] Same files in flight into epic/burn-down:
+    yours  factory/swift-fox-2
+    theirs factory/happy-owl-25 (happy-owl@prowl (teammate bob@example.com))
+    files  src/BeginConversation.vue
+    Agree the merge order by message; nothing is blocked.
+  ```
+
+  It reads the branches your git already has (`origin/<branch>` after a fetch),
+  skips branches already merged, and gives up quietly after 3 seconds or 24
+  branches.
+
 ### 4. Split an epic
 
 A proposes who takes which children:

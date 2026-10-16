@@ -251,3 +251,83 @@ impl PeerMailboxPoller {
         None
     }
 }
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn cas_4ac8_mailbox_poller_honors_retry_after_outside_http_budget() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/peer-messages/claim"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "600"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        crate::cloud::set_canonical_id_in_config_toml(&root, "github.com/acme/widgets").unwrap();
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(&root)
+        .unwrap();
+        let mut agent = crate::types::Agent::new("supervisor".into(), "supervisor".into());
+        agent.role = AgentRole::Supervisor;
+        agent.factory_session = Some("factory-retry".into());
+        crate::store::open_agent_store(&root)
+            .unwrap()
+            .register(&agent)
+            .unwrap();
+        let mut poller = PeerMailboxPoller::new(&root, "factory-retry");
+        let now = Instant::now();
+        assert!(poller.poll(now).await.is_none());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let report = loop {
+            if let Some(report) = poller.poll(Instant::now()).await {
+                break report;
+            }
+            assert!(Instant::now() < deadline, "off-loop poll never completed");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|cause| cause.contains("rate limited"))
+        );
+        poller.poll(now + Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "retried before Retry-After"
+        );
+    }
+
+    #[test]
+    fn cas_4ac8_waiting_rate_limit_health_does_not_become_stale_before_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = health_path(temp.path(), "retry-session");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            file,
+            serde_json::to_vec(&serde_json::json!({
+                "written_at": chrono::Utc::now() - chrono::Duration::minutes(2),
+                "receiving": false,
+                "cause": "peer message ack: rate limited (429)",
+                "next_retry_at": chrono::Utc::now() + chrono::Duration::minutes(5),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let status = mailbox_status_section(temp.path(), Some("retry-session"));
+        assert!(status.contains("rate limited"), "{status}");
+        assert!(!status.contains("stale"), "{status}");
+    }
+}

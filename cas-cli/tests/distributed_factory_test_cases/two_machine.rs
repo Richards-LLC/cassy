@@ -317,6 +317,8 @@ async fn cas_559c_cross_account_peer_claims_are_unavailable_not_empty() {
             let report: serde_json::Value = serde_json::from_str(text).unwrap();
             let peer = &report["peers"][0];
             assert_eq!(peer["claims_visibility"], "different_account");
+            assert_eq!(peer["claims_status"]["state"], "private");
+            assert_eq!(peer["tasks_status"]["state"], "private");
             assert_eq!(peer["user_id"], "other-user");
             assert_eq!(peer["team_id"], "test-team");
             assert_eq!(peer["workers"].as_array().unwrap().len(), 1);
@@ -372,7 +374,23 @@ async fn cas_559c_mcp_peer_detail_lists_claims_workers_branches_without_importin
     }
     let mut task = cas::types::Task::new("cas-active".into(), "Implement peer awareness".into());
     task.status = cas::types::TaskStatus::InProgress;
+    task.branch = Some("factory/bw".into());
+    task.deliverables.work_target = Some(cas::types::WorkTarget {
+        repo_selector: "project:widgets".into(), target_branch: "epic/peer-lane".into(),
+    });
     alpha.task_store().add(&task).unwrap();
+    let mut epic = cas::types::Task::new("cas-held".into(), "Peer lane epic".into());
+    epic.task_type = cas::types::TaskType::Epic;
+    epic.branch = Some("epic/peer-lane".into());
+    alpha.task_store().add(&epic).unwrap();
+    cloud.set_metadata("b", "clone_path", "/machine-beta/worktree");
+    cloud.set_metadata("b", "scratch_root", "/machine-beta/scratch");
+    cloud.set_metadata("b", "peer_prs_v1", &serde_json::json!({
+        "observed_at": chrono::Utc::now(), "truncated": false, "prs": [{
+            "url": "https://github.com/acme/widgets/pull/42", "head_sha": "actual-pr-head",
+            "branch": "factory/bw", "number": 42, "state": "OPEN", "in_merge_queue": true
+        }]
+    }).to_string());
     for id in ["bw", "bw1", "bw2", "bw3"] {
         cloud.set_metadata(id, "branch", &format!("factory/{id}"));
     }
@@ -400,6 +418,24 @@ async fn cas_559c_mcp_peer_detail_lists_claims_workers_branches_without_importin
     assert_eq!(peer["supervisor"]["machine_id"], "machine-beta");
     assert_eq!(peer["supervisor"]["session"], "factory-b");
     assert_eq!(peer["claims"].as_array().unwrap().len(), 3);
+    assert_eq!(peer["owner"], "sup-b");
+    assert_eq!(peer["worktree_root"], "/machine-beta/worktree");
+    assert_eq!(peer["scratch_root"], "/machine-beta/scratch");
+    assert_eq!(peer["epics"][0]["owner"], "sup-b");
+    assert_eq!(peer["epics"][0]["target_branch"], "epic/peer-lane");
+    assert_eq!(peer["prs"][0]["head_sha"], "actual-pr-head");
+    assert_eq!(peer["waiting_merges"][0]["kind"], "merge_queue");
+    let cli_json = operator_cli(&alpha, &["peers", "--peer", "sup-b", "--json"]).output().unwrap();
+    assert!(cli_json.status.success(), "{cli_json:?}");
+    let cli: serde_json::Value = serde_json::from_slice(&cli_json.stdout).unwrap();
+    assert_eq!(cli["peers"][0]["prs"], peer["prs"]);
+    assert_eq!(cli["peers"][0]["epics"][0]["target_branch"], peer["epics"][0]["target_branch"]);
+    let human = operator_cli(&alpha, &["peers", "--peer", "sup-b"]).output().unwrap();
+    assert!(human.status.success(), "{human:?}");
+    let human = String::from_utf8(human.stdout).unwrap();
+    for value in ["/machine-beta/worktree", "Owner sup-b", "epic/peer-lane", "actual-pr-head", "merge_queue"] {
+        assert!(human.contains(value), "missing {value}: {human}");
+    }
     let active = peer["claims"]
         .as_array()
         .unwrap()

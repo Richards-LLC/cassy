@@ -1497,6 +1497,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cas_cd42_reuses_actual_poll_records_without_inventing_missing_pr_urls() {
+        let mut unknown_url = pull(42, "epic/release", true, "2026-10-16T12:00:00Z");
+        unknown_url.url = None;
+        let transport = FakeTransport {
+            runs: Vec::new(), pulls: vec![unknown_url], delivery_pulls: Vec::new(),
+            job: "unused".into(), log: None, calls: Cell::new(0),
+        };
+        let poll = collect_tracked_merge_queue_ejections(
+            &transport, &[], &[], &BTreeSet::new(), &BTreeSet::new(),
+        ).unwrap();
+        assert_eq!(poll.observed_prs.len(), 1);
+        assert_eq!(poll.observed_prs[0].head_sha, "deadbeef");
+        assert!(poll.observed_prs[0].in_merge_queue);
+        assert!(poll.observed_prs[0].url.is_none());
+        assert_eq!(transport.calls.get(), 0, "inventory must not add detail lookups");
+    }
+
     /// cas-0f05: GitHub's runs for fba7a3365 (push, merge_group and
     /// scheduled), recorded 2026-10-14 and trimmed to the fields read.
     const FIXTURE_SHA: &str = "fba7a3365eb0cb6403be9d708e8f03151fc42054";

@@ -394,3 +394,215 @@ fn cas_a81c_claim_copy_uses_scoped_plain_ids_owner_names_and_missing_title_reaso
     assert_eq!(claims[0]["task_id"], "cas-local");
     assert_eq!(claims[0]["lock_key"], local_key);
 }
+
+#[test]
+fn cas_cd42_two_machine_inventory_preserves_private_stale_and_claim_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(dir.path()).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let now = Utc::now();
+    let observed = now - Duration::seconds(400);
+    let mut epic = crate::types::Task::new("cas-epic".into(), "Shared epic".into());
+    epic.task_type = crate::types::TaskType::Epic;
+    epic.branch = Some("epic/target".into());
+    tasks.add(&epic).unwrap();
+    let mut parked = crate::types::Task::new("cas-parked".into(), "Parked work".into());
+    parked.status = crate::types::TaskStatus::AwaitingMerge;
+    parked.assignee = Some("worker-a".into());
+    parked.deliverables.parked_branch = Some("factory/worker-a".into());
+    parked.deliverables.factory_branch_anchor = Some("a".repeat(40));
+    parked.deliverables.work_target = Some(crate::types::WorkTarget {
+        repo_selector: "project:widgets".into(),
+        target_branch: "epic/target".into(),
+    });
+    tasks.add(&parked).unwrap();
+    tasks
+        .add_dependency(&crate::types::Dependency::new(
+            parked.id.clone(),
+            epic.id.clone(),
+            crate::types::DependencyType::ParentChild,
+        ))
+        .unwrap();
+    let prs = vec![
+        PeerPr {
+            url: Some("https://github.com/acme/widgets/pull/42".into()),
+            head_sha: "b".repeat(40),
+            branch: "factory/worker-a".into(),
+            number: 42,
+            state: "OPEN".into(),
+            in_merge_queue: true,
+        },
+        PeerPr {
+            url: Some("https://github.com/acme/widgets/pull/43".into()),
+            head_sha: "c".repeat(40),
+            branch: "epic/target".into(),
+            number: 43,
+            state: "OPEN".into(),
+            in_merge_queue: false,
+        },
+    ];
+    save_pr_snapshot(&root, prs, observed);
+    let mut agents = vec![
+        agent("sup-a", "supervisor", "same", "alpha", REPO, 1),
+        agent("sup-b", "supervisor", "same", "beta", REPO, 400),
+        agent("worker-a", "worker", "same", "alpha", REPO, 1),
+        agent("worker-b", "worker", "same", "beta", REPO, 1),
+        agent("private", "supervisor", "private", "gamma", REPO, 1),
+    ];
+    let mut local = crate::types::Agent::new("sup-a".into(), "sup-a".into());
+    local.metadata = agents[0].metadata.clone();
+    local
+        .metadata
+        .insert("clone_path".into(), "/alpha/worktree".into());
+    let published = presence_agent(&root, &local);
+    // Exercise the production presence metadata path, not a second serializer.
+    let coordinator = super::super::CloudCoordinator::new(super::super::CloudConfig {
+        token: Some("test-token".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let metadata = super::super::presence::heartbeat_metadata(
+        &coordinator,
+        &published,
+        Some("cas-epic"),
+        Some("epic/target"),
+    );
+    for (key, value) in metadata {
+        agents[0]
+            .metadata
+            .insert(key, value.as_str().unwrap().into());
+    }
+    agents[4].user_id = Some("other-user".into());
+    agents[4].metadata.insert(
+        work::PR_META.into(),
+        published.metadata[work::PR_META].clone(),
+    );
+    let locks = vec![
+        lease("cas-epic", "sup-a", LeaseStatus::Active, 600),
+        lease("cas-secret", "private", LeaseStatus::Active, 600),
+    ];
+    let details = assemble_peer_details(
+        peers::repo_peers(&agents, REPO, &[], None, now),
+        &agents,
+        &locks,
+        &[],
+        tasks.as_ref(),
+        Some("test-user"),
+        now,
+    );
+    let a = details.iter().find(|d| d.owner == "sup-a").unwrap();
+    assert_eq!(a.work.epics[0].owner.as_deref(), Some("sup-a"));
+    assert_eq!(a.work.tasks[0].assignee.as_deref(), Some("worker-a"));
+    assert!(
+        a.work.tasks[0].owner.is_none(),
+        "assignment and PR activity must not fabricate ownership"
+    );
+    assert_eq!(a.work.prs_status.state, "stale");
+    assert_eq!(
+        a.work.prs_status.observed_at,
+        Some(observed),
+        "heartbeat must not refresh the PR observation time"
+    );
+    assert_eq!(
+        a.work.tasks[0].pr.as_ref().unwrap().head_sha,
+        "b".repeat(40)
+    );
+    for kind in [
+        "awaiting_merge",
+        "parked_delivery",
+        "open_epic_pr",
+        "merge_queue",
+    ] {
+        assert!(
+            a.work.waiting_merges.iter().any(|w| w.kind == kind),
+            "missing {kind}"
+        );
+    }
+    assert_eq!(
+        a.workers
+            .iter()
+            .map(|w| w.name.as_str())
+            .collect::<Vec<_>>(),
+        ["worker-a"]
+    );
+    let b = details.iter().find(|d| d.owner == "sup-b").unwrap();
+    assert_eq!(b.work.observations_status.state, "stale");
+    assert_eq!(b.work.prs_status.state, "unavailable");
+    assert_eq!(b.workers[0].machine, "beta");
+    let private = details.iter().find(|d| d.owner == "private").unwrap();
+    assert_eq!(private.work.claims_status.state, "private");
+    assert_eq!(private.work.tasks_status.state, "private");
+    assert!(private.claims.is_empty() && private.work.prs.is_empty());
+    assert!(
+        !serde_json::to_string(private)
+            .unwrap()
+            .contains("cas-secret")
+    );
+    assert!(
+        crate::store::open_agent_store(&root)
+            .unwrap()
+            .list(None)
+            .unwrap()
+            .is_empty(),
+        "remote inventory must not register local agents"
+    );
+    let mut report = PeerReport::new(&root, None, true);
+    report.peers = details;
+    report.canonical_id = Some(REPO.into());
+    report.cloud_presence_message.clear();
+    report.mailbox_status.clear();
+    let text = render_peer_report(&report, 80, true);
+    for expected in [
+        "Owner sup-a",
+        "private work",
+        "PRs stale at",
+        "PRs unavailable at",
+        "/alpha/worktree",
+        "Head bbbbb",
+        "open_epic_pr",
+        "merge_queue",
+        "Read-only:",
+    ] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    assert!(!text.contains("Slack") && !text.contains("cas-secret"));
+}
+
+#[test]
+fn cas_cd42_pr_cache_is_bounded_and_corrupt_metadata_is_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(dir.path()).unwrap();
+    let now = Utc::now();
+    let prs = (0..101)
+        .map(|number| PeerPr {
+            url: Some("x".repeat(1000)),
+            head_sha: "a".repeat(40),
+            branch: format!("factory/{number}"),
+            number,
+            state: "OPEN".into(),
+            in_merge_queue: false,
+        })
+        .collect();
+    save_pr_snapshot(&root, prs, now);
+    let bytes = std::fs::read(root.join("peer-pr-observations.json")).unwrap();
+    assert!(bytes.len() <= 32 * 1024);
+    let snapshot: work::PrSnapshot = serde_json::from_slice(&bytes).unwrap();
+    assert!(snapshot.truncated && !snapshot.prs.is_empty() && snapshot.prs.len() < 100);
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    for bad in ["{broken".to_string(), "x".repeat(32 * 1024 + 1)] {
+        let mut supervisor = agent("sup", "supervisor", "lane", "alpha", REPO, 1);
+        supervisor.metadata.insert(work::PR_META.into(), bad);
+        let agents = vec![supervisor];
+        let details = assemble_peer_details(
+            peers::repo_peers(&agents, REPO, &[], None, now),
+            &agents,
+            &[],
+            &[],
+            tasks.as_ref(),
+            Some("test-user"),
+            now,
+        );
+        assert_eq!(details[0].work.prs_status.state, "unavailable");
+        assert!(details[0].work.prs.is_empty());
+    }
+}

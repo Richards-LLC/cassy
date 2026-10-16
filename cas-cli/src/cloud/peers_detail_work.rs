@@ -31,7 +31,7 @@ impl ObservationStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerPr {
     pub url: Option<String>,
     pub head_sha: String,

@@ -69,7 +69,10 @@ fn create_live_root(root: &Path) -> anyhow::Result<()> {
         builder.mode(0o700);
     }
     builder.create(root)?; // atomic refusal of an existing enrollment
-    crate::hub::ensure_private_dir(root)
+    crate::hub::ensure_private_dir(root)?;
+    // Match the real hub bootstrap before sample() derives its scoped boot ID.
+    crate::hub::MachineIdentityStore::new(root).load_or_create()?;
+    Ok(())
 }
 
 #[test]
@@ -124,6 +127,10 @@ async fn lifecycle(root: &Path) -> anyhow::Result<()> {
 #[ignore = "production mutation: requires approved disposable account and separate live browser"]
 async fn presence_live_disposable_producer() -> anyhow::Result<()> {
     anyhow::ensure!(required("CAS_E3DD_LIVE")? == "1", "CAS_E3DD_LIVE must be 1");
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("cas::hub::operator_inbox::presence=info")
+        .with_test_writer()
+        .try_init();
     let account_id = required("CAS_E3DD_ACCOUNT_ID")?;
     anyhow::ensure!(
         account_id == "cas-test-profile-a-v1",

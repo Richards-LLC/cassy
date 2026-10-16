@@ -88,8 +88,8 @@ fn dispatch(daemon: &mut FactoryDaemon, ci: bool, takeover: bool) -> (i64, Strin
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cas_f265_ci_dispatch_wakes_idle_supervisor_once_even_with_recent_checkpoint() {
-    if !child("cas_f265_ci_dispatch_wakes_idle_supervisor_once_even_with_recent_checkpoint") {
+async fn cas_6e355_ci_reminder_wakes_once_when_supervisor_becomes_idle() {
+    if !child("cas_6e355_ci_reminder_wakes_once_when_supervisor_becomes_idle") {
         return;
     }
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
@@ -123,6 +123,19 @@ async fn cas_f265_ci_dispatch_wakes_idle_supervisor_once_even_with_recent_checkp
             .is_some_and(|at| (chrono::Utc::now() - at).num_seconds() < 60)
     );
     let (id, body) = dispatch(&mut daemon, true, false);
+    let name = daemon.app.supervisor_name().to_string();
+    daemon.pane_silent_since.insert(name.clone(), Instant::now());
+    daemon.process_prompt_queue().await.unwrap();
+    let queue = open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    let held = queue.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(held.stage, cas_store::DeliveryStage::Gated, "{held:?}");
+    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+    assert!(teams_messages(&daemon).is_empty());
+    // The first pass delivered nothing. Becoming safe to wake must not wait
+    // for the re-nudge interval or spend the bounded delivery budget.
+    daemon
+        .pane_silent_since
+        .insert(name, Instant::now() - Duration::from_secs(600));
     daemon.process_prompt_queue().await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     let typed = std::fs::read_to_string(root.path().join("input")).unwrap();

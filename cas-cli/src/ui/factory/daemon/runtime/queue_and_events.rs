@@ -9178,14 +9178,19 @@ impl FactoryDaemon {
                                  retrying as a pane nudge"
                             );
                         }
-                        self.lifecycle_redelivery_attempts
-                            .insert(queued.id, std::time::Instant::now());
-                        // cas-7787: only a real (re)delivery burns budget —
-                        // a cooldown tick is policy, not a failed attempt.
-                        *self
-                            .lifecycle_redelivery_counts
-                            .entry(queued.id)
-                            .or_insert(0) += 1;
+                        // cas-6e355: inline supervisor rows have not reached
+                        // any transport yet. Reserve their cadence only after
+                        // the wake gate allows the body-bearing PTY attempt.
+                        if !inline_supervisor_body || queued.urgent {
+                            self.lifecycle_redelivery_attempts
+                                .insert(queued.id, std::time::Instant::now());
+                            // cas-7787: only a real (re)delivery burns budget —
+                            // a cooldown tick is policy, not a failed attempt.
+                            *self
+                                .lifecycle_redelivery_counts
+                                .entry(queued.id)
+                                .or_insert(0) += 1;
+                        }
                     }
                     LifecycleRedelivery::Cooldown => {
                         // GatedNotReady: withheld by policy, not a failed
@@ -9931,6 +9936,12 @@ impl FactoryDaemon {
                     // being read later as an outstanding ask.
                     super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: transport"));
                     if inline_supervisor_body {
+                        // A busy-pane veto above delivered nothing and must
+                        // not delay this row when the supervisor becomes idle.
+                        // Actual attempts still share the bounded cadence.
+                        self.lifecycle_redelivery_attempts
+                            .insert(queued.id, std::time::Instant::now());
+                        *self.lifecycle_redelivery_counts.entry(queued.id).or_insert(0) += 1;
                         self.deliver_supervisor_event_inline(
                             &inbox_source, &prompt_with_instructions, queued.id,
                         ).await

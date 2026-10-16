@@ -7593,6 +7593,42 @@ mod workspace_contract_tests {
         }
     }
 
+    /// The three ordinary-worker allow-to-deny flips in the 200-call replay,
+    /// with only the artifact namespace/cwd mapped into a hermetic project.
+    #[test]
+    fn cas_e460_literal_shell_bodies_keep_status_pid_and_read_only_monitor_commands() {
+        let mut env = TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        let worktree = root.join("worktrees/worker-e460");
+        let artifacts = crate::config::resolved_factory_artifact_paths(&root, None).project_root;
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(artifacts.join("cas-426f")).unwrap();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "worker-e460");
+        env.set("CAS_CLONE_PATH", &worktree);
+        env.remove("CDPATH");
+        let artifacts = artifacts.display();
+        let commands = [
+            format!(r#"mkdir -p {artifacts}/cas-426f; nohup bash -c 'scripts/release.sh; rc=$?; printf "\nRELEASE_EXIT=%s\n" "$rc"; exit "$rc"' > {artifacts}/cas-426f/release.log 2>&1 < /dev/null & echo $! > {artifacts}/cas-426f/release.pid"#),
+            format!(r#"bash -c 'printf "%s\n" "$$" > {artifacts}/cas-426f/release.pid; scripts/release.sh > {artifacts}/cas-426f/release.log 2>&1; rc=$?; printf "\nRELEASE_EXIT=%s\n" "$rc" >> {artifacts}/cas-426f/release.log; exit "$rc"'"#),
+            r#"timeout 590 bash -c 'while [ $(grep -c "Summary \[" target/w58r2.log) -lt 2 ]; do sleep 10; done'; grep -E "FAIL|Summary|SIGABRT|TIMEOUT" target/w58r2.log; grep -c PASS target/w58r2.log"#.to_string(),
+            r#"sh -c 'printf "%s\n" "$?"'"#.to_string(),
+        ];
+        let mut mismatches = Vec::new();
+        for command in commands {
+            let input = HookInput { hook_event_name: "PreToolUse".into(),
+                agent_role: Some("worker".into()), ..bash_input(&command, &worktree) };
+            let output = handle_pre_tool_use(&input, Some(&root)).unwrap();
+            let value = serde_json::to_value(output).unwrap();
+            if value["hookSpecificOutput"]["permissionDecision"] != "allow" {
+                mismatches.push(format!("{command}: {value}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
     #[test]
     fn cas_e460_real_pre_tool_resolves_effective_cwd_and_nested_shell_writes() {
         let mut env = TestEnvGuard::temp_home();

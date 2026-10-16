@@ -822,6 +822,80 @@ mod tests {
         (temp, store)
     }
 
+    #[test]
+    fn cas_30e3_two_openers_racing_create_atomic_keep_the_store_available() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let cloud = CloudConfig {
+            token: Some("offline-fixture-token".into()),
+            endpoint: "http://127.0.0.1:9".into(),
+            ..Default::default()
+        };
+        cloud.save_to_cas_dir(&cas_dir).unwrap();
+        let (staged_tx, staged_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let writer_dir = cas_dir.clone();
+        let task = Task::new("cas-30e3-raced-create".into(), "created by first opener".into());
+        let expected = task.clone();
+        let writer = std::thread::spawn(move || {
+            let store = crate::store::open_task_store(&writer_dir).unwrap();
+            SyncQueue::after_task_intent_stage_for_test(move || {
+                staged_tx.send(()).unwrap();
+                resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            });
+            let result = store.create_atomic(&task, &[], None, None);
+            finished_tx.send(result).unwrap();
+        });
+        staged_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Separate serve processes each run their first recovery pass. Force
+        // that same open behavior for the second opener in this test process.
+        reconcile_schedule().remove(&cas_dir);
+        SyncQueue::after_task_intent_snapshot_for_test(move || {
+            // The open has captured the foreign live intent. Its owner now
+            // commits and retires that intent before the open tries recovery.
+            resume_tx.send(()).unwrap();
+            finished_rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+        });
+        let opened = crate::store::open_task_store(&cas_dir);
+        writer.join().unwrap();
+        let opened = opened.expect("a foreign intent completed after the recovery snapshot must not fail store open");
+        assert_eq!(opened.get(&expected.id).unwrap().title, expected.title);
+        let queue = SyncQueue::open(&cas_dir).unwrap();
+        assert!(queue.pending_task_sync_intents().unwrap().is_empty());
+        let pending = queue.pending(10, 5).unwrap();
+        assert_eq!(pending.len(), 1, "owner's durable retry must remain exactly once under offline sync");
+        assert_eq!(pending[0].entity_id, expected.id);
+    }
+
+    #[test]
+    fn cas_30e3_retired_snapshot_never_retires_a_newer_degraded_intent() {
+        let (temp, store) = create_test_store();
+        let mut task = Task::new("cas-30e3-newer-intent".into(), "first committed body".into());
+        let old = store.stage_upsert(&task, "create_atomic", None, None).unwrap();
+        store.inner.create_atomic_with_mutation_receipt(&task, &[], None, None, &old.mutation_id).unwrap();
+        assert_eq!(store.fulfill_upsert(&old).unwrap(), TaskSyncFulfillResult::Fulfilled);
+        install_task_enqueue_failure(temp.path(), "");
+        task.title = "newer committed body".into();
+        assert_degraded(store.update(&task).unwrap_err(), "update", &task.id);
+        let newer = store.queue.pending_task_sync_intents().unwrap();
+        assert_eq!(newer.len(), 1);
+        assert_ne!(newer[0].mutation_id, old.mutation_id);
+
+        assert_eq!(store.fulfill_upsert_after_validation(&old, TaskSyncFulfillMode::Reconcile,
+            || panic!("retired snapshot must not reach validation")).unwrap(), TaskSyncFulfillResult::Superseded);
+        assert_eq!(store.queue.pending_task_sync_intents().unwrap(), newer,
+            "a stale recovery snapshot must leave newer durable evidence intact");
+        remove_task_enqueue_failure(temp.path());
+        assert_eq!(store.reconcile_pending_task_sync().unwrap(), TaskSyncReconcileOutcome::Clean);
+        assert!(store.queue.pending_task_sync_intents().unwrap().is_empty());
+        let pending = store.queue.pending(10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        let queued: Task = serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(queued.title, task.title);
+    }
+
     /// cas-d5c8 (GH #921): the MCP task write paths (create, update, note,
     /// close, cancel) complete while other agents keep committing writes, the
     /// shape of a 4-6 worker factory session. Before the fix, staging the sync

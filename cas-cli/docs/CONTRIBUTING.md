@@ -130,6 +130,14 @@ shared branches remain eligible. Age/deadline expiry works without a task table;
 malformed envelopes and human messages retain normal delivery semantics.
 Expired rows keep their history, acknowledgement and `superseded_stale` reason.
 
+Exhausting a supervisor message's wake budget stops active wakes while keeping
+its body readable at the next hook or inbox poll. The delivery detail identifies
+the notification and task when available, and reports the failed wake. Merge
+requests, typed status messages and blockers stay actionable until a separate
+premise check proves them obsolete. Missing task state permits delivery; it
+does not prove expiry. Positively stale lifecycle relays retain their withdrawal
+notice, and undelivered worker-death relays retain their dedicated failure report.
+
 
 ## Claude factory launch options
 

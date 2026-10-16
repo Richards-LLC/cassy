@@ -472,7 +472,7 @@ pub(crate) fn lifecycle_stale_outcome(
     }
 }
 
-/// Operator-facing description of one undelivered lifecycle relay
+/// Operator-facing description of one positively stale, undelivered lifecycle relay
 /// (cas-7787, GH #160).
 ///
 /// States what did not happen and what to do, in that order, without
@@ -486,6 +486,41 @@ pub(crate) fn undelivered_relay_notice(task_id: &str, summary: Option<&str>) -> 
          delivered, so it has been withdrawn rather than re-sent with an expired premise. \
          Check {task_id} directly — do not assume it was handled."
     )
+}
+
+/// Wake exhaustion is transport evidence, never evidence that a task moved on.
+/// Task inference from the summary is diagnostic only; it cannot withdraw a row.
+pub(crate) fn exhausted_wake_notice(
+    notification_id: i64,
+    prompt: &str,
+    summary: Option<&str>,
+    attempts: u32,
+) -> String {
+    let merge = parse_merge_request_envelope(prompt);
+    let task_id = merge
+        .as_ref()
+        .map(|envelope| envelope.task_id.clone())
+        .or_else(|| parse_lifecycle_envelope(prompt).map(|envelope| envelope.task_id))
+        .or_else(|| parse_blocker_envelope(prompt).and_then(|envelope| envelope.task_id))
+        .or_else(|| parse_worker_action_envelope(prompt).and_then(|envelope| envelope.task_id))
+        .or_else(|| parse_verification_dispatch_envelope(prompt).map(|envelope| envelope.task_id))
+        .or_else(|| summary.and_then(first_task_id_token));
+    let subject = task_id.as_deref().unwrap_or("task unspecified");
+    let mut notice = format!(
+        "WAKE UNDELIVERED: notification_id={notification_id} ({subject}); wake retries exhausted \
+         after {attempts} attempts. The message remains queued for the supervisor's next turn. \
+         Read it with `coordination action=inbox_poll notification_id={notification_id}`; \
+         do not assume it was handled."
+    );
+    if let Some(envelope) = merge {
+        notice.push_str(&format!(
+            " Review the merge request for {}: delivery {} into {}.",
+            envelope.task_id, envelope.branch_tip, envelope.target_branch,
+        ));
+    } else if let Some(summary) = summary {
+        notice.push_str(&format!(" Summary: {summary}"));
+    }
+    notice
 }
 
 /// Operator-facing description of one undelivered worker-death relay
@@ -1170,6 +1205,7 @@ pub(crate) enum WorkerActionKind {
 pub(crate) struct WorkerActionEnvelope {
     pub kind: WorkerActionKind,
     pub worker: String,
+    pub task_id: Option<String>,
 }
 
 /// Attribute values are written by CAS from registry/store values, but a task
@@ -1272,7 +1308,13 @@ pub(crate) fn parse_worker_action_envelope(prompt: &str) -> Option<WorkerActionE
     let worker = xml_attribute(tag, "worker")
         .filter(|value| !value.is_empty())?
         .to_string();
-    Some(WorkerActionEnvelope { kind, worker })
+    Some(WorkerActionEnvelope {
+        kind,
+        worker,
+        task_id: xml_attribute(tag, "task_id")
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    })
 }
 
 /// Build the verification-dispatch handoff CAS enqueues for the supervisor

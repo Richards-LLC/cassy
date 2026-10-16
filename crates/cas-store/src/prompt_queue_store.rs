@@ -196,6 +196,9 @@ enum TransportEligibility {
     PolledBefore(chrono::DateTime<Utc>),
     /// cas-6ccb: the ids an `inbox_poll` names, whatever their receipt.
     NamedRead,
+    /// cas-bf890: unread [`NOTICE_DIGEST_KIND`] rows with no transport
+    /// marker (the daemon never transports them).
+    NoticeDigest,
 }
 
 /// cas-6ccb (GH #1215): eligibility for [`TransportEligibility::PolledBefore`];
@@ -246,6 +249,27 @@ pub fn fits_hook_surface(prompt: &str) -> bool {
     hook_surface_cost(prompt) <= HOOK_SURFACE_BUDGET_CHARS
 }
 
+/// cas-bf890 (GH #1215 §3): the `kind` CAS stamps on a low-value system
+/// notice (with `origin_kind = 'daemon'`, so no caller can claim it). Such a
+/// row never gets a transport of its own: the daemon does not select it, so it
+/// never writes a Teams pointer or types into a pane, and the rendering hook
+/// drains skip it. One [`HookDrain::NoticeDigest`] drain per turn shows every
+/// one as a single digest line instead. `inbox_poll` still reads them whole.
+pub const NOTICE_DIGEST_KIND: &str = "notice_digest";
+
+/// cas-bf890: the predicate for [`NOTICE_DIGEST_KIND`] rows over an unaliased
+/// `prompt_queue`, for the daemon's selection.
+const NOT_NOTICE_DIGEST_SQL: &str = "AND NOT (COALESCE(origin_kind, '') = 'daemon' \
+     AND COALESCE(kind, '') = 'notice_digest')";
+
+/// cas-bf890: [`NOT_NOTICE_DIGEST_SQL`] over the hook drains' `q` alias.
+const NOT_NOTICE_DIGEST_Q_SQL: &str = "AND NOT (COALESCE(q.origin_kind, '') = 'daemon' \
+     AND COALESCE(q.kind, '') = 'notice_digest')";
+
+/// cas-bf890: only [`NOTICE_DIGEST_KIND`] rows, over the `q` alias.
+const ONLY_NOTICE_DIGEST_Q_SQL: &str = "AND COALESCE(q.origin_kind, '') = 'daemon' \
+     AND COALESCE(q.kind, '') = 'notice_digest'";
+
 /// cas-1f0c: which rows a budgeted hook drain may take; the hook variants of
 /// [`TransportEligibility`].
 #[derive(Debug, Clone, Copy)]
@@ -261,6 +285,10 @@ pub enum HookDrain<'a> {
     /// Rows polled with `inbox_poll` before this turn start and never
     /// acknowledged (cas-6ccb, GH #1215): shown once more.
     PolledBefore(DateTime<Utc>),
+    /// cas-bf890: the unread [`NOTICE_DIGEST_KIND`] rows, which no other hook
+    /// drain takes. Not charged to the body budget: the caller renders them
+    /// as one digest line, not in full.
+    NoticeDigest,
 }
 
 /// cas-1f0c: the result of a budgeted hook drain.
@@ -6251,7 +6279,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             HookDrain::DeliveredAfter(at) => (TransportEligibility::After(at), &[][..], limit),
             HookDrain::WakeNamed(ids) => (TransportEligibility::WakeNamed, ids, limit.min(ids.len())),
             HookDrain::PolledBefore(at) => (TransportEligibility::PolledBefore(at), &[][..], limit),
+            HookDrain::NoticeDigest => (TransportEligibility::NoticeDigest, &[][..], limit),
         };
+        let budget = (!matches!(drain, HookDrain::NoticeDigest)).then_some(budget_chars);
         let (rows, over_budget) = self.drain_unseen_for_recipient_budgeted(
             recipient,
             factory_session,
@@ -6260,7 +6290,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             None,
             transport,
             ids,
-            Some(budget_chars),
+            budget,
         )?;
         Ok(BudgetedSurface { rows, over_budget })
     }
@@ -8860,6 +8890,7 @@ impl SqlitePromptQueueStore {
                 TransportEligibility::WakeNamed => WAKE_NAMED_RECEIPT_SQL,
                 TransportEligibility::PolledBefore(_) => POLLED_UNACKED_RECEIPT_SQL,
                 TransportEligibility::NamedRead => NAMED_READ_RECEIPT_SQL,
+                TransportEligibility::NoticeDigest => UNSEEN_RECIPIENT_RECEIPT_SQL,
             };
             // The receipt clause precedes every other bound predicate, so its
             // parameters follow the join's recipient. `After` (cas-a1ed) and
@@ -18831,5 +18862,200 @@ mod cas_1bc7_tests {
         let (temp, store) = store();
         let _held = foreign_writer(temp.path());
         within_budget(|| store.init()).expect("init with nothing to upgrade writes nothing");
+    }
+}
+
+/// cas-bf890 (GH #1215 §3): abandonment notices about a recipient that has
+/// ended reach the supervisor only as a digest line, never as a transport of
+/// their own. The class is stamped by the producer on the row, so the daemon
+/// selection and the hook drains read one predicate.
+#[cfg(test)]
+mod cas_bf890_notice_digest_tests {
+    use super::*;
+
+    const SESSION: &str = "sess-bf890";
+
+    fn store() -> (tempfile::TempDir, SqlitePromptQueueStore) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        (temp, store)
+    }
+
+    fn register(store: &SqlitePromptQueueStore, name: &str, role: &str, status: &str, session: &str) {
+        let conn = store.conn.lock().unwrap();
+        conn.execute_batch(crate::AGENT_SCHEMA).unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO agents (id, name, role, status, factory_session, registered_at, last_heartbeat)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![format!("id-{name}-{session}"), name, role, status, session, now, now],
+        )
+        .unwrap();
+    }
+
+    /// The sender's message to `target` expires undelivered; returns the id of
+    /// the abandonment notice CAS wrote back to the sender.
+    fn abandon_to(store: &SqlitePromptQueueStore, sender: &str, target: &str) -> i64 {
+        let before: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM prompt_queue WHERE source = 'delivery-watchdog'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let id = store.enqueue_with_session(sender, target, "do the thing", SESSION).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                params![(Utc::now() - chrono::Duration::days(2)).to_rfc3339(), id],
+            )
+            .unwrap();
+        }
+        assert_eq!(store.abandon_pending_older_than(900).unwrap(), 1);
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT MAX(id) FROM prompt_queue WHERE source = 'delivery-watchdog' AND id > ?",
+            params![before],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .unwrap()
+        .expect("an abandonment notice")
+    }
+
+    fn kind_of(store: &SqlitePromptQueueStore, id: i64) -> Option<String> {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row("SELECT kind FROM prompt_queue WHERE id = ?", params![id], |row| row.get(0))
+            .unwrap()
+    }
+
+    fn selected(store: &SqlitePromptQueueStore) -> Vec<i64> {
+        store
+            .peek_for_targets(&["supervisor", "lead-sup"], Some(SESSION), 50)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
+    fn drain(store: &SqlitePromptQueueStore, drain: HookDrain<'_>) -> Vec<i64> {
+        store
+            .surface_for_recipient_within_budget(
+                "supervisor",
+                Some(SESSION),
+                drain,
+                50,
+                HOOK_SURFACE_BUDGET_CHARS,
+            )
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
+    /// Acceptance 2: an abandoned message to a recipient from an earlier
+    /// session never wakes the supervisor. The daemon never selects the
+    /// notice (no Teams pointer, no pane write), and the rendering drains
+    /// leave it to the digest.
+    #[test]
+    fn notice_about_an_ended_recipient_is_never_transported_only_digested() {
+        let (_temp, store) = store();
+        register(&store, "lead-sup", "supervisor", "active", SESSION);
+        register(&store, "old-worker", "worker", "shutdown", "sess-earlier");
+        let notice = abandon_to(&store, "supervisor", "old-worker");
+
+        assert_eq!(kind_of(&store, notice).as_deref(), Some(NOTICE_DIGEST_KIND));
+        assert!(!selected(&store).contains(&notice), "the daemon must never select it");
+        assert!(drain(&store, HookDrain::Unseen).is_empty());
+        assert!(drain(&store, HookDrain::WithoutTransport).is_empty());
+        assert_eq!(drain(&store, HookDrain::NoticeDigest), vec![notice]);
+        // Shown once: the digest receipt retires it.
+        assert!(drain(&store, HookDrain::NoticeDigest).is_empty());
+    }
+
+    /// `inbox_poll` still reads a digest notice whole.
+    #[test]
+    fn inbox_poll_still_reads_a_digest_notice() {
+        let (_temp, store) = store();
+        register(&store, "lead-sup", "supervisor", "active", SESSION);
+        let notice = abandon_to(&store, "supervisor", "never-registered");
+        assert_eq!(kind_of(&store, notice).as_deref(), Some(NOTICE_DIGEST_KIND));
+        let polled = store.poll_unseen_for_recipient("supervisor", Some(SESSION), 10).unwrap();
+        assert_eq!(polled.iter().map(|row| row.id).collect::<Vec<_>>(), vec![notice]);
+        assert!(polled[0].prompt.contains("never-registered"));
+    }
+
+    /// Control: a message to a recipient that is still live failed for some
+    /// other reason. That needs action, so it keeps its ordinary delivery.
+    #[test]
+    fn notice_about_a_live_recipient_keeps_its_ordinary_delivery() {
+        let (_temp, store) = store();
+        register(&store, "lead-sup", "supervisor", "active", SESSION);
+        register(&store, "busy-worker", "worker", "active", SESSION);
+        let notice = abandon_to(&store, "supervisor", "busy-worker");
+
+        assert_eq!(kind_of(&store, notice), None);
+        assert!(selected(&store).contains(&notice));
+        assert!(drain(&store, HookDrain::NoticeDigest).is_empty());
+        assert_eq!(drain(&store, HookDrain::Unseen), vec![notice]);
+    }
+
+    /// The two classes never fold into one episode row: an actionable notice
+    /// must not hide inside a digest row, nor the reverse.
+    #[test]
+    fn ended_and_live_notices_fold_into_separate_episodes() {
+        let (_temp, store) = store();
+        register(&store, "lead-sup", "supervisor", "active", SESSION);
+        register(&store, "busy-worker", "worker", "idle", SESSION);
+        let first_ended = abandon_to(&store, "supervisor", "gone-a");
+        let live = abandon_to(&store, "supervisor", "busy-worker");
+        let second_ended = abandon_to(&store, "supervisor", "gone-b");
+
+        assert_ne!(live, first_ended);
+        assert_eq!(second_ended, first_ended, "ended notices fold into one digest row");
+        assert_eq!(kind_of(&store, live), None);
+        let digest = store.queued_prompt(first_ended).unwrap().unwrap();
+        assert!(digest.prompt.contains("gone-a") && digest.prompt.contains("gone-b"));
+        assert!(!digest.prompt.contains("busy-worker"));
+    }
+
+    /// Scope: a worker's own abandonment notices are not the supervisor
+    /// inbox; they keep their ordinary delivery.
+    #[test]
+    fn a_workers_notice_is_not_digested() {
+        let (_temp, store) = store();
+        register(&store, "lead-sup", "supervisor", "active", SESSION);
+        register(&store, "sender-worker", "worker", "active", SESSION);
+        let notice = abandon_to(&store, "sender-worker", "gone-c");
+        assert_eq!(kind_of(&store, notice), None);
+    }
+
+    /// Acceptance 3 (store half): typed wake rows are never digest rows. The
+    /// daemon still selects them and the turn-start drain still renders them.
+    #[test]
+    fn typed_wake_rows_keep_selection_and_rendering() {
+        let (_temp, store) = store();
+        register(&store, "lead-sup", "supervisor", "active", SESSION);
+        let lifecycle = store
+            .enqueue_with_session(
+                "lifecycle-wake:7",
+                "supervisor",
+                "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-1\">MERGE</task-lifecycle>",
+                SESSION,
+            )
+            .unwrap();
+        let blocker = store
+            .enqueue_with_session("busy-worker", "supervisor", "<cas-blocker>stuck</cas-blocker>", SESSION)
+            .unwrap();
+        let ended = abandon_to(&store, "supervisor", "gone-d");
+        let picked = selected(&store);
+        assert!(picked.contains(&lifecycle) && picked.contains(&blocker) && !picked.contains(&ended));
+        let rendered = drain(&store, HookDrain::Unseen);
+        assert_eq!(rendered, vec![lifecycle, blocker]);
+        assert_eq!(drain(&store, HookDrain::NoticeDigest), vec![ended]);
     }
 }

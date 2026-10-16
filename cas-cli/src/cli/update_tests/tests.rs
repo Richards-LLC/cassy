@@ -131,14 +131,10 @@ fn cas_8235_update_preserves_custom_refs_and_a_usable_default() {
         args.sync = true;
         let (result, output) =
             capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+        result.unwrap();
         if mode == "unregistered" {
-            let error = result.unwrap_err().to_string();
-            assert!(
-                error.contains("missing_registered_violet_credential"),
-                "{error}"
-            );
-        } else {
-            result.unwrap();
+            assert!(output.contains("missing_registered_violet_credential"), "{output}");
+            assert!(root.parent().unwrap().join(".claude/skills/cas-worker/SKILL.md").is_file());
         }
         assert_eq!(std::fs::read_to_string(path).unwrap(), original, "{mode}");
         assert!(!output.contains("cas-8235-private-fixture"));
@@ -155,6 +151,7 @@ fn cas_8235_update_refuses_ambiguous_registered_accounts_without_leaking_secrets
     // The second registration is an alternate account, not necessarily the
     // active harness profile. Even an unexported reference makes it ambiguous.
     let alternate = env.home().join(".codex-second");
+    env.set("CODEX_HOME", &alternate);
     std::fs::create_dir_all(&alternate).unwrap();
     std::fs::write(alternate.join("config.toml"), format!(
         "[mcp_servers.violet]\nurl = '{}'\nenv_http_headers = {{ Authorization = 'VIOLET_SLACK_TOKEN_SECOND' }}\n",
@@ -166,16 +163,16 @@ fn cas_8235_update_refuses_ambiguous_registered_accounts_without_leaking_secrets
     args.sync = true;
     let (result, output) =
         capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
-    let error = result.unwrap_err().to_string();
+    result.unwrap();
     for expected in [
         "ambiguous_violet_credential",
         "VIOLET_SLACK_TOKEN_SECOND",
         "VIOLET_SLACK_TOKEN_SOUNDWAVE",
     ] {
-        assert!(error.contains(expected), "{error}");
+        assert!(output.contains(expected), "{output}");
     }
     assert_eq!(std::fs::read_to_string(path).unwrap(), original);
-    assert!(!format!("{error}{output}").contains("cas-8235-private-fixture"));
+    assert!(!output.contains("cas-8235-private-fixture"));
 }
 
 #[test]
@@ -203,6 +200,109 @@ fn cas_8235_update_uses_private_registered_credential_without_writing_its_value(
     assert!(written.contains("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"));
     assert!(!format!("{written}{output}").contains("cas-8235-file-private"));
     assert_eq!(std::fs::read_to_string(credentials).unwrap(), private);
+}
+
+#[test]
+#[cfg(all(feature = "mcp-proxy", unix))]
+fn cas_8235_review_proxy_refusals_warn_and_continue_sync_and_doctor() {
+    for mode in ["malformed", "symlink", "unregistered"] {
+        let mut env = cas_8235_fixture();
+        std::fs::remove_file(env.home().join(".claude.json")).unwrap();
+        let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
+        env.set("CAS_ROOT", &root);
+        let user = cmcp_core::config::Scope::User.config_path().unwrap();
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        let original = if mode == "malformed" { "[servers.violet\nauth = 'private-malformed-value'".to_owned() }
+            else { cas_8235_proxy("env:VIOLET_SLACK_TOKEN_CASSY_PROXY") };
+        let target = env.home().join("proxy-target.toml");
+        if mode == "symlink" {
+            std::fs::write(&target, &original).unwrap();
+            std::os::unix::fs::symlink(&target, &user).unwrap();
+        } else { std::fs::write(&user, &original).unwrap(); }
+        let mut args = update_test_args(); args.sync = true;
+        let (result, output) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+        result.unwrap();
+        assert!(output.contains("warning: Violet"), "{mode}: {output}");
+        assert!(!output.contains("private-malformed-value"));
+        assert_eq!(std::fs::read_to_string(&user).unwrap(), original);
+        assert!(root.parent().unwrap().join(".claude/skills/cas-worker/SKILL.md").is_file());
+        let row = crate::cli::integrate::violet::doctor_row_from_env(None).unwrap();
+        assert_eq!(row.severity, crate::cli::integrate::violet::DoctorSeverity::Warning, "{row:?}");
+        assert!(row.message.contains(&user.display().to_string()), "{row:?}");
+        assert!(!row.message.contains("private-malformed-value"));
+    }
+}
+
+#[test]
+#[cfg(feature = "mcp-proxy")]
+fn cas_8235_review_backups_do_not_select_accounts_and_managed_defaults_keep_runtime_selection() {
+    for mode in ["backup", "generic", "selector"] {
+        let mut env = cas_8235_fixture();
+        let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
+        env.set("CAS_ROOT", &root);
+        let backup = env.home().join(".claude-backup");
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join(".claude.json"), serde_json::json!({"mcpServers":{"violet":{
+            "url":cas_types::violet_compatibility::violet_hub_url(),
+            "headers":{"Authorization":"Bearer ${VIOLET_SLACK_TOKEN_STALE_BACKUP}"}}}}).to_string()).unwrap();
+        if mode == "generic" { env.set("VIOLET_SLACK_TOKEN", "private-generic"); }
+        if mode == "selector" {
+            env.set("VIOLET_SLACK_TOKEN_ENV", "VIOLET_SLACK_TOKEN_SELECTED");
+            env.set("VIOLET_SLACK_TOKEN_SELECTED", "private-selected");
+        }
+        let user = cmcp_core::config::Scope::User.config_path().unwrap();
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        let original = format!("{}{}", if mode == "backup" { "" } else { "# managed\n" }, cas_8235_proxy("env:VIOLET_SLACK_TOKEN_CASSY_PROXY"));
+        std::fs::write(&user, &original).unwrap();
+        let mut args=update_test_args(); args.sync=true;
+        execute(&args, &update_test_cli(true), Some(&root)).unwrap();
+        let written = std::fs::read_to_string(&user).unwrap();
+        if mode == "backup" { assert!(written.contains("env:VIOLET_SLACK_TOKEN_SOUNDWAVE")); }
+        else { assert_eq!(written, original, "{mode}"); }
+    }
+}
+
+#[test]
+#[cfg(feature = "mcp-proxy")]
+fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
+    use crate::cli::integrate::violet::{HubProbe, ProbeOutcome};
+    struct Probe;
+    impl HubProbe for Probe {
+        fn list_tools(&self, _: &cmcp_core::config::ServerConfig) -> ProbeOutcome {
+            ProbeOutcome::Tools { tools: vec!["violet_read".into(), "violet_post".into()], schema_problems: vec![] }
+        }
+    }
+    let mut env = cas_8235_fixture();
+    let projects = env.home().join("projects");
+    let roots: Vec<_> = ["first", "second"].iter().map(|name| {
+        crate::store::init_cas_dir(&projects.join(name)).unwrap()
+    }).collect();
+    env.set("CAS_PROJECT_ROOTS", &projects);
+    env.set("CAS_ROOT", &roots[0]);
+    let old = cas_types::violet_compatibility::violet_compatibility().legacy_token_prefix.to_owned() + "_CASSY_PROXY";
+    std::fs::write(env.home().join(".claude.json"), serde_json::json!({"mcpServers":{"violet":{
+        "url":cas_types::violet_compatibility::violet_hub_url(),
+        "headers":{"Authorization":format!("Bearer ${{{old}}}")}}}}).to_string()).unwrap();
+    let original = cas_8235_proxy("env:VIOLET_SLACK_TOKEN_CASSY_PROXY");
+    for root in &roots { std::fs::write(root.join("proxy.toml"), &original).unwrap(); }
+    let user = cmcp_core::config::Scope::User.config_path().unwrap();
+    std::fs::create_dir_all(user.parent().unwrap()).unwrap(); std::fs::write(&user, &original).unwrap();
+    let mut args = update_test_args(); args.all_projects=true;
+    let cli = update_test_cli(false);
+    // Inject only the network probe; run the real user store/builtin phases
+    // and the entire native per-project loop, including rules/skills sync.
+    let (result, output) = capture_phase(true, || refresh_all_projects_with_user_refresh(
+        &args, &cli, Some(&roots[0]), None, None, None,
+        || refresh_user_level_store_with_builtins(&args, &cli, || sync_user_builtins_with_violet(&cli,
+            || crate::cli::integrate::violet_retirement::migrate_installed_hub_on_update_with_probe(&Probe))))) ;
+    let report = result.unwrap();
+    assert_eq!(report.project_count, 2, "{output}");
+    assert_eq!(report.failed_count, 0, "{output}");
+    for root in &roots {
+        assert!(std::fs::read_to_string(root.join("proxy.toml")).unwrap().contains("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"), "{output}");
+        assert!(root.parent().unwrap().join(".claude/skills/cas-worker/SKILL.md").is_file());
+    }
+    assert!(!output.contains("cas-8235-private-fixture"));
 }
 
 #[test]

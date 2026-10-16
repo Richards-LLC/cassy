@@ -1127,6 +1127,19 @@ fn refresh_all_projects(
     hub_restart: Option<&super::hub::HubRestartOutcome>,
     first_launch_ms: Option<u64>,
 ) -> anyhow::Result<RefreshReport> {
+    refresh_all_projects_with_user_refresh(args, cli, current_cas_root, hub_transport_error,
+        hub_restart, first_launch_ms, || refresh_user_level_store(args, cli))
+}
+
+fn refresh_all_projects_with_user_refresh(
+    args: &UpdateArgs,
+    cli: &Cli,
+    current_cas_root: Option<&Path>,
+    hub_transport_error: Option<&str>,
+    hub_restart: Option<&super::hub::HubRestartOutcome>,
+    first_launch_ms: Option<u64>,
+    user_refresh: impl FnOnce() -> ProjectPhase,
+) -> anyhow::Result<RefreshReport> {
     let started_at = Instant::now();
     let discovery = discover_local_projects(current_cas_root);
     let mut receipts = Vec::with_capacity(discovery.projects.len());
@@ -1212,7 +1225,7 @@ fn refresh_all_projects(
     }
 
     let (user_level, user_details) =
-        capture_phase(!cli.json, || refresh_user_level_store(args, cli));
+        capture_phase(!cli.json, user_refresh);
     print_project_refresh_summary(
         &receipts,
         &user_level,
@@ -1260,6 +1273,14 @@ fn refresh_all_projects(
 /// deliberately not a project: it is never counted in the project totals and
 /// never appears in the project table.
 fn refresh_user_level_store(args: &UpdateArgs, cli: &Cli) -> ProjectPhase {
+    refresh_user_level_store_with_builtins(args, cli, || sync_user_builtins(cli))
+}
+
+fn refresh_user_level_store_with_builtins(
+    args: &UpdateArgs,
+    cli: &Cli,
+    builtins: impl FnOnce() -> anyhow::Result<()>,
+) -> ProjectPhase {
     let Some(cas_root) = user_level_store_root() else {
         return ProjectPhase::Skipped("no home directory".to_string());
     };
@@ -1268,7 +1289,7 @@ fn refresh_user_level_store(args: &UpdateArgs, cli: &Cli) -> ProjectPhase {
     }
 
     if !cas_root.join("cas.db").is_file() {
-        return match sync_user_builtins(cli) {
+        return match builtins() {
             Ok(()) => ProjectPhase::Ok(format!(
                 "builtins only — no store at {}",
                 cas_root.display()
@@ -1282,7 +1303,7 @@ fn refresh_user_level_store(args: &UpdateArgs, cli: &Cli) -> ProjectPhase {
     if migration.failed() {
         return migration;
     }
-    match sync_user_builtins(cli) {
+    match builtins() {
         Ok(()) => ProjectPhase::Ok(format!(
             "migrated {} and synced builtins",
             cas_root.display()

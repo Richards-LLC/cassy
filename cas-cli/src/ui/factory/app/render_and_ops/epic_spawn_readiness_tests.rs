@@ -375,8 +375,9 @@ fn cas_bfa1_spawn_network_observation_is_reused() {
 
 #[test]
 fn cas_bfa1_real_spawn_notices_deduplicate_within_session() {
-    for kind in ["UNVERIFIED", "PRESERVED", "UNPUBLISHED"] {
+    for kind in ["UNVERIFIED", "PRESERVED", "UNPUBLISHED", "LOCAL-ONLY"] {
         with_fixture(|f| {
+            if kind == "LOCAL-ONLY" { git(&f.repo, &["remote", "remove", "origin"]); }
             if kind == "UNVERIFIED" {
                 f.offline();
             }
@@ -464,5 +465,83 @@ fn cas_bfa1_assigned_epic_ignores_closed_unrelated_focus() {
             )
             .is_empty()
         );
+    });
+}
+
+#[test]
+fn cas_bfa1_round3_adopted_and_targetless_lanes_keep_diverged_history() {
+    for self_target in [true, false] {
+        for published in [true, false] {
+            with_fixture(|f| {
+                let tasks = open_task_store_cached(&f.root).unwrap();
+                let mut epic = tasks.get("cas-round2-epic").unwrap();
+                epic.deliverables.work_target = self_target.then(|| cas_types::WorkTarget {
+                    repo_selector: "project:bfa1-round2".into(),
+                    target_branch: "epic/round2".into(),
+                });
+                tasks.update(&epic).unwrap();
+                git(&f.repo, &["checkout", "epic/round2"]);
+                commit(&f.repo, "adopted-work");
+                let tip = git(&f.repo, &["rev-parse", "HEAD"]);
+                if published { git(&f.repo, &["push", "origin", "epic/round2"]); }
+                git(&f.repo, &["checkout", "main"]);
+                f.advance_parent();
+                let prep = f.prepare().expect("self-target and target-less lanes have no parent refresh");
+                let work = prep.worktree_info.unwrap();
+                assert_eq!(work.parent_branch, "epic/round2");
+                assert_eq!(git(&f.repo, &["rev-parse", work.base_ref.as_deref().unwrap_or(&work.parent_branch)]), tip);
+                assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), tip);
+                assert_eq!(git(&f.repo, &["rev-parse", "main"]), f.base);
+            });
+        }
+    }
+}
+
+#[test]
+fn cas_bfa1_round3_remote_only_recorded_parent_is_usable() {
+    with_fixture(|f| {
+        f.advance_parent();
+        git(&f.repo, &["branch", "release-parent", "main"]);
+        git(&f.repo, &["push", "origin", "release-parent"]);
+        git(&f.repo, &["branch", "-D", "release-parent"]);
+        let tasks = open_task_store_cached(&f.root).unwrap();
+        let mut epic = tasks.get("cas-round2-epic").unwrap();
+        epic.deliverables.work_target.as_mut().unwrap().target_branch = "release-parent".into();
+        tasks.update(&epic).unwrap();
+        let prep = f.prepare().expect("origin-only parent is authoritative");
+        assert_eq!(prep.worktree_info.unwrap().parent_branch, "epic/round2");
+        assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), f.base);
+        assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), f.base);
+    });
+}
+
+#[test]
+fn cas_bfa1_round3_cancelled_epic_is_terminal() {
+    with_fixture(|f| {
+        let tasks = open_task_store_cached(&f.root).unwrap();
+        let mut epic = tasks.get("cas-round2-epic").unwrap();
+        epic.status = cas_types::TaskStatus::Cancelled;
+        tasks.update(&epic).unwrap();
+        for task in [None, Some("cas-round2-child")] {
+            let error = f.app.prepare_worker_spawn(Some("round2-worker"), true, task).err().expect("cancelled epic must refuse").to_string();
+            assert!(error.contains("cancelled") && error.contains("no lane was republished"), "{error}");
+        }
+        assert!(git(&f.origin, &["for-each-ref", "--format=%(refname)", "refs/heads/epic/round2"]).is_empty());
+    });
+}
+
+#[test]
+fn cas_bfa1_round3_live_epic_preferred_over_terminal_duplicate_lane() {
+    with_fixture(|f| {
+        let tasks = open_task_store_cached(&f.root).unwrap();
+        let mut old = tasks.get("cas-round2-epic").unwrap();
+        old.id = "cas-old-lane".into();
+        old.status = cas_types::TaskStatus::Closed;
+        old.priority = cas_types::Priority::P0;
+        tasks.add(&old).unwrap();
+        f.advance_parent();
+        let prep = f.prepare().expect("live lane owner must beat a terminal record");
+        assert_eq!(prep.worktree_info.unwrap().parent_branch, "epic/round2");
+        assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), f.base);
     });
 }

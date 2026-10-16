@@ -189,16 +189,14 @@ fn cas_bfa1_expected_absent_publication_does_not_replace_racing_remote() {
 }
 
 #[test]
-fn cas_bfa1_focus_creates_missing_local_lane_at_base() {
-    with_fixture(|repo, origin, root, base| {
+fn cas_bfa1_round3_focus_refuses_deleted_local_and_remote_lane() {
+    with_fixture(|repo, origin, root, _| {
         git(repo, &["branch", "-D", "epic/unpublished"]);
         let receipt = focus(root);
-        assert_eq!(git(repo, &["rev-parse", "epic/unpublished"]), base);
-        assert_eq!(git(origin, &["rev-parse", "epic/unpublished"]), base);
-        assert!(
-            receipt.contains("created local") && receipt.contains("published"),
-            "{receipt}"
-        );
+        assert!(receipt.contains("refusing to recreate a deleted epic lane"), "{receipt}");
+        for path in [repo, origin] {
+            assert!(git(path, &["for-each-ref", "--format=%(refname)", "refs/heads/epic/unpublished"]).is_empty());
+        }
     });
 }
 

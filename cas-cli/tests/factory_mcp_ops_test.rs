@@ -7970,8 +7970,16 @@ async fn cas_1ba0_message_status_distinguishes_held_inbox_from_composer_retry() 
     let env = FactoryTestEnv::new();
     let queue = env.prompt_queue();
     for held_copy in [true, false] {
-        let id = queue.enqueue("supervisor", "swift-fox", "decision").unwrap();
-        queue.record_pending_reason(id, cas_store::PendingReason::GatedNotReady, Some("same detail in both cases")).unwrap();
+        let id = queue
+            .enqueue("supervisor", "swift-fox", "decision")
+            .unwrap();
+        queue
+            .record_pending_reason(
+                id,
+                cas_store::PendingReason::GatedNotReady,
+                Some("same detail in both cases"),
+            )
+            .unwrap();
         if held_copy {
             queue.record_deferred_inbox(id, 123).unwrap();
         }

@@ -3862,19 +3862,35 @@ fn abandonment_update_notice(notice: &str) -> String {
 /// Keep whole IDs while reserving room for the episode overflow trailer and
 /// the Commander update wrapper. The total still names every abandoned row;
 /// omitted IDs remain available through each original message's status.
-fn abandonment_batch_notice(notices: &[AbandonedSenderNotice], targets: &str, reasons: &str) -> String {
+fn abandonment_batch_notice(
+    notices: &[AbandonedSenderNotice],
+    targets: &str,
+    reasons: &str,
+) -> String {
     let reserve = abandonment_update_notice("").chars().count()
-        + format!("\n+{}{ABANDONMENT_MORE_SUFFIX}", u64::MAX).chars().count();
+        + format!("\n+{}{ABANDONMENT_MORE_SUFFIX}", u64::MAX)
+            .chars()
+            .count();
     let omission = |count| format!(" ({count} ids omitted; see `message_status`)");
-    let header = format!("{} messages to {targets} were abandoned ({reasons})", notices.len());
+    let header = format!(
+        "{} messages to {targets} were abandoned ({reasons})",
+        notices.len()
+    );
     // Pathological target/reason lists must not consume the space for even
     // one complete ID and its omission count. Ordinary headers stay whole.
-    let header_budget = HOOK_SURFACE_BUDGET_CHARS
-        .saturating_sub(HOOK_SURFACE_ROW_OVERHEAD_CHARS + reserve
-            + omission(notices.len()).chars().count() + "; ids ".len()
-            + i64::MIN.to_string().len() + 1);
+    let header_budget = HOOK_SURFACE_BUDGET_CHARS.saturating_sub(
+        HOOK_SURFACE_ROW_OVERHEAD_CHARS
+            + reserve
+            + omission(notices.len()).chars().count()
+            + "; ids ".len()
+            + i64::MIN.to_string().len()
+            + 1,
+    );
     let mut body = if header.chars().count() > header_budget {
-        let mut short: String = header.chars().take(header_budget.saturating_sub(1)).collect();
+        let mut short: String = header
+            .chars()
+            .take(header_budget.saturating_sub(1))
+            .collect();
         short.push('…');
         short
     } else {
@@ -3885,8 +3901,14 @@ fn abandonment_batch_notice(notices: &[AbandonedSenderNotice], targets: &str, re
         let separator = if index == 0 { "" } else { ", " };
         let candidate = format!("{body}{separator}{}", notice.prompt_id);
         let left = notices.len() - index - 1;
-        let suffix = if left == 0 { String::new() } else { omission(left) };
-        if hook_surface_cost(&candidate) + suffix.chars().count() + reserve > HOOK_SURFACE_BUDGET_CHARS {
+        let suffix = if left == 0 {
+            String::new()
+        } else {
+            omission(left)
+        };
+        if hook_surface_cost(&candidate) + suffix.chars().count() + reserve
+            > HOOK_SURFACE_BUDGET_CHARS
+        {
             body.push_str(&omission(notices.len() - index));
             break;
         }
@@ -3909,10 +3931,18 @@ fn fold_abandonment_line(prompt: &str, notice: &str, message_count: u64) -> Stri
         _ => (prompt, 0),
     };
     let with_line = format!("{body}\nAlso: {notice}");
-    if more == 0 && fits_hook_surface(&format!("{with_line}\n+{}{ABANDONMENT_MORE_SUFFIX}", u64::MAX)) {
+    if more == 0
+        && fits_hook_surface(&format!(
+            "{with_line}\n+{}{ABANDONMENT_MORE_SUFFIX}",
+            u64::MAX
+        ))
+    {
         with_line
     } else {
-        format!("{body}\n+{}{ABANDONMENT_MORE_SUFFIX}", more.saturating_add(message_count))
+        format!(
+            "{body}\n+{}{ABANDONMENT_MORE_SUFFIX}",
+            more.saturating_add(message_count)
+        )
     }
 }
 
@@ -9017,15 +9047,27 @@ mod tests {
         let session = "factory-1ba0";
         for (token_api, urgent) in [(false, false), (true, false), (true, true)] {
             let id = if urgent {
-                store.enqueue_urgent("supervisor", "worker-1", "redirect", Some(session), None, None, true)
+                store.enqueue_urgent(
+                    "supervisor",
+                    "worker-1",
+                    "redirect",
+                    Some(session),
+                    None,
+                    None,
+                    true,
+                )
             } else {
                 store.enqueue_with_session("supervisor", "worker-1", "decision", session)
-            }.unwrap();
+            }
+            .unwrap();
             assert!(store.claim_recipient_transport(id, "worker-1").unwrap());
             store.record_deferred_inbox(id, 123).unwrap();
             assert!(!store.claim_recipient_transport(id, "worker-1").unwrap());
-            assert_eq!(store.deferred_inbox_state(id).unwrap().unwrap().1, 123,
-                "a refused reservation must leave a held Teams copy eligible");
+            assert_eq!(
+                store.deferred_inbox_state(id).unwrap().unwrap().1,
+                123,
+                "a refused reservation must leave a held Teams copy eligible"
+            );
             store.release_recipient_transport(id, "worker-1").unwrap();
             if token_api {
                 assert!(
@@ -13218,7 +13260,9 @@ mod tests {
     fn cas_1ba0_abandon_batch(store: &SqlitePromptQueueStore, count: usize) -> Vec<i64> {
         let mut ids = Vec::new();
         for _ in 0..count {
-            let id = store.enqueue_with_session("supervisor", "worker-1", "old work", "sess").unwrap();
+            let id = store
+                .enqueue_with_session("supervisor", "worker-1", "old work", "sess")
+                .unwrap();
             backdate(store, id, 30 * 24 * 60 * 60);
             ids.push(id);
         }
@@ -13240,7 +13284,10 @@ mod tests {
             omitted += batch;
             let rows = gh_1196_notices(&store);
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].1.lines().last().unwrap(), format!("+{omitted}{ABANDONMENT_MORE_SUFFIX}"));
+            assert_eq!(
+                rows[0].1.lines().last().unwrap(),
+                format!("+{omitted}{ABANDONMENT_MORE_SUFFIX}")
+            );
             assert!(fits_hook_surface(&rows[0].1));
         }
     }
@@ -13251,12 +13298,28 @@ mod tests {
         let ids = cas_1ba0_abandon_batch(&store, 1200);
         let rows = gh_1196_notices(&store);
         assert_eq!(rows.len(), 1);
-        assert!(fits_hook_surface(&rows[0].1), "batch notice costs {} chars", hook_surface_cost(&rows[0].1));
+        assert!(
+            fits_hook_surface(&rows[0].1),
+            "batch notice costs {} chars",
+            hook_surface_cost(&rows[0].1)
+        );
         assert!(rows[0].1.contains(&format!("{} messages", ids.len())));
         assert!(rows[0].1.contains("ids omitted"));
-        assert_eq!(store.message_delivery_report(*ids.last().unwrap()).unwrap().unwrap().stage, DeliveryStage::Abandoned);
-        let surfaced = store.surface_unseen_for_recipient_without_transport_delivery("supervisor", Some("sess"), 10).unwrap();
-        assert_eq!(surfaced.iter().map(|row| row.id).collect::<Vec<_>>(), vec![rows[0].0]);
+        assert_eq!(
+            store
+                .message_delivery_report(*ids.last().unwrap())
+                .unwrap()
+                .unwrap()
+                .stage,
+            DeliveryStage::Abandoned
+        );
+        let surfaced = store
+            .surface_unseen_for_recipient_without_transport_delivery("supervisor", Some("sess"), 10)
+            .unwrap();
+        assert_eq!(
+            surfaced.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![rows[0].0]
+        );
     }
 
     /// GH #1196 review L5: episodes use fixed clock hours, not a window

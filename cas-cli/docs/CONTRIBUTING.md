@@ -511,6 +511,11 @@ so a worker that changes harness cannot have its PTY delivery replayed by a hook
 If the deferral stamp cannot be saved, the Teams copy remains available at the
 turn boundary and Cassy queues one supervisor warning per affected message.
 
+Abandonment digests keep the first batch within the hook's message budget by
+showing whole IDs plus an omitted-ID count. The episode's `+N more` trailer
+counts abandoned messages, including every message in a later folded batch.
+Full delivery state remains on each original message for `message_status`.
+
 Integration tests are in `cas-cli/tests/`. Key test files:
 
 - `cli_test.rs` — CLI command integration tests

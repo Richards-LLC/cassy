@@ -81,7 +81,10 @@ async fn exercise_held_copy(fail_stamp: bool) {
         cas_types::AgentRole::Worker,
     );
     worker.factory_session = Some(SESSION.into());
-    open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+    open_agent_store(&cas_dir)
+        .unwrap()
+        .register(&worker)
+        .unwrap();
 
     let mut daemon = super::provisioning_tests::daemon(&cas_dir);
     busy_claude_worker_pane(&mut daemon).await;
@@ -95,14 +98,20 @@ async fn exercise_held_copy(fail_stamp: bool) {
         .unwrap();
     if fail_stamp {
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
-        conn.execute_batch("CREATE TRIGGER fail_deferral BEFORE UPDATE OF deferred_inbox_at ON prompt_queue
+        conn.execute_batch(
+            "CREATE TRIGGER fail_deferral BEFORE UPDATE OF deferred_inbox_at ON prompt_queue
             WHEN NEW.deferred_inbox_at IS NOT NULL
-            BEGIN SELECT RAISE(FAIL, 'deferral stamp fixture failure'); END;").unwrap();
+            BEGIN SELECT RAISE(FAIL, 'deferral stamp fixture failure'); END;",
+        )
+        .unwrap();
     }
     daemon.process_prompt_queue().await.unwrap();
 
     let row = queue.queued_prompt(id).unwrap().unwrap();
-    assert!(row.processed_at.is_none(), "a declined wake holds the row, never drops it");
+    assert!(
+        row.processed_at.is_none(),
+        "a declined wake holds the row, never drops it"
+    );
     let report = queue.message_delivery_report(id).unwrap().unwrap();
     assert_ne!(
         report.wake_attempt,
@@ -124,15 +133,37 @@ async fn exercise_held_copy(fail_stamp: bool) {
 
     if fail_stamp {
         assert!(queue.deferred_inbox_state(id).unwrap().is_none());
-        let notices = queue.peek_all(20).unwrap().into_iter()
-            .filter(|row| row.target == daemon.app.supervisor_name()).collect::<Vec<_>>();
-        assert_eq!(notices.len(), 1, "a failed stamp must be supervisor-visible");
+        let notices = queue
+            .peek_all(20)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.target == daemon.app.supervisor_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notices.len(),
+            1,
+            "a failed stamp must be supervisor-visible"
+        );
         assert!(notices[0].prompt.contains(&format!("notification_id={id}")));
-        assert!(notices[0].prompt.contains("tool-boundary surfacing unavailable"));
+        assert!(
+            notices[0]
+                .prompt
+                .contains("tool-boundary surfacing unavailable")
+        );
         assert!(notices[0].prompt.contains("turn boundary"));
         assert_eq!(notices[0].factory_session.as_deref(), Some(SESSION));
-        assert!(queue.surface_unseen_for_recipient_delivered_after(WORKER, Some(SESSION), 10, turn_started_at).unwrap().is_empty(),
-            "failed deferral remains safe: only the Teams copy can surface");
+        assert!(
+            queue
+                .surface_unseen_for_recipient_delivered_after(
+                    WORKER,
+                    Some(SESSION),
+                    10,
+                    turn_started_at
+                )
+                .unwrap()
+                .is_empty(),
+            "failed deferral remains safe: only the Teams copy can surface"
+        );
         return;
     }
 

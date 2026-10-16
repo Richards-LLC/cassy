@@ -3285,8 +3285,9 @@ mod tests {
             "| Sessions | 1 | The factory daemon loop no longer stalls on reminder probes |"
         ));
         // Zero and unmeasured values stay off page one, named in the note.
-        assert!(!report.contains("| 0 |"), "{report}");
-        assert!(!report.contains("| unavailable |"), "{report}");
+        let page_one = &report[..report.find("## What you can do now").unwrap()];
+        assert!(!page_one.contains("| 0 |"), "{page_one}");
+        assert!(!page_one.contains("unavailable |"), "{page_one}");
         assert!(report.contains("No GitHub issues were closed with this release."));
         assert!(report.contains("Not measured for this release: green to published"));
     }
@@ -3452,7 +3453,8 @@ Dev reply
         sources.release_evidence.lesson_recurrence = None;
         sources.release_evidence.record_latency(&HashMap::new());
         let unavailable = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
-        assert!(unavailable.contains("| Manual interventions | unavailable |"));
+        assert!(!unavailable.contains("| Manual interventions |"));
+        assert!(unavailable.contains("manual interventions."), "{unavailable}");
         let user = was_now_sections(&sources, true);
         let dev = was_now_sections(&sources, false);
         assert!(user.contains("Readable report"));

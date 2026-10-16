@@ -318,7 +318,15 @@ impl SqliteRequestJournal {
                 )
                 .map_err(|error| JournalError::Storage(error.to_string()))?;
             statement
-                .query_map(params![now_ms, limit as i64, context.registration_id, context.project_id], |row| row.get::<_, String>(0))
+                .query_map(
+                    params![
+                        now_ms,
+                        limit as i64,
+                        context.registration_id,
+                        context.project_id
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
                 .map_err(|error| JournalError::Storage(error.to_string()))?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| JournalError::Storage(error.to_string()))?
@@ -986,7 +994,12 @@ impl ExternalWorkService {
     pub fn reconcile_due(&self, now_ms: i64) -> Result<Vec<Value>, ExternalWorkError> {
         let rows = self
             .journal
-            .lease_due(RECONCILE_BATCH_LIMIT, now_ms, Duration::from_secs(15), &self.context)
+            .lease_due(
+                RECONCILE_BATCH_LIMIT,
+                now_ms,
+                Duration::from_secs(15),
+                &self.context,
+            )
             .map_err(journal_error)?;
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
@@ -1455,31 +1468,75 @@ mod tests {
         for (id, kind, input) in [
             ("delivery-rebind", "delivery_rebind", local.clone()),
             ("delivery-receipt", "delivery_receipt", local.clone()),
-            ("other-reader", "release_claim", json!({"project_id":context.project_id,
-                "actor":{"registration_id":"reg-other-reader"}})),
-            ("other-project", "release_claim", json!({"project_id":"github.com/other/repo",
-                "actor":{"registration_id":context.registration_id}})),
+            (
+                "other-reader",
+                "release_claim",
+                json!({"project_id":context.project_id,
+                "actor":{"registration_id":"reg-other-reader"}}),
+            ),
+            (
+                "other-project",
+                "release_claim",
+                json!({"project_id":"github.com/other/repo",
+                "actor":{"registration_id":context.registration_id}}),
+            ),
         ] {
             journal.prepare(id, kind, &input).unwrap();
-            journal.set_wire_request(id, &json!({"request_id":id})).unwrap();
-            journal.record_result(id, &json!({"code":"outcome_unknown"}), Some(Duration::ZERO)).unwrap();
+            journal
+                .set_wire_request(id, &json!({"request_id":id}))
+                .unwrap();
+            journal
+                .record_result(id, &json!({"code":"outcome_unknown"}), Some(Duration::ZERO))
+                .unwrap();
         }
         let cloud = Arc::new(FakeCloud::new(journal.clone()));
         let service = service(cloud.clone(), Arc::new(FakeViolet::ok()), journal.clone());
-        assert!(service.reconcile_due(Utc::now().timestamp_millis() + 1000).unwrap().is_empty());
+        assert!(
+            service
+                .reconcile_due(Utc::now().timestamp_millis() + 1000)
+                .unwrap()
+                .is_empty()
+        );
         assert!(cloud.lookups.lock().unwrap().is_empty());
         let db = Connection::open(root.path().join("cas.db")).unwrap();
-        let untouched: i64 = db.query_row("SELECT COUNT(*) FROM external_work_operations
-            WHERE attempts=0 AND lease_token IS NULL AND stage='retry_wait'", [], |r|r.get(0)).unwrap();
-        assert_eq!(untouched, 4, "foreign kinds and actors must not be leased or settled");
+        let untouched: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM external_work_operations
+            WHERE attempts=0 AND lease_token IS NULL AND stage='retry_wait'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            untouched, 4,
+            "foreign kinds and actors must not be leased or settled"
+        );
         let input = ExternalWorkCommand::ReleaseClaim {
-            resource_id: RESOURCE_ID.into(), expected_generation: 1,
+            resource_id: RESOURCE_ID.into(),
+            expected_generation: 1,
             request_id: Some(REQUEST_ID.into()),
-        }.input(&context);
-        journal.prepare(REQUEST_ID, "release_claim", &input).unwrap();
-        journal.set_wire_request(REQUEST_ID, &json!({"request_id":REQUEST_ID})).unwrap();
-        journal.record_result(REQUEST_ID, &json!({"code":"outcome_unknown"}), Some(Duration::ZERO)).unwrap();
-        assert_eq!(service.reconcile_due(Utc::now().timestamp_millis() + 1000).unwrap().len(), 1);
+        }
+        .input(&context);
+        journal
+            .prepare(REQUEST_ID, "release_claim", &input)
+            .unwrap();
+        journal
+            .set_wire_request(REQUEST_ID, &json!({"request_id":REQUEST_ID}))
+            .unwrap();
+        journal
+            .record_result(
+                REQUEST_ID,
+                &json!({"code":"outcome_unknown"}),
+                Some(Duration::ZERO),
+            )
+            .unwrap();
+        assert_eq!(
+            service
+                .reconcile_due(Utc::now().timestamp_millis() + 1000)
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(*cloud.lookups.lock().unwrap(), vec![REQUEST_ID]);
     }
 

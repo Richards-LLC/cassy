@@ -3338,25 +3338,25 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
             .expect("hold timestamp string"),
     )
     .expect("hold timestamp should be RFC3339");
-    let caller_hold_patch = service
-        .cas_task_update_with_target(
-            serde_json::from_value(serde_json::json!({"id": dependent_id.clone()}))
-                .expect("caller hold patch update request"),
-            None,
-            None,
-            false,
-            None,
-            Some(serde_json::json!({
+    let unified_service = CasService::new(service.clone(), None);
+    let caller_hold_patch: cas_mcp::TaskRequest =
+        serde_json::from_value(serde_json::json!({
+            "action": "update",
+            "id": dependent_id.clone(),
+            "state_patch": {
                 "blocked_hold": {
                     "reason": "caller supplied hold",
                     "who": session_id.clone(),
                     "when": "2026-10-16T15:00:00Z"
                 }
-            })),
-        )
-        .await;
+            }
+        }))
+        .expect("caller hold patch update request");
     assert!(
-        caller_hold_patch.is_err(),
+        unified_service
+            .task(Parameters(caller_hold_patch))
+            .await
+            .is_err(),
         "caller-supplied non-null blocked_hold should be rejected"
     );
     service

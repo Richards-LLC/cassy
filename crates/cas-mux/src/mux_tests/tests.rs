@@ -3786,3 +3786,85 @@ async fn a_held_submit_gate_holds_the_cr_until_it_opens() {
     pane.input_drained_for_test();
     assert_eq!(recorded.0.lock().unwrap().as_slice(), b"payload\r");
 }
+
+#[test]
+fn cas_569f_claude_role_options_and_cas_only_scope() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--name,--remote-control,--fallback-model,--mcp-config,--strict-mcp-config");
+    env.set("CAS_FACTORY_NICE_WORKER", "0");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"), "[factory.claude]\nremote_control = true\nfallback_model = 'sonnet'\n").unwrap();
+    let source = project.path().join(".mcp.json");
+    let original = serde_json::json!({"mcpServers": {
+        "cas": {"command": "fixture-cas", "env": {"KEEP": "yes"}},
+        "external": {"command": "must-not-discover"}
+    }}).to_string();
+    std::fs::write(&source, &original).unwrap();
+    let configs = Mux::factory_pane_configs(&MuxConfig {
+        cwd: project.path().into(), cas_root: Some(root.clone()),
+        workers: 1, worker_cli: SupervisorCli::Claude,
+        supervisor_cli: SupervisorCli::Claude, include_director: false,
+        ..Default::default()
+    });
+    for (name, pane) in &configs {
+        assert!(env_value(pane, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        let value = |flag| pane.args.windows(2).find(|pair| pair[0] == flag).map(|pair| pair[1].as_str());
+        assert_eq!(value("--name"), Some(name.as_str()));
+        assert_eq!(value("--fallback-model"), Some("sonnet"));
+        if env_value(pane, "CAS_AGENT_ROLE") == Some("worker") {
+            assert!(!pane.args.iter().any(|arg| arg == "--remote-control"));
+            assert!(pane.args.iter().any(|arg| arg == "--strict-mcp-config"));
+            let path = value("--mcp-config").unwrap();
+            let document: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let servers = document["mcpServers"].as_object().unwrap();
+            assert_eq!(servers.keys().collect::<Vec<_>>(), vec!["cas"]);
+            assert_eq!(servers["cas"]["command"], "fixture-cas");
+            assert_eq!(servers["cas"]["env"]["KEEP"], "yes");
+            #[cfg(unix)] {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+            }
+        } else {
+            assert_eq!(value("--remote-control"), Some(name.as_str()));
+            assert!(!pane.args.iter().any(|arg| arg == "--strict-mcp-config"));
+            assert!(env_value(pane, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").is_none());
+        }
+    }
+    assert_eq!(std::fs::read_to_string(source).unwrap(), original);
+}
+
+#[test]
+fn cas_569f_claude_unsupported_and_denied_launches_refuse_before_spawn() {
+    let mut env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    for (flags, options, worker_error, supervisor_error) in [
+        ("", "", true, false),
+        ("--mcp-config", "", true, false),
+        ("--strict-mcp-config", "", true, false),
+        ("--mcp-config,--strict-mcp-config", "[factory.claude]\nremote_control=true", false, true),
+        ("--mcp-config,--strict-mcp-config", "[factory.claude]\nfallback_model='sonnet'", true, true),
+        ("--mcp-config,--strict-mcp-config", "[factory]\nsupervisor_only_mcp=['cas']", true, false),
+        ("--mcp-config,--strict-mcp-config", "[factory.claude]\nremote_control='invalid'", true, true),
+    ] {
+        env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", flags);
+        std::fs::write(root.join("config.toml"), options).unwrap();
+        let configs = Mux::factory_pane_configs(&MuxConfig {
+            cwd: project.path().into(), cas_root: Some(root.clone()), workers: 1,
+            worker_cli: SupervisorCli::Claude, supervisor_cli: SupervisorCli::Claude,
+            include_director: false, ..Default::default()
+        });
+        for (_, pane) in configs {
+            let is_worker = env_value(&pane, "CAS_AGENT_ROLE") == Some("worker");
+            let should_refuse = if is_worker {worker_error} else {supervisor_error};
+            assert_eq!(env_value(&pane, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_some(), should_refuse,
+                "flags={flags}, options={options}, worker={is_worker}");
+            if should_refuse {
+                assert!(crate::pty::Pty::spawn("refused-before-discovery", pane).is_err());
+            }
+        }
+    }
+}

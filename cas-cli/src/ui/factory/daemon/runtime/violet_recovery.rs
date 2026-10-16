@@ -109,11 +109,14 @@ pub(crate) fn rebind_known(
     {
         return Err("rebind receipt delivery/reader/registration identity mismatch".into());
     }
-    if !matches!(delivery.consumption.as_str(), "unread" | "queued") {
-        return Err("rebind consumption requires recovery; never replay the ask".into());
-    }
+    let remote = match delivery.consumption.as_str() {
+        "unread" | "queued" => VioletConsumption::Queued,
+        "dispatch_uncertain" => VioletConsumption::DispatchUncertain,
+        "consumed" => VioletConsumption::Consumed,
+        _ => return Err("unknown rebind consumption; never replay the ask".into()),
+    };
     store
-        .adopt_unread(&VioletAdmissionRebind {
+        .recover_known(&VioletAdmissionRebind {
             delivery_id: delivery.id,
             occurrence_id: delivery.occurrence_id,
             reader_slot_id: delivery.reader_slot_id,
@@ -123,8 +126,7 @@ pub(crate) fn rebind_known(
             delivery_generation: delivery.delivery_generation,
             factory_session: request.factory_session.clone(),
             recipient: request.recipient.clone(),
-        })
-        .map(|admission| VioletRecoveryReceipt { admission, consumption: VioletConsumption::Queued, recovery_prompt_id: None })
+        }, remote)
         .map_err(|error| error.to_string())
 }
 

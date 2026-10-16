@@ -2376,6 +2376,8 @@ pub struct Pty {
     id: String,
     /// Writer handle for sending input
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Non-blocking input queue in front of `writer` (factory loop v2 C4a).
+    input: crate::input_queue::PtyInputOwner,
     /// Channel for receiving raw output
     event_rx: mpsc::Receiver<PtyEvent>,
     /// Handle to the reader task
@@ -2655,9 +2657,16 @@ impl Pty {
             }
         });
 
+        let input = crate::input_queue::PtyInput::start(
+            &id,
+            Arc::clone(&writer),
+            crate::input_queue::PTY_INPUT_BUFFER_CAP,
+        )?;
+
         Ok(Self {
             id,
             writer,
+            input,
             event_rx,
             _reader_handle: reader_handle,
             child,
@@ -2747,16 +2756,17 @@ impl Pty {
         self.writer.clone()
     }
 
-    /// Write input to the PTY (for prompt injection)
+    /// The pane's non-blocking input queue (factory loop v2 C4a).
+    pub fn input(&self) -> crate::input_queue::PtyInput {
+        self.input.input().clone()
+    }
+
+    /// Queue input for the PTY. Never blocks on the PTY: the bytes are
+    /// written by the pane's input thread in order. A pane whose child has
+    /// stopped reading refuses input with [`Error::InputFull`] once its
+    /// buffer is full, and a failed write fails every later one.
     pub async fn write(&self, data: &[u8]) -> Result<()> {
-        let mut writer = self.writer.lock().await;
-        writer
-            .write_all(data)
-            .map_err(|e| Error::pty(format!("Write failed: {e}")))?;
-        writer
-            .flush()
-            .map_err(|e| Error::pty(format!("Flush failed: {e}")))?;
-        Ok(())
+        self.input.input().write(data)
     }
 
     /// Write a string to the PTY

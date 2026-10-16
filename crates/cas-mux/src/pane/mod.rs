@@ -1322,8 +1322,10 @@ impl Pane {
                 let framed = crate::harness::injection_payload_bytes(self.harness, text);
                 pty.write(&framed).await?;
                 // Send carriage return after a settle delay in a background task
-                // so we don't block the daemon event loop for 150-500ms.
-                let writer = pty.writer_handle();
+                // so we don't block the daemon event loop for 150-500ms. The CR
+                // goes through the pane's input queue (factory loop v2 C4a), so
+                // it is written after the payload, never before it.
+                let input = pty.input();
                 let settle_ms = if pty.is_codex() { 500 } else { 150 };
                 // cas-ae6d (GH #100): the submit CR is what turns injected text
                 // into an actual turn. It is written from a detached task, so
@@ -1342,22 +1344,30 @@ impl Pane {
                 let submit_pending = std::sync::Arc::clone(&self.inject_submit_pending);
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
-                    let mut guard = writer.lock().await;
-                    match guard.write_all(b"\r").and_then(|()| guard.flush()) {
-                        Ok(()) => {
-                            submit_pending.store(false, std::sync::atomic::Ordering::Release);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "cas::coordination",
-                                stage = "inject_submit_failed",
-                                target_agent = %pane_id,
-                                error = %e,
-                                "injected payload was written but its submit CR failed — the text is \
-                                 sitting unsubmitted in the pane composer and no turn started; later \
-                                 injections remain deferred until this pane is replaced"
-                            );
-                        }
+                    let failed_pane = pane_id.clone();
+                    let report = move |error: String| {
+                        tracing::warn!(
+                            target: "cas::coordination",
+                            stage = "inject_submit_failed",
+                            target_agent = %failed_pane,
+                            error = %error,
+                            "injected payload was written but its submit CR failed — the text is \
+                             sitting unsubmitted in the pane composer and no turn started; later \
+                             injections remain deferred until this pane is replaced"
+                        );
+                    };
+                    let on_failure = report.clone();
+                    let queued = input.write_then(
+                        b"\r",
+                        Box::new(move |result| match result {
+                            Ok(()) => {
+                                submit_pending.store(false, std::sync::atomic::Ordering::Release);
+                            }
+                            Err(error) => on_failure(error.to_string()),
+                        }),
+                    );
+                    if let Err(error) = queued {
+                        report(error.to_string());
                     }
                 });
                 self.clear_composer_dirty();

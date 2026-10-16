@@ -46,6 +46,7 @@ pub mod claude_trust;
 pub mod codex_trust;
 pub mod conformance;
 mod error;
+pub mod input_queue;
 pub mod opencode;
 mod pty;
 pub mod violet_env;
@@ -67,6 +68,7 @@ pub use conformance::{
     opencode_11823_token_plan_conformance_receipt,
 };
 pub use error::{Error, Result};
+pub use input_queue::{PTY_INPUT_BUFFER_CAP, PtyInput};
 pub use pty::claude_supports_chrome_flag;
 pub use pty::{
     ContractRole, PROTECTED_OPERATOR_ENV, claude_supervisor_contract, claude_worker_contract,

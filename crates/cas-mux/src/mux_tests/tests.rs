@@ -3520,3 +3520,48 @@ fn flv2_pty_write_never_blocks_lane() {
     });
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
+
+/// cas-786a6: the urgent inject is a per-pane state machine. The turn break
+/// goes out at once, the payload follows on a later advance once the floor
+/// has passed, and nothing else is typed into the pane meanwhile.
+#[tokio::test]
+async fn urgent_inject_is_a_per_pane_state_machine() {
+    let mut mux = Mux::new(24, 80);
+    let pty = spawn_test_pty("urgent-pane", "exec cat");
+    let pane = Pane::with_pty("urgent-pane", PaneKind::Worker, pty, 24, 80, SupervisorCli::Claude)
+        .expect("pane");
+    mux.add_pane(pane);
+    let floor = std::time::Duration::from_millis(300);
+
+    let started = std::time::Instant::now();
+    let InjectStart::Started(ticket) = mux
+        .begin_interrupt_and_inject("urgent-pane", "redirect", floor, true)
+        .await
+        .unwrap()
+    else {
+        panic!("a clean pane starts the inject");
+    };
+    assert!(started.elapsed() < std::time::Duration::from_millis(100), "begin never waits for the settle");
+    assert!(mux.inject_pending("urgent-pane"));
+    assert!(mux.advance_injects().await.is_empty(), "the floor has not passed");
+    assert_eq!(
+        mux.inject("urgent-pane", "normal").await.unwrap(),
+        InjectOutcome::DeferredComposerDirty,
+        "nothing is typed between the turn break and the payload"
+    );
+    assert_eq!(
+        mux.begin_interrupt_and_inject("urgent-pane", "second", floor, true)
+            .await
+            .unwrap(),
+        InjectStart::Deferred,
+        "one urgent inject per pane"
+    );
+
+    tokio::time::sleep(floor).await;
+    let done = mux.advance_injects().await;
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].ticket, ticket);
+    assert_eq!(done[0].result.as_ref().unwrap(), &InjectOutcome::Delivered);
+    assert!(!mux.inject_pending("urgent-pane"));
+    assert!(!mux.has_pending_injects());
+}

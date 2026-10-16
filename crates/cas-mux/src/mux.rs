@@ -28,6 +28,92 @@ pub enum InjectOutcome {
     DeferredComposerDirty,
 }
 
+/// One urgent inject started by [`Mux::begin_interrupt_and_inject`]
+/// (factory loop v2 C4a, spec §3.5 and §4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct InjectTicket(u64);
+
+impl InjectTicket {
+    /// The ticket's number, for logs.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// What [`Mux::begin_interrupt_and_inject`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectStart {
+    /// The turn break was sent; the payload follows once the pane is ready.
+    /// [`Mux::advance_injects`] reports the outcome under this ticket.
+    Started(InjectTicket),
+    /// Nothing was sent: an operator draft, an unsubmitted earlier payload,
+    /// or another urgent inject already in progress on this pane.
+    Deferred,
+}
+
+/// The outcome of a started urgent inject.
+#[derive(Debug)]
+pub struct InjectCompletion {
+    pub ticket: InjectTicket,
+    pub pane_id: String,
+    /// `Delivered` once the payload is queued for the pane;
+    /// `DeferredComposerDirty` when an operator started a draft during the
+    /// settle (the turn break went out, the payload did not).
+    pub result: Result<InjectOutcome>,
+    /// How long the pane took to become ready after the turn break.
+    pub settled_after: std::time::Duration,
+}
+
+/// Post-break readiness poll for harnesses without a textbox submit (Codex),
+/// cas-4208: the output must stay unchanged this long after the floor.
+const INJECT_STABILITY_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
+/// The most the poll waits past the floor before injecting anyway.
+const INJECT_MAX_EXTRA_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// One urgent inject between its turn break and its payload: the per-pane
+/// state machine that replaces the inline settle await (cas-786a6).
+#[derive(Debug)]
+struct PendingInject {
+    ticket: InjectTicket,
+    pane_id: String,
+    prompt: String,
+    floor: std::time::Duration,
+    preserve_composer: bool,
+    /// Textbox-submit harnesses (Claude, Grok) wait the floor alone.
+    floor_only: bool,
+    started: std::time::Instant,
+    last_bytes: u64,
+    last_change: std::time::Instant,
+}
+
+impl PendingInject {
+    /// Whether the pane is ready for the payload at `now`, given its output
+    /// byte counter. Same rule as the old inline poll (cas-4208), evaluated
+    /// once per loop pass instead of in a sleep loop.
+    fn ready(&mut self, bytes: u64, now: std::time::Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.started);
+        if self.floor_only {
+            return elapsed >= self.floor;
+        }
+        if bytes != self.last_bytes {
+            self.last_bytes = bytes;
+            self.last_change = now;
+        }
+        let quiet = now.saturating_duration_since(self.last_change) >= INJECT_STABILITY_WINDOW;
+        let timed_out = elapsed >= self.floor + INJECT_MAX_EXTRA_WAIT;
+        if timed_out && !quiet {
+            tracing::debug!(
+                target: "cas::coordination",
+                stage = "urgent_settle_timeout",
+                target_agent = %self.pane_id,
+                elapsed_ms = elapsed.as_millis() as u64,
+                "post-break settle hit max wait without confirmed quiescence; injecting anyway"
+            );
+        }
+        timed_out || (elapsed >= self.floor && quiet)
+    }
+}
+
 /// Configuration for the multiplexer
 #[derive(Debug, Clone)]
 pub struct MuxConfig {
@@ -151,6 +237,9 @@ pub struct Mux {
     supervisor_cli: SupervisorCli,
     /// Factory session propagated into dynamically spawned agents.
     factory_session: Option<String>,
+    /// Urgent injects waiting for their pane to settle (cas-786a6).
+    pending_injects: Vec<PendingInject>,
+    next_inject_ticket: u64,
 }
 
 impl Mux {
@@ -168,6 +257,8 @@ impl Mux {
             worker_specs: HashMap::new(),
             supervisor_cli: SupervisorCli::Claude,
             factory_session: None,
+            pending_injects: Vec::new(),
+            next_inject_ticket: 0,
         }
     }
 
@@ -1005,8 +1096,144 @@ impl Mux {
             );
             return Ok(InjectOutcome::DeferredComposerDirty);
         }
+        if self.inject_pending(pane_id) {
+            // An urgent inject broke this pane's turn and is waiting to type
+            // its payload; nothing else is typed in between (cas-786a6).
+            tracing::info!(
+                target: "cas::coordination",
+                stage = "composer_inject_deferred",
+                target_agent = %pane_id,
+                "PTY inject deferred while an urgent inject settles on this pane"
+            );
+            return Ok(InjectOutcome::DeferredComposerDirty);
+        }
         pane.inject_prompt(prompt).await?;
         Ok(InjectOutcome::Delivered)
+    }
+
+    /// Whether an urgent inject is between its turn break and its payload
+    /// on this pane.
+    pub fn inject_pending(&self, pane_id: &str) -> bool {
+        self.pending_injects.iter().any(|inject| inject.pane_id == pane_id)
+    }
+
+    /// Whether any urgent inject is waiting for its pane. The loop polls
+    /// [`Self::advance_injects`] promptly while this holds.
+    pub fn has_pending_injects(&self) -> bool {
+        !self.pending_injects.is_empty()
+    }
+
+    /// Urgent interrupt-and-redirect as a command (factory loop v2 C4a,
+    /// spec §4.3): send the turn break now and return. The payload is typed
+    /// by a later [`Self::advance_injects`] once the pane is ready, and its
+    /// outcome is reported there under the returned ticket. Nothing here, or
+    /// in `advance_injects`, waits: the 1.2–5.2 s settle that
+    /// [`Self::interrupt_and_inject`] awaits inline is a per-pane state.
+    ///
+    /// With `preserve_composer` an attached operator's draft is a hard
+    /// boundary (cas-eacc): a dirty composer, or an earlier payload still
+    /// awaiting its submit CR, returns [`InjectStart::Deferred`] before any
+    /// byte is sent, and a draft started during the settle defers the
+    /// payload. Context reset, a destructive control, passes `false`.
+    /// One urgent inject per pane at a time; a second is deferred.
+    pub async fn begin_interrupt_and_inject(
+        &mut self,
+        pane_id: &str,
+        prompt: &str,
+        floor: std::time::Duration,
+        preserve_composer: bool,
+    ) -> Result<InjectStart> {
+        let pane = self
+            .panes
+            .get(pane_id)
+            .ok_or_else(|| Error::pane_not_found(pane_id))?;
+        if self.inject_pending(pane_id)
+            || (preserve_composer && (pane.is_composer_dirty() || pane.inject_submit_pending()))
+        {
+            tracing::info!(
+                target: "cas::coordination",
+                stage = "urgent_composer_inject_deferred",
+                target_agent = %pane_id,
+                "urgent queue delivery retained until the composer reaches a safe boundary"
+            );
+            return Ok(InjectStart::Deferred);
+        }
+        let floor_only = pane
+            .harness()
+            .backend()
+            .capabilities()
+            .supports_textbox_submit;
+        let last_bytes = pane.bytes_received();
+        // Shared targeted interrupt primitive (see `interrupt_and_inject`).
+        pane.break_turn().await?;
+        self.next_inject_ticket += 1;
+        let ticket = InjectTicket(self.next_inject_ticket);
+        let now = std::time::Instant::now();
+        self.pending_injects.push(PendingInject {
+            ticket,
+            pane_id: pane_id.to_string(),
+            prompt: prompt.to_string(),
+            floor,
+            preserve_composer,
+            floor_only,
+            started: now,
+            last_bytes,
+            last_change: now,
+        });
+        Ok(InjectStart::Started(ticket))
+    }
+
+    /// Advance every pending urgent inject one step: a pane that is ready
+    /// gets its payload (a non-blocking queued write) and its outcome is
+    /// returned; the rest keep waiting. Reads only in-memory pane state,
+    /// the output counter the loop's PTY drain keeps current.
+    pub async fn advance_injects(&mut self) -> Vec<InjectCompletion> {
+        if self.pending_injects.is_empty() {
+            return Vec::new();
+        }
+        let now = std::time::Instant::now();
+        let mut done = Vec::new();
+        let mut index = 0;
+        while index < self.pending_injects.len() {
+            let pane_id = self.pending_injects[index].pane_id.clone();
+            let Some(pane) = self.panes.get(&pane_id) else {
+                let inject = self.pending_injects.remove(index);
+                done.push(InjectCompletion {
+                    ticket: inject.ticket,
+                    settled_after: now.saturating_duration_since(inject.started),
+                    pane_id,
+                    result: Err(Error::pane_not_found(&inject.pane_id)),
+                });
+                continue;
+            };
+            if !self.pending_injects[index].ready(pane.bytes_received(), now) {
+                index += 1;
+                continue;
+            }
+            let inject = self.pending_injects.remove(index);
+            let result = if inject.preserve_composer
+                && (pane.is_composer_dirty() || pane.inject_submit_pending())
+            {
+                tracing::info!(
+                    target: "cas::coordination",
+                    stage = "urgent_composer_inject_deferred",
+                    target_agent = %pane_id,
+                    "an operator draft started during the urgent settle; the payload waits"
+                );
+                Ok(InjectOutcome::DeferredComposerDirty)
+            } else {
+                pane.inject_prompt(&inject.prompt)
+                    .await
+                    .map(|()| InjectOutcome::Delivered)
+            };
+            done.push(InjectCompletion {
+                ticket: inject.ticket,
+                pane_id,
+                result,
+                settled_after: now.saturating_duration_since(inject.started),
+            });
+        }
+        done
     }
 
     /// Compatibility no-op retained for callers from cas-1a4d.
@@ -1181,8 +1408,8 @@ impl Mux {
         }
 
         const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(75);
-        const STABILITY_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
-        const MAX_EXTRA_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
+        const STABILITY_WINDOW: std::time::Duration = INJECT_STABILITY_WINDOW;
+        const MAX_EXTRA_WAIT: std::time::Duration = INJECT_MAX_EXTRA_WAIT;
 
         let start = tokio::time::Instant::now();
         let max_wait = floor + MAX_EXTRA_WAIT;

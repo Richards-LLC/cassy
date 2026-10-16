@@ -12,6 +12,8 @@ pub(crate) mod director_refresh;
 #[cfg(test)]
 mod delivery_matrix_tests;
 mod gui_client;
+#[cfg(test)]
+mod inject_command_tests;
 mod injection_events;
 pub(crate) mod lifecycle;
 #[cfg(test)]

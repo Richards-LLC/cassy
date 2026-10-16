@@ -545,7 +545,7 @@ class Run:
         before = self.b.call("spawn-count", "--run-dir", self.b.run_dir)["spawn_queue_rows"]
         for action, agent, tool, arguments in [
             ("start", self.names["bw"], "task", {"action": "start", "id": task_id}),
-            ("claim", self.names["b"], "task", {"action": "claim", "id": task_id}),
+            ("claim", self.names["bw"], "task", {"action": "claim", "id": task_id}),
             ("spawn", self.names["b"], "factory", {"action": "spawn_workers", "count": 1, "task_id": task_id}),
         ]:
             refused = self.b.tool(agent, tool, **arguments)

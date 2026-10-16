@@ -551,7 +551,7 @@ impl PeerClaims {
         } else {
             let listed = self.listed_holder(held_by);
             let lock = match &listed {
-                Listed::Live(..) => None,
+                Listed::Live(..) | Listed::Shutdown(..) => None,
                 _ => self.read_lock(key, held_by).ok().flatten(),
             };
             Self::answer(Self::assemble(

@@ -326,6 +326,89 @@ mod tests {
             "transport uncertainty does not replay the ask"
         );
     }
+
+    #[test]
+    fn cas_c423_store_uncertain_recovery_keeps_one_reference_and_never_replays_ask() {
+        let root = tempfile::tempdir().unwrap();
+        let mut row = input();
+        row.prompt = "ASK BODY MUST NEVER REPLAY".into();
+        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        let first = store.admit(&row).unwrap();
+        let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+        queue.mark_transport_delivered(first.prompt_id).unwrap();
+        let binding = successor(&row);
+        let recovered = store.recover_known(&binding, VioletConsumption::Queued).unwrap();
+        assert_eq!(recovered.admission.prompt_id, first.prompt_id);
+        assert_eq!(recovered.consumption, VioletConsumption::DispatchUncertain);
+        let notice_id = recovered.recovery_prompt_id.expect("uncertain dispatch needs a recovery reference");
+        let pending = queue.peek_unseen_for_recipient(&binding.recipient, Some(&binding.factory_session), 10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, notice_id);
+        assert!(pending[0].prompt.contains(&row.delivery_id));
+        assert!(!pending[0].prompt.contains("ASK BODY"));
+        assert_eq!(pending[0].origin_kind.as_deref(), Some("daemon"));
+        let reopened = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        assert_eq!(reopened.recover_known(&binding, VioletConsumption::Queued).unwrap(), recovered);
+        assert!(queue.peek_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10).unwrap().is_empty());
+        assert!(store.admit(&row).is_err(), "predecessor cannot revive its original route");
+        let db = Connection::open(root.path().join("cas.db")).unwrap();
+        let counts: (i64, i64) = db.query_row("SELECT (SELECT COUNT(*) FROM violet_admissions),
+            (SELECT COUNT(*) FROM prompt_queue)", [], |r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(counts, (1, 2));
+    }
+
+    #[test]
+    fn cas_c423_store_consumed_recipient_receipt_wins_over_remote_unread() {
+        let root = tempfile::tempdir().unwrap();
+        let row = input();
+        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        let first = store.admit(&row).unwrap();
+        let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+        assert_eq!(queue.surface_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10).unwrap().len(), 1);
+        let binding = successor(&row);
+        let recovered = store.recover_known(&binding, VioletConsumption::Queued).unwrap();
+        assert_eq!(recovered.admission.prompt_id, first.prompt_id);
+        assert_eq!(recovered.consumption, VioletConsumption::Consumed);
+        assert_eq!(recovered.recovery_prompt_id, None);
+        assert!(queue.peek_unseen_for_recipient(&binding.recipient, Some(&binding.factory_session), 10).unwrap().is_empty());
+        assert!(store.adopt_unread(&binding).is_err(), "consumed cannot regress to queued");
+    }
+
+    #[test]
+    fn cas_c423_store_recovery_notice_and_retirement_roll_back_together() {
+        let root = tempfile::tempdir().unwrap();
+        let row = input();
+        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        let first = store.admit(&row).unwrap();
+        let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+        queue.select_for_targets(&[&row.recipient], Some(&row.factory_session), 10).unwrap();
+        let db = Connection::open(root.path().join("cas.db")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_recovery BEFORE UPDATE OF consumption ON violet_admissions
+            BEGIN SELECT RAISE(ABORT, 'recovery commit failed'); END;").unwrap();
+        let error = store.recover_known(&successor(&row), VioletConsumption::Queued).unwrap_err().to_string();
+        assert!(error.contains("recovery commit failed"), "{error}");
+        let before: (i64, String, Option<String>) = db.query_row("SELECT
+            (SELECT COUNT(*) FROM prompt_queue),a.registration_id,q.processed_at
+            FROM violet_admissions a JOIN prompt_queue q ON q.id=a.prompt_id", [],
+            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(before, (1, row.registration_id, None));
+        db.execute_batch("DROP TRIGGER fail_recovery").unwrap();
+        assert_eq!(store.recover_known(&successor(&row), VioletConsumption::Queued).unwrap().admission.prompt_id, first.prompt_id);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VioletConsumption {
+    Queued,
+    DispatchUncertain,
+    Consumed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VioletRecoveryReceipt {
+    pub admission: VioletAdmissionReceipt,
+    pub consumption: VioletConsumption,
+    pub recovery_prompt_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -362,6 +445,12 @@ pub struct SqliteVioletAdmissionStore {
 }
 
 impl SqliteVioletAdmissionStore {
+    /// Apply a validated successor receipt without inferring unread from a
+    /// dead process. Local recipient and transport evidence remains binding.
+    pub fn recover_known(&self, _binding: &VioletAdmissionRebind, _remote: VioletConsumption) -> Result<VioletRecoveryReceipt> {
+        Err(StoreError::Other("known consumption recovery is not implemented".into()))
+    }
+
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let queue = SqlitePromptQueueStore::open(cas_dir)?;
         queue.init()?;

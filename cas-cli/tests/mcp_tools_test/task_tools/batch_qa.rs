@@ -531,3 +531,66 @@ async fn batch_qa_receipt_preserves_skip_marker_gate_cas_d697() {
     assert!(after.contains("adds test skip/focus markers"), "{after}");
     assert_ne!(tasks.get("cas-bq01").unwrap().status, TaskStatus::Closed);
 }
+
+#[tokio::test]
+async fn batch_qa_merge_receipt_binds_own_reviewed_anchor_cas_d697() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    fx.unmerge();
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(
+        &fx.repo,
+        &[
+            "merge",
+            "--no-ff",
+            "-qm",
+            "integrate reviewed staging",
+            "factory/test-agent",
+        ],
+    );
+    let merged = git(&fx.repo, &["rev-parse", "HEAD"]);
+    git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
+    fx.record().await;
+    let mut req = TaskCloseRequest {
+        id: "cas-bq01".into(),
+        reason: Some("integrated reviewed batch".into()),
+        commit_receipt: Some(merged),
+        stranded_branch_override: None,
+        supervisor_override: None,
+        legacy_bypass_code_review: None,
+        search_manifest: None,
+    };
+    let closed = extract_text(
+        fx.core
+            .cas_task_close(Parameters(req.clone()))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        open_task_store(&fx.repo.join(".cas"))
+            .unwrap()
+            .get("cas-bq01")
+            .unwrap()
+            .status,
+        TaskStatus::Closed,
+        "{closed}"
+    );
+    // A sibling's earlier anchor cannot stand in for the later task's delivery.
+    req.id = "cas-bq02".into();
+    req.commit_receipt = open_task_store(&fx.repo.join(".cas"))
+        .unwrap()
+        .get("cas-bq01")
+        .unwrap()
+        .deliverables
+        .factory_branch_anchor;
+    let refused = extract_text(fx.core.cas_task_close(Parameters(req)).await.unwrap());
+    assert_ne!(
+        open_task_store(&fx.repo.join(".cas"))
+            .unwrap()
+            .get("cas-bq02")
+            .unwrap()
+            .status,
+        TaskStatus::Closed,
+        "{refused}"
+    );
+}

@@ -932,6 +932,8 @@ impl CasCore {
     }
 }
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) mod memory;
 pub(crate) mod parent_watchdog;
 mod pre_initialize_guard;
 mod prompts;

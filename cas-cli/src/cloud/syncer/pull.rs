@@ -2744,6 +2744,9 @@ impl CloudSyncer {
         remote: Entry,
         remote_updated_at: DateTime<Utc>,
     ) -> Result<UpsertResult, CasError> {
+        // Re-check after the get→add race too: a recovery key must never
+        // overwrite a concurrent insert belonging to another creation.
+        super::entry_identity::verify_recovery_birth(&local, &remote)?;
         let local_time = store.recent_timestamp(&local)?;
         let action = self.resolve_conflict(
             "entry",

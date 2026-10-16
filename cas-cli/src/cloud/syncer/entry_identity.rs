@@ -31,6 +31,24 @@ pub(super) fn recovery_id(entry: &Entry) -> String {
     format!("{}-recovered-{:x}", entry.id, hash.finalize())
 }
 
+pub(super) fn verify_recovery_birth(local: &Entry, incoming: &Entry) -> Result<(), CasError> {
+    let recovery = incoming
+        .id
+        .rsplit_once("-recovered-")
+        .is_some_and(|(source, hash)| {
+            legacy_counter_id(source)
+                && hash.len() == 64
+                && hash.bytes().all(|c| c.is_ascii_hexdigit())
+        });
+    if recovery && local.created != incoming.created {
+        return Err(CasError::Other(format!(
+            "Memory collision recovery target {} belongs to another creation; no memory was overwritten",
+            incoming.id
+        )));
+    }
+    Ok(())
+}
+
 fn existing_entry(store: &dyn Store, id: &str) -> Result<Option<Entry>, CasError> {
     match store.get(id) {
         Ok(entry) => Ok(Some(entry)),
@@ -75,14 +93,8 @@ impl CloudSyncer {
         let source_id = incoming.id.clone();
         incoming.id = recovery_id(&incoming);
         let recovered = existing_entry(store, &incoming.id)?;
-        if recovered
-            .as_ref()
-            .is_some_and(|row| row.created != incoming.created)
-        {
-            return Err(CasError::Other(format!(
-                "Memory collision recovery target {} belongs to another creation; no memory was overwritten",
-                incoming.id
-            )));
+        if let Some(row) = &recovered {
+            verify_recovery_birth(row, &incoming)?;
         }
         let needs_publish = match &recovered {
             None => true,

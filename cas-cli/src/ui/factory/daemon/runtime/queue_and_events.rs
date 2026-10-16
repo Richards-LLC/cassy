@@ -45,7 +45,7 @@ const SPAWN_PROVISION_TIMEOUT: Duration = Duration::from_secs(300);
 /// cas-2702: how often the daemon inspects the queue for rows it never drained.
 const SPAWN_QUEUE_STALL_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 /// cas-2702: age at which an undrained queue row is reported as stalled.
-const SPAWN_QUEUE_STALL_AGE_SECS: i64 = 60;
+pub(super) const SPAWN_QUEUE_STALL_AGE_SECS: i64 = 60;
 /// Stale expiry self-heals on the next 2-second tick, so never spend the
 /// shared store's 5-second busy timeout (plus blocking retries) on this path.
 const REMINDER_EXPIRY_BUSY_BUDGET: Duration = Duration::from_millis(100);
@@ -882,7 +882,7 @@ fn spawn_queue_reset_report(
 ///
 /// `reported` holds request ids already surfaced, so a stalled row is reported
 /// once rather than on every tick.
-fn stalled_spawn_requests<'a>(
+pub(super) fn stalled_spawn_requests<'a>(
     pending: &'a [cas_store::SpawnRequest],
     now: chrono::DateTime<chrono::Utc>,
     min_age: chrono::Duration,
@@ -1217,7 +1217,7 @@ fn enqueue_spawn_cancelled_notice(
     Ok(id)
 }
 
-fn append_spawn_audit(
+pub(super) fn append_spawn_audit(
     cas_dir: &std::path::Path,
     factory_session: &str,
     request_id: Option<i64>,
@@ -1818,7 +1818,7 @@ pub enum ToolCallEvidence {
 }
 
 impl ToolCallEvidence {
-    fn from_transcript(has_in_flight_call: bool) -> Self {
+    pub(super) fn from_transcript(has_in_flight_call: bool) -> Self {
         if has_in_flight_call {
             Self::InFlight
         } else {
@@ -5061,56 +5061,6 @@ impl FactoryDaemon {
         observed.reaction.is_some() || observed.wake.is_some()
     }
 
-    /// Whether a recipient completed a harness turn after the last wake-gate
-    /// attempt for this row. A completed turn is the precise retry boundary:
-    /// it does not prove this message was consumed, but it proves the busy
-    /// turn that caused the decline is over.
-    /// cas-913c: whether `pane_target` is inside a turn by its harness
-    /// transcript (latest turn start not yet followed by a turn end), or
-    /// `None` when no transcript can be read.
-    /// cas-5129: activity and first-prompt evidence for a Claude recipient,
-    /// read from its transcript and registry row. Unknown evidence is the
-    /// default (no activity, not booting), which keeps the existing cadence.
-    fn recipient_wake_evidence(&self, pane_target: &str) -> RecipientWakeEvidence {
-        let Some(agent) = open_agent_store(self.app.cas_dir())
-            .ok()
-            .and_then(|store| store.list(None).ok())
-            .and_then(|agents| agents.into_iter().find(|agent| agent.name == pane_target))
-        else {
-            return RecipientWakeEvidence::default();
-        };
-        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
-        let path = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
-            self.app.cas_dir(),
-            &agent,
-        )
-        .filter(|path| path.exists());
-        let now = chrono::Utc::now();
-        match path {
-            Some(path) => {
-                let written_recently = std::fs::metadata(&path)
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(|written| std::time::SystemTime::now().duration_since(written).ok())
-                    .is_some_and(|age| age <= CLAUDE_ACTIVE_TRANSCRIPT_WINDOW);
-                RecipientWakeEvidence {
-                    recently_active: written_recently
-                        || crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
-                            &path, cli,
-                        ),
-                    awaiting_first_prompt: false,
-                }
-            }
-            None => RecipientWakeEvidence {
-                recently_active: false,
-                awaiting_first_prompt: cli == cas_mux::SupervisorCli::Claude
-                    && (now - agent.registered_at)
-                        .to_std()
-                        .is_ok_and(|age| age <= CLAUDE_FIRST_PROMPT_GRACE),
-            },
-        }
-    }
-
     /// cas-ac97 (GH #1153): classify what the recipient's harness transcript
     /// says happened after a normal delivery. Pane output growth is only the
     /// fallback when no authoritative transcript exists, because the PTY echo
@@ -5155,28 +5105,6 @@ impl FactoryDaemon {
             latest.wake.map(|observation| observation.at),
             latest.completion.map(|observation| observation.at),
         )
-    }
-
-    fn recipient_mid_turn(&self, pane_target: &str) -> Option<bool> {
-        let store = open_agent_store(self.app.cas_dir()).ok()?;
-        let agent = store
-            .list(None)
-            .ok()?
-            .into_iter()
-            .find(|agent| agent.name == pane_target)?;
-        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
-        let path = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
-            self.app.cas_dir(),
-            &agent,
-        )
-        .filter(|path| path.exists())?;
-        let latest =
-            crate::mcp::tools::service::harness_observation::latest_turn_observations(&path, cli);
-        Some(match (latest.wake, latest.completion) {
-            (Some(start), Some(end)) => start.at > end.at,
-            (Some(_), None) => true,
-            _ => false,
-        })
     }
 
     fn recipient_turn_completion_after(
@@ -5281,7 +5209,7 @@ impl FactoryDaemon {
         escalate: bool,
     ) -> bool {
         let silent =
-            escalate && wake_starved_needs_supervisor(self.recipient_wake_evidence(pane_target));
+            escalate && wake_starved_needs_supervisor(self.prepared_wake_evidence(pane_target));
         let detail = if silent {
             format!(
                 "wake budget spent after {attempts} attempts and the recipient's transcript has been \
@@ -5523,6 +5451,7 @@ impl FactoryDaemon {
             (!requested_stop).then_some(at),
             Some(cleanup),
         );
+        self.queue_jobs.prompt_preparation.forget_pane(worker_name);
         self.dead_workers.insert(worker_name.to_string());
 
         self.app
@@ -6226,6 +6155,7 @@ impl FactoryDaemon {
                 );
                 self.dead_workers.insert(worker.clone());
                 self.pane_buffers.remove(&worker);
+                self.queue_jobs.prompt_preparation.forget_pane(&worker);
                 self.app
                     .set_error(format!("Worker '{worker}' failed during harness boot"));
                 self.app.notifier().notify_crash(&worker, &detail);
@@ -6754,14 +6684,15 @@ impl FactoryDaemon {
     /// spoof-by-naming the stamp exists to remove.
     fn wake_sender_for(&self, origin: Option<&cas_store::QueueOrigin>) -> WakeSender {
         let resolved = match origin {
-            Some(cas_store::QueueOrigin::RegisteredAgent { agent_id }) => {
-                crate::store::open_agent_store(self.app.cas_dir())
-                    .ok()
-                    .and_then(|store| store.get(agent_id).ok())
-            }
+            Some(cas_store::QueueOrigin::RegisteredAgent { agent_id }) => self
+                .queue_jobs
+                .prompt_preparation
+                .agents()
+                .iter()
+                .find(|agent| agent.id == *agent_id),
             _ => None,
         };
-        Self::wake_sender_from_origin(origin, resolved.as_ref())
+        Self::wake_sender_from_origin(origin, resolved)
     }
 
     /// Pure classification half of [`Self::wake_sender_for`] (cas-d9a8).
@@ -7098,28 +7029,10 @@ impl FactoryDaemon {
         if !name.eq_ignore_ascii_case(self.app.supervisor_name()) {
             return None;
         }
-        let cas_dir = self.app.cas_dir();
-        let harness_waiting_for_input = crate::ui::factory::director::idle_worker_liveness(
-            cas_dir, worker,
-        )
-        .is_some_and(|observation| {
-            observation.state
-                == crate::mcp::tools::service::worker_liveness::Liveness::WaitingForInput
-        });
-        let task_blocked = crate::store::open_task_store_cached(cas_dir)
-            .ok()
-            .and_then(|store| store.list(Some(cas_types::TaskStatus::Blocked)).ok())
-            .is_some_and(|tasks| {
-                tasks.iter().any(|task| {
-                    task.assignee
-                        .as_deref()
-                        .is_some_and(|assignee| assignee.eq_ignore_ascii_case(worker))
-                })
-            });
-        Some(WorkerWaitState {
-            harness_waiting_for_input,
-            task_blocked,
-        })
+        self.queue_jobs
+            .prompt_preparation
+            .recipient(worker)
+            .map(|inputs| inputs.wait)
     }
 
     /// Minimum settle floor between an urgent turn-break (Esc) and the
@@ -7212,62 +7125,47 @@ impl FactoryDaemon {
         }
     }
 
-    /// Read the current wake state for a pane. Pure read — the streak is
-    /// advanced only by [`Self::refresh_pane_quiet_samples`], so two decisions
-    /// in the same poll see the same evidence.
-    fn pane_wake_state(&self, pane_target: &str) -> PaneWakeState {
+    /// Combine off-loop transcript inputs with the pane's current vetoes.
+    fn prepared_pane_wake_state(&self, pane: &str) -> PaneWakeState {
         PaneWakeState {
-            composer_dirty: self.app.mux.pane_composer_dirty(pane_target),
-            ready_for_injection: self.app.mux.pane_ready_for_injection(pane_target),
+            composer_dirty: self.app.mux.pane_composer_dirty(pane),
+            ready_for_injection: self.app.mux.pane_ready_for_injection(pane),
             silent_for: self
                 .pane_silent_since
-                .get(pane_target)
+                .get(pane)
                 .map(|since| since.elapsed()),
-            tool_call: self.recipient_tool_call_evidence(pane_target),
+            tool_call: self.prepared_tool_call_evidence(pane),
         }
     }
-
-    /// Whether `pane_target`'s harness transcript shows an outstanding tool
-    /// call (cas-45c4). Uses `resolve_worker` +
-    /// `transcript_has_in_flight_tool_call` — the same pair `cas factory
-    /// is-wedged` and the director's stall detector use, so the three cannot
-    /// disagree about what "still working" means.
-    ///
-    /// Unresolvable transcript → [`ToolCallEvidence::Unknown`] (cas-9e81).
-    ///
-    /// This used to return `true` ("assume in flight") on both unresolvable
-    /// arms, on the principle that absence of telemetry is not permission to
-    /// type into someone's pane. The principle is sound; folding it into the
-    /// same value as observed evidence was not. `resolve_worker` returns
-    /// `transcript_path: None` for every pane whose Claude session lives under
-    /// a non-default `CLAUDE_CONFIG_DIR`, so on a two-account factory this
-    /// arm fired for EVERY recipient on EVERY pass — a permanent fleet-wide
-    /// veto that was indistinguishable, in the logs and in `message_status`,
-    /// from ordinary busy-recipient protection. Note the neighbours already
-    /// disagreed with it: `classify_worker` maps a missing transcript to
-    /// `in_flight = false`, and `transcript_has_in_flight_tool_call` maps a
-    /// missing FILE to `false`.
-    ///
-    /// `Unknown` keeps the caution — it is held to the conservative
-    /// sustained-silence bar — without turning "we cannot see" into "it is
-    /// busy, forever".
-    fn recipient_tool_call_evidence(&self, pane_target: &str) -> ToolCallEvidence {
-        let cas_root = self.app.cas_dir();
-        // cas-d2a2: cached per pane; the transcript is re-read only when it
-        // changed, and its path is re-resolved at most every 2 s.
+    fn prepared_tool_call_evidence(&self, pane: &str) -> ToolCallEvidence {
         self.queue_jobs
-            .tool_call_probes
-            .probe(
-                pane_target,
-                Instant::now(),
-                || {
-                    crate::cli::factory::wedged::resolve_worker(cas_root, pane_target)
-                        .ok()
-                        .and_then(|resolved| Some((resolved.transcript_path?, resolved.cli)))
-                },
-                crate::cli::factory::wedged::transcript_has_in_flight_tool_call,
-            )
-            .map_or(ToolCallEvidence::Unknown, ToolCallEvidence::from_transcript)
+            .prompt_preparation
+            .recipient(pane)
+            .map(|inputs| inputs.tool_call)
+            .unwrap_or(ToolCallEvidence::Unknown)
+    }
+    fn prepared_turn_completion_after(
+        &self,
+        pane: &str,
+        after: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.queue_jobs
+            .prompt_preparation
+            .recipient(pane)?
+            .latest
+            .completion
+            .as_ref()
+            .filter(|completion| completion.at > after)
+            .map(|completion| completion.at)
+    }
+    fn prepared_mid_turn(&self, pane: &str) -> Option<bool> {
+        self.queue_jobs
+            .prompt_preparation
+            .recipient(pane)?
+            .mid_turn()
+    }
+    fn prepared_wake_evidence(&self, pane: &str) -> RecipientWakeEvidence {
+        self.queue_jobs.prompt_preparation.wake_evidence(pane)
     }
 
     /// Forward pending supervisor replies to the authenticated Commander hub
@@ -8261,12 +8159,32 @@ impl FactoryDaemon {
     /// call (the job's ready flag wakes the loop); inline it lands at once.
     fn next_queue_selection(&mut self) -> Option<super::prompt_queue_jobs::QueueSelection> {
         let cas_dir = self.app.cas_dir().to_path_buf();
-        // A pass that returned early still owes its settling stamps.
         self.queue_jobs.settle_injects(&cas_dir);
         self.queue_jobs.apply_completions();
         self.queue_jobs.expire_injects(&cas_dir, Instant::now());
-        // cas-786a6: a claim whose row was not delivered in time is released.
         self.queue_jobs.expire_claims(&cas_dir, Instant::now());
+        let raw = if self.queue_jobs.prompt_preparation.has_pending() {
+            None
+        } else {
+            self.next_unprepared_queue_selection()
+        };
+        let mut preparation = std::mem::take(&mut self.queue_jobs.prompt_preparation);
+        let ready = preparation.advance(
+            &mut self.queue_jobs,
+            raw,
+            self.app.cas_dir().to_path_buf(),
+            self.app.supervisor_name().to_string(),
+            self.app.worker_names().to_vec(),
+            Instant::now(),
+        );
+        self.queue_jobs.prompt_preparation = preparation;
+        ready
+    }
+
+    fn next_unprepared_queue_selection(
+        &mut self,
+    ) -> Option<super::prompt_queue_jobs::QueueSelection> {
+        let cas_dir = self.app.cas_dir().to_path_buf();
         if let Some(selection) = self.queue_jobs.take_selection() {
             return Some(selection);
         }
@@ -8283,14 +8201,15 @@ impl FactoryDaemon {
             operator_replies: !self.ws_clients.is_empty(),
             adopt_operator_notices: !self.shutdown.load(std::sync::atomic::Ordering::SeqCst),
         };
-        self.queue_jobs.submit_select(request, |request, generation| {
-            let selection = run_queue_select(request, generation);
-            if selection.is_err() {
-                // A broken handle is reopened on the next selection.
-                super::prompt_queue_jobs::forget_job_thread_stores(&request.cas_dir);
-            }
-            selection
-        });
+        self.queue_jobs
+            .submit_select(request, |request, generation| {
+                let selection = run_queue_select(request, generation);
+                if selection.is_err() {
+                    // A broken handle is reopened on the next selection.
+                    super::prompt_queue_jobs::forget_job_thread_stores(&request.cas_dir);
+                }
+                selection
+            });
         self.queue_jobs.apply_completions();
         self.queue_jobs.take_selection()
     }
@@ -8490,6 +8409,12 @@ impl FactoryDaemon {
             let queued = selected;
             if queued.processed_at.is_some() { continue; }
             let facts = row_facts.get(&queued.id).cloned().unwrap_or_default();
+            if !self.queue_jobs.prompt_preparation.allows_delivery(Instant::now()) {
+                // Earlier injects/probes can outlive this batch's evidence.
+                // Claimed rows stay owned; unclaimed rows remain selectable.
+                self.queue_jobs.carry_claimed_row(queued, facts);
+                continue;
+            }
             // Spec §4.5 rule 2: a row whose earlier inject has not settled is
             // not delivered again, even if a selection picked it again.
             // cas-4272: a row whose terminal or delivered stamp has not landed
@@ -8863,7 +8788,7 @@ impl FactoryDaemon {
                         continue;
                     }
                 }
-                let pane = self.pane_wake_state(&queued.target);
+                let pane = self.prepared_pane_wake_state(&queued.target);
                 if let Some(reason) = pane.veto_for_active_looking_recipient() {
                     // cas-d5ab review H1: the stall nudge's own decline is never
                     // activity, or the nudge would withdraw itself.
@@ -8993,7 +8918,7 @@ impl FactoryDaemon {
                 .wake_gate
                 .and_then(|(_, last_attempt)| last_attempt)
                 .and_then(|attempt| {
-                    let completed_at = self.recipient_turn_completion_after(pane_target, attempt);
+                    let completed_at = self.prepared_turn_completion_after(pane_target, attempt);
                     wake_retry_due_to_turn_end(Some(attempt), completed_at).then_some(())
                 })
                 .is_some();
@@ -9126,18 +9051,18 @@ impl FactoryDaemon {
                 // cas-5129: a busy or still-booting recipient keeps the
                 // budget; only a silent long turn or an unreachable worker
                 // spends it and reaches the supervisor.
-                let turn_aware = if self.recipient_tool_call_evidence(pane_target) == ToolCallEvidence::InFlight {
+                let turn_aware = if self.prepared_tool_call_evidence(pane_target) == ToolCallEvidence::InFlight {
                     TurnAwareRetry::Wait
                 } else {
                     claude_turn_aware_retry_with_evidence(
                     attempts,
-                    self.recipient_mid_turn(pane_target),
-                    self.pane_wake_state(pane_target)
+                    self.prepared_mid_turn(pane_target),
+                    self.prepared_pane_wake_state(pane_target)
                         .silent_for
                         .is_some_and(|silent| silent >= SILENCE_FOR_IDLE_RECIPIENT_WAKE),
                     last_attempt,
                     chrono::Utc::now(),
-                    self.recipient_wake_evidence(pane_target),
+                    self.prepared_wake_evidence(pane_target),
                     )
                 };
                 if retry_at_turn_end {
@@ -9852,7 +9777,7 @@ impl FactoryDaemon {
                     // cas-45c4: every recipient's pane is sampled now — the
                     // worker path needs the same turn evidence the supervisor
                     // wake introduced (cas-f02b).
-                    let pane_state = self.pane_wake_state(&pane_target);
+                    let pane_state = self.prepared_pane_wake_state(&pane_target);
                     // cas-f02b: at most one supervisor wake per drain pass. The
                     // supervisor is the single convergence point for every
                     // worker's lifecycle traffic, so an epic drain can park
@@ -10057,69 +9982,6 @@ impl FactoryDaemon {
         Ok(())
     }
 
-    /// cas-2702 (GH #58): report queue rows that were never dequeued.
-    ///
-    /// Anything still pending well past a poll interval is an anomaly — most
-    /// often a request enqueued against a different factory session name than
-    /// the daemon is running under, which this daemon will never drain. Silent
-    /// accumulation is the worst outcome, so each such row is logged and
-    /// audited once.
-    fn report_stalled_spawn_requests(&mut self, queue: &dyn cas_store::SpawnQueueStore) {
-        let now = Instant::now();
-        if self.last_spawn_queue_stall_scan.is_some_and(|last| {
-            now.saturating_duration_since(last) < SPAWN_QUEUE_STALL_SCAN_INTERVAL
-        }) {
-            return;
-        }
-        self.last_spawn_queue_stall_scan = Some(now);
-
-        let Ok(pending) = queue.peek(50) else {
-            return;
-        };
-        let stalled = stalled_spawn_requests(
-            &pending,
-            chrono::Utc::now(),
-            chrono::Duration::seconds(SPAWN_QUEUE_STALL_AGE_SECS),
-            &self.reported_stalled_spawn_requests,
-        );
-        let reports: Vec<(i64, String)> = stalled
-            .into_iter()
-            .map(|request| {
-                let target = request.factory_session.as_deref().unwrap_or("(unscoped)");
-                (
-                    request.id,
-                    format!(
-                        "Spawn request {} ({}) has been queued since {} without being dequeued. \
-                         It targets factory session '{}' while this daemon is session '{}'. \
-                         No worker will start for it until a daemon for that session drains it.",
-                        request.id,
-                        request.action.as_str(),
-                        request.created_at.to_rfc3339(),
-                        target,
-                        self.session_name,
-                    ),
-                )
-            })
-            .collect();
-
-        for (id, detail) in reports {
-            self.reported_stalled_spawn_requests.insert(id);
-            tracing::warn!(
-                request_id = id,
-                "cas-2702: spawn request stalled in the queue without being dequeued"
-            );
-            append_spawn_audit(
-                self.app.cas_dir(),
-                &self.session_name,
-                Some(id),
-                None,
-                "dequeue",
-                "stalled",
-                &detail,
-            );
-        }
-    }
-
     /// Apply a supervisor's `restart_spawn_queue` request (cas-73b5, GH #970).
     ///
     /// Restarts the daemon's spawn pipeline in place, without touching any
@@ -10194,6 +10056,9 @@ impl FactoryDaemon {
 
         self.reported_stalled_spawn_requests.clear();
         self.last_spawn_queue_stall_scan = None;
+        let mut ingress = std::mem::take(&mut self.queue_jobs.spawn_ingress);
+        ingress.cancel(&mut self.queue_jobs, "Supervisor spawn-queue restart", false);
+        self.queue_jobs.spawn_ingress = ingress;
 
         let (outcome, message) =
             spawn_queue_reset_report(chrono::Utc::now(), &request.requester, &dropped);
@@ -10228,57 +10093,37 @@ impl FactoryDaemon {
     /// this converts spawn requests into individual PendingSpawn items that are
     /// processed one-per-tick in the main loop.
     pub(super) fn enqueue_spawn_requests(&mut self) -> anyhow::Result<()> {
-        // cas-2702 (GH #58): a failure here used to be swallowed by the caller,
-        // so a queue that stopped draining left no trace at all while the
-        // supervisor kept being told "Queued spawn request".
-        let queue = match open_spawn_queue_store(self.app.cas_dir()) {
-            Ok(queue) => queue,
-            Err(e) => {
-                let detail = format!("Could not open the spawn queue store: {e}");
-                tracing::error!(error = %e, "cas-2702: spawn queue unreadable — no requests can drain");
-                append_spawn_audit(
-                    self.app.cas_dir(),
-                    &self.session_name,
-                    None,
-                    None,
-                    "dequeue",
-                    "failed",
-                    &detail,
-                );
-                return Err(e.into());
-            }
+        let now = Instant::now();
+        let scan_stalls = self.last_spawn_queue_stall_scan.is_none_or(|last| {
+            now.saturating_duration_since(last) >= SPAWN_QUEUE_STALL_SCAN_INTERVAL
+        });
+        let request = || super::queue_control_jobs::SpawnPollRequest {
+            cas_dir: self.app.cas_dir().to_path_buf(),
+            session: self.session_name.clone(),
+            supervisor: self.app.supervisor_name().to_string(),
+            scan_stalls,
+            reported: self.reported_stalled_spawn_requests.clone(),
         };
-        let requests = match queue.poll(&self.session_name, 10) {
-            Ok(requests) => requests,
-            Err(e) => {
-                let detail = format!("Spawn queue poll failed: {e}");
-                tracing::error!(error = %e, "cas-2702: spawn queue poll failed — requests stay queued");
-                append_spawn_audit(
-                    self.app.cas_dir(),
-                    &self.session_name,
-                    None,
-                    None,
-                    "dequeue",
-                    "failed",
-                    &detail,
-                );
-                return Err(e.into());
-            }
+        let mut ingress = std::mem::take(&mut self.queue_jobs.spawn_ingress);
+        let submitted = {
+            let _enforced_ingress = cas_store::lane_guard::enforce_here();
+            ingress.advance(&mut self.queue_jobs, request, now)
         };
-
-        self.report_stalled_spawn_requests(queue.as_ref());
+        let ready = ingress.take_ready();
+        self.queue_jobs.spawn_ingress = ingress;
+        if submitted && scan_stalls {
+            self.last_spawn_queue_stall_scan = Some(now);
+        }
+        let Some(batch) = ready else {
+            return Ok(());
+        };
+        let batch = batch.map_err(|error| anyhow::anyhow!("{error}"))?;
+        for (id, _) in batch.stalled {
+            self.reported_stalled_spawn_requests.insert(id);
+        }
+        let requests = batch.requests;
 
         for request in requests {
-            let action = request.action.as_str();
-            append_spawn_audit(
-                self.app.cas_dir(),
-                &self.session_name,
-                Some(request.id),
-                None,
-                "dequeue",
-                "accepted",
-                action,
-            );
             match request.action {
                 SpawnAction::Spawn => {
                     let request_id = Some(request.id);
@@ -10690,6 +10535,7 @@ impl FactoryDaemon {
                         task_id_for_finish,
                     ) {
                         Ok(name) => {
+                            self.queue_jobs.prompt_preparation.forget_pane(&name);
                             if let Some(seed_receipt) = seed_receipt.as_deref() {
                                 crate::ui::factory::app::queue_worker_target_seed_notice(
                                     self.app.cas_dir(),
@@ -11235,6 +11081,7 @@ impl FactoryDaemon {
                     // cas-c1a2: the stopped session's output must never be
                     // quoted for a later worker reusing this name.
                     self.pane_buffers.remove(name);
+                    self.queue_jobs.prompt_preparation.forget_pane(name);
                     // Remove shut-down workers from native Agent Teams
                     if let Some(ref teams) = self.teams {
                         let _ = teams.remove_member(name);
@@ -11247,6 +11094,7 @@ impl FactoryDaemon {
                 // cas-c1a2: the relaunch reuses the pane name; start its
                 // buffer empty so diagnostics quote the new process only.
                 self.pane_buffers.remove(&name);
+                self.queue_jobs.prompt_preparation.forget_pane(&name);
                 // Build per-worker Teams config for the respawned worker
                 let teams_config = self.teams.as_ref().map(|t| {
                     use super::teams::TeamsManager;
@@ -11297,6 +11145,7 @@ impl FactoryDaemon {
                 // this, its register-timeout detail quoted the previous
                 // session's transcript and hid what the new Codex printed.
                 self.pane_buffers.remove(&name);
+                self.queue_jobs.prompt_preparation.forget_pane(&name);
                 let teams_config = self.teams.as_ref().map(|t| {
                     use super::teams::TeamsManager;
                     let color_idx = self.app.worker_names().len();
@@ -11433,6 +11282,7 @@ impl FactoryDaemon {
                 let cwd = self.app.project_path().to_path_buf();
                 match self.app.mux.add_shell(&name, cwd, shell.as_deref()) {
                     Ok(_) => {
+                        self.queue_jobs.prompt_preparation.forget_pane(&name);
                         tracing::info!("Shell pane '{}' spawned", name);
                         self.gui_notify_pane_added(&name, cas_mux::PaneKind::Shell);
                     }
@@ -11445,6 +11295,7 @@ impl FactoryDaemon {
             }
             PendingSpawn::KillShell { name } => match self.app.mux.remove_shell(&name) {
                 Ok(()) => {
+                    self.queue_jobs.prompt_preparation.forget_pane(&name);
                     tracing::info!("Shell pane '{}' killed", name);
                     self.gui_notify_pane_removed(&name);
                 }
@@ -19994,7 +19845,7 @@ mod stall_nudge_rework_tests {
         make_worker_ready_for(daemon, cas_mux::SupervisorCli::Codex).await;
     }
 
-    async fn make_worker_ready_for(daemon: &mut FactoryDaemon, harness: cas_mux::SupervisorCli) {
+    pub(super) async fn make_worker_ready_for(daemon: &mut FactoryDaemon, harness: cas_mux::SupervisorCli) {
         let pty = cas_mux::Pty::spawn("worker-a", cas_mux::PtyConfig {
             command: "sh".into(), args: vec!["-c".into(), "printf ready; sleep 30".into()],
             cwd: Some(std::env::temp_dir()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
@@ -20188,3 +20039,7 @@ mod supervisor_notice_wake_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "queue_control_tests.rs"]
+mod queue_control_tests;

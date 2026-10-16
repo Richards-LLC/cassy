@@ -3043,7 +3043,6 @@ impl FactoryDaemon {
         // Refresh intervals
         let mut last_refresh = std::time::Instant::now();
         let mut last_prompt_poll = std::time::Instant::now();
-        let mut last_spawn_poll = std::time::Instant::now();
         // GitHub polling is intentionally decoupled from the two-second UI
         // refresh. The blocking CLI calls run on Tokio's blocking pool and
         // results are handed back to this loop for durable prompt enqueue.
@@ -3289,9 +3288,9 @@ impl FactoryDaemon {
             }
 
             // Poll spawn queue (enqueues requests, doesn't execute them)
-            if last_spawn_poll.elapsed() >= poll_interval {
-                let _ = self.enqueue_spawn_requests();
-                last_spawn_poll = std::time::Instant::now();
+            // Completion-driven acceptance; the ingress owns the 100ms cadence.
+            if let Err(error) = self.enqueue_spawn_requests() {
+                tracing::error!(%error, "cas-2702: could not accept spawn queue poll result");
             }
 
             // Process pending spawns (non-blocking: git ops run on background thread)
@@ -3865,20 +3864,7 @@ impl FactoryDaemon {
             }
         }
         drop(director_refresh);
-        // cas-d2a2: queue stamps run on the StoreWorker through the queue
-        // job lanes; drain the lanes first so no critical stamp is still
-        // waiting on a lane while the StoreWorker reports idle (jobs.rs).
-        let queue_cas_dir = self.app.cas_dir().to_path_buf();
-        if !self.queue_jobs.drain_for_shutdown(&queue_cas_dir, Duration::from_secs(5)) {
-            tracing::warn!("prompt-queue job lanes still busy at shutdown");
-        }
-        // Let queued store writes land before cleanup tears the session down.
-        if !store_worker.wait_idle(Duration::from_secs(5)) {
-            tracing::warn!(
-                pending = store_worker.pending(),
-                "factory store worker still busy at shutdown"
-            );
-        }
+        self.finish_shutdown_writes(store_worker, Duration::from_secs(5));
 
         // Stop recording if it was enabled
         if self.app.record_enabled() {
@@ -4387,6 +4373,37 @@ impl FactoryDaemon {
             self.inject_director_prompt(prompt, &events, refresh_started, store_worker, Some(assignment))
                 .await;
         }
+    }
+
+    /// Shutdown: hand off the last deferred session-metadata write, then let
+    /// every queued store write land, each step bounded by `timeout` so a
+    /// wedged write cannot hang shutdown (cas-54a2). Returns whether the
+    /// store worker went idle.
+    pub(super) fn finish_shutdown_writes(
+        &mut self,
+        store_worker: &super::store_worker::StoreWorker,
+        timeout: Duration,
+    ) -> bool {
+        // cas-54a2: a focus change made since the last refresh pass (from the
+        // keyboard, say) is still in its slot; it must not be lost.
+        self.flush_epic_focus_write(store_worker);
+        // cas-d2a2: queue stamps run on the StoreWorker through the queue
+        // job lanes; drain the lanes first so no critical stamp is still
+        // waiting on a lane while the StoreWorker reports idle (jobs.rs).
+        let queue_cas_dir = self.app.cas_dir().to_path_buf();
+        if !self.queue_jobs.drain_for_shutdown(&queue_cas_dir, timeout) {
+            tracing::warn!("prompt-queue job lanes still busy at shutdown");
+        }
+        // Let queued store writes (the epic focus and worker-hold clears
+        // among them) land before cleanup tears the session down.
+        let idle = store_worker.wait_idle(timeout);
+        if !idle {
+            tracing::warn!(
+                pending = store_worker.pending(),
+                "factory store worker still busy at shutdown"
+            );
+        }
+        idle
     }
 
     /// Hand the latest epic-focus write to the store worker (cas-5e72).

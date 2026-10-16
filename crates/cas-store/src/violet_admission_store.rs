@@ -1105,7 +1105,8 @@ fn recover_known_in_tx(
     // Recipient-side full surfacing is distinct from a daemon's
     // transport handoff. Selection alone is conservatively uncertain.
     let (surfaced, touched): (bool, bool) = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM prompt_queue_recipient_seen
+        "SELECT (acked_at IS NOT NULL AND acked_via='explicit_ack')
+           OR EXISTS(SELECT 1 FROM prompt_queue_recipient_seen
              WHERE prompt_id=q.id AND recipient=?2
                AND source IN ('hook_surfaced','inbox_poll','observed_wake')),
            selected_at IS NOT NULL OR processed_at IS NOT NULL

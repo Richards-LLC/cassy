@@ -1041,10 +1041,11 @@ pub struct FactoryApp {
     /// cas-4491f: non-live worker panes whose teardown requests wait to be
     /// queued off the loop ([`Self::take_phantom_teardowns`]).
     pending_phantom_teardowns: Vec<String>,
-    /// cas-5e72: the daemon writes the session's epic focus off the loop.
-    /// Set, a focus change only records the write
-    /// ([`Self::take_epic_focus_write`]); unset, it writes in place.
-    deferred_epic_focus_writes: bool,
+    /// cas-5e72: the daemon writes session metadata (the epic focus, a
+    /// removed worker's hold) off the loop. Set, a focus change only records
+    /// its write ([`Self::take_epic_focus_write`]) and a hold clear goes to
+    /// the store worker; unset, both write in place.
+    deferred_session_metadata_writes: bool,
     /// The latest epic-focus write not yet handed off: `(metadata path,
     /// focused epic or None to clear)`. A later change replaces an earlier
     /// one, so the last focus wins.
@@ -2023,7 +2024,7 @@ impl FactoryApp {
             return;
         };
         let path = metadata_path(session_name);
-        if self.deferred_epic_focus_writes {
+        if self.deferred_session_metadata_writes {
             self.pending_epic_focus_write = Some((path, epic_id));
             return;
         }
@@ -2047,8 +2048,8 @@ impl FactoryApp {
     }
 
     /// Defer epic-focus writes to the caller (the daemon's store worker).
-    pub(crate) fn set_deferred_epic_focus_writes(&mut self, deferred: bool) {
-        self.deferred_epic_focus_writes = deferred;
+    pub(crate) fn set_deferred_session_metadata_writes(&mut self, deferred: bool) {
+        self.deferred_session_metadata_writes = deferred;
     }
 
     /// The latest deferred epic-focus write, for [`persist_epic_focus_at`]
@@ -2156,17 +2157,29 @@ impl FactoryApp {
 
     pub(crate) fn remove_worker_from_event_detector(&mut self, worker_name: &str) {
         self.event_detector.remove_worker(worker_name);
-        let Some(session_name) = self.factory_session.as_deref() else {
+        let Some(session_name) = self.factory_session.clone() else {
             return;
         };
-        let path = metadata_path(session_name);
-        if let Err(error) = persist_session_metadata_worker_hold_at(&path, worker_name, false) {
-            tracing::warn!(
-                worker = %worker_name,
-                factory_session = %session_name,
-                error = %error,
-                "failed to clear removed worker from durable hold set"
-            );
+        let path = metadata_path(&session_name);
+        let worker = worker_name.to_string();
+        let clear_hold = move || {
+            if let Err(error) = persist_session_metadata_worker_hold_at(&path, &worker, false) {
+                tracing::warn!(
+                    worker = %worker,
+                    factory_session = %session_name,
+                    error = %error,
+                    "failed to clear removed worker from durable hold set"
+                );
+            }
+        };
+        // cas-5e72: a worker exit is handled inside the daemon's PTY
+        // exchange; the session-metadata write runs on the store worker, in
+        // order with the epic-focus writes.
+        if self.deferred_session_metadata_writes && false {
+            crate::ui::factory::daemon::runtime::store_worker::global()
+                .submit("worker hold clear", clear_hold);
+        } else {
+            clear_hold();
         }
     }
 

@@ -2438,8 +2438,9 @@ impl FactoryDaemon {
         // running them.
         let mut director_refresh = super::director_refresh::DirectorRefresh::new();
         self.app.set_deferred_worker_health_probes(true);
-        // cas-5e72: the epic-focus metadata write runs on the store worker.
-        self.app.set_deferred_epic_focus_writes(true);
+        // cas-5e72: session-metadata writes (epic focus, worker holds) run on
+        // the store worker.
+        self.app.set_deferred_session_metadata_writes(true);
         let _task_sync_reconcile = super::store_worker::spawn_task_sync_reconcile(
             self.app.cas_dir().to_path_buf(),
             Arc::clone(&self.shutdown),

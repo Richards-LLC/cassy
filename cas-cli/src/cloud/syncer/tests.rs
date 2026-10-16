@@ -4086,3 +4086,185 @@ async fn cas_fd42_repaired_backlog_pushes_tasks_before_dependency() {
             .is_some()
     );
 }
+
+/// cas-9b5d fixture: a pinned personal store whose push replies acknowledge
+/// every task and dependency it receives, with a deliberately small batch so
+/// the prowl head-of-line shape (one full batch of waiting edges) is cheap.
+async fn cas_9b5d_personal_fixture(
+    batch_size: usize,
+) -> (
+    tempfile::TempDir,
+    Arc<SyncQueue>,
+    CloudSyncer,
+    wiremock::MockServer,
+) {
+    use crate::cloud::CloudConfig;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(|request: &wiremock::Request| {
+            let body = decode_push_body(request);
+            let mut reply = serde_json::Map::new();
+            for key in ["tasks", "task_dependencies"] {
+                if let Some(rows) = body.get(key).and_then(|rows| rows.as_array()) {
+                    reply.insert(
+                        key.to_string(),
+                        serde_json::json!({"inserted": rows.len(), "updated": 0, "skipped": 0}),
+                    );
+                }
+            }
+            ResponseTemplate::new(200).set_body_json(serde_json::Value::Object(reply))
+        })
+        .mount(&server)
+        .await;
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    crate::store::open_store_local(temp.path()).unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            ..Default::default()
+        },
+        CloudSyncerConfig {
+            batch_size,
+            ..Default::default()
+        },
+        "p".into(),
+        temp.path(),
+    );
+    (temp, queue, syncer, server)
+}
+
+fn cas_9b5d_enqueue_task(queue: &SyncQueue, id: &str) {
+    use crate::cloud::{EntityType, SyncOperation};
+    queue
+        .enqueue(
+            EntityType::Task,
+            id,
+            SyncOperation::Upsert,
+            Some(&format!(r#"{{"id":"{id}","title":"{id}","origin_project":"p"}}"#)),
+        )
+        .unwrap();
+}
+
+fn cas_9b5d_enqueue_edge(queue: &SyncQueue, from: &str, to: &str) {
+    use crate::cloud::{EntityType, SyncOperation};
+    queue
+        .enqueue(
+            EntityType::TaskDependency,
+            &format!("{from}:{to}:blocks"),
+            SyncOperation::Upsert,
+            Some(&format!(
+                r#"{{"from_id":"{from}","to_id":"{to}","dep_type":"blocks","origin_project":"p"}}"#
+            )),
+        )
+        .unwrap();
+}
+
+/// cas-9b5d (prowl gabber-studio): the endpoint tasks were rejected as
+/// team_owned_project and parked, and the oldest pending batch was made of
+/// edges waiting on them. The edges waited forever, every round pushed
+/// nothing, and the push stopped "after making no progress" on every daemon
+/// tick, so the thousands of rows behind them were never sent.
+#[tokio::test]
+async fn cas_9b5d_parked_endpoints_do_not_wedge_the_personal_push() {
+    let (_temp, queue, syncer, server) = cas_9b5d_personal_fixture(2).await;
+    let max_retries = CloudSyncerConfig::default().max_retries;
+    for id in ["parked-a", "parked-b"] {
+        cas_9b5d_enqueue_task(&queue, id);
+        let row = queue
+            .list_all(10)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.entity_id == id)
+            .unwrap();
+        queue
+            .record_row_outcome(row.id, "rejected", Some("team_owned_project"))
+            .unwrap();
+        queue
+            .park_failed(
+                row.id,
+                "cloud rejected tasks: reason=team_owned_project",
+                max_retries,
+            )
+            .unwrap();
+    }
+    cas_9b5d_enqueue_edge(&queue, "parked-a", "parked-b");
+    cas_9b5d_enqueue_edge(&queue, "parked-b", "parked-a");
+    cas_9b5d_enqueue_task(&queue, "live-task");
+
+    let result = syncer.push().unwrap();
+
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|error| error.contains("no progress")),
+        "{:?}",
+        result.errors
+    );
+    assert_eq!(result.pushed_tasks, 1, "the row behind the edges is sent");
+    assert_eq!(result.pushed_task_dependencies, 0, "edges stay withheld");
+    let rows = queue.list_all(10).unwrap();
+    assert!(rows.iter().all(|row| row.entity_id != "live-task"));
+    let edges: Vec<_> = rows
+        .iter()
+        .filter(|row| row.entity_type == crate::cloud::EntityType::TaskDependency)
+        .collect();
+    assert_eq!(edges.len(), 2);
+    for edge in edges {
+        assert_eq!(edge.retry_count, max_retries, "edge leaves the pending queue");
+        assert_eq!(
+            edge.last_reason.as_deref(),
+            Some("dependency_endpoint_unavailable")
+        );
+        let error = edge.last_error.as_deref().unwrap();
+        assert!(error.contains("team_owned_project"), "{error}");
+    }
+    assert_eq!(
+        queue
+            .intentional_park_counts(None, max_retries)
+            .unwrap()
+            .get("dependency_endpoint_unavailable"),
+        Some(&2)
+    );
+    let posts = server.received_requests().await.unwrap();
+    assert!(posts.iter().all(|request| {
+        decode_push_body(request)
+            .get("task_dependencies")
+            .is_none()
+    }));
+}
+
+/// cas-9b5d: edges older than their still-pending endpoint tasks must not
+/// fill the FIFO batch either, or the endpoints are never reached.
+#[tokio::test]
+async fn cas_9b5d_edges_ahead_of_pending_endpoints_do_not_fill_the_batch() {
+    let (_temp, queue, syncer, server) = cas_9b5d_personal_fixture(2).await;
+    cas_9b5d_enqueue_edge(&queue, "late-a", "late-b");
+    cas_9b5d_enqueue_edge(&queue, "late-b", "late-a");
+    cas_9b5d_enqueue_task(&queue, "late-a");
+    cas_9b5d_enqueue_task(&queue, "late-b");
+
+    let result = syncer.push().unwrap();
+
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.pushed_tasks, 2);
+    assert_eq!(result.pushed_task_dependencies, 2);
+    assert!(queue.list_all(10).unwrap().is_empty());
+    let posts = server.received_requests().await.unwrap();
+    let first = decode_push_body(&posts[0]);
+    assert!(first.get("tasks").is_some(), "{first}");
+    assert!(first.get("task_dependencies").is_none(), "{first}");
+}

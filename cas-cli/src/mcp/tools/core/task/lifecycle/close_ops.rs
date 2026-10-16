@@ -737,15 +737,77 @@ fn proof_field_tokens(field: &str) -> Vec<&str> {
         .collect()
 }
 
+// Keep assignments visible: dropping '=' turns `jobs=16 loops=2` into
+// adjacent `16 loops` and lets the loops field borrow the jobs value.
+fn proof_numeric_tokens(field: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    for (index, character) in field.char_indices() {
+        if character.is_ascii_alphanumeric() {
+            start.get_or_insert(index);
+        } else {
+            if let Some(start) = start.take() {
+                tokens.push(&field[start..index]);
+            }
+            if matches!(character, '=' | ':') {
+                tokens.push(&field[index..index + 1]);
+            }
+        }
+    }
+    if let Some(start) = start {
+        tokens.push(&field[start..]);
+    }
+    tokens
+}
+
+fn proof_number_has_owner(tokens: &[&str], index: usize) -> bool {
+    index.checked_sub(1).is_some_and(|previous| {
+        matches!(
+            tokens[previous],
+            "=" | ":"
+                | "j"
+                | "jobs"
+                | "parallelism"
+                | "concurrency"
+                | "loop"
+                | "loops"
+                | "run"
+                | "runs"
+                | "iteration"
+                | "iterations"
+                | "time"
+                | "times"
+        )
+    })
+}
+
 fn has_adjacent_number<F>(text: &str, label: &str, predicate: F) -> bool
 where
     F: Fn(u32) -> bool,
 {
     text.split([';', ',', '|']).any(|field| {
-        proof_field_tokens(field).windows(2).any(|window| {
+        let tokens = proof_numeric_tokens(field);
+        tokens.iter().enumerate().any(|(index, token)| {
+            if *token != label {
+                return false;
+            }
             let number_matches = |token: &str| token.parse::<u32>().ok().is_some_and(&predicate);
-            (window[0] == label && number_matches(window[1]))
-                || (window[1] == label && number_matches(window[0]))
+            if tokens
+                .get(index + 1)
+                .is_some_and(|token| matches!(*token, "=" | ":"))
+            {
+                // An explicit field takes only its own value, never the
+                // preceding field's value or a later unrelated number.
+                return tokens
+                    .get(index + 2)
+                    .is_some_and(|token| number_matches(token));
+            }
+            tokens
+                .get(index + 1)
+                .is_some_and(|token| number_matches(token))
+                || index.checked_sub(1).is_some_and(|previous| {
+                    number_matches(tokens[previous]) && !proof_number_has_owner(&tokens, previous)
+                })
         })
     })
 }
@@ -897,9 +959,10 @@ fn has_at_least_three_runs(lower: &str) -> bool {
         return true;
     }
     if lower.split([';', ',', '|']).any(|field| {
-        proof_field_tokens(field).iter().any(|token| {
+        proof_numeric_tokens(field).iter().any(|token| {
             token
                 .strip_suffix('x')
+                .or_else(|| token.strip_prefix('x'))
                 .and_then(|number| number.parse::<u32>().ok())
                 .is_some_and(|number| number >= 3)
         })

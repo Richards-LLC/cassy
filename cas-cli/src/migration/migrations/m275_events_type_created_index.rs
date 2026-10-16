@@ -106,12 +106,15 @@ mod tests {
             );
             let result = crate::migration::run_migrations(&cas_dir, false).unwrap();
             assert_eq!(detected(&conn), 1);
-            assert!(
-                result
-                    .reconciliations
-                    .iter()
-                    .any(|line| line.contains("275")),
-                "{result:?}"
+            assert_eq!(result.applied_count, 1, "{result:?}");
+            assert_eq!(result.applied_names, [MIGRATION.name]);
+            assert!(result.errors.is_empty(), "{result:?}");
+            assert_eq!(
+                crate::migration::run_migrations(&cas_dir, false)
+                    .unwrap()
+                    .applied_count,
+                0,
+                "repaired index is applied exactly once"
             );
             assert_eq!(
                 conn.query_row(

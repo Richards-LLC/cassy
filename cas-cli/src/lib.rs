@@ -220,7 +220,8 @@ pub(crate) mod test_support {
                 // silently maintaining a second list here.
                 (!crate::test_env_guard::is_scrubbed_ambient_env_key(key)
                     || key == "CAS_ROOT"
-                    || key == "CAS_FACTORY_BUILD_GUARD")
+                    || key == "CAS_FACTORY_BUILD_GUARD"
+                    || key == "CAS_GH_BIN")
                     && !matches!(
                         key,
                         "CLAUDE_CONFIG_DIR"
@@ -240,6 +241,14 @@ pub(crate) mod test_support {
             std::path::Path::new(&pinned),
             guard.home().join(".cas"),
             "CAS_ROOT must be the hermetic root inside the temp HOME"
+        );
+        let gh = std::env::var_os("CAS_GH_BIN").expect("guard must pin gh away from the host");
+        assert!(
+            std::process::Command::new(gh)
+                .arg("--version")
+                .output()
+                .is_err(),
+            "the default gh fixture must fail before any process or network call"
         );
         drop(guard);
         assert_eq!(

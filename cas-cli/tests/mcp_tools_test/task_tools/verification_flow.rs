@@ -13,6 +13,9 @@ use rmcp::handler::server::wrapper::Parameters;
 use std::process::Command;
 use tempfile::TempDir;
 
+#[path = "../../fixtures/ci_check_run.rs"]
+mod ci_check_run;
+
 fn proof_boundary_git(path: &std::path::Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
@@ -7062,6 +7065,8 @@ async fn test_branchless_no_code_epic_closes_without_checkout_snapshot_cas_04c6(
 async fn test_epic_close_derives_anchor_from_epic_branch_gh_892() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut test_env);
+    let gh = ci_check_run::green_ci(test_env.home());
+    test_env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(cas_dir.join("config.toml"), "[verification]\nenabled = false\n")
         .expect("disable verification for anchor-focused close");
@@ -7129,6 +7134,10 @@ async fn test_epic_close_derives_anchor_from_epic_branch_gh_892() {
         TaskStatus::Closed
     );
     assert!(!epic_tip.is_empty());
+    assert_eq!(
+        std::env::var_os(cas::github_issue_attach::GH_BIN_ENV),
+        Some(gh.into_os_string())
+    );
 }
 
 /// GH #892: a merge receipt belongs to the declared target even when the
@@ -7138,6 +7147,8 @@ async fn test_epic_close_derives_anchor_from_epic_branch_gh_892() {
 async fn test_epic_close_accepts_target_receipt_when_epic_branch_lags_gh_892() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut test_env);
+    let gh = ci_check_run::green_ci(test_env.home());
+    test_env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(cas_dir.join("config.toml"), "[verification]\nenabled = false\n")
         .expect("disable verification for target receipt close");
@@ -7234,6 +7245,10 @@ async fn test_epic_close_accepts_target_receipt_when_epic_branch_lags_gh_892() {
         TaskStatus::Closed
     );
     assert_ne!(merge_tip, old_epic_tip);
+    assert_eq!(
+        std::env::var_os(cas::github_issue_attach::GH_BIN_ENV),
+        Some(gh.into_os_string())
+    );
 }
 
 #[tokio::test]

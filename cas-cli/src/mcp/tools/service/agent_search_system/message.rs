@@ -2806,9 +2806,11 @@ impl CasService {
         // detailed delivery report stays available through message_status;
         // only actionable exceptions expand the send result.
         // cas-d5ab: with a daemon listening, give it its first pass so a busy
-        // recipient's deferral is named at send time, not 50 ms later. A row
-        // the daemon will not decide soon (native-extension recipient, a
-        // backlog longer than one selection batch) is not waited on.
+        // recipient's deferral is named at send time, not 50 ms later. A
+        // native-extension recipient's row is never decided by the daemon,
+        // so it is not waited on. A backlog is not a reason to skip: the wait
+        // is bounded and says "no decision yet" when it runs out (review N1:
+        // a project-wide pending count skipped every real send).
         let native_recipient = resolved_target_agent.as_ref().is_some_and(|agent| {
             agent.metadata.get("native_extension").is_some_and(|value| value == "true")
         });
@@ -2816,9 +2818,6 @@ impl CasService {
             && !urgent
             && !duplicate_suppressed
             && !native_recipient
-            && queue
-                .pending_count()
-                .is_ok_and(|pending| pending <= SEND_OUTCOME_BACKLOG_LIMIT)
             && daemon_accepts_notify(&self.inner.cas_root);
         let (send_report, no_decision_yet) = if awaits_decision {
             wait_for_send_outcome(&*queue, message_id).await
@@ -3904,10 +3903,6 @@ const SEND_OUTCOME_SETTLE: std::time::Duration = std::time::Duration::from_milli
 #[cfg(test)]
 const SEND_OUTCOME_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
 const SEND_OUTCOME_POLL: std::time::Duration = std::time::Duration::from_millis(20);
-
-/// The daemon's selection batch (`QueueSelectRequest::limit`): a row behind
-/// a longer backlog may wait passes for its first decision.
-const SEND_OUTCOME_BACKLOG_LIMIT: usize = 10;
 
 /// Whether the daemon has made its first decision on a fresh row: handed it
 /// over, held it, or stated why it waits (review M4). A row nobody has looked

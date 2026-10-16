@@ -168,7 +168,7 @@ struct BusyWorkerFactory {
 
 impl BusyWorkerFactory {
     async fn new(env: &[(&str, Option<&str>)]) -> Self {
-        use cas_store::{EventStore, TaskStore};
+        use cas_store::EventStore;
         let root = tempfile::tempdir().unwrap();
         let claude_config = root.path().join("claude-config");
         std::fs::create_dir_all(claude_config.join("teams").join(SESSION).join("inboxes")).unwrap();
@@ -333,6 +333,16 @@ async fn ct2_p1_send_returns_named_outcome() {
     ])
     .await;
     factory.tool_call_in_flight();
+    // Review N1: unread rows elsewhere in the project (other sessions, other
+    // recipients) never stop the send from waiting for its own decision.
+    let queue = factory.queue();
+    for n in 0..15 {
+        queue
+            .enqueue_with_session("supervisor", &format!("other-{n}"), "elsewhere", "another-session")
+            .unwrap();
+        queue.enqueue_with_session("supervisor", "unregistered", "backlog", SESSION).unwrap();
+    }
+    assert!(queue.pending_count().unwrap() > 10);
     let core = crate::mcp::CasCore::with_daemon(factory.cas_dir.clone(), None, None);
     core.set_agent_id_for_testing("supervisor-id".into());
     #[cfg(feature = "mcp-proxy")]

@@ -181,8 +181,29 @@ impl CasCore {
                             .unwrap_or_default()
                             .is_empty()
                     {
+                        let hold = super::block_hold::read(task_store.as_ref(), &req.from_id)
+                            .map_err(|error| {
+                                Self::error(
+                                    ErrorCode::INTERNAL_ERROR,
+                                    format!(
+                                        "Could not read structured blocked hold; task remains blocked: {error}"
+                                    ),
+                                )
+                            })?;
+                        if let Some(hold) = hold {
+                            super::block_hold::record_auto_unblock_skipped(
+                                &mut task,
+                                &hold.reason,
+                            );
+                            task_store.update(&task).map_err(|error| {
+                                Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
+                            })?;
+                            return Ok(Self::success(format!(
+                                "Removed external dependency: {} was blocked_by {}. Task remains blocked: {}.",
+                                req.from_id, req.to_id, hold.reason
+                            )));
+                        }
                         task.status = TaskStatus::Open;
-                        task.updated_at = chrono::Utc::now();
                         task_store.update(&task).map_err(|error| {
                             Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
                         })?;

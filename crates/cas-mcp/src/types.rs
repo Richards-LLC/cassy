@@ -290,7 +290,7 @@ pub struct TaskRequest {
     /// validated and applied atomically by the task store; null removes a
     /// field. Prose notes remain the human/audit surface.
     #[schemars(
-        description = "For update: JSON merge patch for structured execution state (phase, receipts, files_touched, decisions, next_step); null deletes a field"
+        description = "For update: JSON merge patch for structured execution state (phase, receipts, files_touched, decisions, next_step); null deletes a field. blocked_hold is managed by status transitions; only null may be supplied to clear it"
     )]
     #[serde(default)]
     pub state_patch: Option<serde_json::Value>,

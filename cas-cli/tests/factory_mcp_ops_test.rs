@@ -6705,6 +6705,38 @@ async fn inbox_poll_withholds_superseded_awaiting_merge_relay() {
     );
 }
 
+#[tokio::test]
+async fn cas_1485_inbox_poll_and_named_repeat_expire_closed_task_relays() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_NAME", None), ("CAS_SESSION_ID", None), ("CAS_FACTORY_SESSION", None),
+    ]);
+    for polled_before_close in [false, true] {
+        let env = FactoryTestEnv::with_agent_id("cas-1485-supervisor");
+        let mut supervisor = Agent::new("cas-1485-supervisor".into(), "relay-supervisor".into());
+        supervisor.role = AgentRole::Supervisor;
+        env.agent_store().register(&supervisor).unwrap();
+        let mut task = Task::new("cas-1485-inbox".into(), "closed after enqueue".into());
+        task.status = TaskStatus::AwaitingMerge;
+        env.task_store().add(&task).unwrap();
+        let body = format!("<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{}\" new=\"awaiting_merge\" notification_id=\"17717\" occurrence=\"{}\">\nMERGE REQUIRED\n</task-lifecycle>", task.id, chrono::Utc::now().to_rfc3339());
+        let queue = env.prompt_queue();
+        let id = queue.enqueue("lifecycle-wake:17717", "supervisor", &body).unwrap();
+        if polled_before_close {
+            let result = env.service.coordination(Parameters(coord_req("inbox_poll"))).await.unwrap();
+            assert!(get_text(&result).contains(&body), "live relay remains actionable before close");
+        }
+        task.status = TaskStatus::Closed;
+        env.task_store().update(&task).unwrap();
+        let mut request = coord_req("inbox_poll");
+        if polled_before_close { request.notification_id = Some(id); }
+        let result = env.service.coordination(Parameters(request)).await.unwrap();
+        assert!(!get_text(&result).contains(&body), "a terminal task must not receive a fresh merge demand");
+        let report = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.pending_reason, Some(cas_store::PendingReason::SupersededStale));
+        assert!(report.confirmed_at.is_some());
+    }
+}
+
 /// cas-53a7: the MCP reader must mirror its real receipt across every alias a
 /// supervisor answers to.  A broadcast reaches the pane-name alias first; if
 /// this reader drops `mirror_receipts_across_aliases`, the logical

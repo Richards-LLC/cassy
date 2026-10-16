@@ -92,7 +92,7 @@ impl Fx {
 
 #[tokio::test]
 async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
-    let mut env = TestEnvGuard::new();
+    let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);
     let recorded = fx.supervisor.verification(Parameters(fx.request())).await
         .expect("one supervisor receipt must cover the staging walk");

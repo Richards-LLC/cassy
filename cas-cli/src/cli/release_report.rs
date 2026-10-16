@@ -1908,7 +1908,7 @@ fn assemble_markdown(
     output.push_str("## Install\n\n");
     output.push_str("```bash\n");
     output.push_str(&format!(
-        "cas update  # install {tag} through the project's normal release channel\n"
+        "cas update --yes --version {version}\n"
     ));
     output.push_str("```\n\n");
     output.push_str("| Asset | Digest | Size |\n| --- | --- | ---: |\n");

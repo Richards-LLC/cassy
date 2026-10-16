@@ -88,10 +88,12 @@ def simple(source):
                 caption = 'GitHub issues closed with this release · ' + str(len(rows[2:]))
             elif rows[0][0] == 'Area' and rows[0][1] == 'Changes':
                 caption = ''  # the open <summary> above names this table
-            elif rows[0][0] == 'Measure':
-                caption = 'Release at a glance'
-            else:
+            elif rows[0][0] == 'Surface':
                 caption = 'Issues closed, by area'
+            elif rows[0][0] == 'Asset':
+                caption = 'Release assets'
+            else:
+                caption = ''
             result.append('<div class="table-wrap"><table>' + ('<caption>' + caption + '</caption>' if caption else '') + '<thead><tr>')
             for k, cell in enumerate(rows[0]):
                 num = ' class="num"' if rows[1][k].endswith(':') else ''

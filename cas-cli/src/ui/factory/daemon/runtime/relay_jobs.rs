@@ -44,6 +44,8 @@ const RELAY_WRITE_BUDGET: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Relay {
     UsageLimit,
+    NormalProbes,
+    IdleUnread,
     AuthFailure,
     Permission,
     Escalation,
@@ -55,6 +57,8 @@ impl Relay {
     fn name(self) -> &'static str {
         match self {
             Self::UsageLimit => "usage-limit",
+            Self::NormalProbes => "normal-probes",
+            Self::IdleUnread => "idle-unread",
             Self::AuthFailure => "auth-failure",
             Self::Permission => "permission",
             Self::Escalation => "escalation",
@@ -78,6 +82,17 @@ pub(crate) struct PermissionCandidate {
 
 /// What a relay job hands back to the loop.
 pub(crate) enum RelayOutput {
+    NormalProbeRead(Vec<super::delivery_probe_jobs::NormalPrepared>),
+    NormalFlagWritten {
+        row_id: i64,
+        probe: super::queue_and_events::NormalDeliveryProbe,
+        done: bool,
+    },
+    IdleUnreadRead {
+        context: super::queue_and_events::message_attention::AttentionInputs,
+        candidates: Vec<super::delivery_probe_jobs::IdleCandidate>,
+    },
+    ProbeWritten,
     /// Each candidate worker's usage-limit evidence: `(agent id, name,
     /// evidence)`.
     UsageLimitRead(
@@ -94,7 +109,12 @@ pub(crate) enum RelayOutput {
         persisted: bool,
     },
     /// Each candidate worker with its account-failure evidence.
-    AuthRead(Vec<(cas_types::Agent, crate::factory_auth_health::AuthFailureEvidence)>),
+    AuthRead(
+        Vec<(
+            cas_types::Agent,
+            crate::factory_auth_health::AuthFailureEvidence,
+        )>,
+    ),
     AuthWritten {
         agent_id: String,
         worker: String,
@@ -282,7 +302,8 @@ impl RelayJobs {
     ) -> bool {
         let key = spec.key.clone();
         // Marked first: an inline runtime finishes the job inside submit.
-        self.in_flight.insert(key.clone(), (spec.generation, Instant::now()));
+        self.in_flight
+            .insert(key.clone(), (spec.generation, Instant::now()));
         let submitted = jobs.submit_external(spec, move || {
             Box::new(work()) as Box<dyn std::any::Any + Send>
         });

@@ -57,3 +57,5 @@ pub(crate) use queue_and_events::{
 mod supervisor_notice_tests;
 
 pub(crate) mod queue_control_jobs;
+
+pub(crate) mod delivery_probe_jobs;

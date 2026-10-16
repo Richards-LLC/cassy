@@ -2,7 +2,7 @@ use crate::ui::factory::daemon::SpawnVerification;
 use crate::ui::factory::daemon::imports::*;
 
 #[path = "message_attention.rs"]
-mod message_attention;
+pub(crate) mod message_attention;
 use message_attention::MessageAttention;
 
 #[cfg(test)]
@@ -11,7 +11,7 @@ mod message_attention_tests;
 
 /// What a delivery probe learned about recipient-authored activity (GH #1163).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RecipientActivity {
+pub(crate) enum RecipientActivity {
     /// A reply or attributed task note after delivery.
     Found,
     /// The store answered: none yet.
@@ -2928,7 +2928,7 @@ const NORMAL_DELIVERY_OBSERVE_WINDOW: std::time::Duration = std::time::Duration:
 const NORMAL_DELIVERY_BUSY_RECHECK: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// A normal write that has not yet produced evidence of a harness turn.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NormalDeliveryProbe {
     pub(crate) pane: String,
     pub(crate) target: String,
@@ -2956,7 +2956,7 @@ pub(crate) struct NormalDeliveryProbe {
 /// retired itself and the supervisor read `stage=delivered` while the worker
 /// sat idle. A transcript turn record is the evidence that a turn started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum NormalDeliveryTurnEvidence {
+pub(crate) enum NormalDeliveryTurnEvidence {
     /// The transcript records this message, or any turn start, at or after
     /// delivery.
     TurnStarted,
@@ -3833,6 +3833,26 @@ impl FactoryDaemon {
                         }
                     }
                     RelayOutput::DeathSweepWritten => {}
+                    RelayOutput::NormalProbeRead(results) => {
+                        for result in results {
+                            if self.normal_delivery_probes.get(&result.row_id) == Some(&result.probe)
+                                && result.live.load(Ordering::Acquire) {
+                                self.queue_jobs.normal_probe_jobs.ready.insert(result.row_id, result);
+                            }
+                        }
+                    }
+                    RelayOutput::NormalFlagWritten { row_id, probe, done } => {
+                        if self.normal_delivery_probes.get(&row_id) == Some(&probe) {
+                            if done {
+                                self.normal_delivery_probes.remove(&row_id);
+                                self.queue_jobs.normal_probe_jobs.forget_row(row_id);
+                            } else if let Some(current) = self.normal_delivery_probes.get_mut(&row_id) {
+                                current.next_check_at = Some(Instant::now() + NORMAL_DELIVERY_BUSY_RECHECK);
+                            }
+                        }
+                    }
+                    RelayOutput::IdleUnreadRead { context, candidates } => self.decide_idle_unread_probe(basis, context, candidates),
+                    RelayOutput::ProbeWritten => {}
                     RelayOutput::EscalationRead {
                         notice_ids,
                         notice_states,
@@ -4389,79 +4409,48 @@ impl FactoryDaemon {
     /// read or acknowledged. Notification 3539008 sat 22 minutes on an idle
     /// worker; the sender bounce waits 30 minutes for a normal message and
     /// cannot tell an idle recipient from a busy one.
-    fn relay_idle_unacked_messages(&mut self, queue: &dyn cas_store::PromptQueueStore) {
-        let after = i64::try_from(IDLE_UNACKED_RELAY_AFTER.as_secs()).unwrap_or(i64::MAX);
-        let candidates =
-            match queue.delivery_stalled_candidates(&self.session_name, after, after, 50) {
-                Ok(candidates) => candidates,
-                Err(error) => {
-                    tracing::warn!(%error, "cas-913c: failed to scan idle unacked messages");
-                    return;
+    fn relay_idle_unacked_messages(&mut self, _queue: &dyn cas_store::PromptQueueStore) {
+        use super::relay_jobs::{Relay, RelayOutput};
+        self.drain_relay_jobs();
+        let context = message_attention::AttentionInputs::from_daemon(self);
+        let supervisor = self.app.supervisor_name().to_string();
+        self.relay_jobs
+            .submit_read(&mut self.queue_jobs, Relay::IdleUnread, move || {
+                let candidates =
+                    super::delivery_probe_jobs::read_idle_unread(&context, &supervisor);
+                RelayOutput::IdleUnreadRead {
+                    context,
+                    candidates,
                 }
-            };
-        let supervisor_name = self.app.supervisor_name().to_string();
-        let now = chrono::Utc::now();
-        let decisions = self.message_attention_decisions(queue, &candidates);
-        for queued in candidates {
-            if decisions.get(&queued.id) != Some(&MessageAttention::Needed) {
-                continue;
-            }
-            let target = queued.target.as_str();
-            if target == "supervisor" || target.eq_ignore_ascii_case(&supervisor_name) {
-                continue;
-            }
-            let turn_completed_at = self.recipient_turn_completion_after(target, queued.created_at);
-            let pane_silent_for = self
-                .pane_silent_since
-                .get(target)
-                .map(|since| since.elapsed());
-            if !idle_unacked_relay_due(now, queued.created_at, turn_completed_at, pane_silent_for) {
-                continue;
-            }
-            let summary: String = queued
-                .summary
-                .as_deref()
-                .unwrap_or("(no summary)")
-                .chars()
-                .take(240)
-                .collect();
-            let idle_since = turn_completed_at
-                .map(|at| at.to_rfc3339())
-                .unwrap_or_else(|| "its pane went silent".to_string());
-            let notice = format!(
-                "<system-notice>Unread message on an idle worker: notification_id={id}; target='{target}';                  from='{source}'; summary='{summary}'. The worker has been idle since {idle_since} and has                  not read or acknowledged it. Check `message_status notification_id={id}` and re-send it                  urgently (`coordination action=interrupt`) if the worker should act on it.</system-notice>",
-                id = queued.id,
-                source = queued.source,
-            );
-            let summary_line = format!("Unread on idle worker {target}: #{}", queued.id);
-            match queue.enqueue_idempotent(
-                "daemon",
-                &supervisor_name,
-                &notice,
-                Some(self.session_name.as_str()),
-                Some(&summary_line),
-                Some(cas_store::NotificationPriority::High),
-                &format!("idle-unacked:{}", queued.id),
-                None,
+            });
+        self.drain_relay_jobs();
+    }
+    fn decide_idle_unread_probe(
+        &mut self,
+        basis: u64,
+        context: message_attention::AttentionInputs,
+        candidates: Vec<super::delivery_probe_jobs::IdleCandidate>,
+    ) {
+        for candidate in candidates {
+            let row = &candidate.row;
+            if !idle_unacked_relay_due(
+                chrono::Utc::now(),
+                row.created_at,
+                candidate.completion,
+                self.pane_silent_since
+                    .get(&row.target)
+                    .map(|since| since.elapsed()),
             ) {
-                Ok(cas_store::EnqueueIdempotentResult::Created(relay_id)) => {
-                    super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
-                    tracing::warn!(
-                        target: "cas::coordination",
-                        stage = "idle_unacked_relayed",
-                        message_id = queued.id,
-                        relay_id,
-                        target_agent = %target,
-                        "cas-913c: relayed an unread message on an idle worker to the supervisor"
-                    );
-                }
-                Ok(cas_store::EnqueueIdempotentResult::AlreadyExists(_)) => {}
-                Err(error) => tracing::warn!(
-                    message_id = queued.id,
-                    %error,
-                    "cas-913c: failed to relay an unread message on an idle worker"
-                ),
+                continue;
             }
+            let key = format!("idle-unacked:{}", row.id);
+            let supervisor = self.app.supervisor_name().to_string();
+            let context = context.clone();
+            self.relay_jobs
+                .submit_write(&mut self.queue_jobs, &key, Some(basis), move || {
+                    super::delivery_probe_jobs::write_idle_unread(&context, &supervisor, candidate);
+                    super::relay_jobs::RelayOutput::ProbeWritten
+                });
         }
     }
 
@@ -4566,68 +4555,7 @@ impl FactoryDaemon {
         self.inbox_deferred_writes.remove(&row_id);
         self.urgent_wake_probes.remove(&row_id);
         self.normal_delivery_probes.remove(&row_id);
-    }
-
-    /// GH #1163: replies and attributed task notes prove the recipient is
-    /// handling work even when a mid-turn message starts no new harness turn.
-    /// Retire only the health probe: leave per-message read/ack receipts alone.
-    ///
-    /// GH #1165: this runs on the daemon loop thread under its store wait
-    /// budget. The worker's agent id comes from the director snapshot (a store
-    /// read only when the snapshot lacks it), and a store read that fails or
-    /// runs out of budget is `Unknown`: the probe waits for a later pass
-    /// instead of being judged on missing evidence.
-    fn recipient_authored_activity_after(
-        &self,
-        queue: &dyn cas_store::PromptQueueStore,
-        worker: &str,
-        after: chrono::DateTime<chrono::Utc>,
-    ) -> RecipientActivity {
-        match queue.has_message_from_since(worker, &self.session_name, after) {
-            Ok(true) => return RecipientActivity::Found,
-            Ok(false) => {}
-            Err(error) => {
-                tracing::debug!(%error, worker, "recipient reply evidence unavailable this pass");
-                return RecipientActivity::Unknown;
-            }
-        }
-        let snapshot = self
-            .app
-            .director_data()
-            .agents
-            .iter()
-            .filter(|agent| agent.name == worker)
-            .max_by_key(|agent| agent.registered_at)
-            .map(|agent| agent.id.clone());
-        let agent_id = match snapshot {
-            Some(id) => id,
-            None => match open_agent_store(self.app.cas_dir()).and_then(|store| {
-                store.list(None).map_err(crate::error::CasError::from)
-            }) {
-                Ok(agents) => match agents
-                    .into_iter()
-                    .filter(|agent| agent.name == worker)
-                    .max_by_key(|agent| agent.registered_at)
-                {
-                    Some(agent) => agent.id,
-                    None => return RecipientActivity::Absent,
-                },
-                Err(error) => {
-                    tracing::debug!(%error, worker, "recipient agent unavailable this pass");
-                    return RecipientActivity::Unknown;
-                }
-            },
-        };
-        match crate::store::open_event_store(self.app.cas_dir()).and_then(|store| {
-            Ok(store.has_event_since(cas_types::EventType::TaskNoteAdded, &agent_id, after)?)
-        }) {
-            Ok(true) => RecipientActivity::Found,
-            Ok(false) => RecipientActivity::Absent,
-            Err(error) => {
-                tracing::debug!(%error, worker, "recipient note evidence unavailable this pass");
-                RecipientActivity::Unknown
-            }
-        }
+        self.queue_jobs.normal_probe_jobs.forget_row(row_id);
     }
 
     /// Retry a normal message whose PTY write never yielded any pane output,
@@ -4635,70 +4563,91 @@ impl FactoryDaemon {
     /// `Mux::inject`, never `interrupt_and_inject`: this watchdog is evidence
     /// and visibility, not permission to auto-escalate a normal message.
     async fn resolve_normal_delivery_probes(&mut self, queue: &dyn cas_store::PromptQueueStore) {
-        let now = std::time::Instant::now();
-        // cas-ac97 (GH #1153): only a due probe reads harness evidence, so a
-        // transcript is scanned about once per observe window per message
-        // rather than on every poll.
+        use super::relay_jobs::{Relay, RelayOutput};
+        let now = Instant::now();
+        self.queue_jobs
+            .normal_probe_jobs
+            .sync_current(&self.normal_delivery_probes);
+        self.drain_relay_jobs();
         let due: Vec<_> = self
             .normal_delivery_probes
             .iter()
-            .filter(|(_, probe)| {
+            .filter(|(id, probe)| {
                 normal_delivery_probe_due(probe.delivered_at, probe.next_check_at, now)
+                    && !self.queue_jobs.normal_probe_jobs.ready.contains_key(id)
+                    && !self.relay_jobs.writing(&format!("normal-flag:{id}"))
             })
+            .take(50)
             .map(|(id, probe)| (*id, probe.clone()))
             .collect();
-        let mut actions = Vec::with_capacity(due.len());
-        for (row_id, probe) in due {
-            match self.recipient_authored_activity_after(queue, &probe.pane, probe.delivered_at_utc) {
+        if !due.is_empty() && !self.relay_jobs.reading(Relay::NormalProbes) {
+            let requests: Vec<_> = due
+                .into_iter()
+                .map(|(id, probe)| {
+                    let live = self.queue_jobs.normal_probe_jobs.track(id, &probe);
+                    let agent_id = self
+                        .app
+                        .director_data()
+                        .agents
+                        .iter()
+                        .filter(|agent| agent.name == probe.pane)
+                        .max_by_key(|agent| agent.registered_at)
+                        .map(|agent| agent.id.clone());
+                    (id, probe, agent_id, live)
+                })
+                .collect();
+            let cas_dir = self.app.cas_dir().to_path_buf();
+            let session = self.session_name.clone();
+            self.relay_jobs
+                .submit_read(&mut self.queue_jobs, Relay::NormalProbes, move || {
+                    RelayOutput::NormalProbeRead(
+                        requests
+                            .into_iter()
+                            .map(|(row_id, probe, agent_id, live)| {
+                                super::delivery_probe_jobs::read_normal_probe(
+                                    &cas_dir, &session, row_id, probe, agent_id, live,
+                                )
+                            })
+                            .collect(),
+                    )
+                });
+            self.drain_relay_jobs();
+        }
+        let mut actions = Vec::new();
+        for (row_id, prepared) in std::mem::take(&mut self.queue_jobs.normal_probe_jobs.ready) {
+            if self.normal_delivery_probes.get(&row_id) != Some(&prepared.probe)
+                || !prepared.live.load(Ordering::Acquire)
+            {
+                continue;
+            }
+            let probe = prepared.probe;
+            match prepared.activity {
                 RecipientActivity::Found => {
                     self.normal_delivery_probes.remove(&row_id);
+                    self.queue_jobs.normal_probe_jobs.forget_row(row_id);
                     continue;
                 }
-                // GH #1165: the store was busy; judge this probe on a later pass.
                 RecipientActivity::Unknown => continue,
                 RecipientActivity::Absent => {}
             }
-            let pane_output_grew = self
-                .app
-                .mux
-                .pane_bytes_received(&probe.pane)
-                .is_some_and(|bytes| bytes > probe.bytes_at_delivery);
-            let evidence = self.normal_delivery_turn_evidence(
-                &probe.pane,
-                probe.delivered_at_utc,
-                &probe.prompt,
-                pane_output_grew,
-            );
-            // GH #1163: a long turn can push its start out of the bounded tail.
-            // Share worker_status's execution evidence (including tool activity)
-            // rather than interpreting a missing start as an idle recipient.
-            let evidence = if evidence != NormalDeliveryTurnEvidence::TurnStarted
-                && crate::ui::factory::director::idle_worker_liveness(
-                    self.app.cas_dir(),
-                    &probe.pane,
-                )
-                .is_some_and(|observation| {
-                    observation.state
-                        == crate::mcp::tools::service::worker_liveness::Liveness::Executing
-                }) {
-                NormalDeliveryTurnEvidence::RecipientBusy
-            } else {
-                evidence
+            let evidence = match prepared.evidence {
+                NormalDeliveryTurnEvidence::Unavailable { .. } => {
+                    NormalDeliveryTurnEvidence::Unavailable {
+                        pane_output_grew: self
+                            .app
+                            .mux
+                            .pane_bytes_received(&probe.pane)
+                            .is_some_and(|bytes| bytes > probe.bytes_at_delivery),
+                    }
+                }
+                evidence => evidence,
             };
             let action = normal_delivery_probe_action(evidence, probe.nudge_sent_at);
-            tracing::debug!(
-                target: "cas::coordination",
-                stage = "normal_delivery_watchdog_evidence",
-                message_id = row_id,
-                target_agent = %probe.pane,
-                ?evidence,
-                ?action,
-                "cas-ac97: normal delivery watchdog read harness turn evidence"
-            );
-            actions.push((row_id, probe.pane, probe.target, evidence, action));
+            actions.push((row_id, probe, evidence, action, prepared.live));
         }
-
-        for (row_id, pane, target, evidence, action) in actions {
+        for (row_id, probe, evidence, action, live) in actions {
+            let pane = probe.pane.clone();
+            let target = probe.target.clone();
             match action {
                 NormalDeliveryProbeAction::Observed => {
                     self.normal_delivery_probes.remove(&row_id);
@@ -4720,14 +4669,14 @@ impl FactoryDaemon {
                     );
                     let nudge = self.app.mux.inject(&pane, &payload).await;
                     let (attempt, detail) = normal_delivery_watchdog_nudge_record(&nudge, evidence);
-                    if let Err(error) = queue.record_wake_attempt(row_id, attempt, Some(&detail)) {
-                        tracing::warn!(
-                            target: "cas::coordination",
-                            message_id = row_id,
-                            %error,
-                            "failed to record the delivery watchdog nudge on the row"
-                        );
-                    }
+                    let cas_dir = self.app.cas_dir().to_path_buf();
+                    self.relay_jobs.submit_write(&mut self.queue_jobs, &format!("normal-nudge:{row_id}"), None, move || {
+                        if let Err(error) = crate::store::open_prompt_queue_store(&cas_dir)
+                            .and_then(|queue| Ok(queue.record_wake_attempt(row_id, attempt, Some(&detail))?)) {
+                            tracing::warn!(row_id, %error, "failed to record delivery watchdog nudge");
+                        }
+                        RelayOutput::ProbeWritten
+                    });
                     if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
                         probe.nudge_sent_at = Some(now);
                         probe.next_check_at = Some(now + NORMAL_DELIVERY_OBSERVE_WINDOW);
@@ -4754,59 +4703,22 @@ impl FactoryDaemon {
                         self.normal_delivery_probes.remove(&row_id);
                         continue;
                     }
-                    // cas-ac97 (GH #1153): `message_status` must not keep
-                    // reading as a successful delivery for a turn that never
-                    // started. `Failed` overwrites the earlier `Fired`, so the
-                    // narrative names the failed wake. Recorded before the
-                    // relay so the row is truthful even while the relay retries.
-                    let detail = normal_delivery_watchdog_flag_detail(evidence);
-                    if let Err(error) = queue.record_wake_attempt(
-                        row_id,
-                        cas_store::WakeAttempt::Failed,
-                        Some(&detail),
-                    ) {
-                        tracing::warn!(
-                            target: "cas::coordination",
-                            message_id = row_id,
-                            %error,
-                            "failed to record the delivery watchdog flag on the row"
-                        );
-                    }
-                    // A normal message that was transport-delivered, then
-                    // ignored across the bounded retry window is worker-health
-                    // evidence, not merely an informational inbox row. Route it
-                    // through the durable worker-attention outbox so every
-                    // harness reaches the owning supervisor without a manual
-                    // worker_status poll (cas-986a).
-                    let relay = super::lifecycle::enqueue_worker_delivery_stalled_relay(
-                        self.app.cas_dir(),
-                        &pane,
-                        row_id,
-                        chrono::Utc::now(),
-                    );
-                    if !matches!(
-                        relay,
-                        super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
-                    ) {
-                        // The durable/prompt outbox has not confirmed this
-                        // incident. Keep the probe so a later sweep retries
-                        // with its stable message-id occurrence key, without
-                        // rereading the transcript on every poll.
-                        if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
-                            probe.next_check_at = Some(now + NORMAL_DELIVERY_BUSY_RECHECK);
-                        }
-                        continue;
-                    }
-                    self.normal_delivery_probes.remove(&row_id);
-                    // The durable attention outbox already contains the incident.
-                    // A second per-message system notice would bypass its coalescing.
-                    tracing::warn!(
-                        target: "cas::coordination",
-                        stage = "normal_delivery_watchdog_flagged",
-                        message_id = row_id,
-                        target_agent = %pane,
-                        ?evidence,
-                        "normal delivery started no harness turn after retry; supervisor notified without urgent escalation"
+                    let cas_dir = self.app.cas_dir().to_path_buf();
+                    let session = self.session_name.clone();
+                    self.relay_jobs.submit_write(
+                        &mut self.queue_jobs,
+                        &format!("normal-flag:{row_id}"),
+                        None,
+                        move || {
+                            let done = super::delivery_probe_jobs::write_normal_flag(
+                                &cas_dir, &session, row_id, &probe, evidence, &live,
+                            );
+                            RelayOutput::NormalFlagWritten {
+                                row_id,
+                                probe,
+                                done,
+                            }
+                        },
                     );
                 }
             }
@@ -5045,76 +4957,6 @@ impl FactoryDaemon {
             prompt,
         );
         observed.reaction.is_some() || observed.wake.is_some()
-    }
-
-    /// cas-ac97 (GH #1153): classify what the recipient's harness transcript
-    /// says happened after a normal delivery. Pane output growth is only the
-    /// fallback when no authoritative transcript exists, because the PTY echo
-    /// of the injected text grows it with no turn at all.
-    fn normal_delivery_turn_evidence(
-        &self,
-        pane_target: &str,
-        delivered_at: chrono::DateTime<chrono::Utc>,
-        prompt: &str,
-        pane_output_grew: bool,
-    ) -> NormalDeliveryTurnEvidence {
-        let unavailable = NormalDeliveryTurnEvidence::Unavailable { pane_output_grew };
-        let Some(agent) = open_agent_store(self.app.cas_dir())
-            .ok()
-            .and_then(|store| store.list(None).ok())
-            .and_then(|agents| agents.into_iter().find(|agent| agent.name == pane_target))
-        else {
-            return unavailable;
-        };
-        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
-        if cli == cas_mux::SupervisorCli::OpenCode {
-            return unavailable;
-        }
-        let Some(path) = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
-            self.app.cas_dir(),
-            &agent,
-        )
-        .filter(|path| path.is_file()) else {
-            return unavailable;
-        };
-        let message = crate::mcp::tools::service::harness_observation::observations_after_delivery(
-            &path,
-            cli,
-            delivered_at,
-            prompt,
-        );
-        let latest =
-            crate::mcp::tools::service::harness_observation::latest_turn_observations(&path, cli);
-        classify_normal_delivery_turn(
-            delivered_at,
-            message.wake.map(|observation| observation.at),
-            latest.wake.map(|observation| observation.at),
-            latest.completion.map(|observation| observation.at),
-        )
-    }
-
-    fn recipient_turn_completion_after(
-        &self,
-        pane_target: &str,
-        after: chrono::DateTime<chrono::Utc>,
-    ) -> Option<chrono::DateTime<chrono::Utc>> {
-        let Ok(store) = open_agent_store(self.app.cas_dir()) else {
-            return None;
-        };
-        let Ok(agents) = store.list(None) else {
-            return None;
-        };
-        let Some(agent) = agents.into_iter().find(|agent| agent.name == pane_target) else {
-            return None;
-        };
-        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
-        let Some(path) = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
-            self.app.cas_dir(),
-            &agent,
-        ) else {
-            return None;
-        };
-        crate::mcp::tools::service::harness_observation::turn_completion_after(&path, cli, after)
     }
 
     /// The daemon transport-handoff receipt (tests; the delivery path uses
@@ -5433,7 +5275,7 @@ impl FactoryDaemon {
             (!requested_stop).then_some(at),
         );
         self.app.mark_worker_crashed(worker_name).await;
-        self.queue_jobs.prompt_preparation.forget_pane(worker_name);
+        self.forget_probe_pane(worker_name);
         self.dead_workers.insert(worker_name.to_string());
 
         self.app
@@ -5951,7 +5793,7 @@ impl FactoryDaemon {
                 self.app.mark_worker_crashed(&worker).await;
                 self.dead_workers.insert(worker.clone());
                 self.pane_buffers.remove(&worker);
-                self.queue_jobs.prompt_preparation.forget_pane(&worker);
+                self.forget_probe_pane(&worker);
                 self.app
                     .set_error(format!("Worker '{worker}' failed during harness boot"));
                 self.app.notifier().notify_crash(&worker, &detail);
@@ -6470,6 +6312,13 @@ impl FactoryDaemon {
             // sender never wakes, whatever the payload says.
             WakeSender::Unstamped | WakeSender::Unattributed | WakeSender::Unresolvable => None,
         }
+    }
+
+    fn forget_probe_pane(&mut self, pane: &str) {
+        self.queue_jobs.prompt_preparation.forget_pane(pane);
+        self.normal_delivery_probes
+            .retain(|_, probe| probe.pane != pane && probe.target != pane);
+        self.queue_jobs.normal_probe_jobs.forget_pane(pane);
     }
 
     /// Resolve a row's stamped origin into the value the wake gate reasons
@@ -10331,7 +10180,7 @@ impl FactoryDaemon {
                         task_id_for_finish,
                     ) {
                         Ok(name) => {
-                            self.queue_jobs.prompt_preparation.forget_pane(&name);
+                            self.forget_probe_pane(&name);
                             if let Some(seed_receipt) = seed_receipt.as_deref() {
                                 crate::ui::factory::app::queue_worker_target_seed_notice(
                                     self.app.cas_dir(),
@@ -10858,7 +10707,7 @@ impl FactoryDaemon {
                     // cas-c1a2: the stopped session's output must never be
                     // quoted for a later worker reusing this name.
                     self.pane_buffers.remove(name);
-                    self.queue_jobs.prompt_preparation.forget_pane(name);
+                    self.forget_probe_pane(name);
                     // Remove shut-down workers from native Agent Teams
                     if let Some(ref teams) = self.teams {
                         let _ = teams.remove_member(name);
@@ -10871,7 +10720,7 @@ impl FactoryDaemon {
                 // cas-c1a2: the relaunch reuses the pane name; start its
                 // buffer empty so diagnostics quote the new process only.
                 self.pane_buffers.remove(&name);
-                self.queue_jobs.prompt_preparation.forget_pane(&name);
+                self.forget_probe_pane(&name);
                 // Build per-worker Teams config for the respawned worker
                 let teams_config = self.teams.as_ref().map(|t| {
                     use super::teams::TeamsManager;
@@ -10922,7 +10771,7 @@ impl FactoryDaemon {
                 // this, its register-timeout detail quoted the previous
                 // session's transcript and hid what the new Codex printed.
                 self.pane_buffers.remove(&name);
-                self.queue_jobs.prompt_preparation.forget_pane(&name);
+                self.forget_probe_pane(&name);
                 let teams_config = self.teams.as_ref().map(|t| {
                     use super::teams::TeamsManager;
                     let color_idx = self.app.worker_names().len();
@@ -11059,7 +10908,7 @@ impl FactoryDaemon {
                 let cwd = self.app.project_path().to_path_buf();
                 match self.app.mux.add_shell(&name, cwd, shell.as_deref()) {
                     Ok(_) => {
-                        self.queue_jobs.prompt_preparation.forget_pane(&name);
+                        self.forget_probe_pane(&name);
                         tracing::info!("Shell pane '{}' spawned", name);
                         self.gui_notify_pane_added(&name, cas_mux::PaneKind::Shell);
                     }
@@ -11072,7 +10921,7 @@ impl FactoryDaemon {
             }
             PendingSpawn::KillShell { name } => match self.app.mux.remove_shell(&name) {
                 Ok(()) => {
-                    self.queue_jobs.prompt_preparation.forget_pane(&name);
+                    self.forget_probe_pane(&name);
                     tracing::info!("Shell pane '{}' killed", name);
                     self.gui_notify_pane_removed(&name);
                 }

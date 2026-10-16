@@ -163,7 +163,13 @@ fn cas_031e_old_probe_read_panics_under_enforcement_control() {
     let progress = loop_watchdog::LoopProgress::new();
     let (_attachment, _enforce) =
         loop_watchdog::enforced_daemon_step(&progress, loop_watchdog::LoopPhase::PromptQueue);
-    daemon.normal_delivery_turn_evidence("worker-a", chrono::Utc::now(), "original message", false);
+    super::super::delivery_probe_jobs::normal_delivery_turn_evidence_io(
+        daemon.app.cas_dir(),
+        "worker-a",
+        chrono::Utc::now(),
+        "original message",
+        false,
+    );
 }
 
 #[tokio::test]

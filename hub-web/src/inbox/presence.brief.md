@@ -28,6 +28,15 @@ Final cloud contract §17 and §7.4; machine notices already use verified replay
 
 Native headings, lists, buttons and a consent details disclosure; all actions reachable by keyboard. Machine rows wrap on 390px and use existing light/dark/forced-colors tokens. Snapshot and notice text work without motion. Planned real-cloud proof: a disposable opted-in hub stops, a separate enrolled phone stores one signed outage, then stores the matching recovery. Local protocol-double tests prove choreography only. Runtime proof belongs to the supervisor.
 
+Forced-colors follow-up (cas-b604): the house buttons use a solid system
+ButtonBorder edge when fills are replaced by the user's palette. Enable,
+Disable, Refresh and adjacent inbox actions keep the same recognizable shape;
+the normal Glass palette and spacing remain inherited from DESIGN.md. The J19
+keyboard opt-in checks actual computed edges with forced-colors active.
+The settings summary and toggle use short visible labels under the machine
+heading; their accessible names retain the machine for readers navigating
+between controls (F02, folded from cas-8bd8).
+
 ## Critique
 
 Self-review, 2026-10-06, on the Commander build at `8c92afe2e`:

@@ -92,12 +92,23 @@ describe("operator inbox view (cas-9b7d QA round 1)", () => {
     expect(inbox.dialog.querySelector<HTMLDetailsElement>("#presence-consent-machine")!.open).toBe(true);
     expect(document.activeElement?.id).toBe("presence-details-machine");
     const enable = inbox.dialog.querySelector<HTMLButtonElement>("#presence-toggle-machine")!;
-    expect(enable.textContent).toBe("Enable alerts for Atlas");
+    const renderedSummary = inbox.dialog.querySelector("#presence-details-machine")!;
+    expect(renderedSummary.textContent).toBe("Monitoring settings");
+    expect(renderedSummary.getAttribute("aria-label")).toBe("Monitoring settings for Atlas");
+    expect(enable.textContent).toBe("Enable alerts");
+    expect(enable.getAttribute("aria-label")).toBe("Enable alerts for Atlas");
     expect(details.textContent).toContain("90 days");
     expect(details.textContent).toContain("Enable alerts, then run cas hub restart on Atlas");
     expect(details.textContent).not.toMatch(/hub reporter|presence reporting permission/);
     enable.click();
     await vi.waitFor(() => expect(controller.setMonitoring).toHaveBeenCalledWith("machine", true));
+    presence.machines[0]!.monitoring = "enabled";
+    inbox.render();
+    const disable = inbox.dialog.querySelector<HTMLButtonElement>("#presence-toggle-machine")!;
+    expect(disable.textContent).toBe("Disable alerts");
+    expect(disable.getAttribute("aria-label")).toBe("Disable alerts for Atlas");
+    disable.click();
+    await vi.waitFor(() => expect(controller.setMonitoring).toHaveBeenLastCalledWith("machine", false));
   });
 
   it("renders a verified machine notice outside conversation bubbles", () => {

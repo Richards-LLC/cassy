@@ -47,6 +47,8 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await expect(row.getByText("Monitoring is off", { exact: true })).toBeVisible({ timeout: 15_000 });
       expect(cloud.presence.get(soundwave.id)?.monitoring).toBe("disabled");
       const settings = row.locator("summary");
+      await expect(settings).toHaveText("Monitoring settings");
+      await expect(settings).toHaveAccessibleName("Monitoring settings for soundwave");
       const chevron = settings.locator(".machine-presence-chevron");
       await expect(chevron).toBeVisible();
       const closedMarker = await chevron.evaluate((node) => getComputedStyle(node).transform);
@@ -56,6 +58,29 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       expect(await chevron.evaluate((node) => getComputedStyle(node).transform)).not.toBe(closedMarker);
       await expect(row.getByText(/Enable alerts, then run cas hub restart on soundwave/)).toBeVisible();
       const enable = row.getByRole("button", { name: "Enable alerts for soundwave", exact: true });
+      await expect(enable).toHaveText("Enable alerts");
+      await page.emulateMedia({ forcedColors: "active" });
+      expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+      for (const button of [enable, inbox.getByRole("button", { name: "Refresh machine status" }), inbox.getByRole("button", { name: "Sign out of the inbox", exact: true })]) {
+        const edges = await button.evaluate((node) => {
+          const style = getComputedStyle(node);
+          return ["Top", "Right", "Bottom", "Left"].map((side) => ({
+            width: parseFloat(style.getPropertyValue(`border-${side.toLowerCase()}-width`)),
+            style: style.getPropertyValue(`border-${side.toLowerCase()}-style`),
+            color: style.getPropertyValue(`border-${side.toLowerCase()}-color`),
+          }));
+        });
+        for (const edge of edges) {
+          expect(edge.width).toBeGreaterThan(0);
+          expect(edge.style).toBe("solid");
+          expect(edge.color).not.toBe("rgba(0, 0, 0, 0)");
+        }
+      }
+      if (process.env.QA_ARTIFACTS) {
+        await enable.scrollIntoViewIfNeeded();
+        await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/presence-enable-forced-colors.png` });
+      }
+      await page.emulateMedia({ forcedColors: null });
       await enable.focus();
       await enable.press("Enter");
       await expect(row.getByText("Waiting for the first report", { exact: true })).toBeVisible();
@@ -139,6 +164,17 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
         await expect(row.getByText(/Serve: degraded/)).toBeVisible();
         await expect(notices.getByText("soundwave recovered", { exact: true })).toBeVisible();
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        if (cell.name === "forced-colors") {
+          await row.locator("summary").click();
+          const disable = row.getByRole("button", { name: "Disable alerts for soundwave", exact: true });
+          await expect(disable).toBeVisible();
+          expect(await disable.evaluate((node) => parseFloat(getComputedStyle(node).borderTopWidth))).toBeGreaterThan(0);
+          if (process.env.QA_ARTIFACTS) {
+            await disable.scrollIntoViewIfNeeded();
+            await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/presence-disable-forced-colors.png` });
+          }
+          await inbox.getByRole("button", { name: "Refresh machine status" }).scrollIntoViewIfNeeded();
+        }
         if (process.env.QA_ARTIFACTS) await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/presence-${cell.name}.png` });
       }
     });
@@ -156,6 +192,7 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
         await settings.press("Enter");
       }
       const disable = row.getByRole("button", { name: "Disable alerts for soundwave", exact: true });
+      await expect(disable).toHaveText("Disable alerts");
       await disable.focus();
       await disable.press("Enter");
       await expect(row.getByText("Monitoring is off", { exact: true })).toBeVisible();
@@ -163,6 +200,8 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await deskInbox.getByRole("button", { name: "Refresh machine status" }).click();
       await expect(deskInbox.getByText("Monitoring is off", { exact: true })).toBeVisible();
       await expect(notices.getByText("soundwave recovered", { exact: true })).toHaveCount(1);
+      await expect(row.getByRole("button", { name: "Enable alerts for soundwave", exact: true })).toMatchAriaSnapshot('- button "Enable alerts for soundwave"');
+      if (process.env.QA_ARTIFACTS) await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/keyboard-disable.png` });
     });
   } finally {
     await peer.close();

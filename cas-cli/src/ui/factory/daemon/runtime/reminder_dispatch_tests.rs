@@ -119,7 +119,21 @@ async fn idle_supervisor_reminder_wakes_once(ci: bool) {
     let agent = daemon.app.director_data().agents.iter().find(|a| a.id == "single-sup").unwrap();
     assert!(agent.latest_activity.is_some());
     assert!(agent.last_heartbeat.is_some_and(|at| (chrono::Utc::now() - at).num_seconds() < 60));
-    let (_, body) = dispatch(&mut daemon, ci, false);
+    let (id, body) = dispatch(&mut daemon, ci, false);
+    if ci {
+        // cas-6e355: a busy pane holds the CI wake with nothing delivered...
+        let name = daemon.app.supervisor_name().to_string();
+        daemon.pane_silent_since.insert(name.clone(), Instant::now());
+        daemon.process_prompt_queue().await.unwrap();
+        let queue = open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+        let held = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(held.stage, cas_store::DeliveryStage::Gated, "{held:?}");
+        assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+        assert!(teams_messages(&daemon).is_empty());
+        // ...and becoming idle wakes it without waiting for the re-nudge
+        // interval or spending the bounded delivery budget.
+        daemon.pane_silent_since.insert(name, Instant::now() - Duration::from_secs(600));
+    }
     daemon.process_prompt_queue().await.unwrap();
     let typed = typed_once(&root, &daemon, &body).await;
     daemon.process_prompt_queue().await.unwrap();
@@ -127,8 +141,8 @@ async fn idle_supervisor_reminder_wakes_once(ci: bool) {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cas_f265_idle_supervisor_ci_reminder_wakes_once_even_with_recent_checkpoint() {
-    if child("cas_f265_idle_supervisor_ci_reminder_wakes_once_even_with_recent_checkpoint") {
+async fn cas_6e355_ci_reminder_wakes_once_when_supervisor_becomes_idle() {
+    if child("cas_6e355_ci_reminder_wakes_once_when_supervisor_becomes_idle") {
         idle_supervisor_reminder_wakes_once(true).await;
     }
 }

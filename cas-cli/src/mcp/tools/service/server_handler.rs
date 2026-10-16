@@ -622,6 +622,31 @@ fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
 mod tests {
     use super::potentially_mutating_call;
 
+    #[tokio::test]
+    async fn cas_6eec_mcp_dispatch_records_its_authenticated_workers_activity() {
+        use crate::mcp::tools::service::CasService;
+        use rmcp::model::CallToolResult;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        let worker = cas_types::Agent::new_with_role("worker-session".into(), "worker".into(), cas_types::AgentRole::Worker);
+        core.open_agent_store().unwrap().register(&worker).unwrap();
+        core.bind_agent_identity(worker.id.clone(), crate::mcp::server::AgentIdentitySource::ServerInternal).unwrap();
+        let events = crate::store::open_event_store(&root).unwrap();
+        let worker_id = worker.id.clone();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        service.call_with_deadline_and_grace("task", None, std::time::Duration::from_secs(5), std::time::Duration::from_secs(5), async move {
+            // A call in flight must already be visible, even before its result.
+            let activity = events.latest_worker_activity(&worker_id, "worker").unwrap()
+                .expect("authenticated MCP calls are worker activity");
+            assert_eq!(activity.session_id.as_deref(), Some(worker_id.as_str()));
+            assert_eq!(activity.event_type, cas_types::EventType::WorkerActivity);
+            assert!((chrono::Utc::now() - activity.created_at).num_seconds() < 5);
+            Ok(CallToolResult::success(vec![]))
+        }).await.unwrap();
+    }
+
     fn result_text(result: &rmcp::model::CallToolResult) -> String {
         serde_json::to_string(result).unwrap()
     }

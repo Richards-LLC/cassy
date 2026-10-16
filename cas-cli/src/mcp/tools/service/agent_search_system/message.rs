@@ -560,8 +560,19 @@ pub(crate) fn wake_attempt_narrative(
 /// claimed by the daemon's transport. A Claude teams handoff is claimed when
 /// the inbox file is written, but Claude Code renders it only at a turn
 /// boundary, so "claimed" is not "rendered".
-pub(crate) fn recipient_receipt_narrative(receipt: Option<cas_store::SurfacingSource>) -> String {
+pub(crate) fn recipient_receipt_narrative(
+    receipt: Option<cas_store::SurfacingSource>,
+    poll_settled: Option<&str>,
+) -> String {
     use cas_store::SurfacingSource;
+    // cas-6ccb: an inbox_poll that withheld the row, did not replay it, or
+    // showed it as a redelivery settled it; the recipient confirmed nothing.
+    if let (Some(SurfacingSource::InboxPoll), Some(reason)) = (receipt, poll_settled) {
+        return format!(
+            "recipient_receipt: {reason} (poll_settled; not an acknowledgement, and not repeated \
+             at the next turn).\n"
+        );
+    }
     let line = match receipt {
         None => return String::new(),
         Some(SurfacingSource::HookSurfaced) => {
@@ -2952,11 +2963,14 @@ impl CasService {
             }
         }
 
-        // This is an at-most-once claim for the polling API: the store records
-        // recipient-seen state in the same transaction that selects the rows,
-        // before this MCP response is handed back. That prevents concurrent
-        // duplicate delivery, but a response lost after this point is not
-        // replayed by a later poll. Daemon transport state remains independent.
+        // The store records recipient-seen state in the same transaction that
+        // selects the rows, before this MCP response is handed back. That
+        // prevents concurrent duplicate delivery; a later poll does not replay
+        // a row. cas-6ccb (GH #1215): a row polled but never acknowledged with
+        // message_ack is shown once more by the next turn's hook (the
+        // `inbox_poll` receipt, older than that turn, with no ack), so a row
+        // polled mid-turn and not acted on is not lost. Daemon transport state
+        // remains independent.
         // cas-3bf1 (GH #176): poll every alias this agent answers to, not just
         // its registered pane name. A supervisor answers to two, and rows
         // addressed to the logical `supervisor` alias were previously
@@ -3039,6 +3053,7 @@ impl CasService {
         // operator-readable reason; no suppression may disappear silently.
         let mut withheld: Vec<(i64, String)> = Vec::new();
         let mut redelivered = 0usize;
+        let mut shown_redeliveries: Vec<i64> = Vec::new();
         // cas-098d (GH #904): older transport deliveries are claimed and named,
         // not replayed.
         let mut replays: Vec<(i64, String)> = Vec::new();
@@ -3232,6 +3247,8 @@ impl CasService {
                 }
                 InboxRedelivery::MarkRedelivery => {
                     redelivered += 1;
+                    // cas-6ccb: shown again in full here; no third showing.
+                    shown_redeliveries.push(message.id);
                     body.push_str(&format!(
                         "**[{}] From: {} — {INBOX_REDELIVERY_MARKER} (already delivered {})**\n\
                         Summary: {}\n{}\n{}Message: {}\n\n",
@@ -3260,6 +3277,28 @@ impl CasService {
                 }
             }
             rendered += 1;
+        }
+        // cas-6ccb (GH #1215): a row this poll withheld as already done, or
+        // named without replaying it, is settled now, so the next turn's
+        // repeat of unacknowledged polled rows never brings back its body.
+        // No ack and no stage change: the recipient confirmed none of these.
+        let settled: Vec<(i64, String)> = withheld
+            .iter()
+            .map(|(id, reason)| (*id, format!("withheld by inbox_poll: {reason}")))
+            .chain(replays.iter().map(|(id, what)| {
+                (*id, format!("not replayed by inbox_poll: {what}"))
+            }))
+            .chain(shown_redeliveries.iter().map(|id| {
+                (*id, "shown again by inbox_poll as an earlier delivery".to_string())
+            }))
+            .collect();
+        if let Err(error) = queue.settle_polled_rows(&aliases, &settled) {
+            tracing::warn!(
+                target: "cas::coordination",
+                recipient = %recipient,
+                %error,
+                "cas-6ccb: could not settle withheld inbox rows; they may be repeated once"
+            );
         }
 
         let replay_note = (!replays.is_empty()).then(|| {
@@ -3301,9 +3340,10 @@ impl CasService {
         }
 
         let mut output = format!(
-            "Pulled {rendered} unread message(s) for {recipient} (at-most-once inbox claim: \
-             marked seen before this response is delivered; daemon transport delivery is \
-             unchanged)"
+            "Pulled {rendered} unread message(s) for {recipient} (inbox claim: marked seen \
+             now; a direct message you neither message_ack nor answer is shown once more at \
+             your next turn, except broadcasts and rows withheld or marked already delivered \
+             here; daemon transport delivery is unchanged)"
         );
         if redelivered > 0 {
             output.push_str(&format!(
@@ -3563,7 +3603,10 @@ impl CasService {
                 // `wake_attempt` is the daemon's own record of which of those
                 // happened; `wake` remains recipient-side evidence.
                 let wake_attempt_line = wake_attempt_narrative(r.wake_attempt, r.wake);
-                let receipt_line = recipient_receipt_narrative(r.recipient_receipt);
+                let receipt_line = recipient_receipt_narrative(
+                    r.recipient_receipt,
+                    r.recipient_poll_settled.as_deref(),
+                );
                 // cas-15f2: a row that no daemon can select used to read
                 // "awaiting_delivery" for a full 15 minutes and then flip to
                 // abandoned, so the operator watching it had no way to tell
@@ -4101,11 +4144,18 @@ mod inbox_poll_identity_tests {
     #[test]
     fn recipient_receipt_separates_rendered_from_claimed() {
         use cas_store::SurfacingSource;
-        let rendered = super::recipient_receipt_narrative(Some(SurfacingSource::HookSurfaced));
-        let claimed = super::recipient_receipt_narrative(Some(SurfacingSource::TransportClaimed));
+        let rendered = super::recipient_receipt_narrative(Some(SurfacingSource::HookSurfaced), None);
+        let claimed = super::recipient_receipt_narrative(Some(SurfacingSource::TransportClaimed), None);
         assert!(rendered.contains("rendered —"), "{rendered}");
         assert!(claimed.contains("claimed, not rendered"), "{claimed}");
-        assert!(super::recipient_receipt_narrative(None).is_empty());
+        assert!(super::recipient_receipt_narrative(None, None).is_empty());
+        // cas-6ccb: a settled poll receipt says why, and that it is no ack.
+        let settled = super::recipient_receipt_narrative(
+            Some(SurfacingSource::InboxPoll),
+            Some("withheld by inbox_poll: merge request for cas-1, already done"),
+        );
+        assert!(settled.starts_with("recipient_receipt: withheld by inbox_poll:"), "{settled}");
+        assert!(settled.contains("not an acknowledgement"), "{settled}");
     }
 
     /// The three wake-attempt states must read differently. If two of them

@@ -4273,3 +4273,195 @@ async fn cas_9b5d_edges_ahead_of_pending_endpoints_do_not_fill_the_batch() {
     assert!(first.get("tasks").is_some(), "{first}");
     assert!(first.get("task_dependencies").is_none(), "{first}");
 }
+
+/// cas-9b5d: one automatic daemon sync (`sync_with_sessions`) against a mock
+/// cloud, for a store that is personal, team-linked, or team-only. Returns the
+/// requests per endpoint, the queue and the sync result.
+async fn cas_9b5d_daemon_sync(
+    team_id: Option<&str>,
+    team_only: bool,
+) -> (
+    std::collections::BTreeMap<&'static str, usize>,
+    tempfile::TempDir,
+    Arc<SyncQueue>,
+    SyncResult,
+) {
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation};
+    use crate::store::{
+        open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
+        open_rule_store_local, open_skill_store_local, open_spec_store, open_store_local,
+        open_task_store_local,
+    };
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tasks": {"inserted": 1, "updated": 0, "skipped": 0}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/sync/pull"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [], "tasks": [], "rules": [], "skills": [],
+            "pulled_at": "2026-10-16T12:00:00Z",
+        })))
+        .mount(&server)
+        .await;
+    if let Some(team_id) = team_id {
+        Mock::given(method("GET"))
+            .and(path(format!("/api/teams/{team_id}/sync/pull")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [], "tasks": [], "rules": [], "skills": [],
+                "task_dependencies": [],
+                "pulled_at": "2026-10-16T12:00:00Z",
+                "team_id": team_id,
+                "status": "ok",
+            })))
+            .mount(&server)
+            .await;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    let store = open_store_local(temp.path()).unwrap();
+    let task_store = open_task_store_local(temp.path()).unwrap();
+    let rule_store = open_rule_store_local(temp.path()).unwrap();
+    let skill_store = open_skill_store_local(temp.path()).unwrap();
+    let spec_store = open_spec_store(temp.path()).unwrap();
+    let event_store = open_event_store(temp.path()).unwrap();
+    let prompt_store = open_prompt_store(temp.path()).unwrap();
+    let file_change_store = open_file_change_store(temp.path()).unwrap();
+    let commit_link_store = open_commit_link_store(temp.path()).unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    queue
+        .enqueue(
+            EntityType::Task,
+            "personal-row",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"personal-row","title":"personal-row","origin_project":"p"}"#),
+        )
+        .unwrap();
+    if let Some(team_id) = team_id {
+        // gabber-studio's stuck team watermark (cas-59d9 preflight).
+        queue
+            .set_metadata(
+                &format!("last_team_pull_at_{team_id}_p"),
+                "2026-10-15T21:52:10.801Z",
+            )
+            .unwrap();
+    }
+
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            team_id: team_id.map(str::to_string),
+            team_only,
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "p".into(),
+        temp.path(),
+    );
+    let result = syncer
+        .sync_with_sessions(
+            store.as_ref(),
+            task_store.as_ref(),
+            rule_store.as_ref(),
+            skill_store.as_ref(),
+            spec_store.as_ref(),
+            event_store.as_ref(),
+            prompt_store.as_ref(),
+            file_change_store.as_ref(),
+            commit_link_store.as_ref(),
+            &[],
+        )
+        .unwrap();
+
+    let mut calls = std::collections::BTreeMap::new();
+    for request in server.received_requests().await.unwrap() {
+        let key = match (request.method.as_str(), request.url.path()) {
+            ("POST", "/api/sync/push") => "personal_push",
+            ("GET", "/api/sync/pull") => "personal_pull",
+            ("GET", p) if p.ends_with("/sync/pull") => "team_pull",
+            ("POST", p) if p.ends_with("/sync/push") => "team_push",
+            _ => "other",
+        };
+        *calls.entry(key).or_default() += 1;
+    }
+    (calls, temp, queue, result)
+}
+
+/// cas-9b5d: prowl's team-linked stores (team_id set, team_only off) pushed
+/// personal rows the cloud refused as team_owned_project every daemon tick,
+/// and never pulled team scope, so gabber-studio's team watermark stayed at
+/// a manual sync from the day before. The daemon must follow cas-421e: team
+/// scope only, personal rows left queued and untouched.
+#[tokio::test]
+async fn cas_9b5d_team_linked_daemon_sync_uses_team_scope_only() {
+    let (calls, _temp, queue, result) = cas_9b5d_daemon_sync(Some("team-1"), false).await;
+
+    assert_eq!(calls.get("personal_push"), None, "{calls:?}");
+    assert_eq!(calls.get("personal_pull"), None, "{calls:?}");
+    assert_eq!(calls.get("team_pull"), Some(&1), "{calls:?}");
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(
+        queue
+            .get_metadata("last_team_pull_at_team-1_p")
+            .unwrap()
+            .as_deref(),
+        Some("2026-10-16T12:00:00Z"),
+        "the team watermark advances"
+    );
+    let rows = queue.list_all(10).unwrap();
+    assert_eq!(rows.len(), 1, "the personal row stays queued");
+    assert_eq!(rows[0].entity_id, "personal-row");
+    assert_eq!(rows[0].team_id.as_deref().unwrap_or(""), "");
+    assert_eq!(rows[0].retry_count, 0);
+    assert_eq!(rows[0].last_error, None);
+}
+
+/// cas-9b5d control: team-only stores already synced in team scope.
+#[tokio::test]
+async fn cas_9b5d_team_only_daemon_sync_stays_team_scoped() {
+    let (calls, _temp, queue, result) = cas_9b5d_daemon_sync(Some("team-1"), true).await;
+
+    assert_eq!(calls.get("personal_push"), None, "{calls:?}");
+    assert_eq!(calls.get("personal_pull"), None, "{calls:?}");
+    assert_eq!(calls.get("team_pull"), Some(&1), "{calls:?}");
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(
+        queue
+            .get_metadata("last_team_pull_at_team-1_p")
+            .unwrap()
+            .as_deref(),
+        Some("2026-10-16T12:00:00Z")
+    );
+}
+
+/// cas-9b5d control: a personal store keeps its personal push and pull.
+#[tokio::test]
+async fn cas_9b5d_personal_daemon_sync_is_unchanged() {
+    let (calls, _temp, queue, result) = cas_9b5d_daemon_sync(None, false).await;
+
+    assert_eq!(calls.get("personal_push"), Some(&1), "{calls:?}");
+    assert_eq!(calls.get("personal_pull"), Some(&1), "{calls:?}");
+    assert_eq!(calls.get("team_pull"), None, "{calls:?}");
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.pushed_tasks, 1);
+    assert!(queue.list_all(10).unwrap().is_empty());
+    assert_eq!(
+        queue.get_metadata("last_pull_at").unwrap().as_deref(),
+        Some("2026-10-16T12:00:00Z")
+    );
+}

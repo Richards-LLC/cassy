@@ -11,6 +11,8 @@ mod blame_attribution_test;
 mod cloud_login_scope_test;
 #[path = "../history_search_production_path_test.rs"]
 mod history_search_production_path_test;
+#[path = "../hub_idle_sync_test.rs"]
+mod hub_idle_sync_test;
 #[path = "../knowledge_distillation_test.rs"]
 mod knowledge_distillation_test;
 #[path = "../known_repos_binding_test.rs"]

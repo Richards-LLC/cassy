@@ -492,8 +492,7 @@ impl WatchBook {
             .filter(|watch| {
                 watch.channel_id == channel
                     && (watch.watched_thread_roots.contains(thread)
-                        || watch.violet_thread_roots.contains(thread)
-                        || watch.has_seen(&watch.message_key(thread)))
+                        || watch.violet_thread_roots.contains(thread))
             })
             .min_by(|a, b| {
                 a.started_at

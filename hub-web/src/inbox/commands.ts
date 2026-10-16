@@ -211,7 +211,7 @@ async function save(context: CommandContext, command: QueuedCommand, patch: Part
 }
 
 /** Submit (or re-submit) one stored command; never mints a new ID. */
-async function submit(context: CommandContext, command: QueuedCommand, target: CommandTarget): Promise<QueuedCommand> {
+async function submitRequest(context: CommandContext, command: QueuedCommand, target: CommandTarget): Promise<QueuedCommand> {
   let current = command;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (!current.request) current = await save(context, current, { request: await sealRequest(context, current, target), state: "submitting" });
@@ -231,6 +231,29 @@ async function submit(context: CommandContext, command: QueuedCommand, target: C
     }
   }
   return current;
+}
+
+// Coalesce callers in this store; Web Locks also serialize other tabs of the
+// same browser profile. A command's sealed bytes must be durable before retry.
+const submitting = new WeakMap<InboxStore, Map<string, Promise<QueuedCommand>>>();
+async function submit(context: CommandContext, command: QueuedCommand, target: CommandTarget): Promise<QueuedCommand> {
+  let inFlight = submitting.get(context.store);
+  if (!inFlight) submitting.set(context.store, inFlight = new Map());
+  const existing = inFlight.get(command.commandId);
+  if (existing) return existing;
+  const work = async () => {
+    // syncCommands may have read its row before another caller finished.
+    const current = (await context.store.commands(context.identity.accountId)).find(row => row.commandId === command.commandId);
+    if (!current) throw new CommandRefusal("command_missing");
+    if (current.state !== "sealing" && current.state !== "submitting") return current;
+    return submitRequest(context, current, target);
+  };
+  const locks = typeof navigator === "undefined" ? undefined : navigator.locks;
+  const pending = Promise.resolve(locks
+    ? locks.request(`cas-operator-command:${command.accountId}:${command.commandId}`, { mode: "exclusive" }, work)
+    : work());
+  inFlight.set(command.commandId, pending);
+  try { return await pending; } finally { inFlight.delete(command.commandId); }
 }
 
 export async function queueOfflineMessage(context: CommandContext, target: CommandTarget, body: string): Promise<QueuedCommand> {

@@ -2,7 +2,7 @@
 // double. The machine side (reserve, admit once, receipt) is Rust,
 // cas-cli/src/hub/operator_inbox/commands.rs.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { OperatorCloudDouble } from "../../test/operator-cloud-double";
 import { cancelOfflineMessage, commandStatusLabel, queueOfflineMessage, sessionRoutingId, syncCommands, type CommandContext } from "./commands";
 import { completeEnrollment, pollEnrollment, refreshEpochKeys, startEnrollment } from "./enrollment";
@@ -41,13 +41,36 @@ async function setup() {
 }
 
 describe("offline operator messages (§10)", () => {
-  it("queue as Pending machine, replay to other devices, and read Accepted after the machine's receipt", async () => {
+  it("concurrent replay keeps one sealed request and cannot replace Accepted with Not sent", async () => {
     const { cloud, machine, machineKeys, target, scope } = await setup();
     const phone = await device(cloud, "new phone", scope);
-    const queued = await queueOfflineMessage(phone.context, target, "Ship it once soundwave is back");
-    expect(queued.state).toBe("pending_machine");
-    expect(commandStatusLabel(queued.state)).toBe("Waiting for the machine");
-    expect(commandStatusLabel(queued.state, "soundwave")).toBe("Waiting for soundwave");
+    const gate = () => {
+      let release!: () => void;
+      const wait = new Promise<void>(resolve => { release = resolve; });
+      return { wait, release };
+    };
+    const sealing = gate(), continueSeal = gate(), syncRead = gate(), staleRead = gate(), continueSync = gate();
+    const principals = phone.client.principals.bind(phone.client);
+    vi.spyOn(phone.client, "principals").mockImplementationOnce(async () => {
+      sealing.release(); await continueSeal.wait; return principals();
+    });
+    const queueing = queueOfflineMessage(phone.context, target, "Ship it once soundwave is back");
+    await sealing.wait;
+    const commands = phone.store.commands.bind(phone.store);
+    vi.spyOn(phone.store, "commands").mockImplementationOnce(async account => {
+      const rows = await commands(account);
+      syncRead.release(); return rows;
+    }).mockImplementationOnce(async account => {
+      const rows = await commands(account);
+      expect(rows[0].state).toBe("sealing");
+      staleRead.release(); await continueSync.wait; return rows;
+    });
+    const replaying = syncCommands(phone.context);
+    await syncRead.wait;
+    const delayedSync = syncCommands(phone.context);
+    await staleRead.wait;
+    continueSeal.release();
+    const [queued] = await Promise.all([queueing, replaying]);
 
     // The machine can open exactly this command with its own key and IDs.
     const stored = cloud.commands.get(queued.commandId)!;
@@ -73,8 +96,19 @@ describe("offline operator messages (§10)", () => {
 
     cloud.acceptCommand(queued.commandId);
     const [synced] = await syncCommands(phone.context);
+
+    // This replay began during sealing but resumes after the accepted receipt.
+    continueSync.release();
+    const [stale] = await delayedSync;
+    expect(queued.state).toBe("pending_machine");
+    expect(commandStatusLabel(queued.state)).toBe("Waiting for the machine");
+    expect(commandStatusLabel(queued.state, "soundwave")).toBe("Waiting for soundwave");
     expect(synced.state).toBe("accepted");
     expect(commandStatusLabel(synced.state, "soundwave")).toBe("soundwave received it");
+    expect(stale.state).toBe("accepted");
+    expect(stale.request).toEqual(queued.request);
+    expect((await phone.store.commands(cloud.accountId))[0].state).toBe("accepted");
+    expect(cloud.log.filter(r => r.method === "POST" && r.path === "/api/operator/commands")).toHaveLength(1);
   });
 
   it("refuses a session this device was not granted, before anything leaves the device", async () => {

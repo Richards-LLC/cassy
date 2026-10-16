@@ -24560,6 +24560,181 @@ mod merge_state_gate_tests {
         assert!(response.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.contains("MERGE REQUIRED"))));
     }
 
+    /// cas-44e93: a per-task factory branch pushed once (`pushed`), with a
+    /// local-only child commit (`local`) checked out — the cas-e460 shape.
+    struct UnpushedAnchorFixture {
+        _env: TestEnvGuard,
+        dir: TempDir,
+        _bare: TempDir,
+        store: std::sync::Arc<dyn cas_store::TaskStore>,
+        service: crate::mcp::CasService,
+        task_id: String,
+        branch: String,
+        pushed: String,
+        local: String,
+    }
+
+    fn unpushed_anchor_fixture(status: TaskStatus, recorded_anchor: AnchorChoice) -> UnpushedAnchorFixture {
+        use cas_types::{Agent, AgentRole, WorkTarget};
+
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "worker");
+        let dir = init_factory_repo("anchor-worker");
+        let p = dir.path();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        git(p, &["push", "-q", "origin", "main"]);
+        let task_id = "cas-anchor".to_string();
+        let branch = format!("factory/anchor-worker-{task_id}");
+        git(p, &["checkout", "-q", "-b", &branch]);
+        std::fs::write(p.join("delivery.rs"), "// cas-anchor delivery\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-anchor): delivery"]);
+        git(p, &["push", "-q", "origin", &branch]);
+        let pushed = rev_parse_local(p, &branch);
+        std::fs::write(p.join("delivery.rs"), "// cas-anchor delivery, local follow-up\n").unwrap();
+        git(p, &["commit", "-q", "-am", "fix(cas-anchor): local follow-up"]);
+        let local = rev_parse_local(p, &branch);
+        let root = p.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-anchor-fixture\"\n[verification]\nenabled = false\n",
+        )
+        .unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        let core = CasCore::with_daemon(root, None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                "anchor-worker-id".into(),
+                "anchor-worker".into(),
+                AgentRole::Worker,
+            ))
+            .unwrap();
+        core.set_agent_id_for_testing("anchor-worker-id".into());
+        let mut task = Task::new(task_id.clone(), "Anchor delivery".into());
+        task.status = status;
+        task.task_type = TaskType::Bug;
+        task.assignee = Some("anchor-worker".into());
+        task.risk = vec![TaskRisk::None];
+        task.deliverables.factory_branch_anchor = Some(match recorded_anchor {
+            AnchorChoice::Pushed => pushed.clone(),
+            AnchorChoice::Local => local.clone(),
+        });
+        task.deliverables.parked_branch = Some(branch.clone());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-anchor-fixture".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&task).unwrap();
+        UnpushedAnchorFixture {
+            _env: env,
+            dir,
+            _bare: bare,
+            store,
+            service: crate::mcp::CasService::new(core, None),
+            task_id,
+            branch,
+            pushed,
+            local,
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum AnchorChoice {
+        Pushed,
+        Local,
+    }
+
+    async fn close_text(fixture: &UnpushedAnchorFixture) -> (Option<bool>, String) {
+        let response = fixture
+            .service
+            .task(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action": "close",
+                    "id": fixture.task_id,
+                    "reason": "ready for review",
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        let text = response
+            .content
+            .iter()
+            .filter_map(|content| match &content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (response.is_error, text)
+    }
+
+    // cas-44e93 AC1: cas-e460 closed with a local-only child of its pushed
+    // tip checked out and parked that commit, which origin never had.
+    #[tokio::test]
+    async fn cas_44e93_close_refuses_local_only_tip_naming_pushed_tip() {
+        let fixture = unpushed_anchor_fixture(TaskStatus::InProgress, AnchorChoice::Pushed);
+        assert!(!git_commit_is_ancestor(
+            fixture.dir.path(),
+            &fixture.local,
+            &format!("origin/{}", fixture.branch)
+        ));
+        let (is_error, text) = close_text(&fixture).await;
+        assert_eq!(is_error, Some(true), "{text}");
+        assert!(text.contains(&fixture.pushed), "refusal must name the pushed tip: {text}");
+        let stored = fixture.store.get(&fixture.task_id).unwrap();
+        assert_ne!(stored.status, TaskStatus::AwaitingMerge, "{text}");
+        assert_ne!(
+            stored.deliverables.factory_branch_anchor.as_deref(),
+            Some(fixture.local.as_str()),
+            "a commit origin does not have must never become the delivery anchor"
+        );
+    }
+
+    // cas-44e93 AC2: once an unpushed anchor was recorded, re-closing from
+    // the pushed tip moves the anchor there; no request_changes needed.
+    #[tokio::test]
+    async fn cas_44e93_reclose_from_pushed_tip_reanchors_unpushed_anchor() {
+        let fixture = unpushed_anchor_fixture(TaskStatus::AwaitingMerge, AnchorChoice::Local);
+        git(fixture.dir.path(), &["reset", "-q", "--hard", &fixture.pushed]);
+        let (is_error, text) = close_text(&fixture).await;
+        assert_eq!(is_error, Some(true), "{text}");
+        assert!(text.contains("MERGE REQUIRED"), "{text}");
+        let stored = fixture.store.get(&fixture.task_id).unwrap();
+        assert_eq!(stored.status, TaskStatus::AwaitingMerge, "{text}");
+        assert_eq!(
+            stored.deliverables.factory_branch_anchor.as_deref(),
+            Some(fixture.pushed.as_str()),
+            "{}",
+            stored.notes
+        );
+    }
+
+    // cas-44e93 AC3: a pushed descendant of a pushed anchor still advances.
+    #[tokio::test]
+    async fn cas_44e93_pushed_descendant_still_advances_parked_anchor() {
+        let fixture = unpushed_anchor_fixture(TaskStatus::AwaitingMerge, AnchorChoice::Pushed);
+        git(fixture.dir.path(), &["push", "-q", "origin", &fixture.branch]);
+        let (is_error, text) = close_text(&fixture).await;
+        assert_eq!(is_error, Some(true), "{text}");
+        assert!(text.contains("MERGE REQUIRED"), "{text}");
+        let stored = fixture.store.get(&fixture.task_id).unwrap();
+        assert_eq!(
+            stored.deliverables.factory_branch_anchor.as_deref(),
+            Some(fixture.local.as_str()),
+            "{}",
+            stored.notes
+        );
+    }
+
     #[tokio::test]
     async fn ordinary_reopen_keeps_unreviewed_merge_request_actionable_cas_1cc7() {
         use crate::prompt_revalidation::{

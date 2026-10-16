@@ -6224,9 +6224,10 @@ mod workspace_contract_tests {
         ] {
             assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
         }
-        for command in [
+        let commands = [
             // H1: the find expression arrives on stdin.
-            "printf 'x' | xargs find docs",
+            // (The catch-all only judges commands that name a policy word.)
+            "printf 'grant-write' | xargs find docs",
             "grep -l grant-write docs/* | xargs find",
             // H2: replace mode makes the awk program a placeholder.
             "printf 'x' | xargs -I{} awk {} docs/grant-write.md",
@@ -6250,11 +6251,16 @@ mod workspace_contract_tests {
             "jq -L /tmp/mods 'import \"x\" as x; .' f | grep grant-write",
             "jq --rawfile x /etc/shadow -n '$x' | grep grant-write",
             "jq -f prog.jq f | grep grant-write",
-        ] {
-            let denial = operator_policy_command_denial(command)
-                .unwrap_or_else(|| panic!("{command} must be refused"));
-            assert!(denial.contains("OPERATOR-ONLY"), "{denial}");
-        }
+        ];
+        // Collect every leak so one run shows the whole gap.
+        let admitted: Vec<&str> = commands
+            .into_iter()
+            .filter(|command| {
+                !operator_policy_command_denial(command)
+                    .is_some_and(|denial| denial.contains("OPERATOR-ONLY"))
+            })
+            .collect();
+        assert!(admitted.is_empty(), "must be refused: {admitted:#?}");
     }
 
     /// cas-3c26: an agent cannot change the role environment its own commands

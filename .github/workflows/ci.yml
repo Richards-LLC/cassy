@@ -972,6 +972,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      # cas-4427: redundant now that Commander bundles its fonts; removal pending operator approval.
       # cas-c4b2: the app ships no fonts, so its sans-serif and monospace
       # stacks resolve to whatever the machine renders. Ubuntu's hosted image
       # renders DejaVu, which moved the J2, J5, J14 and J15 layouts; the

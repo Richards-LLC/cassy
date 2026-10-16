@@ -610,6 +610,14 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
             }
+            "qa.mode" => {
+                let mode = match value.trim() {
+                    "per_task" => QaMode::PerTask,
+                    "batch" => QaMode::Batch,
+                    _ => return Err(MemError::Parse("qa.mode must be per_task or batch".into())),
+                };
+                self.qa.get_or_insert_with(QaConfig::default).mode = mode;
+            }
             "qa.independent_pass" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);
                 qa.independent_pass = value

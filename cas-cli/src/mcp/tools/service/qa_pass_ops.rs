@@ -11,6 +11,36 @@ use crate::qa_pass::PreExistingIssue;
 use cas_types::{Dependency, DependencyType, QaPass, QaVerdict, TaskStatus};
 
 impl CasService {
+    pub(super) async fn verification_batch_receipt(&self, req: VerificationRequest)
+        -> Result<CallToolResult, McpError> {
+        let reject = |reason: String| Self::error(ErrorCode::INVALID_PARAMS,
+            format!("batch_receipt rejected: {reason}"));
+        let recorder = self.inner.resolve_live_supervisor_authority()
+            .map_err(|_| reject("requires a live registered supervisor".into()))?;
+        let config = crate::config::Config::load(&self.inner.cas_root).map_err(|e| reject(e.to_string()))?;
+        if config.qa().mode != crate::config::QaMode::Batch {
+            return Err(reject("requires qa.mode=batch".into()));
+        }
+        let receipt = crate::qa_batch::prepare_receipt(&self.inner.cas_root, &recorder,
+            req.task_ids.as_deref().ok_or_else(|| reject("task_ids is required".into()))?,
+            required(req.staging_sha.as_deref(), "staging_sha")?,
+            required(req.ledger_artifact_id.as_deref(), "ledger_artifact_id")?,
+            std::path::Path::new(required(req.ledger_path.as_deref(), "ledger_path")?))
+            .map_err(reject)?;
+        cas_store::record_qa_batch_receipt(&self.inner.cas_root, &receipt)
+            .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+        let note = format!("[{}] QA batch receipt {}: staging={} ledger={} recorder={}",
+            receipt.recorded_at, receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.recorder_agent_id);
+        for task_id in receipt.task_heads.keys() {
+            if let Err(error) = self.inner.open_task_store()?.append_note(task_id, &note) {
+                tracing::warn!(%task_id, %error, "batch receipt recorded but task audit note failed");
+            }
+        }
+        Ok(Self::success(format!("Batch QA receipt {} recorded: {} tasks at staging {}. Ledger: {} ({}).",
+            receipt.id, receipt.task_heads.len(), receipt.staging_sha,
+            receipt.ledger_artifact_id, receipt.ledger_path)))
+    }
+
     pub(super) async fn verification_qa_record(
         &self,
         req: VerificationRequest,
@@ -389,15 +419,32 @@ impl CasService {
         req: VerificationRequest,
     ) -> Result<CallToolResult, McpError> {
         let task_id = required(req.task_id.as_deref(), "task_id")?;
+        let mut batch = String::new();
+        if crate::config::Config::load(&self.inner.cas_root).is_ok_and(|c| c.qa().mode == crate::config::QaMode::Batch) {
+            let task = self.inner.open_task_store()?.get(task_id)
+                .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+            let (repo, target) = crate::qa_batch::task_context(&self.inner.cas_root, &task)
+                .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+            let receipt = match task.deliverables.factory_branch_anchor.as_deref() {
+                Some(head) => crate::qa_batch::satisfying_receipt(&self.inner.cas_root, &task, &repo, &target, head)
+                    .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?,
+                None => None,
+            };
+            batch = match receipt {
+                Some(receipt) => format!("Batch QA PASS for {task_id}: receipt={} staging={} ledger={} ({}).\n",
+                    receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.ledger_path),
+                None => format!("Batch QA: no valid staging receipt for {task_id}'s current delivery.\n"),
+            };
+        }
         let _ = cas_store::latest_qa_pass(&self.inner.cas_root, task_id, chrono::Utc::now());
         let passes = cas_store::list_qa_passes(&self.inner.cas_root, task_id)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         if passes.is_empty() {
             return Ok(Self::success(format!(
-                "No independent QA pass recorded for {task_id}."
+                "{batch}No independent QA pass recorded for {task_id}."
             )));
         }
-        let mut out = format!("Independent QA passes for {task_id} (newest first):\n");
+        let mut out = format!("{batch}Independent QA passes for {task_id} (newest first):\n");
         for pass in &passes {
             out.push_str(&format!(
                 "- {} round {} @{} {} reviewer={} qa_task={} ledger={}{}\n",

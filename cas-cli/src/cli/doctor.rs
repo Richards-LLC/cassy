@@ -8436,34 +8436,98 @@ mod tests {
     }
 
     #[test]
+    fn violet_wake_check_prefers_v2_and_preserves_legacy_cas_639c() {
+        use crate::ui::factory::daemon::runtime::violet_activity::WatchBook;
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        let native = WatchBook::path(dir.path());
+        let legacy = native.with_file_name("watches.json");
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        let claim = (now - chrono::Duration::seconds(30)).to_rfc3339();
+        let legacy_bytes = format!(
+            r#"{{"watches": [], "relay": {{"last_claim_at": "{claim}", "consecutive_errors": 4, "last_error": "claim: HTTP 503"}}}}"#
+        );
+        std::fs::write(&legacy, &legacy_bytes).unwrap();
+        let check = violet_wake_check(dir.path(), now)
+            .expect("pre-migration legacy health remains visible");
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        assert!(check.message.contains("HTTP 503"), "{}", check.message);
+        assert!(!native.exists(), "a doctor read must not migrate state");
+        assert_eq!(std::fs::read(&legacy).unwrap(), legacy_bytes.as_bytes());
+
+        let native_bytes = format!(
+            r#"{{"format_version":2,"watches": [], "relay": {{"last_claim_at": "{claim}", "last_ok_at": "{claim}"}}}}"#
+        );
+        std::fs::write(&native, &native_bytes).unwrap();
+        let check = violet_wake_check(dir.path(), now).unwrap();
+        assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+        assert!(
+            check.message.contains("last claim 30s ago"),
+            "{}",
+            check.message
+        );
+        assert_eq!(std::fs::read(&native).unwrap(), native_bytes.as_bytes());
+        assert_eq!(std::fs::read(&legacy).unwrap(), legacy_bytes.as_bytes());
+
+        for invalid in [
+            br#"{"format_version":999,"watches":[]}"#.as_slice(),
+            b"{truncated".as_slice(),
+        ] {
+            std::fs::write(&native, invalid).unwrap();
+            assert!(
+                violet_wake_check(dir.path(), now).is_none(),
+                "present unsupported/corrupt v2 must never revive stale legacy health"
+            );
+            assert_eq!(std::fs::read(&native).unwrap(), invalid);
+            assert_eq!(std::fs::read(&legacy).unwrap(), legacy_bytes.as_bytes());
+        }
+    }
+
+    #[test]
     fn violet_wake_check_reads_the_watch_book_cas_a897() {
         let dir = tempfile::tempdir().unwrap();
         let now = chrono::Utc::now();
-        assert!(violet_wake_check(dir.path(), now).is_none(), "no book, no row");
+        assert!(
+            violet_wake_check(dir.path(), now).is_none(),
+            "no book, no row"
+        );
 
-        let book = dir.path().join("violet").join("watches.json");
+        let book =
+            crate::ui::factory::daemon::runtime::violet_activity::WatchBook::path(dir.path());
         std::fs::create_dir_all(book.parent().unwrap()).unwrap();
         let claim = (now - chrono::Duration::seconds(30)).to_rfc3339();
         std::fs::write(
             &book,
-            format!(r#"{{"watches": [], "relay": {{"last_claim_at": "{claim}", "last_ok_at": "{claim}"}}}}"#),
+            format!(r#"{{"format_version":2,"watches": [], "relay": {{"last_claim_at": "{claim}", "last_ok_at": "{claim}"}}}}"#),
         )
         .unwrap();
         let check = violet_wake_check(dir.path(), now).unwrap();
         assert_eq!(check.name, "violet wake");
         assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
-        assert!(check.message.contains("last claim 30s ago"), "{}", check.message);
+        assert!(
+            check.message.contains("last claim 30s ago"),
+            "{}",
+            check.message
+        );
         assert!(matches!(check.group(), CheckGroup::Integrations));
 
         std::fs::write(
             &book,
             format!(
-                r#"{{"watches": [], "relay": {{"last_claim_at": "{claim}", "consecutive_errors": 4, "last_error": "claim: HTTP 503"}}}}"#
+                r#"{{"format_version":2,"watches": [], "relay": {{"last_claim_at": "{claim}", "consecutive_errors": 4, "last_error": "claim: HTTP 503"}}}}"#
             ),
         )
         .unwrap();
         let check = violet_wake_check(dir.path(), now).unwrap();
-        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
         assert!(check.message.contains("HTTP 503"), "{}", check.message);
     }
 
@@ -9726,17 +9790,24 @@ mod tests {
         );
     }
 
-    /// `cas-3efe`: when neon is configured but the live client can't reach
-    /// the platform (LiveNeonClient is a placeholder that always errors),
-    /// every recorded branch becomes McpUnreachable. Doctor reports
-    /// "skipped — MCP not configured" at Warning severity rather than
-    /// hard-failing — so the whole `cas doctor` run still exits cleanly
-    /// in CI environments without an MCP server.
+    /// `cas-3efe`: recorded Neon IDs without an MCP server produce a Warning
+    /// and "MCP not configured", rather than hard-failing doctor.
     #[test]
     fn integration_checks_neon_mcp_unreachable_is_skipped_not_error() {
-        // The binary installs this before dispatch; this standalone library test
-        // exercises reqwest without passing through main.
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        // cas-eba9: the live client merges project and user MCP config. Keep
+        // both scopes private so this unavailable-server fixture cannot spawn
+        // installed Neon/Playwright children that retain nextest's stderr.
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        #[cfg(feature = "mcp-proxy")]
+        {
+            let project = crate::cli::integrate::proxy::proxy_config_path();
+            let config = cmcp_core::config::Config::load_merged(project.as_deref()).unwrap();
+            assert!(
+                config.servers.is_empty(),
+                "unreachable Neon fixture must not inherit configured MCP servers"
+            );
+        }
         let repo = TempDir::new().unwrap();
         let neon_skill = repo.path().join(".claude/skills/neon-database/SKILL.md");
         fs::create_dir_all(neon_skill.parent().unwrap()).unwrap();

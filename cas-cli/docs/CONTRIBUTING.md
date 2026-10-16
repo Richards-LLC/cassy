@@ -14,6 +14,13 @@ to the operator continue to be recorded. Existing conversation history is retain
 
 ## Coordination messages and reminders
 
+Projects that review a batch once on staging can select `qa.mode=batch`.
+Unmerged user-facing deliveries park with evidence deferred and no automatic
+per-task QA pass. A registered supervisor records the shared published ledger
+with `verification action=batch_receipt`; each listed delivery must be contained
+in that task's configured target. See [batch QA](../../docs/qa/batch-qa.md).
+Unset or `per_task` keeps the existing per-delivery gates.
+
 Message bodies default to 1,200 characters, or 2,500 for blocker and merge
 requests; task note bodies default to 1,500. These limits are configurable via
 `factory.message_max_chars`, `factory.message_max_chars_escalation` and
@@ -55,11 +62,47 @@ MCP activity emits at most one event per server-bound worker every 30 seconds,
 with the throttle checked in memory before store access. This interval is much
 shorter than the default 300-second quiet threshold; concurrent calls share the
 same reservation and failed writes can retry.
+Confirmed authenticated Supervisor and Director roles are cached per immutable
+server core, so their calls skip further activity-related store reads. Standard
+bootstrap roles, missing sessions and inactive workers remain retryable; a
+Standard row corrected to Worker starts recording activity on the same core.
 Heartbeat and registration calls remain telemetry, so heartbeat alone cannot
 hide a quiet worker. Call activity uses the server's immutable registered actor;
 request fields naming another worker do not credit that worker. Open harness
 tool calls and live worker-owned child processes continue to count as activity;
 unrelated process trees and persistent MCP sidecars do not.
+
+For delivery diagnosis, the `prompt_queue` and its receipt tables live in the
+project's `.cas/cas.db`. Open it read-only to avoid creating a misleading empty
+database at a guessed path. Writable prompt-queue opens remove a regular empty
+`.cas/prompt_queue.db` artifact when it has no SQLite recovery sidecars; nonempty
+files, symlinks and sidecar-backed artifacts remain untouched for investigation.
+Read-only queue opens never perform this cleanup.
+
+A parked task can merge its pushed delivery while its worker checkout holds
+uncommitted work for a later task. With `cleanup=false`, `worktree_merge` checks
+that the local source and a fresh origin fetch both equal the parked anchor,
+then merges that immutable commit in an isolated checkout. Its receipt names
+the pushed ref and states that the worker checkout was left untouched.
+Unpushed or mismatched tips retain the dirty-checkout refusal; cleanup requests
+retain the existing protection against deleting uncommitted work.
+
+Recipient drains revalidate typed lifecycle relays against the task's current
+terminal state before recording surfacing or spending the hook body budget.
+An obsolete relay is retained with `superseded_stale`, its task/status reason
+and a terminal-task reconciliation acknowledgement. Hooks, named wakes, inbox
+polls and repeats of earlier polls share this atomic guard; notification ids
+are never interpreted as task ids. Current terminal reports and payloads with
+no positive terminal-task evidence remain eligible.
+The same atomic boundary expires verification-dispatch handoffs after their
+RFC3339 deadline or when their task is terminal. CI red-run and worker-attention
+snapshots expire after one hour, or sooner with positive terminal-task evidence.
+CI resolves a task from an explicit task id or an unambiguous local task branch /
+parked branch; it performs no Git or network lookup. Fresh alerts on unknown or
+shared branches remain eligible. Age/deadline expiry works without a task table;
+malformed envelopes and human messages retain normal delivery semantics.
+Expired rows keep their history, acknowledgement and `superseded_stale` reason.
+
 
 ## Factory cloud client (disabled by default)
 
@@ -119,6 +162,55 @@ the alias first, then run `cas cloud project --adopt-aliases`,
 `cas cloud sync`. Otherwise, retire the local duplicate. Retrying alone cannot
 repair remote ownership; alias adoption rewrites local task provenance and
 does not move Cloud rows.
+
+## Cloud cleanup and rate limits
+
+SessionEnd writes an atomic intent under `.cas/cloud_shutdown/` before deleting
+the local agent. Hooks make no HTTP requests. The embedded daemon drains intents
+at session startup and on its off-loop presence heartbeat, including when it has
+no owned active agent. If no daemon starts, cleanup waits for the next daemon.
+Intents are keyed by agent, harness session and registration timestamp. Presence
+requests share a nonblocking read lease; shutdown takes the exclusive lease.
+A resumed session with a newer registration and a matching harness session
+supersedes older cleanup, including legacy intents, and its own SessionEnd
+creates separate cleanup. Each intent records the ended registration timestamp;
+a real SessionStart advances a fenced incarnation even when failed local cleanup,
+revival or automatic registration left the row active. Automatic MCP reinsertion
+after `/clear` remains fenced without a session id, regardless of PID ancestry.
+Shutdown checks supersession without the network lease and takes the exclusive
+lease only for due work. Presence shares parsed fences within each pass and
+refreshes them after acquiring its lease when the intent directory changes.
+Change detection compares mtime plus the exact sorted intent filenames, so a
+late intent is detected even when timestamps and entry counts coincide. Readers
+remain lock-free; unchanged generations retain their parsed intent cache.
+A listing failure fails closed for an unknown harness session; known sessions
+can still check their direct fences. Cleanup re-reads pending work before writing
+so a stale pass cannot recreate retired files or overwrite a completion. Startup
+replies without waiting for Cloud work; concurrent startup requests coalesce by
+agent and are drained after the current presence pass. A panicked presence pass
+can be restarted by the next kick. A retained ended row advances its registration
+timestamp only on a harness SessionStart. A resumed
+incarnation resets old presence backoff, and superseded cleanup disappears from
+health even before its scheduled retry.
+
+Shutdown, claim release and peer ACK retry HTTP 429 up to three attempts within
+five seconds (or a caller's shorter budget). `Retry-After` seconds and HTTP dates
+are respected up to 15 minutes; absent or invalid values use 200 ms then 400 ms
+backoff. A delay
+outside the HTTP budget returns a named rate-limit failure. Durable shutdown
+intents and the mailbox poller preserve longer server delays across later passes;
+mailbox health remains current while waiting for that scheduled retry. Within a
+mailbox pass, later claim chunks, ACKs and metadata requests share the cooldown;
+already claimed messages remain eligible for local admission and later ACK.
+
+Presence and worker status show pending cleanup and its cause even after the
+agent row is gone. After 24 hours a failed intent expires and stops retrying.
+The daemon retains its agent id and cause under `.cas/cloud_shutdown/expired/`
+before pruning the work item. Inspect these records alongside Cloud presence;
+removing a diagnostic does not perform shutdown. Successful intents stop
+appearing in health immediately and retain an incarnation fence until their
+24-hour retention ends. Completed-only passes need no store or network lease.
+Intents contain no tokens or arbitrary agent metadata.
 
 ## Project issue repository reads
 

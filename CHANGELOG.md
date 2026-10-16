@@ -7,7 +7,165 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.59.0] - 2026-10-16
+
+### Added — a batch QA mode: one staging walk covers every task in a batch (#1203, cas-d697, cas-5129a)
+
+- With `qa.mode = "batch"`, one non-implementer walks every change in a merged
+  batch on staging and records one immutable batch QA receipt: the ledger, the
+  task ids and the staging SHA. The close gate accepts that receipt for each
+  listed task instead of a per-task QA bundle and independent QA pass. The
+  default mode is unchanged.
+- Batch deliveries that were squash-merged, or closed while origin was stale,
+  close correctly: the deferred-close check maps a squash head to its delivery
+  anchor and counts the local target. A supervisor override never clears batch
+  QA debt; only a covering batch receipt or a passed QA round does (cas-5129a).
+
+### Fixed — Commander renders its designed type on every machine (cas-4427)
+
+- Commander now bundles Inter and JetBrains Mono (latin subsets, 88,660 bytes,
+  `font-display: swap`, OFL licences included) and the hub serves them under
+  `font-src 'self'`. Hosts without those fonts no longer fall back to their own
+  sans-serif and monospace faces.
+
+### Fixed — Commander Interrupt names the device holding control (cas-04e8, cas-8bed)
+
+- When Interrupt is refused because another device holds the session, Commander
+  reads the holder and names it. On a hub-admin pairing it takes control by
+  force and says which device it took it from, instead of failing with
+  "Couldn't take control of this session".
+- The invariants test case left without an assertion by this change asserts its
+  409-holder contract again.
+
+### Fixed — the Write access receipt is clear of the rail's fade (cas-a8d9)
+
+- At 1280×844 the receipt's last line and the label below it no longer sit in
+  the rail's bottom fade, where they read at about 3.4:1.
+
+### Fixed — operator-authenticated commands stay out of reach, read-only searches stay allowed (cas-3b2f, cas-b7b2, cas-f99e)
+
+- The operator-policy catch-all uses fail-closed per-tool flag allowlists. Base
+  readers and `git` no longer accept flags that run other programs (env
+  split-string wrappers, external diff through env or config-env,
+  preprocessor and compress options).
+- Read-only `awk` pattern searches, `find … | xargs grep` and `gh … | grep`
+  searches are allowed; `xargs` cannot supply hidden arguments and only `grep`
+  is accepted after it.
+- Only a direct `cas config get` is allowed through the `cas` arm, and tool
+  names must be bare command names.
+
+### Fixed — a rate-limited shutdown no longer leaves a stale agent listed (cas-4ac8, cas-12e7)
+
+- Cassy Cloud calls that get HTTP 429 honour `Retry-After`, or back off with a
+  bound, for session-end shutdown, claim release and peer-message
+  acknowledgement. Presence and mailbox health name "rate limited" as the cause,
+  and a session-end shutdown survives as a durable intent until it ships.
+- The shutdown drainer detects new intents even on filesystems whose directory
+  timestamps are too coarse to change, so a late heartbeat cannot bring back an
+  agent whose shutdown already shipped.
+
+### Fixed — after /clear the heartbeat stays with the new session (cas-9735)
+
+- A tool call from the cleared session's old core no longer moves heartbeat
+  ownership back to the fenced old agent; the new session keeps it while the old
+  one is cleaned up.
+
+### Fixed — two supervisors on one clone keep their own Slack watches (cas-639c)
+
+- Violet channel watches are kept per session, so starting a second supervisor
+  no longer stops a peer's live watches. Claims are routed to the supervisor
+  that started the thread, and the login is rechecked rather than read once at
+  start.
+
+### Fixed — `cas serve` starts while another agent is creating a task (cas-30e3)
+
+- Task-sync recovery at boot skips a concurrent agent's retired intent snapshot
+  instead of failing the task store, so `cas serve` no longer exits at start
+  under parallel creates. Genuinely ambiguous intents still fail loudly.
+
+### Fixed — epic branches are published and current when work starts (cas-bfa1)
+
+- Focusing an epic, or spawning its first workers, publishes a missing epic
+  branch to origin and fast-forwards a stale local copy, so worker lanes are no
+  longer cut from an unpublished or months-old branch.
+
+### Fixed — a parked delivery merges even when the worker has moved on (#1225 follow-up, cas-cfd1)
+
+- `worktree_merge` merges a pushed, parked delivery ref through an isolated
+  temporary worktree when the worker's reused worktree is dirty with its next
+  task. The worker's checkout is left untouched, and the receipt names the
+  pushed ref.
+
+### Fixed — supervisors get one alert when several workers die together (cas-26c8, cas-ff42, cas-58a3)
+
+- Unexpected deaths of several workers fold into one Critical relay that lists
+  each worker's last output, instead of one relay per worker plus a group relay.
+- Each fold has one recovery path, folds per recipient, logs when it gives up,
+  and is covered across sessions.
+- The crash bookkeeping (process-group reaping, worktree checks and the stale
+  mark) runs after the PTY exchange instead of inside it, and worker names stay
+  reserved until crash cleanup ends.
+
+### Fixed — stale relays stop reaching the supervisor (cas-1485, cas-7af8, cas-5871)
+
+- Lifecycle relays for tasks that already closed expire in every supervisor
+  drain, with a durable reason, instead of arriving hours late.
+- CI-red relays for branch heads that have moved, verification dispatches past
+  their deadline or for closed tasks, and worker-attention alerts older than an
+  hour expire the same way. Fresh and uncertain relays are still delivered.
+- Fired reminders and lifecycle rows are marked processed, and the
+  undelivered-relay banner is capped and ages out.
+
+### Changed — the factory loop does no store or file I/O on the input path (#1211 in part; cas-4491f, cas-7b6b, cas-031e, cas-5e72, cas-54a2, cas-9db0b)
+
+- Relay, director-inject and director-refresh store I/O, the per-pass
+  spawn-queue poll, the prompt-queue wake gate, the idle-unacked and
+  normal-delivery turn probes, and the epic-focus write all run off the daemon
+  loop. Key-to-echo p99 under write pressure drops from 77.7 ms
+  to 12.8 ms.
+- Daemon shutdown flushes a pending epic-focus write and drains the store
+  worker, so a last-moment focus change is kept.
+- The loop enforces this boundary: an I/O call on the input or inject path
+  panics under the test harness and is logged once per site otherwise. A load
+  harness with synthetic PTY writers records p99 latency receipts.
+
+### Fixed — agent tool calls stay under 2 s while the database is busy (cas-1bc7)
+
+- With 16 agents and another process holding long write transactions, MCP
+  tool-call p99 drops from 2.2 s to 1.9 s. Several calls had been taking
+  the database write lock without writing anything: every prompt-queue open,
+  each inbox poll's stale sweep and its empty unread-message drain, every
+  turn hook's empty drain, and the daemon's Viktor watch expiry. These now
+  read first and take the lock only when they have something to write.
+- A heartbeat and its task- and worktree-lease renewals are now one
+  transaction, as cas-85d9 intended, and take the write lock once instead of
+  three times. If a lease renewal fails, the heartbeat rolls back with it, and
+  a busy retry no longer counts a renewal twice.
+
+### Fixed — an empty `prompt_queue.db` no longer misleads diagnosis (cas-4e19)
+
+- A regular zero-byte `.cas/prompt_queue.db` with no recovery sidecars is
+  removed on a writable open; the live queue stays in `cas.db`, as documented.
+  Supervisor and Director activity is cached for authenticated sessions only.
+
+### Tests and docs
+
+- Flaky daemon tests (`flv2` inject and slot-cap) are deterministic under
+  parallel load (cas-a8dc).
+- The Doctor Neon-unreachable test is hermetic and no longer leaks MCP
+  children (cas-eba9).
+- HUB-J11's network-drop receipt shows the outage, and the reconnect stage
+  releases it (cas-793b).
+- Release reports for v3.57.0 and v3.58.0 are published under
+  `docs/release-reports/` (cas-72bb).
+
 ## [3.58.0] - 2026-10-16
+
+### Fixed — Commander keeps your place when you load earlier turns (cas-100f)
+
+- Scrolling up to read earlier turns no longer snaps back to the newest
+  message when the 5-second heartbeat redraws the transcript. The tail pin now
+  waits one animation frame and re-checks the reader's position first.
 
 ### Fixed — busy Claude workers see supervisor messages at their next tool call (#1223, cas-a1ed, cas-1ba0)
 

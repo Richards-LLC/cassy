@@ -163,6 +163,11 @@ pub(crate) fn register_agent_with_conn(conn: &Connection, agent: &Agent) -> Resu
             cc_session_id = COALESCE(excluded.cc_session_id, agents.cc_session_id),
             parent_id = excluded.parent_id,
             machine_id = excluded.machine_id,
+            -- A failed SessionEnd delete can leave a shutdown row behind.
+            -- Only a harness SessionStart may advance that incarnation;
+            -- automatic MCP registration has no harness session id.
+            registered_at = CASE WHEN agents.status = 'shutdown' AND excluded.cc_session_id IS NOT NULL
+                THEN excluded.registered_at ELSE agents.registered_at END,
             last_heartbeat = excluded.last_heartbeat,
             active_tasks = excluded.active_tasks,
             metadata = excluded.metadata,
@@ -244,7 +249,8 @@ impl SqliteAgentStore {
             let rows = conn.execute(
                 "UPDATE agents SET name = ?1, agent_type = ?2, role = ?3, status = ?4, pid = ?5,
              ppid = ?6, cc_session_id = ?7, parent_id = ?8, machine_id = ?9, last_heartbeat = ?10,
-             active_tasks = ?11, metadata = ?12, pid_starttime = ?13, factory_session = COALESCE(?14, factory_session)
+             active_tasks = ?11, metadata = ?12, pid_starttime = ?13, factory_session = COALESCE(?14, factory_session),
+             registered_at = MAX(registered_at, ?16)
              WHERE id = ?15",
                 params![
                     agent.name,
@@ -262,6 +268,10 @@ impl SqliteAgentStore {
                     agent.pid_starttime.map(|v| v as i64),
                     agent.factory_session.as_deref(),
                     agent.id,
+                    // Explicit SessionStart can advance a retained active row.
+                    // UTC RFC3339 epochs sort chronologically; stale snapshots
+                    // must not roll an already resumed incarnation backward.
+                    agent.registered_at.to_rfc3339(),
                 ],
             )?;
 
@@ -380,6 +390,10 @@ impl SqliteAgentStore {
     pub(crate) fn agent_heartbeat(&self, id: &str) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.lock_conn()?;
+            // cas-1bc7: one write transaction for the heartbeat and both lease
+            // renewals, as cas-85d9 intended. Three autocommit statements took
+            // the write lock three times, each queued behind any other writer.
+            let tx = ImmediateTx::new(&conn)?;
             let now_dt = Utc::now();
             let now = now_dt.to_rfc3339();
 
@@ -387,7 +401,7 @@ impl SqliteAgentStore {
             // explicitly shut down or marked stale should not be revived by a heartbeat —
             // their daemon may still be running briefly after the process was killed.
             // Also confirm startup on first heartbeat (startup_confirmed = 1).
-            let rows = conn.execute(
+            let rows = tx.execute(
             "UPDATE agents SET last_heartbeat = ?, status = 'active', startup_confirmed = 1 WHERE id = ? AND status IN ('active', 'idle')",
             params![now, id],
         )?;
@@ -397,7 +411,7 @@ impl SqliteAgentStore {
                 // providing a specific error message without a second round-trip.
                 // We already know the UPDATE didn't match, so the agent either
                 // doesn't exist or is in a non-live state.
-                let status: Option<String> = conn
+                let status: Option<String> = tx
                     .query_row(
                         "SELECT status FROM agents WHERE id = ?",
                         params![id],
@@ -485,16 +499,17 @@ impl SqliteAgentStore {
             let renewed_until =
                 (now_dt + chrono::Duration::seconds(TASK_LEASE_HEARTBEAT_RENEWAL_SECS))
                     .to_rfc3339();
-            conn.execute(
+            tx.execute(
                 "UPDATE task_leases SET expires_at = ?, renewed_at = ?, renewal_count = renewal_count + 1
                  WHERE agent_id = ? AND status = 'active'",
                 params![renewed_until, now, id],
             )?;
-            conn.execute(
+            tx.execute(
                 "UPDATE worktree_leases SET expires_at = ?, renewed_at = ?, renewal_count = renewal_count + 1
                  WHERE agent_id = ? AND status = 'active'",
                 params![renewed_until, now, id],
             )?;
+            tx.commit()?;
 
             Ok(())
         }) // with_write_retry

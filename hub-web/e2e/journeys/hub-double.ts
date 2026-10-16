@@ -227,6 +227,8 @@ export class HubDouble {
    * holds, unless forced by a hub-admin pairing, which takes it over.
    */
   private readonly leaseHolders = new Map<string, string>();
+  /** One lease read can be held at the wire boundary to exercise stale-cache races. */
+  private readonly leaseReadGates = new Map<string, { wait: Promise<void>; started: () => void }>();
   /** POST /v1/sessions/<s>/lease calls, in order, with whether they forced. */
   readonly leaseTakes: Array<{ machine: string; session: string; force: boolean; status: number }> = [];
   /** Turns pushed live, replayed in history like a real hub after a reload. */
@@ -277,6 +279,16 @@ export class HubDouble {
 
   /** Another device (named `label`) holds control of the session until a take overrides it. */
   holdLease(session: string, label: string): void { this.leaseHolders.set(session, label); }
+
+  /** Hold the next GET lease response until released, and expose when it reaches the hub. */
+  holdNextLeaseRead(session: string): { started: Promise<void>; release: () => void } {
+    let begin!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { begin = resolve; });
+    const wait = new Promise<void>((resolve) => { release = resolve; });
+    this.leaseReadGates.set(session, { wait, started: begin });
+    return { started, release };
+  }
 
   /** Resolve on the next matching wire observation, with no polling sleeps. */
   waitFor(observed: () => boolean): Promise<void> {
@@ -893,8 +905,15 @@ export class HubDouble {
         if (status === 409) return route.fulfill({ status, json: { error: "lease_unavailable" } });
         if (status === 403) return route.fulfill({ status, json: { error: "scope_denied", required_scope: "hub:admin" } });
         this.leaseHolders.delete(session);
-      } else if (method === "GET" && holder) {
-        return route.fulfill({ json: { held_by_me: false, controller_label: holder } });
+      } else if (method === "GET") {
+        const gate = this.leaseReadGates.get(session);
+        if (gate) {
+          this.leaseReadGates.delete(session);
+          gate.started();
+          await gate.wait;
+        }
+        const currentHolder = this.leaseHolders.get(session);
+        if (currentHolder) return route.fulfill({ json: { held_by_me: false, controller_label: currentHolder } });
       }
       return route.fulfill({ json: { held_by_me: true, controller_label: "Journey browser" } });
     }

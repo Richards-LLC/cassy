@@ -54,6 +54,84 @@ fn store_at(dir: &TempDir) -> SqlitePromptQueueStore {
     store
 }
 
+fn cas_7af8_assert_hook_expiry(kind: &str) {
+    let mut env = TestEnvGuard::temp_home();
+    supervisor_env(&mut env);
+    for stale in [false, true] {
+        for tool_boundary in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let store = store_at(&temp);
+            let deadline = chrono::Utc::now() + chrono::Duration::hours(if stale { -1 } else { 1 });
+            let (source, body) = match kind {
+                "verification" => ("verification-dispatch:vd-hook", format!("<cas-verification-dispatch dispatch_id=\"vd-hook\" task_id=\"cas-7af8-unknown\" owner=\"supervisor-id\" deadline=\"{}\">VERIFY HOOK</cas-verification-dispatch>", deadline.to_rfc3339())),
+                "ci" => ("lifecycle-wake:ci-red-run:factory/test:abc", "<ci-red-run branch=\"factory/test\" head_sha=\"abc\" run_id=\"42\">CI FAILED HOOK</ci-red-run>".into()),
+                _ => ("lifecycle-wake:worker-attention:42", "<worker-attention kind=\"supervisor_unread\" worker=\"test-worker\" notification_id=\"42\">OLD UNREAD HOOK</worker-attention>".into()),
+            };
+            let id = store.enqueue_with_session(source, "supervisor", &body, SESSION).unwrap();
+            if stale && kind != "verification" {
+                rusqlite::Connection::open(temp.path().join("cas.db")).unwrap().execute(
+                    "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
+                    rusqlite::params![(chrono::Utc::now() - chrono::Duration::hours(8)).to_rfc3339(), id],
+                ).unwrap();
+            }
+            let hook = input("supervisor");
+            let surfaced = if tool_boundary {
+                let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
+                crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(Some(temp.path()), &hook, None, &mut budget)
+            } else {
+                crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(Some(temp.path()), &hook)
+            };
+            let contains_body = surfaced.as_deref().is_some_and(|text| text.contains(&body));
+            assert_eq!(contains_body, !stale, "{kind} stale={stale} tool_boundary={tool_boundary}: {surfaced:?}");
+            if stale {
+                assert_eq!(store.message_delivery_report(id).unwrap().unwrap().pending_reason, Some(cas_store::PendingReason::SupersededStale));
+            }
+        }
+    }
+}
+
+#[test]
+fn cas_7af8_hook_expires_verification_dispatch_after_deadline() {
+    cas_7af8_assert_hook_expiry("verification");
+}
+
+#[test]
+fn cas_7af8_hook_expires_aged_ci_red_run() {
+    cas_7af8_assert_hook_expiry("ci");
+}
+
+#[test]
+fn cas_7af8_hook_expires_aged_worker_attention() {
+    cas_7af8_assert_hook_expiry("attention");
+}
+
+#[test]
+fn cas_1485_supervisor_hooks_never_render_a_closed_task_merge_relay() {
+    let mut env = TestEnvGuard::temp_home();
+    supervisor_env(&mut env);
+    for tool_boundary in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let store = store_at(&temp);
+        let tasks = crate::store::open_task_store_local(temp.path()).unwrap();
+        let mut task = Task::new("cas-1485-hook".into(), "finished lane".into());
+        task.status = TaskStatus::AwaitingMerge;
+        tasks.add(&task).unwrap();
+        let body = format!("<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{}\" new=\"awaiting_merge\" notification_id=\"17717\" occurrence=\"{}\">\nMERGE REQUIRED\n</task-lifecycle>", task.id, chrono::Utc::now().to_rfc3339());
+        let id = store.enqueue_with_session("lifecycle-wake:17717", "supervisor", &body, SESSION).unwrap();
+        task.status = TaskStatus::Closed;
+        tasks.update(&task).unwrap();
+        let hook = input("supervisor");
+        let surfaced = if tool_boundary {
+            let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
+            crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(Some(temp.path()), &hook, None, &mut budget)
+        } else {
+            crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(Some(temp.path()), &hook)
+        };
+        assert!(!surfaced.as_deref().is_some_and(|text| text.contains(&body)), "stale merge action surfaced: {surfaced:?}");
+        assert_eq!(store.message_delivery_report(id).unwrap().unwrap().pending_reason, Some(cas_store::PendingReason::SupersededStale));
+    }
+}
+
 /// The receipt ledger is the authoritative answer to whether a particular
 /// recipient alias has seen a row.  Check it without draining: a drain would
 /// create the very receipt this wiring test needs to prove already exists.

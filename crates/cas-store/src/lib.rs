@@ -63,6 +63,7 @@ pub mod markdown;
 mod prompt_queue_store;
 mod prompt_store;
 mod qa_pass_store;
+mod qa_batch_store;
 mod epic_split_store;
 mod recording_store;
 mod recording_text_store;
@@ -140,6 +141,8 @@ pub use qa_pass_store::{
     satisfying_qa_passes, set_qa_task,
     waive_qa_pass, withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task,
 };
+pub use qa_batch_store::{QA_BATCH_SCHEMA_STATEMENTS, QaBatchReceipt, record_qa_batch_receipt,
+    list_qa_batch_receipts, qa_batch_receipts_for_task, qa_task_implementation_actors, defer_qa_batch_evidence, has_qa_batch_deferral};
 pub use artifact_store::{
     ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,
     SqliteArtifactStore, looks_like_signed_upload_url,
@@ -743,6 +746,31 @@ pub trait TaskStore: Send + Sync {
 
     /// List tasks with optional status filter
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>>;
+
+    /// Find a lane owner through the store's visibility policy, preferring a
+    /// live epic over historical terminal records.
+    fn epic_for_branch(&self, branch: &str) -> Result<Option<Task>> {
+        self.epic_for_branch_excluding(branch, &[])
+    }
+
+    /// Narrow lane query with visibility exclusions supplied by wrappers.
+    /// Database stores override this; the fallback supports in-memory stores.
+    fn epic_for_branch_excluding(&self, branch: &str, excluded: &[String]) -> Result<Option<Task>> {
+        Ok(self
+            .list(None)?
+            .into_iter()
+            .filter(|task| {
+                task.task_type == cas_types::TaskType::Epic
+                    && task.branch.as_deref() == Some(branch)
+                    && !excluded.contains(&task.id)
+            })
+            .min_by(|a, b| {
+                a.is_terminal()
+                    .cmp(&b.is_terminal())
+                    .then_with(|| b.updated_at.cmp(&a.updated_at))
+                    .then_with(|| a.id.cmp(&b.id))
+            }))
+    }
 
     /// List the board and rows suppressed by a local visibility policy.
     /// Audit callers use the second collection to explain exclusions; ordinary

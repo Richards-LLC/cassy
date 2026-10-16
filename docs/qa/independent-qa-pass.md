@@ -1,5 +1,7 @@
 # Independent QA and polish pass (design, cas-619f)
 
+Projects using one staging walk per batch can opt into [batch QA](batch-qa.md).
+
 Status: draft for supervisor approval, 2026-09-23.
 
 ## Problem

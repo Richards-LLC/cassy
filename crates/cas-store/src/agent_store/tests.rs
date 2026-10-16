@@ -1505,3 +1505,87 @@ fn cas_8063_unregister_retains_minimal_peer_identity_once() {
     assert!(metadata["retired_agent"].get("metadata").is_none());
     assert!(!metadata.to_string().contains("private-value"));
 }
+
+#[test]
+fn cas_4ac8_round3_registration_time_changes_only_for_real_start_after_shutdown() {
+    let (_temp, store) = create_test_store();
+    let mut original = Agent::new("retained-row".into(), "worker".into());
+    original.cc_session_id = Some("same-session".into());
+    store.register(&original).unwrap();
+    let mut fresh = original.clone();
+    fresh.registered_at += Duration::seconds(1);
+    store.register(&fresh).unwrap();
+    assert_eq!(store.get(&original.id).unwrap().registered_at, original.registered_at);
+    store.graceful_shutdown(&original.id).unwrap();
+    let mut automatic = fresh.clone();
+    automatic.cc_session_id = None;
+    store.register(&automatic).unwrap();
+    assert_eq!(store.get(&original.id).unwrap().registered_at, original.registered_at);
+    store.graceful_shutdown(&original.id).unwrap();
+    store.register(&fresh).unwrap();
+    assert_eq!(store.get(&original.id).unwrap().registered_at, fresh.registered_at);
+}
+
+#[test]
+fn cas_4ac8_round4_explicit_update_advances_incarnation_but_stale_update_cannot_rewind() {
+    let (_temp, store) = create_test_store();
+    let mut old = Agent::new("active-resume-epoch".into(), "worker".into());
+    old.cc_session_id = Some("same".into());
+    store.register(&old).unwrap();
+    let mut resumed = old.clone();
+    resumed.registered_at += Duration::seconds(1);
+    store.update(&resumed).unwrap();
+    assert_eq!(store.get(&old.id).unwrap().registered_at, resumed.registered_at);
+    // An unrelated metadata write can race a SessionStart; it must keep the
+    // newer durable epoch while still saving the requested metadata.
+    old.metadata.insert("control".into(), "retained".into());
+    store.update(&old).unwrap();
+    let current = store.get(&old.id).unwrap();
+    assert_eq!(current.registered_at, resumed.registered_at);
+    assert_eq!(current.metadata.get("control"), old.metadata.get("control"));
+}
+
+/// cas-1bc7: the heartbeat and its lease renewals are one transaction
+/// (cas-85d9's contract), so they take the write lock once. A failure in the
+/// last renewal leaves the heartbeat itself unwritten.
+#[test]
+fn cas_1bc7_heartbeat_and_lease_renewals_commit_atomically() {
+    let (temp, store) = create_test_store();
+    let agent = Agent::new("agent-1bc7".to_string(), "Heartbeat".to_string());
+    store.register(&agent).unwrap();
+    let before = store.get("agent-1bc7").unwrap().last_heartbeat;
+
+    // An active worktree lease whose renewal fails.
+    let raw = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    raw.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+         INSERT INTO worktree_leases
+             (worktree_id, agent_id, status, acquired_at, expires_at, renewed_at, renewal_count)
+         VALUES ('wt-1bc7', 'agent-1bc7', 'active', '2026-01-01T00:00:00Z',
+                 '2026-01-01T00:10:00Z', '2026-01-01T00:00:00Z', 0);
+         CREATE TRIGGER cas_1bc7_fail_renewal BEFORE UPDATE ON worktree_leases
+         BEGIN SELECT RAISE(ABORT, 'cas-1bc7 renewal probe'); END;",
+    )
+    .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let error = store.heartbeat("agent-1bc7").expect_err("the renewal fails");
+    assert!(error.to_string().contains("cas-1bc7 renewal probe"), "{error}");
+    assert_eq!(
+        store.get("agent-1bc7").unwrap().last_heartbeat,
+        before,
+        "a failed renewal rolls the heartbeat back with it"
+    );
+
+    raw.execute_batch("DROP TRIGGER cas_1bc7_fail_renewal").unwrap();
+    store.heartbeat("agent-1bc7").unwrap();
+    assert_ne!(store.get("agent-1bc7").unwrap().last_heartbeat, before);
+    let renewals: i64 = raw
+        .query_row(
+            "SELECT renewal_count FROM worktree_leases WHERE worktree_id = 'wt-1bc7'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(renewals, 1);
+}

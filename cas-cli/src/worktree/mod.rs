@@ -41,9 +41,9 @@ pub use external_symlinks::{
 pub use git::{GitError, GitOperations};
 pub(crate) use manager::WorktreeError;
 pub use manager::{
-    CleanupReport, DirtyWorktreeWarning, ExternalSymlinkWarning, RemoveOutcome, WorktreeConfig,
-    WorktreeManager, WorktreeResult, node_modules_setup_instruction, provision_worker_project_config,
-    symlink_project_config,
+    CleanupReport, DirtyWorktreeWarning, ExternalSymlinkWarning, RemoveOutcome, WorkerRemovalPlan,
+    WorktreeConfig, WorktreeManager, WorktreeResult, node_modules_setup_instruction,
+    provision_worker_project_config, remove_worker_worktree_io, symlink_project_config,
 };
 pub use salvage::{SalvageError, SalvageOutcome, SkipReason, salvage};
 

@@ -51,7 +51,9 @@ pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
         last_usage_limit_scan: None,
         open_operator_notices: std::collections::HashMap::new(),
         last_permission_request_scan: None,
+        last_death_sweep: None,
         reported_permission_requests: std::collections::HashSet::new(),
+        relay_jobs: Default::default(),
         last_commander_mirror_scan: None,
         queue_jobs: super::prompt_queue_jobs::QueueJobs::inline(),
         reported_auth_failed_workers: std::collections::HashMap::new(),
@@ -339,7 +341,6 @@ async fn daemon_provisioning_deadline_retires_only_stalled_generation() {
 /// the session log. The supervisor is still told.
 #[test]
 fn provisioning_failure_marks_the_spawn_request_failed_with_its_reason_cas_d741() {
-    use cas_store::SpawnQueueStore;
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();

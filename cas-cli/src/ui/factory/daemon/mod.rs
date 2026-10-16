@@ -276,8 +276,12 @@ pub struct FactoryDaemon {
     /// cas-4143: last scan of Claude's team-lead mailbox for teammate
     /// permission requests parked for a lead nobody plays.
     last_permission_request_scan: Option<Instant>,
+    /// cas-26c8: when the recorded-worker-death sweep last read.
+    last_death_sweep: Option<Instant>,
     /// cas-4143: permission request ids already relayed to the supervisor.
     reported_permission_requests: std::collections::HashSet<String>,
+    /// cas-4491f: the relays' read and write jobs (`runtime::relay_jobs`).
+    relay_jobs: crate::ui::factory::daemon::runtime::relay_jobs::RelayJobs,
     /// Bounded supervisor transcript scan for Commander mirroring.
     last_commander_mirror_scan: Option<Instant>,
     /// Factory loop v2 C3 (cas-d2a2): the prompt queue's selection, stamps,

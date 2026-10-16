@@ -17,14 +17,14 @@ type WriterJob = Box<dyn FnOnce() + Send + 'static>;
 
 /// A single writer thread, like the StoreWorker, that records which jobs ran
 /// on it. With `gated`, jobs wait until [`TestWriter::open`].
-struct TestWriter {
+pub(in super::super) struct TestWriter {
     sender: Mutex<mpsc::Sender<(&'static str, WriterJob)>>,
     ran: Arc<Mutex<Vec<(&'static str, String)>>>,
     gate: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl TestWriter {
-    fn start(gated: bool) -> Arc<Self> {
+    pub(in super::super) fn start(gated: bool) -> Arc<Self> {
         let (sender, receiver) = mpsc::channel::<(&'static str, WriterJob)>();
         let ran = Arc::new(Mutex::new(Vec::new()));
         let gate = Arc::new((Mutex::new(!gated), Condvar::new()));
@@ -54,13 +54,13 @@ impl TestWriter {
         })
     }
 
-    fn open(&self) {
+    pub(in super::super) fn open(&self) {
         let (open, ready) = &*self.gate;
         *open.lock().unwrap() = true;
         ready.notify_all();
     }
 
-    fn ran(&self) -> Vec<(&'static str, String)> {
+    pub(in super::super) fn ran(&self) -> Vec<(&'static str, String)> {
         self.ran.lock().unwrap().clone()
     }
 }
@@ -73,7 +73,7 @@ impl WriteExecutor for SharedWriter {
     }
 }
 
-fn jobs_on(writer: &Arc<TestWriter>) -> QueueJobs {
+pub(in super::super) fn jobs_on(writer: &Arc<TestWriter>) -> QueueJobs {
     QueueJobs::start_with(LaneWiring {
         reader: None,
         writer: Arc::new(SharedWriter(Arc::clone(writer))),

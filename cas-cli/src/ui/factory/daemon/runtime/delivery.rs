@@ -967,17 +967,39 @@ impl FactoryDaemon {
             == DirectorPromptRoute::DurableQueue
     }
 
-    /// cas-ae6d: daemon-bound wrapper over [`enqueue_director_prompt`].
-    pub(crate) fn enqueue_director_prompt(
+    /// cas-ae6d: hand a director prompt to the durable queue, on the store
+    /// worker (cas-4491f: never on the loop). `stage` names the log line:
+    /// `director_prompt_queued` for an unready pane, `director_prompt_requeued`
+    /// after a direct attempt that did not land.
+    pub(crate) fn submit_director_prompt_enqueue(
         &self,
+        store_worker: &super::store_worker::StoreWorker,
         prompt: &crate::ui::factory::director::Prompt,
-    ) -> anyhow::Result<i64> {
-        enqueue_director_prompt(
-            self.app.cas_dir(),
-            self.session_name.as_str(),
-            &prompt.target,
-            &prompt.text,
-        )
+        stage: &'static str,
+    ) {
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        let session = self.session_name.clone();
+        let target = prompt.target.clone();
+        let text = prompt.text.clone();
+        store_worker.submit("director prompt enqueue", move || {
+            match enqueue_director_prompt(&cas_dir, &session, &target, &text) {
+                Ok(id) => tracing::info!(
+                    target: "cas::coordination",
+                    stage,
+                    channel = "prompt_queue",
+                    target_agent = %target,
+                    prompt_id = id,
+                    "director prompt handed to the durable queue"
+                ),
+                Err(error) => tracing::warn!(
+                    target: "cas::coordination",
+                    stage = "director_prompt_queue_failed",
+                    target_agent = %target,
+                    %error,
+                    "durable enqueue failed; the director prompt may be lost"
+                ),
+            }
+        });
     }
 
     /// Deliver `text` to `target` over the channel the recipient can actually

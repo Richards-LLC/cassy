@@ -195,6 +195,8 @@ dotenvy = "0.15"
         "ghostty-vt.wasm",
         "ghostty-write-pty.wasm",
         "symbols.woff2",
+        "inter.woff2",
+        "jetbrains-mono.woff2",
     ] {
         fs::write(dist.join(asset), asset).expect("fixture Hub asset");
     }

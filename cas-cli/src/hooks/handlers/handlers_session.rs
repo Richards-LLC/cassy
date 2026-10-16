@@ -60,8 +60,11 @@ pub fn handle_session_start(
         if std::env::var("CAS_FACTORY_MODE").is_ok_and(|value| !value.trim().is_empty())
             && let Ok(agent) = std::env::var("CAS_AGENT_NAME")
             && !agent.trim().is_empty()
-            && let Err(error) =
-                crate::factory_hook_canary::record_session_start(cas_root, &agent, &input.session_id)
+            && let Err(error) = crate::factory_hook_canary::record_session_start(
+                cas_root,
+                &agent,
+                &input.session_id,
+            )
         {
             eprintln!("cas: could not record the SessionStart hook canary for {agent}: {error}");
         }
@@ -107,6 +110,7 @@ pub fn handle_session_start(
         let register_directly = |stores: &mut HookStores| {
             if let Some(agent_store) = stores.agents() {
                 match crate::mcp::daemon::register_session_start_agent(
+                    cas_root,
                     agent_store.as_ref(),
                     &input.session_id,
                     agent_name.as_deref(),
@@ -391,8 +395,10 @@ pub fn handle_session_start(
     // codemap/project-overview so those keep the preview top slot.
     //
     // (1) Staged BUG-*/FEATURE-* reports that were never pushed to GitHub.
-    let artifacts_root =
-        crate::config::project_factory_artifacts_root(cas_root, &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()));
+    let artifacts_root = crate::config::project_factory_artifacts_root(
+        cas_root,
+        &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()),
+    );
     if let Some(banner) =
         crate::hooks::handlers::session_hygiene::build_session_start_unfiled_reports_banner_sized(
             cas_root,

@@ -1711,6 +1711,9 @@ impl CasCore {
                 }
             }
             if new_status == TaskStatus::Closed && task.status != TaskStatus::Closed {
+                if let Err(message) = crate::qa_batch::ensure_deferred_close(&self.cas_root, &task, None, None) {
+                    return Ok(Self::tool_error(message));
+                }
                 let close_repo_context = match task.deliverables.work_target.as_ref() {
                     Some(target) => Some(
                         super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(

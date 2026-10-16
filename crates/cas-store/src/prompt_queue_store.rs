@@ -1357,12 +1357,315 @@ fn sql_literal(value: &str) -> String {
 
 /// Whether the `agents` table exists on this connection. Prompt-queue tests
 /// and some legacy databases open the queue without it.
+/// cas-1bc7: databases whose cas-dcf2 historical-reply demotion this process
+/// has already run, keyed by the database file path.
+fn historical_demotions_done() -> &'static Mutex<std::collections::HashSet<String>> {
+    static DONE: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    DONE.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// The database a connection serves, by canonical path, so two spellings of
+/// one file share a flag; `None` for an in-memory database, which is checked
+/// on every open.
+fn historical_demotion_key(conn: &Connection) -> Option<String> {
+    let path = conn.path().filter(|path| !path.is_empty())?;
+    Some(
+        std::fs::canonicalize(path)
+            .map(|canonical| canonical.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string()),
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: runs between a drain's lock-free probe and its locked
+    /// re-select (cas-1bc7 review).
+    static AFTER_DRAIN_PROBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn historical_demotion_pending(key: Option<&str>) -> bool {
+    key.is_none_or(|key| {
+        !historical_demotions_done()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(key)
+    })
+}
+
+fn mark_historical_demotion_done(key: Option<String>) {
+    if let Some(key) = key {
+        historical_demotions_done()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key);
+    }
+}
+
+#[cfg(test)]
+fn historical_demotion_scans() -> &'static Mutex<HashMap<String, u32>> {
+    static SCANS: std::sync::OnceLock<Mutex<HashMap<String, u32>>> = std::sync::OnceLock::new();
+    SCANS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn note_historical_demotion_scan(key: Option<&str>) {
+    if let Some(key) = key {
+        *historical_demotion_scans()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(key.to_string())
+            .or_default() += 1;
+    }
+}
+
+/// Test hook: model rows that predate this process's first open.
+#[cfg(test)]
+fn forget_historical_demotion(conn: &Connection) {
+    if let Some(key) = historical_demotion_key(conn) {
+        historical_demotions_done()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key);
+    }
+}
+
 fn agents_table_exists(conn: &Connection) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents')",
         [],
         |row| row.get(0),
     )?)
+}
+
+/// cas-5871: how old a terminal relay of a session with no running agent
+/// must be before the session counts as ended.
+pub const ENDED_SESSION_RELAY_AGE_SECS: i64 = 24 * 60 * 60;
+
+/// A lifecycle relay that ended without reaching its supervisor and has not
+/// been acknowledged (shared by the reconciliations below).
+const TERMINAL_UNACKED_RELAY_SQL: &str = "transport_delivered_at IS NULL
+       AND acked_at IS NULL
+       AND source LIKE 'lifecycle-wake:%'
+       AND highest_stage IN ('suppressed', 'dropped', 'abandoned')";
+
+/// ... whose task is closed or cancelled.
+const RELAY_TASK_CLOSED_SQL: &str = "EXISTS (
+           SELECT 1 FROM tasks
+           WHERE status IN ('closed', 'cancelled')
+             AND (prompt_queue.summary = tasks.id
+                  OR prompt_queue.summary LIKE '%: ' || tasks.id
+                  OR prompt_queue.summary LIKE '%: ' || tasks.id || ' (%')
+       )";
+
+/// ... whose session has no running agent and which is older than the bound
+/// (binds the cutoff).
+const RELAY_SESSION_ENDED_SQL: &str = "NULLIF(factory_session, '') IS NOT NULL
+       AND created_at < ?
+       AND NOT EXISTS (
+           SELECT 1 FROM agents
+           WHERE agents.factory_session = prompt_queue.factory_session
+             AND agents.status <> 'shutdown'
+       )";
+
+impl SqlitePromptQueueStore {
+    /// A local terminal task is positive evidence that its action alert expired.
+    fn terminal_relay_task_status(
+        tx: &ImmediateTx<'_>,
+        has_tasks: bool,
+        task_id: &str,
+    ) -> Result<Option<String>> {
+        if !has_tasks { return Ok(None); }
+        Ok(tx.query_row(
+            "SELECT status FROM tasks WHERE id = ?1 AND status IN ('closed', 'cancelled')",
+            params![task_id], |row| row.get(0),
+        ).optional()?)
+    }
+
+    /// CI envelopes normally name only a branch. A reused/shared branch is
+    /// ambiguous: never suppress a fresh alert because one old task closed.
+    fn terminal_ci_branch_task(
+        tx: &ImmediateTx<'_>,
+        has_tasks: bool,
+        branch: &str,
+    ) -> Result<Option<(String, String)>> {
+        if !has_tasks { return Ok(None); }
+        let mut stmt = tx.prepare_cached(
+            "SELECT id, status FROM tasks WHERE branch = ?1
+                OR CASE WHEN json_valid(deliverables)
+                    THEN json_extract(deliverables, '$.parked_branch') END = ?1
+             LIMIT 2",
+        )?;
+        let matches = stmt.query_map(params![branch], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(if matches.len() == 1 && matches!(matches[0].1.as_str(), "closed" | "cancelled") {
+            matches.into_iter().next()
+        } else { None })
+    }
+
+    fn supervisor_relay_expiry_reason(
+        tx: &ImmediateTx<'_>,
+        has_tasks: bool,
+        prompt: &QueuedPrompt,
+        now: DateTime<Utc>,
+    ) -> Result<Option<String>> {
+        let terminal_detail = |task_id: &str, status: &str| {
+            format!("relay for {task_id} superseded by terminal task state {status} at recipient drain")
+        };
+        if prompt.source.starts_with("verification-dispatch:") {
+            if let Some(envelope) = cas_types::parse_verification_dispatch_envelope(&prompt.prompt) {
+                if let Some(status) = Self::terminal_relay_task_status(tx, has_tasks, &envelope.task_id)? {
+                    return Ok(Some(terminal_detail(&envelope.task_id, &status)));
+                }
+                if DateTime::parse_from_rfc3339(&envelope.deadline).is_ok_and(|deadline| deadline <= now) {
+                    return Ok(Some(format!("verification dispatch {} deadline {} passed at recipient drain", envelope.dispatch_id, envelope.deadline)));
+                }
+            }
+            return Ok(None);
+        }
+        if !prompt.source.starts_with("lifecycle-wake:") { return Ok(None); }
+        if let Some(envelope) = cas_types::parse_lifecycle_envelope(&prompt.prompt) {
+            return Ok(Self::terminal_relay_task_status(tx, has_tasks, &envelope.task_id)?
+                .filter(|status| status != &envelope.new_status.to_string())
+                .map(|status| terminal_detail(&envelope.task_id, &status)));
+        }
+        let point_in_time = if prompt.source.starts_with("lifecycle-wake:ci-red-run:") {
+            if let Some(envelope) = cas_types::parse_ci_red_run_envelope(&prompt.prompt) {
+                let terminal = if let Some(task_id) = &envelope.task_id {
+                    Self::terminal_relay_task_status(tx, has_tasks, task_id)?.map(|status| (task_id.clone(), status))
+                } else {
+                    Self::terminal_ci_branch_task(tx, has_tasks, &envelope.branch)?
+                };
+                if let Some((task_id, status)) = terminal {
+                    return Ok(Some(terminal_detail(&task_id, &status)));
+                }
+                Some("CI red-run")
+            } else { None }
+        } else if prompt.source.starts_with("lifecycle-wake:worker-attention:") {
+            if let Some(envelope) = cas_types::parse_worker_attention_envelope(&prompt.prompt) {
+                if let Some(task_id) = &envelope.task_id
+                    && let Some(status) = Self::terminal_relay_task_status(tx, has_tasks, task_id)? {
+                    return Ok(Some(terminal_detail(task_id, &status)));
+                }
+                Some("worker-attention")
+            } else { None }
+        } else { None };
+        // These are snapshots, not durable instructions. No Git or network
+        // lookup belongs on a recipient drain; bound stale head/worker alerts
+        // even when no task can be resolved (cas-7af8).
+        Ok(point_in_time.filter(|_| prompt.created_at <= now - chrono::Duration::hours(1))
+            .map(|kind| format!("{kind} snapshot older than 1 hour at recipient drain (queued {})", prompt.created_at)))
+    }
+
+    /// Revalidate supervisor relays under the transaction that would receipt
+    /// their body, before render budget/seen writes (cas-1485, cas-7af8).
+    fn expire_supervisor_relays_in_tx(
+        tx: &ImmediateTx<'_>,
+        prompts: Vec<QueuedPrompt>,
+    ) -> Result<Vec<QueuedPrompt>> {
+        if !prompts.iter().any(|prompt| prompt.source.starts_with("lifecycle-wake:") || prompt.source.starts_with("verification-dispatch:")) {
+            return Ok(prompts);
+        }
+        let has_tasks: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
+            [], |row| row.get(0),
+        )?;
+        let now = Utc::now();
+        let mut current = Vec::with_capacity(prompts.len());
+        for prompt in prompts {
+            if let Some(detail) = Self::supervisor_relay_expiry_reason(tx, has_tasks, &prompt, now)? {
+                // Preserve forensic transport history on a previously polled
+                // row. Early stages can advance to Suppressed; acknowledgement
+                // retires replay without fabricating a recipient-seen receipt.
+                let stage = Self::read_highest_stage(tx, prompt.id)?;
+                let stage = if stage.rank() >= DeliveryStage::Suppressed.rank() {
+                    stage
+                } else { DeliveryStage::Suppressed };
+                Self::atomic_stage_stamp_in_tx(tx, prompt.id, stage,
+                    AtomicStampOpts {
+                        reason: Some(PendingReason::SupersededStale), detail: Some(&detail), set_processed: true,
+                        broadcast_attempted: None, broadcast_succeeded: None, broadcast_failed: None,
+                    })?;
+                let acked_via = if cas_types::parse_lifecycle_envelope(&prompt.prompt).is_some() {
+                    "terminal_task_reconciled"
+                } else { "relay_expired" };
+                tx.execute(
+                    "UPDATE prompt_queue SET acked_via = CASE WHEN acked_at IS NULL THEN ?1 ELSE acked_via END,
+                        acked_at = COALESCE(acked_at, ?2) WHERE id = ?3",
+                    params![acked_via, now.to_rfc3339(), prompt.id],
+                )?;
+            } else {
+                current.push(prompt);
+            }
+        }
+        Ok(current)
+    }
+
+    /// cas-5871: reconcile terminal relays whose task closed and/or whose
+    /// session ended. A read-only existence check comes first, so a status
+    /// read with nothing to reconcile never takes the write lock; when there
+    /// is work, one transaction does both updates.
+    fn reconcile_relays(&self, task_closed: bool, session_ended: bool) -> Result<usize> {
+        let cutoff = (Utc::now() - chrono::Duration::seconds(ENDED_SESSION_RELAY_AGE_SECS))
+            .to_rfc3339();
+        let (task_closed, session_ended) = {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tasks_exist: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
+                [],
+                |row| row.get(0),
+            )?;
+            // Without a registry there is no evidence a session ended.
+            let session_ended = session_ended && agents_table_exists(&conn)?;
+            let task_closed = task_closed && tasks_exist;
+            let due = |condition: &str, bind_cutoff: bool| -> Result<bool> {
+                let sql = format!(
+                    "SELECT EXISTS(SELECT 1 FROM prompt_queue WHERE {TERMINAL_UNACKED_RELAY_SQL} AND {condition})"
+                );
+                Ok(if bind_cutoff {
+                    conn.query_row(&sql, params![cutoff], |row| row.get(0))?
+                } else {
+                    conn.query_row(&sql, [], |row| row.get(0))?
+                })
+            };
+            (
+                task_closed && due(RELAY_TASK_CLOSED_SQL, false)?,
+                session_ended && due(RELAY_SESSION_ENDED_SQL, true)?,
+            )
+        };
+        if !task_closed && !session_ended {
+            return Ok(0);
+        }
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = ImmediateTx::new(&conn)?;
+            let now = Utc::now().to_rfc3339();
+            let mut reconciled = 0;
+            if task_closed {
+                reconciled += tx.execute(
+                    &format!(
+                        "UPDATE prompt_queue
+                         SET acked_at = ?, acked_via = 'terminal_task_reconciled'
+                         WHERE {TERMINAL_UNACKED_RELAY_SQL} AND {RELAY_TASK_CLOSED_SQL}"
+                    ),
+                    params![now],
+                )?;
+            }
+            if session_ended {
+                reconciled += tx.execute(
+                    &format!(
+                        "UPDATE prompt_queue
+                         SET acked_at = ?, acked_via = 'session_ended_reconciled'
+                         WHERE {TERMINAL_UNACKED_RELAY_SQL} AND {RELAY_SESSION_ENDED_SQL}"
+                    ),
+                    params![now, cutoff],
+                )?;
+            }
+            tx.commit()?;
+            Ok(reconciled)
+        })
+    }
 }
 
 /// The audience of an `all_workers` broadcast, for one draining `recipient`
@@ -2128,6 +2431,13 @@ pub trait PromptQueueStore: Send + Sync {
         older_than_secs: i64,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
+
+    /// Whether the supervisor relay `prompt_id` still has not reached the
+    /// supervisor, by the delivery conditions of
+    /// [`Self::undelivered_supervisor_lifecycle_relays`] (cas-4491f: the
+    /// escalation re-checks each candidate under its write). A row that is
+    /// gone is no longer undelivered.
+    fn supervisor_relay_still_undelivered(&self, prompt_id: i64) -> Result<bool>;
 
     /// Relay-watchdog alerts of `factory_session` (cas-e829): for each alert
     /// row, the supervisor relay it is about and whether that relay's problem
@@ -2923,6 +3233,27 @@ pub trait PromptQueueStore: Send + Sync {
     /// Returns the number of previously-unacknowledged rows reconciled.
     fn reconcile_terminal_lifecycle_relays(&self) -> Result<usize>;
 
+    /// cas-5871: reconcile terminal lifecycle relays whose factory session
+    /// has ended: no agent row of that session is still running and the
+    /// relay is older than [`ENDED_SESSION_RELAY_AGE_SECS`]. SessionEnd
+    /// deletes agent rows and a crashed agent's row stays stale, so a missing
+    /// row is not evidence the session lives. The supervisor the relay was for
+    /// is gone, so it leaves the undelivered-relay banner. Like
+    /// [`Self::reconcile_terminal_lifecycle_relays`], the forensic row and its
+    /// stage are kept; a row that may still be delivered (not yet terminal) is
+    /// never touched. Returns the rows reconciled.
+    fn reconcile_ended_session_lifecycle_relays(&self) -> Result<usize> {
+        Ok(0)
+    }
+
+    /// cas-5871: both reconciliations for a status read. A read-only check
+    /// runs first; the write transaction opens only when a relay is due, so
+    /// an ordinary `worker_status` takes no write lock.
+    fn reconcile_lifecycle_relays(&self) -> Result<usize> {
+        Ok(self.reconcile_terminal_lifecycle_relays()?
+            + self.reconcile_ended_session_lifecycle_relays()?)
+    }
+
     /// Count all unresolved terminal or >60s pending lifecycle relays without
     /// a display cap. Status banners cannot hide backlog depth.
     fn undelivered_lifecycle_relay_count(&self) -> Result<usize>;
@@ -3035,6 +3366,28 @@ pub fn read_inbox_signal(cas_dir: &Path, recipient: &str) -> Option<i64> {
 }
 
 impl SqlitePromptQueueStore {
+    /// Remove the empty diagnostic artifact left by older installations/tools.
+    /// All live queue tables are in cas.db. Never discard data, SQLite recovery
+    /// sidecars, symlinks, or directories, and don't let cleanup block delivery.
+    fn remove_empty_queue_artifact(cas_dir: &Path) {
+        let path = cas_dir.join("prompt_queue.db");
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else { return };
+        if !metadata.file_type().is_file() || metadata.len() != 0 {
+            return;
+        }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            match std::fs::symlink_metadata(cas_dir.join(format!("prompt_queue.db{suffix}"))) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                _ => return,
+            }
+        }
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(%error, "could not remove empty prompt queue artifact");
+            }
+        }
+    }
+
     /// Stamp `recipient`'s inbox signal after a committed enqueue.
     /// Best-effort: a failed stamp only delays surfacing to the next turn.
     fn signal_inbox(&self, recipient: &str) {
@@ -3068,6 +3421,8 @@ impl SqlitePromptQueueStore {
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
         let conn = crate::shared_db::shared_connection(&db_path)?;
+
+        Self::remove_empty_queue_artifact(cas_dir);
 
         Ok(Self { conn })
     }
@@ -4537,17 +4892,41 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // full acknowledgement. Preserve the activity timestamp but
             // demote it on upgrade: no historical row has transcript evidence
             // solely because a later outbound message happened.
-            conn.execute(
-                "UPDATE prompt_queue
-                 SET assumed_seen_at = COALESCE(assumed_seen_at, acked_at),
-                     acked_at = NULL,
-                     acked_via = NULL,
-                     highest_stage = 'assumed_seen',
-                     last_pending_reason = 'awaiting_ack',
-                     last_pending_detail = 'historical reply activity; awaiting message-specific confirmation'
-                 WHERE acked_via = 'inferred_from_reply'",
-                [],
-            )?;
+            //
+            // cas-1bc7: every open runs init, and an UPDATE takes the write
+            // lock even when it matches nothing. Nothing writes this value any
+            // more, so read first and write only while such rows remain. The
+            // read scans prompt_queue, and a tool call opens the queue more
+            // than once, so it runs once per database per process: rows an
+            // older binary still writes are demoted by the next process that
+            // opens the database.
+            let demotion_key = historical_demotion_key(&conn);
+            let historical_inference: bool = if historical_demotion_pending(demotion_key.as_deref())
+            {
+                #[cfg(test)]
+                note_historical_demotion_scan(demotion_key.as_deref());
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM prompt_queue WHERE acked_via = 'inferred_from_reply')",
+                    [],
+                    |row| row.get(0),
+                )?
+            } else {
+                false
+            };
+            if historical_inference {
+                conn.execute(
+                    "UPDATE prompt_queue
+                     SET assumed_seen_at = COALESCE(assumed_seen_at, acked_at),
+                         acked_at = NULL,
+                         acked_via = NULL,
+                         highest_stage = 'assumed_seen',
+                         last_pending_reason = 'awaiting_ack',
+                         last_pending_detail = 'historical reply activity; awaiting message-specific confirmation'
+                     WHERE acked_via = 'inferred_from_reply'",
+                    [],
+                )?;
+            }
+            mark_historical_demotion_done(demotion_key);
 
             // cas-7a01 (GH #155): the receipt table predates the surfacing
             // path, so existing databases need the provenance column added.
@@ -5525,6 +5904,29 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             tx.commit()?;
             Ok((inserted > 0).then_some(bounce_id))
         })
+    }
+
+    fn supervisor_relay_still_undelivered(&self, prompt_id: i64) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let pending: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM prompt_queue q
+                 WHERE q.id = ?
+                   AND q.transport_delivered_at IS NULL
+                   AND q.acked_at IS NULL
+                   AND (
+                        COALESCE(q.highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
+                        OR (q.highest_stage = 'abandoned'
+                            AND q.last_pending_reason IN ('undelivered_lifecycle_relay', 'undelivered_after_wake_declines', 'abandoned_unknown_target', 'recipient_ended_unread'))
+                   )
+                   AND NOT EXISTS (
+                        SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = q.id
+                   )",
+                params![prompt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(pending.is_some())
     }
 
     fn undelivered_supervisor_lifecycle_relays(
@@ -6941,6 +7343,14 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
         let stored_pending = stored_reason.as_deref().and_then(PendingReason::parse);
         let (pending_reason, pending_detail) = match stage {
+            // Terminal-task reconciliation retires a formerly transported
+            // relay without erasing its handoff history. Report its durable
+            // expiry reason instead of claiming it is still awaiting an ack.
+            DeliveryStage::Delivered | DeliveryStage::AssumedSeen | DeliveryStage::Confirmed
+                if confirmed_at.is_some() && stored_pending == Some(PendingReason::SupersededStale) =>
+            {
+                (stored_pending, stored_detail)
+            }
             DeliveryStage::Confirmed => (None, None),
             DeliveryStage::AssumedSeen => (
                 Some(PendingReason::AwaitingAck),
@@ -7958,29 +8368,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     }
 
     fn reconcile_terminal_lifecycle_relays(&self) -> Result<usize> {
-        crate::shared_db::with_write_retry(|| {
-            let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let tx = ImmediateTx::new(&conn)?;
-            let now = Utc::now().to_rfc3339();
-            let reconciled = tx.execute(
-                "UPDATE prompt_queue
-                 SET acked_at = ?, acked_via = 'terminal_task_reconciled'
-                 WHERE transport_delivered_at IS NULL
-                   AND acked_at IS NULL
-                   AND source LIKE 'lifecycle-wake:%'
-                   AND highest_stage IN ('suppressed', 'dropped', 'abandoned')
-                   AND EXISTS (
-                       SELECT 1 FROM tasks
-                       WHERE status IN ('closed', 'cancelled')
-                         AND (prompt_queue.summary = tasks.id
-                              OR prompt_queue.summary LIKE '%: ' || tasks.id
-                              OR prompt_queue.summary LIKE '%: ' || tasks.id || ' (%')
-                   )",
-                params![now],
-            )?;
-            tx.commit()?;
-            Ok(reconciled)
-        })
+        self.reconcile_relays(true, false)
+    }
+
+    fn reconcile_ended_session_lifecycle_relays(&self) -> Result<usize> {
+        self.reconcile_relays(false, true)
+    }
+
+    fn reconcile_lifecycle_relays(&self) -> Result<usize> {
+        self.reconcile_relays(true, true)
     }
 
     fn undelivered_lifecycle_relay_count(&self) -> Result<usize> {
@@ -8004,8 +8400,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let prompt_id = conn
             .query_row(
-                "SELECT id FROM prompt_queue WHERE source = ? ORDER BY id DESC LIMIT 1",
-                params![format!("lifecycle-wake:{lifecycle_wake_id}")],
+                // cas-5871: a kind-prefixed relay (`lifecycle-wake:integration:<id>`,
+                // a sweep notice) is acknowledged by the same durable id.
+                "SELECT id FROM prompt_queue
+                 WHERE source = ?1 OR source LIKE 'lifecycle-wake:%:' || ?2
+                 ORDER BY id DESC LIMIT 1",
+                params![format!("lifecycle-wake:{lifecycle_wake_id}"), lifecycle_wake_id.to_string()],
                 |row| row.get(0),
             )
             .optional()?;
@@ -8057,8 +8457,25 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     fn expire_stale_pending(&self, older_than_secs: i64) -> Result<Vec<QueuedPrompt>> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+            // cas-1bc7: every inbox poll runs this sweep. Look for a candidate
+            // without the write lock first, so a sweep with nothing to expire
+            // never queues behind another writer. A row that turns stale after
+            // this read is expired by the next sweep, and is already filtered
+            // out of delivery meanwhile (cas-d047).
+            let any_candidate: bool = conn.query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM prompt_queue
+                      WHERE processed_at IS NULL AND created_at < ?
+                        AND {OPERATOR_LANE_EXCLUSION})"
+                ),
+                params![cutoff],
+                |row| row.get(0),
+            )?;
+            if !any_candidate {
+                return Ok(Vec::new());
+            }
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now().to_rfc3339();
 
             // cas-f7b0 (contract v2, P3.1/P1.3): the operator lane owns its
@@ -8389,7 +8806,6 @@ impl SqlitePromptQueueStore {
 
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             // cas-d047 (GH #69): never hand a recipient a months-old item, and
             // (GH #70 sibling) never hand it a row the daemon already
             // terminally quarantined as dropped/suppressed/abandoned — neither
@@ -8410,7 +8826,7 @@ impl SqlitePromptQueueStore {
                 ""
             };
             // cas-6853: a broadcast reaches only its real audience.
-            let audience_sql = broadcast_audience_sql(recipient, agents_table_exists(&tx)?);
+            let audience_sql = broadcast_audience_sql(recipient, agents_table_exists(&conn)?);
             // cas-1f0c: once a Teams body fallback carries the row, no hook
             // renders it: any marker for a direct row, this recipient's for a
             // broadcast.
@@ -8571,6 +8987,26 @@ impl SqlitePromptQueueStore {
                     )
                 };
 
+            // cas-1bc7: inbox polls and turn hooks drain an empty inbox most of
+            // the time. Probe with the same query, without the write lock,
+            // and take the lock only when there is a row to receipt. The
+            // selection is re-run under the lock, so a row another drain
+            // took in between is not handed out twice.
+            let any_row = {
+                let mut stmt = conn.prepare_cached(&sql)?;
+                let mut rows = stmt.query(rusqlite::params_from_iter(
+                    query_params.iter().map(|p| p.as_ref()),
+                ))?;
+                rows.next()?.is_some()
+            };
+            if !any_row {
+                return Ok((Vec::new(), Vec::new()));
+            }
+            #[cfg(test)]
+            if let Some(hook) = AFTER_DRAIN_PROBE.with(|hook| hook.borrow_mut().take()) {
+                hook();
+            }
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let prompts: Vec<QueuedPrompt> = {
                 let mut stmt = tx.prepare_cached(&sql)?;
                 stmt.query_map(
@@ -8579,6 +9015,7 @@ impl SqlitePromptQueueStore {
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()?
             };
+            let prompts = Self::expire_supervisor_relays_in_tx(&tx, prompts)?;
             // cas-1f0c: keep only what the caller can render whole; a row
             // that does not fit gets no receipt and stays unread.
             let mut over_budget: Vec<(i64, usize)> = Vec::new();
@@ -8744,6 +9181,252 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    fn cas_7af8_assert_relay_expiry(kind: &str) {
+        // Fresh controls run first, so every red proves that live work still surfaces.
+        for case in ["fresh", "within_age", "aged", "closed", "cancelled", "deadline"] {
+            if case == "deadline" && kind != "verification" { continue; }
+            if case == "aged" && kind == "verification" { continue; }
+            for repeat in [false, true] {
+                let (temp, store) = create_test_store();
+                let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+                tasks.init().unwrap();
+                let mut task = Task::new("cas-7af8-target".into(), "current lane".into());
+                task.status = TaskStatus::InProgress;
+                if case == "cancelled" {
+                    task.branch = Some("factory/test-delivery".into());
+                } else {
+                    task.deliverables.parked_branch = Some("factory/test-delivery".into());
+                }
+                tasks.add(&task).unwrap();
+                let deadline = Utc::now() + chrono::Duration::hours(if case == "deadline" { -1 } else { 1 });
+                let (source, body) = match kind {
+                    "verification" => ("verification-dispatch:vd-test", format!("<cas-verification-dispatch dispatch_id=\"vd-test\" task_id=\"{}\" owner=\"supervisor-id\" deadline=\"{}\">VERIFY</cas-verification-dispatch>", task.id, deadline.to_rfc3339())),
+                    "ci" => ("lifecycle-wake:ci-red-run:factory/test-delivery:abc", "<ci-red-run branch=\"factory/test-delivery\" head_sha=\"abc\" run_id=\"42\">CI FAILED</ci-red-run>".into()),
+                    _ => ("lifecycle-wake:worker-attention:42", format!("<worker-attention kind=\"worker_stalled\" worker=\"test-worker\" task_id=\"{}\" notification_id=\"42\">WORKER QUIET</worker-attention>", task.id)),
+                };
+                let id = store.enqueue_with_session(source, "supervisor", &body, "session").unwrap();
+                if repeat && case != "deadline" {
+                    assert_eq!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().len(), 1);
+                }
+                if matches!(case, "aged" | "within_age") {
+                    crate::shared_db::lock_connection(&store.conn).unwrap().execute(
+                        "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
+                        params![(Utc::now() - chrono::Duration::minutes(if case == "aged" { 65 } else { 55 })).to_rfc3339(), id],
+                    ).unwrap();
+                } else if matches!(case, "closed" | "cancelled") {
+                    task.status = if case == "closed" { TaskStatus::Closed } else { TaskStatus::Cancelled };
+                    tasks.update(&task).unwrap();
+                }
+                let rows = if repeat && case != "deadline" {
+                    store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::PolledBefore(Utc::now() + chrono::Duration::seconds(1)), 10, HOOK_SURFACE_BUDGET_CHARS).unwrap().rows
+                } else {
+                    store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap()
+                };
+                if matches!(case, "fresh" | "within_age") {
+                    assert_eq!(
+                        rows.iter().map(|row| row.prompt.as_str()).collect::<Vec<_>>(),
+                        vec![body.as_str()],
+                        "fresh {kind} must surface"
+                    );
+                } else {
+                    assert!(rows.is_empty(), "stale {kind} {case} leaked (repeat={repeat})");
+                    let report = store.message_delivery_report(id).unwrap().unwrap();
+                    assert_eq!(report.pending_reason, Some(PendingReason::SupersededStale));
+                    assert!(report.confirmed_at.is_some(), "expiry must retire replay eligibility");
+                    assert!(report.pending_detail.as_deref().is_some_and(|detail| !detail.is_empty()));
+                    assert_eq!(store.recipient_receipt(id, "supervisor").unwrap(),
+                        (repeat && case != "deadline").then_some(SurfacingSource::InboxPoll), "expiry must not fabricate a recipient receipt");
+                    assert!(store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().is_empty(), "expiry must survive another drain");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cas_7af8_verification_dispatch_expires_at_deadline_or_terminal_task() {
+        cas_7af8_assert_relay_expiry("verification");
+    }
+
+    #[test]
+    fn cas_7af8_ci_red_run_expires_by_age_or_terminal_branch_task() {
+        cas_7af8_assert_relay_expiry("ci");
+    }
+
+    #[test]
+    fn cas_7af8_worker_attention_expires_by_age_or_terminal_task() {
+        cas_7af8_assert_relay_expiry("attention");
+    }
+
+    #[test]
+    fn cas_7af8_uncertain_and_unrelated_messages_remain_eligible() {
+        let (temp, store) = create_test_store();
+        let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+        tasks.init().unwrap();
+        for (id, status) in [("cas-old", TaskStatus::Closed), ("cas-live", TaskStatus::InProgress)] {
+            let mut task = Task::new(id.into(), "shared branch".into());
+            task.branch = Some("factory/shared".into());
+            task.status = status;
+            tasks.add(&task).unwrap();
+        }
+        let future_deadline = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        for (source, body, old) in [
+            ("lifecycle-wake:ci-red-run:test", "<ci-red-run branch=\"factory/shared\" head_sha=\"abc\" run_id=\"42\">ambiguous branch</ci-red-run>".to_string(), false),
+            ("lifecycle-wake:ci-red-run:test", "<ci-red-run branch=\"unknown\" head_sha=\"abc\" run_id=\"42\">unknown fresh branch</ci-red-run>".to_string(), false),
+            ("lifecycle-wake:ci-red-run:test", "<ci-red-run branch=\"factory/shared\" head_sha=\"abc\" run_id=\"bad\">malformed CI</ci-red-run>".to_string(), true),
+            ("lifecycle-wake:worker-attention:42", "<worker-attention kind=\"unknown\" worker=\"test\" notification_id=\"42\">unknown attention</worker-attention>".to_string(), true),
+            ("human", "<worker-attention kind=\"worker_stalled\" worker=\"test\" notification_id=\"42\">human quote</worker-attention>".to_string(), true),
+            ("lifecycle-wake:ci-red-run:test", "Quoted: <ci-red-run branch=\"factory/shared\" head_sha=\"abc\" run_id=\"42\">quoted CI</ci-red-run>".to_string(), true),
+            ("verification-dispatch:vd-test", "<cas-verification-dispatch dispatch_id=\"vd-test\" task_id=\"cas-live\" owner=\"supervisor\" deadline=\"unknown\">uncertain deadline</cas-verification-dispatch>".to_string(), true),
+            ("verification-dispatch:vd-test", format!("<cas-verification-dispatch dispatch_id=\"vd-test\" task_id=\"cas-live\" owner=\"supervisor\" deadline=\"{future_deadline}\">old but still valid dispatch</cas-verification-dispatch>"), true),
+        ] {
+            let id = store.enqueue_with_session(source, "supervisor", &body, "session").unwrap();
+            if old {
+                crate::shared_db::lock_connection(&store.conn).unwrap().execute(
+                    "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
+                    params![(Utc::now() - chrono::Duration::hours(8)).to_rfc3339(), id],
+                ).unwrap();
+            }
+            let rows = store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap();
+            assert_eq!(rows.iter().map(|row| row.prompt.as_str()).collect::<Vec<_>>(), vec![body.as_str()]);
+        }
+    }
+
+    #[test]
+    fn cas_1485_terminal_task_relay_never_surfaces_through_any_atomic_drain() {
+        for status in [TaskStatus::Closed, TaskStatus::Cancelled] {
+            for path in ["unseen", "without_transport", "delivered_after", "wake_named", "poll_repeat", "inbox"] {
+                let (temp, store) = create_test_store();
+                let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+                tasks.init().unwrap();
+                let mut task = Task::new("cas-1485-terminal".into(), "relay target".into());
+                task.status = TaskStatus::AwaitingMerge;
+                tasks.add(&task).unwrap();
+                let body = format!("<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{}\" new=\"awaiting_merge\" notification_id=\"17717\" occurrence=\"{}\">\nMERGE REQUIRED\n</task-lifecycle>", task.id, Utc::now().to_rfc3339());
+                let id = store.enqueue_with_session("lifecycle-wake:17717", "supervisor", &body, "session").unwrap();
+                let turn_start = Utc::now() - chrono::Duration::minutes(1);
+                if path == "poll_repeat" {
+                    assert_eq!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().len(), 1);
+                } else if path == "delivered_after" {
+                    store.mark_transport_delivered(id).unwrap();
+                }
+                task.status = status;
+                tasks.update(&task).unwrap();
+                let rows = match path {
+                    "unseen" => store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap(),
+                    "without_transport" => store.surface_unseen_for_recipient_without_transport_delivery("supervisor", Some("session"), 10).unwrap(),
+                    "delivered_after" => store.surface_unseen_for_recipient_delivered_after("supervisor", Some("session"), 10, turn_start).unwrap(),
+                    "wake_named" => store.surface_wake_named_for_recipient("supervisor", Some("session"), &[id]).unwrap(),
+                    "poll_repeat" => store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::PolledBefore(Utc::now() + chrono::Duration::seconds(1)), 10, HOOK_SURFACE_BUDGET_CHARS).unwrap().rows,
+                    _ => store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap(),
+                };
+                assert!(rows.is_empty(), "{status} lifecycle payload must not surface via {path}");
+                let report = store.message_delivery_report(id).unwrap().unwrap();
+                assert_eq!(report.pending_reason, Some(PendingReason::SupersededStale), "{path}");
+                assert!(report.pending_detail.as_deref().is_some_and(|detail| detail.contains(&task.id)), "{path}");
+                assert!(report.confirmed_at.is_some(), "resolved forensic row must be acknowledged: {path}");
+                assert_eq!(store.recipient_receipt(id, "supervisor").unwrap(),
+                    (path == "poll_repeat").then_some(SurfacingSource::InboxPoll),
+                    "withholding must not fabricate a fresh hook/poll receipt: {path}");
+            }
+        }
+    }
+
+    #[test]
+    fn cas_1485_current_terminal_reports_and_uncertain_payloads_still_surface() {
+        for (source, current, announced, missing_task, malformed) in [
+            ("lifecycle-wake:17717", TaskStatus::AwaitingMerge, "awaiting_merge", false, false),
+            ("lifecycle-wake:17717", TaskStatus::Closed, "closed", false, false),
+            ("lifecycle-wake:17717", TaskStatus::Closed, "awaiting_merge", true, false),
+            ("lifecycle-wake:17717", TaskStatus::Closed, "awaiting_merge", false, true),
+            ("human", TaskStatus::Closed, "awaiting_merge", false, false),
+        ] {
+            let (temp, store) = create_test_store();
+            let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+            tasks.init().unwrap();
+            let mut task = Task::new("cas-1485-control".into(), "current task".into());
+            task.status = current;
+            tasks.add(&task).unwrap();
+            let id = if missing_task { "cas-1485-missing" } else { &task.id };
+            let occurrence = if malformed { "unknown".into() } else { Utc::now().to_rfc3339() };
+            let body = format!("<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{id}\" new=\"{announced}\" notification_id=\"17717\" occurrence=\"{occurrence}\">body</task-lifecycle>");
+            store.enqueue_with_session(source, "supervisor", &body, "session").unwrap();
+            let rows = store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap();
+            assert_eq!(rows.iter().map(|row| row.prompt.as_str()).collect::<Vec<_>>(), vec![body.as_str()],
+                "only a current task id and stale typed lifecycle envelope may be expired");
+        }
+        let (_temp, store) = create_test_store();
+        let body = format!("<task-lifecycle task_id=\"cas-1485-unknown\" new=\"awaiting_merge\" occurrence=\"{}\">body</task-lifecycle>", Utc::now().to_rfc3339());
+        store.enqueue_with_session("lifecycle-wake:17717", "supervisor", &body, "session").unwrap();
+        assert_eq!(store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().len(), 1,
+            "a queue without task schema has no terminal-state evidence");
+    }
+
+    #[test]
+    fn cas_4e19_writable_queue_open_removes_empty_diagnostic_decoy() {
+        let (temp, store) = create_test_store();
+        let prompt = "real queued message";
+        let id = store.enqueue("sender", "worker", prompt).unwrap();
+        let decoy = temp.path().join("prompt_queue.db");
+        std::fs::write(&decoy, []).unwrap();
+
+        let reader = SqlitePromptQueueStore::open_read_only(temp.path()).unwrap();
+        assert!(decoy.exists(), "read-only diagnosis must not mutate files");
+        let rows = reader.peek_all(10).unwrap();
+        assert_eq!((rows[0].id, rows[0].prompt.as_str()), (id, prompt));
+
+        let reopened = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        reopened.init().unwrap();
+        assert!(!decoy.exists(), "writable open must remove the misleading empty database");
+        let rows = reopened.peek_all(10).unwrap();
+        assert_eq!((rows[0].id, rows[0].prompt.as_str()), (id, prompt));
+        assert!(temp.path().join("cas.db").metadata().unwrap().len() > 0);
+        SqlitePromptQueueStore::open(temp.path()).unwrap();
+        assert!(!decoy.exists(), "opening the queue must never recreate the decoy");
+    }
+
+    #[test]
+    fn cas_4e19_queue_cleanup_preserves_data_and_recovery_sidecars() {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let temp = TempDir::new().unwrap();
+            let artifact = temp.path().join("prompt_queue.db");
+            let retained = b"diagnostic evidence";
+            if suffix.is_empty() {
+                std::fs::write(&artifact, retained).unwrap();
+            } else {
+                std::fs::write(&artifact, []).unwrap();
+                std::fs::write(temp.path().join(format!("prompt_queue.db{suffix}")), retained).unwrap();
+            }
+            let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+            store.init().unwrap();
+            assert!(artifact.exists(), "preserve data or recovery evidence: {suffix}");
+            let evidence = temp.path().join(format!("prompt_queue.db{suffix}"));
+            assert_eq!(std::fs::read(evidence).unwrap(), retained);
+            assert_eq!(store.pending_count().unwrap(), 0, "retained artifacts must not become the live queue");
+        }
+    }
+
+    #[test]
+    fn cas_4e19_queue_cleanup_preserves_directories() {
+        let temp = TempDir::new().unwrap();
+        let artifact = temp.path().join("prompt_queue.db");
+        std::fs::create_dir(&artifact).unwrap();
+        SqlitePromptQueueStore::open(temp.path()).unwrap();
+        assert!(artifact.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cas_4e19_queue_cleanup_does_not_follow_symlinks() {
+        let temp = TempDir::new().unwrap();
+        let target = temp.path().join("elsewhere.db");
+        std::fs::write(&target, []).unwrap();
+        let artifact = temp.path().join("prompt_queue.db");
+        std::os::unix::fs::symlink(&target, &artifact).unwrap();
+        SqlitePromptQueueStore::open(temp.path()).unwrap();
+        assert!(std::fs::symlink_metadata(&artifact).unwrap().file_type().is_symlink());
+        assert!(target.exists());
     }
 
     #[test]
@@ -11415,6 +12098,9 @@ mod tests {
                 params![inferred_at, message],
             )
             .unwrap();
+            // The row stands for one written before this process first opened
+            // the database (cas-1bc7: the check runs once per process).
+            forget_historical_demotion(&conn);
         }
 
         store.init().unwrap();
@@ -13693,6 +14379,88 @@ mod tests {
         assert!(prompts[0].contains(cause), "{prompts:?}");
         // pin: GH #1196: the misleading session-membership reason must not reach operator notices.
         assert!(!prompts[0].contains("factory session"), "{prompts:?}");
+    }
+
+    /// cas-5871: worker_status listed nine undelivered relays from September
+    /// sessions long ended (CI FAILED for kind-owl-50 on 2026-09-29, rolling
+    /// integration rows from 2026-09-11). A terminal relay older than a day
+    /// whose session has no running agent is reconciled, whether its agent
+    /// rows were shut down or deleted at SessionEnd. One from a live session,
+    /// a recent one, or one that may still be delivered stays.
+    #[test]
+    fn terminal_relays_from_ended_sessions_leave_the_banner_cas_5871() {
+        use crate::{AgentStore, SqliteAgentStore};
+        use cas_types::{Agent, AgentRole, AgentStatus};
+        let (temp, store) = create_test_store();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut live = Agent::new("live-sup".into(), "live-sup".into());
+        live.role = AgentRole::Supervisor;
+        live.factory_session = Some("live-session".into());
+        agents.register(&live).unwrap();
+        let mut gone = Agent::new("gone-sup".into(), "gone-sup".into());
+        gone.role = AgentRole::Supervisor;
+        gone.factory_session = Some("ended-session".into());
+        gone.status = AgentStatus::Shutdown;
+        agents.register(&gone).unwrap();
+
+        let relay = |session: &str, terminal: bool, age: chrono::Duration| {
+            let id = store
+                .enqueue_with_session("lifecycle-wake:ci-red-run:factory/kind-owl-50:e528", "supervisor", "CI FAILED", session)
+                .unwrap();
+            if terminal {
+                store.mark_undelivered_lifecycle_relay(id, Some("expired")).unwrap();
+            }
+            let conn = crate::shared_db::lock_connection(&store.conn).unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
+                params![(Utc::now() - age).to_rfc3339(), id],
+            )
+            .unwrap();
+            id
+        };
+        let old = chrono::Duration::days(2);
+        let ended_terminal = relay("ended-session", true, old);
+        // SessionEnd deleted every agent row of this session.
+        let vanished_terminal = relay("vanished-session", true, old);
+        let live_terminal = relay("live-session", true, old);
+        let ended_pending = relay("ended-session", false, old);
+        let ended_recent = relay("vanished-session", true, chrono::Duration::hours(2));
+        assert_eq!(store.undelivered_lifecycle_relay_count().unwrap(), 5);
+
+        assert_eq!(store.reconcile_ended_session_lifecycle_relays().unwrap(), 2);
+        let listed: Vec<i64> = store
+            .list_undelivered_lifecycle_relays(10)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.prompt_id)
+            .collect();
+        for gone in [ended_terminal, vanished_terminal] {
+            assert!(!listed.contains(&gone), "{listed:?}");
+        }
+        for kept in [live_terminal, ended_pending, ended_recent] {
+            assert!(listed.contains(&kept), "{kept} {listed:?}");
+        }
+        let kept = store.queued_prompt(ended_terminal).unwrap().unwrap();
+        assert!(kept.acked_at.is_some(), "the forensic row is kept, only reconciled");
+        assert_eq!(store.reconcile_lifecycle_relays().unwrap(), 0, "once, and nothing else due");
+    }
+
+    /// cas-5871 review M2: a kind-prefixed relay
+    /// (`lifecycle-wake:integration:<id>`) is cleared by message_ack with its
+    /// durable id, as the banner's hint says.
+    #[test]
+    fn a_kind_prefixed_relay_is_acknowledged_by_its_durable_id_cas_5871() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("lifecycle-wake:integration:11259", "supervisor", "Rolling integration requires attention", "s")
+            .unwrap();
+        let near_miss = store
+            .enqueue_with_session("lifecycle-wake:integration:111259", "supervisor", "another", "s")
+            .unwrap();
+        assert_eq!(store.ack_lifecycle_wake(11259).unwrap(), Some(id));
+        assert!(store.queued_prompt(id).unwrap().unwrap().acked_at.is_some());
+        assert!(store.queued_prompt(near_miss).unwrap().unwrap().acked_at.is_none());
     }
 
     #[test]
@@ -17918,5 +18686,142 @@ mod cas_6ccb_poll_settled_tests {
         assert!(report.confirmed_at.is_none());
         assert_ne!(report.stage, DeliveryStage::Confirmed);
         assert_eq!(report.recipient_poll_settled.as_deref(), Some("withheld by inbox_poll: done"));
+    }
+}
+
+/// cas-1bc7: under write contention (the many-agent harness's background
+/// writers), every write-lock acquisition on a tool call's path queues behind
+/// the holder. An empty inbox poll, a stale sweep with nothing due and a
+/// re-open's init must not take the write lock at all.
+#[cfg(test)]
+mod cas_1bc7_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Another connection holds the write lock until dropped.
+    fn foreign_writer(dir: &Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(dir.join("cas.db")).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        conn
+    }
+
+    fn store() -> (TempDir, SqlitePromptQueueStore) {
+        let temp = TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        (temp, store)
+    }
+
+    /// Run `f` with a short wait budget, so a write-lock wait fails fast
+    /// instead of sleeping out the 5 s busy timeout.
+    fn within_budget<T>(f: impl FnOnce() -> T) -> T {
+        let _budget = crate::wait_budget::bound_waits_for(std::time::Duration::from_millis(150));
+        f()
+    }
+
+    #[test]
+    fn cas_1bc7_empty_inbox_drains_take_no_write_lock() {
+        let (temp, store) = store();
+        // Mail for someone else is not this recipient's.
+        store.enqueue("supervisor", "worker-b", "not yours").unwrap();
+        let _held = foreign_writer(temp.path());
+        let polled = within_budget(|| store.poll_unseen_for_recipient("worker-a", None, 10));
+        assert!(polled.unwrap().is_empty(), "an empty poll answers without the write lock");
+        let surfaced = within_budget(|| store.surface_unseen_for_recipient("worker-a", None, 10));
+        assert!(surfaced.unwrap().is_empty(), "so does an empty turn-hook drain");
+    }
+
+    #[test]
+    fn cas_1bc7_a_nonempty_drain_still_receipts_once() {
+        let (_temp, store) = store();
+        let id = store.enqueue("supervisor", "worker-a", "real work").unwrap();
+        let first = store.poll_unseen_for_recipient("worker-a", None, 10).unwrap();
+        assert_eq!(first.iter().map(|row| row.id).collect::<Vec<_>>(), vec![id]);
+        assert!(
+            store.poll_unseen_for_recipient("worker-a", None, 10).unwrap().is_empty(),
+            "the receipt written under the lock still retires the row"
+        );
+    }
+
+    #[test]
+    fn cas_1bc7_stale_sweep_with_nothing_due_takes_no_write_lock() {
+        let (temp, store) = store();
+        store.enqueue("supervisor", "worker-a", "fresh").unwrap();
+        let _held = foreign_writer(temp.path());
+        let expired = within_budget(|| store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS));
+        assert!(expired.unwrap().is_empty());
+    }
+
+    /// Review: the demotion check scans prompt_queue, so it runs on the
+    /// first open of a database in this process only.
+    #[test]
+    fn cas_1bc7_second_open_does_not_scan_for_historical_inference() {
+        let temp = TempDir::new().unwrap();
+        let first = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        first.init().unwrap();
+        let key = historical_demotion_key(&first.conn.lock().unwrap()).expect("a file database");
+        let scans = || historical_demotion_scans().lock().unwrap().get(&key).copied();
+        assert_eq!(scans(), Some(1), "the first open checks once");
+        first.init().unwrap();
+        let second = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        second.init().unwrap();
+        assert_eq!(scans(), Some(1), "later opens of the same database do not scan");
+    }
+
+    /// Review 2a: a row the probe saw but another connection receipted
+    /// before the locked re-select is not handed out (or receipted) again.
+    #[test]
+    fn cas_1bc7_a_row_taken_between_probe_and_lock_is_not_drained_twice() {
+        let (temp, store) = store();
+        let id = store.enqueue("supervisor", "worker-a", "contended").unwrap();
+        let path = temp.path().join("cas.db");
+        AFTER_DRAIN_PROBE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let other = rusqlite::Connection::open(&path).unwrap();
+                other
+                    .execute(
+                        "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at, source)
+                         VALUES (?1, 'worker-a', ?2, 'inbox_poll')",
+                        params![id, Utc::now().to_rfc3339()],
+                    )
+                    .unwrap();
+            }));
+        });
+        let drained = store.poll_unseen_for_recipient("worker-a", None, 10).unwrap();
+        assert!(
+            AFTER_DRAIN_PROBE.with(|hook| hook.borrow().is_none()),
+            "the probe saw the row, so the hook ran"
+        );
+        assert!(drained.is_empty(), "the locked re-select sees the other receipt: {drained:?}");
+    }
+
+    /// Review 2b: a stale row the sweep could not reach under a foreign lock
+    /// is swept once the lock is released.
+    #[test]
+    fn cas_1bc7_a_stale_row_is_swept_after_the_lock_is_released() {
+        let (temp, store) = store();
+        let id = store.enqueue("supervisor", "worker-a", "ancient").unwrap();
+        let created = (Utc::now() - chrono::Duration::days(130)).to_rfc3339();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE prompt_queue SET created_at = ? WHERE id = ?", params![created, id])
+            .unwrap();
+        let held = foreign_writer(temp.path());
+        assert!(
+            within_budget(|| store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS)).is_err(),
+            "a due row needs the write lock, so the sweep defers"
+        );
+        drop(held);
+        let expired = store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap();
+        assert_eq!(expired.iter().map(|row| row.id).collect::<Vec<_>>(), vec![id]);
+    }
+
+    #[test]
+    fn cas_1bc7_reopen_init_takes_no_write_lock() {
+        let (temp, store) = store();
+        let _held = foreign_writer(temp.path());
+        within_budget(|| store.init()).expect("init with nothing to upgrade writes nothing");
     }
 }

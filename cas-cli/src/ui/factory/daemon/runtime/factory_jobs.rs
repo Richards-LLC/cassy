@@ -154,6 +154,10 @@ pub(crate) fn ci_status_spec(generation: u64) -> JobSpec {
 pub(crate) struct DeliverabilityBatch {
     /// Each prompt with whether it is still deliverable, in batch order.
     pub(crate) prompts: Vec<(Prompt, bool)>,
+    /// Each prompt's assignment state, read with the re-check (cas-4491f),
+    /// in batch order. Empty when it was not read: a prompt without one is
+    /// delivered directly.
+    pub(crate) assignments: Vec<crate::ui::factory::app::AssignmentRead>,
     /// The tick's revalidated events (stall nudges look up their episode).
     pub(crate) events: Vec<DirectorEvent>,
     /// When the tick's refresh started, for delivery latency telemetry.
@@ -170,4 +174,12 @@ pub(crate) enum FactoryJobOutput {
     WorkerHealth(WorkerHealthReport),
     ReminderScan,
     CiStatus(GitEvidenceMap),
+}
+
+/// Only the director's own result kinds; other owners drain theirs separately.
+pub(crate) fn is_factory_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        DIRECTOR_SNAPSHOT | REVALIDATE_FRESH | WORKER_HEALTH_PROBE | REMINDER_SCAN | CI_STATUS
+    )
 }

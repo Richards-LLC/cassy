@@ -848,6 +848,12 @@ fn prefer_fresher_base_ref(
     repo_root: &std::path::Path,
     base: &str,
 ) -> (Option<String>, Option<String>) {
+    prefer_fresher_base_ref_observed(repo_root, base, true)
+}
+
+fn prefer_fresher_base_ref_observed(
+    repo_root: &std::path::Path, base: &str, fetch: bool,
+) -> (Option<String>, Option<String>) {
     // Already an explicit remote-tracking ref: nothing to compare against.
     if base.starts_with("origin/") {
         return (None, None);
@@ -855,14 +861,15 @@ fn prefer_fresher_base_ref(
     // A remote-tracking ref is only evidence of the last fetch. Refresh it
     // before comparing so a long-running supervisor does not keep cutting
     // workers from an origin/main snapshot that is stale too.
-    let _ = crate::worktree::GitOperations::new(repo_root.to_path_buf()).fetch_branch(base);
+    if fetch { let _ = crate::worktree::GitOperations::new(repo_root.to_path_buf()).fetch_branch(base); }
     let remote = format!("origin/{base}");
     if !ref_exists(repo_root, base) || !ref_exists(repo_root, &remote) {
         return (None, None);
     }
-    let local_sha = short_sha(repo_root, base);
-    let remote_sha = short_sha(repo_root, &remote);
-    if local_sha == remote_sha && local_sha != "unknown" {
+    let (Some(local_sha), Some(remote_sha)) = (full_sha(repo_root, base), full_sha(repo_root, &remote)) else {
+        return (None, None);
+    };
+    if local_sha == remote_sha {
         return (None, None);
     }
 
@@ -871,16 +878,23 @@ fn prefer_fresher_base_ref(
 
     match (behind, ahead) {
         (0, _) => (None, None),
-        (behind, 0) => (
-            full_sha(repo_root, &remote),
-            Some(format!(
+        (behind, 0) => {
+            let git = crate::worktree::GitOperations::new(repo_root.to_path_buf());
+            let advance = if base.starts_with("epic/") {
+                git.advance_local_branch(base, &local_sha, &remote_sha)
+            } else { Ok(()) };
+            let state = match advance {
+                Ok(()) if base.starts_with("epic/") => "The local epic branch was fast-forwarded to the fetched tip.".to_string(),
+                Ok(()) => "The local integration branch was left unchanged.".to_string(),
+                Err(error) => format!("The local branch was preserved: {error}. Reconcile its checkout before retrying."),
+            };
+            (full_sha(repo_root, &remote), Some(format!(
                 "SPAWN BASE REFRESHED: local '{base}' ({local_sha}) is {behind} commit(s) behind \
                  '{remote}' ({remote_sha}); the worker worktree was cut from '{remote}' \
                  ({remote_sha}) so it starts on the fetched tip instead of the stale local ref \
-                 (cas-d897 / GH #146). Update the local branch \
-                 (`git fetch && git branch -f {base} {remote}`) to keep the two in step."
-            )),
-        ),
+                 (cas-d897 / GH #146). {state}"
+            )))
+        },
         (behind, ahead) => (
             None,
             Some(format!(
@@ -938,7 +952,13 @@ fn checkout_ref_for_spawn_base(
     parent_branch: &str,
     source: &SpawnBaseSource,
 ) -> (Option<String>, Option<String>, String) {
-    let (mut base_ref, freshness_notice) = prefer_fresher_base_ref(repo_root, parent_branch);
+    checkout_ref_for_spawn_base_observed(repo_root, parent_branch, source, true)
+}
+
+fn checkout_ref_for_spawn_base_observed(
+    repo_root: &std::path::Path, parent_branch: &str, source: &SpawnBaseSource, fetch: bool,
+) -> (Option<String>, Option<String>, String) {
+    let (mut base_ref, freshness_notice) = prefer_fresher_base_ref_observed(repo_root, parent_branch, fetch);
     let mut checkout_ref = parent_branch.to_string();
     if matches!(source, SpawnBaseSource::WorkTarget { .. }) {
         let remote = format!("origin/{parent_branch}");
@@ -975,21 +995,22 @@ fn checkout_ref_for_spawn_base(
 /// not be cut from an unpublished operator commit. A genuinely split
 /// epic/parent history is also refused because the worker must not inherit a
 /// base known to omit target history.
-fn fast_forward_epic_base_from_parent(
+fn refresh_epic_base_from_parent(
     repo_root: &std::path::Path,
     epic_branch: &str,
     parent_branch: &str,
+    parent_ref: &str,
+    publish_existing: bool,
 ) -> Result<Option<String>, String> {
     if epic_branch == parent_branch
         || !ref_exists(repo_root, epic_branch)
-        || !ref_exists(repo_root, parent_branch)
+        || !ref_exists(repo_root, parent_ref)
     {
         return Ok(None);
     }
 
     let epic_sha = full_sha(repo_root, epic_branch)
         .ok_or_else(|| format!("could not resolve epic base '{epic_branch}'"))?;
-    let parent_ref = freshest_nondivergent_ref(repo_root, parent_branch)?;
     let parent_sha = full_sha(repo_root, &parent_ref)
         .ok_or_else(|| format!("could not resolve recorded parent '{parent_ref}'"))?;
     if epic_sha == parent_sha {
@@ -1087,28 +1108,23 @@ fn fast_forward_epic_base_from_parent(
         }
     }
 
-    // Publishing is best-effort. The local fast-forward is already the safe
-    // spawn base, so a remote-less checkout or rejected publication must not
-    // roll it back and reintroduce the stale-base worker cut this refresh just
-    // prevented.
-    let origin_configured = std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(repo_root)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    if !origin_configured {
+    if !publish_existing {
         return Ok(Some(format!(
-            "EPIC BASE FAST-FORWARDED (LOCAL-ONLY): epic base '{epic_branch}' ({}) advanced to its recorded parent '{parent_branch}' via '{parent_ref}' ({}); no origin remote is configured, so the refreshed local ref is unpublished and will be used to cut the worker worktree.",
-            &epic_sha[..epic_sha.len().min(8)],
-            &parent_sha[..parent_sha.len().min(8)],
+            "EPIC BASE FAST-FORWARDED (LOCAL): epic base '{epic_branch}' ({epic_sha}) advanced to its recorded parent '{parent_branch}' via '{parent_ref}' ({parent_sha}); publication is handled separately; the refreshed local tip will be used."
         )));
     }
 
-    let push = std::process::Command::new("git")
+    // This path is selected only after a verified origin fetch. A failed
+    // push retains the safe local fast-forward for the worker checkout.
+    let mut command = std::process::Command::new("git");
+    command
         .args(["push", "origin", &format!("{refname}:{refname}")])
-        .current_dir(repo_root)
-        .output();
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .current_dir(repo_root);
+    let push = crate::worktree::GitOperations::run_command_bounded(
+        command,
+        std::time::Duration::from_secs(30),
+    );
     if !matches!(&push, Ok(output) if output.status.success()) {
         let push_error = match push {
             Ok(output) => String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -1137,111 +1153,6 @@ fn epic_base_refresh_refusal(error: &str) -> String {
     )
 }
 
-/// Choose the shared parent ref without silently picking an unpublished local
-/// side of a local/remote split. A fetched remote that strictly contains the
-/// local ref is the freshest safe parent; an equal remote is authoritative;
-/// an ahead local ref and a true split must be reconciled before a worker can
-/// inherit either one.
-fn freshest_nondivergent_ref(repo_root: &std::path::Path, branch: &str) -> Result<String, String> {
-    if branch.starts_with("origin/") {
-        return Ok(branch.to_string());
-    }
-    let local = branch.strip_prefix("refs/heads/").unwrap_or(branch);
-    // Keep the fast-forward decision authoritative to the remote observed at
-    // this spawn, rather than an origin/<branch> ref fetched hours earlier.
-    let _ = crate::worktree::GitOperations::new(repo_root.to_path_buf()).fetch_branch(local);
-    let remote = format!("origin/{local}");
-    if !ref_exists(repo_root, &remote) {
-        return Ok(branch.to_string());
-    }
-
-    let local_sha = full_sha(repo_root, branch)
-        .ok_or_else(|| format!("could not resolve recorded parent '{branch}'"))?;
-    let remote_sha = full_sha(repo_root, &remote)
-        .ok_or_else(|| format!("could not resolve fetched parent '{remote}'"))?;
-    if local_sha == remote_sha {
-        return Ok(branch.to_string());
-    }
-
-    let local_is_ancestor = std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", branch, &remote])
-        .current_dir(repo_root)
-        .status()
-        .map_err(|error| format!("could not compare parent '{branch}' to '{remote}': {error}"))?;
-    if local_is_ancestor.success() {
-        return Ok(remote);
-    }
-    let remote_is_ancestor = std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", &remote, branch])
-        .current_dir(repo_root)
-        .status()
-        .map_err(|error| format!("could not compare parent '{remote}' to '{branch}': {error}"))?;
-    if remote_is_ancestor.success() {
-        return Err(format!(
-            "local parent '{branch}' ({}) is ahead of shared '{remote}' ({}); refusing to advance an epic base from an unpublished local parent",
-            &local_sha[..local_sha.len().min(8)],
-            &remote_sha[..remote_sha.len().min(8)],
-        ));
-    }
-
-    Err(format!(
-        "recorded parent '{branch}' ({}) and fetched '{remote}' ({}) have diverged; refusing to choose a worker base",
-        &local_sha[..local_sha.len().min(8)],
-        &remote_sha[..remote_sha.len().min(8)],
-    ))
-}
-
-/// Return an epic branch and its explicitly declared integration parent. An
-/// epic without a `WorkTarget` retains the legacy branch-only behaviour.
-fn recorded_epic_parent_branch(
-    cas_dir: &std::path::Path,
-    epic_id: &str,
-) -> Option<(String, String)> {
-    let store = open_task_store_cached(cas_dir).ok()?;
-    let epic = store.get(epic_id).ok()?;
-    let epic_branch = epic
-        .branch
-        .filter(|branch| !branch.trim().is_empty())?;
-    let parent_branch = epic
-        .deliverables
-        .work_target
-        .as_ref()
-        .map(|target| target.target_branch.trim())
-        .filter(|branch| !branch.is_empty())?
-        .to_string();
-    Some((epic_branch, parent_branch))
-}
-
-/// Locate the epic whose recorded branch is the resolved spawn base, then
-/// return that epic's declared parent. This is deliberately branch-oriented:
-/// a task-level WorkTarget can resolve directly to an *outer* epic branch,
-/// leaving no task-epic id in [`SpawnBaseSource`] even though that base itself
-/// has a parent that must be refreshed before a worker is cut.
-fn recorded_epic_parent_branch_for_resolved_base(
-    cas_dir: &std::path::Path,
-    resolved_base: &str,
-) -> Option<(String, String)> {
-    let store = open_task_store_cached(cas_dir).ok()?;
-    store
-        .list(None)
-        .ok()?
-        .into_iter()
-        .filter(|task| task.task_type == cas_types::TaskType::Epic)
-        .find_map(|epic| {
-            let epic_branch = epic.branch?.trim().to_string();
-            if epic_branch.is_empty() || epic_branch != resolved_base {
-                return None;
-            }
-            let parent_branch = epic
-                .deliverables
-                .work_target
-                .as_ref()
-                .map(|target| target.target_branch.trim())
-                .filter(|branch| !branch.is_empty())?
-                .to_string();
-            Some((epic_branch, parent_branch))
-        })
-}
 
 #[cfg(test)]
 fn cleanup_cancelled_spawn_worktree_with_manager(
@@ -1264,6 +1175,85 @@ fn cleanup_cancelled_spawn_worktree_with_manager(
     manager.register_worktree(&result.worker_name, worktree);
     manager.remove_worker(&result.worker_name, false)?;
     Ok(true)
+}
+
+/// cas-58a3: what a crashed worker's off-loop cleanup needs.
+#[derive(Debug, Clone)]
+pub struct CrashCleanup {
+    pub cas_dir: std::path::PathBuf,
+    pub factory_session: Option<String>,
+    pub worker: String,
+    /// The worker's tracked worktree, if any; reclaimed only when it holds no
+    /// open task and is clean.
+    pub worktree: Option<crate::worktree::WorkerRemovalPlan>,
+}
+
+/// cas-58a3: what the off-loop crash cleanup did to the worktree. `None` when
+/// it was left alone (open tasks, or none tracked).
+#[derive(Debug)]
+pub struct CrashCleanupOutcome {
+    pub worktree: Option<crate::worktree::WorktreeResult<RemoveOutcome>>,
+}
+
+/// cas-58a3: the I/O half of [`FactoryApp::mark_worker_crashed`], for a job
+/// lane. The interactive leader may have exited while a long-lived child
+/// remains in its process group: reap the durable group before the lane is
+/// eligible for respawn. Then reclaim the worktree only when all of the
+/// worker's tasks are Closed (the supervisor has moved on) and the tree is
+/// clean; by default it is preserved for respawn.
+pub fn crash_cleanup_io(cleanup: &CrashCleanup) -> CrashCleanupOutcome {
+    let name = cleanup.worker.as_str();
+    if let Some(record) = crate::ui::factory::process_groups::list(&cleanup.cas_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|record| {
+            record.worker_name == name
+                && cleanup
+                    .factory_session
+                    .as_deref()
+                    .is_none_or(|session| record.factory_session == session)
+        })
+    {
+        if let Err(error) = crate::ui::factory::process_groups::reap_blocking(&cleanup.cas_dir, &record) {
+            tracing::warn!(
+                worker = %name,
+                pgid = record.pgid,
+                error = %error,
+                "crashed worker process group survived reap; retaining GC record"
+            );
+        }
+    }
+
+    let Some(plan) = cleanup.worktree.as_ref() else {
+        return CrashCleanupOutcome { worktree: None };
+    };
+    let Ok(agent_store) = open_agent_store(&cleanup.cas_dir) else {
+        return CrashCleanupOutcome { worktree: None };
+    };
+    let Some(agent_id) = agent_store
+        .list(None)
+        .ok()
+        .and_then(|agents| agents.into_iter().find(|a| a.name == name).map(|a| a.id))
+    else {
+        return CrashCleanupOutcome { worktree: None };
+    };
+    if worker_has_open_tasks(&cleanup.cas_dir, &agent_id) {
+        return CrashCleanupOutcome { worktree: None };
+    }
+    let outcome = crate::worktree::remove_worker_worktree_io(plan);
+    if let Ok(RemoveOutcome::DirtyDeferred(warning)) = &outcome
+        && let Err(e) = flag_agent_dirty_on_shutdown(
+            agent_store.as_ref(),
+            &agent_id,
+            &warning.path,
+            warning.file_count,
+        )
+    {
+        tracing::warn!("Failed to flag dirty_on_shutdown for agent '{agent_id}': {e}");
+    }
+    CrashCleanupOutcome {
+        worktree: Some(outcome),
+    }
 }
 
 /// Stamp `dirty_on_shutdown=true` (plus path + file count) onto the agent
@@ -1872,6 +1862,14 @@ impl WorkerSpawnContext {
                     let focus = self.factory_session.as_deref()
                         .map(crate::ui::factory::app::preferred_epic_focus_from_session_metadata_named)
                         .unwrap_or_default();
+                    if self.task_id.is_none() && let Some(id) = focus.epic_id.as_deref() {
+                        let store = open_task_store_cached(&self.cas_dir)?;
+                        match store.get(id) {
+                            Ok(epic) if epic.is_terminal() => anyhow::bail!("spawn refused: pinned epic {id} is {}; no lane was republished", epic.status),
+                            Err(_) => anyhow::bail!("spawn refused: pinned epic {id} no longer exists; no lane was republished"),
+                            _ => {},
+                        }
+                    }
                     let state =
                         crate::ui::factory::app::resolve_epic_state_for_focus(&data, &focus);
                     self.current_epic_id = state.epic_id().map(str::to_string);
@@ -1955,45 +1953,108 @@ impl WorkerSpawnContext {
                 let (parent_branch, base_source) =
                     resolve_spawn_base(&task_base, self.epic_branch.as_deref(), &trunk);
                 let mut notices: Vec<String> = Vec::new();
-                if let Some(notice) = ensure_local_spawn_parent(&repo_root, &parent_branch)
+                let recorded_epic = open_task_store_cached(&self.cas_dir)?.epic_for_branch(&parent_branch)?;
+                let managed_epic = parent_branch.starts_with("epic/") && recorded_epic.is_some();
+                if let Some(epic) = &recorded_epic
+                    && epic.is_terminal()
+                {
+                    anyhow::bail!(
+                        "spawn refused: epic {} is {}; no lane was republished",
+                        epic.id,
+                        epic.status
+                    );
+                }
+                if managed_epic {
+                    // Adopted self-target lanes and legacy target-less epics have
+                    // no recorded parent to refresh. Publish their local tip as
+                    // it is, even if it is an ancestor of the configured trunk.
+                    let refresh_parent = recorded_epic
+                        .as_ref()
+                        .and_then(|epic| epic.deliverables.work_target.as_ref())
+                        .map(|target| target.target_branch.trim())
+                        .filter(|parent| !parent.is_empty() && *parent != parent_branch);
+                    let observation = spawn_git.observe_epic_publication(&parent_branch, refresh_parent);
+                    let existing_remote = matches!(observation.remote, Ok(Some(true)));
+                    if !ref_exists(&repo_root, &parent_branch) && !existing_remote {
+                        if let Err(error) = &observation.remote {
+                            anyhow::bail!(
+                                "EPIC BRANCH UNVERIFIED: '{parent_branch}' cannot be prepared because origin could not be verified: {error}; no lane was recreated"
+                            );
+                        }
+                        anyhow::bail!(
+                            "spawn base '{parent_branch}' doesn't resolve; refusing to recreate a deleted epic lane from trunk"
+                        );
+                    }
+                    // Reconcile a verified existing epic once before preparing from
+                    // its parent, so a stale local copy cannot omit origin's work.
+                    let preserve = if existing_remote {
+                        let readiness = spawn_git
+                            .ensure_epic_published_observed(&parent_branch, refresh_parent, &observation)
+                            .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
+                        if let Some(notice) = readiness.notice {
+                            notices.push(notice);
+                        }
+                        !readiness.can_refresh_parent
+                    } else {
+                        false
+                    };
+                    if let Some(parent) = refresh_parent {
+                        if let Some(parent_ref) = spawn_git
+                            .shared_parent_ref(parent)
+                            .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?
+                        {
+                            if preserve {
+                                // Remote divergence forbids moving either side, but local
+                                // ancestry validation still uses the fetched/cached parent.
+                                let ahead = spawn_git.commits_behind(&parent_ref, &parent_branch)?;
+                                let behind = spawn_git.commits_behind(&parent_branch, &parent_ref)?;
+                                if ahead > 0 && behind > 0 {
+                                    anyhow::bail!(
+                                        "{}",
+                                        epic_base_refresh_refusal(&format!(
+                                            "epic base '{parent_branch}' and recorded parent '{parent_ref}' have diverged; no refs changed"
+                                        ))
+                                    );
+                                }
+                            } else if let Some(notice) = refresh_epic_base_from_parent(
+                                &repo_root,
+                                &parent_branch,
+                                &parent,
+                                &parent_ref,
+                                existing_remote,
+                            )
+                            .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?
+                            {
+                                notices.push(notice);
+                            }
+                        } else {
+                            notices.push(format!("EPIC BASE REFRESH SKIPPED: '{parent_branch}' recorded parent '{parent}' has no resolvable local or cached origin ref; using the existing epic tip unchanged."));
+                        }
+                    }
+                    if !existing_remote {
+                        match spawn_git.ensure_epic_published_observed(
+                            &parent_branch,
+                            refresh_parent,
+                            &observation,
+                        ) {
+                            Ok(readiness) => {
+                                if let Some(notice) = readiness.notice {
+                                    notices.push(notice);
+                                }
+                            }
+                            Err(error) => notices.push(format!(
+                                "EPIC BRANCH UNVERIFIED: '{parent_branch}' ({}); {error}",
+                                full_sha(&repo_root, &parent_branch).unwrap_or_else(|| "missing".into())
+                            )),
+                        }
+                    }
+                } else if let Some(notice) = ensure_local_spawn_parent(&repo_root, &parent_branch)
                     .map_err(|error| anyhow::anyhow!("{error}"))?
                 {
                     notices.push(notice);
                 }
-                let base_epic_id = match &base_source {
-                    SpawnBaseSource::TaskEpic { epic_id, .. } => Some(epic_id.as_str()),
-                    SpawnBaseSource::PinnedFocus => self.current_epic_id.as_deref(),
-                    SpawnBaseSource::WorkTarget { .. }
-                    | SpawnBaseSource::TaskWithoutEpic { .. }
-                    | SpawnBaseSource::Trunk => None,
-                };
-                // cas-b6f5 (GH #434): a task-level WorkTarget may point at
-                // an outer epic branch, so the winning SpawnBaseSource has no
-                // task-epic id even though the resolved base itself records a
-                // parent. Look up that base as an epic after retaining the
-                // direct child-epic path used by cas-83f6.
-                let recorded_base_parent = base_epic_id
-                    .and_then(|epic_id| recorded_epic_parent_branch(&self.cas_dir, epic_id))
-                    .filter(|(epic_branch, _)| epic_branch == &parent_branch)
-                    .or_else(|| {
-                        recorded_epic_parent_branch_for_resolved_base(&self.cas_dir, &parent_branch)
-                    });
-                if let Some((epic_branch, recorded_parent)) = recorded_base_parent {
-                    let refresh = fast_forward_epic_base_from_parent(
-                        &repo_root,
-                        &epic_branch,
-                        &recorded_parent,
-                    )
-                    .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
-                    if let Some(notice) = refresh {
-                        notices.push(notice);
-                    }
-                }
-                // cas-d897 (GH #146): the winning branch name still has to be
-                // resolved to the fresher of its local and origin refs — a
-                // stale local ref silently backdates every worker cut from it.
                 let (base_ref, freshness_notice, checkout_ref) =
-                    checkout_ref_for_spawn_base(&repo_root, &parent_branch, &base_source);
+                    checkout_ref_for_spawn_base_observed(&repo_root, &parent_branch, &base_source, !managed_epic);
                 if let Some(notice) = freshness_notice {
                     notices.push(notice);
                 }
@@ -2265,8 +2326,12 @@ impl FactoryApp {
         let worker_name = match name {
             Some(name) => name.to_string(),
             None => {
-                let existing: std::collections::HashSet<&str> =
-                    self.worker_names.iter().map(String::as_str).collect();
+                let existing: std::collections::HashSet<&str> = self
+                    .worker_names
+                    .iter()
+                    .chain(self.crash_cleanups_pending.keys())
+                    .map(String::as_str)
+                    .collect();
                 let mut candidate = generate_unique(1)[0].clone();
                 let mut attempts = 0;
                 while existing.contains(candidate.as_str()) && attempts < 100 {
@@ -2282,6 +2347,11 @@ impl FactoryApp {
                 vec![("success", "false"), ("reason", "worker_exists")],
             );
             anyhow::bail!("Worker '{worker_name}' already exists");
+        }
+        if self.crash_cleanup_pending(&worker_name) {
+            anyhow::bail!(
+                "Worker '{worker_name}' is still being cleaned up after its exit; retry once its reap and worktree check finish"
+            );
         }
         Ok(WorkerSpawnContext {
             worker_name,
@@ -2767,30 +2837,20 @@ impl FactoryApp {
     /// AND the tree is clean — in that case we reclaim it the same way graceful
     /// shutdown would. Dirty trees are always preserved and flagged for salvage.
     pub async fn mark_worker_crashed(&mut self, name: &str) {
-        // The interactive leader may have exited while a long-lived child
-        // remains in its process group. Reap the durable group before making
-        // this lane eligible for respawn.
-        if let Some(record) = crate::ui::factory::process_groups::list(self.cas_dir())
-            .unwrap_or_default()
-            .into_iter()
-            .find(|record| {
-                record.worker_name == name
-                    && self
-                        .factory_session()
-                        .is_none_or(|session| record.factory_session == session)
-            })
-        {
-            match crate::ui::factory::process_groups::reap(self.cas_dir(), &record).await {
-                Ok(_) => {}
-                Err(error) => tracing::warn!(
-                    worker = %name,
-                    pgid = record.pgid,
-                    error = %error,
-                    "crashed worker process group survived reap; retaining GC record"
-                ),
-            }
-        }
+        let cleanup = self.mark_worker_crashed_in_memory(name);
+        let outcome = crash_cleanup_io(&cleanup);
+        self.apply_crash_cleanup(name, outcome);
+    }
 
+    /// cas-58a3: the loop half of [`Self::mark_worker_crashed`]. It drops the
+    /// worker from the roster, event detector, pane grid and layout, and
+    /// returns what [`crash_cleanup_io`] needs: the process-group reap and the
+    /// worktree reclaim check, which must not run inside the daemon loop's
+    /// enforced PTY exchange (C6).
+    pub fn mark_worker_crashed_in_memory(&mut self, name: &str) -> CrashCleanup {
+        // cas-58a3 review H1: the name stays reserved until its cleanup is
+        // applied (or abandoned), so no respawn shares its scope or worktree.
+        *self.crash_cleanups_pending.entry(name.to_string()).or_default() += 1;
         // Remove from worker tracking
         self.worker_names.retain(|n| n != name);
 
@@ -2803,21 +2863,6 @@ impl FactoryApp {
         // Ensure selected tab is still valid
         self.clamp_selected_worker_tab();
 
-        // Determine if this crashed worker can have its worktree reclaimed.
-        // Default: preserve for respawn. Only reclaim when all assigned tasks
-        // are Closed (supervisor has moved on) AND tree is clean.
-        let cas_dir = self.cas_dir().to_path_buf();
-        if let Ok(agent_store) = open_agent_store(&cas_dir) {
-            if let Ok(agents) = agent_store.list(None) {
-                if let Some(agent) = agents.iter().find(|a| a.name == name) {
-                    let agent_id = agent.id.clone();
-                    if !worker_has_open_tasks(&cas_dir, &agent_id) {
-                        self.finalize_worker_worktree(&agent_store, &agent_id, name);
-                    }
-                }
-            }
-        }
-
         // Sync pane sizes to adjust layout
         let _ = self.sync_pane_sizes();
 
@@ -2826,6 +2871,86 @@ impl FactoryApp {
             "factory_worker_crashed",
             vec![("workers_remaining", &workers_remaining)],
         );
+        CrashCleanup {
+            cas_dir: self.cas_dir().to_path_buf(),
+            factory_session: self.factory_session().map(str::to_string),
+            worker: name.to_string(),
+            worktree: self
+                .worktree_manager
+                .as_ref()
+                .and_then(|manager| manager.worker_removal_plan(name)),
+        }
+    }
+
+    /// cas-58a3 review H1: whether `name`'s crash cleanup is still pending.
+    /// Respawn and named spawn treat such a name as busy.
+    pub fn crash_cleanup_pending(&self, name: &str) -> bool {
+        self.crash_cleanups_pending.contains_key(name)
+    }
+
+    /// cas-58a3 review H1: release a name whose crash cleanup will never be
+    /// applied (it was given up), so the name can be spawned again.
+    pub fn abandon_crash_cleanup(&mut self, name: &str) {
+        self.release_crash_cleanup(name);
+    }
+
+    /// cas-58a3 review L-a: one cleanup of `name` finished. The name stays
+    /// reserved while another crash cleanup of the same worker is pending
+    /// (a second exit of a respawn that raced the first cleanup).
+    fn release_crash_cleanup(&mut self, name: &str) {
+        if let Some(count) = self.crash_cleanups_pending.get_mut(name) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.crash_cleanups_pending.remove(name);
+            }
+        }
+    }
+
+    /// cas-58a3: the loop half after [`crash_cleanup_io`] reports: forget a
+    /// reclaimed worktree, and surface a preserved or failed one.
+    pub fn apply_crash_cleanup(&mut self, name: &str, outcome: CrashCleanupOutcome) {
+        self.release_crash_cleanup(name);
+        match outcome.worktree {
+            None | Some(Ok(RemoveOutcome::NotTracked)) => {}
+            Some(Ok(RemoveOutcome::Removed)) => {
+                if let Some(manager) = self.worktree_manager.as_mut() {
+                    manager.forget_worker(name);
+                }
+            }
+            Some(Err(error)) => {
+                self.set_error(format!("Worker '{name}' worktree cleanup failed: {error}"));
+            }
+            Some(Ok(RemoveOutcome::DirtyDeferred(warning))) => {
+                self.set_error(format!(
+                    "Worker '{}' shut down with {} uncommitted file{} at {} — worktree preserved for salvage",
+                    warning.worker_name,
+                    warning.file_count,
+                    if warning.file_count == 1 { "" } else { "s" },
+                    warning.path.display(),
+                ));
+            }
+            Some(Ok(RemoveOutcome::ExternalSymlinksBlocked(warning))) => {
+                // cas-df97: live external symlinks (e.g. dotfiles a
+                // stow/install step pointed at this worktree by mistake)
+                // resolve into it — removing the directory would leave every
+                // one dangling. Preserve the worktree and name every
+                // offending link so it's fixable without spelunking.
+                let links_desc = warning
+                    .links
+                    .iter()
+                    .map(|l| format!("{} -> {}", l.link.display(), l.target.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.set_error(format!(
+                    "Worker '{}' shut down but worktree at {} has {} live external symlink{} pointing into it — worktree preserved, NOT removed: {}",
+                    warning.worker_name,
+                    warning.path.display(),
+                    warning.links.len(),
+                    if warning.links.len() == 1 { "" } else { "s" },
+                    links_desc,
+                ));
+            }
+        }
     }
 
     /// Respawn a crashed worker
@@ -2869,6 +2994,14 @@ impl FactoryApp {
             "factory_worker_respawn_requested",
             vec![("worktrees_enabled", bool_prop(self.worktrees_enabled()))],
         );
+
+        // cas-58a3 review H1: a crashed worker's late cleanup would act on the
+        // respawn's scope and worktree.
+        if self.crash_cleanup_pending(name) {
+            anyhow::bail!(
+                "Worker '{name}' is still being cleaned up after its exit; retry once its reap and worktree check finish"
+            );
+        }
 
         // Check if worker is already active
         if self.worker_names.contains(&name.to_string()) {
@@ -3025,12 +3158,38 @@ impl FactoryApp {
 }
 
 #[cfg(test)]
+#[path = "epic_spawn_readiness_tests.rs"]
+mod spawn_readiness_tests;
+
+#[cfg(test)]
 mod spawn_base_tests {
     use super::*;
     use crate::test_support::TestEnvGuard;
     use rmcp::handler::server::wrapper::Parameters;
     use std::process::Command;
     use tempfile::TempDir;
+
+    #[test]
+    fn cas_bfa1_spawn_batch_advances_local_base_once() {
+        let temp = TempDir::new().unwrap();
+        let origin = temp.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        init_repo(&origin);
+        let old = head_sha(&origin, "main");
+        commit_file(&origin, "new-base", "current origin");
+        let expected = head_sha(&origin, "main");
+        let repo = temp.path().join("repo");
+        assert!(Command::new("git")
+            .args(["clone", "-q", origin.to_str().unwrap(), repo.to_str().unwrap()])
+            .status().unwrap().success());
+        assert!(Command::new("git").args(["branch", "epic/batch", &old])
+            .current_dir(&repo).status().unwrap().success());
+        assert!(Command::new("git").args(["branch", "epic/batch", "main"])
+            .current_dir(&origin).status().unwrap().success());
+        let notices = (0..8).filter_map(|_| prefer_fresher_base_ref(&repo, "epic/batch").1).count();
+        assert_eq!(head_sha(&repo, "epic/batch"), expected, "spawn must advance the stale local merge-back ref");
+        assert_eq!(notices, 1, "one stale tip must not produce eight identical refresh notices");
+    }
 
     fn init_repo(dir: &std::path::Path) {
         Command::new("git")
@@ -4113,6 +4272,7 @@ mod spawn_base_tests {
             remote_sha,
             "the worktree must be cut from origin's tip, not the stale local ref"
         );
+        assert_eq!(short_sha(&repo, "main"), local_sha, "spawn selection must not move the operator's trunk");
         let notice = notice.expect("a base swapped for origin's tip must be reported");
         assert!(notice.contains(&local_sha), "{notice}");
         assert!(notice.contains(&remote_sha), "{notice}");
@@ -4807,7 +4967,7 @@ mod spawn_base_tests {
         );
         let parent_tip = head_sha(&origin, "main");
 
-        let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+        let notice = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/behind", "main")
             .expect("clean ancestry must be safe to fast-forward")
             .expect("the stale epic base must be refreshed");
         assert!(notice.contains("EPIC BASE FAST-FORWARDED"), "{notice}");
@@ -4905,7 +5065,7 @@ mod spawn_base_tests {
         let epic_tip = head_sha(&repo, "epic/behind");
         assert_ne!(local_parent_tip, remote_parent_tip);
 
-        let error = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+        let error = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/behind", "main")
             .expect_err("an unpublished local parent must refuse epic refresh");
         assert!(error.contains("ahead of shared 'origin/main'"), "{error}");
         assert!(error.contains("unpublished local parent"), "{error}");
@@ -4928,10 +5088,10 @@ mod spawn_base_tests {
         commit(&repo, "parent-advance.txt", "parent advanced locally");
         let parent_tip = head_sha(&repo, "main");
 
-        let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+        let notice = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/behind", "main")
             .expect("a remote-less checkout can still refresh its local epic base")
             .expect("the local refresh must be reported");
-        assert!(notice.contains("LOCAL-ONLY"), "{notice}");
+        assert!(notice.contains("EPIC BASE FAST-FORWARDED (LOCAL):"), "{notice}");
         assert!(notice.contains("epic/behind"), "{notice}");
         assert!(notice.contains("main"), "{notice}");
         assert!(notice.contains("unpublished"), "{notice}");
@@ -4987,11 +5147,11 @@ mod spawn_base_tests {
 
         commit(&repo, "parent-advance.txt", "parent advanced locally");
         let parent_tip = head_sha(&repo, "main");
-        let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+        let notice = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/behind", "main")
             .unwrap()
             .unwrap();
 
-        assert!(notice.contains("LOCAL-ONLY"), "{notice}");
+        assert!(notice.contains("EPIC BASE FAST-FORWARDED (LOCAL):"), "{notice}");
         assert_eq!(head_sha(&sibling, "HEAD"), parent_tip);
         assert!(sibling.join("parent-advance.txt").is_file());
         let status = Command::new("git")
@@ -5051,7 +5211,7 @@ mod spawn_base_tests {
         commit(&origin, "parent-advance.txt", "parent advanced upstream");
         let parent_tip = head_sha(&origin, "main");
 
-        let notice = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+        let notice = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/behind", "main")
             .expect("a rejected publish must retain the safe local refresh")
             .expect("the unpublished refresh must be reported");
         assert!(notice.contains("UNPUBLISHED"), "{notice}");
@@ -5170,15 +5330,11 @@ mod spawn_base_tests {
         let (base, source) = resolve_spawn_base(&task_base, None, "main");
         assert_eq!(base, "epic/outer");
         assert!(matches!(source, SpawnBaseSource::WorkTarget { .. }));
-        let (epic_branch, recorded_parent) =
-            recorded_epic_parent_branch_for_resolved_base(&cas_dir, &base)
-                .expect("the resolved WorkTarget branch belongs to the outer epic");
-        assert_eq!(epic_branch, base);
-        assert_eq!(recorded_parent, "main");
-
-        let notice = fast_forward_epic_base_from_parent(&repo, &epic_branch, &recorded_parent)
-            .expect("the strictly-behind outer epic must fast-forward")
-            .expect("the refresh must be reported");
+        std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id = \"test\"\n").unwrap();
+        let prepared = super::spawn_readiness_tests::prepare_existing_task(&repo, &cas_dir, "cas-child")
+            .expect("the strictly-behind outer epic must prepare through production");
+        assert_eq!(prepared.worktree_info.as_ref().unwrap().parent_branch, "epic/outer");
+        let notice = prepared.warnings.join("\n");
         assert!(notice.contains("EPIC BASE FAST-FORWARDED"), "{notice}");
         assert!(notice.contains("pushed to origin"), "{notice}");
         assert_eq!(head_sha(&repo, "epic/outer"), parent_tip);
@@ -5236,7 +5392,7 @@ mod spawn_base_tests {
             .unwrap();
         commit(&repo, "parent-only.txt", "parent-only work");
 
-        let error = fast_forward_epic_base_from_parent(&repo, "epic/diverged", "main")
+        let error = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/diverged", "main")
             .expect_err("divergent epic/parent history cannot be fast-forwarded");
         assert!(error.contains("have diverged"), "{error}");
         let refusal = epic_base_refresh_refusal(&error);
@@ -5266,99 +5422,56 @@ mod spawn_base_tests {
     /// before `WorkerSpawnPrep` can cut a no-code worker from a diverged epic.
     #[test]
     fn no_code_spawn_refuses_diverged_epic_before_worktree_cut_cas_a075() {
-        let tmp = TempDir::new().unwrap();
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        init_repo(&repo);
-        add_origin(&repo, "https://github.com/example/test.git");
-
-        Command::new("git")
-            .args(["checkout", "-q", "-b", "epic/diverged-support"])
-            .current_dir(&repo)
-            .output()
-            .unwrap();
-        commit(&repo, "epic-only.txt", "support epic work");
-        Command::new("git")
-            .args(["checkout", "-q", "main"])
-            .current_dir(&repo)
-            .output()
-            .unwrap();
-        commit(&repo, "parent-only.txt", "current support playbook parent");
-
-        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
-        let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
-        let mut epic = cas_types::Task::new("cas-support-epic".into(), "support epic".into());
-        epic.task_type = cas_types::TaskType::Epic;
-        epic.branch = Some("epic/diverged-support".into());
-        epic.deliverables.work_target = Some(cas_types::WorkTarget {
-            repo_selector: "remote:github.com/example/test".into(),
-            target_branch: "main".into(),
-        });
-        store.add(&epic).unwrap();
-        let mut child = cas_types::Task::new("cas-support-child".into(), "support task".into());
-        child.execution_note = Some("no-code".into());
-        store.add(&child).unwrap();
-        store
-            .add_dependency(&cas_types::Dependency {
-                from_id: child.id.clone(),
-                to_id: epic.id.clone(),
-                dep_type: cas_types::DependencyType::ParentChild,
-                created_at: chrono::Utc::now(),
-                created_by: None,
-            })
-            .unwrap();
-
-        let worktree_root = repo.join(".cas").join("worktrees");
-        let manager = WorktreeManager::new(
-            &repo,
-            WorktreeConfig {
-                enabled: true,
-                base_path: worktree_root.to_string_lossy().to_string(),
-                branch_prefix: "factory/".to_string(),
-                auto_merge: false,
-                cleanup_on_close: false,
-                promote_entries_on_merge: false,
-            },
-        )
-        .unwrap();
-        let worker_path = manager.worktree_path_for_worker("diverged-support-worker");
-        let mut app = FactoryApp::from_init_result(
-            cas_dir.clone(),
-            Mux::new(40, 120),
-            Some(manager),
-            DirectorData::load_fast(&cas_dir).unwrap(),
-            "support-supervisor".into(),
-            Vec::new(),
-            crate::ui::factory::notification::NotifyConfig::default(),
-            false,
-            AutoPromptConfig::default(),
-            cas_mux::SupervisorCli::Claude,
-            cas_mux::SupervisorCli::Claude,
-            120,
-            40,
-            false,
-            None,
-            None,
-            repo,
-        )
-        .unwrap();
-
-        let error = match app.prepare_worker_spawn(
-            Some("diverged-support-worker"),
-            true,
-            Some("cas-support-child"),
-        ) {
-            Ok(_) => panic!("diverged no-code epic must refuse before preparing a cut"),
-            Err(error) => error,
-        };
-        let error = error.to_string();
-        assert!(error.contains("EPIC BASE REFRESH REFUSED"), "{error}");
-        assert!(error.contains("epic/diverged-support"), "{error}");
-        assert!(error.contains("main"), "{error}");
-        assert!(
-            !worker_path.exists(),
-            "refused spawn must not create the worker worktree"
-        );
+        for offline in [false, true] {
+            super::spawn_readiness_tests::with_fixture(|fixture| {
+                let tasks = open_task_store_cached(&fixture.root).unwrap();
+                super::spawn_readiness_tests::git(
+                    &fixture.repo,
+                    &["branch", "-m", "epic/round2", "epic/diverged-support"],
+                );
+                let mut epic = tasks.get("cas-round2-epic").unwrap();
+                epic.branch = Some("epic/diverged-support".into());
+                tasks.update(&epic).unwrap();
+                let mut child = tasks.get("cas-round2-child").unwrap();
+                child.execution_note = Some("no-code".into());
+                tasks.update(&child).unwrap();
+                super::spawn_readiness_tests::git(
+                    &fixture.repo,
+                    &["checkout", "epic/diverged-support"],
+                );
+                super::spawn_readiness_tests::commit(&fixture.repo, "epic-only");
+                let tip = super::spawn_readiness_tests::git(
+                    &fixture.repo,
+                    &["rev-parse", "epic/diverged-support"],
+                );
+                super::spawn_readiness_tests::git(&fixture.repo, &["checkout", "main"]);
+                fixture.advance_parent();
+                if offline {
+                    fixture.offline();
+                }
+                let error = fixture
+                    .prepare()
+                    .err()
+                    .expect("diverged no-code epic must refuse")
+                    .to_string();
+                assert!(
+                    error.contains("EPIC BASE REFRESH REFUSED") && error.contains("have diverged"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("epic/diverged-support") && error.contains("main"),
+                    "{error}"
+                );
+                assert_eq!(
+                    super::spawn_readiness_tests::git(
+                        &fixture.repo,
+                        &["rev-parse", "epic/diverged-support"]
+                    ),
+                    tip
+                );
+                assert!(!fixture.repo.join(".cas/worktrees/round2-worker").exists());
+            });
+        }
     }
 
     /// The base can also be stale against its OWN remote — the live checkout is

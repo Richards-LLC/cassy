@@ -234,8 +234,23 @@ pub(super) fn enqueue_correlated_worker_deaths_relay(
     cas_dir: &std::path::Path,
     group: &[super::queue_and_events::ObservedWorkerExit],
 ) -> WorkerAttentionRelayOutcome {
+    enqueue_folded_worker_deaths_relay(cas_dir, group).outcome
+}
+
+/// cas-26c8: [`enqueue_correlated_worker_deaths_relay`] plus whether the
+/// fold's durable row is recorded and its prompt enqueued, which decide what
+/// happens to the held per-worker relays.
+pub(super) fn enqueue_folded_worker_deaths_relay(
+    cas_dir: &std::path::Path,
+    group: &[super::queue_and_events::ObservedWorkerExit],
+) -> FoldedRelayAttempt {
     let Some(first) = group.first() else {
-        return WorkerAttentionRelayOutcome::NotApplicable;
+        return FoldedRelayAttempt {
+            outcome: WorkerAttentionRelayOutcome::NotApplicable,
+            recorded: false,
+            prompt_enqueued: false,
+            recipient: None,
+        };
     };
     let last = group.last().unwrap_or(first);
     let spread_ms = (last.at - first.at).num_milliseconds().max(0);
@@ -244,24 +259,170 @@ pub(super) fn enqueue_correlated_worker_deaths_relay(
         .map(|exit| format!("{} ({})", exit.worker, exit.status))
         .collect::<Vec<_>>()
         .join("; ");
+    // cas-26c8 (ct2_p2_died_together_folds): this relay replaces the
+    // per-worker worker_died relays, so each worker's tasks and cleaned tail
+    // (12 lines / 600 chars, clean_death_tail) are listed here.
+    let entries = group
+        .iter()
+        .map(|exit| {
+            let Some(death) = exit.death.as_ref() else {
+                return format!("- {} ({})", exit.worker, exit.status);
+            };
+            let list = |ids: &[String]| {
+                if ids.is_empty() { "none".to_string() } else { ids.join(", ") }
+            };
+            let tail = death
+                .exit
+                .output_tail
+                .as_deref()
+                .map(|tail| {
+                    let quoted = tail.lines().map(|line| format!("    > {line}")).collect::<Vec<_>>();
+                    format!("\n  last output:\n{}", quoted.join("\n"))
+                })
+                .unwrap_or_default();
+            format!(
+                "- {} ({}): held tasks {}; parked {}{tail}",
+                exit.worker,
+                exit.status,
+                list(&death.summary.held_task_ids),
+                list(&death.summary.recovered_task_ids),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let detail = format!(
         "{count} worker harnesses exited within {spread_ms} ms of each other, starting {start}: \
          {workers}. Treat this as one incident with a shared cause (host, harness binary, \
-         account or network) before respawning; each worker's own worker-died relay lists \
-         the tasks it parked.",
+         account or network) before respawning. This relay replaces the per-worker \
+         worker-died relays:\n{entries}",
         count = group.len(),
         start = first.at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     );
     let occurrence = format!("{}:{}", first.worker, first.at.timestamp_millis());
-    enqueue_worker_attention_relay_detail(
+    let folded_incidents = group
+        .iter()
+        .filter_map(|exit| exit.death.as_ref())
+        .map(|death| crate::mcp::tools::service::orphan_recovery::death_incident_key(&death.agent))
+        .collect::<Vec<_>>();
+    let (outcome, prompt_enqueued, recorded, recipient) = enqueue_worker_attention_relay_inner(
         cas_dir,
         "workers_died_together",
         &first.worker,
         None,
         None,
-        &detail,
+        |_| detail.clone(),
         &occurrence,
+        None,
+        &folded_incidents,
+    );
+    FoldedRelayAttempt {
+        outcome,
+        recorded,
+        prompt_enqueued,
+        recipient,
+    }
+}
+
+/// cas-ff42 L2: inject the prompt of a fold's per-recipient copy (a live
+/// Director's, say) to that recipient, as the per-worker prompts the fold
+/// replaced would have been. The row is re-read on the write lane first.
+pub(super) fn inject_fold_copy_prompt(
+    cas_dir: &std::path::Path,
+    notification_id: i64,
+    payload: &serde_json::Value,
+) -> WorkerAttentionRelayOutcome {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_WAKE_SOURCE_PREFIX;
+    use cas_store::{NotificationPriority, SupervisorQueueStore};
+    let Ok(queue) = crate::store::open_supervisor_queue_store(cas_dir) else {
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    match queue.get(notification_id) {
+        Ok(Some(row)) if row.prompt_delivered_at.is_none() && row.processed_at.is_none() => {}
+        _ => return WorkerAttentionRelayOutcome::NotApplicable,
+    }
+    let text = |key: &str| payload.get(key).and_then(serde_json::Value::as_str);
+    let (Some(recipient), Some(worker), Some(detail)) =
+        (text("fold_copy_for"), text("worker"), text("detail"))
+    else {
+        return WorkerAttentionRelayOutcome::NotApplicable;
+    };
+    let (Ok(agents), Ok(prompt_queue)) = (
+        crate::store::open_agent_store(cas_dir),
+        crate::store::open_prompt_queue_store(cas_dir),
+    ) else {
+        return WorkerAttentionRelayOutcome::Pending;
+    };
+    let Ok(agent) = agents.get(recipient) else {
+        return WorkerAttentionRelayOutcome::NotApplicable;
+    };
+    let prefix = crate::harness_policy::agent_tool_prefix(&agent).unwrap_or("");
+    let body = format!(
+        "<worker-attention kind=\"workers_died_together\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}\nRun `{prefix}factory action=worker_status` and reassign or recover the worker as needed.\n</worker-attention>"
+    );
+    if prompt_queue
+        .enqueue_idempotent(
+            &format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}"),
+            &agent.name,
+            &body,
+            agent.factory_session.as_deref(),
+            Some(&format!("workers_died_together: {worker}")),
+            Some(NotificationPriority::Critical),
+            &format!("worker-attention-outbox:{notification_id}"),
+            Some(&cas_store::QueueOrigin::Daemon),
+        )
+        .is_err()
+    {
+        return WorkerAttentionRelayOutcome::Pending;
+    }
+    super::delivery::wake_daemon_after_enqueue(cas_dir);
+    let _ = queue.mark_prompt_delivered(notification_id);
+    WorkerAttentionRelayOutcome::Persisted { notification_id }
+}
+
+/// cas-26c8 review M1: re-drive a folded relay whose durable row (with its
+/// members already stamped) exists but whose prompt never reached the queue,
+/// e.g. the daemon stopped between the two. The stored detail and occurrence
+/// replay the same idempotent key.
+pub(super) fn redrive_folded_worker_deaths_relay(
+    cas_dir: &std::path::Path,
+    notification_id: i64,
+    payload: &serde_json::Value,
+) -> WorkerAttentionRelayOutcome {
+    use cas_store::SupervisorQueueStore;
+    // Re-read on the write lane: a prompt injected since the sweep's read
+    // means there is nothing to re-drive.
+    match crate::store::open_supervisor_queue_store(cas_dir).map(|queue| queue.get(notification_id)) {
+        Ok(Ok(Some(row))) if row.prompt_delivered_at.is_none() => {}
+        _ => return WorkerAttentionRelayOutcome::NotApplicable,
+    }
+    let text = |key: &str| payload.get(key).and_then(serde_json::Value::as_str);
+    let (Some(worker), Some(detail), Some(occurrence)) =
+        (text("worker"), text("detail"), text("occurrence"))
+    else {
+        return WorkerAttentionRelayOutcome::NotApplicable;
+    };
+    let folded_incidents = payload
+        .get("folded_incidents")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    enqueue_worker_attention_relay_inner(
+        cas_dir,
+        "workers_died_together",
+        worker,
+        None,
+        None,
+        |_| detail.to_string(),
+        occurrence,
+        None,
+        &folded_incidents,
     )
+    .0
 }
 
 /// cas-4143: a teammate permission request CAS did not pre-approve has waited
@@ -896,6 +1057,42 @@ fn enqueue_worker_attention_relay_detail_with_key(
     occurrence: &str,
     stable_key: Option<&str>,
 ) -> WorkerAttentionRelayOutcome {
+    enqueue_worker_attention_relay_inner(
+        cas_dir, kind, worker, task_id, elapsed_secs, detail, occurrence, stable_key, &[],
+    )
+    .0
+}
+
+/// cas-26c8 / cas-ff42: one folded-relay attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FoldedRelayAttempt {
+    pub outcome: WorkerAttentionRelayOutcome,
+    /// The fold's durable row is committed, which stamped its members in the
+    /// same transaction. From here the death sweep owns its prompt.
+    pub recorded: bool,
+    pub prompt_enqueued: bool,
+    /// cas-ff42 review: who the fold went to, for whether the death sweep
+    /// re-drives its prompt.
+    pub recipient: Option<String>,
+}
+
+/// The relay, whether its supervisor prompt is enqueued, and whether its
+/// durable row is recorded. A `Pending` outcome whose prompt is enqueued
+/// failed only to stamp the durable row: the supervisor will still hear it
+/// (cas-26c8 L2). A recorded row the prompt never reached is re-driven by the
+/// death sweep (cas-ff42 L1).
+#[allow(clippy::too_many_arguments)]
+fn enqueue_worker_attention_relay_inner(
+    cas_dir: &std::path::Path,
+    kind: &str,
+    worker: &str,
+    task_id: Option<&str>,
+    elapsed_secs: Option<u64>,
+    detail: impl Fn(&str) -> String,
+    occurrence: &str,
+    stable_key: Option<&str>,
+    folded_incidents: &[String],
+) -> (WorkerAttentionRelayOutcome, bool, bool, Option<String>) {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
         LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_notice_recipient,
     };
@@ -904,12 +1101,12 @@ fn enqueue_worker_attention_relay_detail_with_key(
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
         tracing::warn!("worker attention relay skipped: agent store unavailable");
-        return WorkerAttentionRelayOutcome::Pending;
+        return (WorkerAttentionRelayOutcome::Pending, false, false, None);
     };
     let supervisor = resolve_notice_recipient(agent_store.as_ref(), factory_session.as_deref());
     let Ok(supervisor_queue) = crate::store::open_supervisor_queue_store(cas_dir) else {
         tracing::warn!(worker = %worker, kind, "worker attention relay skipped: supervisor queue unavailable");
-        return WorkerAttentionRelayOutcome::Pending;
+        return (WorkerAttentionRelayOutcome::Pending, false, false, Some(supervisor.id.clone()));
     };
     // `occurrence` identifies the detected episode, not this delivery attempt.
     // A retry after a durable-only write must reuse it across daemon restarts.
@@ -934,23 +1131,45 @@ fn enqueue_worker_attention_relay_detail_with_key(
         "detail": detail(""),
         "factory_session": factory_session,
         "occurrence": occurrence,
+        "folded_incidents": folded_incidents,
     })
     .to_string();
-    let notification_id = match supervisor_queue.notify_idempotent(
-        &supervisor.id,
-        kind,
-        &payload,
-        NotificationPriority::High,
-        &key,
-    ) {
+    // cas-26c8: a folded multi-worker death replaces Critical worker_died
+    // relays, so it keeps their priority.
+    let priority = if kind == "workers_died_together" {
+        NotificationPriority::Critical
+    } else {
+        NotificationPriority::High
+    };
+    // cas-26c8 review M1: a folded relay is recorded in the same transaction
+    // that stamps the per-worker worker_died rows it replaces.
+    let recorded = if folded_incidents.is_empty() {
+        supervisor_queue.notify_idempotent(&supervisor.id, kind, &payload, priority, &key)
+    } else {
+        supervisor_queue.notify_idempotent_folding(
+            &supervisor.id,
+            kind,
+            &payload,
+            priority,
+            &key,
+            "worker_died",
+            folded_incidents,
+        )
+    };
+    let notification_id = match recorded {
         Ok(NotifyIdempotentResult::Created(id)) => id,
         Ok(NotifyIdempotentResult::AlreadyExists {
             id,
             prompt_delivered: true,
         }) => {
-            return WorkerAttentionRelayOutcome::Persisted {
-                notification_id: id,
-            };
+            return (
+                WorkerAttentionRelayOutcome::Persisted {
+                    notification_id: id,
+                },
+                true,
+                true,
+                Some(supervisor.id.clone()),
+            );
         }
         Ok(NotifyIdempotentResult::AlreadyExists {
             id,
@@ -958,12 +1177,12 @@ fn enqueue_worker_attention_relay_detail_with_key(
         }) => id,
         Err(error) => {
             tracing::error!(worker = %worker, kind, %error, "worker attention relay durable enqueue failed");
-            return WorkerAttentionRelayOutcome::Pending;
+            return (WorkerAttentionRelayOutcome::Pending, false, false, Some(supervisor.id.clone()));
         }
     };
     let Ok(prompt_queue) = crate::store::open_prompt_queue_store(cas_dir) else {
         tracing::error!(worker = %worker, kind, notification_id, "worker attention relay left pending: prompt queue unavailable");
-        return WorkerAttentionRelayOutcome::Pending;
+        return (WorkerAttentionRelayOutcome::Pending, false, true, Some(supervisor.id.clone()));
     };
     // Resolve the registered receiver at this enqueue attempt, including retries
     // after a durable-only write. Missing harness evidence stays neutral; the
@@ -986,7 +1205,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
     if supervisor.id == "operator" {
         body = match crate::supervisor_notices::operator_prompt(&body, kind) {
             Ok(body) => body,
-            Err(_) => return WorkerAttentionRelayOutcome::Pending,
+            Err(_) => return (WorkerAttentionRelayOutcome::Pending, false, true, Some(supervisor.id.clone())),
         };
     }
     let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
@@ -996,19 +1215,19 @@ fn enqueue_worker_attention_relay_detail_with_key(
         &body,
         supervisor.session.as_deref(),
         Some(&format!("{kind}: {worker}")),
-        Some(NotificationPriority::High),
+        Some(priority),
         &format!("worker-attention-outbox:{notification_id}"),
         Some(&cas_store::QueueOrigin::Daemon),
     ) {
         tracing::error!(worker = %worker, kind, notification_id, %error, "worker attention relay prompt enqueue failed");
-        return WorkerAttentionRelayOutcome::Pending;
+        return (WorkerAttentionRelayOutcome::Pending, false, true, Some(supervisor.id.clone()));
     }
     super::delivery::wake_daemon_after_enqueue(cas_dir);
     if let Err(error) = supervisor_queue.mark_prompt_delivered(notification_id) {
         tracing::warn!(notification_id, %error, "worker attention relay prompt stamp failed; idempotent replay remains safe");
-        return WorkerAttentionRelayOutcome::Pending;
+        return (WorkerAttentionRelayOutcome::Pending, true, true, Some(supervisor.id.clone()));
     }
-    WorkerAttentionRelayOutcome::Persisted { notification_id }
+    (WorkerAttentionRelayOutcome::Persisted { notification_id }, true, true, Some(supervisor.id.clone()))
 }
 
 #[cfg(test)]
@@ -1442,6 +1661,8 @@ mod worker_attention_tests {
                 at: t0 + chrono::Duration::milliseconds(600 * index as i64),
                 worker: (*worker).to_string(),
                 status: "exited with code 0".to_string(),
+                death: None,
+                recording: false,
             })
             .collect::<Vec<_>>();
 
@@ -1463,6 +1684,501 @@ mod worker_attention_tests {
             assert!(prompt.contains(&format!("{worker} (exited with code 0)")), "{prompt}");
         }
     }
+
+    /// cas-26c8 (spec-6194 P2.6, ct2_p2_died_together_folds): workers that die
+    /// unexpectedly together reach the supervisor as ONE Critical relay with
+    /// one entry per worker (tasks and cleaned tail), not N worker_died relays
+    /// plus a workers_died_together relay. A lone death is unchanged: one
+    /// worker_died relay.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ct2_p2_died_together_folds() {
+        use crate::mcp::tools::service::orphan_recovery::recover_worker_deferring_relay;
+        use super::super::queue_and_events::{DeferredWorkerDeath, ObservedWorkerExit};
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "provision-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "provision-test");
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let t0 = chrono::Utc::now() - chrono::Duration::seconds(30);
+        let died_at = |name: &str, at: chrono::DateTime<chrono::Utc>| {
+            let mut worker = Agent::new(format!("{name}-id"), name.to_string());
+            worker.role = AgentRole::Worker;
+            worker.status = AgentStatus::Active;
+            worker.factory_session = Some("provision-test".to_string());
+            agents.register(&worker).unwrap();
+            let exit = crate::prompt_revalidation::WorkerExitCause {
+                exit_code: Some(0),
+                exit_signal: None,
+                output_tail: Some(format!("{name} last line")),
+            };
+            let summary = recover_worker_deferring_relay(
+                &cas_dir,
+                agents.as_ref(),
+                &worker,
+                &[],
+                "exited with code 0",
+                Some(&exit),
+            )
+            .expect("an unexpected death is recorded with its relay held");
+            ObservedWorkerExit {
+                at,
+                worker: name.to_string(),
+                status: exit.status(),
+                death: Some(DeferredWorkerDeath {
+                    agent: worker,
+                    summary,
+                    reason: "exited with code 0".to_string(),
+                    exit,
+                }),
+                recording: false,
+            }
+        };
+        let died = |name: &str, offset_ms: i64| died_at(name, t0 + chrono::Duration::milliseconds(offset_ms));
+        let notices = || {
+            crate::store::open_supervisor_queue_store(&cas_dir)
+                .unwrap()
+                .list_pending("supervisor-id")
+                .unwrap()
+        };
+        let prompt_rows = || {
+            crate::store::open_prompt_queue_store(&cas_dir)
+                .unwrap()
+                .peek_all(50)
+                .unwrap()
+        };
+
+        daemon.recent_worker_exits = vec![died("codex-a", 0), died("codex-b", 700), died("codex-c", 1_200)];
+        // Review M: each held death is durable at once; only its prompt waits.
+        assert_eq!(
+            notices().iter().filter(|row| row.event_type == "worker_died").count(),
+            3,
+            "the deaths are recorded before the window closes"
+        );
+        // pin: review M contract: a held death has its durable row but no prompt yet.
+        assert!(prompt_rows().is_empty(), "no prompt until the window closes");
+        daemon.last_death_sweep = None;
+        daemon.relay_correlated_worker_deaths();
+        let rows = notices();
+        let kinds: Vec<&str> = rows.iter().map(|row| row.event_type.as_str()).collect();
+        assert_eq!(kinds, ["workers_died_together"], "one folded relay, no per-worker relays");
+        assert_eq!(rows[0].priority, cas_store::NotificationPriority::Critical);
+        let prompts = prompt_rows();
+        // pin: the AC is exactly one supervisor wake for the whole group.
+        assert_eq!(prompts.len(), 1, "one wake: {prompts:?}");
+        let body = &prompts[0].prompt;
+        for worker in ["codex-a", "codex-b", "codex-c"] {
+            let entry = format!("- {worker} (exited with code 0)");
+            let tail = format!("> {worker} last line");
+            // pin: one entry per worker naming its exit status (the folded per-worker relay).
+            assert!(body.contains(&entry), "{body}");
+            // pin: each entry quotes that worker's cleaned output tail.
+            assert!(body.contains(&tail), "each entry carries the worker's cleaned tail: {body}");
+        }
+        assert!(daemon.recent_worker_exits.is_empty());
+
+        daemon.recent_worker_exits = vec![died("codex-d", 0)];
+        daemon.last_death_sweep = None;
+        daemon.relay_correlated_worker_deaths();
+        let rows = notices();
+        let lone: Vec<_> = rows.iter().filter(|row| row.event_type == "worker_died").collect();
+        assert_eq!(lone.len(), 1, "a lone death relays as before: {rows:?}");
+        // pin: review L: the lone death's PROMPT reaches the supervisor, not only its row.
+        assert!(prompt_rows().iter().any(|row| row.prompt.contains("codex-d")), "lone prompt");
+        assert!(lone[0].payload.contains("codex-d"), "{}", lone[0].payload);
+        assert_eq!(lone[0].priority, cas_store::NotificationPriority::Critical);
+        assert_eq!(
+            rows.iter().filter(|row| row.event_type == "workers_died_together").count(),
+            1,
+            "a lone death adds no group relay"
+        );
+
+        // Review M: a daemon that stops or restarts inside the window loses
+        // what it held in memory. While the window is open nothing is sent;
+        // once nothing holds the deaths, the sweep injects their relays.
+        let before = prompt_rows().len();
+        let now = chrono::Utc::now();
+        daemon.recent_worker_exits = vec![died_at("codex-e", now), died_at("codex-f", now)];
+        daemon.last_death_sweep = None;
+        daemon.relay_correlated_worker_deaths();
+        // pin: the sweep must skip deaths the live daemon still holds.
+        assert_eq!(prompt_rows().len(), before, "held deaths wait for their window");
+        daemon.recent_worker_exits.clear(); // the restarted daemon holds nothing
+        daemon.last_death_sweep = None;
+        daemon.relay_correlated_worker_deaths();
+        let injected = prompt_rows();
+        assert_eq!(injected.len(), before + 2, "both deaths still reach the supervisor");
+        for worker in ["codex-e", "codex-f"] {
+            assert!(
+                injected.iter().any(|row| row.prompt.contains(worker)),
+                "{worker}: {injected:?}"
+            );
+        }
+        daemon.last_death_sweep = None;
+        daemon.relay_correlated_worker_deaths();
+        // pin: a second sweep must not inject the same deaths again.
+        assert_eq!(prompt_rows().len(), before + 2, "the sweep injects each death once");
+    }
+
+    /// cas-26c8 review M1 crash test: the daemon stops after the folded
+    /// relay's durable row is written (members stamped in that transaction)
+    /// but before its prompt. The restarted sweep re-drives the folded prompt
+    /// once and injects none of the folded per-worker relays. Review H1: a
+    /// second factory sharing the database is left alone.
+    #[tokio::test(flavor = "current_thread")]
+    async fn folded_relay_survives_a_crash_before_its_prompt_cas_26c8() {
+        use crate::mcp::tools::service::orphan_recovery::{
+            death_incident_key, recover_worker_deferring_relay,
+        };
+        use cas_store::SupervisorQueueStore;
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "provision-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "provision-test");
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut other = Agent::new("other-supervisor-id".to_string(), "other-supervisor".to_string());
+        other.role = AgentRole::Supervisor;
+        other.status = AgentStatus::Active;
+        other.factory_session = Some("other-factory".to_string());
+        agents.register(&other).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let record = |name: &str, session: &str| {
+            let mut worker = Agent::new(format!("{name}-id"), name.to_string());
+            worker.role = AgentRole::Worker;
+            worker.status = AgentStatus::Active;
+            worker.factory_session = Some(session.to_string());
+            agents.register(&worker).unwrap();
+            recover_worker_deferring_relay(&cas_dir, agents.as_ref(), &worker, &[], "exited", None)
+                .expect("recorded");
+            death_incident_key(&worker)
+        };
+        let incidents = vec![record("codex-g", "provision-test"), record("codex-h", "provision-test")];
+        record("other-w", "other-factory");
+
+        // What the folded relay writes before its prompt, then the crash.
+        let occurrence = "codex-g:1";
+        let payload = serde_json::json!({
+            "kind": "workers_died_together",
+            "worker": "codex-g",
+            "detail": "2 worker harnesses exited together: codex-g; codex-h",
+            "factory_session": "provision-test",
+            "occurrence": occurrence,
+            "folded_incidents": incidents,
+        });
+        let queue = crate::store::open_supervisor_queue_store(&cas_dir).unwrap();
+        queue
+            .notify_idempotent_folding(
+                "supervisor-id",
+                "workers_died_together",
+                &payload.to_string(),
+                cas_store::NotificationPriority::Critical,
+                &format!("worker-attention:provision-test:workers_died_together:codex-g:{occurrence}"),
+                "worker_died",
+                &incidents,
+            )
+            .unwrap();
+
+        daemon.last_death_sweep = None;
+        // cas-ff42 L4: another factory's crashed fold, in the same database.
+        let other_payload = serde_json::json!({
+            "kind": "workers_died_together",
+            "worker": "other-w",
+            "detail": "2 worker harnesses exited together: other-w; other-x",
+            "factory_session": "other-factory",
+            "occurrence": "other-w:1",
+            "folded_incidents": [],
+        });
+        queue
+            .notify_idempotent(
+                "other-supervisor-id",
+                "workers_died_together",
+                &other_payload.to_string(),
+                cas_store::NotificationPriority::Critical,
+                "worker-attention:other-factory:workers_died_together:other-w:other-w:1",
+            )
+            .unwrap();
+
+        daemon.last_death_sweep = None;
+        daemon.relay_correlated_worker_deaths(); // the restarted daemon holds nothing
+        let prompts = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(20)
+            .unwrap();
+        let folded = prompts
+            .iter()
+            // pin: the folded relay is recognised by its worker-attention kind attribute.
+            .filter(|row| row.prompt.contains("kind=\"workers_died_together\""))
+            .count();
+        // pin: exactly the folded prompt is re-driven after the crash.
+        assert_eq!(folded, 1, "{prompts:?}");
+        let per_worker = prompts
+            .iter()
+            .filter(|row| row.prompt.contains("worker-died") || row.summary.as_deref().is_some_and(|s| s.starts_with("worker died")))
+            .count();
+        assert_eq!(per_worker, 0, "folded members are never injected: {prompts:?}");
+        assert!(
+            !prompts.iter().any(|row| row.prompt.contains("other-w")),
+            "another factory's held death and crashed fold are not swept: {prompts:?}"
+        );
+        daemon.last_death_sweep = None;
+        daemon.relay_correlated_worker_deaths();
+        let again = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(20).unwrap();
+        // pin: review M1: a second sweep must not re-drive the fold again.
+        assert_eq!(again.len(), prompts.len(), "the re-drive happens once");
+    }
+
+    /// cas-ff42 L3: a recorded death whose prompt never went out is given up
+    /// on once it ages out of the sweep, with one warning and no late alarm.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_death_sweep_reports_giving_up_once_cas_ff42() {
+        use cas_store::SupervisorQueueStore;
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "provision-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "provision-test");
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let queue = crate::store::open_supervisor_queue_store(&cas_dir).unwrap();
+        let payload = serde_json::json!({
+            "worker_id": "stale-w-id",
+            "worker_name": "stale-w",
+            "factory_session": "provision-test",
+        });
+        let cas_store::NotifyIdempotentResult::Created(id) = queue
+            .notify_idempotent(
+                "supervisor-id",
+                "worker_died",
+                &payload.to_string(),
+                cas_store::NotificationPriority::Critical,
+                "worker_died:stale-w-id:1:supervisor-id",
+            )
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        let aged = (chrono::Utc::now() - chrono::Duration::minutes(40)).to_rfc3339();
+        rusqlite::Connection::open(cas_dir.join("cas.db"))
+            .unwrap()
+            .execute(
+                "UPDATE supervisor_queue SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![aged, id],
+            )
+            .unwrap();
+
+        for _ in 0..2 {
+            daemon.last_death_sweep = None;
+            daemon.relay_correlated_worker_deaths();
+        }
+        assert!(daemon.relay_jobs.death_sweep_given_up.contains(&id), "the give-up is reported");
+        assert_eq!(daemon.relay_jobs.death_sweep_given_up.len(), 1, "reported once");
+        let prompts = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+        // pin: cas-ff42 L3: giving up means no late per-worker alarm.
+        assert!(prompts.is_empty(), "an aged-out death is not sent late: {prompts:?}");
+    }
+
+    /// cas-26c8 review L: pin the folded relay's L2 signal on the normal path.
+    #[test]
+    fn folded_relay_reports_its_prompt_enqueued_cas_26c8() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "folded-signal",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "folded-signal");
+        let t0 = chrono::Utc::now();
+        let group = ["codex-a", "codex-b"]
+            .iter()
+            .map(|worker| super::super::queue_and_events::ObservedWorkerExit {
+                at: t0,
+                worker: (*worker).to_string(),
+                status: "exited with code 0".to_string(),
+                death: None,
+                recording: false,
+            })
+            .collect::<Vec<_>>();
+        let attempt = enqueue_folded_worker_deaths_relay(&cas_dir, &group);
+        assert!(
+            matches!(attempt.outcome, WorkerAttentionRelayOutcome::Persisted { .. }),
+            "{attempt:?}"
+        );
+        // pin: review L2 contract: a persisted fold reports prompt_enqueued=true.
+        assert!(attempt.prompt_enqueued, "a persisted fold reports its prompt enqueued");
+        // pin: cas-ff42 L1: a persisted fold reports its row committed.
+        assert!(attempt.recorded, "a persisted fold reports its row recorded");
+    }
+
+    /// cas-26c8 review L1: every closed group is listed on its own, so a group
+    /// whose folded relay is retried never holds back a later lone death.
+    #[test]
+    fn a_stuck_death_group_does_not_block_later_deaths_cas_26c8() {
+        use super::super::queue_and_events::{
+            ObservedWorkerExit, WORKER_DEATH_CORRELATION_WINDOW, closed_death_groups,
+            death_group_key,
+        };
+        let t0 = chrono::Utc::now() - chrono::Duration::seconds(60);
+        let exit = |worker: &str, offset_ms: i64| ObservedWorkerExit {
+            at: t0 + chrono::Duration::milliseconds(offset_ms),
+            worker: worker.to_string(),
+            status: "exited with code 0".to_string(),
+            death: None,
+            recording: false,
+        };
+        let exits = vec![exit("stuck-a", 0), exit("stuck-b", 500), exit("lone-c", 20_000)];
+        let groups = closed_death_groups(&exits, chrono::Utc::now(), WORKER_DEATH_CORRELATION_WINDOW);
+        let names: Vec<Vec<&str>> = groups
+            .iter()
+            .map(|group| group.iter().map(|exit| exit.worker.as_str()).collect())
+            .collect();
+        assert_eq!(names, [vec!["stuck-a", "stuck-b"], vec!["lone-c"]]);
+        assert_ne!(
+            death_group_key(&groups[0]),
+            death_group_key(&groups[1]),
+            "each group has its own write key, so neither waits on the other"
+        );
+    }
+
+    /// cas-26c8 review L2 / cas-ff42 L1 and L3: a committed fold is done once
+    /// its prompt is queued or the death sweep re-drives its recipient. A
+    /// fold to a recipient the sweep never re-drives (`operator`, or one
+    /// outside the session) keeps retrying, then gives up with a warning. The
+    /// per-worker fallback only covers a fold that never committed, so no
+    /// path sends twice.
+    #[test]
+    fn folded_group_step_covers_every_recovery_path_cas_ff42() {
+        use super::super::queue_and_events::{FoldedGroupStep, folded_group_step};
+        let young = chrono::Duration::seconds(30);
+        let old = chrono::Duration::minutes(11);
+        // (recorded, prompt queued, sweep re-drives the recipient, age)
+        assert_eq!(folded_group_step(true, true, false, young), FoldedGroupStep::Fold);
+        assert_eq!(folded_group_step(true, false, true, young), FoldedGroupStep::Fold, "the sweep owns it");
+        assert_eq!(folded_group_step(true, true, false, old), FoldedGroupStep::Fold, "no double send");
+        assert_eq!(
+            folded_group_step(true, false, false, young),
+            FoldedGroupStep::Retry,
+            "an operator fold whose prompt failed is retried, not marked done"
+        );
+        assert_eq!(folded_group_step(true, false, false, old), FoldedGroupStep::GiveUp);
+        assert_eq!(folded_group_step(false, false, false, young), FoldedGroupStep::Retry);
+        assert_eq!(folded_group_step(false, false, false, old), FoldedGroupStep::FallBack);
+    }
+
+    /// cas-ff42 review: the name fallback never marks a same-name respawn
+    /// that registered after the exit as the dead worker.
+    #[test]
+    fn a_death_record_never_takes_a_later_same_name_respawn_cas_ff42() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let exit_at = chrono::Utc::now() - chrono::Duration::seconds(30);
+        for (id, heartbeat) in [
+            ("old-id", exit_at - chrono::Duration::seconds(5)),
+            ("respawn-id", exit_at + chrono::Duration::seconds(10)),
+        ] {
+            let mut worker = Agent::new(id.to_string(), "codex-r".to_string());
+            worker.role = AgentRole::Worker;
+            worker.status = AgentStatus::Active;
+            worker.factory_session = Some("provision-test".to_string());
+            agents.register(&worker).unwrap();
+            let mut stored = agents.get(id).unwrap();
+            stored.last_heartbeat = heartbeat;
+            agents.update(&stored).unwrap();
+        }
+        let death = super::super::queue_and_events::record_worker_death_io(
+            &cas_dir,
+            "provision-test",
+            "codex-r",
+            None,
+            "exited with code 1",
+            None,
+            crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred,
+            Some(exit_at),
+        );
+        // A live same-name successor means no death is reported (GH #924);
+        // whatever is reported, it is never the respawn's.
+        assert!(death.is_none_or(|death| death.agent.id == "old-id"));
+        assert_eq!(agents.get("respawn-id").unwrap().status, AgentStatus::Active, "the respawn is untouched");
+        assert_ne!(agents.get("old-id").unwrap().status, AgentStatus::Active, "the dead row is stale");
+    }
+
+    /// cas-ff42 review L2: a live Director that also gets worker deaths keeps
+    /// a prompt of its own: the fold's per-recipient copy is prompted to it
+    /// by the death sweep, and its per-worker rows are folded away.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_live_director_is_prompted_with_its_fold_copy_cas_ff42() {
+        use crate::mcp::tools::service::orphan_recovery::recover_worker_deferring_relay;
+        use super::super::queue_and_events::{DeferredWorkerDeath, ObservedWorkerExit};
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "provision-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "provision-test");
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut director = Agent::new("director-id".to_string(), "director".to_string());
+        director.role = AgentRole::Director;
+        director.status = AgentStatus::Active;
+        director.factory_session = Some("provision-test".to_string());
+        agents.register(&director).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let t0 = chrono::Utc::now() - chrono::Duration::seconds(30);
+        let died = |name: &str, offset_ms: i64| {
+            let mut worker = Agent::new(format!("{name}-id"), name.to_string());
+            worker.role = AgentRole::Worker;
+            worker.status = AgentStatus::Active;
+            worker.factory_session = Some("provision-test".to_string());
+            agents.register(&worker).unwrap();
+            let summary =
+                recover_worker_deferring_relay(&cas_dir, agents.as_ref(), &worker, &[], "exited", None)
+                    .expect("recorded");
+            ObservedWorkerExit {
+                at: t0 + chrono::Duration::milliseconds(offset_ms),
+                worker: name.to_string(),
+                status: "exited with code 0".to_string(),
+                death: Some(DeferredWorkerDeath {
+                    agent: worker,
+                    summary,
+                    reason: "exited".to_string(),
+                    exit: Default::default(),
+                }),
+                recording: false,
+            }
+        };
+        daemon.recent_worker_exits = vec![died("codex-p", 0), died("codex-q", 400)];
+        for _ in 0..2 {
+            daemon.last_death_sweep = None;
+            daemon.relay_correlated_worker_deaths();
+        }
+        let prompts = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(20).unwrap();
+        let folded_to = |target: &str| {
+            prompts
+                .iter()
+                // pin: the folded relay is recognised by its worker-attention kind attribute.
+                .filter(|row| row.target == target && row.prompt.contains("kind=\"workers_died_together\""))
+                .count()
+        };
+        // pin: the supervisor and the Director each get exactly one folded prompt.
+        assert_eq!(folded_to("supervisor"), 1, "{prompts:?}");
+        assert_eq!(folded_to("director"), 1, "the Director is prompted with its copy: {prompts:?}");
+        let pending = crate::store::open_supervisor_queue_store(&cas_dir)
+            .unwrap()
+            .list_pending("director-id")
+            .unwrap();
+        assert!(
+            pending.iter().all(|row| row.event_type != "worker_died"),
+            "the Director's per-worker rows are folded away: {pending:?}"
+        );
+    }
+
 
     /// cas-4143: a parked teammate permission request becomes one durable
     /// supervisor wake that names the worker, command and age and carries the
@@ -2204,7 +2920,9 @@ impl FactoryDaemon {
             last_usage_limit_scan: None,
             open_operator_notices: std::collections::HashMap::new(),
             last_permission_request_scan: None,
+            last_death_sweep: None,
             reported_permission_requests: std::collections::HashSet::new(),
+            relay_jobs: Default::default(),
             last_commander_mirror_scan: None,
             queue_jobs,
         reported_auth_failed_workers: std::collections::HashMap::new(),
@@ -2325,7 +3043,6 @@ impl FactoryDaemon {
         // Refresh intervals
         let mut last_refresh = std::time::Instant::now();
         let mut last_prompt_poll = std::time::Instant::now();
-        let mut last_spawn_poll = std::time::Instant::now();
         // GitHub polling is intentionally decoupled from the two-second UI
         // refresh. The blocking CLI calls run on Tokio's blocking pool and
         // results are handed back to this loop for durable prompt enqueue.
@@ -2437,6 +3154,9 @@ impl FactoryDaemon {
         // running them.
         let mut director_refresh = super::director_refresh::DirectorRefresh::new();
         self.app.set_deferred_worker_health_probes(true);
+        // cas-5e72: session-metadata writes (epic focus, worker holds) run on
+        // the store worker.
+        self.app.set_deferred_session_metadata_writes(true);
         let _task_sync_reconcile = super::store_worker::spawn_task_sync_reconcile(
             self.app.cas_dir().to_path_buf(),
             Arc::clone(&self.shutdown),
@@ -2456,6 +3176,10 @@ impl FactoryDaemon {
             loop_progress.enter(super::loop_watchdog::LoopPhase::ClientInput);
             // Input forwarding and PTY exchange must not touch the store.
             let store_free_input = cas_store::wait_budget::forbid_store_access();
+            // C6 (cas-9db0b): input forwarding and the PTY exchange are proven
+            // clean, so this lane enforces here. Outside tests a blocking call
+            // is recorded and logged once as an error; it never panics.
+            let enforced_input = cas_store::lane_guard::enforce_here();
             // Error timeout must run in daemon mode too (not only local event loop path).
             let had_error = self.app.error_message.is_some();
             self.app.check_error_timeout();
@@ -2485,6 +3209,7 @@ impl FactoryDaemon {
             let ws_activity = self.process_ws_client_input().await;
             let bytes_processed = self.exchange_terminal(&loop_progress).await;
             let had_output = bytes_processed > 0;
+            drop(enforced_input);
             drop(store_free_input);
 
             let summary_metadata = format!(
@@ -2510,6 +3235,9 @@ impl FactoryDaemon {
             // client surface had a chance to submit or clear its composer.
             // This stays outside process_prompt_queue so a deferred inject
             // never blocks the input loop that can make its target clean.
+            // C6 (cas-9db0b): the C4a inject and C3 queue pass are proven
+            // clean; the lane enforces until the queue pass ends.
+            let enforced_queue = cas_store::lane_guard::enforce_here();
             self.app.mux.flush_deferred_injections().await;
             // cas-786a6 (factory loop v2 C4a): urgent injects whose pane has
             // settled type their payload now. A settle is a per-pane state;
@@ -2544,6 +3272,7 @@ impl FactoryDaemon {
                 last_prompt_poll = std::time::Instant::now();
                 prompt_notified = false;
             }
+            drop(enforced_queue);
 
             // cas-73b5: a supervisor's `restart_spawn_queue` request is applied
             // here, at most once a second.
@@ -2559,9 +3288,9 @@ impl FactoryDaemon {
             }
 
             // Poll spawn queue (enqueues requests, doesn't execute them)
-            if last_spawn_poll.elapsed() >= poll_interval {
-                let _ = self.enqueue_spawn_requests();
-                last_spawn_poll = std::time::Instant::now();
+            // Completion-driven acceptance; the ingress owns the 100ms cadence.
+            if let Err(error) = self.enqueue_spawn_requests() {
+                tracing::error!(%error, "cas-2702: could not accept spawn queue poll result");
             }
 
             // Process pending spawns (non-blocking: git ops run on background thread)
@@ -3102,6 +3831,18 @@ impl FactoryDaemon {
             }
         }
 
+        // End only this session's Violet watches before removing its liveness
+        // receipt. Mark stopping without waiting for an in-flight HTTP claim;
+        // that tick finishes retirement, and later ticks cannot reopen it.
+        if let Some(violet) = violet_wake.as_ref() {
+            let violet = std::sync::Arc::clone(violet);
+            match tokio::task::spawn_blocking(move || violet.stop_blocking()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "could not stop session Violet watches"),
+                Err(error) => tracing::warn!(%error, "Violet session stop task failed"),
+            }
+        }
+
         // cas-223f review M4: prompts waiting for their fresh re-check are not
         // dropped at shutdown. Finished re-checks are delivered as decided;
         // ones that never reported are re-checked here, as the inject loop
@@ -3110,19 +3851,7 @@ impl FactoryDaemon {
             .drain_deliverability(&mut self.queue_jobs, Duration::from_secs(2))
             .await;
         for batch in rechecked {
-            let super::factory_jobs::DeliverabilityBatch {
-                prompts,
-                events,
-                refresh_started,
-            } = batch;
-            for (prompt, deliverable) in prompts {
-                if !deliverable {
-                    log_dropped_stale_prompt(&prompt);
-                    continue;
-                }
-                self.inject_director_prompt(prompt, &events, refresh_started, store_worker)
-                    .await;
-            }
+            self.inject_rechecked_batch(batch, store_worker).await;
         }
         for pending in unchecked {
             for prompt in pending.prompts {
@@ -3130,25 +3859,12 @@ impl FactoryDaemon {
                     log_dropped_stale_prompt(&prompt);
                     continue;
                 }
-                self.inject_director_prompt(prompt, &pending.events, pending.refresh_started, store_worker)
+                self.inject_director_prompt(prompt, &pending.events, pending.refresh_started, store_worker, None)
                     .await;
             }
         }
         drop(director_refresh);
-        // cas-d2a2: queue stamps run on the StoreWorker through the queue
-        // job lanes; drain the lanes first so no critical stamp is still
-        // waiting on a lane while the StoreWorker reports idle (jobs.rs).
-        let queue_cas_dir = self.app.cas_dir().to_path_buf();
-        if !self.queue_jobs.drain_for_shutdown(&queue_cas_dir, Duration::from_secs(5)) {
-            tracing::warn!("prompt-queue job lanes still busy at shutdown");
-        }
-        // Let queued store writes land before cleanup tears the session down.
-        if !store_worker.wait_idle(Duration::from_secs(5)) {
-            tracing::warn!(
-                pending = store_worker.pending(),
-                "factory store worker still busy at shutdown"
-            );
-        }
+        self.finish_shutdown_writes(store_worker, Duration::from_secs(5));
 
         // Stop recording if it was enabled
         if self.app.record_enabled() {
@@ -3331,10 +4047,11 @@ impl FactoryDaemon {
         if let Some(evidence) = refresh.take_ci_status(&mut self.queue_jobs) {
             self.app.apply_ci_status(evidence);
         }
-        if due {
-            crate::ui::factory::app::timed_refresh_step("start director read", || refresh.start_director_read(&self.app, &mut self.queue_jobs));
-        }
         let mut refreshed = false;
+        // cas-4491f review L1: a finished snapshot is applied before a due one
+        // starts, so a pending result does not defer the due one into a
+        // second read. Its delivery read, if any, still goes first (the
+        // start below waits for it).
         if let Some(load) = refresh.take_director_read(&mut self.queue_jobs) {
             refreshed = true;
             let applied = crate::ui::factory::app::timed_refresh_step("apply director read", || self.app.apply_director_refresh(load));
@@ -3347,6 +4064,13 @@ impl FactoryDaemon {
                     {
                         tracing::warn!(%error, "failed to persist supervisor stall metric");
                     }
+                });
+            }
+            // cas-4491f: phantom worker panes' teardown requests are queued on
+            // the store worker too.
+            if let Some((cas_dir, session, workers)) = self.app.take_phantom_teardowns() {
+                store_worker.submit("phantom worker teardown", move || {
+                    crate::ui::factory::app::queue_phantom_worker_teardowns(&cas_dir, &session, &workers);
                 });
             }
             let requests = self.app.take_worker_health_requests();
@@ -3379,6 +4103,11 @@ impl FactoryDaemon {
                     tracing::debug!(%error, "director refresh read failed; panels keep the last snapshot");
                 }
             }
+        }
+        // cas-4491f (C2b review L4): a refresh deferred behind a busy read
+        // or liveness job starts on the first pass they are done.
+        if due || refresh.refresh_requested() {
+            crate::ui::factory::app::timed_refresh_step("start director read", || refresh.start_director_read(&self.app, &mut self.queue_jobs));
         }
         let mut delivery = refresh.take_delivery_read(&mut self.queue_jobs);
         // cas-223f review round 2, M3: a read without fresh data is retried
@@ -3421,19 +4150,7 @@ impl FactoryDaemon {
         // cas-223f: prompts whose fresh re-check (`RevalidateFresh`) finished.
         for batch in refresh.take_deliverability(&mut self.queue_jobs) {
             loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshInject);
-            let super::factory_jobs::DeliverabilityBatch {
-                prompts,
-                events,
-                refresh_started,
-            } = batch;
-            for (prompt, deliverable) in prompts {
-                if !deliverable {
-                    log_dropped_stale_prompt(&prompt);
-                    continue;
-                }
-                self.inject_director_prompt(prompt, &events, refresh_started, store_worker)
-                    .await;
-            }
+            self.inject_rechecked_batch(batch, store_worker).await;
         }
         refreshed
     }
@@ -3537,9 +4254,13 @@ impl FactoryDaemon {
         // Handle epic state transitions
         loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshFollowUp);
         let changes = crate::ui::factory::app::timed_refresh_step("epic events", || self.app.handle_epic_events(&delivery_events));
+        // cas-5e72: a focus change's metadata write goes to the store worker,
+        // which runs writes in order, so the last focus wins.
+        self.flush_epic_focus_write(store_worker);
         for change in changes {
             let _ = self.handle_epic_change(change).await;
         }
+        self.flush_epic_focus_write(store_worker);
 
         // Process reminders (time-based and event-based)
         crate::ui::factory::app::timed_refresh_step("reminders", || self.process_reminders(&delivery_events));
@@ -3588,7 +4309,7 @@ impl FactoryDaemon {
             && (refresh.has_pending_deliverability()
                 || prompts
                     .iter()
-                    .any(crate::ui::factory::app::prompt_needs_fresh_recheck))
+                    .any(crate::ui::factory::app::prompt_needs_inject_read))
         {
             match refresh.start_deliverability_check(
                 &self.app,
@@ -3605,16 +4326,92 @@ impl FactoryDaemon {
                             log_dropped_stale_prompt(&prompt);
                             continue;
                         }
-                        self.inject_director_prompt(prompt, &delivery_events, refresh_started, store_worker)
+                        self.inject_director_prompt(prompt, &delivery_events, refresh_started, store_worker, None)
                             .await;
                     }
                     return;
                 }
             }
         }
+        // cas-4491f: nothing here needs a read; an assignment wake went
+        // through the re-check above.
         for prompt in prompts {
-            self.inject_director_prompt(prompt, &delivery_events, refresh_started, store_worker)
+            self.inject_director_prompt(
+                prompt,
+                &delivery_events,
+                refresh_started,
+                store_worker,
+                Some(crate::ui::factory::app::AssignmentRead::NotAssignment),
+            )
+            .await;
+        }
+    }
+
+    /// Inject a re-checked prompt batch, in order: a prompt the fresh read
+    /// retracted is dropped, and an assignment wake uses the task state the
+    /// job read with it (cas-4491f).
+    pub(super) async fn inject_rechecked_batch(
+        &mut self,
+        batch: super::factory_jobs::DeliverabilityBatch,
+        store_worker: &super::store_worker::StoreWorker,
+    ) {
+        let super::factory_jobs::DeliverabilityBatch {
+            prompts,
+            assignments,
+            events,
+            refresh_started,
+        } = batch;
+        let mut assignments = assignments.into_iter();
+        for (prompt, deliverable) in prompts {
+            let assignment = assignments
+                .next()
+                .unwrap_or(crate::ui::factory::app::AssignmentRead::Unread);
+            if !deliverable {
+                log_dropped_stale_prompt(&prompt);
+                continue;
+            }
+            self.inject_director_prompt(prompt, &events, refresh_started, store_worker, Some(assignment))
                 .await;
+        }
+    }
+
+    /// Shutdown: hand off the last deferred session-metadata write, then let
+    /// every queued store write land, each step bounded by `timeout` so a
+    /// wedged write cannot hang shutdown (cas-54a2). Returns whether the
+    /// store worker went idle.
+    pub(super) fn finish_shutdown_writes(
+        &mut self,
+        store_worker: &super::store_worker::StoreWorker,
+        timeout: Duration,
+    ) -> bool {
+        // cas-54a2: a focus change made since the last refresh pass (from the
+        // keyboard, say) is still in its slot; it must not be lost.
+        self.flush_epic_focus_write(store_worker);
+        // cas-d2a2: queue stamps run on the StoreWorker through the queue
+        // job lanes; drain the lanes first so no critical stamp is still
+        // waiting on a lane while the StoreWorker reports idle (jobs.rs).
+        let queue_cas_dir = self.app.cas_dir().to_path_buf();
+        if !self.queue_jobs.drain_for_shutdown(&queue_cas_dir, timeout) {
+            tracing::warn!("prompt-queue job lanes still busy at shutdown");
+        }
+        // Let queued store writes (the epic focus and worker-hold clears
+        // among them) land before cleanup tears the session down.
+        let idle = store_worker.wait_idle(timeout);
+        if !idle {
+            tracing::warn!(
+                pending = store_worker.pending(),
+                "factory store worker still busy at shutdown"
+            );
+        }
+        idle
+    }
+
+    /// Hand the latest epic-focus write to the store worker (cas-5e72).
+    pub(super) fn flush_epic_focus_write(&mut self, store_worker: &super::store_worker::StoreWorker) {
+        if let Some((path, epic_id)) = self.app.take_epic_focus_write() {
+            store_worker.submit("epic focus metadata", move || {
+                crate::ui::factory::app::persist_epic_focus_at(&path, epic_id.as_deref());
+            });
         }
     }
 
@@ -3622,13 +4419,19 @@ impl FactoryDaemon {
     /// to the durable queue, an assignment through the assignment row, an
     /// unready pane through the queue, and everything else straight to the
     /// recipient's inbox or PTY.
+    ///
+    /// `assignment` is the assignment state read off the loop with the
+    /// prompt's re-check (cas-4491f). `None` reads it here: only the paths
+    /// that run without job lanes (no runtime, or shutdown) pass `None`.
     async fn inject_director_prompt(
         &mut self,
         prompt: crate::ui::factory::director::Prompt,
         delivery_events: &[crate::ui::factory::director::DirectorEvent],
         refresh_started: std::time::Instant,
         store_worker: &super::store_worker::StoreWorker,
+        assignment: Option<crate::ui::factory::app::AssignmentRead>,
     ) {
+        use crate::ui::factory::app::AssignmentRead;
         // A routine nudge has one queryable row and uses the queue's
         // busy-recipient gate. Never write it directly into a Teams inbox.
         if let Some(task_id) = prompt.stall_nudge_task.clone() {
@@ -3647,36 +4450,68 @@ impl FactoryDaemon {
             return;
         }
         // GH #682: the event snapshot was read before this
-        // loop. Re-read assignment state at the final direct
+        // loop. Assignment state is re-read at the final direct
         // transport boundary so a task that moved beyond Open
         // in that gap cannot receive stale `task start`
-        // boilerplate.
-        if let Some((task_id, status)) = super::delivery::assignment_stale_status(
-            self.app.cas_dir(),
-            &prompt.text,
-            &prompt.target,
-        ) {
-            tracing::info!(
-                target: "cas::coordination",
-                stage = "suppress_terminal_assignment",
-                target_agent = %prompt.target,
-                task_id = %task_id,
-                status = %status,
-                "cas-2b0b: suppressed a direct assignment for a terminal task"
-            );
-            return;
-        }
-        // Task mutations and director snapshots share one durable
-        // assignment row; a late tick cannot duplicate the wake.
-        if let Some(task_id) = crate::prompt_revalidation::assignment_solicited_task_id(&prompt.text) {
-            if let Ok(task) = crate::store::open_task_store_cached(self.app.cas_dir())
-                .and_then(|store| store.get(&task_id).map_err(crate::CasError::from))
-            {
-                match crate::task_assignment::enqueue(self.app.cas_dir(), &task) {
-                    Ok(_) => return,
-                    Err(error) => tracing::warn!(%error, "assignment enqueue failed; retaining director fallback"),
-                }
+        // boilerplate. cas-4491f: the daemon reads it in the
+        // prompt's `RevalidateFresh` job, not here.
+        let assignment = assignment
+            .unwrap_or_else(|| AssignmentRead::read(self.app.cas_dir(), None, &prompt));
+        match assignment {
+            AssignmentRead::Stale(task_id, status) => {
+                tracing::info!(
+                    target: "cas::coordination",
+                    stage = "suppress_terminal_assignment",
+                    target_agent = %prompt.target,
+                    task_id = %task_id,
+                    status = %status,
+                    "cas-2b0b: suppressed a direct assignment for a terminal task"
+                );
+                return;
             }
+            // Task mutations and director snapshots share one durable
+            // assignment row; a late tick cannot duplicate the wake. The row
+            // is written on the store worker (cas-4491f). If that write fails
+            // the wake goes to the durable queue rather than being lost.
+            AssignmentRead::Task(task) => {
+                let cas_dir = self.app.cas_dir().to_path_buf();
+                let session = self.session_name.clone();
+                store_worker.submit("director assignment wake", move || {
+                    if let Err(error) = crate::task_assignment::enqueue(&cas_dir, &task) {
+                        tracing::warn!(%error, "assignment enqueue failed; queueing the director wake instead");
+                        if let Err(error) = super::delivery::enqueue_director_prompt(
+                            &cas_dir,
+                            &session,
+                            &prompt.target,
+                            &prompt.text,
+                        ) {
+                            tracing::warn!(
+                                target: "cas::coordination",
+                                stage = "director_prompt_queue_failed",
+                                target_agent = %prompt.target,
+                                error = %error,
+                                "assignment wake could not be queued; it may be lost"
+                            );
+                        }
+                    }
+                });
+                return;
+            }
+            // Review M4 (GH #682): the re-check never read this wake's task.
+            // Read it, check it and write its row on the store worker; a
+            // wake that is not an assignment after all is delivered as usual.
+            AssignmentRead::Unread
+                if crate::prompt_revalidation::assignment_solicited_task_id(&prompt.text)
+                    .is_some() =>
+            {
+                let cas_dir = self.app.cas_dir().to_path_buf();
+                let session = self.session_name.clone();
+                store_worker.submit("director assignment wake (unread)", move || {
+                    crate::ui::factory::app::resolve_unread_assignment(&cas_dir, &session, &prompt);
+                });
+                return;
+            }
+            AssignmentRead::NotAssignment | AssignmentRead::Unavailable | AssignmentRead::Unread => {}
         }
         // cas-ae6d (GH #100): a loss-intolerant prompt (today:
         // the assignment wake-up) bound for a PTY pane that is
@@ -3689,28 +4524,13 @@ impl FactoryDaemon {
         // durable by construction, which is exactly why the
         // same assignment woke a claude worker while codex
         // workers were left idle.
-        let pane_was_unready = self.route_director_prompt_to_queue(&prompt);
-        if pane_was_unready {
-            match self.enqueue_director_prompt(&prompt) {
-                Ok(id) => {
-                    tracing::info!(
-                        target: "cas::coordination",
-                        stage = "director_prompt_queued",
-                        channel = "prompt_queue",
-                        target_agent = %prompt.target,
-                        prompt_id = id,
-                        "director prompt parked on the durable queue because the recipient's PTY pane is not ready"
-                    );
-                    return;
-                }
-                Err(e) => tracing::warn!(
-                    target: "cas::coordination",
-                    stage = "director_prompt_queue_failed",
-                    target_agent = %prompt.target,
-                    error = %e,
-                    "durable enqueue failed; attempting direct injection instead"
-                ),
-            }
+        //
+        // cas-4491f: the queue write runs on the store worker. A write that
+        // fails there is logged; injecting into a pane that is not ready
+        // would only be swallowed by its startup input buffer.
+        if self.route_director_prompt_to_queue(&prompt) {
+            self.submit_director_prompt_enqueue(store_worker, &prompt, "director_prompt_queued");
+            return;
         }
         // cas-f9e8 telemetry: measure director prompt
         // injection latency from the start of this refresh
@@ -3750,39 +4570,16 @@ impl FactoryDaemon {
         let total_ms = refresh_started.elapsed().as_secs_f64() * 1000.0;
         // cas-ae6d: a durable prompt that did not actually land
         // (transport error, or a composer-dirty deferral this
-        // lane cannot retry) is re-queued rather than lost.
-        //
-        // `pane_was_unready` means we only reached this direct
-        // inject because the durable enqueue itself failed.
-        // `Mux::inject` reports Delivered as soon as the write
-        // syscall returns, so a pane still flushing its startup
-        // input buffer yields a delivered-looking write that the
-        // harness never sees. Do not let that count as durable
-        // delivery — retry it, and if the queue is still
-        // unwritable, say so loudly rather than silently.
+        // lane cannot retry) is re-queued rather than lost. An
+        // unready pane never reaches this direct inject
+        // (cas-4491f: its queue write is not retried here).
         let delivered = super::delivery::durable_delivery_landed(
             matches!(inject_result, Ok(cas_mux::InjectOutcome::Delivered)),
-            pane_was_unready,
+            false,
         );
         if super::delivery::needs_durable_followup(delivered, prompt.durable_retry)
         {
-            match self.enqueue_director_prompt(&prompt) {
-                Ok(id) => tracing::info!(
-                    target: "cas::coordination",
-                    stage = "director_prompt_requeued",
-                    channel = "prompt_queue",
-                    target_agent = %prompt.target,
-                    prompt_id = id,
-                    "director prompt re-queued after a direct delivery attempt did not land"
-                ),
-                Err(e) => tracing::warn!(
-                    target: "cas::coordination",
-                    stage = "director_prompt_requeue_failed",
-                    target_agent = %prompt.target,
-                    error = %e,
-                    "durable re-queue failed; assignment wake-up may be lost"
-                ),
-            }
+            self.submit_director_prompt_enqueue(store_worker, &prompt, "director_prompt_requeued");
         }
         match inject_result {
             Ok(cas_mux::InjectOutcome::Delivered) => tracing::info!(

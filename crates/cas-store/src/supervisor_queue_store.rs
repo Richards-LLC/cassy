@@ -153,6 +153,29 @@ pub trait SupervisorQueueStore: Send + Sync {
         transition_key: &str,
     ) -> Result<NotifyIdempotentResult>;
 
+    /// cas-26c8: [`Self::notify_idempotent`] for a relay that replaces other
+    /// notifications. In ONE transaction it records this row and stamps and
+    /// acknowledges every not-yet-injected `folded_event_type` row whose
+    /// transition key starts with one of `folded_key_prefixes` followed by
+    /// `:` (one per recipient of a folded death), so no crash, failed open or
+    /// changed recipient list can leave both the fold and a member to send.
+    /// The default does the two steps one after the other.
+    fn notify_idempotent_folding(
+        &self,
+        supervisor_id: &str,
+        event_type: &str,
+        payload: &str,
+        priority: NotificationPriority,
+        transition_key: &str,
+        folded_event_type: &str,
+        folded_key_prefixes: &[String],
+    ) -> Result<NotifyIdempotentResult> {
+        let result =
+            self.notify_idempotent(supervisor_id, event_type, payload, priority, transition_key)?;
+        let _ = (folded_event_type, folded_key_prefixes);
+        Ok(result)
+    }
+
     /// Mark prompt_queue delivery complete for a durable notification (cas-17e4 outbox).
     /// Idempotent: safe to call again after success.
     fn mark_prompt_delivered(&self, notification_id: i64) -> Result<()>;
@@ -183,6 +206,26 @@ pub trait SupervisorQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<SupervisorNotification>>;
 
+    /// cas-ff42: [`Self::list_pending_prompt_outbox`] for rows created in
+    /// `[created_after, created_before)`, so old rows a sweep has given up on
+    /// can never crowd recent ones out of the limit. The default filters the
+    /// unwindowed list.
+    fn list_pending_prompt_outbox_between(
+        &self,
+        supervisor_id: &str,
+        event_type: &str,
+        created_after: DateTime<Utc>,
+        created_before: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<SupervisorNotification>> {
+        Ok(self
+            .list_pending_prompt_outbox(supervisor_id, event_type, usize::MAX)?
+            .into_iter()
+            .filter(|row| row.created_at >= created_after && row.created_at < created_before)
+            .take(limit)
+            .collect())
+    }
+
     /// Poll for pending notifications (ordered by priority, then created_at)
     /// Returns up to `limit` notifications and marks them as processed
     fn poll(&self, supervisor_id: &str, limit: usize) -> Result<Vec<SupervisorNotification>>;
@@ -209,7 +252,9 @@ pub trait SupervisorQueueStore: Send + Sync {
     /// `older_than_secs` ago, in one IMMEDIATE transaction (cas-f207).
     ///
     /// Finished means: an outbox row (`transition_key` set) whose prompt was
-    /// delivered, or a pull row (no key) that was processed. Pending and
+    /// delivered, a pull row (no key) that was processed, or a
+    /// `reminder_fired` record whose prompt_queue row exists (cas-5871).
+    /// Pending and
     /// undelivered rows stay. Attention keys stay while their session has a
     /// registered non-shutdown agent; old delivered keys from ended sessions
     /// age out. Missing registry/session evidence stays conservative.
@@ -358,6 +403,101 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
         })
     }
 
+    fn notify_idempotent_folding(
+        &self,
+        supervisor_id: &str,
+        event_type: &str,
+        payload: &str,
+        priority: NotificationPriority,
+        transition_key: &str,
+        folded_event_type: &str,
+        folded_key_prefixes: &[String],
+    ) -> Result<NotifyIdempotentResult> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let now = Utc::now().to_rfc3339();
+            let changed = tx.execute(
+                "INSERT OR IGNORE INTO supervisor_queue
+                    (supervisor_id, event_type, payload, priority, created_at, transition_key)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                params![
+                    supervisor_id,
+                    event_type,
+                    payload,
+                    i32::from(priority),
+                    now,
+                    transition_key
+                ],
+            )?;
+            let result = if changed > 0 {
+                NotifyIdempotentResult::Created(tx.last_insert_rowid())
+            } else {
+                let (existing_id, prompt_delivered_at): (i64, Option<String>) = tx.query_row(
+                    "SELECT id, prompt_delivered_at FROM supervisor_queue WHERE transition_key = ?",
+                    params![transition_key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                NotifyIdempotentResult::AlreadyExists {
+                    id: existing_id,
+                    prompt_delivered: prompt_delivered_at.is_some(),
+                }
+            };
+            // cas-ff42 L2: every other recipient of a folded member (a live
+            // Director, say) gets its own copy of the fold, so stamping its
+            // member rows never leaves it without the group alert. The copy
+            // is unstamped and names its recipient (`fold_copy_for`), so the
+            // death sweep injects its prompt like the per-worker prompts it
+            // replaces.
+            for prefix in folded_key_prefixes {
+                let member = format!("{prefix}:");
+                let others: Vec<String> = {
+                    let mut stmt = tx.prepare(
+                        "SELECT DISTINCT supervisor_id FROM supervisor_queue
+                          WHERE event_type = ?1
+                            AND prompt_delivered_at IS NULL
+                            AND substr(transition_key, 1, length(?2)) = ?2
+                            AND supervisor_id <> ?3",
+                    )?;
+                    stmt.query_map(params![folded_event_type, member, supervisor_id], |row| {
+                        row.get::<_, String>(0)
+                    })?
+                    .collect::<std::result::Result<_, _>>()?
+                };
+                for other in others {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO supervisor_queue
+                            (supervisor_id, event_type, payload, priority, created_at,
+                             transition_key)
+                         VALUES (?1, ?2, json_set(?3, '$.fold_copy_for', ?1), ?4, ?5, ?6)",
+                        params![
+                            other,
+                            event_type,
+                            payload,
+                            i32::from(priority),
+                            now,
+                            format!("{transition_key}:{other}")
+                        ],
+                    )?;
+                }
+            }
+            for prefix in folded_key_prefixes {
+                let member = format!("{prefix}:");
+                tx.execute(
+                    "UPDATE supervisor_queue
+                        SET prompt_delivered_at = COALESCE(prompt_delivered_at, ?1),
+                            processed_at = COALESCE(processed_at, ?1)
+                      WHERE event_type = ?2
+                        AND prompt_delivered_at IS NULL
+                        AND substr(transition_key, 1, length(?3)) = ?3",
+                    params![now, folded_event_type, member],
+                )?;
+            }
+            tx.commit()?;
+            Ok(result)
+        })
+    }
+
     fn mark_prompt_delivered(&self, notification_id: i64) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -444,6 +584,40 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
         let rows = stmt
             .query_map(
                 params![supervisor_id, event_type, limit as i64],
+                Self::notification_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn list_pending_prompt_outbox_between(
+        &self,
+        supervisor_id: &str,
+        event_type: &str,
+        created_after: DateTime<Utc>,
+        created_before: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<SupervisorNotification>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, supervisor_id, event_type, payload, priority, created_at, processed_at,
+                    transition_key, prompt_delivered_at
+             FROM supervisor_queue
+             WHERE supervisor_id = ?1 AND event_type = ?2
+               AND processed_at IS NULL AND prompt_delivered_at IS NULL
+               AND julianday(created_at) >= julianday(?3)
+               AND julianday(created_at) < julianday(?4)
+             ORDER BY priority ASC, created_at ASC, id ASC LIMIT ?5",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![
+                    supervisor_id,
+                    event_type,
+                    created_after.to_rfc3339(),
+                    created_before.to_rfc3339(),
+                    limit as i64
+                ],
                 Self::notification_from_row,
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -608,6 +782,20 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
                 [],
                 |row| row.get(0),
             )?;
+            let has_prompt_queue: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prompt_queue')",
+                [],
+                |row| row.get(0),
+            )?;
+            let reminder_delivered = if has_prompt_queue {
+                "EXISTS (
+                     SELECT 1 FROM prompt_queue
+                     WHERE prompt_queue.dedupe_key = 'reminder-fired:'
+                         || json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.reminder_id')
+                 )"
+            } else {
+                "0"
+            };
             let ended_attention = if has_agents {
                 "NULLIF(json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.factory_session'), '') IS NOT NULL
                  AND NOT EXISTS (
@@ -629,6 +817,13 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
                      WHERE created_at < ?1
                        AND (
                            (transition_key IS NULL AND processed_at IS NOT NULL)
+                           -- cas-5871: a reminder is delivered through
+                           -- prompt_queue; its record here is finished once
+                           -- that prompt row exists (keyed reminder-fired:<id>,
+                           -- unique-indexed). A record whose prompt enqueue
+                           -- failed may be the only delivery and stays.
+                           OR (transition_key IS NULL AND event_type = 'reminder_fired'
+                               AND ({reminder_delivered}))
                            OR (transition_key IS NOT NULL
                                AND prompt_delivered_at IS NOT NULL
                                AND (transition_key NOT LIKE 'worker-attention:%'
@@ -1222,6 +1417,198 @@ mod tests {
         expected.sort();
         assert_eq!(remaining, expected);
         assert!(store.prune_finished_batch(0, 10).is_err(), "a zero window is refused");
+    }
+
+
+    /// cas-5871: an outbox row is consumed by its prompt delivery, not by
+    /// `processed_at`, which stays the supervisor's acknowledgement (`ack`
+    /// refuses an already-processed row). Retention finishes a delivered
+    /// task_lifecycle row once it ages out, so it does not stay forever.
+    #[test]
+    fn a_delivered_lifecycle_row_ages_out_and_keeps_its_ack_slot_cas_5871() {
+        let (_temp, store) = create_test_store();
+        let id = match store
+            .notify_idempotent(
+                "supervisor-1",
+                "task_lifecycle",
+                "{}",
+                NotificationPriority::Normal,
+                "cas-x:open:closed:s:task_closed:1",
+            )
+            .unwrap()
+        {
+            NotifyIdempotentResult::Created(id) => id,
+            other => panic!("{other:?}"),
+        };
+        store.mark_prompt_delivered(id).unwrap();
+        assert!(store.get(id).unwrap().unwrap().processed_at.is_none(), "not acknowledged yet");
+        store.ack(id).unwrap();
+        {
+            let aged = (Utc::now() - chrono::Duration::days(15)).to_rfc3339();
+            let conn = store.conn.lock().unwrap();
+            conn.execute("UPDATE supervisor_queue SET created_at = ?1", params![aged]).unwrap();
+        }
+        assert_eq!(store.prune_finished_batch(14 * 24 * 60 * 60, 10).unwrap(), 1);
+        assert!(store.get(id).unwrap().is_none());
+    }
+
+    /// cas-5871: 2,942 reminder_fired rows since May were never consumed.
+    /// The reminder is delivered through prompt_queue, so an aged record whose
+    /// prompt row exists is finished. One whose prompt enqueue failed may be
+    /// the only delivery and stays, as does any other unconsumed pull row.
+    #[test]
+    fn an_aged_reminder_record_is_pruned_only_once_its_prompt_exists_cas_5871() {
+        let (temp, store) = create_test_store();
+        let prompts = crate::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        crate::PromptQueueStore::init(&prompts).unwrap();
+        let delivered = store
+            .notify("supervisor-1", "reminder_fired", r#"{"reminder_id":7}"#, NotificationPriority::Normal)
+            .unwrap();
+        crate::PromptQueueStore::enqueue_idempotent(
+            &prompts,
+            "lead-sup",
+            "lead-sup",
+            "Reminder #7: check CI",
+            Some("s"),
+            None,
+            None,
+            "reminder-fired:7",
+            None,
+        )
+        .unwrap();
+        let only_delivery = store
+            .notify("supervisor-1", "reminder_fired", r#"{"reminder_id":8}"#, NotificationPriority::Normal)
+            .unwrap();
+        let pull = store
+            .notify("supervisor-1", "worker_died", "{}", NotificationPriority::Normal)
+            .unwrap();
+        {
+            let aged = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+            let conn = store.conn.lock().unwrap();
+            conn.execute("UPDATE supervisor_queue SET created_at = ?1", params![aged])
+                .unwrap();
+        }
+        assert_eq!(store.prune_finished_batch(14 * 24 * 60 * 60, 10).unwrap(), 1);
+        assert!(store.get(delivered).unwrap().is_none(), "its prompt row exists");
+        assert!(store.get(only_delivery).unwrap().is_some(), "it may be the only delivery");
+        assert!(store.get(pull).unwrap().is_some(), "a pending pull row is never deleted");
+    }
+    /// cas-26c8 review M1: the folded relay and the stamping of its member
+    /// rows are one transaction. Every recipient's member row is stamped and
+    /// acknowledged, a lookalike key is untouched, an already-delivered member
+    /// keeps its delivery time, and a replay changes nothing.
+    #[test]
+    fn folding_relay_stamps_its_members_in_one_transaction_cas_26c8() {
+        let (_temp, store) = create_test_store();
+        let died = |key: &str, recipient: &str| match store
+            .notify_idempotent(recipient, "worker_died", "{}", NotificationPriority::Critical, key)
+            .unwrap()
+        {
+            NotifyIdempotentResult::Created(id) => id,
+            other => panic!("{other:?}"),
+        };
+        let a1 = died("worker_died:w1:100:sup-a", "sup-a");
+        let b1 = died("worker_died:w1:100:sup-b", "sup-b");
+        let a2 = died("worker_died:w2:200:sup-a", "sup-a");
+        let lookalike = died("worker_died:w10:100:sup-a", "sup-a");
+        store.mark_prompt_delivered(a2).unwrap();
+        let delivered_at = store.get(a2).unwrap().unwrap().prompt_delivered_at;
+
+        let members = vec!["worker_died:w1:100".to_string(), "worker_died:w2:200".to_string()];
+        let fold = |store: &SqliteSupervisorQueueStore| {
+            store
+                .notify_idempotent_folding(
+                    "sup-a",
+                    "workers_died_together",
+                    "{}",
+                    NotificationPriority::Critical,
+                    "fold:w1:100",
+                    "worker_died",
+                    &members,
+                )
+                .unwrap()
+        };
+        let folded = fold(&store);
+        assert!(matches!(folded, NotifyIdempotentResult::Created(_)), "{folded:?}");
+        for id in [a1, b1] {
+            let row = store.get(id).unwrap().unwrap();
+            // pin: review M1: a folded member is stamped so it is never injected.
+            assert!(row.prompt_delivered_at.is_some(), "member {id} is stamped");
+            // pin: review M1: a folded member is acknowledged in the same transaction.
+            assert!(row.processed_at.is_some(), "member {id} is acknowledged");
+        }
+        assert_eq!(store.get(a2).unwrap().unwrap().prompt_delivered_at, delivered_at);
+        let untouched = store.get(lookalike).unwrap().unwrap();
+        assert!(untouched.prompt_delivered_at.is_none() && untouched.processed_at.is_none());
+        // cas-ff42 L2: sup-b's member row was folded away, so sup-b holds its
+        // own copy of the fold, awaiting its prompt and naming its recipient.
+        let copy = store
+            .get_by_transition_key("fold:w1:100:sup-b")
+            .unwrap()
+            .expect("the other recipient keeps the group alert");
+        assert_eq!(copy.supervisor_id, "sup-b");
+        assert_eq!(copy.event_type, "workers_died_together");
+        assert!(copy.prompt_delivered_at.is_none() && copy.processed_at.is_none());
+        let copy_payload: serde_json::Value = serde_json::from_str(&copy.payload).unwrap();
+        assert_eq!(copy_payload["fold_copy_for"], "sup-b");
+        assert!(
+            store.get_by_transition_key("fold:w1:100:sup-a").unwrap().is_none(),
+            "the fold's own recipient gets no copy"
+        );
+
+        let NotifyIdempotentResult::Created(fold_id) = folded else { unreachable!() };
+        assert_eq!(
+            fold(&store),
+            NotifyIdempotentResult::AlreadyExists { id: fold_id, prompt_delivered: false },
+            "a replay re-reads the same fold"
+        );
+    }
+
+    /// cas-ff42: the windowed outbox query keeps aged-out rows from crowding
+    /// recent ones out of its limit.
+    #[test]
+    fn windowed_prompt_outbox_skips_rows_outside_the_window_cas_ff42() {
+        let (_temp, store) = create_test_store();
+        let mut ids = Vec::new();
+        for key in ["old-1", "old-2", "new-1"] {
+            let NotifyIdempotentResult::Created(id) = store
+                .notify_idempotent("sup", "worker_died", "{}", NotificationPriority::Critical, key)
+                .unwrap()
+            else {
+                unreachable!()
+            };
+            ids.push(id);
+        }
+        let aged = (Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE supervisor_queue SET created_at = ?1 WHERE id IN (?2, ?3)",
+                params![aged, ids[0], ids[1]],
+            )
+            .unwrap();
+        }
+        let now = Utc::now();
+        let recent = store
+            .list_pending_prompt_outbox_between(
+                "sup",
+                "worker_died",
+                now - chrono::Duration::minutes(30),
+                now + chrono::Duration::seconds(1),
+                1,
+            )
+            .unwrap();
+        assert_eq!(recent.iter().map(|row| row.id).collect::<Vec<_>>(), [ids[2]]);
+        let aged_out = store
+            .list_pending_prompt_outbox_between(
+                "sup",
+                "worker_died",
+                now - chrono::Duration::hours(3),
+                now - chrono::Duration::minutes(30),
+                10,
+            )
+            .unwrap();
+        assert_eq!(aged_out.len(), 2);
     }
 
 }

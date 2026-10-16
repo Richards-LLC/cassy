@@ -158,6 +158,7 @@ pub fn forbid_store_access() -> ForbidStoreGuard {
 #[must_use = "the permitted region lasts only while the guard is alive"]
 pub struct PermitStoreGuard {
     previous_depth: u32,
+    _report: crate::lane_guard::ModeGuard,
     _not_send: std::marker::PhantomData<*const ()>,
 }
 
@@ -169,11 +170,13 @@ impl Drop for PermitStoreGuard {
 
 /// Lift [`forbid_store_access`] for a named exception inside a store-free
 /// region, such as an operator command that arrives on the input path but is
-/// not keystroke forwarding. The wait budget still applies.
+/// not keystroke forwarding. The wait budget still applies. On an enforced
+/// daemon lane the exception is reported, not enforced (factory loop v2 C6).
 pub fn permit_store_access() -> PermitStoreGuard {
     let previous_depth = FORBID_DEPTH.with(|depth| depth.replace(0));
     PermitStoreGuard {
         previous_depth,
+        _report: crate::lane_guard::report_here(),
         _not_send: std::marker::PhantomData,
     }
 }

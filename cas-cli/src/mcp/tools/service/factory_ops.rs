@@ -1680,6 +1680,17 @@ fn format_assigned_task_info(
 /// Pure over its input so the wording and the empty case are unit-testable
 /// without a daemon, a queue, or a clock.
 fn format_undelivered_relay_section(rows: &[cas_store::UndeliveredLifecycleRelay]) -> String {
+    format_undelivered_relay_section_at(rows, chrono::Utc::now())
+}
+
+/// [`format_undelivered_relay_section`] at a given time (cas-5871).
+fn format_undelivered_relay_section_at(
+    rows: &[cas_store::UndeliveredLifecycleRelay],
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    // cas-5871: a relay older than a day is counted with the action that
+    // clears it; listing it on every call buried the live ones.
+    let stale_before = now - chrono::Duration::hours(24);
     let actionable = rows
         .iter()
         .filter(|row| {
@@ -1691,13 +1702,16 @@ fn format_undelivered_relay_section(rows: &[cas_store::UndeliveredLifecycleRelay
     if actionable.is_empty() {
         return String::new();
     }
-    let total = actionable.len();
-    let displayed = actionable.len().min(10);
+    let (recent, stale): (Vec<_>, Vec<_>) = actionable
+        .into_iter()
+        .partition(|row| row.created_at >= stale_before);
+    let total = recent.len() + stale.len();
+    let displayed = recent.len().min(10);
     let mut out = String::new();
     out.push_str(&format!(
         "🔴 UNDELIVERED SUPERVISOR RELAY ({total} total; displaying {displayed}) — these never reached you:\n",
     ));
-    for row in actionable.into_iter().take(displayed) {
+    for row in recent.into_iter().take(displayed) {
         let what = row
             .summary
             .as_deref()
@@ -1722,6 +1736,37 @@ fn format_undelivered_relay_section(rows: &[cas_store::UndeliveredLifecycleRelay
         if let Some(detail) = &row.detail {
             out.push_str(&format!("    {detail}\n"));
         }
+    }
+    if !stale.is_empty() {
+        // Review M2: at most a handful of commands on one status line.
+        const STALE_ACK_HINTS: usize = 5;
+        let ack_ids = stale
+            .iter()
+            .filter_map(|row| row.source.rsplit(':').next()?.parse::<i64>().ok())
+            .collect::<Vec<_>>();
+        let mut acks = ack_ids
+            .iter()
+            .take(STALE_ACK_HINTS)
+            .map(|id| format!("`coordination action=message_ack notification_id={id}`"))
+            .collect::<Vec<_>>();
+        if ack_ids.len() > STALE_ACK_HINTS {
+            acks.push(format!("and {} more", ack_ids.len() - STALE_ACK_HINTS));
+        }
+        out.push_str(&format!(
+            "  + {} older than 24 h (oldest {}), not listed. Check each task, then clear it{}\n",
+            stale.len(),
+            stale
+                .iter()
+                .map(|row| row.created_at)
+                .min()
+                .map(|at| at.format("%Y-%m-%d").to_string())
+                .unwrap_or_default(),
+            if acks.is_empty() {
+                " with `message_ack` on its relay".to_string()
+            } else {
+                format!(": {}", acks.join(", "))
+            }
+        ));
     }
     out.push_str(
         "  These lanes may still be waiting on you. Open each task directly \
@@ -3795,7 +3840,8 @@ impl CasService {
                     crate::cloud::presence::render_line(Some(&record), chrono::Utc::now())
                 })
                 .unwrap_or_default();
-            let mailbox_health = format!("{presence}{mailbox_health}");
+            let shutdown = crate::cloud::shutdown::health(&self.inner.cas_root, chrono::Utc::now());
+            let mailbox_health = format!("{presence}{shutdown}{mailbox_health}");
             return Ok(Self::success(if health.is_empty() {
                 format!("{summary}\n{}", mailbox_health.trim_end())
             } else {
@@ -4109,7 +4155,10 @@ impl CasService {
                 // sampling the remaining actionable backlog. Scan the same
                 // bounded maximum as worker-death coalescing so task-free
                 // informational deaths cannot occupy the ten-row display cap.
-                let _ = queue.reconcile_terminal_lifecycle_relays();
+                // cas-5871: a relay to a supervisor whose session has ended
+                // can no longer be acted on by anyone it was for either. One
+                // call; it takes the write lock only when a relay is due.
+                let _ = queue.reconcile_lifecycle_relays();
                 queue
                     .list_undelivered_lifecycle_relays(
                         super::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT,
@@ -6771,20 +6820,9 @@ impl CasService {
 
         let clear = req.clear.unwrap_or(false);
         let epic_id = req.id.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let request = if clear {
-            FocusEpic::Clear
-        } else {
-            let Some(epic_id) = epic_id else {
-                return Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    "focus_epic requires `id=<epic-id>` or `clear=true`",
-                ));
-            };
-            FocusEpic::Pin {
-                epic_id,
-                delivery_mode: requested_delivery_mode,
-            }
-        };
+        if !clear && epic_id.is_none() {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, "focus_epic requires `id=<epic-id>` or `clear=true`"));
+        }
 
         // cas-566b: the body is the operator facade the Commander hub also
         // calls; this arm keeps MCP's request parsing and error codes.
@@ -6794,7 +6832,16 @@ impl CasService {
         let pinned_epic = (!clear).then(|| epic_id.map(str::to_string)).flatten();
         let cas_root = self.inner.cas_root.clone();
         let agent_id = self.inner.get_agent_id().ok();
-        let text = focus_epic(&self.inner.cas_root, &factory_session, request).map_err(
+        let focus_root = self.inner.cas_root.clone();
+        let focus_session = factory_session.clone();
+        let focus_id = pinned_epic.clone();
+        let text = tokio::task::spawn_blocking(move || {
+            let request = match focus_id.as_deref() {
+                Some(epic_id) => FocusEpic::Pin { epic_id, delivery_mode: requested_delivery_mode },
+                None => FocusEpic::Clear,
+            };
+            focus_epic(&focus_root, &focus_session, request)
+        }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("focus worker failed: {error}")))?.map_err(
             |error| match error {
                 OperationError::Failed(message) => Self::error(ErrorCode::INTERNAL_ERROR, message),
                 OperationError::NotFound(message) | OperationError::Invalid(message) => {
@@ -11315,6 +11362,59 @@ mod spawn_lifecycle_tests {
             out.contains("not evidence the work was handled"),
             "must refuse to let silence read as success: {out}"
         );
+    }
+
+    /// cas-5871: relays older than a day are counted with a cleanup hint,
+    /// not listed. Nine September relays topped every worker_status in
+    /// October and pushed the live ones down.
+    #[test]
+    fn relays_older_than_a_day_are_counted_not_listed_cas_5871() {
+        let now = chrono::Utc::now();
+        let mut old = lost_relay("CI FAILED: factory/kind-owl-50 (e528)");
+        old.source = "lifecycle-wake:2904".to_string();
+        old.created_at = now - chrono::Duration::days(16);
+        let mut older = old.clone();
+        older.source = "lifecycle-wake:2903".to_string();
+        older.prompt_id += 1;
+        let fresh = lost_relay("task_awaiting_merge: cas-fe23 (2026-10-16T02:00:00Z)");
+        let out = format_undelivered_relay_section_at(&[fresh, old, older], now);
+        assert!(out.contains("cas-fe23"), "a recent relay is listed: {out}");
+        assert!(!out.contains("kind-owl-50"), "an old relay is not listed: {out}");
+        assert!(out.contains("2 older than 24 h"), "old relays are counted: {out}");
+        assert!(
+            out.contains("message_ack notification_id=2904") && out.contains("notification_id=2903"),
+            "the hint names how to clear each one: {out}"
+        );
+
+        let only_old = format_undelivered_relay_section_at(
+            &[{
+                let mut row = lost_relay("CI FAILED: factory/kind-owl-50 (e528)");
+                row.created_at = now - chrono::Duration::days(2);
+                row
+            }],
+            now,
+        );
+        assert!(only_old.contains("1 older than 24 h"), "{only_old}");
+        assert!(!only_old.contains("kind-owl-50"), "{only_old}");
+    }
+
+    /// cas-5871 review M2: the stale hint names at most five ack commands.
+    #[test]
+    fn the_stale_relay_hint_is_capped_cas_5871() {
+        let now = chrono::Utc::now();
+        let rows = (0..80)
+            .map(|n| {
+                let mut row = lost_relay("CI FAILED: factory/kind-owl-50 (e528)");
+                row.source = format!("lifecycle-wake:integration:{}", 30_000 + n);
+                row.prompt_id += n;
+                row.created_at = now - chrono::Duration::days(20);
+                row
+            })
+            .collect::<Vec<_>>();
+        let out = format_undelivered_relay_section_at(&rows, now);
+        assert_eq!(out.matches("message_ack").count(), 5, "{out}");
+        assert!(out.contains("and 75 more"), "{out}");
+        assert!(out.contains("80 older than 24 h"), "{out}");
     }
 
     /// The banner must be absent when there is nothing lost — a heading that

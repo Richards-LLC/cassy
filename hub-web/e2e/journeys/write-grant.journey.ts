@@ -129,13 +129,28 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await expect(panel.getByRole("combobox", { name: "Task" })).toHaveValue("cas-1234");
         await expect(rail.locator(".write-grant-result .write-grant-id")).toHaveText("cas-1234");
         await expect(rail.locator(".write-grant-result .write-grant-id")).toHaveCSS("white-space", "nowrap");
-        // cas-68d0 F02: the receipt is in view clear of the rail's bottom fade.
+        // cas-a8d9: compare the receipt with the fade's rendered top, including
+        // the sticky pseudo-element's negative margins inside the rail padding.
         if (width === 1280) {
           await expect.poll(() => rail.locator(".write-grant-result").evaluate((line) => {
             const scroller = line.closest(".conversation-context")!;
-            const fade = parseFloat(getComputedStyle(scroller, "::after").height) || 0;
-            return scroller.getBoundingClientRect().bottom - fade - line.getBoundingClientRect().bottom;
-          }), "receipt bottom clears the fade").toBeGreaterThanOrEqual(0);
+            const fade = getComputedStyle(scroller, "::after");
+            const probe = document.createElement("span");
+            Object.assign(probe.style, {
+              position: fade.position,
+              display: fade.display,
+              height: fade.height,
+              marginBlockStart: fade.marginBlockStart,
+              marginBlockEnd: fade.marginBlockEnd,
+              bottom: fade.bottom,
+              visibility: "hidden",
+              pointerEvents: "none",
+            });
+            scroller.append(probe);
+            const fadeTop = probe.getBoundingClientRect().top;
+            probe.remove();
+            return fadeTop - line.getBoundingClientRect().bottom;
+          }), "every receipt line clears the rendered fade").toBeGreaterThanOrEqual(0);
         }
         expect(hub.writeGrants.map((call: any) => [call.status, call.body])).toEqual([[200, {
           action: "grant", task: "cas-1234", path: "~/soundwave-config/docs/requests", mode: "create+edit", reason: "INGEST request files",

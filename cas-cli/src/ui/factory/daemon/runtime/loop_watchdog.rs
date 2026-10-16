@@ -522,6 +522,33 @@ fn attached() -> Option<Arc<LoopProgress>> {
     ATTACHED.with(|attached| attached.borrow().clone())
 }
 
+/// A test lane in enforce mode, with this test process's enforced
+/// violations set to panic (the explicit test-harness switch, factory loop
+/// v2 C6). Tests of passes proven clean enter their lane this way; the
+/// daemon itself never calls it.
+#[cfg(test)]
+pub(crate) fn enforce_test_lane(
+    lane: cas_store::lane_guard::Lane,
+) -> cas_store::lane_guard::LaneGuard {
+    cas_store::lane_guard::panic_on_enforced_violations_for_tests();
+    cas_store::lane_guard::enforce_lane(lane)
+}
+
+/// The daemon loop's lane as `FactoryDaemon::run` holds it: attached to
+/// `progress` in report mode, then the enforced scope `run` opens around a
+/// proven-clean step (`lane_guard::enforce_here`), with this test process's
+/// enforced violations set to panic. Hold both until the step ends.
+#[cfg(test)]
+pub(crate) fn enforced_daemon_step(
+    progress: &Arc<LoopProgress>,
+    phase: LoopPhase,
+) -> (LaneAttachment, cas_store::lane_guard::ModeGuard) {
+    cas_store::lane_guard::panic_on_enforced_violations_for_tests();
+    let attachment = progress.attach(Lane::Control);
+    progress.enter(phase);
+    (attachment, cas_store::lane_guard::enforce_here())
+}
+
 /// Mark the attached lane as entering `step`. A no-op off a lane thread.
 pub(crate) fn mark(step: Step) {
     if let Some(progress) = attached() {
@@ -610,8 +637,10 @@ impl LoopProgress {
     }
 
     /// Mark this thread as `lane`, so sub-steps marked with [`mark`] and
-    /// [`scoped`] reach this progress and blocking calls are reported
-    /// (factory loop v2 §6.6, report mode).
+    /// [`scoped`] reach this progress and blocking calls are reported with
+    /// their step (factory loop v2 §6.6). The daemon loop stays in report
+    /// mode until its residual loop I/O moves to the jobs lane (C2c,
+    /// cas-4491f); tests enforce with `lane_guard::enforce_lane` (C6).
     pub(crate) fn attach(self: &Arc<Self>, lane: Lane) -> LaneAttachment {
         let lane_guard = lane.guarded().map(cas_store::lane_guard::enter_lane);
         let previous = ATTACHED.with(|attached| attached.replace(Some(Arc::clone(self))));
@@ -674,6 +703,7 @@ impl LoopProgress {
         if let Some(lane) = step.lane.guarded() {
             cas_store::lane_guard::switch_lane(lane);
         }
+        cas_store::lane_guard::set_step(step.name);
         let now = self.clock.now();
         let left = match self.current.lock() {
             Ok(mut current) => std::mem::replace(&mut *current, CurrentStep { step, started: now }),

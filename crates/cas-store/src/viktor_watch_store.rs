@@ -270,14 +270,28 @@ impl SqliteViktorWatchStore {
     }
 
     pub fn expire_stale(&self) -> Result<usize> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        conn.execute(
-            "UPDATE viktor_thread_watches SET status = 'expired',
-             last_error = COALESCE(last_error, 'watch TTL elapsed')
-             WHERE status = 'pending' AND datetime(expires_at) <= datetime('now')",
-            [],
-        )
-        .map_err(Into::into)
+        // cas-1bc7 review L3: a busy write lock is retried like other writes.
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            // cas-1bc7: every serve's daemon runs this on its tick, and an
+            // UPDATE takes the write lock even when nothing is due. Read first.
+            let any_due: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM viktor_thread_watches
+                  WHERE status = 'pending' AND datetime(expires_at) <= datetime('now'))",
+                [],
+                |row| row.get(0),
+            )?;
+            if !any_due {
+                return Ok(0);
+            }
+            conn.execute(
+                "UPDATE viktor_thread_watches SET status = 'expired',
+                 last_error = COALESCE(last_error, 'watch TTL elapsed')
+                 WHERE status = 'pending' AND datetime(expires_at) <= datetime('now')",
+                [],
+            )
+            .map_err(Into::into)
+        })
     }
 
     pub fn quarantine_for_task(&self, task_id: &str) -> Result<usize> {
@@ -336,6 +350,18 @@ impl SqliteViktorWatchStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-1bc7: the daemon tick's expiry with nothing due takes no write
+    /// lock, so it never queues behind another writer.
+    #[test]
+    fn cas_1bc7_expire_with_nothing_due_takes_no_write_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteViktorWatchStore::open(temp.path()).unwrap();
+        let held = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+        held.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let _budget = crate::wait_budget::bound_waits_for(std::time::Duration::from_millis(150));
+        assert_eq!(store.expire_stale().unwrap(), 0);
+    }
 
     #[test]
     fn records_deduplicates_and_quarantines_task_watches() {

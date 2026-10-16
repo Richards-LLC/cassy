@@ -1,0 +1,6 @@
+Cloud presence: shutdown pending 1, expired 0.
+Retry: automatic when a daemon runs, for up to 24h.
+Cause: retired-agent: Shutdown: rate limited (429)
+Cloud presence: shutdown pending 0, expired 1.
+Inspect expired cleanup: ls .cas/cloud_shutdown
+Cause: retired-agent: Shutdown: rate limited (429)

@@ -27,6 +27,14 @@ const TASK_SYNC_STRIPES: u64 = 64;
 /// Reconcile runs on task-store opens, which are read paths.
 const RECONCILE_BUSY_BOUND: Duration = Duration::from_millis(100);
 
+// One-shot, thread-local barriers for deterministic real-store race tests.
+// They run after SQLite guards are released and never exist in production.
+#[cfg(test)]
+thread_local! {
+    static AFTER_INTENT_STAGE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_INTENT_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 thread_local! {
     /// Reconcile leases this thread holds. `begin_write` refuses while any is
     /// held: a reconcile takes its lease only after it owns the SQLite write
@@ -245,6 +253,16 @@ pub(crate) enum TaskSyncFulfillResult {
 }
 
 impl SyncQueue {
+    #[cfg(test)]
+    pub(crate) fn after_task_intent_stage_for_test(hook: impl FnOnce() + 'static) {
+        AFTER_INTENT_STAGE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn after_task_intent_snapshot_for_test(hook: impl FnOnce() + 'static) {
+        AFTER_INTENT_SNAPSHOT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
     /// The queue connection, honouring the thread's store wait budget: the
     /// cached daemon task store shares this connection with background
     /// threads that may hold it across a busy wait (GH #1165).
@@ -415,6 +433,9 @@ impl SyncQueue {
             global_scope,
         };
         tx.commit()?;
+        drop(conn);
+        #[cfg(test)]
+        if let Some(hook) = AFTER_INTENT_STAGE.with(|slot| slot.borrow_mut().take()) { hook(); }
         Ok(intent)
     }
 
@@ -461,7 +482,12 @@ impl SyncQueue {
                 global_scope: row.get(10)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(CasError::from)
+        let intents = rows.collect::<Result<Vec<_>, _>>().map_err(CasError::from)?;
+        drop(statement);
+        drop(conn);
+        #[cfg(test)]
+        if let Some(hook) = AFTER_INTENT_SNAPSHOT.with(|slot| slot.borrow_mut().take()) { hook(); }
+        Ok(intents)
     }
 
     /// Queue only the canonical payload under the current routing policy.
@@ -521,6 +547,21 @@ impl SyncQueue {
                     (tx, Some(lease))
                 }
             };
+            // The pending list was read before the entity lease was claimed.
+            // Its live owner may have completed (or cancelled) this exact
+            // intent and retired its receipt in that gap. A missing snapshot
+            // is already handled, not unclassified revision evidence. Check
+            // under the write transaction/lease, and never retire a newer
+            // intent for the same entity on behalf of this stale snapshot.
+            if mode == TaskSyncFulfillMode::Reconcile
+                && !tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM task_sync_intents WHERE id = ?1 AND mutation_id = ?2 AND entity_id = ?3)",
+                    params![intent.id, intent.mutation_id, intent.entity_id],
+                    |row| row.get::<_, bool>(0),
+                )?
+            {
+                return Ok(TaskSyncFulfillResult::Superseded);
+            }
             let revision = match classify_task_sync_intent(&tx, intent)? {
                 TaskSyncIntentClass::Superseded => {
                     retire_task_sync_evidence(&tx, &intent.entity_id)?;

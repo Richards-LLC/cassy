@@ -121,7 +121,10 @@ pub struct WorktreeManager {
 mod epic_ops;
 pub mod worker_ops;
 
-pub use worker_ops::{CleanupReport, DirtyWorktreeWarning, ExternalSymlinkWarning, RemoveOutcome};
+pub use worker_ops::{
+    CleanupReport, DirtyWorktreeWarning, ExternalSymlinkWarning, RemoveOutcome, WorkerRemovalPlan,
+    remove_worker_worktree_io,
+};
 
 /// Where a merge into a target branch is executed (cas-4702 / GH #68).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -572,6 +575,46 @@ impl WorktreeManager {
         };
 
         Ok(merge_commit)
+    }
+
+    /// Integrate an exact parked delivery independently of a reused worker's
+    /// checkout. The local branch and a fresh origin fetch must both agree
+    /// with the anchor; the isolated merge consumes the immutable SHA. This
+    /// operation deliberately has no cleanup option.
+    pub(crate) fn merge_pushed_delivery_preserving_worktree(
+        &self,
+        worktree: &mut Worktree,
+        anchor: &str,
+    ) -> WorktreeResult<Option<String>> {
+        let refuse = |detail: String| WorktreeError::UncommittedChanges(format!(
+            "dirty source checkout retained: pushed delivery proof required; {detail}. No merge was attempted"
+        ));
+        let anchor = self.git.resolve_commit(anchor)
+            .ok_or_else(|| refuse("parked anchor cannot be resolved".into()))?;
+        let source_ref = format!("refs/heads/{}", worktree.branch);
+        if self.git.resolve_commit(&source_ref).as_deref() != Some(anchor.as_str()) {
+            return Err(refuse("source tip does not match the parked anchor".into()));
+        }
+        let pushed_ref = format!("refs/remotes/origin/{}", worktree.branch);
+        let refspec = format!("+refs/heads/{}:{pushed_ref}", worktree.branch);
+        self.git.fetch_branch(&refspec)
+            .map_err(|error| refuse(format!("could not verify pushed ref: {error}")))?;
+        if self.git.resolve_commit(&pushed_ref).as_deref() != Some(anchor.as_str())
+            || self.git.resolve_commit(&source_ref).as_deref() != Some(anchor.as_str())
+        {
+            return Err(refuse("pushed ref or local source tip does not match the parked anchor".into()));
+        }
+        match self.git.merge_branch_via_temp_worktree(&worktree.parent_branch, &anchor, true) {
+            Ok(commit) => {
+                worktree.mark_merged(commit.clone());
+                Ok(commit)
+            }
+            Err(error @ (GitError::MergeConflict | GitError::MergeConflictPaths(_))) => {
+                worktree.mark_conflict();
+                Err(error.into())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Remove a successfully merged worktree after any caller-owned durable

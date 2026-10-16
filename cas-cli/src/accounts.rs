@@ -197,6 +197,25 @@ pub enum DirChange {
     Rename { label: String, to: String },
 }
 
+/// How a file reaches the base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeKind {
+    /// The base has no such file yet.
+    Copy,
+    /// It differs and needs a person: kept beside the base copy as
+    /// `<name>.from-<account>`.
+    SideBySide,
+    /// A regenerable cache (plugin marketplaces, synced skills): the newest
+    /// copy wins; every original stays in the backup.
+    Newest,
+    /// A project memory index (`MEMORY.md`): the union of its lines, so
+    /// every account's memories stay indexed.
+    UnionLines,
+    /// A plugin registry: the union of its JSON objects, base first.
+    JsonUnion,
+}
+
 /// One file copied into the base.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Merge {
@@ -207,7 +226,44 @@ pub struct Merge {
     /// Where it lands relative to the base: `rel`, or a side-by-side name for
     /// a conflict.
     pub to: String,
+    /// Only [`MergeKind::SideBySide`] is a conflict a person reviews.
     pub conflict: bool,
+    pub kind: MergeKind,
+}
+
+/// How a differing copy of `rel` is resolved (cas-e1f4, measured on the
+/// operator's accounts: 815 raw conflicts, 731 of them plugin marketplace
+/// caches and 31 project memory indexes).
+fn resolution(rel: &str) -> MergeKind {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    if rel.starts_with("projects/") && rel.ends_with("/memory/MEMORY.md") {
+        return MergeKind::UnionLines;
+    }
+    if matches!(rel, "plugins/installed_plugins.json" | "plugins/known_marketplaces.json") {
+        return MergeKind::JsonUnion;
+    }
+    let regenerable = [
+        "plugins/marketplaces/",
+        "plugins/cache/",
+        "plugins/synced/",
+        "plugins/repos/",
+        "skills/synced/",
+    ]
+    .iter()
+    .any(|prefix| rel.starts_with(prefix))
+        || rel.starts_with("plugins/plugin-directory-cache")
+        || (rel.starts_with("plugins/") && name.starts_with('.'));
+    if regenerable {
+        MergeKind::Newest
+    } else {
+        MergeKind::SideBySide
+    }
+}
+
+fn modified(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .unwrap_or(std::time::UNIX_EPOCH)
 }
 
 /// One shared item replaced by a link to the base.
@@ -376,6 +432,7 @@ pub fn plan(provider: Provider, home: &Path) -> Result<Plan> {
 
     // Merge every account's shared items into the base, defaults first.
     let mut planned: HashMap<String, [u8; 32]> = HashMap::new();
+    let mut planned_time: HashMap<String, std::time::SystemTime> = HashMap::new();
     let mut seen_sources: BTreeSet<PathBuf> = BTreeSet::new();
     let base_canonical = base.canonicalize().ok();
     let mut merges = Vec::new();
@@ -405,30 +462,45 @@ pub fn plan(provider: Provider, home: &Path) -> Result<Plan> {
                         }
                     }
                 };
+                let merge = |rel: String, to: String, kind: MergeKind| Merge {
+                    account: account.label.clone(),
+                    rel,
+                    to,
+                    conflict: kind == MergeKind::SideBySide,
+                    kind,
+                };
                 match existing {
                     None => {
                         planned.insert(rel.clone(), digest);
-                        merges.push(Merge {
-                            account: account.label.clone(),
-                            to: rel.clone(),
-                            rel,
-                            conflict: false,
-                        });
+                        planned_time.insert(rel.clone(), modified(&file));
+                        merges.push(merge(rel.clone(), rel, MergeKind::Copy));
                     }
                     Some(existing) if existing == digest => {}
-                    Some(_) => {
-                        let to = side_by_side(&rel, &account.label);
-                        if planned.contains_key(&to) || base.join(&to).exists() {
-                            continue;
+                    Some(_) => match resolution(&rel) {
+                        MergeKind::Newest => {
+                            let current = planned_time
+                                .get(&rel)
+                                .copied()
+                                .unwrap_or_else(|| modified(&base.join(&rel)));
+                            if modified(&file) > current {
+                                planned.insert(rel.clone(), digest);
+                                planned_time.insert(rel.clone(), modified(&file));
+                                merges.push(merge(rel.clone(), rel, MergeKind::Newest));
+                            }
                         }
-                        planned.insert(to.clone(), digest);
-                        merges.push(Merge {
-                            account: account.label.clone(),
-                            rel,
-                            to,
-                            conflict: true,
-                        });
-                    }
+                        kind @ (MergeKind::UnionLines | MergeKind::JsonUnion) => {
+                            planned.insert(rel.clone(), digest);
+                            merges.push(merge(rel.clone(), rel, kind));
+                        }
+                        _ => {
+                            let to = side_by_side(&rel, &account.label);
+                            if planned.contains_key(&to) || base.join(&to).exists() {
+                                continue;
+                            }
+                            planned.insert(to.clone(), digest);
+                            merges.push(merge(rel, to, MergeKind::SideBySide));
+                        }
+                    },
                 }
             }
         }
@@ -621,15 +693,26 @@ pub fn apply(plan: &Plan, home: &Path, stamp: &str) -> Result<Applied> {
         let source = locate(&original, &moved, home)
             .with_context(|| format!("could not find {} to merge", original.display()))?;
         let target = plan.base.join(&merge.to);
-        if target.exists() {
-            continue;
-        }
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(&source, &target).with_context(|| {
-            format!("could not copy {} into the base", source.display())
-        })?;
+        match merge.kind {
+            MergeKind::Copy | MergeKind::SideBySide if target.exists() => continue,
+            MergeKind::Copy | MergeKind::SideBySide | MergeKind::Newest => {
+                std::fs::copy(&source, &target).with_context(|| {
+                    format!("could not copy {} into the base", source.display())
+                })?;
+            }
+            MergeKind::UnionLines => union_lines(&source, &target)?,
+            MergeKind::JsonUnion => {
+                if json_union(&source, &target).is_err() {
+                    // Unreadable JSON is a person's call, side by side.
+                    let aside = plan.base.join(side_by_side(&merge.rel, &merge.account));
+                    std::fs::copy(&source, &aside)?;
+                    conflicts += 1;
+                }
+            }
+        }
         merged += 1;
         conflicts += usize::from(merge.conflict);
     }
@@ -727,6 +810,65 @@ pub fn apply(plan: &Plan, home: &Path, stamp: &str) -> Result<Applied> {
         linked,
         dir_changes: plan.dir_changes.len(),
     })
+}
+
+/// Append the lines of `source` that `target` lacks, keeping `target`'s
+/// order first (a `MEMORY.md` index from each account).
+fn union_lines(source: &Path, target: &Path) -> Result<()> {
+    let base = std::fs::read_to_string(target).unwrap_or_default();
+    let incoming = std::fs::read_to_string(source)
+        .with_context(|| format!("could not read {}", source.display()))?;
+    let known: BTreeSet<&str> = base.lines().collect();
+    let mut merged = base.clone();
+    let mut added = false;
+    for line in incoming.lines() {
+        if line.trim().is_empty() || known.contains(line) {
+            continue;
+        }
+        if !added && !merged.is_empty() && !merged.ends_with('\n') {
+            merged.push('\n');
+        }
+        merged.push_str(line);
+        merged.push('\n');
+        added = true;
+    }
+    if added {
+        std::fs::write(target, merged)?;
+    }
+    Ok(())
+}
+
+/// Merge the JSON object at `source` into `target`: objects merge
+/// recursively, `target` wins on a scalar, arrays gain missing items.
+fn json_union(source: &Path, target: &Path) -> Result<()> {
+    fn merge(into: &mut serde_json::Value, from: serde_json::Value) {
+        match (into, from) {
+            (serde_json::Value::Object(into), serde_json::Value::Object(from)) => {
+                for (key, value) in from {
+                    match into.get_mut(&key) {
+                        Some(existing) => merge(existing, value),
+                        None => {
+                            into.insert(key, value);
+                        }
+                    }
+                }
+            }
+            (serde_json::Value::Array(into), serde_json::Value::Array(from)) => {
+                for value in from {
+                    if !into.contains(&value) {
+                        into.push(value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut base: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(target)?)?;
+    let incoming: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(source)?)?;
+    anyhow::ensure!(base.is_object() && incoming.is_object(), "not a JSON object");
+    merge(&mut base, incoming);
+    std::fs::write(target, serde_json::to_string_pretty(&base)? + "\n")?;
+    Ok(())
 }
 
 /// Where `original` lives now: in place, or under the backup a parent of it
@@ -920,7 +1062,7 @@ pub fn render_plan(plan: &Plan, home: &Path) -> String {
     // Merges grouped per account and top-level item, so a projects/ tree
     // reads as one line.
     let mut groups: BTreeMap<(String, String), usize> = BTreeMap::new();
-    for merge in plan.merges.iter().filter(|merge| !merge.conflict) {
+    for merge in plan.merges.iter().filter(|merge| merge.kind == MergeKind::Copy) {
         let item = merge.rel.split('/').next().unwrap_or(&merge.rel).to_string();
         *groups.entry((merge.account.clone(), item)).or_default() += 1;
     }
@@ -930,6 +1072,32 @@ pub fn render_plan(plan: &Plan, home: &Path) -> String {
             if count == 1 { "" } else { "s" }
         ));
     }
+    let count = |kind: MergeKind| plan.merges.iter().filter(|m| m.kind == kind).count();
+    let (memory, registries, caches) = (
+        count(MergeKind::UnionLines),
+        count(MergeKind::JsonUnion),
+        count(MergeKind::Newest),
+    );
+    if memory > 0 {
+        out.push_str(&format!(
+            "Union {memory} project memory index{} (MEMORY.md), so every account's memories stay listed\n",
+            if memory == 1 { "" } else { "es" }
+        ));
+    }
+    if registries > 0 {
+        out.push_str(&format!(
+            "Union {registries} plugin registr{} (installed and known marketplaces)\n",
+            if registries == 1 { "y" } else { "ies" }
+        ));
+    }
+    if caches > 0 {
+        out.push_str(&format!(
+            "Keep the newest of {caches} regenerable cache file{} (plugin marketplaces, synced skills)\n",
+            if caches == 1 { "" } else { "s" }
+        ));
+    }
+    // Every conflict a person reviews, listed in full: they are few once
+    // caches, memory indexes and registries merge themselves.
     for merge in plan.conflicts() {
         out.push_str(&format!(
             "Conflict {} from ~/{}: kept as {}\n",

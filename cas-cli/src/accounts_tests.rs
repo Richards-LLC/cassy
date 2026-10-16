@@ -28,7 +28,6 @@ fn claude_home() -> tempfile::TempDir {
     write(&main.join("commands/a.md"), "A");
     write(&main.join("skills/s/SKILL.md"), "S");
     write(&main.join("settings.json"), "{\"main\":1}");
-    write(&main.join("projects/-repo/memory/MEMORY.md"), "main memory");
     // ~/.claude-alt: a unique login b@x.com, a conflicting settings.json.
     let alt = h.join(".claude-alt");
     login(&alt, "b@x.com");
@@ -42,6 +41,16 @@ fn claude_home() -> tempfile::TempDir {
     write(&a.join("commands/a.md"), "A");
     std::os::unix::fs::symlink(main.join("skills"), a.join("skills")).unwrap();
     write(&a.join("sessions/s1.json"), "per-account");
+    // Project memory indexes differ per account; plugin caches and registries
+    // differ too.
+    write(&main.join("projects/-repo/memory/MEMORY.md"), "- [one](one.md)\n");
+    write(&a.join("projects/-repo/memory/MEMORY.md"), "- [one](one.md)\n- [two](two.md)\n");
+    write(&a.join("projects/-repo/memory/two.md"), "two");
+    write(&main.join("plugins/marketplaces/m/README.md"), "old cache");
+    write(&main.join("plugins/installed_plugins.json"), "{\"plugins\":{\"x@m\":[1]}}");
+    write(&a.join("plugins/installed_plugins.json"), "{\"plugins\":{\"y@m\":[2]}}");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write(&a.join("plugins/marketplaces/m/README.md"), "new cache");
     // A second named account with nothing shared yet.
     login(&h.join(".claude-c@x.com"), "c@x.com");
     // A typo directory with no login.
@@ -86,6 +95,15 @@ fn cas_e1f4_dry_run_lists_planned_links_merges_and_conflicts() {
     assert!(
         !merged.iter().any(|(_, to, _)| to.starts_with("commands/a.md.from")),
         "identical files are not conflicts"
+    );
+    let kinds: Vec<_> = plan.merges.iter().map(|m| (m.rel.as_str(), m.kind)).collect();
+    assert!(kinds.contains(&("projects/-repo/memory/MEMORY.md", MergeKind::UnionLines)));
+    assert!(kinds.contains(&("plugins/installed_plugins.json", MergeKind::JsonUnion)));
+    assert!(kinds.contains(&("plugins/marketplaces/m/README.md", MergeKind::Newest)));
+    assert_eq!(
+        plan.conflicts().map(|m| m.rel.as_str()).collect::<Vec<_>>(),
+        ["settings.json"],
+        "only a file a person must judge is a conflict"
     );
     assert!(
         !plan.merges.iter().any(|m| m.rel.contains("credentials") || m.rel.contains("sessions")),
@@ -147,6 +165,24 @@ fn cas_e1f4_apply_links_shared_items_keeps_logins_merges_and_backs_up() {
     );
     // pin: operator-facing dry-run and receipt wording.
     assert_eq!(std::fs::read_to_string(base.join("skills/s/SKILL.md")).unwrap(), "S");
+    assert_eq!(
+        std::fs::read_to_string(base.join("projects/-repo/memory/MEMORY.md")).unwrap(),
+        "- [one](one.md)\n- [two](two.md)\n",
+        "both accounts' memories stay indexed"
+    );
+    // pin: merged file contents the operator relies on.
+    assert_eq!(std::fs::read_to_string(base.join("projects/-repo/memory/two.md")).unwrap(), "two");
+    assert_eq!(
+        std::fs::read_to_string(base.join("plugins/marketplaces/m/README.md")).unwrap(),
+        "new cache",
+        "the newest regenerable cache wins"
+    );
+    let registry: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(base.join("plugins/installed_plugins.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(registry["plugins"]["x@m"].is_array() && registry["plugins"]["y@m"].is_array());
+    assert!(!base.join("plugins/marketplaces/m/README.md.from-claude-a@x.com").exists());
     // pin: operator-facing dry-run and receipt wording.
     assert_eq!(std::fs::read_to_string(base.join("projects/p/t.jsonl")).unwrap(), "typo transcript");
     assert_eq!(

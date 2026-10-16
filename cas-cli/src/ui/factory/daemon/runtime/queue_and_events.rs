@@ -6711,15 +6711,8 @@ impl FactoryDaemon {
             .recipient(pane)?
             .mid_turn()
     }
-    fn prepared_wake_evidence(&self, pane: &str) -> RecipientWakeEvidence {
-        self.queue_jobs
-            .prompt_preparation
-            .recipient(pane)
-            .map(|inputs| inputs.wake_evidence(self.queue_jobs.prompt_preparation.wake_now()))
-            .unwrap_or(RecipientWakeEvidence {
-                recently_active: false,
-                awaiting_first_prompt: true,
-            })
+    fn prepared_wake_evidence(&mut self, pane: &str) -> RecipientWakeEvidence {
+        self.queue_jobs.prompt_preparation.wake_evidence(pane)
     }
 
     /// Forward pending supervisor replies to the authenticated Commander hub

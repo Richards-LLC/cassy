@@ -305,6 +305,7 @@ fn poll_spawn_queue(request: &SpawnPollRequest) -> Result<SpawnBatch, String> {
 
 pub(crate) const WAKE_GATE_READ: &str = "WakeGateRead";
 const WAKE_MAX_AGE: Duration = Duration::from_millis(250);
+const WAKE_READ_BUDGET: Duration = Duration::from_millis(100);
 
 use super::prompt_queue_jobs::QueueSelection;
 use super::queue_and_events::{RecipientWakeEvidence, ToolCallEvidence, WorkerWaitState};
@@ -318,6 +319,7 @@ pub(crate) struct RecipientInputs {
     pub wait: WorkerWaitState,
     active_until: Option<chrono::DateTime<chrono::Utc>>,
     first_prompt_until: Option<chrono::DateTime<chrono::Utc>>,
+    unknown_observed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl RecipientInputs {
@@ -377,8 +379,6 @@ fn unknown_wake_inputs(
     captured_at: Instant,
     now: chrono::DateTime<chrono::Utc>,
 ) -> WakeInputs {
-    let until = now
-        + chrono::Duration::from_std(super::queue_and_events::CLAUDE_FIRST_PROMPT_GRACE).unwrap();
     WakeInputs {
         agents: vec![],
         recipients: recipients
@@ -395,7 +395,8 @@ fn unknown_wake_inputs(
                             task_blocked: false,
                         },
                         active_until: None,
-                        first_prompt_until: Some(until),
+                        first_prompt_until: None,
+                        unknown_observed_at: Some(now),
                     },
                 )
             })
@@ -418,6 +419,8 @@ pub(crate) struct PromptPreparation {
     current: Option<WakeInputs>,
     unusable_reads: u8,
     fallback: Option<WakeInputs>,
+    // Retained across reads and batches: unavailable registration is not a new boot.
+    unknown_first_seen: HashMap<String, chrono::DateTime<chrono::Utc>>,
     #[cfg(test)]
     pub(crate) read_delay: Duration,
     #[cfg(test)]
@@ -431,6 +434,36 @@ impl PromptPreparation {
             return now;
         }
         chrono::Utc::now()
+    }
+    fn remember_unknowns(&mut self, inputs: &WakeInputs) {
+        for (pane, input) in &inputs.recipients {
+            if let Some(observed) = input.unknown_observed_at {
+                self.unknown_first_seen
+                    .entry(pane.clone())
+                    .or_insert(observed);
+            }
+        }
+    }
+    pub(crate) fn wake_evidence(&mut self, pane: &str) -> RecipientWakeEvidence {
+        let now = self.wake_now();
+        let (mut evidence, unknown_observed_at) = self
+            .recipient(pane)
+            .map(|input| (input.wake_evidence(now), input.unknown_observed_at))
+            .unwrap_or((RecipientWakeEvidence::default(), Some(now)));
+        if let Some(observed) = unknown_observed_at {
+            let first_seen = self
+                .unknown_first_seen
+                .entry(pane.into())
+                .or_insert(observed);
+            evidence.awaiting_first_prompt = now >= *first_seen
+                && now
+                    <= *first_seen
+                        + chrono::Duration::from_std(
+                            super::queue_and_events::CLAUDE_FIRST_PROMPT_GRACE,
+                        )
+                        .unwrap();
+        }
+        evidence
     }
     pub(crate) fn has_pending(&self) -> bool {
         self.pending.is_some()
@@ -447,10 +480,15 @@ impl PromptPreparation {
             if now.saturating_duration_since(inputs.captured_at) <= WAKE_MAX_AGE {
                 let mut selection = self.pending.take()?;
                 selection.registered_agents = inputs.agents.clone();
+                self.remember_unknowns(&inputs);
                 self.current = Some(inputs);
                 self.fallback = None;
                 self.unusable_reads = 0;
                 return Some(selection);
+            }
+            if let Some(fallback) = self.fallback.take() {
+                self.remember_unknowns(&fallback);
+                self.fallback = Some(fallback);
             }
             self.unusable_reads = self.unusable_reads.saturating_add(1);
         }
@@ -494,6 +532,16 @@ impl PromptPreparation {
     ) -> Option<QueueSelection> {
         jobs.apply_completions();
         self.collect(jobs);
+        if self.in_flight.is_some()
+            && self.last_submitted.is_some_and(|submitted| {
+                now.saturating_duration_since(submitted)
+                    >= super::factory_jobs::in_flight_timeout(WAKE_READ_BUDGET)
+            })
+        {
+            self.in_flight = None;
+            self.unusable_reads = self.unusable_reads.saturating_add(1);
+            tracing::warn!("prompt wake input job timed out; retaining batch for bounded retry");
+        }
         if let Some(selection) = selection {
             debug_assert!(self.pending.is_none());
             if selection.rows.is_empty() {
@@ -583,7 +631,7 @@ impl PromptPreparation {
                 lane: Lane::Blocking,
                 criticality: Criticality::Refresh,
                 generation,
-                budget: Duration::from_millis(100),
+                budget: WAKE_READ_BUDGET,
             },
             move || {
                 let captured_at = Instant::now();
@@ -631,16 +679,17 @@ impl PromptPreparation {
             match result.outcome {
                 Ok(ExternalOutcome::Done(value)) => match value.downcast::<WakeReadOutcome>() {
                     Ok(value) => {
-                        self.fallback = Some(value.unknown);
                         match value.inputs {
                             Ok(inputs) => {
                                 self.unusable_reads = self.unusable_reads.saturating_sub(1);
                                 self.ready = Some(inputs);
                             }
                             Err(error) => {
+                                self.remember_unknowns(&value.unknown);
                                 tracing::warn!(%error, "prompt wake inputs unavailable; retaining batch")
                             }
                         }
+                        self.fallback = Some(value.unknown);
                     }
                     Err(_) => tracing::error!("invalid prompt wake input result; retaining batch"),
                 },
@@ -689,12 +738,8 @@ fn read_wake_inputs(
                     tool_call: ToolCallEvidence::Unknown,
                     has_transcript: false,
                     active_until: None,
-                    first_prompt_until: Some(
-                        now + chrono::Duration::from_std(
-                            super::queue_and_events::CLAUDE_FIRST_PROMPT_GRACE,
-                        )
-                        .unwrap(),
-                    ),
+                    first_prompt_until: None,
+                    unknown_observed_at: Some(now),
                     wait: WorkerWaitState {
                         harness_waiting_for_input: false,
                         task_blocked: blocked.contains(&name.to_ascii_lowercase()),
@@ -754,6 +799,7 @@ fn read_wake_inputs(
                 has_transcript: path.is_some(),
                 active_until,
                 first_prompt_until,
+                unknown_observed_at: None,
                 wait: WorkerWaitState {
                     harness_waiting_for_input,
                     task_blocked: blocked.contains(&name.to_ascii_lowercase()),

@@ -3003,7 +3003,9 @@ impl FactoryDaemon {
 
             // Poll spawn queue (enqueues requests, doesn't execute them)
             // Completion-driven acceptance; the ingress owns the 100ms cadence.
-            let _ = self.enqueue_spawn_requests();
+            if let Err(error) = self.enqueue_spawn_requests() {
+                tracing::error!(%error, "cas-2702: could not accept spawn queue poll result");
+            }
 
             // Process pending spawns (non-blocking: git ops run on background thread)
             loop_progress.enter(super::loop_watchdog::LoopPhase::PendingSpawns);

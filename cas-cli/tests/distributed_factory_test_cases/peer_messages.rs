@@ -1374,6 +1374,36 @@ fn cas_a19b_peer_abandonment_survives_an_unregistered_sender() {
     assert!(future[0].prompt.contains("peer-outbox:43"));
 }
 
+#[tokio::test]
+async fn ct2_p3_overcap_peer_body_readable() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, _registry, mailbox) = fake_cloud_with_mailbox().await;
+    let alpha = TestMachine::new("machine-alpha");
+    let beta = TestMachine::new("machine-beta");
+    seed_project(&alpha, &server.uri(), "github.com/acme/widgets");
+    seed_project(&beta, &server.uri(), "github.com/acme/widgets");
+    let (a, b) = (alpha.cas_dir.clone(), beta.cas_dir.clone());
+    let (aa, bb) = (a.clone(), b.clone());
+    tokio::task::spawn_blocking(move || {
+        supervisor_at(&aa, "machine-alpha", "a");
+        supervisor_at(&bb, "machine-beta", "b");
+    }).await.unwrap();
+    let (sender, receiver) = (service_for(&a, "a"), service_for(&b, "b"));
+    let body = format!("contract-v2 over-cap body\n{}\nend-of-body", "readable 体\n".repeat(400));
+    assert!(body.chars().count() > cas::config::Config::default().factory().message_max_chars);
+    coordinate(&sender, json!({"action":"message", "target":"sup-b@machine-beta", "summary":"long peer body", "message":body})).await.unwrap();
+    assert_eq!(mailbox.lock().unwrap()[0]["body"].as_str(), Some(body.as_str()));
+    let rows = tokio::task::spawn_blocking(move || { tick(&b, "b"); inbox(&b) }).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].prompt.ends_with(&body));
+    let reply = format!("reply\n{body}");
+    coordinate(&receiver, json!({"action":"message", "target":"sup-a@machine-alpha", "summary":"long peer reply", "message":reply, "in_reply_to":rows[0].id})).await.unwrap();
+    assert_eq!(mailbox.lock().unwrap()[1]["body"].as_str(), Some(reply.as_str()));
+    let rows = tokio::task::spawn_blocking(move || { tick(&a, "a"); inbox(&a) }).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].prompt.ends_with(&reply));
+}
+
 
 async fn restart_peer_mail(unregister: bool, legacy: bool, fail_notice: bool) {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();

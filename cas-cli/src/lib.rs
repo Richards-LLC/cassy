@@ -53,6 +53,7 @@ pub mod factory_preflight;
 pub mod factory_daemon_health;
 pub mod factory_session_scope;
 pub mod factory_supervisor_overlap;
+pub(crate) mod supervisor_notices;
 pub mod factory_target_cache;
 pub mod fs_space;
 pub mod gh_graphql;

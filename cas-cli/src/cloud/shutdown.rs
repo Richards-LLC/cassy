@@ -106,47 +106,59 @@ fn supersedes(intent: &Intent, agent: &Agent) -> bool {
 pub(crate) struct Snapshot {
     files: std::collections::BTreeMap<PathBuf, Result<Intent, String>>,
     listing_failed: bool,
-    generation: Option<std::time::SystemTime>,
+    generation: Option<DirectoryGeneration>,
+}
+
+/// Exact sorted intent names detect changes even when timestamps and entry
+/// counts coincide. No hash collision or writer-side counter is involved.
+#[derive(PartialEq, Eq)]
+struct DirectoryGeneration {
+    modified: Option<std::time::SystemTime>,
+    files: Vec<PathBuf>,
 }
 
 impl Snapshot {
     pub(crate) fn load(root: &Path) -> Self {
-        // Capture BEFORE listing: an enqueue during loading must invalidate
-        // this snapshot at the next post-lease check too.
-        let generation = directory_generation(root);
-        match paths(root) {
-            Ok(files) => Self {
-                files: files
-                    .into_iter()
+        Self::from_observation(directory_generation(root))
+    }
+
+    fn from_observation(observation: std::io::Result<DirectoryGeneration>) -> Self {
+        match observation {
+            Ok(generation) => {
+                let files = generation
+                    .files
+                    .iter()
+                    .cloned()
                     .filter_map(|file| match read(&file) {
                         Ok(intent) => Some((file, Ok(intent))),
                         Err(error) if missing(&error) => None,
                         Err(error) => Some((file, Err(error.to_string()))),
                     })
-                    .collect(),
-                listing_failed: false,
-                generation,
-            },
+                    .collect();
+                Self {
+                    files,
+                    listing_failed: false,
+                    generation: Some(generation),
+                }
+            }
             Err(error) => {
                 tracing::warn!(%error, "cloud shutdown intent listing unavailable; checking agent fences directly");
                 Self {
                     files: Default::default(),
                     listing_failed: true,
-                    generation,
+                    generation: None,
                 }
             }
         }
     }
 
-    /// Call only after acquiring the shared presence lease. Atomic intent
-    /// creation/replacement/removal changes the directory generation, so a
-    /// completed shutdown from another daemon cannot hide behind a stale pass.
+    /// Call only after acquiring the shared presence lease. Compare intent
+    /// names as well as mtime, so coarse timestamps cannot hide a late fence.
+    /// Reuse the observed listing on reload instead of walking it twice.
     pub(crate) fn refresh_after_lease(&mut self, root: &Path) {
-        if self.listing_failed
-            || self.generation.is_none()
-            || self.generation != directory_generation(root)
-        {
-            *self = Self::load(root);
+        let current = directory_generation(root);
+        if self.listing_failed || self.generation.as_ref() != current.as_ref().ok() {
+            *self = Self::from_observation(current);
         }
     }
 
@@ -198,10 +210,16 @@ impl Snapshot {
     }
 }
 
-fn directory_generation(root: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(root.join(DIR))
+fn directory_generation(root: &Path) -> std::io::Result<DirectoryGeneration> {
+    // Capture mtime BEFORE listing. A change during snapshot loading must
+    // remain observable at the post-lease check too. Intent paths are sorted.
+    let modified = std::fs::metadata(root.join(DIR))
         .and_then(|metadata| metadata.modified())
-        .ok()
+        .ok();
+    Ok(DirectoryGeneration {
+        modified,
+        files: paths(root)?,
+    })
 }
 
 /// Revalidate before replacing an existing intent. A stale pass must not

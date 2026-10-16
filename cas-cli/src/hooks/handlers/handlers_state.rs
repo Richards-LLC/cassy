@@ -190,6 +190,17 @@ pub(crate) fn cleanup_agent_leases(
         return None;
     }
 
+    // Persist before deleting the local identity. Hooks never make cloud calls;
+    // a daemon (including one started by the next session) owns bounded retry.
+    if let Some(coordinator) = crate::cloud::presence::project_coordinator(cas_root)
+        && let Err(error) = crate::cloud::shutdown::enqueue(
+            cas_root, &agent.id, session_id, &coordinator.cloud_config().endpoint,
+        )
+    {
+        tracing::error!(agent_id = %agent.id, %error, "could not persist cloud shutdown; preserving local identity");
+        return None;
+    }
+
     // Gracefully shutdown the agent and get list of released task IDs
     let released_task_ids = agent_store.graceful_shutdown(&agent.id).unwrap_or_default();
 

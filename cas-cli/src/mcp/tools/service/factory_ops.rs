@@ -3795,7 +3795,8 @@ impl CasService {
                     crate::cloud::presence::render_line(Some(&record), chrono::Utc::now())
                 })
                 .unwrap_or_default();
-            let mailbox_health = format!("{presence}{mailbox_health}");
+            let shutdown = crate::cloud::shutdown::health(&self.inner.cas_root, chrono::Utc::now());
+            let mailbox_health = format!("{presence}{shutdown}{mailbox_health}");
             return Ok(Self::success(if health.is_empty() {
                 format!("{summary}\n{}", mailbox_health.trim_end())
             } else {

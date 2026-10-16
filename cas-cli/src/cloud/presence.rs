@@ -243,6 +243,9 @@ pub fn register_now(
     agent: &Agent,
     now: DateTime<Utc>,
 ) -> PresenceRecord {
+    if super::shutdown::is_ended(cas_root, agent) {
+        return failing(None, &agent.id, "session ended; cloud shutdown pending or completed".into(), now);
+    }
     let previous = load(cas_root, &agent.id);
     let focus = current_focus(agent);
     let branch = current_branch(cas_root, agent);
@@ -305,6 +308,9 @@ pub fn tick(
     agent: &Agent,
     now: DateTime<Utc>,
 ) -> TickAction {
+    if super::shutdown::is_ended(cas_root, agent) {
+        return TickAction::Waiting;
+    }
     let outcome = |record: PresenceRecord, ok: TickAction| match record.state {
         PresenceState::Registered => ok,
         PresenceState::Failing => TickAction::Failed(record.cause.unwrap_or_default()),

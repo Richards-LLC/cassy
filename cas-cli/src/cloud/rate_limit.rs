@@ -37,6 +37,9 @@ pub(crate) fn call(
             return response;
         }
         std::thread::sleep(delay);
+        if Instant::now() >= deadline {
+            return response;
+        }
     }
     unreachable!("last attempt returns")
 }

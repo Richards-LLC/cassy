@@ -780,3 +780,59 @@ async fn cas_4ac8_ack_retries_rate_limit_without_readmission() {
     assert!(result.is_ok(), "{result:?}");
     assert!(start.elapsed() >= std::time::Duration::from_secs(1));
 }
+
+#[tokio::test]
+async fn cas_4ac8_persistent_ack_rate_limit_is_bounded_and_named_in_mailbox_health() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages/ack"))
+        .respond_with(ResponseTemplate::new(429))
+        .expect(3)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages/claim"))
+        .respond_with(ResponseTemplate::new(429))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let endpoint = server.uri();
+    let error = tokio::task::spawn_blocking(move || {
+        HttpPeerMailbox::new(&endpoint, "test-token")
+            .ack("consumer", &[("pm-1".into(), PeerAckOutcome::Delivered)])
+    })
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(error.contains("rate limited"), "{error}");
+    let machine = Machine::new();
+    machine.register("recipient", "recipient", AgentRole::Supervisor, "factory-a");
+    crate::cloud::set_canonical_id_in_config_toml(&machine.cas, REPO).unwrap();
+    crate::cloud::CloudConfig {
+        endpoint: server.uri(),
+        token: Some("test-token".into()),
+        ..Default::default()
+    }
+    .save_to_cas_dir(&machine.cas)
+    .unwrap();
+    let root = machine.cas.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        PeerMailboxRuntime::start(&root, "factory-a")
+            .unwrap()
+            .tick_blocking()
+    })
+    .await
+    .unwrap();
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|cause| cause.contains("rate limited")),
+        "{:?}",
+        report.errors
+    );
+    assert!(mailbox_status_section(&machine.cas, Some("factory-a")).contains("rate limited"));
+}

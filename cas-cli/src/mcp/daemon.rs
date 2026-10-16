@@ -511,6 +511,9 @@ impl EmbeddedDaemon {
         }
         let cas_root = self.config.cas_root.clone();
         *slot = Some(tokio::task::spawn_blocking(move || {
+            if let Err(error) = crate::cloud::shutdown::drain(&cas_root, &coordinator, Utc::now()) {
+                tracing::warn!(%error, "cloud shutdown drain failed");
+            }
             let Ok(store) = open_agent_store(&cas_root) else {
                 return;
             };
@@ -1861,6 +1864,9 @@ impl EmbeddedDaemon {
                     let cas_root = self.config.cas_root.clone();
                     let agent = agent.clone();
                     let record = tokio::task::spawn_blocking(move || {
+                        if let Err(error) = crate::cloud::shutdown::drain(&cas_root, &coordinator, Utc::now()) {
+                            tracing::warn!(%error, "startup cloud shutdown drain failed");
+                        }
                         crate::cloud::presence::ensure_registered(
                             &coordinator,
                             &cas_root,
@@ -1926,6 +1932,9 @@ impl EmbeddedDaemon {
     /// failures under SQLite lock contention can cause workers to be
     /// incorrectly marked stale in multi-agent factory sessions.
     async fn send_agent_heartbeat(&self) {
+        // Drain ended identities even when this daemon no longer owns an agent.
+        let presence_id = self.agent_id.read().await.clone().unwrap_or_default();
+        self.kick_cloud_presence(presence_id).await;
         if let Ok(store) = open_agent_store(&self.config.cas_root) {
             // If we don't have an agent_id yet, try to adopt one by PID.
             // This handles the factory case where another daemon owns the

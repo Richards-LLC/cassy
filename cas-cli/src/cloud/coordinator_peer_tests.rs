@@ -366,3 +366,35 @@ async fn cas_4ac8_presence_names_rate_limiting() {
             .contains("rate limited")
     );
 }
+
+#[tokio::test]
+async fn cas_4ac8_cleanup_budget_does_not_retry_other_errors_or_early_retry_after() {
+    for (code, header) in [
+        (503, "0"),
+        (429, "600"),
+        (429, "Thu, 01 Jan 2099 00:00:00 GMT"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/agents/sup-1/shutdown"))
+            .respond_with(ResponseTemplate::new(code).insert_header("Retry-After", header))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+        let result = tokio::task::spawn_blocking(move || {
+            coordinator(&endpoint)
+                .with_agent_id("sup-1")
+                .with_timeout(Duration::from_millis(100))
+                .shutdown()
+        })
+        .await
+        .unwrap();
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains(&format!("({code})")), "{error}");
+        if code == 429 {
+            assert!(error.contains("rate limited"), "{error}");
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}

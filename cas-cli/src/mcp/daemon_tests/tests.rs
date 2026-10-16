@@ -11,6 +11,104 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::test_support::TestEnvGuard;
 
+/// cas-f1fb: exercise the serve's real sync entrypoint, including the lease
+/// around queue writes and HTTP. A hub sweep already in flight must win;
+/// after it releases, the daemon must sync and keep competing holders out.
+#[tokio::test]
+async fn cas_f1fb_daemon_cloud_sync_respects_and_holds_store_lease() {
+    use crate::cloud::sync_lease::SyncLease;
+    use std::sync::atomic::AtomicUsize;
+
+    let mut env = TestEnvGuard::temp_home();
+    let project = env.home().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let root = init_cas_dir(&project).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set_current_dir(&project);
+    crate::cloud::set_canonical_id_in_config_toml(&root, "daemon-lease-project").unwrap();
+
+    let server = MockServer::start().await;
+    let mut cloud = CloudConfig::default();
+    cloud.endpoint = server.uri();
+    cloud.token = Some("synthetic-lease-test-token".into());
+    cloud.save_to_cas_dir(&root).unwrap();
+    let queue = SyncQueue::open(&root).unwrap();
+    queue.init().unwrap();
+    queue
+        .enqueue(
+            EntityType::Entry,
+            "daemon-lease-entry",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"daemon-lease-entry","scope":"project","origin_project":"daemon-lease-project","content":"queued"}"#),
+        )
+        .unwrap();
+
+    // Observe contention at the network boundary, while run_cloud_sync is
+    // still in flight. This also catches a lease dropped before HTTP begins.
+    let excluded_competitors = Arc::new(AtomicUsize::new(0));
+    for (verb, suffix, body) in [
+        (
+            "POST",
+            "push",
+            serde_json::json!({"synced": {"entries": 1}}),
+        ),
+        (
+            "GET",
+            "pull",
+            serde_json::json!({
+                "entries": [], "tasks": [], "rules": [], "skills": [],
+                "specs": [], "events": [], "prompts": [],
+                "file_changes": [], "commit_links": [],
+                "pulled_at": "2026-10-16T13:00:00Z",
+            }),
+        ),
+    ] {
+        let root = root.clone();
+        let excluded = excluded_competitors.clone();
+        Mock::given(method(verb))
+            .and(path(format!("/api/sync/{suffix}")))
+            .respond_with(move |_: &wiremock::Request| {
+                if SyncLease::try_acquire(&root).unwrap().is_none() {
+                    excluded.fetch_add(1, Ordering::SeqCst);
+                }
+                ResponseTemplate::new(200).set_body_json(&body)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let daemon = EmbeddedDaemon::new(EmbeddedDaemonConfig {
+        cas_root: root.clone(),
+        index_code: false,
+        ..Default::default()
+    });
+    let held = SyncLease::try_acquire(&root).unwrap().unwrap();
+    let skipped = daemon.trigger_cloud_sync().await.unwrap();
+    assert!(skipped.errors.is_empty(), "{:?}", skipped.errors);
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "the daemon must make no cloud request while the hub holds the lease"
+    );
+    assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
+
+    drop(held);
+    let synced = daemon.trigger_cloud_sync().await.unwrap();
+    assert!(synced.errors.is_empty(), "{:?}", synced.errors);
+    assert_eq!(synced.pushed_entries, 1);
+    assert!(queue.pending(10, 5).unwrap().is_empty());
+    assert_eq!(
+        excluded_competitors.load(Ordering::SeqCst),
+        2,
+        "the daemon must hold the lease during both push and pull"
+    );
+    server.verify().await;
+    assert!(
+        SyncLease::try_acquire(&root).unwrap().is_some(),
+        "the daemon must release the lease when its cycle finishes"
+    );
+}
+
 #[tokio::test]
 async fn cas_8095_team_only_daemon_makes_only_team_calls() {
     let server = MockServer::start().await;
@@ -273,7 +371,10 @@ fn context_reset_rebind_preserves_worker_name_and_lease_for_claude_and_codex() {
         assert!(reused, "{worker_cli} registration must reuse the row");
         assert_eq!(resolved.id, original.id);
         assert_eq!(resolved.name, original.name);
-        assert_eq!(resolved.cc_session_id.as_deref(), Some(new_session.as_str()));
+        assert_eq!(
+            resolved.cc_session_id.as_deref(),
+            Some(new_session.as_str())
+        );
         assert_eq!(
             agent_store
                 .get_lease("cas-742-lease")
@@ -416,14 +517,24 @@ fn stale_factory_worker_queues_exact_forced_process_tree_shutdown() {
     let mut worker = Agent::new("stale-worker-id".to_string(), "stale-worker".to_string());
     worker.role = AgentRole::Worker;
     worker.factory_session = Some("factory-gh236".to_string());
-    let request_id = queue_stale_factory_worker_shutdown(&cas_root, &worker).expect("queue stale factory worker").expect("factory worker must queue shutdown");
+    let request_id = queue_stale_factory_worker_shutdown(&cas_root, &worker)
+        .expect("queue stale factory worker")
+        .expect("factory worker must queue shutdown");
     let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
-    let request = queue.peek(10).expect("peek shutdown queue").into_iter().find(|request| request.id == request_id).expect("exact shutdown request");
+    let request = queue
+        .peek(10)
+        .expect("peek shutdown queue")
+        .into_iter()
+        .find(|request| request.id == request_id)
+        .expect("exact shutdown request");
     assert_eq!(request.action, cas_store::SpawnAction::Shutdown);
     assert_eq!(request.worker_names, vec!["stale-worker"]);
     assert!(request.force);
     assert_eq!(request.factory_session.as_deref(), Some("factory-gh236"));
-    assert_eq!(queue_stale_factory_worker_shutdown(&cas_root, &worker).expect("dedupe queue"), None);
+    assert_eq!(
+        queue_stale_factory_worker_shutdown(&cas_root, &worker).expect("dedupe queue"),
+        None
+    );
 }
 
 // =========================================================================
@@ -1313,7 +1424,10 @@ fn source_scan_classifies_test_modules_by_relative_boundary() {
 
     let (sites_checked, violations) = scan_production_pid_assignments(&src_root);
 
-    assert_eq!(sites_checked, 1, "only the production assignment is scanned");
+    assert_eq!(
+        sites_checked, 1,
+        "only the production assignment is scanned"
+    );
     assert_eq!(
         violations.len(),
         1,

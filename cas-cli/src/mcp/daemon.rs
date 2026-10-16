@@ -2220,19 +2220,6 @@ impl EmbeddedDaemon {
 
         // Run in blocking task (ureq is synchronous)
         tokio::task::spawn_blocking(move || {
-            // cas-f1fb: one background sync per store. Another serve in this
-            // project, or the hub's idle-store sweep, may be mid-sync; skip
-            // this tick rather than race it on the same queue.
-            let _lease = match crate::cloud::sync_lease::SyncLease::try_acquire(&cas_root) {
-                Ok(Some(lease)) => lease,
-                Ok(None) => {
-                    tracing::debug!(target: "cas::sync", "cloud sync skipped: another syncer holds the store's lease");
-                    return Ok(SyncResult::default());
-                }
-                Err(error) => {
-                    return Err(CasError::Other(format!("cloud sync lease: {error}")));
-                }
-            };
             match maybe_mark_personal_scope_notice(&cas_root) {
                 Ok(Some(notice)) => {
                     let msg = notice.message();

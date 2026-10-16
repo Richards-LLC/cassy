@@ -454,13 +454,13 @@ fn cas_639c_same_channel_sweeps_route_owned_threads_without_dedupe_collision() {
     );
     assert_eq!(
         second.apply_sweep(&fx.queue, "C1", read(&messages), at(400)),
-        SweepOutcome::Woke { messages: 2 }
+        SweepOutcome::Woke { messages: 1 }
     );
     let rows = fx.wakes();
     assert_eq!(
         rows.len(),
         4,
-        "each owning session receives its own thread; unknown messages keep channel-watch behavior"
+        "each session receives its owned thread and the first wake claims the unknown root"
     );
     for (session, owned, foreign) in [("first", 100, 120), ("second", 120, 100)] {
         let row = rows
@@ -471,6 +471,120 @@ fn cas_639c_same_channel_sweeps_route_owned_threads_without_dedupe_collision() {
         assert!(row.prompt.contains(&format!("message_ts={}", ts(owned))));
         assert!(!row.prompt.contains(&format!("message_ts={}", ts(foreign))));
     }
+    assert_eq!(WatchBook::read(&fx.watch_path).unwrap().thread_owner("C1", &ts(150)), Some("first"));
+}
+
+#[test]
+fn cas_639c_review_missing_metadata_prunes_old_owner_before_routing() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut old = fx.wake("old", t0());
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 5, 0, "U1"));
+    old.poll_once(&relay, &fx.queue, true, at(10));
+    crate::ui::factory::session::SessionManager::new().remove_metadata("old").unwrap();
+    let mut next = fx.wake("next", at(20));
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 25, 0, "U2"));
+    next.poll_once(&relay, &fx.queue, true, at(30));
+    assert_eq!(fx.wakes().last().unwrap().factory_session.as_deref(), Some("next"));
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    assert_eq!(saved.watch("C1", "old").unwrap().stop_reason.as_deref(), Some("session_end"));
+}
+
+#[test]
+fn cas_639c_review_logged_out_ticks_do_not_write_or_warn() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_USER_CLOUD_JSON", env.home().join("cloud.json"));
+    crate::cloud::CloudConfig::default().save_user().unwrap();
+    let runtime = VioletWakeRuntime::start(&root, "logged-out", "supervisor").unwrap();
+    for _ in 0..4 {
+        let (report, sweeps, presence) = runtime.tick_blocking();
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(sweeps.is_empty());
+        assert!(presence.is_none());
+    }
+    assert!(!WatchBook::path(&root).exists());
+    assert!(watch_status(&root, t0()).is_none());
+}
+
+#[test]
+fn cas_639c_review_corrupt_book_is_quarantined_and_recovered_with_doctor_finding() {
+    let fx = Fixture::new();
+    std::fs::create_dir_all(fx.watch_path.parent().unwrap()).unwrap();
+    let corrupt = b"{broken watch book";
+    std::fs::write(&fx.watch_path, corrupt).unwrap();
+    let relay = FakeRelay::new();
+    relay.publish(mention("C1", 0));
+    let mut wake = fx.wake(SESSION, t0());
+    assert_eq!(wake.poll_once(&relay, &fx.queue, true, at(10)).wakes, 1);
+    assert_eq!(std::fs::read(fx.watch_path.with_extension("json.corrupt")).unwrap(), corrupt);
+    let (health, message) = watch_status(fx._temp.path(), at(10)).unwrap().doctor(at(10));
+    assert_eq!(health, WatchHealth::Warning);
+    assert!(message.contains("corrupt"), "{message}");
+}
+
+#[test]
+fn cas_639c_review_foreign_hot_thread_cannot_evict_cold_thread_dedupe() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let cold = envelope(PROJECT, "C1", "thread_reply", 1, 20, "U1");
+    let mut owner = fx.wake("owner", t0());
+    relay.publish(mention("C1", 0));
+    relay.publish(cold.clone());
+    owner.poll_once(&relay, &fx.queue, true, at(10));
+    let mut claimant = fx.wake("claimant", at(20));
+    for batch in 0..11 {
+        for item in 0..20 {
+            relay.publish(envelope(PROJECT, "C1", "thread_reply", 25 + batch * 20 + item, 0, "U2"));
+        }
+        claimant.poll_once(&relay, &fx.queue, false, at(100 + batch * 70));
+    }
+    let replay = FakeRelay::new();
+    replay.publish(cold);
+    let report = owner.poll_once(&replay, &fx.queue, true, at(1000));
+    assert_eq!((report.wakes, report.admitted), (0, 1), "{report:?}");
+}
+
+#[test]
+fn cas_639c_review_versioned_book_migrates_legacy_once_without_writing_it() {
+    let fx = Fixture::new();
+    // pin: pre-3.59 binaries write only watches.json; v2 must use another file.
+    assert!(fx.watch_path.ends_with("watches.v2.json"));
+    let relay = FakeRelay::new();
+    let mut old = fx.wake("old", t0());
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 5, 0, "U1"));
+    old.poll_once(&relay, &fx.queue, true, at(10));
+    let mut legacy: serde_json::Value = serde_json::from_slice(&std::fs::read(&fx.watch_path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("format_version");
+    let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+    std::fs::remove_file(&fx.watch_path).unwrap();
+    let legacy_path = fx.watch_path.with_file_name("watches.json");
+    std::fs::write(&legacy_path, &legacy_bytes).unwrap();
+    fx.wake("next", at(20)).poll_once(&relay, &fx.queue, true, at(30));
+    assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy_bytes);
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&fx.watch_path).unwrap()).unwrap();
+    assert_eq!(saved["format_version"], 2);
+    std::fs::write(&legacy_path, b"old binary overwrote its legacy file").unwrap();
+    fx.wake("next", at(40)).poll_once(&relay, &fx.queue, true, at(50));
+    assert!(WatchBook::read(&fx.watch_path).unwrap().watch("C1", "old").unwrap().is_active());
+    assert_eq!(std::fs::read(&legacy_path).unwrap(), b"old binary overwrote its legacy file");
+}
+
+#[test]
+fn cas_639c_review_future_book_version_is_refused_without_overwrite() {
+    let fx = Fixture::new();
+    std::fs::create_dir_all(fx.watch_path.parent().unwrap()).unwrap();
+    let future = br#"{"format_version":999,"watches":[]}"#;
+    std::fs::write(&fx.watch_path, future).unwrap();
+    let relay = FakeRelay::new();
+    relay.publish(mention("C1", 0));
+    let mut wake = fx.wake(SESSION, t0());
+    let report = wake.poll_once(&relay, &fx.queue, true, at(10));
+    assert!(report.errors.iter().any(|error| error.contains("unsupported")), "{report:?}");
+    assert_eq!(report.wakes, 0);
+    assert_eq!(std::fs::read(&fx.watch_path).unwrap(), future);
+    assert!(!fx.watch_path.with_extension("json.corrupt").exists());
 }
 
 #[test]

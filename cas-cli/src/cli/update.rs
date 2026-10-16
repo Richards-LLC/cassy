@@ -2096,6 +2096,9 @@ fn sync_claude_files_into(
         crate::cli::integrate::violet_retirement::retire_installed_hub(Some(
             &cas_root.join("proxy.toml"),
         ))?;
+        crate::cli::integrate::violet_retirement::repair_proxy_credentials_on_update(Some(
+            &cas_root.join("proxy.toml"),
+        ))?;
     }
     let project_root = project_root.unwrap_or_else(|| cas_root.parent().unwrap_or(&cas_root));
     let claude_dir = project_root.join(".claude");

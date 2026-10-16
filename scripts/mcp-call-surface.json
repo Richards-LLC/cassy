@@ -150,6 +150,7 @@
         "priority",
         "prompt",
         "reason",
+        "scope",
         "session_id",
         "shared",
         "spawn_brief",

@@ -1842,7 +1842,7 @@ impl WorkerSpawnContext {
                     let focus = self.factory_session.as_deref()
                         .map(crate::ui::factory::app::preferred_epic_focus_from_session_metadata_named)
                         .unwrap_or_default();
-                    if let Some(id) = focus.epic_id.as_deref() {
+                    if self.task_id.is_none() && let Some(id) = focus.epic_id.as_deref() {
                         let store = open_task_store_cached(&self.cas_dir)?;
                         match store.get(id) {
                             Ok(epic) if epic.status == cas_types::TaskStatus::Closed => anyhow::bail!("spawn refused: pinned epic {id} is closed; no lane was republished"),

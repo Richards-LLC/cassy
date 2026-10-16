@@ -435,3 +435,34 @@ fn cas_bfa1_real_spawn_notices_deduplicate_within_session() {
         });
     }
 }
+
+#[test]
+fn cas_bfa1_assigned_epic_ignores_closed_unrelated_focus() {
+    with_fixture(|f| {
+        let tasks = open_task_store_cached(&f.root).unwrap();
+        let mut other = cas_types::Task::new("cas-old-focus".into(), "Old focus".into());
+        other.task_type = cas_types::TaskType::Epic;
+        other.status = cas_types::TaskStatus::Closed;
+        other.branch = Some("epic/old-focus".into());
+        tasks.add(&other).unwrap();
+        let path = crate::ui::factory::metadata_path("bfa1-round2");
+        let mut metadata: crate::ui::factory::SessionMetadata =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        metadata.pinned_epic_id = Some(other.id);
+        std::fs::write(path, serde_json::to_string(&metadata).unwrap()).unwrap();
+        let prep = f.prepare().unwrap();
+        assert_eq!(prep.worktree_info.unwrap().parent_branch, "epic/round2");
+        assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), f.base);
+        assert!(
+            git(
+                &f.origin,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/heads/epic/old-focus"
+                ]
+            )
+            .is_empty()
+        );
+    });
+}

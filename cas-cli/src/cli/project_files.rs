@@ -224,7 +224,10 @@ fn source_projections(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
     let syncer = crate::sync::SkillSyncer::with_defaults(root);
     for skill in skills.iter().filter(|skill| syncer.is_enabled(skill)) {
         projections.insert(
-            format!(".claude/skills/{}/SKILL.md", crate::sync::skills::skill_dir_name(&skill.name)),
+            format!(
+                ".claude/skills/{}/SKILL.md",
+                crate::sync::skills::skill_dir_name(&skill.name)
+            ),
             syncer.generate_skill_md(skill).into_bytes(),
         );
     }

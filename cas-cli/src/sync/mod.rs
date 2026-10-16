@@ -159,8 +159,7 @@ impl Syncer {
                 rule.paths,
                 rule.surfaced_content()
             )
-        };
-
+        }
     }
 
     /// Sync all proven rules and remove stale files

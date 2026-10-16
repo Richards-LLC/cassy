@@ -2010,7 +2010,10 @@ fn cas_6718_drifted_project(home: &Path) -> PathBuf {
             ".claude/workflows/cas-code-review.js",
             "// managed_by: cas\n// retired\n",
         ),
-        (".codex/hooks.json", r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo project-codex-hook"},{"type":"command","command":"cas hook PreToolUse"}]}]}}"#),
+        (
+            ".codex/hooks.json",
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo project-codex-hook"},{"type":"command","command":"cas hook PreToolUse"}]}]}}"#,
+        ),
         ("README.md", "Project content\n"),
         (
             ".claude/skills/cas-personal/SKILL.md",
@@ -2069,7 +2072,11 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     args.dry_run = false;
     execute(&args, &update_test_cli(true), Some(&root)).unwrap();
     let status = cas_6718_git(&project, &["status", "--porcelain"]);
-    assert!(status.is_empty(), "update left managed drift: {status}\n{}", cas_6718_git(&project, &["diff"]));
+    assert!(
+        status.is_empty(),
+        "update left managed drift: {status}\n{}",
+        cas_6718_git(&project, &["diff"])
+    );
     assert!(cas_6718_git(&project, &["log", "-1", "--format=%s"]).starts_with("chore(cassy):"));
     for path in [
         ".claude/skills/cas/SKILL.md",
@@ -2104,8 +2111,15 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
             .unwrap()
             .starts_with("# Project Codex preferences\n")
     );
-    let hooks: serde_json::Value = serde_json::from_slice(&std::fs::read(project.join(".codex/hooks.json")).unwrap()).unwrap();
-    assert!(hooks["hooks"]["PreToolUse"].as_array().unwrap().iter().any(|g| g["hooks"][0]["command"] == "echo project-codex-hook"));
+    let hooks: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(project.join(".codex/hooks.json")).unwrap()).unwrap();
+    assert!(
+        hooks["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["hooks"][0]["command"] == "echo project-codex-hook")
+    );
     let first = cas_6718_git(&project, &["rev-parse", "HEAD"]);
     execute(&args, &update_test_cli(true), Some(&root)).unwrap();
     assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), first);
@@ -2175,14 +2189,29 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
     ] {
         let file = project.join(path);
         let original = std::fs::read_to_string(&file).unwrap();
-        let conflicted = if path == "CLAUDE.md" { original.replace("@AGENTS.md", suffix) } else { format!("{original}{suffix}") };
+        let conflicted = if path == "CLAUDE.md" {
+            original.replace("@AGENTS.md", suffix)
+        } else {
+            format!("{original}{suffix}")
+        };
         std::fs::write(&file, &conflicted).unwrap();
-        if path == "CLAUDE.md" { cas_6718_git(&project, &["add", path]); }
+        if path == "CLAUDE.md" {
+            cas_6718_git(&project, &["add", path]);
+        }
         let index = cas_6718_git(&project, &["ls-files", "--stage"]);
-        let (result, output) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+        let (result, output) =
+            capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
         result.unwrap();
-        let receipt: serde_json::Value = serde_json::from_str(output.lines().last().unwrap()).unwrap();
-        assert!(receipt["managed_files"]["conflicts"].as_array().unwrap().iter().any(|p| p == path), "{receipt}");
+        let receipt: serde_json::Value =
+            serde_json::from_str(output.lines().last().unwrap()).unwrap();
+        assert!(
+            receipt["managed_files"]["conflicts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p == path),
+            "{receipt}"
+        );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), conflicted);
         assert_eq!(cas_6718_git(&project, &["ls-files", "--stage"]), index);
         std::fs::write(file, original).unwrap();

@@ -398,6 +398,7 @@ fn peer(name: &str, machine: &str, live: bool) -> Peer {
         live,
         user_id: None,
         owner: None,
+        branch: None,
         own: None,
     }
 }

@@ -659,6 +659,7 @@ fn cas_2a5a_directory_opens_with_a_verdict_and_collapses_stale_rows() {
         live: age <= crate::cloud::peers::PEER_LIVE_SECS,
         user_id: Some("u1".into()),
         owner: None,
+        branch: None,
         own: None,
     };
     let peers = [

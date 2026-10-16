@@ -83,7 +83,13 @@ impl ClaimsVisibility {
 fn claims_visibility(viewer: Option<&str>, owner: Option<&AgentInfo>) -> ClaimsVisibility {
     match (viewer, owner.and_then(|a| a.user_id.as_deref())) {
         (Some(viewer), Some(owner)) if viewer == owner => ClaimsVisibility::SameAccount,
-        (_, Some(_)) if owner.and_then(|a| a.team_id.as_deref()).is_some_and(|id| !id.trim().is_empty()) => ClaimsVisibility::TeamProject,
+        (_, Some(_))
+            if owner
+                .and_then(|a| a.team_id.as_deref())
+                .is_some_and(|id| !id.trim().is_empty()) =>
+        {
+            ClaimsVisibility::TeamProject
+        }
         (Some(_), Some(_)) => ClaimsVisibility::DifferentAccount,
         _ => ClaimsVisibility::Unknown,
     }
@@ -450,7 +456,11 @@ pub fn discover_peer_report(
     if detail {
         // #155: the Cloud project visibility rule includes teammates' locks.
         // An unreadable list is unknown, never an invented empty inventory.
-        let locks = if supervisors.is_empty() { Ok(Vec::new()) } else { coordinator.list_locks() };
+        let locks = if supervisors.is_empty() {
+            Ok(Vec::new())
+        } else {
+            coordinator.list_locks()
+        };
         // Awareness must not run the cloud outbox's repair-on-open writer.
         let tasks = crate::store::open_task_store_local(cas_root)?;
         report.peers = assemble_peer_details(
@@ -663,10 +673,15 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
             ));
             if detail.claims_visibility == ClaimsVisibility::TeamProject {
                 line("  Claims visible (team project)".into());
-                line(format!("  Account {}", detail.user_id.as_deref().unwrap_or("unknown")));
+                line(format!(
+                    "  Account {}",
+                    detail.user_id.as_deref().unwrap_or("unknown")
+                ));
             }
             match detail.claims_visibility {
-                ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject if detail.work.claims_status.state == "ready" => {
+                ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject
+                    if detail.work.claims_status.state == "ready" =>
+                {
                     line(format!(
                         "  Claims  {} observed | age since renewal (s)",
                         detail.claims.len()
@@ -728,10 +743,16 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                     .collect::<Vec<_>>()
                     .join(", ");
                 let task_label = match detail.claims_visibility {
-                    ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject if detail.work.claims_status.state != "ready" => {
+                    ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject
+                        if detail.work.claims_status.state != "ready" =>
+                    {
                         "unknown"
                     }
-                    ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject if task_ids.is_empty() => "none",
+                    ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject
+                        if task_ids.is_empty() =>
+                    {
+                        "none"
+                    }
                     ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject => &task_ids,
                     _ => "not visible",
                 };

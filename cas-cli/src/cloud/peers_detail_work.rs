@@ -268,7 +268,9 @@ impl PeerWork {
             },
             claims_status: ObservationStatus::at(
                 match visibility {
-                    ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject if !peer.live => "stale",
+                    ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject if !peer.live => {
+                        "stale"
+                    }
                     ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject => "ready",
                     ClaimsVisibility::DifferentAccount => "private",
                     ClaimsVisibility::Unknown => "unavailable",

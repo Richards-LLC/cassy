@@ -84,7 +84,9 @@ fn unknown(cause: &str, tool_prefix: &str) -> String {
 
 fn claims(detail: &PeerDetail) -> String {
     match detail.claims_visibility {
-        ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject if detail.work.claims_status.state == "ready" => {
+        ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject
+            if detail.work.claims_status.state == "ready" =>
+        {
             let count = detail.claims.len();
             format!("{count} claimed task{}", if count == 1 { "" } else { "s" })
         }

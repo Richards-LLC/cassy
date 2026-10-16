@@ -120,6 +120,14 @@ impl FakeCloud {
                 .collect();
             return (200, serde_json::json!({"status": "success", "agents": agents}));
         }
+        // Legacy one-account control fixture also serves #155's project
+        // list. Direct account reads above still drive the ownership races.
+        if method == "GET" && url.starts_with("/api/agents/locks?") {
+            let locks: Vec<_> = state.locks.iter()
+                .filter(|(_, lock)| lock.status == "active" && lock.expires_at > Utc::now())
+                .map(|(key, lock)| lock_json(key, lock)).collect();
+            return (200, serde_json::json!({"status":"success", "locks":locks}));
+        }
         let Some(rest) = url.strip_prefix("/api/agents/tasks/") else {
             // Registration, heartbeats, sync: accepted and ignored.
             return (404, serde_json::json!({"error": "not found"}));

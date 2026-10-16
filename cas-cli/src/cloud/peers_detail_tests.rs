@@ -9,15 +9,31 @@ fn cas_8ea7_team_claims_are_visible_with_their_owner() {
     let dir = tempfile::tempdir().unwrap();
     let root = crate::store::init_cas_dir(dir.path()).unwrap();
     let tasks = crate::store::open_task_store_local(&root).unwrap();
-    let mut owner = agent("teammate", "supervisor", "team-session", "team-host", REPO, 1);
+    let mut owner = agent(
+        "teammate",
+        "supervisor",
+        "team-session",
+        "team-host",
+        REPO,
+        1,
+    );
     owner.user_id = Some("other-user".into());
     let agents = vec![owner];
     let locks = vec![lease("cas-held", "teammate", LeaseStatus::Active, 600)];
     let details = assemble_peer_details(
         peers::repo_peers(&agents, REPO, &[], None, Utc::now()),
-        &agents, &locks, &[], tasks.as_ref(), Some("test-user"), Utc::now(),
+        &agents,
+        &locks,
+        &[],
+        tasks.as_ref(),
+        Some("test-user"),
+        Utc::now(),
     );
-    assert_eq!(details[0].claims.len(), 1, "a project-visible teammate's claim must be shown");
+    assert_eq!(
+        details[0].claims.len(),
+        1,
+        "a project-visible teammate's claim must be shown"
+    );
     assert_eq!(details[0].claims[0].agent_name.as_deref(), Some("teammate"));
     assert_eq!(details[0].user_id.as_deref(), Some("other-user"));
     assert_eq!(details[0].work.claims_status.state, "ready");

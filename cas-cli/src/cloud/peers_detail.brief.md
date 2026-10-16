@@ -40,3 +40,20 @@ The terminal labels `Claims visible (team project)` and `Account <user_id>`
 before the existing claim rows, which remain bounded to 72 columns. Failed
 reads remain unavailable. Personal projects keep the private boundary. Start,
 claim and spawn refusals include the agent, machine and account from the 409.
+
+
+Team renderer gate (2026-10-16, patient-cheetah-69):
+`terminal-qa: PASS cas-8ea7-peers · 12 runs · 0 fail · 0 warn · 0 allowed`.
+Captures: cas-8ea7/proof/terminal-qa/report.json in the task artifacts directory.
+The actual built CLI at 7a3c2f6 rendered a transient, explicitly labelled Cloud
+fixture; it exercised the team renderer already committed at 72a056a76. This is
+terminal fixture evidence, not production claim proof. The later claim transport
+change preserves that renderer and the peer-detail JSON shape.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | Peer/live verdict and repo lead; account appears beside claims under the named owner. |
+| Fit | 4 | All 12 80/120-column captures pass; long values retain the JSON escape. |
+| Craft | 4 | Existing owner/machine/task groups retain their spacing and age units. |
+| Theme safety | 5 | Dark, light, Solarized, ASCII, piped and NO_COLOR pass with no controls. |
+| Machine contract | 5 | One JSON PeerReport retains account and claim owner identities. |

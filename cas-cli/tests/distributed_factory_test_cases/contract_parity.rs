@@ -40,7 +40,6 @@ fn contract_parity_fake_cloud_matches_production() {
     replay.assert_clean();
 }
 
-
 fn amend_team_lock_shape(value: &mut serde_json::Value) {
     use serde_json::{Value, json};
     match value {
@@ -53,9 +52,15 @@ fn amend_team_lock_shape(value: &mut serde_json::Value) {
             if object.get("error").and_then(Value::as_str) == Some("already_claimed") {
                 object.insert("user_id".into(), json!("<user>"));
             }
-            for value in object.values_mut() { amend_team_lock_shape(value); }
+            for value in object.values_mut() {
+                amend_team_lock_shape(value);
+            }
         }
-        Value::Array(values) => for value in values { amend_team_lock_shape(value); },
+        Value::Array(values) => {
+            for value in values {
+                amend_team_lock_shape(value);
+            }
+        }
         _ => {}
     }
 }

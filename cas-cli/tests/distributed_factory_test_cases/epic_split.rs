@@ -596,5 +596,10 @@ async fn cas_8ea7_two_accounts_refuse_start_claim_spawn_and_show_team_claims() {
     assert_eq!(report["peers"][0]["user_id"], "account-a");
     assert_eq!(report["peers"][0]["claims_status"]["state"], "ready");
     assert!(claims.release_own("cas-a1", "a").unwrap());
-    assert!(beta.claim("cas-a1").await.unwrap().contains("Task claimed:"));
+    assert!(
+        beta.claim("cas-a1")
+            .await
+            .unwrap()
+            .contains("Task claimed:")
+    );
 }

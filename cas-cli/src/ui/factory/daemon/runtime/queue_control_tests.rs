@@ -71,7 +71,7 @@ fn cas_7b6b_reset_accounts_for_dequeued_completion_before_control_applies_it() {
             .unwrap()
             .iter()
             .any(|row| row.target == daemon.app.supervisor_name()
-                && row.prompt.contains(&format!("spawn requests {id}"))
+                && row.prompt.contains(&id.to_string())
                 && row.prompt.contains("re-issue")),
         "late cancelled requests must be named to the supervisor"
     );

@@ -143,7 +143,7 @@ pub(crate) fn ignored_paths(root: &Path, harnesses: &[SupervisorCli]) -> Vec<Str
                 for skill in skills {
                     paths.insert(format!(
                         "/.claude/skills/{}/SKILL.md",
-                        cas_core::sync::skills::skill_dir_name(&skill.name)
+                        crate::sync::skills::skill_dir_name(&skill.name)
                     ));
                 }
             }

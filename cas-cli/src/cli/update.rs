@@ -2332,8 +2332,8 @@ fn sync_claude_files_into(
     let skill_store = open_skill_store(&cas_root)?;
     let skills = skill_store.list(None)?;
     let skill_syncer = SkillSyncer::with_defaults(project_root);
-    // The builtin writer, not database projection cleanup, owns these dirs.
-    // Preserve project-authored cas-* siblings too; explicit disabled database
+    // Preserve project-authored cas-* siblings; builtin pruning already
+    // belongs to its own writer. Explicit disabled database
     // skills are still handled by sync_skill inside this operation.
     let retained = skill_syncer.list_synced()?.into_iter().collect();
     let skill_report = skill_syncer.sync_all_preserving(&skills, &retained)?;

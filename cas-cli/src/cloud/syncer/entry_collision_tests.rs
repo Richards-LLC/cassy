@@ -76,7 +76,7 @@ impl Fixture {
             .await;
     }
 
-    fn pull(&self) -> Result<SyncResult, CasError> {
+    fn pull(&self) -> std::result::Result<SyncResult, CasError> {
         let tasks = open_task_store_local(&self.root).unwrap();
         let rules = open_rule_store_local(&self.root).unwrap();
         let skills = open_skill_store_local(&self.root).unwrap();

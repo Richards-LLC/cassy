@@ -13384,6 +13384,13 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        // The reused name belongs to a live worker of this session. cas-bf890:
+        // that is what keeps the sender notice an actionable inbox row; a
+        // notice about a recipient with no live agent is a digest row instead.
+        crate::store::open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&crate::types::Agent::new("wise-raven-21-id".into(), "wise-raven-21".into()))
+            .unwrap();
 
         let ancient = queue
             .enqueue("supervisor", "wise-raven-21", "verify+close cas-85c0")

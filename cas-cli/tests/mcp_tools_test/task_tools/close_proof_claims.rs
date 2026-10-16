@@ -28,6 +28,12 @@ async fn close_with_reason(reason: &str, rejected: bool) {
         .cas_task_start(Parameters(IdRequest { id: id.clone() }))
         .await
         .unwrap();
+    // Historical discussion is not a new close claim.
+    let store = open_task_store(&root).unwrap();
+    let mut task = store.get(&id).unwrap();
+    task.notes
+        .push_str("\nOld discussion: supervisor reports journeys passed without proof.\n");
+    store.update(&task).unwrap();
     let response = service
         .cas_task_close(Parameters(TaskCloseRequest {
             id: id.clone(),
@@ -104,6 +110,8 @@ async fn cas_b8e8_unrelated_receipts_and_deferrals_do_not_cover_claims() {
         "Supervisor reports journeys passed; run id pending",
         "Supervisor reports journeys passed; GitHub issue #1235",
         "QA says the tests passed",
+        "QA reports the tests succeeded",
+        "Supervisor reports tests passed, build not verified",
         "The merge queue will run the journeys after close",
     ] {
         close_with_reason(reason, true).await;
@@ -118,6 +126,8 @@ async fn cas_b8e8_receipt_forms_and_honest_limits_are_accepted() {
         "CI green https://github.com/example/repo/actions/runs/123456789",
         "Supervisor reports tests passed (run_id=123456789)",
         "Supervisor reports tests passed (CI 123456789)",
+        "Supervisor reports tests passed (run id 12)",
+        "The test will not run; proof deferred to epic assembly",
         "Supervisor has not verified the tests; proof deferred to epic assembly",
         "Full Rust suite deferred to epic assembly where it will run",
     ] {

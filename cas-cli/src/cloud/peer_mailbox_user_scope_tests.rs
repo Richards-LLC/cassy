@@ -641,3 +641,49 @@ fn cas_2a5a_project_names_come_from_canonical_ids() {
     assert_eq!(project_name("git@github.com:acme/pulse-card.git").as_deref(), Some("pulse-card"));
     assert_eq!(project_name("  "), None);
 }
+
+#[test]
+fn cas_2a5a_directory_opens_with_a_verdict_and_collapses_stale_rows() {
+    use crate::cloud::peers::render_user_peers;
+    let now = chrono::Utc::now();
+    let at = |name: &str, project: &str, machine: &str, session: &str, age: i64, focus: Option<&str>| Peer {
+        agent_id: format!("{name}-{session}-{age}"),
+        name: name.into(),
+        machine: machine.into(),
+        machine_id: None,
+        session: Some(session.into()),
+        canonical_id: Some(format!("github.com/acme/{project}")),
+        focus: focus.map(str::to_string),
+        last_heartbeat: now - chrono::Duration::seconds(age),
+        heartbeat_age_secs: age,
+        live: age <= crate::cloud::peers::PEER_LIVE_SECS,
+        user_id: Some("u1".into()),
+    };
+    let peers = [
+        at("bright-newt-56", "gabber", "prowl", "s1", 13, None),
+        at("fierce-shark-94", "cloud", "soundwave", "s2", 16, Some("cas-8cb0")),
+        at("true-dragon-23", "gabber", "soundwave", "s3", 3_600, None),
+        // A second registration of the same supervisor collapses.
+        at("true-dragon-23", "gabber", "soundwave", "s3", 7_200, None),
+        at("swift-owl-75", "mines", "soundwave", "s4", 50_000, None),
+    ];
+    let text = render_user_peers(&peers, false);
+    let first = text.lines().next().unwrap();
+    // pin: the verdict line in the sibling `cas peers` grammar.
+    assert_eq!(first, "[OK] 4 supervisors in 3 projects | 2 live");
+    assert!(!text.contains("focus -"), "{text}");
+    assert!(text.contains("focus cas-8cb0"), "{text}");
+    assert!(!text.contains("true-dragon-23"), "stale rows collapse: {text}");
+    // pin: stale supervisors are a count per project.
+    assert!(text.contains("Stale, seen in the last 24h (2): gabber 1, mines 1."), "{text}");
+    // pin: one copyable command to a live supervisor whose project is unique.
+    assert!(text.contains("target=supervisor:gabber"), "{text}");
+    assert!(text.lines().all(|line| line.chars().count() <= 80), "{text}");
+
+    let verbose = render_user_peers(&peers, true);
+    assert_eq!(verbose.matches("true-dragon-23").count(), 1, "{verbose}");
+    assert!(verbose.contains("swift-owl-75"));
+
+    // pin: the empty directory still opens with a verdict.
+    assert!(render_user_peers(&[], false).starts_with("[OK] 0 supervisors in 0 projects | 0 live"));
+}

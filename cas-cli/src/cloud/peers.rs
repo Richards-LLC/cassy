@@ -402,61 +402,128 @@ pub fn discover_user_peers(
 }
 
 /// Human-readable lines for `coordination action=peers scope=all` and
-/// `cas peers --all` (cas-2a5a).
-pub fn render_user_peers(peers: &[Peer]) -> String {
-    let mut out = crate::cloud::presence::wrap_line(
-        "Your account's supervisors, all projects and machines (Cassy Cloud):",
+/// `cas peers --all` (cas-2a5a): a verdict line, the live supervisors to
+/// message, the stale ones collapsed to a count per project (listed in full
+/// with `verbose`), and one copyable message command.
+pub fn render_user_peers(peers: &[Peer], verbose: bool) -> String {
+    use crate::cloud::presence::wrap_line;
+    // One row per supervisor identity: a re-registration of the same name,
+    // machine and session shows once, under its freshest heartbeat.
+    let mut seen = std::collections::HashSet::new();
+    let rows: Vec<&Peer> = peers
+        .iter()
+        .filter(|peer| {
+            seen.insert((
+                peer.name.to_ascii_lowercase(),
+                peer.machine.to_ascii_lowercase(),
+                peer.session.clone(),
+            ))
+        })
+        .collect();
+    let project = |peer: &Peer| peer.project_name().unwrap_or_else(|| "unknown".to_string());
+    let projects: std::collections::BTreeSet<String> = rows.iter().map(|p| project(p)).collect();
+    let (live, stale): (Vec<&Peer>, Vec<&Peer>) = rows.iter().partition(|peer| peer.live);
+    let mut out = format!(
+        "[OK] {} supervisor{} in {} project{} | {} live\n",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" },
+        projects.len(),
+        if projects.len() == 1 { "" } else { "s" },
+        live.len(),
     );
-    if peers.is_empty() {
+    if rows.is_empty() {
         out.push_str("  no other supervisors of your account seen in the last 24h\n");
         return out;
     }
-    for peer in peers {
-        let state = if peer.live { "live" } else { "stale" };
-        let project = peer.project_name().unwrap_or_else(|| "unknown".to_string());
-        out.push_str(&format!(
-            "  {} [{state}] {project} on {}, seen {} ago\n    session {} | focus {}\n",
+    let row = |peer: &Peer| {
+        let focus = peer
+            .focus
+            .as_deref()
+            .map(|focus| format!(" | focus {focus}"))
+            .unwrap_or_default();
+        format!(
+            "  {} {} on {}, seen {} ago\n    session {}{focus}\n",
             peer.name,
+            project(peer),
             peer.machine,
             age(peer.heartbeat_age_secs),
             peer.session.as_deref().unwrap_or("-"),
-            peer.focus.as_deref().unwrap_or("-"),
-        ));
+        )
+    };
+    if live.is_empty() {
+        out.push_str("Live: none\n");
+    } else {
+        out.push_str("Live:\n");
+        for peer in &live {
+            out.push_str(&row(peer));
+        }
     }
-    out.push_str(&crate::cloud::presence::wrap_line(
-        "Address one as target=supervisor:<project>, <name> or <name>@<machine>.",
-    ));
-    out.push_str(&crate::cloud::presence::wrap_line(
+    if !stale.is_empty() {
+        if verbose {
+            out.push_str("Stale, seen in the last 24h:\n");
+            for peer in &stale {
+                out.push_str(&row(peer));
+            }
+        } else {
+            let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+            for peer in &stale {
+                *counts.entry(project(peer)).or_default() += 1;
+            }
+            let counts = counts
+                .iter()
+                .map(|(project, count)| format!("{project} {count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&wrap_line(&format!(
+                "Stale, seen in the last 24h ({}): {counts}. List them with --verbose or --json.",
+                stale.len()
+            )));
+        }
+    }
+    // One copyable command, to a live supervisor if any: by project when
+    // that names exactly one live supervisor, else by name@machine.
+    if let Some(peer) = live.first().or(stale.first()) {
+        let name = project(peer);
+        let unique =
+            name != "unknown" && live.iter().filter(|other| project(other) == name).count() <= 1;
+        let target = if unique {
+            format!("supervisor:{name}")
+        } else {
+            format!("{}@{}", peer.name, peer.machine)
+        };
+        out.push_str(&wrap_line(&format!(
+            "Message one: coordination action=message target={target} summary=\"<one line>\" \
+             message=\"<text>\""
+        )));
+    }
+    out.push_str(&wrap_line(
         "Cross-project messages are advisory: never urgent, never the operator.",
     ));
     out
 }
 
-/// The account-wide section, with lookup failures reported in it.
-pub fn user_peers_section(cas_root: &Path, self_id: Option<&str>) -> String {
-    match discover_user_peers(cas_root, self_id) {
-        Ok(UserPeerDiscovery::Found { peers, .. }) => render_user_peers(&peers),
-        Ok(UserPeerDiscovery::NotLoggedIn) => crate::cloud::presence::wrap_line(
-            "Peers: not logged in to Cassy Cloud, so your other projects' supervisors are \
-             unknown (`cas login`).",
-        ),
-        Err(error) => {
-            crate::cloud::presence::wrap_line(&format!("Peers: Cassy Cloud lookup failed: {error}"))
-        }
-    }
-}
-
 /// `coordination action=peers scope=all` and `cas peers --all`: the
-/// account-wide directory as text, or as one JSON document (cas-2a5a).
+/// account-wide directory as text, or as one JSON document (cas-2a5a). A
+/// failed lookup is an error in both forms, so the CLI exits non-zero.
 pub fn user_peers_report(
     cas_root: &Path,
     self_id: Option<&str>,
     json: bool,
+    verbose: bool,
 ) -> Result<String, crate::error::CasError> {
+    let discovery = discover_user_peers(cas_root, self_id).map_err(|error| {
+        crate::error::CasError::Other(format!("Cassy Cloud lookup failed: {error}"))
+    })?;
     if !json {
-        return Ok(user_peers_section(cas_root, self_id));
+        return Ok(match discovery {
+            UserPeerDiscovery::Found { peers, .. } => render_user_peers(&peers, verbose),
+            UserPeerDiscovery::NotLoggedIn => crate::cloud::presence::wrap_line(
+                "[WARN] Not logged in to Cassy Cloud, so your other projects' supervisors are \
+                 unknown. Run `cas login`.",
+            ),
+        });
     }
-    let value = match discover_user_peers(cas_root, self_id)? {
+    let value = match discovery {
         UserPeerDiscovery::Found { peers, .. } => serde_json::json!({
             "scope": "user",
             "status": "ready",

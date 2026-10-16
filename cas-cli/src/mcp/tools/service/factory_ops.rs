@@ -5841,6 +5841,7 @@ impl CasService {
                     &cas_root,
                     self_id.as_deref(),
                     req.json.unwrap_or(false),
+                    req.detail.unwrap_or(false),
                 );
             }
             if !req.detail.unwrap_or(false) && req.peer.is_none() && !req.json.unwrap_or(false) {

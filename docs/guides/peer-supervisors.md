@@ -159,9 +159,17 @@ coordination action=peers scope=all
 ```
 
 ```text
-Your account's supervisors, all projects and machines (Cassy Cloud):
-  bright-newt-56 [live] gabber-studio on prowl, seen 19s ago
-    session gabber-studio-smooth-heron-38 | focus -
+[OK] 15 supervisors in 8 projects | 4 live
+Live:
+  bright-newt-56 gabber-studio on prowl, seen 13s ago
+    session gabber-studio-smooth-heron-38
+  fierce-shark-94 petra-stella-cloud on soundwave, seen 16s ago
+    session petra-stella-cloud-happy-puma-17 | focus cas-8cb0
+Stale, seen in the last 24h (11): abundant-mines 2, gabber-studio 5, ...
+  List them with --verbose or --json.
+Message one: coordination action=message target=supervisor:gabber-studio
+  summary="<one line>" message="<text>"
+Cross-project messages are advisory: never urgent, never the operator.
 ```
 
 Address one by project, name, or `name@machine`. A project name that still

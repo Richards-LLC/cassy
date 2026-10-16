@@ -41,7 +41,10 @@ pub fn execute(args: &PeersArgs, cli: &super::Cli, cas_root: &Path) -> Result<()
                         serde_json::json!({"scope": "user", "status": "lookup_failed", "error": error.to_string()})
                     );
                 } else {
-                    println!("[ERROR] Peers: {error}");
+                    print!(
+                        "{}",
+                        crate::cloud::presence::wrap_line(&format!("[ERROR] Peers: {error}"))
+                    );
                 }
                 anyhow::bail!("Peer discovery unavailable (lookup_failed)");
             }

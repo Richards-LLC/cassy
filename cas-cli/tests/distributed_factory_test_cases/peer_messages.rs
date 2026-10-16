@@ -1631,8 +1631,10 @@ async fn cas_8063_repair_history_warning_keeps_mailbox_receiving() {
         seed_project(&machine, &endpoint, "github.com/acme/widgets");
         supervisor(&machine, "b");
         let events = cas::store::open_event_store(&machine.cas_dir).unwrap();
-        for i in 0..125 {
-            let event = cas::types::Event::new(
+        // Mix typed and pre-metadata retirements: both must share the same
+        // budget, including the legacy-name backlog seen in the incident.
+        for i in 0..338 {
+            let mut event = cas::types::Event::new(
                 cas::types::EventType::AgentShutdown,
                 cas::types::EventEntityType::Agent,
                 format!("retired-{i}"),
@@ -1643,6 +1645,7 @@ async fn cas_8063_repair_history_warning_keeps_mailbox_receiving() {
                 "factory_session":"factory-b",
                 "registered_at":(chrono::Utc::now()-chrono::Duration::days(1)).to_rfc3339()
             }}));
+            if i % 2 == 1 { event.metadata = None; }
             events.record(&event).unwrap();
         }
         let report = tick(&machine.cas_dir, "b");

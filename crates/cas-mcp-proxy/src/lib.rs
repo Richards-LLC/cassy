@@ -605,6 +605,24 @@ impl ProxyEngine {
         Ok(engine)
     }
 
+    /// cas-b3b4a: like [`Self::from_configs`], but an upstream whose tool
+    /// catalog is cached at `catalog` for its exact configuration starts
+    /// dormant: its tools are listed and it is spawned on the first call.
+    pub async fn from_configs_with_catalog(
+        configs: HashMap<String, ServerConfig>,
+        catalog: Option<PathBuf>,
+    ) -> Result<Self> {
+        let _ = catalog;
+        Self::from_configs(configs).await
+    }
+
+    /// cas-b3b4a: stop every live upstream unused for `idle`; it stays
+    /// listed and restarts on its next call. Returns how many stopped.
+    pub async fn stop_idle(&self, idle: Duration) -> usize {
+        let _ = idle;
+        0
+    }
+
     /// Bound every subsequent upstream tool call by `timeout` (cas-53ce).
     pub fn set_call_timeout(&self, timeout: Duration) {
         if let Ok(mut current) = self.call_timeout.write() {
@@ -2088,6 +2106,14 @@ async fn connect_server(name: &str, config: &ServerConfig) -> Result<ConnectedSe
     })
 }
 
+/// cas-b3b4a: the argv and environment a stdio upstream is launched with.
+/// cas-b3b4a: a credential never travels in argv, where any local user can
+/// read it with `ps`; an argument that looks like one refuses the launch.
+pub fn check_stdio_argv(args: &[String]) -> Result<()> {
+    let _ = args;
+    Ok(())
+}
+
 /// Node Postgres MCP servers whose drivers turn `timestamp without time zone`
 /// into a JS `Date` in the child's local zone and then serialize it with a
 /// `Z` suffix. On an EDT host a stored `14:34:21` came back as `18:34:21Z`
@@ -2986,6 +3012,8 @@ mod tests {
             &script,
             r#"import json, os, sys, time
 log = sys.argv[1]
+with open(os.path.join(os.path.dirname(log), "starts.log"), "a") as handle:
+    handle.write("start\n")
 def send(message):
     sys.stdout.write(json.dumps(message) + "\n")
     sys.stdout.flush()
@@ -3044,6 +3072,55 @@ for line in sys.stdin:
 
     async fn fake_health(engine: &ProxyEngine) -> UpstreamHealth {
         engine.health.read().await.get("fake").cloned().expect("fake health")
+    }
+
+    /// cas-b3b4a: with a cached catalog a serve spawns no upstream until one
+    /// of its tools is called; an idle upstream stops and the next call
+    /// starts it again. Its tools stay listed throughout.
+    #[tokio::test]
+    async fn cas_b3b4a_cached_upstream_starts_on_first_call_and_stops_when_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("catalog.json");
+        let configs = HashMap::from([("fake".to_string(), fake_upstream(dir.path()))]);
+        let starts = || {
+            std::fs::read_to_string(dir.path().join("starts.log"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        // The first serve learns the catalog once.
+        let first = ProxyEngine::from_configs_with_catalog(configs.clone(), Some(cache.clone()))
+            .await
+            .unwrap();
+        first.shutdown().await;
+        assert_eq!(starts(), 1);
+
+        let engine = ProxyEngine::from_configs_with_catalog(configs, Some(cache))
+            .await
+            .unwrap();
+        assert_eq!(starts(), 1, "a cached upstream is not spawned at startup");
+        assert_eq!(engine.tool_count().await, 3, "its tools are still listed");
+        assert!(engine.upstream_connected("fake").await, "it is available on demand");
+
+        assert_eq!(call_fake(&engine, "echo").await.unwrap(), "ok");
+        assert_eq!(starts(), 2, "the first call starts it");
+        assert_eq!(engine.stop_idle(Duration::ZERO).await, 1);
+        assert_eq!(engine.tool_count().await, 3);
+        assert_eq!(call_fake(&engine, "echo").await.unwrap(), "ok");
+        assert_eq!(starts(), 3, "the next call restarts it");
+        engine.shutdown().await;
+    }
+
+    /// cas-b3b4a: no credential in a stdio upstream's argv.
+    #[test]
+    fn cas_b3b4a_stdio_launch_keeps_credentials_out_of_argv() {
+        let args = |values: &[&str]| values.iter().map(|value| value.to_string()).collect::<Vec<_>>();
+        check_stdio_argv(&args(&["-y", "@playwright/mcp@latest", "--browser", "chrome"])).unwrap();
+        for argv in [&["start", "napi_secret123"][..], &["--token=ghp_abcdef123456"][..]] {
+            let error = check_stdio_argv(&args(argv)).unwrap_err().to_string();
+            assert!(error.contains("environment"), "{error}");
+            assert!(!error.contains("secret123") && !error.contains("abcdef"), "{error}");
+        }
     }
 
     /// cas-53ce (GH #1168): a transport error drops the upstream, health

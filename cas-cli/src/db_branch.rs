@@ -283,6 +283,47 @@ pub fn redact_connection_strings(text: &str) -> String {
     out
 }
 
+/// cas-b3b4a: [`NeonBranchApi`] over the `neonctl` CLI, so Cassy's own
+/// branch work needs no Neon MCP upstream. The key travels in
+/// `NEON_API_KEY`, never in argv; without one, neonctl uses its own login.
+pub struct NeonCli {
+    pub program: PathBuf,
+    pub api_key: Option<String>,
+}
+
+impl NeonCli {
+    async fn run(&self, args: &[&str]) -> Result<String, String> {
+        let _ = args;
+        Err("neonctl backend not implemented".into())
+    }
+}
+
+impl NeonBranchApi for NeonCli {
+    async fn list_branches(&self, project_id: &str) -> Result<Vec<NeonBranchInfo>, String> {
+        Ok(parse_branches(&self.run(&["branches", "list", "--project-id", project_id]).await?))
+    }
+
+    async fn create_branch(
+        &self,
+        project_id: &str,
+        name: &str,
+        parent_id: &str,
+    ) -> Result<NeonBranchInfo, String> {
+        let _ = (project_id, name, parent_id);
+        Err("neonctl backend not implemented".into())
+    }
+
+    async fn connection_string(&self, project_id: &str, branch_id: &str) -> Result<String, String> {
+        let _ = (project_id, branch_id);
+        Err("neonctl backend not implemented".into())
+    }
+
+    async fn delete_branch(&self, project_id: &str, branch_id: &str) -> Result<(), String> {
+        let _ = (project_id, branch_id);
+        Err("neonctl backend not implemented".into())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Project binding and the parent guardrail
 // ---------------------------------------------------------------------------

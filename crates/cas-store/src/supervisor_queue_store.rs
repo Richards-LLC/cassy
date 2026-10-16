@@ -209,7 +209,9 @@ pub trait SupervisorQueueStore: Send + Sync {
     /// `older_than_secs` ago, in one IMMEDIATE transaction (cas-f207).
     ///
     /// Finished means: an outbox row (`transition_key` set) whose prompt was
-    /// delivered, or a pull row (no key) that was processed. Pending and
+    /// delivered, a pull row (no key) that was processed, or a
+    /// `reminder_fired` record whose prompt_queue row exists (cas-5871).
+    /// Pending and
     /// undelivered rows stay. Attention keys stay while their session has a
     /// registered non-shutdown agent; old delivered keys from ended sessions
     /// age out. Missing registry/session evidence stays conservative.
@@ -608,6 +610,20 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
                 [],
                 |row| row.get(0),
             )?;
+            let has_prompt_queue: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prompt_queue')",
+                [],
+                |row| row.get(0),
+            )?;
+            let reminder_delivered = if has_prompt_queue {
+                "EXISTS (
+                     SELECT 1 FROM prompt_queue
+                     WHERE prompt_queue.dedupe_key = 'reminder-fired:'
+                         || json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.reminder_id')
+                 )"
+            } else {
+                "0"
+            };
             let ended_attention = if has_agents {
                 "NULLIF(json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.factory_session'), '') IS NOT NULL
                  AND NOT EXISTS (
@@ -629,6 +645,13 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
                      WHERE created_at < ?1
                        AND (
                            (transition_key IS NULL AND processed_at IS NOT NULL)
+                           -- cas-5871: a reminder is delivered through
+                           -- prompt_queue; its record here is finished once
+                           -- that prompt row exists (keyed reminder-fired:<id>,
+                           -- unique-indexed). A record whose prompt enqueue
+                           -- failed may be the only delivery and stays.
+                           OR (transition_key IS NULL AND event_type = 'reminder_fired'
+                               AND ({reminder_delivered}))
                            OR (transition_key IS NOT NULL
                                AND prompt_delivered_at IS NOT NULL
                                AND (transition_key NOT LIKE 'worker-attention:%'
@@ -1224,4 +1247,78 @@ mod tests {
         assert!(store.prune_finished_batch(0, 10).is_err(), "a zero window is refused");
     }
 
+
+    /// cas-5871: an outbox row is consumed by its prompt delivery, not by
+    /// `processed_at`, which stays the supervisor's acknowledgement (`ack`
+    /// refuses an already-processed row). Retention finishes a delivered
+    /// task_lifecycle row once it ages out, so it does not stay forever.
+    #[test]
+    fn a_delivered_lifecycle_row_ages_out_and_keeps_its_ack_slot_cas_5871() {
+        let (_temp, store) = create_test_store();
+        let id = match store
+            .notify_idempotent(
+                "supervisor-1",
+                "task_lifecycle",
+                "{}",
+                NotificationPriority::Normal,
+                "cas-x:open:closed:s:task_closed:1",
+            )
+            .unwrap()
+        {
+            NotifyIdempotentResult::Created(id) => id,
+            other => panic!("{other:?}"),
+        };
+        store.mark_prompt_delivered(id).unwrap();
+        assert!(store.get(id).unwrap().unwrap().processed_at.is_none(), "not acknowledged yet");
+        store.ack(id).unwrap();
+        {
+            let aged = (Utc::now() - chrono::Duration::days(15)).to_rfc3339();
+            let conn = store.conn.lock().unwrap();
+            conn.execute("UPDATE supervisor_queue SET created_at = ?1", params![aged]).unwrap();
+        }
+        assert_eq!(store.prune_finished_batch(14 * 24 * 60 * 60, 10).unwrap(), 1);
+        assert!(store.get(id).unwrap().is_none());
+    }
+
+    /// cas-5871: 2,942 reminder_fired rows since May were never consumed.
+    /// The reminder is delivered through prompt_queue, so an aged record whose
+    /// prompt row exists is finished. One whose prompt enqueue failed may be
+    /// the only delivery and stays, as does any other unconsumed pull row.
+    #[test]
+    fn an_aged_reminder_record_is_pruned_only_once_its_prompt_exists_cas_5871() {
+        let (temp, store) = create_test_store();
+        let prompts = crate::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        crate::PromptQueueStore::init(&prompts).unwrap();
+        let delivered = store
+            .notify("supervisor-1", "reminder_fired", r#"{"reminder_id":7}"#, NotificationPriority::Normal)
+            .unwrap();
+        crate::PromptQueueStore::enqueue_idempotent(
+            &prompts,
+            "lead-sup",
+            "lead-sup",
+            "Reminder #7: check CI",
+            Some("s"),
+            None,
+            None,
+            "reminder-fired:7",
+            None,
+        )
+        .unwrap();
+        let only_delivery = store
+            .notify("supervisor-1", "reminder_fired", r#"{"reminder_id":8}"#, NotificationPriority::Normal)
+            .unwrap();
+        let pull = store
+            .notify("supervisor-1", "worker_died", "{}", NotificationPriority::Normal)
+            .unwrap();
+        {
+            let aged = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+            let conn = store.conn.lock().unwrap();
+            conn.execute("UPDATE supervisor_queue SET created_at = ?1", params![aged])
+                .unwrap();
+        }
+        assert_eq!(store.prune_finished_batch(14 * 24 * 60 * 60, 10).unwrap(), 1);
+        assert!(store.get(delivered).unwrap().is_none(), "its prompt row exists");
+        assert!(store.get(only_delivery).unwrap().is_some(), "it may be the only delivery");
+        assert!(store.get(pull).unwrap().is_some(), "a pending pull row is never deleted");
+    }
 }

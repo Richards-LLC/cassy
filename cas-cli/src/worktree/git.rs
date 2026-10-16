@@ -11,6 +11,7 @@ use crate::hooks::handlers::session_hygiene::{PorcelainEntry, porcelain_status};
 use crate::types::GitContext;
 
 pub(crate) mod branch_ops;
+mod epic_branch;
 
 pub use branch_ops::{TargetPushOutcome, TargetReconcile};
 

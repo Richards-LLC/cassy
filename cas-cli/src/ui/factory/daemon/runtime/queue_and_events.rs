@@ -970,7 +970,7 @@ fn append_spawn_audit_line(paths: impl IntoIterator<Item = std::path::PathBuf>, 
 /// inbox. Separate from [`enqueue_spawn_outcome_notice`] because the spawn did
 /// NOT fail — the worker exists, it just started on old history, and calling
 /// that a failure would train supervisors to ignore it.
-fn enqueue_spawn_warning_notice(
+pub(crate) fn enqueue_spawn_warning_notice(
     cas_dir: &std::path::Path,
     supervisor_name: &str,
     factory_session: &str,
@@ -984,13 +984,35 @@ fn enqueue_spawn_warning_notice(
         .unwrap_or_else(|| "direct spawn".to_string());
     let summary = format!("Worker spawn base warning: {worker_name}");
     let message = format!("Factory spawn {request} for worker '{worker_name}': {warning}");
-    let id = queue.enqueue_with_summary(
-        "director",
-        supervisor_name,
-        &message,
-        Some(factory_session),
-        Some(&summary),
-    )?;
+    let kind = [
+        "SPAWN BASE REFRESHED",
+        "EPIC BRANCH UNPUBLISHED",
+        "EPIC BRANCH PRESERVED",
+        "EPIC BRANCH UNVERIFIED",
+        "EPIC BRANCH LOCAL-ONLY",
+    ]
+    .into_iter()
+    .find(|kind| warning.starts_with(kind));
+    let identity = kind.and_then(|kind| {
+        let (_, rest) = warning.split_once("'")?;
+        let (branch, rest) = rest.split_once("'")?;
+        let (_, rest) = rest.split_once('(')?;
+        let (tip, _) = rest.split_once(')')?;
+        Some(format!("spawn-base-notice:{factory_session}:{kind}:{branch}:{tip}"))
+    });
+    let id = if let Some(identity) = identity {
+        // Identity contains the branch and original stale tip, never a worker,
+        // request or changing remote tip. All provisioners share this ledger.
+        match queue.enqueue_idempotent(
+            "director", supervisor_name, &message, Some(factory_session), Some(&summary),
+            None, &identity, Some(&cas_store::QueueOrigin::Daemon),
+        )? {
+            cas_store::EnqueueIdempotentResult::Created(id) => id,
+            cas_store::EnqueueIdempotentResult::AlreadyExists(id) => return Ok(id),
+        }
+    } else {
+        queue.enqueue_with_summary("director", supervisor_name, &message, Some(factory_session), Some(&summary))?
+    };
     super::delivery::wake_daemon_after_enqueue(cas_dir);
     Ok(id)
 }
@@ -11332,16 +11354,17 @@ pub(super) fn fire_reminder(
 
     // Enqueue to notification queue (for web UI / structured data).
     // Notify the owner so they know their reminder fired.
-    if let Some(queue) = supervisor_queue {
-        if let Err(e) = queue.notify(
-            &reminder.owner_id,
-            "reminder_fired",
-            &payload,
-            cas_store::NotificationPriority::Normal,
-        ) {
-            tracing::error!("Failed to enqueue reminder notification: {}", e);
-        }
-    }
+    let record_id = supervisor_queue.as_ref().and_then(|queue| {
+        queue
+            .notify(
+                &reminder.owner_id,
+                "reminder_fired",
+                &payload,
+                cas_store::NotificationPriority::Normal,
+            )
+            .inspect_err(|e| tracing::error!("Failed to enqueue reminder notification: {}", e))
+            .ok()
+    });
 
     // Enqueue to prompt queue for PTY injection into the resolved recipient.
     if let Some(queue) = prompt_queue {
@@ -11418,6 +11441,13 @@ pub(super) fn fire_reminder(
         if let Err(e) = enqueued {
             tracing::error!("Failed to enqueue reminder prompt: {}", e);
         } else {
+            // cas-5871: the prompt row is the delivery; the record is
+            // consumed, or it would sit unprocessed forever.
+            if let (Some(records), Some(id)) = (supervisor_queue, record_id)
+                && let Err(error) = records.ack(id)
+            {
+                tracing::warn!(reminder = reminder.id, %error, "could not consume the reminder record");
+            }
             super::delivery::wake_daemon_after_enqueue(cas_dir);
             tracing::info!(
                 "Fired reminder #{} → {} ({}): {}",
@@ -11882,10 +11912,24 @@ mod tests {
             // pin: external reminder descriptions persist the observed tag and exact ref.
             "external condition satisfied: tag v9.99.0 exists at refs/tags/v9.99.0@0123456789012345678901234567890123456789"
         );
-        let notifications = supervisor_store.peek("supervisor-1", 10).unwrap();
+        // cas-5871: the record is written, and consumed once the prompt is
+        // queued, so it is no longer pending.
+        let records = || -> Vec<(String, String, Option<String>)> {
+            let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+            let mut stmt = conn
+                .prepare("SELECT event_type, payload, processed_at FROM supervisor_queue")
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let notifications = records();
         assert_eq!(notifications.len(), 1);
-        assert_eq!(notifications[0].event_type, "reminder_fired");
-        assert!(notifications[0].payload.contains("tag_exists"));
+        assert_eq!(notifications[0].0, "reminder_fired");
+        assert!(notifications[0].1.contains("tag_exists"));
+        assert!(notifications[0].2.is_some(), "consumed once delivered");
+        assert!(supervisor_store.peek("supervisor-1", 10).unwrap().is_empty());
         let prompts = prompt_store.peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].target, "new-supervisor");
@@ -11905,7 +11949,7 @@ mod tests {
             Some(&context),
             temp.path(),
         );
-        assert_eq!(supervisor_store.peek("supervisor-1", 10).unwrap().len(), 1);
+        assert_eq!(records().len(), 1);
         assert_eq!(prompt_store.peek_all(10).unwrap().len(), 1);
     }
 

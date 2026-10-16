@@ -569,3 +569,40 @@ async fn c2_lane_drop_hands_the_probe_back_once() {
     }
     assert!(refresh.health_in_flight.is_empty(), "every other probe reported");
 }
+
+/// Review round 2, M1: a snapshot given up after its timeout still holds its
+/// key in the runtime, so the next submit is coalesced into its rerun. That
+/// submit stays in flight and its result applies; the timed-out job's result
+/// is ignored. Before the fix, every later snapshot was dropped as refused
+/// and the panels froze while reads stayed slow.
+#[tokio::test]
+async fn c2_coalesced_snapshot_after_timeout_still_applies() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let mut refresh = DirectorRefresh::new()
+        .with_read_delay(Duration::from_millis(400))
+        .with_timeout(Duration::from_millis(50));
+    refresh.start_director_read(&daemon.app, &mut daemon.queue_jobs);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(refresh.take_director_read(&mut daemon.queue_jobs).is_none());
+    assert!(!refresh.director.busy(), "the timed-out snapshot freed its slot");
+
+    // The first job still runs, so this submit coalesces into its rerun.
+    refresh.start_director_read(&daemon.app, &mut daemon.queue_jobs);
+    assert!(refresh.director.busy(), "a coalesced submit stays in flight");
+    let in_flight = refresh.director.in_flight.map(|(generation, _)| generation);
+    // Keep the coalesced job from timing out while the first one finishes.
+    refresh.timeout_override = Some(Duration::from_secs(30));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let load = loop {
+        if let Some(load) = refresh.take_director_read(&mut daemon.queue_jobs) {
+            break load;
+        }
+        assert!(Instant::now() < deadline, "the coalesced snapshot never applied");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    drop(load);
+    assert!(in_flight.is_some());
+    assert!(!refresh.director.busy());
+}

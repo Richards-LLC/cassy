@@ -475,14 +475,43 @@ impl DirectorRefresh {
                 Box::new(FactoryJobOutput::DirectorSnapshot(request.read(stores)))
             },
         );
-        if !matches!(
-            submitted,
-            Submitted::Queued | Submitted::QueuedDroppedOldest { .. }
-        ) {
-            tracing::warn!(?submitted, "director snapshot refused by the job runtime");
+        if !self.queued_or_coalesced(submitted) {
+            tracing::warn!("director snapshot refused by the job runtime");
             self.director.fail(generation);
         }
         self.poll(jobs);
+    }
+
+    /// Whether a refresh job submitted with a new generation will report
+    /// under that generation (review round 2, M1):
+    /// - `Queued`: it runs.
+    /// - `Coalesced`: the key is still busy (often with a job given up after
+    ///   its timeout). The runtime keeps this submit as the key's rerun and
+    ///   runs it next, so its generation stays in flight; the busy job's
+    ///   result has an older generation and is ignored. A rerun it replaced
+    ///   never reports, which is fine because only the newest is tracked.
+    /// - `QueuedDroppedOldest`: it runs; the dropped job (its own generation)
+    ///   is failed, so if it was ours its slot frees. When the dropped key
+    ///   still has a queued rerun, that rerun carries a newer generation and
+    ///   the generation check leaves it in flight.
+    ///
+    /// Anything else was refused.
+    fn queued_or_coalesced(&mut self, submitted: Submitted) -> bool {
+        match submitted {
+            Submitted::Queued | Submitted::Coalesced { .. } | Submitted::QueuedBehindKey => true,
+            Submitted::QueuedDroppedOldest {
+                dropped_key,
+                dropped_generation,
+                ..
+            } => {
+                self.fail(&dropped_key, dropped_generation);
+                true
+            }
+            refused => {
+                tracing::warn!(?refused, "factory refresh job refused by the job runtime");
+                false
+            }
+        }
     }
 
     pub(crate) fn take_director_read(&mut self, jobs: &mut QueueJobs) -> Option<DirectorRefreshLoad> {
@@ -571,11 +600,8 @@ impl DirectorRefresh {
         let submitted = jobs.submit_external(factory_jobs::ci_status_spec(generation), move || {
             Box::new(FactoryJobOutput::CiStatus(request.run()))
         });
-        if !matches!(
-            submitted,
-            Submitted::Queued | Submitted::QueuedDroppedOldest { .. }
-        ) {
-            tracing::warn!(?submitted, "CI status job refused by the job runtime");
+        if !self.queued_or_coalesced(submitted) {
+            tracing::warn!("CI status job refused by the job runtime");
             self.ci_status.fail(generation);
         }
     }
@@ -687,7 +713,7 @@ impl DirectorRefresh {
             let probe = (request.worker.clone(), request.task.clone());
             let cas_root = cas_root.clone();
             // Recorded first: an inline runtime finishes the job inside submit.
-            let previous = self.health_in_flight.insert(
+            self.health_in_flight.insert(
                 key.clone(),
                 HealthInFlight {
                     probe: probe.clone(),
@@ -695,27 +721,14 @@ impl DirectorRefresh {
                     since: Instant::now(),
                 },
             );
-            match jobs.submit_external(spec, move || {
+            let submitted = jobs.submit_external(spec, move || {
                 Box::new(FactoryJobOutput::WorkerHealth(
                     crate::ui::factory::director::run_worker_health_probe(Some(&cas_root), &request),
                 ))
-            }) {
-                Submitted::Queued => {}
-                Submitted::QueuedDroppedOldest { dropped_key, .. } => {
-                    if let Some(dropped) = self.health_in_flight.remove(&dropped_key) {
-                        refused.push(dropped.probe);
-                    }
-                }
-                // The key is already running: its report covers this ask.
-                Submitted::Coalesced { .. } | Submitted::QueuedBehindKey => {
-                    if let Some(previous) = previous {
-                        self.health_in_flight.insert(key, previous);
-                    }
-                }
-                Submitted::DroppedRefresh | Submitted::Closed | Submitted::LaneMismatch { .. } => {
-                    self.health_in_flight.remove(&key);
-                    refused.push(probe);
-                }
+            });
+            if !self.queued_or_coalesced(submitted) {
+                self.health_in_flight.remove(&key);
+                refused.push(probe);
             }
         }
         refused.extend(std::mem::take(&mut self.health_failed));

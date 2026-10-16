@@ -4304,7 +4304,7 @@ async fn cas_9b5d_daemon_sync(
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/api/sync/pull"))
+        .and(path(super::pull::PULL_PATH))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "entries": [], "tasks": [], "rules": [], "skills": [],
             "pulled_at": "2026-10-16T12:00:00Z",
@@ -4396,7 +4396,7 @@ async fn cas_9b5d_daemon_sync(
     for request in server.received_requests().await.unwrap() {
         let key = match (request.method.as_str(), request.url.path()) {
             ("POST", "/api/sync/push") => "personal_push",
-            ("GET", "/api/sync/pull") => "personal_pull",
+            ("GET", super::pull::PULL_PATH) => "personal_pull",
             ("GET", p) if p.ends_with("/sync/pull") => "team_pull",
             ("POST", p) if p.ends_with("/sync/push") => "team_push",
             _ => "other",

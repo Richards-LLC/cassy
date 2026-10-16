@@ -125,6 +125,42 @@ malformed envelopes and human messages retain normal delivery semantics.
 Expired rows keep their history, acknowledgement and `superseded_stale` reason.
 
 
+## Claude factory launch options
+
+Claude agents receive their factory identity as `--name` when the installed
+CLI advertises that exact option. Claude workers use a private, mode-0600 MCP
+configuration containing only `cas`, together with `--mcp-config` and
+`--strict-mcp-config`. The existing project CAS definition is retained when
+present; otherwise Cassy supplies `cas serve`. Supervisor MCP discovery keeps
+its normal scopes. Native hooks, account selection and Teams settings still
+apply. Project files are left intact, and supervisor-only environment denials
+also apply to the generated CAS definition.
+
+Workers refuse to start if strict MCP flags are unsupported, the project root
+is missing, configuration cannot be provisioned, or `supervisor_only_mcp`
+denies `cas`. Upgrade Claude or correct the reported project configuration
+before retrying. Tasks needing other native MCP servers should go through the
+supervisor or the configured Cassy proxy.
+
+Two optional settings apply to initial, dynamic and recycled Claude agents:
+
+```toml
+[factory.claude]
+remote_control = false # Opt in for the supervisor only; workers stay network-quiet.
+# fallback_model = "sonnet" # Explicit overload fallback for both roles.
+```
+
+Use `cas config set factory.claude.remote_control true` to opt in, and
+`cas config set factory.claude.fallback_model sonnet` to choose a fallback.
+An empty fallback value clears it. Explicitly requested unsupported flags
+produce a launch error; model availability and remote access are resolved by
+Claude. Capability detection shares one successful `claude --help` capture
+per factory process; restart the factory after changing the installed CLI.
+
+Dynamic system-prompt exclusion remains deferred pending a controlled cache,
+cost and context-correctness comparison. This change claims no startup-time,
+token or cost improvement.
+
 ## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client

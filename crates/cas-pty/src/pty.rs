@@ -3663,6 +3663,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cas_569f_option_probe_matches_whole_flags_and_keeps_legacy_overrides() {
+        let mut env = TestEnvGuard::new();
+        env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "-n, --name-prefix <name>\n--remote-control-session-name-prefix <prefix>\n--fallback-model <model>");
+        assert!(!claude_supports_flag("--name"));
+        assert!(!claude_supports_flag("--remote-control"));
+        assert!(claude_supports_flag("--fallback-model"));
+        env.set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
+        env.set("CAS_FACTORY_CHROME_SUPPORTED", "1");
+        assert!(claude_supports_effort_flag());
+        assert!(claude_supports_chrome_flag());
+        env.set("CAS_FACTORY_EFFORT_SUPPORTED", "0");
+        env.set("CAS_FACTORY_CHROME_SUPPORTED", "0");
+        assert!(!claude_supports_effort_flag());
+        assert!(!claude_supports_chrome_flag());
+        env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "");
+        assert!(!claude_supports_flag("--fallback-model"));
+    }
+
+    #[tokio::test]
     async fn cas_569f_supported_session_names_reach_both_role_launches() {
         let mut env = TestEnvGuard::new();
         env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--name");

@@ -1163,7 +1163,9 @@ async fn assert_renewal_snapshot_race(mode: &str) {
     {
         let mut state = cloud.state.lock().unwrap();
         state.requests.clear();
-        state.statuses.insert(dead.agent_id.clone(), "shutdown".into());
+        state
+            .statuses
+            .insert(dead.agent_id.clone(), "shutdown".into());
         match mode {
             "released" => state.change_after_lock_read = Some((1, None)),
             "reassigned" => state.change_after_lock_read = Some((1, Some(winner.agent_id.clone()))),
@@ -1172,23 +1174,46 @@ async fn assert_renewal_snapshot_race(mode: &str) {
         }
     }
     let report = cas::cloud::peer_claims::renew_agent_claims(&worker.cas_dir, &worker.agent_id);
-    let rows = cas::store::open_prompt_queue_store(&worker.cas_dir).unwrap().peek_all(100).unwrap();
-    assert!(rows.iter().all(|row| !row.prompt.contains("dead-peer")), "{rows:?}");
+    let rows = cas::store::open_prompt_queue_store(&worker.cas_dir)
+        .unwrap()
+        .peek_all(100)
+        .unwrap();
+    assert!(
+        rows.iter().all(|row| !row.prompt.contains("dead-peer")),
+        "{rows:?}"
+    );
     if mode == "reassigned" {
         assert_eq!(report.conflicts.len(), 1, "{report:?}");
         assert_eq!(report.conflicts[0].1.agent_id, winner.agent_id);
         assert_eq!(report.conflicts[0].1.name(), "third-live-peer");
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert!(rows[0].prompt.contains("third-live-peer"));
-        assert_eq!(cloud.active_lock("cas-renew-race").unwrap().1.agent_id, winner.agent_id);
+        assert_eq!(
+            cloud.active_lock("cas-renew-race").unwrap().1.agent_id,
+            winner.agent_id
+        );
     } else {
         assert!(report.conflicts.is_empty(), "{report:?}");
         assert_eq!(report.failed, 1, "retry is advisory: {report:?}");
         assert!(rows.is_empty(), "{rows:?}");
-        if mode == "released" { assert!(cloud.active_lock("cas-renew-race").is_none()); }
-        else { assert_eq!(cloud.active_lock("cas-renew-race").unwrap().1.agent_id, dead.agent_id); }
+        if mode == "released" {
+            assert!(cloud.active_lock("cas-renew-race").is_none());
+        } else {
+            assert_eq!(
+                cloud.active_lock("cas-renew-race").unwrap().1.agent_id,
+                dead.agent_id
+            );
+        }
     }
-    assert!(!cloud.state.lock().unwrap().requests.iter().any(|r| r.ends_with("/release")));
+    assert!(
+        !cloud
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .any(|r| r.ends_with("/release"))
+    );
 }
 
 #[tokio::test]

@@ -7,6 +7,7 @@ import { readFile, writeFile, lstat, mkdir } from "node:fs/promises";
 import { resolve, extname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { assertSandboxIdentity } from "./presence-live-account.mjs";
 import { chromium, expect } from "@playwright/test";
 
 const cloud = "https://petra-stella-cloud.vercel.app";
@@ -35,8 +36,7 @@ async function authority(path, body) {
   return response.json();
 }
 const identity = await authority("/api/me");
-assert.equal(identity.user_id, accountId);
-assert.equal(identity.email?.split("@")[0], "cassy-e3dd-test");
+assertSandboxIdentity(identity, accountId);
 async function waitFile(name, timeout = 60_000) {
   const until = Date.now() + timeout;
   for (;;) {

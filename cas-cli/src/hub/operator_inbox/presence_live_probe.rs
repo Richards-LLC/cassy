@@ -8,6 +8,44 @@ use crate::hub::operator_inbox::machine::{
 
 const CLOUD: &str = "https://petra-stella-cloud.vercel.app";
 
+fn sandbox_identity(identity: &Value, account_id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        account_id == "cas-test-profile-a-v1",
+        "only sandbox profile A is allowed"
+    );
+    anyhow::ensure!(
+        identity["user_id"].as_str() == Some(account_id),
+        "test account id mismatch"
+    );
+    anyhow::ensure!(
+        identity["email"].as_str() == Some("cas-test-a@sandbox.petrastella.io"),
+        "only sandbox profile A is allowed"
+    );
+    Ok(())
+}
+
+#[test]
+fn presence_live_identity_refuses_every_non_sandbox_account() {
+    let sandbox =
+        json!({"user_id": "cas-test-profile-a-v1", "email": "cas-test-a@sandbox.petrastella.io"});
+    sandbox_identity(&sandbox, "cas-test-profile-a-v1").unwrap();
+    assert!(sandbox_identity(&sandbox, "production-id").is_err());
+    assert!(
+        sandbox_identity(
+            &json!({"user_id": "production-id", "email": "cas-test-a@sandbox.petrastella.io"}),
+            "cas-test-profile-a-v1"
+        )
+        .is_err()
+    );
+    assert!(
+        sandbox_identity(
+            &json!({"user_id": "cas-test-profile-a-v1", "email": "operator@example.com"}),
+            "cas-test-profile-a-v1"
+        )
+        .is_err()
+    );
+}
+
 fn required(name: &str) -> anyhow::Result<String> {
     std::env::var(name).map_err(|_| anyhow::anyhow!("missing {name}"))
 }
@@ -52,8 +90,8 @@ async fn presence_live_disposable_producer() -> anyhow::Result<()> {
     anyhow::ensure!(required("CAS_E3DD_LIVE")? == "1", "CAS_E3DD_LIVE must be 1");
     let account_id = required("CAS_E3DD_ACCOUNT_ID")?;
     anyhow::ensure!(
-        uuid::Uuid::parse_str(&account_id).is_ok(),
-        "invalid test account id"
+        account_id == "cas-test-profile-a-v1",
+        "only sandbox profile A is allowed"
     );
     let key_path = PathBuf::from(required("CAS_E3DD_API_KEY_FILE")?);
     let key_meta = fs::symlink_metadata(&key_path)?;
@@ -82,16 +120,7 @@ async fn presence_live_disposable_producer() -> anyhow::Result<()> {
         me.status
     );
     let identity: Value = serde_json::from_slice(&me.body)?;
-    anyhow::ensure!(
-        identity["user_id"].as_str() == Some(account_id.as_str()),
-        "test account id mismatch"
-    );
-    anyhow::ensure!(
-        identity["email"]
-            .as_str()
-            .is_some_and(|email| email.split('@').next() == Some("cassy-e3dd-test")),
-        "account must be labeled cassy-e3dd-test"
-    );
+    sandbox_identity(&identity, &account_id)?;
     let root = PathBuf::from(required("CAS_E3DD_LIVE_ROOT")?);
     anyhow::ensure!(
         root.is_absolute()
@@ -113,7 +142,7 @@ async fn presence_live_disposable_producer() -> anyhow::Result<()> {
         &EnrollRequest {
             hub_id: &label,
             label: &label,
-            projects: &["cas-e3dd-live".to_owned()],
+            projects: &["cas-test-project".to_owned()],
             presence: true,
         },
     )?;

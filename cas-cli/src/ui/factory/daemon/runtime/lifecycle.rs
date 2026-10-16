@@ -3320,9 +3320,6 @@ impl FactoryDaemon {
         if let Some(evidence) = refresh.take_ci_status(&mut self.queue_jobs) {
             self.app.apply_ci_status(evidence);
         }
-        if due || refresh.refresh_requested() {
-            refresh.start_director_read(&self.app, &mut self.queue_jobs);
-        }
         let mut refreshed = false;
         // cas-4491f review L1: a finished snapshot is applied before a due one
         // starts, so a pending result does not defer the due one into a
@@ -3382,6 +3379,9 @@ impl FactoryDaemon {
         }
         // cas-4491f (C2b review L4): a refresh deferred behind a busy read
         // or liveness job starts on the first pass they are done.
+        if due || refresh.refresh_requested() {
+            crate::ui::factory::app::timed_refresh_step("start director read", || refresh.start_director_read(&self.app, &mut self.queue_jobs));
+        }
         let mut delivery = refresh.take_delivery_read(&mut self.queue_jobs);
         // cas-223f review round 2, M3: a read without fresh data is retried
         // before its events are delivered unrevalidated; never revalidated
@@ -3731,8 +3731,7 @@ impl FactoryDaemon {
             // wake that is not an assignment after all is delivered as usual.
             AssignmentRead::Unread
                 if crate::prompt_revalidation::assignment_solicited_task_id(&prompt.text)
-                    .is_some()
-                    && false =>
+                    .is_some() =>
             {
                 let cas_dir = self.app.cas_dir().to_path_buf();
                 let session = self.session_name.clone();

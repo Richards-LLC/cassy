@@ -3132,8 +3132,10 @@ pub(super) fn still_undelivered_relays(
     candidates
         .into_iter()
         .filter(|queued| {
-            let _ = queue;
-            relay_task_still_current(task_store.as_deref(), queued)
+            queue
+                .supervisor_relay_still_undelivered(queued.id)
+                .unwrap_or(true)
+                && relay_task_still_current(task_store.as_deref(), queued)
         })
         .collect()
 }
@@ -3307,8 +3309,9 @@ impl FactoryDaemon {
                     .collect(),
             )
         });
-        let _ = submitted;
-        self.last_usage_limit_scan = Some(now);
+        if submitted {
+            self.last_usage_limit_scan = Some(now);
+        }
         self.drain_relay_jobs();
     }
 

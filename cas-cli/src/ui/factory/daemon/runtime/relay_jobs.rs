@@ -282,6 +282,7 @@ impl RelayJobs {
     /// one could repeat a notice (review M2).
     pub(crate) fn take(&mut self, jobs: &mut QueueJobs) -> Vec<RelayDone> {
         jobs.apply_completions();
+        self.forget_settled_writes();
         let mut writes = Vec::new();
         let mut reads = Vec::new();
         for result in jobs.take_external_completions_where(is_relay_kind) {

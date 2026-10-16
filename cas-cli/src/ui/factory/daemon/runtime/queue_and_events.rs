@@ -3912,6 +3912,7 @@ impl FactoryDaemon {
                         Ok(true) => {
                             if let Some(pending) = self.queue_jobs.poison_jobs.pointers.get_mut(&key) {
                                 pending.phase = super::poison_sweep_jobs::PointerPhase::File;
+                                pending.retry_at = Instant::now();
                             }
                         }
                         Ok(false) => { self.queue_jobs.poison_jobs.pointers.remove(&key); }
@@ -3926,6 +3927,7 @@ impl FactoryDaemon {
                         if delivered { self.queue_jobs.poison_jobs.pointers.remove(&key); }
                         else if let Some(pending) = self.queue_jobs.poison_jobs.pointers.get_mut(&key) {
                             pending.phase = super::poison_sweep_jobs::PointerPhase::Release;
+                            pending.retry_at = Instant::now();
                         }
                     }
                     RelayOutput::PointerReleased { key, released } => {
@@ -4398,21 +4400,27 @@ impl FactoryDaemon {
             .filter(|(_, pending)| pending.retry_at <= Instant::now())
             .map(|(key, pending)| (key.clone(), pending.phase, pending.work.clone())).collect();
         for (key, phase, work) in pending {
-            match phase {
+            let pending_key = key.clone();
+            let submitted = match phase {
                 PointerPhase::Claim => {
                     let job_key = format!("{key}:claim");
                     self.relay_jobs.submit_write(&mut self.queue_jobs, &job_key, None, move ||
-                        RelayOutput::PointerClaimed { key, claimed: pointer::claim_pointer(&work) });
+                        RelayOutput::PointerClaimed { key: key.clone(), claimed: pointer::claim_pointer(&work) })
                 }
                 PointerPhase::File => {
                     let job_key = format!("{key}:file");
                     self.relay_jobs.submit_blocking_write(&mut self.queue_jobs, &job_key, move ||
-                        RelayOutput::PointerFiled { key, delivered: pointer::file_pointer(&work) });
+                        RelayOutput::PointerFiled { key: key.clone(), delivered: pointer::file_pointer(&work) })
                 }
                 PointerPhase::Release => {
                     let job_key = format!("{key}:release");
                     self.relay_jobs.submit_write(&mut self.queue_jobs, &job_key, None, move ||
-                        RelayOutput::PointerReleased { key, released: pointer::release_pointer(&work) });
+                        RelayOutput::PointerReleased { key: key.clone(), released: pointer::release_pointer(&work) })
+                }
+            };
+            if submitted {
+                if let Some(pending) = self.queue_jobs.poison_jobs.pointers.get_mut(&pending_key) {
+                    pending.retry_at = Instant::now() + Duration::from_secs(1);
                 }
             }
         }
@@ -4462,7 +4470,7 @@ impl FactoryDaemon {
             self.relay_jobs.submit_write(&mut self.queue_jobs, &key, None, move || {
                 if live.load(Ordering::Acquire) {
                     if let Ok(queue) = crate::store::open_prompt_queue_store(&cas_dir) {
-                        let unread: Vec<_> = unread.iter().filter(|row| super::poison_sweep_jobs::still_unread(queue.as_ref(), row)).collect();
+                        let unread: Vec<_> = unread.iter().filter(|row| super::poison_sweep_jobs::still_unread(queue.as_ref(), row) == Some(true)).collect();
                         if let Some(oldest) = unread.iter().min_by_key(|row| row.id) {
                             let outcome = super::lifecycle::enqueue_supervisor_unread_relay(&cas_dir, &oldest.source, oldest.id, unread.len());
                             if let super::lifecycle::WorkerAttentionRelayOutcome::Persisted { notification_id } = outcome {
@@ -8242,7 +8250,7 @@ impl FactoryDaemon {
             &worker_names,
             &registered_session_agents,
         );
-        let valid_targets: Vec<&str> = valid_target_names.iter().map(String::as_str).collect();
+
 
         // Aged session-scoped rows for agents no longer in the roster are
         // terminal poison, not work for another tick. Fresh unknown targets

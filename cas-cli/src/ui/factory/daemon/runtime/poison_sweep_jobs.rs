@@ -76,29 +76,31 @@ pub(crate) fn same_message(a: &cas_store::QueuedPrompt, b: &cas_store::QueuedPro
         && a.prompt == b.prompt
         && a.factory_session == b.factory_session
 }
+/// None means unreadability, not evidence that the subject was resolved.
 pub(crate) fn still_unread(
     queue: &dyn cas_store::PromptQueueStore,
     old: &cas_store::QueuedPrompt,
-) -> bool {
-    let Ok(Some(row)) = queue.queued_prompt(old.id) else {
-        return false;
+) -> Option<bool> {
+    let current = queue.queued_prompt(old.id).ok()?;
+    let Some(row) = current else {
+        return Some(false);
     };
     if !same_message(&row, old) || row.acked_at.is_some() {
-        return false;
+        return Some(false);
     }
-    let Ok(Some(report)) = queue.message_delivery_report(old.id) else {
-        return false;
-    };
-    report.confirmed_at.is_none()
-        && !report
-            .recipient_receipt
-            .is_some_and(cas_store::SurfacingSource::is_surfaced)
-        && !matches!(
-            report.stage,
-            cas_store::DeliveryStage::Dropped
-                | cas_store::DeliveryStage::Abandoned
-                | cas_store::DeliveryStage::Suppressed
-        )
+    let report = queue.message_delivery_report(old.id).ok()??;
+    Some(
+        report.confirmed_at.is_none()
+            && !report
+                .recipient_receipt
+                .is_some_and(cas_store::SurfacingSource::is_surfaced)
+            && !matches!(
+                report.stage,
+                cas_store::DeliveryStage::Dropped
+                    | cas_store::DeliveryStage::Abandoned
+                    | cas_store::DeliveryStage::Suppressed
+            ),
+    )
 }
 pub(crate) fn read_pointers(
     cas_dir: &std::path::Path,
@@ -237,7 +239,7 @@ pub(crate) fn write_bounce(
     let Ok(queue) = crate::store::open_prompt_queue_store(&context.cas_dir) else {
         return;
     };
-    if !still_unread(queue.as_ref(), &candidate.row) {
+    if still_unread(queue.as_ref(), &candidate.row) != Some(true) {
         return;
     }
     match queue.enqueue_delivery_stalled_bounce(

@@ -131,11 +131,13 @@ pub(crate) fn write_normal_flag(
     let Some(row) = current else {
         return true;
     };
-    if row.prompt != probe.prompt
-        || row.target != probe.target
-        || !super::poison_sweep_jobs::still_unread(queue.as_ref(), &row)
-    {
+    if row.prompt != probe.prompt || row.target != probe.target {
         return true;
+    }
+    match super::poison_sweep_jobs::still_unread(queue.as_ref(), &row) {
+        Some(false) => return true,
+        None => return false,
+        Some(true) => {}
     }
     let detail = normal_delivery_watchdog_flag_detail(evidence);
     if let Err(error) =
@@ -230,7 +232,7 @@ pub(crate) fn write_idle_unread(
         return false;
     };
     let row = candidate.row;
-    if !super::poison_sweep_jobs::still_unread(queue.as_ref(), &row) {
+    if super::poison_sweep_jobs::still_unread(queue.as_ref(), &row) != Some(true) {
         return false;
     }
     let summary: String = row

@@ -863,14 +863,9 @@ fn has_platform_proof_note(notes: &str) -> bool {
 }
 
 fn has_target_scope(lower: &str) -> bool {
-    // A structured target names its scope directly, including non-Rust
-    // runners. Keep every legacy prose spelling alongside this form.
-    lower.split_whitespace().any(|token| {
-        token.strip_prefix("target=").is_some_and(|value| {
-            !value.trim_matches(['\'', '"', '`', ';', ',', '|']).is_empty()
-                && !value.contains('=')
-        })
-    }) || [
+    // Structured Rust scope must still declare the whole target. Non-Rust
+    // scope is explicit or uses a named runner; keep all legacy prose forms.
+    loaded_proof::has_structured_target_scope(lower) || [
         &["whole", "target"][..],
         &["entire", "target"],
         &["full", "target"],

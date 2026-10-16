@@ -10,6 +10,35 @@ const REQUIREMENTS: [&str; 4] = [
 ];
 const EXAMPLE: &str = "LOADED_PROOF: target=explicit non-Rust (vitest src/example.test.ts + jest tests/example.test.js) parallelism=16 loops=3 result=PASS";
 
+pub(super) fn has_structured_target_scope(lower: &str) -> bool {
+    lower.split([';', ',', '|']).any(|field| {
+        let mut words = field.split_whitespace();
+        while let Some(word) = words.next() {
+            let Some(scope) = word.strip_prefix("target=") else {
+                continue;
+            };
+            let scope = scope.trim_matches(['\'', '"', '`']);
+            if matches!(
+                scope,
+                "whole" | "entire" | "full" | "vitest" | "jest" | "pytest"
+            ) {
+                return true;
+            }
+            if scope == "go" && words.next() == Some("test") {
+                return true;
+            }
+            if scope == "explicit" {
+                let next = words.next();
+                if next == Some("non-rust") || (next == Some("non") && words.next() == Some("rust"))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+}
+
 pub(super) struct Fields([bool; 4]);
 
 impl Fields {

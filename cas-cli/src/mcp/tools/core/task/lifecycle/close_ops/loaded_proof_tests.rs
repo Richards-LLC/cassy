@@ -28,7 +28,10 @@ fn cas_a576_rust_module_filter_target_is_refused() {
         "cargo test some::single_test",
         "whole::single_test",
         "vitest_lookalike",
+        "jest::single_test",
         "go build",
+        "custom-runner a",
+        "explicit",
         "explicit Rust (cas::some::single_test)",
     ] {
         let task = concurrency_task(&format!(
@@ -84,10 +87,15 @@ fn cas_a576_split_notes_report_each_incomplete_receipt() {
 fn structured_targets_accept_non_rust_runners_and_parallelism_forms_without_sha() {
     for receipt in [
         "target=explicit non-Rust (vitest a + jest b) parallelism=-j16 loops=3 result=PASS",
-        "target=non-Rust (vitest a) --jobs 16 loops=3 result=PASS",
+        "target=explicit non-Rust (vitest a) --jobs 16 loops=3 result=PASS",
         "target=vitest src/example.test.ts parallelism=16 loops=3 result=PASS",
         "target=jest tests/example.test.js concurrency=16 loops=4 exit=0",
-        "target=custom-runner a --jobs=16 3x; SUCCESS",
+        "target=explicit non-Rust (custom-runner a) --jobs=16 3x; SUCCESS",
+        "target=pytest tests/test_example.py parallelism=16 loops=3 result=PASS",
+        "target=go test ./... parallelism=16 loops=3 result=PASS",
+        "target=whole parallelism=16 loops=3 result=PASS",
+        "target=entire parallelism=16 loops=3 result=PASS",
+        "target=full parallelism=16 loops=3 result=PASS",
         "target=whole target cargo test -j16; 3 loops; PASS",
         "whole target under -j16, 3 loops; result: PASS",
         "non-Rust target: pnpm test -j16; 3 runs; PASS",

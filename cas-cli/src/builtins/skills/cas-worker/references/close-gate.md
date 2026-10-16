@@ -79,9 +79,13 @@ When the close gate requires a `loaded_proof` for `risk=concurrency`, add one
 LOADED_PROOF: target=explicit non-Rust (vitest src/example.test.ts + jest tests/example.test.js) parallelism=16 loops=3 result=PASS
 ```
 
-Replace the example target with the complete target actually exercised. A
-nonempty `target=<scope>` also accepts Vitest, Jest and other named runners;
-legacy `non-Rust target: ...` and `whole/entire/full target` prose still works.
+Replace the example target with the complete target actually exercised. Use
+`target=whole`, `target=entire` or `target=full` for a complete Rust target (an
+optional `target` word may follow). Use `target=explicit non-Rust (...)` for
+other ecosystems. Direct `target=vitest`, `target=jest`, `target=pytest` and
+`target=go test` runner forms also work. A Rust module/test-filter `target=`
+value does not establish whole-target scope. Legacy `non-Rust target: ...`
+and `whole/entire/full target` prose still works.
 Record 16 actual concurrent processes/workers with `parallelism=16` or
 `concurrency=16`. `-j16` and `--jobs 16` also work when they describe the runner
 or harness used; the receipt does not require Cargo flags on a non-Rust runner.

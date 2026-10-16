@@ -47,9 +47,13 @@ replacing the target with the complete target actually exercised:
 LOADED_PROOF: target=explicit non-Rust (vitest src/example.test.ts + jest tests/example.test.js) parallelism=16 loops=3 result=PASS
 ```
 
-The four parsed fields are target, parallelism, loops and result. A nonempty
-`target=<scope>` names a Rust or non-Rust target, including `target=vitest ...`,
-`target=jest ...` or another runner. Existing prose forms such as
+The four parsed fields are target, parallelism, loops and result. Structured
+whole-target scopes are `target=whole`, `target=entire` and `target=full`, with
+an optional `target` word after the scope. Non-Rust scopes use
+`target=explicit non-Rust (...)`, or the explicitly supported runner forms
+`target=vitest ...`, `target=jest ...`, `target=pytest ...` and `target=go test ...`.
+A Rust module/test-filter `target=` value does not prove whole-target scope;
+other non-Rust runners use the explicit non-Rust form. Existing prose such as
 `non-Rust target: pnpm test` and `whole/entire/full target` remain accepted.
 For a non-Rust harness, record 16 actual concurrent processes/workers as
 `parallelism=16` or `concurrency=16`; `-j16`, `-j 16`, `--jobs 16` and

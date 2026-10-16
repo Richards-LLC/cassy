@@ -1145,11 +1145,12 @@ const AREAS: [(&str, &[&str]); 8] = [
     ]),
     ("Tasks and merges", &[
         "task", "delivery", "deliveries", "merge request", "merges", "parked", "close gate",
-        "close", "qa", "verification", "epic", "review", "proof", "receipt",
+        "qa", "verification", "epic", "review", "proof", "receipt",
     ]),
     ("Messages", &["message", "reminder", "inbox", "reply", "replies", "notice"]),
     ("Releases and CI", &[
         "release", "merge queue", "ci", "install", "update", "changelog", "publish",
+        "publication",
         "build", "gate", "runner", "journey",
     ]),
     ("Memory and search", &["memory", "recall", "search", "index", "briefing", "lesson"]),

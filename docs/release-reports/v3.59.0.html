@@ -4,7 +4,7 @@
      section data-section markers are stable; preserve their order. -->
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light dark"><title>Cassy v3.59.0 · Release report · Published 16 October 2026 · 09:33:05 UTC · release commit <code>42dabfb3744ef36de3f63809efe9df5611d98e0f</code>.</title>
+<meta name="color-scheme" content="light dark"><title>Cassy v3.59.0 · Release report · Published 16 October 2026 · 09:33 UTC</title>
 <style>
 :root{ --bg:#F7F4EE;--surface:#FFFFFF;--surface-hero:#F1E7DD;--line:#DAD3C7;--line-strong:#8F8371;--ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--verdict-soft:#DDE1F7;--evidence:#5A5F6E;--action:#2E3A9F;--good:#226845;--warning:#7F5504;--danger:#B3261E;--good-tint:rgba(34,104,69,0.10);--warning-tint:rgba(127,85,4,0.10);--danger-tint:rgba(179,38,30,0.10);--focus:#2E3A9F; --font-display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;--font-body:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--font-mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color-scheme:light dark}
 @media(prefers-color-scheme:dark){:root{ --bg:#12141A;--surface:#191C24;--surface-hero:#241E1E;--line:#2B3040;--line-strong:#6B7390;--ink:#E9E6E0;--ink-muted:#A3A7B4;--verdict:#A9B3FF;--verdict-soft:rgba(169,179,255,0.16);--evidence:#A3A7B4;--action:#A9B3FF;--good:#5FC492;--warning:#E2B14D;--danger:#EF7B72;--good-tint:rgba(95,196,146,0.14);--warning-tint:rgba(226,177,77,0.14);--danger-tint:rgba(239,123,114,0.14);--focus:#A9B3FF }}
@@ -15,12 +15,12 @@ a{color:var(--action);text-underline-offset:3px;overflow-wrap:anywhere}a:hover{t
 main{max-width:1120px;margin:auto;padding:0 24px}.hero{background:var(--surface-hero);color:var(--ink);border-bottom:3px solid var(--verdict);padding:48px max(24px,calc((100vw - 1072px)/2)) 24px}
 .eyebrow{font:600 12px/1.5 var(--font-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted)}.folio{display:flex;justify-content:space-between;gap:16px;margin:0 0 32px}.hero-grid{display:grid;grid-template-columns:1.1fr 1fr;gap:48px;align-items:center}
 h1{font:400 clamp(40px,4.6vw,60px)/1.06 var(--font-display);letter-spacing:-.025em;margin:0;max-width:19ch}.hero h1 em{font-weight:400;color:var(--verdict)}h2{font:600 27px/1.2 var(--font-body);letter-spacing:-.015em;margin:0 0 24px}h3{font:600 21px/1.35 var(--font-body);margin:4px 0 16px}h4{font-size:17px;line-height:1.4;margin:0 0 12px;font-weight:600}p{margin:0 0 16px;max-width:68ch}figure{margin:0}svg{display:block;width:100%;height:auto}.svg-label,.svg-count{font:15px var(--font-body);fill:var(--ink)}.svg-count{font-family:var(--font-mono)}.svg-meta{font:10px var(--font-mono);fill:var(--ink-muted)}.svg-note{font:11px var(--font-body);fill:var(--ink-muted)}.dot{fill:var(--evidence)}.decisive{fill:var(--verdict)}.figure-claim{font-size:14px;line-height:1.45;margin:8px 0 0;color:var(--ink-muted)}.hero-note{border-top:1px solid var(--line-strong);margin:32px 0 0;padding-top:16px;display:flex;gap:24px;justify-content:space-between;font-size:14px;color:var(--ink-muted)}.hero-note p{margin:0}.hero-note a{white-space:nowrap}
-.report-section{padding:64px 0;border-bottom:1px solid var(--line-strong)}.section-top{display:flex;justify-content:space-between;gap:16px}.section-no{white-space:nowrap;font:14px var(--font-mono);color:var(--ink-muted)}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin-bottom:24px}.stat{border-left:1px solid var(--line-strong);padding-left:16px}.stat:first-child{border:0;padding:0}.stat-value{display:block;font:400 44px/1.1 var(--font-display);letter-spacing:-.025em;margin-bottom:8px}.stat-label{display:block;font-weight:600;margin-bottom:8px}.stat p{font-size:12px;line-height:1.5;color:var(--ink-muted);margin:0}.method{font-size:14px;color:var(--ink-muted)}details{margin-top:24px}summary{cursor:pointer;font-weight:600;color:var(--action)}details p{font-size:14px;margin-top:16px}.table-wrap{overflow-x:auto;margin:24px 0}table{width:100%;border-collapse:collapse;text-align:left;font-size:14px}caption{text-align:left;color:var(--ink-muted);font-size:14px;margin-bottom:12px}th,td{padding:12px 12px 12px 0;border-bottom:1px solid var(--line);vertical-align:top}th{font-weight:500}thead th{font:600 11px/1.6 var(--font-mono);letter-spacing:.05em;text-transform:uppercase;border-bottom:1px solid var(--line-strong)}.num{text-align:right;font-variant-numeric:tabular-nums}tbody th{min-width:56px}tbody tr:last-child td,tbody tr:last-child th{border-bottom:1px solid var(--line-strong)}code,pre{font-family:var(--font-mono);font-size:.86em}code{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:24px 0;padding:20px;border-left:3px solid var(--verdict);background:var(--surface);color:var(--ink)}
+.report-section{padding:64px 0;border-bottom:1px solid var(--line-strong)}.section-top{display:flex;justify-content:space-between;gap:16px}.section-no{white-space:nowrap;font:14px var(--font-mono);color:var(--ink-muted)}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin-bottom:24px}.stat{border-left:1px solid var(--line-strong);padding-left:16px}.stat:first-child{border:0;padding:0}.stat-value{display:block;font:400 44px/1.1 var(--font-display);letter-spacing:-.025em;margin-bottom:8px}.stat-label{display:block;font-weight:600;margin-bottom:8px}.stat p{font-size:12px;line-height:1.5;color:var(--ink-muted);margin:0}.method{font-size:14px;color:var(--ink-muted)}details{margin-top:24px}details+.stats{margin-top:40px}#map-data th:first-child{width:22%}#map-data th:nth-child(2){width:12%}summary{cursor:pointer;font-weight:600;color:var(--action)}details p{font-size:14px;margin-top:16px}.table-wrap{overflow-x:auto;margin:24px 0}table{width:100%;border-collapse:collapse;text-align:left;font-size:14px}caption{text-align:left;color:var(--ink-muted);font-size:14px;margin-bottom:12px}th,td{padding:12px 12px 12px 0;border-bottom:1px solid var(--line);vertical-align:top}th{font-weight:500}thead th{font:600 11px/1.6 var(--font-mono);letter-spacing:.05em;text-transform:uppercase;border-bottom:1px solid var(--line-strong)}.num{text-align:right;font-variant-numeric:tabular-nums}tbody th{min-width:56px}tbody tr:last-child td,tbody tr:last-child th{border-bottom:1px solid var(--line-strong)}code,pre{font-family:var(--font-mono);font-size:.86em}code{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:24px 0;padding:20px;border-left:3px solid var(--verdict);background:var(--surface);color:var(--ink)}
 .theme{padding:32px 0;border-top:1px solid var(--line);display:grid;grid-template-columns:220px 1fr;gap:48px}.theme:first-child{border-top:0;padding-top:0}.change{padding:0 0 24px;margin:0 0 24px;border-bottom:1px solid var(--line)}.change:last-child{margin:0;padding:0;border:0}.pair{display:grid;grid-template-columns:1fr 1.25fr;gap:24px}.pair p{font-size:15px;line-height:1.6;margin:0}.was{color:var(--ink-muted)}.state{display:block;font:600 10px/1.8 var(--font-mono);letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px}.now .state{color:var(--verdict)}
 .users .theme-1 .theme-label{padding:24px;background:var(--surface-hero);color:var(--ink);align-self:start;border-left:3px solid var(--verdict)}.users .theme-2{grid-template-columns:1fr}.users .theme-2 .theme-label{display:flex;gap:16px;align-items:baseline}.users .theme-2 .pair{grid-template-columns:1fr 1fr}.users .theme-2 .change{display:grid;grid-template-columns:220px 1fr;gap:48px}.users .theme-4{grid-template-columns:1fr}.users .theme-4 .changes{display:grid;grid-template-columns:1fr 1fr;gap:24px}.users .theme-4 .change{padding:24px;background:var(--surface);color:var(--ink);border:0;margin:0}.users .theme-4 .pair{display:block}.users .theme-4 .was{margin-bottom:16px}
 .dev .theme{gap:32px}.dev .change{display:grid;grid-template-columns:150px 1fr;gap:24px;margin:0 0 16px;padding-bottom:16px}.dev h4{font-size:14px}.dev .pair{display:block}.dev .pair p{font-size:14px}.dev .was{margin-bottom:4px}.dev .state{display:inline;margin-right:8px}.dev .changes>p{font-size:14px;color:var(--ink-muted)}.install pre{font-size:32px}.install h3{margin-top:32px}.install code{word-break:break-all}.stitch{width:132px;color:var(--verdict);margin-bottom:24px}.provenance{font-size:14px}.provenance pre{font-size:12px}.provenance p{max-width:90ch}.page-footer{max-width:1120px;margin:auto;padding:32px 24px 48px;display:flex;justify-content:space-between;gap:24px;font-size:12px;color:var(--ink-muted)}
 @media(max-width:820px){.hero-grid{gap:24px}.theme{grid-template-columns:160px 1fr;gap:24px}.users .theme-2 .change{grid-template-columns:160px 1fr;gap:24px}.dev .theme,.dev .change{grid-template-columns:1fr;gap:8px}.stats{gap:16px}.stat-value{font-size:34px}}
-@media(max-width:600px){main{padding:0 24px}.hero{padding:24px 24px 20px}.folio{display:block;margin-bottom:24px}.folio span{display:block}.hero-grid{grid-template-columns:1fr;gap:24px}h1{font-size:40px;max-width:19ch}.hero figure{max-width:400px}.hero-note{display:block;margin-top:20px;padding-top:12px;font-size:12px}.hero-note a{display:inline-block;margin-top:8px}.figure-claim{font-size:12px}.report-section{padding:40px 0}.stats{grid-template-columns:1fr 1fr;gap:24px}.stat:nth-child(3){border:0;padding:0}.stat-value{font-size:38px}.theme,.users .theme-2 .change{grid-template-columns:1fr;gap:16px}.pair,.users .theme-2 .pair{grid-template-columns:1fr;gap:12px}.users .theme-1 .theme-label{padding:16px}.users .theme-4 .changes{grid-template-columns:1fr}.theme{padding:24px 0}.theme-label h3{margin-bottom:4px}.change{margin-bottom:20px;padding-bottom:20px}.users .theme-2 .theme-label{display:block}.table-wrap{margin:20px 0}td,th{padding-right:10px;font-size:12px}thead th{font-size:10px}.ledger td:last-child{overflow-wrap:anywhere;width:24%}.page-footer{display:block}.page-footer span{display:block;margin-bottom:8px}.section-top{gap:8px}h2{font-size:25px}.install pre{font-size:27px}}
+@media(max-width:600px){main{padding:0 24px}.hero{padding:24px 24px 20px}.folio{display:block;margin-bottom:24px}.folio span{display:block}.hero-grid{grid-template-columns:1fr;gap:24px}h1{font-size:34px;max-width:19ch}.hero figure{max-width:400px}.hero-note{display:block;margin-top:20px;padding-top:12px;font-size:12px}.hero-note a{display:inline-block;margin-top:8px}.figure-claim{font-size:12px}.report-section{padding:40px 0}.stats{grid-template-columns:1fr 1fr;gap:24px}.stat:nth-child(3){border:0;padding:0}.stat-value{font-size:38px}.theme,.users .theme-2 .change{grid-template-columns:1fr;gap:16px}.pair,.users .theme-2 .pair{grid-template-columns:1fr;gap:12px}.users .theme-1 .theme-label{padding:16px}.users .theme-4 .changes{grid-template-columns:1fr}.theme{padding:24px 0}.theme-label h3{margin-bottom:4px}.change{margin-bottom:20px;padding-bottom:20px}.users .theme-2 .theme-label{display:block}.table-wrap{margin:20px 0}td,th{padding-right:10px;font-size:12px}thead th{font-size:10px}.ledger td:last-child{overflow-wrap:anywhere;width:24%}.page-footer{display:block}.page-footer span{display:block;margin-bottom:8px}.section-top{gap:8px}h2{font-size:25px}.install pre{font-size:27px}}
 
 @page{margin:15mm}
 @media print{
@@ -34,7 +34,7 @@ main{max-width:none;padding:0}.skip{display:none}
 .report-section{padding:7mm 0 0;border:0;break-before:auto}
 .section-top{break-after:avoid}h2{font-size:20pt;margin-bottom:5mm}
 h3{font-size:14pt}h4{font-size:10pt}h2,h3,h4{break-after:avoid}p{max-width:none;orphans:3;widows:3}
-.stats{gap:5mm;break-inside:avoid}.stat-value{font-size:25pt}.stat p{font-size:8pt}.stat-label{font-size:9pt}
+.stats{gap:5mm;break-inside:auto}.stat{break-inside:avoid}.stat-value{font-size:25pt}.stat p{font-size:8pt}.stat-label{font-size:9pt}
 .method,details p,caption{font-size:8pt}summary{font-size:9pt}
 .table-wrap{overflow:visible;margin:5mm 0}table{font-size:9pt;table-layout:fixed}
 thead{display:table-header-group}th,td{padding:2mm;font-size:8pt;overflow-wrap:anywhere}
@@ -63,75 +63,103 @@ pre{background:var(--surface);color:var(--ink);padding:4mm;white-space:pre-wrap}
 </style></head><body>
 <a class="skip" href="#content">Skip to release details</a>
 <!-- section: hero -->
-<header class="hero" data-section="hero"><div class="folio eyebrow"><span>Cassy v3.59.0 / Release notes</span><span>Published 16 October 2026 · 09:33:05 UTC · release commit <code>42dabfb3744ef36de3f63809efe9df5611d98e0f</code>.</span></div>
+<header class="hero" data-section="hero"><div class="folio eyebrow"><span>Cassy v3.59.0 / Release notes</span><span>Published 16 October 2026 · 09:33 UTC</span></div>
 <div class="hero-grid"><h1>Keys echo at once even when every session is busy, tool calls stay under two seconds under load, and Commander looks the same on every machine.</h1><figure>
-<!-- Change-map contract v1: each g[data-surface] has data-count (integer),
-     data-issues (JSON string array), data-emphasis (true/false). Every circle
-     carries data-issue; one equal-area circle per verified closure. Zero rows
-     stay labelled. SVG description and adjacent table carry identical data. -->
-<svg viewBox="0 0 340 166" role="img" aria-labelledby="map-title map-desc" data-change-map="1" data-total="1">
-<title id="map-title">Projects carries the one verified closure, batch QA; the session speed-ups and the Commander fixes shipped without a closing GitHub issue.</title><desc id="map-desc">Sessions 0, Projects 1, Commander 0. Each filled circle represents one closed issue. Total 1.</desc>
-<text x="0" y="16" class="svg-meta">SURFACE</text><text x="337" y="16" text-anchor="end" class="svg-meta">CLOSED</text>
-<g data-surface="Sessions" data-count="0" data-issues="[]" data-emphasis="false">
-<text x="0" y="51" class="svg-label">Sessions</text>
-<text x="134" y="50" class="svg-note">no listed issues</text>
-<text x="337" y="51" text-anchor="end" class="svg-count">0</text></g>
-<g data-surface="Projects" data-count="1" data-issues="[&quot;1203&quot;]" data-emphasis="true">
-<text x="0" y="91" class="svg-label">Projects</text>
-<circle cx="140" cy="86" r="7" class="decisive" data-issue="1203"><title>Issue #1203</title></circle>
-<text x="337" y="91" text-anchor="end" class="svg-count">1</text></g>
-<g data-surface="Commander" data-count="0" data-issues="[]" data-emphasis="false">
-<text x="0" y="131" class="svg-label">Commander</text>
-<text x="134" y="130" class="svg-note">no listed issues</text>
-<text x="337" y="131" text-anchor="end" class="svg-count">0</text></g></svg><figcaption class="figure-claim">Projects carries the one verified closure, batch QA; the session speed-ups and the Commander fixes shipped without a closing GitHub issue.</figcaption></figure></div>
-<div class="hero-note"><p>One dot, one closed issue. 1 issue-bearing surfaces.</p><a href="#map-data">Read the map data ↓</a></div></header>
+<!-- Change-map contract v2: each g[data-area] has data-count (integer >= 1),
+     data-changes (JSON string array of plain-language change titles) and
+     data-emphasis (true/false). Every circle carries data-change and a title;
+     one equal-area circle per shipped change. Areas without changes are not
+     drawn. v1 sources draw g[data-surface] with data-issues and data-issue
+     circles instead. The SVG description and adjacent table carry the data. -->
+<svg viewBox="0 0 340 202" role="img" aria-labelledby="map-title map-desc" data-change-map="1" data-total="16">
+<title id="map-title">16 changes shipped across 4 areas; Sessions has the most, 9.</title><desc id="map-desc">Commander 3, Sessions 9, Tasks 3, Safety 1. Each filled circle represents one shipped change. Total 16.</desc>
+<text x="0" y="16" class="svg-meta">AREA</text><text x="337" y="16" text-anchor="end" class="svg-meta">CHANGES</text>
+<g data-area="Commander" data-count="3" data-changes="[&quot;Commander renders its designed type on every machine&quot;, &quot;Commander Interrupt names the device holding control&quot;, &quot;The Write access receipt is clear of the rail&#x27;s fade&quot;]" data-emphasis="false">
+<text x="0" y="51" class="svg-label">Commander</text>
+<circle cx="160" cy="46" r="7" class="dot" data-change="1"><title>Commander renders its designed type on every machine</title></circle>
+<circle cx="182" cy="46" r="7" class="dot" data-change="2"><title>Commander Interrupt names the device holding control</title></circle>
+<circle cx="204" cy="46" r="7" class="dot" data-change="3"><title>The Write access receipt is clear of the rail&#x27;s fade</title></circle>
+<text x="337" y="51" text-anchor="end" class="svg-count">3</text></g>
+<g data-area="Sessions" data-count="9" data-changes="[&quot;A rate-limited shutdown no longer leaves a stale agent listed&quot;, &quot;After /clear the heartbeat stays with the new session&quot;, &quot;Two supervisors on one clone keep their own Slack watches&quot;, &quot;`cas serve` starts while another agent is creating a task&quot;, &quot;Supervisors get one alert when several workers die together&quot;, &quot;Stale relays stop reaching the supervisor&quot;, &quot;The factory loop does no store or file I/O on the input path&quot;, &quot;Agent tool calls stay under 2 s while the database is busy&quot;, &quot;An empty `prompt_queue.db` no longer misleads diagnosis&quot;]" data-emphasis="true">
+<text x="0" y="85" class="svg-label">Sessions</text>
+<circle cx="160" cy="80" r="7" class="decisive" data-change="1"><title>A rate-limited shutdown no longer leaves a stale agent listed</title></circle>
+<circle cx="182" cy="80" r="7" class="decisive" data-change="2"><title>After /clear the heartbeat stays with the new session</title></circle>
+<circle cx="204" cy="80" r="7" class="decisive" data-change="3"><title>Two supervisors on one clone keep their own Slack watches</title></circle>
+<circle cx="226" cy="80" r="7" class="decisive" data-change="4"><title>`cas serve` starts while another agent is creating a task</title></circle>
+<circle cx="248" cy="80" r="7" class="decisive" data-change="5"><title>Supervisors get one alert when several workers die together</title></circle>
+<circle cx="270" cy="80" r="7" class="decisive" data-change="6"><title>Stale relays stop reaching the supervisor</title></circle>
+<circle cx="292" cy="80" r="7" class="decisive" data-change="7"><title>The factory loop does no store or file I/O on the input path</title></circle>
+<circle cx="160" cy="100" r="7" class="decisive" data-change="8"><title>Agent tool calls stay under 2 s while the database is busy</title></circle>
+<circle cx="182" cy="100" r="7" class="decisive" data-change="9"><title>An empty `prompt_queue.db` no longer misleads diagnosis</title></circle>
+<text x="337" y="85" text-anchor="end" class="svg-count">9</text></g>
+<g data-area="Tasks" data-count="3" data-changes="[&quot;A batch QA mode: one staging walk covers every task in a batch&quot;, &quot;Epic branches are published and current when work starts&quot;, &quot;A parked delivery merges even when the worker has moved on&quot;]" data-emphasis="false">
+<text x="0" y="139" class="svg-label">Tasks</text>
+<circle cx="160" cy="134" r="7" class="dot" data-change="1"><title>A batch QA mode: one staging walk covers every task in a batch</title></circle>
+<circle cx="182" cy="134" r="7" class="dot" data-change="2"><title>Epic branches are published and current when work starts</title></circle>
+<circle cx="204" cy="134" r="7" class="dot" data-change="3"><title>A parked delivery merges even when the worker has moved on</title></circle>
+<text x="337" y="139" text-anchor="end" class="svg-count">3</text></g>
+<g data-area="Safety" data-count="1" data-changes="[&quot;Operator-authenticated commands stay out of reach, read-only searches stay allowed&quot;]" data-emphasis="false">
+<text x="0" y="173" class="svg-label">Safety</text>
+<circle cx="160" cy="168" r="7" class="dot" data-change="1"><title>Operator-authenticated commands stay out of reach, read-only searches stay allowed</title></circle>
+<text x="337" y="173" text-anchor="end" class="svg-count">1</text></g></svg><figcaption class="figure-claim">16 changes shipped across 4 areas; Sessions has the most, 9.</figcaption></figure></div>
+<div class="hero-note"><p>One dot, one shipped change. 1 GitHub issue closed with this release, listed in the fixes ledger.</p><a href="#map-data">See every change ↓</a></div></header>
 <main id="content">
 <!-- section: glance -->
 <section class="report-section" data-section="glance"><div class="section-top"><h2>Release at a glance</h2><span class="section-no">01 / 06</span></div>
-<div class="stats"><div class="stat"><span class="stat-value">1</span><span class="stat-label">Verified closures</span><p>Issues referenced by PR #1227 and closed after its merge</p></div>
-<div class="stat"><span class="stat-value">28</span><span class="stat-label">Changelog entries</span><p>2 Added, 3 Changed and 23 Fixed top-level entries in the v3.59.0 CHANGELOG section</p></div>
+<details open id="map-data"><summary>What shipped, by area</summary><p>One dot is one change listed in the v3.59.0 CHANGELOG. Dots count changes, not their size or importance.</p><div class="table-wrap"><table><thead><tr>
+<th scope="col">Area</th>
+<th scope="col" class="num">Changes</th>
+<th scope="col">What changed</th>
+</tr></thead><tbody>
+<tr>
+<th scope="row">Commander</th>
+<td class="num">3</td>
+<td>Commander renders its designed type on every machine; Commander Interrupt names the device holding control; The Write access receipt is clear of the rail&#x27;s fade</td>
+</tr>
+<tr>
+<th scope="row">Sessions</th>
+<td class="num">9</td>
+<td>A rate-limited shutdown no longer leaves a stale agent listed; After /clear the heartbeat stays with the new session; Two supervisors on one clone keep their own Slack watches; <code>cas serve</code> starts while another agent is creating a task; Supervisors get one alert when several workers die together; Stale relays stop reaching the supervisor; The factory loop does no store or file I/O on the input path; Agent tool calls stay under 2 s while the database is busy; An empty <code>prompt_queue.db</code> no longer misleads diagnosis</td>
+</tr>
+<tr>
+<th scope="row">Tasks</th>
+<td class="num">3</td>
+<td>A batch QA mode: one staging walk covers every task in a batch; Epic branches are published and current when work starts; A parked delivery merges even when the worker has moved on</td>
+</tr>
+<tr>
+<th scope="row">Safety</th>
+<td class="num">1</td>
+<td>Operator-authenticated commands stay out of reach, read-only searches stay allowed</td>
+</tr>
+<tr>
+<th scope="row">Total</th>
+<td class="num">16</td>
+<td>4 areas</td>
+</tr>
+</tbody></table></div><p>Source: CHANGELOG <code>CHANGELOG.md</code>, release-notes draft <code>docs/release-notes/2026-10-16-v3.59.0-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.59.0; retrieved 2026-10-16T14:02:54Z.</p></details>
+<div class="stats"><div class="stat"><span class="stat-value">16</span><span class="stat-label">Changes shipped</span><p>1 added, 14 fixed, 1 changed; tests and docs not counted</p></div>
+<div class="stat"><span class="stat-value">1</span><span class="stat-label">GitHub issues closed</span><p>Closed from PR #1227 opening to 15 min after merge</p></div>
 <div class="stat"><span class="stat-value">77.7 → 12.8 ms</span><span class="stat-label">Key to echo, p99</span><p>A keystroke&#x27;s echo under write pressure with 16 agents</p></div>
 <div class="stat"><span class="stat-value">50 → 1 ms</span><span class="stat-label">Control pass, p99</span><p>One daemon loop pass in its worst 5 s window, same load</p></div>
 <div class="stat"><span class="stat-value">2.23 → 1.88 s</span><span class="stat-label">Tool call, p99</span><p>Task and coordination tool calls under the same 16-agent pressure</p></div>
 <div class="stat"><span class="stat-value">54 → 14 ms</span><span class="stat-label">Message, p50</span><p>One unloaded <code>coordination.message</code> call on a single serve</p></div>
 <div class="stat"><span class="stat-value">36 m 48 s</span><span class="stat-label">Cut → published</span><p>Release PR #1227 opened at 08:56:17Z to publication at 09:33:05Z</p></div>
-<div class="stat"><span class="stat-value">3 m 7 s</span><span class="stat-label">Merged → published</span><p>Main landing at 09:29:58Z to release publication at 09:33:05Z</p></div></div><div class="method"><p>Closures and changelog entries are counted separately: a changelog entry is a shipped change, and only an issue referenced by the release PR that closed after the merge counts as a closure. One such issue closed, at 09:35:48 UTC; the section&#x27;s 4 Tests and docs entries are not counted as changelog entries. The latency rows compare a build without the change against a build with it, from the factory&#x27;s load receipts rather than production telemetry. The pressure profile is 16 agents, synthetic writers at 38, 63 and 236 writes/s, and 300 s per phase. Key to echo and control pass compare build 0b85372 (r5) with the C2d build ddce962. Tool call compares C2d with the cas-1bc7 build 3ad81fd, rerun on a quiet host. Message compares the 54 ms baseline with build 004ea9a, with no background writers. Timing endpoints are GitHub&#x27;s PR <code>createdAt</code> and <code>mergedAt</code> and the release <code>publishedAt</code>; cut to main took 33 m 41 s. The merge queue ejected the first attempt on a GitHub macOS runner fault, and the release re-entered it once at 09:14:48Z with no product change. No release-latency receipt was written for this release, so green-to-published and per-stage timings are unavailable.</p></div>
-<details open id="map-data"><summary>Change map · data and reading guide</summary><p>Each equal-area dot represents one issue that release PR #1227 references and that closed after it merged. The figure counts closures, not impact, effort, or severity.</p><div class="table-wrap"><table><caption>Change map data · closed issues by surface</caption><thead><tr>
-<th scope="col">Surface</th>
-<th scope="col" class="num">Issues closed</th>
-<th scope="col">Issue numbers</th>
-</tr></thead><tbody>
-<tr>
-<th scope="row">Sessions</th>
-<td class="num">0</td>
-<td>The typing, tool-call and alert improvements are part of the factory-loop work, whose issue stays open</td>
-</tr>
-<tr>
-<th scope="row">Projects</th>
-<td class="num">1</td>
-<td>#1203</td>
-</tr>
-<tr>
-<th scope="row">Commander</th>
-<td class="num">0</td>
-<td>The bundled fonts, the Interrupt holder and the readable receipt shipped without a GitHub issue</td>
-</tr>
-<tr>
-<th scope="row">Total</th>
-<td class="num">1</td>
-<td>1 issue-bearing surface</td>
-</tr>
-</tbody></table></div><p>Sources: <a href="https://github.com/Richards-LLC/cassy/pull/1227">release PR #1227</a>, <a href="https://github.com/Richards-LLC/cassy/blob/42dabfb3744ef36de3f63809efe9df5611d98e0f/CHANGELOG.md">CHANGELOG at the release commit</a>, and the linked issue record in the fixes ledger. Retrieved 16 October 2026 at 09:38 UTC.</p></details></section>
+<div class="stat"><span class="stat-value">3 m 7 s</span><span class="stat-label">Merged → published</span><p>Main landing at 09:29:58Z to release publication at 09:33:05Z</p></div></div><div class="method"><p>Changes and GitHub issues are counted separately. A change is one titled entry in the v3.59.0 CHANGELOG section; tests and documentation entries are listed under the hood but not counted. A GitHub issue counts when release PR #1227 or the CHANGELOG section references it and it closed between the PR opening (08:56:17Z) and 15 minutes after its merge (09:44:58Z). Issues are closed by hand shortly after the merge, so a report run inside that window waits for referenced issues that are still open. The latency rows compare a build without the change against a build with it, from the factory&#x27;s load receipts rather than production telemetry: 16 agents, synthetic writers at 38, 63 and 236 writes/s, and 300 s per phase. Key to echo and control pass compare build 0b85372 with ddce962; tool call compares ddce962 with 3ad81fd, rerun on a quiet host; message compares the 54 ms baseline with 004ea9a, with no background writers. The cut and merge rows use GitHub&#x27;s PR <code>createdAt</code> and <code>mergedAt</code> and the release <code>publishedAt</code>. Not measured for this release: green to published, request to published, blockers, lesson recurrence, manual interventions.</p></div></section>
 <!-- section: users -->
 <section class="report-section users" data-section="users"><div class="section-top"><h2>What you can do now</h2><span class="section-no">02 / 06</span></div><section class="theme theme-1"><div class="theme-label"><span class="eyebrow">01</span><h3>Smoother sessions</h3></div><div class="changes">
 <article class="change"><h4>Instant typing</h4><div class="pair"><p class="was"><span class="state">Was</span>with many sessions busy, a keystroke could take about 80 ms to appear.</p><p class="now"><span class="state">Now</span>it appears in about 13 ms.</p></div></article>
 <article class="change"><h4>Faster tools under load</h4><div class="pair"><p class="was"><span class="state">Was</span>tool calls could take over 2 seconds while the database was busy.</p><p class="now"><span class="state">Now</span>they stay under 2 seconds.</p></div></article>
 <article class="change"><h4>Starts reliably</h4><div class="pair"><p class="was"><span class="state">Was</span>a session could fail to start while another was creating a task.</p><p class="now"><span class="state">Now</span>it starts.</p></div></article>
-<article class="change"><h4>One alert for a crash</h4><div class="pair"><p class="was"><span class="state">Was</span>when several helpers stopped at once, you got one alert per helper plus a group alert.</p><p class="now"><span class="state">Now</span>one alert lists each helper&#x27;s last output.</p></div></article>
+<article class="change"><h4>One alert for a crash</h4><div class="pair"><p class="was"><span class="state">Was</span>when several helpers stopped at once you got one alert per helper plus a group alert.</p><p class="now"><span class="state">Now</span>one alert lists each helper&#x27;s last output.</p></div></article>
 <article class="change"><h4>No stale alerts</h4><div class="pair"><p class="was"><span class="state">Was</span>alerts for finished work, moved branches or old checks could arrive hours late.</p><p class="now"><span class="state">Now</span>out-of-date alerts expire quietly, and the banner of undelivered alerts clears itself.</p></div></article>
 <article class="change"><h4>Focus kept on shutdown</h4><div class="pair"><p class="was"><span class="state">Was</span>a project focus chosen just before shutdown could be lost.</p><p class="now"><span class="state">Now</span>it is saved.</p></div></article>
 </div></section>
-<section class="theme theme-2"><div class="theme-label"><span class="eyebrow">02</span><h3>Projects, Slack and the cloud</h3></div><div class="changes">
+<section class="theme theme-2"><div class="theme-label"><span class="eyebrow">02</span><h3>Commander</h3></div><div class="changes">
+<article class="change"><h4>Designed type everywhere</h4><div class="pair"><p class="was"><span class="state">Was</span>Commander used each machine&#x27;s own fallback fonts.</p><p class="now"><span class="state">Now</span>it ships Inter and JetBrains Mono, so it looks the same on every machine.</p></div></article>
+<article class="change"><h4>Interrupt says who has control</h4><div class="pair"><p class="was"><span class="state">Was</span>Interrupt could fail with &quot;Couldn&#x27;t take control&quot; when another device held the session.</p><p class="now"><span class="state">Now</span>it names that device, and an admin pairing takes control and says from whom.</p></div></article>
+<article class="change"><h4>Readable receipts</h4><div class="pair"><p class="was"><span class="state">Was</span>the last line of the Write access receipt sat in a faded edge.</p><p class="now"><span class="state">Now</span>it is fully readable.</p></div></article>
+</div></section>
+<section class="theme theme-3"><div class="theme-label"><span class="eyebrow">03</span><h3>Projects, Slack and the cloud</h3></div><div class="changes">
 <article class="change"><h4>Batch QA</h4><div class="pair"><p class="was"><span class="state">Was</span>every change needed its own QA pass.</p><p class="now"><span class="state">Now</span>a project can choose one review walk for a whole batch of changes.</p></div></article>
 <article class="change"><h4>Two leads, one project</h4><div class="pair"><p class="was"><span class="state">Was</span>starting a second lead session on the same project stopped the first one&#x27;s Slack watches.</p><p class="now"><span class="state">Now</span>each keeps its own.</p></div></article>
 <article class="change"><h4>Clean sign-off</h4><div class="pair"><p class="was"><span class="state">Was</span>a busy cloud could leave a closed session listed for up to a day.</p><p class="now"><span class="state">Now</span>sign-off retries until it goes through, and &quot;rate limited&quot; is named as the cause.</p></div></article>
@@ -139,20 +167,15 @@ pre{background:var(--surface);color:var(--ink);padding:4mm;white-space:pre-wrap}
 <article class="change"><h4>Fresh project branches</h4><div class="pair"><p class="was"><span class="state">Was</span>new work could start from an unpublished or months-old project branch.</p><p class="now"><span class="state">Now</span>the branch is published and brought up to date first.</p></div></article>
 <article class="change"><h4>Finished work merges</h4><div class="pair"><p class="was"><span class="state">Was</span>finished work could not merge while its author had already started on something else.</p><p class="now"><span class="state">Now</span>it merges, and the new work is left untouched.</p></div></article>
 <article class="change"><h4>Safer commands</h4><div class="pair"><p class="was"><span class="state">Was</span>some read commands could be made to run other programs, while harmless searches were refused.</p><p class="now"><span class="state">Now</span>risky options are refused and plain searches work.</p></div></article>
-</div></section>
-<section class="theme theme-3"><div class="theme-label"><span class="eyebrow">03</span><h3>Commander</h3></div><div class="changes">
-<article class="change"><h4>Designed type everywhere</h4><div class="pair"><p class="was"><span class="state">Was</span>Commander used each machine&#x27;s own fallback fonts.</p><p class="now"><span class="state">Now</span>it ships Inter and JetBrains Mono, so it looks the same on every machine.</p></div></article>
-<article class="change"><h4>Interrupt says who has control</h4><div class="pair"><p class="was"><span class="state">Was</span>Interrupt could fail with &quot;Couldn&#x27;t take control&quot; when another device held the session.</p><p class="now"><span class="state">Now</span>it names that device, and an admin pairing takes control and says from whom.</p></div></article>
-<article class="change"><h4>Readable receipts</h4><div class="pair"><p class="was"><span class="state">Was</span>the last line of the Write access receipt sat in a faded edge.</p><p class="now"><span class="state">Now</span>it is fully readable.</p></div></article>
 </div></section></section>
 <!-- section: dev -->
 <section class="report-section dev" data-section="dev"><div class="section-top"><h2>Under the hood</h2><span class="section-no">03 / 06</span></div><section class="theme theme-1"><div class="theme-label"><span class="eyebrow">01</span><h3>Daemon loop (#1211, in part)</h3></div><div class="changes">
 <article class="change"><h4>Relay and director I/O</h4><div class="pair"><p class="was"><span class="state">Was</span>relay, director-inject and director-refresh store I/O ran inline on the loop.</p><p class="now"><span class="state">Now</span>it runs as store-worker jobs.</p></div></article>
-<article class="change"><h4>Spawn and wake gate</h4><div class="pair"><p class="was"><span class="state">Was</span>the per-pass spawn-queue poll and the prompt-queue wake gate blocked the loop.</p><p class="now"><span class="state">Now</span>both run off the loop; key-to-echo p99 under write pressure is 77.7 ms → 12.8 ms.</p></div></article>
+<article class="change"><h4>Spawn and wake gate</h4><div class="pair"><p class="was"><span class="state">Was</span>the per-pass spawn-queue poll and prompt-queue wake gate blocked the loop.</p><p class="now"><span class="state">Now</span>both are off-loop; key-to-echo p99 under write pressure is 77.7 ms → 12.8 ms.</p></div></article>
 <article class="change"><h4>Turn probes</h4><div class="pair"><p class="was"><span class="state">Was</span>the idle-unacked and normal-delivery probes read the agent store and transcripts on the loop.</p><p class="now"><span class="state">Now</span>they run as off-loop relay jobs.</p></div></article>
 <article class="change"><h4>Epic focus</h4><div class="pair"><p class="was"><span class="state">Was</span><code>set_active_epic</code> wrote session metadata on the loop and could drop the last write at shutdown.</p><p class="now"><span class="state">Now</span>the store worker writes it, and shutdown flushes and drains.</p></div></article>
-<article class="change"><h4>Lane enforcement</h4><div class="pair"><p class="was"><span class="state">Was</span>nothing stopped I/O from creeping back onto the input path.</p><p class="now"><span class="state">Now</span><code>enforce_lane</code> panics under the test harness and logs once per site otherwise; a synthetic-PTY load harness writes p99 receipts.</p></div></article>
-<article class="change"><h4>Worker exit</h4><div class="pair"><p class="was"><span class="state">Was</span><code>mark_worker_crashed</code> reaped process groups and checked worktrees inside the PTY exchange.</p><p class="now"><span class="state">Now</span>that runs after the exchange, and names stay reserved until crash cleanup ends.</p></div></article>
+<article class="change"><h4>Lane enforcement</h4><div class="pair"><p class="was"><span class="state">Was</span>nothing stopped I/O from creeping back onto the input path.</p><p class="now"><span class="state">Now</span><code>enforce_lane</code> panics under the test harness and logs once per site otherwise, and a synthetic-PTY load harness writes p99 receipts.</p></div></article>
+<article class="change"><h4>Worker exit</h4><div class="pair"><p class="was"><span class="state">Was</span><code>mark_worker_crashed</code> reaped process groups and checked worktrees inside the PTY exchange.</p><p class="now"><span class="state">Now</span>that runs after the exchange; names stay reserved until crash cleanup ends.</p></div></article>
 </div></section>
 <section class="theme theme-2"><div class="theme-label"><span class="eyebrow">02</span><h3>Store and serve</h3></div><div class="changes">
 <article class="change"><h4>Write lock only on writes</h4><div class="pair"><p class="was"><span class="state">Was</span>prompt-queue opens, inbox stale sweeps, empty drains and the Viktor watch expiry took the SQLite write lock without writing.</p><p class="now"><span class="state">Now</span>they read first; MCP p99 under 16-agent pressure is 2.23 s → 1.88 s.</p></div></article>
@@ -161,54 +184,78 @@ pre{background:var(--surface);color:var(--ink);padding:4mm;white-space:pre-wrap}
 <article class="change"><h4>Empty prompt_queue.db</h4><div class="pair"><p class="was"><span class="state">Was</span>a 0-byte <code>.cas/prompt_queue.db</code> sat beside the live queue in <code>cas.db</code>.</p><p class="now"><span class="state">Now</span>a regular empty file with no sidecars is removed on a writable open.</p></div></article>
 </div></section>
 <section class="theme theme-3"><div class="theme-label"><span class="eyebrow">03</span><h3>Relays and alerts</h3></div><div class="changes">
-<article class="change"><h4>Folded deaths</h4><div class="pair"><p class="was"><span class="state">Was</span>N Critical <code>worker_died</code> relays plus <code>workers_died_together</code>.</p><p class="now"><span class="state">Now</span>one Critical fold per recipient with each worker&#x27;s cleaned tail; the sweep owns recovery, and a give-up is logged.</p></div></article>
-<article class="change"><h4>Lifecycle expiry</h4><div class="pair"><p class="was"><span class="state">Was</span>an <code>awaiting_merge</code> relay for a closed task reached the supervisor 8.5 h late.</p><p class="now"><span class="state">Now</span>terminal-obsolete lifecycle relays expire atomically in every drain, with a durable reason.</p></div></article>
-<article class="change"><h4>Other stale relays</h4><div class="pair"><p class="was"><span class="state">Was</span>CI-red relays for moved heads, verification dispatches past their deadline and old attention alerts were still delivered.</p><p class="now"><span class="state">Now</span>they expire the same way; fresh and uncertain relays stay eligible.</p></div></article>
-<article class="change"><h4>Dead-letter rows</h4><div class="pair"><p class="was"><span class="state">Was</span><code>reminder_fired</code> and <code>task_lifecycle</code> rows were never processed, and the undelivered-relay banner never aged.</p><p class="now"><span class="state">Now</span>rows are reconciled, and the banner is capped.</p></div></article>
+<article class="change"><h4>Folded deaths</h4><div class="pair"><p class="was"><span class="state">Was</span>N Critical <code>worker_died</code> relays plus <code>workers_died_together</code>.</p><p class="now"><span class="state">Now</span>one Critical fold per recipient with each worker&#x27;s cleaned tail; the sweep owns recovery and a give-up is logged.</p></div></article>
+<article class="change"><h4>Lifecycle expiry</h4><div class="pair"><p class="was"><span class="state">Was</span>an <code>awaiting_merge</code> relay for a closed task reached the supervisor 8.5 h late.</p><p class="now"><span class="state">Now</span>terminal-obsolete lifecycle relays expire atomically in every drain with a durable reason.</p></div></article>
+<article class="change"><h4>Other stale relays</h4><div class="pair"><p class="was"><span class="state">Was</span>CI-red for moved heads, verification dispatches past deadline and old attention alerts were still delivered.</p><p class="now"><span class="state">Now</span>they expire the same way; fresh and uncertain relays stay eligible.</p></div></article>
+<article class="change"><h4>Dead-letter rows</h4><div class="pair"><p class="was"><span class="state">Was</span><code>reminder_fired</code> and <code>task_lifecycle</code> rows were never processed, and the undelivered-relay banner never aged.</p><p class="now"><span class="state">Now</span>rows are reconciled and the banner is capped.</p></div></article>
 </div></section>
 <section class="theme theme-4"><div class="theme-label"><span class="eyebrow">04</span><h3>Cloud, Violet and git</h3></div><div class="changes">
-<article class="change"><h4>HTTP 429</h4><div class="pair"><p class="was"><span class="state">Was</span>a 429 at session end was one-shot, leaving the agent listed for up to 24 h.</p><p class="now"><span class="state">Now</span><code>Retry-After</code> or bounded backoff for shutdown, claim release and peer ack, plus a durable shutdown intent and a named &quot;rate limited&quot; health cause.</p></div></article>
+<article class="change"><h4>HTTP 429</h4><div class="pair"><p class="was"><span class="state">Was</span>a 429 on session-end shutdown was one-shot, leaving the agent listed for up to 24 h.</p><p class="now"><span class="state">Now</span><code>Retry-After</code> or bounded backoff for shutdown, claim release and peer ack, plus a durable shutdown intent and a named &quot;rate limited&quot; health cause.</p></div></article>
 <article class="change"><h4>Shutdown snapshot</h4><div class="pair"><p class="was"><span class="state">Was</span>new shutdown intents were detected only by directory mtime.</p><p class="now"><span class="state">Now</span>exact file identity, so a coarse mtime cannot hide a change.</p></div></article>
 <article class="change"><h4>Heartbeat after /clear</h4><div class="pair"><p class="was"><span class="state">Was</span><code>ensure_agent_active</code> moved heartbeat ownership to the fenced old agent.</p><p class="now"><span class="state">Now</span>owner precedence keeps it with the new session.</p></div></article>
-<article class="change"><h4>Violet watches</h4><div class="pair"><p class="was"><span class="state">Was</span><code>watches.json</code> was per clone, so a second daemon stopped a peer&#x27;s watches.</p><p class="now"><span class="state">Now</span>watches are keyed per session, with owner routing and a login retry.</p></div></article>
-<article class="change"><h4>Epic publication</h4><div class="pair"><p class="was"><span class="state">Was</span><code>focus_epic</code> and the first spawn could leave a missing or stale epic branch.</p><p class="now"><span class="state">Now</span>the branch is published to origin and fast-forwarded before lanes are cut.</p></div></article>
-<article class="change"><h4>Dirty reused worktree</h4><div class="pair"><p class="was"><span class="state">Was</span><code>worktree_merge</code> refused a pushed delivery while the worktree held the next task.</p><p class="now"><span class="state">Now</span>it merges the parked SHA through an isolated temporary worktree.</p></div></article>
+<article class="change"><h4>Violet watches</h4><div class="pair"><p class="was"><span class="state">Was</span><code>watches.json</code> was per clone, so a second daemon stopped a peer&#x27;s watches.</p><p class="now"><span class="state">Now</span>watches are keyed per session with owner routing and a login retry.</p></div></article>
+<article class="change"><h4>Epic publication</h4><div class="pair"><p class="was"><span class="state">Was</span><code>focus_epic</code> and the first spawn left a missing or stale epic branch.</p><p class="now"><span class="state">Now</span>the branch is published to origin and fast-forwarded before lanes are cut.</p></div></article>
+<article class="change"><h4>Dirty reused worktree</h4><div class="pair"><p class="was"><span class="state">Was</span><code>worktree_merge</code> refused a pushed delivery when the worker&#x27;s worktree was dirty with its next task.</p><p class="now"><span class="state">Now</span>it merges the parked SHA through an isolated temporary worktree.</p></div></article>
 </div></section>
 <section class="theme theme-5"><div class="theme-label"><span class="eyebrow">05</span><h3>Policy, QA and Commander</h3></div><div class="changes">
-<article class="change"><h4>Command policy</h4><div class="pair"><p class="was"><span class="state">Was</span>base readers and <code>git</code> accepted flags that run other programs, while read-only <code>awk</code>, <code>find … | xargs grep</code> and <code>gh … | grep</code> were refused.</p><p class="now"><span class="state">Now</span>fail-closed per-tool flag allowlists; grep-only <code>xargs</code>; a direct <code>cas config get</code> only.</p></div></article>
+<article class="change"><h4>Command policy</h4><div class="pair"><p class="was"><span class="state">Was</span>base readers and <code>git</code> accepted flags that run other programs, and read-only <code>awk</code>, <code>find | xargs grep</code> and <code>gh | grep</code> were refused.</p><p class="now"><span class="state">Now</span>fail-closed per-tool flag allowlists; grep-only <code>xargs</code>; direct <code>cas config get</code> only.</p></div></article>
 <article class="change"><h4>Batch QA (#1203)</h4><div class="pair"><p class="was"><span class="state">Was</span><code>qa.evidence_gate</code> required a per-task QA bundle.</p><p class="now"><span class="state">Now</span>with <code>qa.mode = &quot;batch&quot;</code>, one immutable batch receipt (ledger, task ids, staging SHA) satisfies each listed task.</p></div></article>
-<article class="change"><h4>Squash and stale-origin closes</h4><div class="pair"><p class="was"><span class="state">Was</span>a squash-merged or stale-origin batch delivery was refused at close.</p><p class="now"><span class="state">Now</span>the squash maps to its anchor and the local target counts; an override never clears batch debt.</p></div></article>
-<article class="change"><h4>Bundled fonts</h4><div class="pair"><p class="was"><span class="state">Was</span>Commander shipped no fonts, so CI and users rendered fallbacks.</p><p class="now"><span class="state">Now</span>Inter and JetBrains Mono woff2 (88,660 B) are served under <code>font-src &#x27;self&#x27;</code>.</p></div></article>
+<article class="change"><h4>Squash and stale-origin closes</h4><div class="pair"><p class="was"><span class="state">Was</span>a squash-merged or stale-origin batch delivery was refused at close.</p><p class="now"><span class="state">Now</span>the squash maps to its anchor and the local target counts; override never clears batch debt.</p></div></article>
+<article class="change"><h4>Bundled fonts</h4><div class="pair"><p class="was"><span class="state">Was</span>Commander shipped no fonts, so CI and users rendered fallbacks.</p><p class="now"><span class="state">Now</span>Inter and JetBrains Mono woff2 (88,660 B) under <code>font-src &#x27;self&#x27;</code>.</p></div></article>
 <article class="change"><h4>Interrupt on 409</h4><div class="pair"><p class="was"><span class="state">Was</span>a refused take showed a generic failure.</p><p class="now"><span class="state">Now</span>the holder is read and named; hub-admin pairings retry with force.</p></div></article>
 <article class="change"><h4>Write access receipt</h4><div class="pair"><p class="was"><span class="state">Was</span>its last line sat in the rail&#x27;s bottom fade at about 3.4:1.</p><p class="now"><span class="state">Now</span>it is clear of the fade.</p></div></article>
-<article class="change"><h4>Deterministic tests</h4><div class="pair"><p class="was"><span class="state">Was</span>the <code>flv2</code> inject and slot-cap tests flaked under parallel load, and the Doctor Neon test leaked MCP children.</p><p class="now"><span class="state">Now</span>both are deterministic and hermetic.</p></div></article>
+<article class="change"><h4>Tests</h4><div class="pair"><p class="was"><span class="state">Was</span><code>flv2</code> inject and slot-cap tests flaked under parallel load, and the Doctor Neon test leaked MCP children.</p><p class="now"><span class="state">Now</span>both are deterministic and hermetic.</p></div></article>
 </div></section></section>
 <!-- section: ledger -->
-<section class="report-section ledger" data-section="ledger"><div class="section-top"><h2>Fixes ledger</h2><span class="section-no">04 / 06</span></div><div class="table-wrap"><table><caption>Issue register · 1 verified closures</caption><thead><tr>
+<section class="report-section ledger" data-section="ledger"><div class="section-top"><h2>Fixes ledger</h2><span class="section-no">04 / 06</span></div><div class="table-wrap"><table><caption>GitHub issues closed with this release · 1</caption><thead><tr>
 <th scope="col">Issue</th>
-<th scope="col">State</th>
+<th scope="col">Title</th>
 <th scope="col">Closed</th>
-<th scope="col">Theme</th>
+<th scope="col">Area</th>
 </tr></thead><tbody>
 <tr>
 <th scope="row"><a href="https://github.com/Richards-LLC/cassy/issues/1203">#1203</a></th>
-<td>CLOSED</td>
+<td>QA: support a batch QA receipt and a project &#x27;batch&#x27; QA mode (one staging walk per batch instead of per-task bundles)</td>
 <td>2026-10-16T09:35:48Z</td>
-<td>Projects</td>
+<td>Tasks</td>
 </tr>
-</tbody></table></div></section>
+</tbody></table></div>
+<p>Referenced and still open at retrieval, so not counted: <a href="https://github.com/Richards-LLC/cassy/issues/1211">#1211</a>.</p>
+<p>Referenced but closed outside this release&#x27;s counting window, so not counted: <a href="https://github.com/Richards-LLC/cassy/issues/1225">#1225</a>.</p></section>
 <!-- section: install -->
 <section class="report-section install" data-section="install"><div class="section-top"><h2>Install</h2><span class="section-no">05 / 06</span></div>
 <svg class="stitch" viewBox="0 0 132 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="currentColor"/><circle cx="31" cy="8" r="5" fill="currentColor"/><circle cx="54" cy="8" r="5" fill="currentColor"/><circle cx="77" cy="8" r="5" fill="currentColor"/><circle cx="100" cy="8" r="5" fill="currentColor"/><circle cx="123" cy="8" r="5" fill="currentColor"/></svg><pre><code>cas update --yes --version 3.59.0</code></pre>
-<ul>
-<li>macOS ARM64 — <a href="https://github.com/Richards-LLC/cassy/releases/download/v3.59.0/cas-aarch64-apple-darwin.tar.gz">download archive</a>, SHA-256 <code>d67984ae8d0540b602b8d37b158299d9977d786cdb636fcade161e854dae5ded</code>, 33,166,313 bytes.</li>
-<li>Linux x86_64 — <a href="https://github.com/Richards-LLC/cassy/releases/download/v3.59.0/cas-x86_64-unknown-linux-gnu.tar.gz">download archive</a>, SHA-256 <code>df8f3818d3d5492d08f77f245fe542f635d861aa4373ffc47258f1e77b000c14</code>, 37,563,538 bytes.</li>
-</ul></section>
+<div class="table-wrap"><table><caption>Release assets</caption><thead><tr>
+<th scope="col">Asset</th>
+<th scope="col">Digest</th>
+<th scope="col" class="num">Size</th>
+</tr></thead><tbody>
+<tr>
+<th scope="row">cas-aarch64-apple-darwin.tar.gz</th>
+<td>sha256:d67984ae8d0540b602b8d37b158299d9977d786cdb636fcade161e854dae5ded</td>
+<td class="num">33166313</td>
+</tr>
+<tr>
+<th scope="row">cas-x86_64-unknown-linux-gnu.tar.gz</th>
+<td>sha256:df8f3818d3d5492d08f77f245fe542f635d861aa4373ffc47258f1e77b000c14</td>
+<td class="num">37563538</td>
+</tr>
+</tbody></table></div></section>
 <!-- section: provenance -->
-<section class="report-section provenance" data-section="provenance"><div class="section-top"><h2>Evidence and scope</h2><span class="section-no">06 / 06</span></div><p>The report covers the v3.59.0 runtime published from release commit <code>42dabfb3744ef36de3f63809efe9df5611d98e0f</code> (tag v3.59.0). The closure window is the issues referenced by <a href="https://github.com/Richards-LLC/cassy/pull/1227">PR #1227</a> that closed after its merge at 09:29:58Z on 16 October 2026. The changelog is at <a href="https://github.com/Richards-LLC/cassy/blob/42dabfb3744ef36de3f63809efe9df5611d98e0f/CHANGELOG.md">the release commit</a>, the published release is <a href="https://github.com/Richards-LLC/cassy/releases/tag/v3.59.0">v3.59.0</a>, and the user-facing wording follows the release-notes draft <code>docs/release-notes/2026-10-16-v3.59.0-slack.md</code>.</p>
-<p>Timing sources: GitHub PR #1227 (<code>createdAt</code> 08:56:17Z, <code>mergedAt</code> 09:29:58Z) and release <code>publishedAt</code> 09:33:05Z. The merge queue ejected the first attempt on a GitHub macOS runner fault: no log was uploaded, and Release Prebuild macOS built fine. The release re-entered the queue once, at 09:14:48Z, with no product change. The release was installed on the release host about 18 s after publication (09:33:23Z). No release-latency receipt exists under <code>~/.cas/artifacts/release/</code> for v3.59.0, so green-to-published, request-to-published and stage timings are unavailable, and no budget verdict is claimed. Retrieved 16 October 2026 at 09:38 UTC.</p>
-<p>Latency sources: the factory loop v2 load receipts. Key-to-echo and control-pass p99 come from <code>load-flv2-c2d-ddce962-n16.json</code> (16 of 16 agents live, writers delivered at 38.1, 63.1 and 236.4 writes/s) against the r5 receipt for build 0b85372. Tool-call p99 comes from the cas-1bc7 rerun on a quiet host, <code>load-c1bc7-3ad81fd-r2-n16.json</code>, against the C2d pressure phase. Message p50 comes from the cas-1bc7 single-serve check on build 004ea9a (20 calls per tool). All are pre-release candidate builds of this release&#x27;s changes, not the published binary.</p>
-<p>Not counted as closures: #1225 closed on 16 October at 05:11:12Z with v3.58.0, before this release; this release ships its follow-up, merging a parked delivery from a dirty worktree. #1211 (the factory TUI architecture) is still open; the daemon-loop work here addresses it in part. Dots count issue closures, not impact, effort, or severity.</p></section>
+<section class="report-section provenance" data-section="provenance"><div class="section-top"><h2>Evidence and scope</h2><span class="section-no">06 / 06</span></div><p>Retrieved: 2026-10-16T14:02:54Z.</p>
+<p>Source: CHANGELOG <code>CHANGELOG.md</code>, release-notes draft <code>docs/release-notes/2026-10-16-v3.59.0-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.59.0; retrieved 2026-10-16T14:02:54Z.</p>
+<p>Each change is placed in a product area by the words in its title, then its text; a change that matches no area is listed under Other. Correct an area in the Change map table before rendering.</p>
+<p>Release PR: &lt;https://github.com/Richards-LLC/cassy/pull/1227&gt; (merged 2026-10-16T09:29:58Z).</p>
+<p>Release-notes draft: <code>docs/release-notes/2026-10-16-v3.59.0-slack.md</code>.</p>
+<p>CHANGELOG source: <code>CHANGELOG.md</code>.</p>
+<p>GitHub release: &lt;https://github.com/Richards-LLC/cassy/releases/tag/v3.59.0&gt; (published or unknown).</p>
+<p>Release receipt: unavailable.</p>
+<h3>Pipeline latency</h3>
+<p>Stage timings are unavailable: the latency receipt records no STAGE_SECS.</p>
+<p>Source warnings:</p>
+<ul>
+<li>release receipts: green-to-published latency is unavailable under ~/.cas/artifacts/release/</li>
+</ul></section>
 </main><footer class="page-footer"><span>Cassy v3.59.0 / Release report</span><span><a href="v3.59.0.md">Markdown source</a> · <a href="v3.59.0.pdf">Print edition</a></span></footer>
 <script>addEventListener("beforeprint",()=>document.querySelectorAll("details").forEach(panel=>{panel.open=true}));</script>
 </body></html>

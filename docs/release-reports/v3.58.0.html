@@ -4,7 +4,7 @@
      section data-section markers are stable; preserve their order. -->
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light dark"><title>Cassy v3.58.0 · Release report · Published 16 October 2026 · 05:07:27 UTC · release commit <code>a80e319f127df8e1c64e9c1932b9ab301364689d</code>.</title>
+<meta name="color-scheme" content="light dark"><title>Cassy v3.58.0 · Release report · Published 16 October 2026 · 05:07 UTC</title>
 <style>
 :root{ --bg:#F7F4EE;--surface:#FFFFFF;--surface-hero:#F1E7DD;--line:#DAD3C7;--line-strong:#8F8371;--ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--verdict-soft:#DDE1F7;--evidence:#5A5F6E;--action:#2E3A9F;--good:#226845;--warning:#7F5504;--danger:#B3261E;--good-tint:rgba(34,104,69,0.10);--warning-tint:rgba(127,85,4,0.10);--danger-tint:rgba(179,38,30,0.10);--focus:#2E3A9F; --font-display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;--font-body:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--font-mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color-scheme:light dark}
 @media(prefers-color-scheme:dark){:root{ --bg:#12141A;--surface:#191C24;--surface-hero:#241E1E;--line:#2B3040;--line-strong:#6B7390;--ink:#E9E6E0;--ink-muted:#A3A7B4;--verdict:#A9B3FF;--verdict-soft:rgba(169,179,255,0.16);--evidence:#A3A7B4;--action:#A9B3FF;--good:#5FC492;--warning:#E2B14D;--danger:#EF7B72;--good-tint:rgba(95,196,146,0.14);--warning-tint:rgba(226,177,77,0.14);--danger-tint:rgba(239,123,114,0.14);--focus:#A9B3FF }}
@@ -15,12 +15,12 @@ a{color:var(--action);text-underline-offset:3px;overflow-wrap:anywhere}a:hover{t
 main{max-width:1120px;margin:auto;padding:0 24px}.hero{background:var(--surface-hero);color:var(--ink);border-bottom:3px solid var(--verdict);padding:48px max(24px,calc((100vw - 1072px)/2)) 24px}
 .eyebrow{font:600 12px/1.5 var(--font-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted)}.folio{display:flex;justify-content:space-between;gap:16px;margin:0 0 32px}.hero-grid{display:grid;grid-template-columns:1.1fr 1fr;gap:48px;align-items:center}
 h1{font:400 clamp(40px,4.6vw,60px)/1.06 var(--font-display);letter-spacing:-.025em;margin:0;max-width:19ch}.hero h1 em{font-weight:400;color:var(--verdict)}h2{font:600 27px/1.2 var(--font-body);letter-spacing:-.015em;margin:0 0 24px}h3{font:600 21px/1.35 var(--font-body);margin:4px 0 16px}h4{font-size:17px;line-height:1.4;margin:0 0 12px;font-weight:600}p{margin:0 0 16px;max-width:68ch}figure{margin:0}svg{display:block;width:100%;height:auto}.svg-label,.svg-count{font:15px var(--font-body);fill:var(--ink)}.svg-count{font-family:var(--font-mono)}.svg-meta{font:10px var(--font-mono);fill:var(--ink-muted)}.svg-note{font:11px var(--font-body);fill:var(--ink-muted)}.dot{fill:var(--evidence)}.decisive{fill:var(--verdict)}.figure-claim{font-size:14px;line-height:1.45;margin:8px 0 0;color:var(--ink-muted)}.hero-note{border-top:1px solid var(--line-strong);margin:32px 0 0;padding-top:16px;display:flex;gap:24px;justify-content:space-between;font-size:14px;color:var(--ink-muted)}.hero-note p{margin:0}.hero-note a{white-space:nowrap}
-.report-section{padding:64px 0;border-bottom:1px solid var(--line-strong)}.section-top{display:flex;justify-content:space-between;gap:16px}.section-no{white-space:nowrap;font:14px var(--font-mono);color:var(--ink-muted)}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin-bottom:24px}.stat{border-left:1px solid var(--line-strong);padding-left:16px}.stat:first-child{border:0;padding:0}.stat-value{display:block;font:400 44px/1.1 var(--font-display);letter-spacing:-.025em;margin-bottom:8px}.stat-label{display:block;font-weight:600;margin-bottom:8px}.stat p{font-size:12px;line-height:1.5;color:var(--ink-muted);margin:0}.method{font-size:14px;color:var(--ink-muted)}details{margin-top:24px}summary{cursor:pointer;font-weight:600;color:var(--action)}details p{font-size:14px;margin-top:16px}.table-wrap{overflow-x:auto;margin:24px 0}table{width:100%;border-collapse:collapse;text-align:left;font-size:14px}caption{text-align:left;color:var(--ink-muted);font-size:14px;margin-bottom:12px}th,td{padding:12px 12px 12px 0;border-bottom:1px solid var(--line);vertical-align:top}th{font-weight:500}thead th{font:600 11px/1.6 var(--font-mono);letter-spacing:.05em;text-transform:uppercase;border-bottom:1px solid var(--line-strong)}.num{text-align:right;font-variant-numeric:tabular-nums}tbody th{min-width:56px}tbody tr:last-child td,tbody tr:last-child th{border-bottom:1px solid var(--line-strong)}code,pre{font-family:var(--font-mono);font-size:.86em}code{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:24px 0;padding:20px;border-left:3px solid var(--verdict);background:var(--surface);color:var(--ink)}
+.report-section{padding:64px 0;border-bottom:1px solid var(--line-strong)}.section-top{display:flex;justify-content:space-between;gap:16px}.section-no{white-space:nowrap;font:14px var(--font-mono);color:var(--ink-muted)}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin-bottom:24px}.stat{border-left:1px solid var(--line-strong);padding-left:16px}.stat:first-child{border:0;padding:0}.stat-value{display:block;font:400 44px/1.1 var(--font-display);letter-spacing:-.025em;margin-bottom:8px}.stat-label{display:block;font-weight:600;margin-bottom:8px}.stat p{font-size:12px;line-height:1.5;color:var(--ink-muted);margin:0}.method{font-size:14px;color:var(--ink-muted)}details{margin-top:24px}details+.stats{margin-top:40px}#map-data th:first-child{width:22%}#map-data th:nth-child(2){width:12%}summary{cursor:pointer;font-weight:600;color:var(--action)}details p{font-size:14px;margin-top:16px}.table-wrap{overflow-x:auto;margin:24px 0}table{width:100%;border-collapse:collapse;text-align:left;font-size:14px}caption{text-align:left;color:var(--ink-muted);font-size:14px;margin-bottom:12px}th,td{padding:12px 12px 12px 0;border-bottom:1px solid var(--line);vertical-align:top}th{font-weight:500}thead th{font:600 11px/1.6 var(--font-mono);letter-spacing:.05em;text-transform:uppercase;border-bottom:1px solid var(--line-strong)}.num{text-align:right;font-variant-numeric:tabular-nums}tbody th{min-width:56px}tbody tr:last-child td,tbody tr:last-child th{border-bottom:1px solid var(--line-strong)}code,pre{font-family:var(--font-mono);font-size:.86em}code{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:24px 0;padding:20px;border-left:3px solid var(--verdict);background:var(--surface);color:var(--ink)}
 .theme{padding:32px 0;border-top:1px solid var(--line);display:grid;grid-template-columns:220px 1fr;gap:48px}.theme:first-child{border-top:0;padding-top:0}.change{padding:0 0 24px;margin:0 0 24px;border-bottom:1px solid var(--line)}.change:last-child{margin:0;padding:0;border:0}.pair{display:grid;grid-template-columns:1fr 1.25fr;gap:24px}.pair p{font-size:15px;line-height:1.6;margin:0}.was{color:var(--ink-muted)}.state{display:block;font:600 10px/1.8 var(--font-mono);letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px}.now .state{color:var(--verdict)}
 .users .theme-1 .theme-label{padding:24px;background:var(--surface-hero);color:var(--ink);align-self:start;border-left:3px solid var(--verdict)}.users .theme-2{grid-template-columns:1fr}.users .theme-2 .theme-label{display:flex;gap:16px;align-items:baseline}.users .theme-2 .pair{grid-template-columns:1fr 1fr}.users .theme-2 .change{display:grid;grid-template-columns:220px 1fr;gap:48px}.users .theme-4{grid-template-columns:1fr}.users .theme-4 .changes{display:grid;grid-template-columns:1fr 1fr;gap:24px}.users .theme-4 .change{padding:24px;background:var(--surface);color:var(--ink);border:0;margin:0}.users .theme-4 .pair{display:block}.users .theme-4 .was{margin-bottom:16px}
 .dev .theme{gap:32px}.dev .change{display:grid;grid-template-columns:150px 1fr;gap:24px;margin:0 0 16px;padding-bottom:16px}.dev h4{font-size:14px}.dev .pair{display:block}.dev .pair p{font-size:14px}.dev .was{margin-bottom:4px}.dev .state{display:inline;margin-right:8px}.dev .changes>p{font-size:14px;color:var(--ink-muted)}.install pre{font-size:32px}.install h3{margin-top:32px}.install code{word-break:break-all}.stitch{width:132px;color:var(--verdict);margin-bottom:24px}.provenance{font-size:14px}.provenance pre{font-size:12px}.provenance p{max-width:90ch}.page-footer{max-width:1120px;margin:auto;padding:32px 24px 48px;display:flex;justify-content:space-between;gap:24px;font-size:12px;color:var(--ink-muted)}
 @media(max-width:820px){.hero-grid{gap:24px}.theme{grid-template-columns:160px 1fr;gap:24px}.users .theme-2 .change{grid-template-columns:160px 1fr;gap:24px}.dev .theme,.dev .change{grid-template-columns:1fr;gap:8px}.stats{gap:16px}.stat-value{font-size:34px}}
-@media(max-width:600px){main{padding:0 24px}.hero{padding:24px 24px 20px}.folio{display:block;margin-bottom:24px}.folio span{display:block}.hero-grid{grid-template-columns:1fr;gap:24px}h1{font-size:40px;max-width:19ch}.hero figure{max-width:400px}.hero-note{display:block;margin-top:20px;padding-top:12px;font-size:12px}.hero-note a{display:inline-block;margin-top:8px}.figure-claim{font-size:12px}.report-section{padding:40px 0}.stats{grid-template-columns:1fr 1fr;gap:24px}.stat:nth-child(3){border:0;padding:0}.stat-value{font-size:38px}.theme,.users .theme-2 .change{grid-template-columns:1fr;gap:16px}.pair,.users .theme-2 .pair{grid-template-columns:1fr;gap:12px}.users .theme-1 .theme-label{padding:16px}.users .theme-4 .changes{grid-template-columns:1fr}.theme{padding:24px 0}.theme-label h3{margin-bottom:4px}.change{margin-bottom:20px;padding-bottom:20px}.users .theme-2 .theme-label{display:block}.table-wrap{margin:20px 0}td,th{padding-right:10px;font-size:12px}thead th{font-size:10px}.ledger td:last-child{overflow-wrap:anywhere;width:24%}.page-footer{display:block}.page-footer span{display:block;margin-bottom:8px}.section-top{gap:8px}h2{font-size:25px}.install pre{font-size:27px}}
+@media(max-width:600px){main{padding:0 24px}.hero{padding:24px 24px 20px}.folio{display:block;margin-bottom:24px}.folio span{display:block}.hero-grid{grid-template-columns:1fr;gap:24px}h1{font-size:34px;max-width:19ch}.hero figure{max-width:400px}.hero-note{display:block;margin-top:20px;padding-top:12px;font-size:12px}.hero-note a{display:inline-block;margin-top:8px}.figure-claim{font-size:12px}.report-section{padding:40px 0}.stats{grid-template-columns:1fr 1fr;gap:24px}.stat:nth-child(3){border:0;padding:0}.stat-value{font-size:38px}.theme,.users .theme-2 .change{grid-template-columns:1fr;gap:16px}.pair,.users .theme-2 .pair{grid-template-columns:1fr;gap:12px}.users .theme-1 .theme-label{padding:16px}.users .theme-4 .changes{grid-template-columns:1fr}.theme{padding:24px 0}.theme-label h3{margin-bottom:4px}.change{margin-bottom:20px;padding-bottom:20px}.users .theme-2 .theme-label{display:block}.table-wrap{margin:20px 0}td,th{padding-right:10px;font-size:12px}thead th{font-size:10px}.ledger td:last-child{overflow-wrap:anywhere;width:24%}.page-footer{display:block}.page-footer span{display:block;margin-bottom:8px}.section-top{gap:8px}h2{font-size:25px}.install pre{font-size:27px}}
 
 @page{margin:15mm}
 @media print{
@@ -34,7 +34,7 @@ main{max-width:none;padding:0}.skip{display:none}
 .report-section{padding:7mm 0 0;border:0;break-before:auto}
 .section-top{break-after:avoid}h2{font-size:20pt;margin-bottom:5mm}
 h3{font-size:14pt}h4{font-size:10pt}h2,h3,h4{break-after:avoid}p{max-width:none;orphans:3;widows:3}
-.stats{gap:5mm;break-inside:avoid}.stat-value{font-size:25pt}.stat p{font-size:8pt}.stat-label{font-size:9pt}
+.stats{gap:5mm;break-inside:auto}.stat{break-inside:avoid}.stat-value{font-size:25pt}.stat p{font-size:8pt}.stat-label{font-size:9pt}
 .method,details p,caption{font-size:8pt}summary{font-size:9pt}
 .table-wrap{overflow:visible;margin:5mm 0}table{font-size:9pt;table-layout:fixed}
 thead{display:table-header-group}th,td{padding:2mm;font-size:8pt;overflow-wrap:anywhere}
@@ -63,63 +63,121 @@ pre{background:var(--surface);color:var(--ink);padding:4mm;white-space:pre-wrap}
 </style></head><body>
 <a class="skip" href="#content">Skip to release details</a>
 <!-- section: hero -->
-<header class="hero" data-section="hero"><div class="folio eyebrow"><span>Cassy v3.58.0 / Release notes</span><span>Published 16 October 2026 · 05:07:27 UTC · release commit <code>a80e319f127df8e1c64e9c1932b9ab301364689d</code>.</span></div>
+<header class="hero" data-section="hero"><div class="folio eyebrow"><span>Cassy v3.58.0 / Release notes</span><span>Published 16 October 2026 · 05:07 UTC</span></div>
 <div class="hero-grid"><h1>Messages reach busy workers at their next step, supervisors stop nagging about work that has already landed, and Commander keeps your place while you read earlier turns.</h1><figure>
-<!-- Change-map contract v1: each g[data-surface] has data-count (integer),
-     data-issues (JSON string array), data-emphasis (true/false). Every circle
-     carries data-issue; one equal-area circle per verified closure. Zero rows
-     stay labelled. SVG description and adjacent table carry identical data. -->
-<svg viewBox="0 0 340 166" role="img" aria-labelledby="map-title map-desc" data-change-map="1" data-total="3">
-<title id="map-title">Messages lead the closure stitch with 2 of 3 verified closures; the third stops a false merge nag.</title><desc id="map-desc">Messages 2, Stall checks 1, Commander 0. Each filled circle represents one closed issue. Total 3.</desc>
-<text x="0" y="16" class="svg-meta">SURFACE</text><text x="337" y="16" text-anchor="end" class="svg-meta">CLOSED</text>
-<g data-surface="Messages" data-count="2" data-issues="[&quot;1196&quot;, &quot;1223&quot;]" data-emphasis="true">
-<text x="0" y="51" class="svg-label">Messages</text>
-<circle cx="140" cy="46" r="7" class="decisive" data-issue="1196"><title>Issue #1196</title></circle>
-<circle cx="165" cy="46" r="7" class="decisive" data-issue="1223"><title>Issue #1223</title></circle>
+<!-- Change-map contract v2: each g[data-area] has data-count (integer >= 1),
+     data-changes (JSON string array of plain-language change titles) and
+     data-emphasis (true/false). Every circle carries data-change and a title;
+     one equal-area circle per shipped change. Areas without changes are not
+     drawn. v1 sources draw g[data-surface] with data-issues and data-issue
+     circles instead. The SVG description and adjacent table carry the data. -->
+<svg viewBox="0 0 340 304" role="img" aria-labelledby="map-title map-desc" data-change-map="1" data-total="28">
+<title id="map-title">28 changes shipped across 7 areas; Sessions has the most, 14.</title><desc id="map-desc">Commander 2, Sessions 14, Tasks 5, Messages 3, Releases 1, Slack and Cloud 2, Other 1. Each filled circle represents one shipped change. Total 28.</desc>
+<text x="0" y="16" class="svg-meta">AREA</text><text x="337" y="16" text-anchor="end" class="svg-meta">CHANGES</text>
+<g data-area="Commander" data-count="2" data-changes="[&quot;Commander keeps your place when you load earlier turns&quot;, &quot;Commander permission notes give one instruction that works&quot;]" data-emphasis="false">
+<text x="0" y="51" class="svg-label">Commander</text>
+<circle cx="160" cy="46" r="7" class="dot" data-change="1"><title>Commander keeps your place when you load earlier turns</title></circle>
+<circle cx="182" cy="46" r="7" class="dot" data-change="2"><title>Commander permission notes give one instruction that works</title></circle>
 <text x="337" y="51" text-anchor="end" class="svg-count">2</text></g>
-<g data-surface="Stall checks" data-count="1" data-issues="[&quot;1225&quot;]" data-emphasis="false">
-<text x="0" y="91" class="svg-label">Stall checks</text>
-<circle cx="140" cy="86" r="7" class="dot" data-issue="1225"><title>Issue #1225</title></circle>
-<text x="337" y="91" text-anchor="end" class="svg-count">1</text></g>
-<g data-surface="Commander" data-count="0" data-issues="[]" data-emphasis="false">
-<text x="0" y="131" class="svg-label">Commander</text>
-<text x="134" y="130" class="svg-note">no listed issues</text>
-<text x="337" y="131" text-anchor="end" class="svg-count">0</text></g></svg><figcaption class="figure-claim">Messages lead the closure stitch with 2 of 3 verified closures; the third stops a false merge nag.</figcaption></figure></div>
-<div class="hero-note"><p>One dot, one closed issue. 2 issue-bearing surfaces.</p><a href="#map-data">Read the map data ↓</a></div></header>
+<g data-area="Sessions" data-count="14" data-changes="[&quot;Busy Claude workers see supervisor messages at their next tool call&quot;, &quot;Sending to a busy worker says when the message will arrive&quot;, &quot;Replies thread between supervisors and workers&quot;, &quot;Reminders wake an idle supervisor&quot;, &quot;Peer messages sent during a supervisor restart are delivered&quot;, &quot;Supervisors hand off epics and hear about conflicts&quot;, &quot;Dead workers&#x27; cloud claims no longer block their replacement&quot;, &quot;Quiet-worker alerts skip busy workers&quot;, &quot;Supervisor stall nudges stay quiet when nothing is stalled&quot;, &quot;Respawning a worker by name reuses its kept worktree&quot;, &quot;Recycled Claude workers come back on Claude&quot;, &quot;Factory loop I/O moves off the TUI thread&quot;, &quot;Worker test proofs run without the host&#x27;s installed tools&quot;, &quot;Multi-supervisor coordination design spec&quot;]" data-emphasis="true">
+<text x="0" y="85" class="svg-label">Sessions</text>
+<circle cx="160" cy="80" r="7" class="decisive" data-change="1"><title>Busy Claude workers see supervisor messages at their next tool call</title></circle>
+<circle cx="182" cy="80" r="7" class="decisive" data-change="2"><title>Sending to a busy worker says when the message will arrive</title></circle>
+<circle cx="204" cy="80" r="7" class="decisive" data-change="3"><title>Replies thread between supervisors and workers</title></circle>
+<circle cx="226" cy="80" r="7" class="decisive" data-change="4"><title>Reminders wake an idle supervisor</title></circle>
+<circle cx="248" cy="80" r="7" class="decisive" data-change="5"><title>Peer messages sent during a supervisor restart are delivered</title></circle>
+<circle cx="270" cy="80" r="7" class="decisive" data-change="6"><title>Supervisors hand off epics and hear about conflicts</title></circle>
+<circle cx="292" cy="80" r="7" class="decisive" data-change="7"><title>Dead workers&#x27; cloud claims no longer block their replacement</title></circle>
+<circle cx="160" cy="100" r="7" class="decisive" data-change="8"><title>Quiet-worker alerts skip busy workers</title></circle>
+<circle cx="182" cy="100" r="7" class="decisive" data-change="9"><title>Supervisor stall nudges stay quiet when nothing is stalled</title></circle>
+<circle cx="204" cy="100" r="7" class="decisive" data-change="10"><title>Respawning a worker by name reuses its kept worktree</title></circle>
+<circle cx="226" cy="100" r="7" class="decisive" data-change="11"><title>Recycled Claude workers come back on Claude</title></circle>
+<circle cx="248" cy="100" r="7" class="decisive" data-change="12"><title>Factory loop I/O moves off the TUI thread</title></circle>
+<circle cx="270" cy="100" r="7" class="decisive" data-change="13"><title>Worker test proofs run without the host&#x27;s installed tools</title></circle>
+<circle cx="292" cy="100" r="7" class="decisive" data-change="14"><title>Multi-supervisor coordination design spec</title></circle>
+<text x="337" y="85" text-anchor="end" class="svg-count">14</text></g>
+<g data-area="Tasks" data-count="5" data-changes="[&quot;Merge requests show the worker&#x27;s proof&quot;, &quot;A parked task merges at its reviewed commit after the next task starts&quot;, &quot;Epic close ignores reused lanes&#x27; commits for other tasks&quot;, &quot;The loaded-proof close gate accepts non-Rust receipts and explains refusals&quot;, &quot;Terminal QA runs through a symlinked skills folder&quot;]" data-emphasis="false">
+<text x="0" y="139" class="svg-label">Tasks</text>
+<circle cx="160" cy="134" r="7" class="dot" data-change="1"><title>Merge requests show the worker&#x27;s proof</title></circle>
+<circle cx="182" cy="134" r="7" class="dot" data-change="2"><title>A parked task merges at its reviewed commit after the next task starts</title></circle>
+<circle cx="204" cy="134" r="7" class="dot" data-change="3"><title>Epic close ignores reused lanes&#x27; commits for other tasks</title></circle>
+<circle cx="226" cy="134" r="7" class="dot" data-change="4"><title>The loaded-proof close gate accepts non-Rust receipts and explains refusals</title></circle>
+<circle cx="248" cy="134" r="7" class="dot" data-change="5"><title>Terminal QA runs through a symlinked skills folder</title></circle>
+<text x="337" y="139" text-anchor="end" class="svg-count">5</text></g>
+<g data-area="Messages" data-count="3" data-changes="[&quot;Polled messages that were never handled come back once&quot;, &quot;Abandoned-message notices fold into one, and operator sends fail fast&quot;, &quot;The coordination tool states its message limits and reminder rules&quot;]" data-emphasis="false">
+<text x="0" y="173" class="svg-label">Messages</text>
+<circle cx="160" cy="168" r="7" class="dot" data-change="1"><title>Polled messages that were never handled come back once</title></circle>
+<circle cx="182" cy="168" r="7" class="dot" data-change="2"><title>Abandoned-message notices fold into one, and operator sends fail fast</title></circle>
+<circle cx="204" cy="168" r="7" class="dot" data-change="3"><title>The coordination tool states its message limits and reminder rules</title></circle>
+<text x="337" y="173" text-anchor="end" class="svg-count">3</text></g>
+<g data-area="Releases" data-count="1" data-changes="[&quot;Release latency receipts work with main-push publication&quot;]" data-emphasis="false">
+<text x="0" y="207" class="svg-label">Releases</text>
+<circle cx="160" cy="202" r="7" class="dot" data-change="1"><title>Release latency receipts work with main-push publication</title></circle>
+<text x="337" y="207" text-anchor="end" class="svg-count">1</text></g>
+<g data-area="Slack and Cloud" data-count="2" data-changes="[&quot;`cas violet` uses the saved Violet credentials&quot;, &quot;The Cassy Cloud apps menu closes after Explorer opens&quot;]" data-emphasis="false">
+<text x="0" y="241" class="svg-label">Slack and Cloud</text>
+<circle cx="160" cy="236" r="7" class="dot" data-change="1"><title>`cas violet` uses the saved Violet credentials</title></circle>
+<circle cx="182" cy="236" r="7" class="dot" data-change="2"><title>The Cassy Cloud apps menu closes after Explorer opens</title></circle>
+<text x="337" y="241" text-anchor="end" class="svg-count">2</text></g>
+<g data-area="Other" data-count="1" data-changes="[&quot;CLI error lines and `cas config list` are readable on light themes&quot;]" data-emphasis="false">
+<text x="0" y="275" class="svg-label">Other</text>
+<circle cx="160" cy="270" r="7" class="dot" data-change="1"><title>CLI error lines and `cas config list` are readable on light themes</title></circle>
+<text x="337" y="275" text-anchor="end" class="svg-count">1</text></g></svg><figcaption class="figure-claim">28 changes shipped across 7 areas; Sessions has the most, 14.</figcaption></figure></div>
+<div class="hero-note"><p>One dot, one shipped change. 3 GitHub issues closed with this release, listed in the fixes ledger.</p><a href="#map-data">See every change ↓</a></div></header>
 <main id="content">
 <!-- section: glance -->
 <section class="report-section" data-section="glance"><div class="section-top"><h2>Release at a glance</h2><span class="section-no">01 / 06</span></div>
-<div class="stats"><div class="stat"><span class="stat-value">3</span><span class="stat-label">Verified closures</span><p>Issues referenced by PR #1226 and closed after its merge</p></div>
-<div class="stat"><span class="stat-value">38</span><span class="stat-label">Changelog entries</span><p>2 Added, 3 Changed and 33 Fixed top-level entries in the v3.58.0 CHANGELOG section</p></div>
-<div class="stat"><span class="stat-value">80 m 27 s</span><span class="stat-label">Cut → published</span><p>Release PR #1226 opened at 03:47:00Z to publication at 05:07:27Z</p></div>
-<div class="stat"><span class="stat-value">3 m 13 s</span><span class="stat-label">Merged → published</span><p>Main landing at 05:04:14Z to release publication at 05:07:27Z</p></div>
-<div class="stat"><span class="stat-value">1</span><span class="stat-label">Merge-queue repairs</span><p>One ejection on a Commander journey; repaired by a product fix and re-queued at 04:47:30Z</p></div></div><div class="method"><p>Closures and changelog entries are counted separately: a changelog entry is a shipped change, and only an issue referenced by the release PR that closed after the merge counts as a closure. Three such issues closed at 05:11 UTC. Timing endpoints are GitHub&#x27;s PR <code>createdAt</code> and <code>mergedAt</code>, the merge-queue re-entry time, and the release <code>publishedAt</code>. No release-latency receipt was written for this release, so green-to-published and per-stage timings are unavailable.</p></div>
-<details open id="map-data"><summary>Change map · data and reading guide</summary><p>Each equal-area dot represents one issue that release PR #1226 references and that closed after it merged. The figure counts closures, not impact, effort, or severity.</p><div class="table-wrap"><table><caption>Change map data · closed issues by surface</caption><thead><tr>
-<th scope="col">Surface</th>
-<th scope="col" class="num">Issues closed</th>
-<th scope="col">Issue numbers</th>
+<details open id="map-data"><summary>What shipped, by area</summary><p>One dot is one change listed in the v3.58.0 CHANGELOG. Dots count changes, not their size or importance.</p><div class="table-wrap"><table><thead><tr>
+<th scope="col">Area</th>
+<th scope="col" class="num">Changes</th>
+<th scope="col">What changed</th>
 </tr></thead><tbody>
 <tr>
-<th scope="row">Messages</th>
-<td class="num">2</td>
-<td>#1196, #1223</td>
-</tr>
-<tr>
-<th scope="row">Stall checks</th>
-<td class="num">1</td>
-<td>#1225</td>
-</tr>
-<tr>
 <th scope="row">Commander</th>
-<td class="num">0</td>
-<td>The Commander scroll fix, the readable terminal colours and Slack credential repair shipped without a GitHub issue</td>
+<td class="num">2</td>
+<td>Commander keeps your place when you load earlier turns; Commander permission notes give one instruction that works</td>
+</tr>
+<tr>
+<th scope="row">Sessions</th>
+<td class="num">14</td>
+<td>Busy Claude workers see supervisor messages at their next tool call; Sending to a busy worker says when the message will arrive; Replies thread between supervisors and workers; Reminders wake an idle supervisor; Peer messages sent during a supervisor restart are delivered; Supervisors hand off epics and hear about conflicts; Dead workers&#x27; cloud claims no longer block their replacement; Quiet-worker alerts skip busy workers; Supervisor stall nudges stay quiet when nothing is stalled; Respawning a worker by name reuses its kept worktree; Recycled Claude workers come back on Claude; Factory loop I/O moves off the TUI thread; Worker test proofs run without the host&#x27;s installed tools; Multi-supervisor coordination design spec</td>
+</tr>
+<tr>
+<th scope="row">Tasks</th>
+<td class="num">5</td>
+<td>Merge requests show the worker&#x27;s proof; A parked task merges at its reviewed commit after the next task starts; Epic close ignores reused lanes&#x27; commits for other tasks; The loaded-proof close gate accepts non-Rust receipts and explains refusals; Terminal QA runs through a symlinked skills folder</td>
+</tr>
+<tr>
+<th scope="row">Messages</th>
+<td class="num">3</td>
+<td>Polled messages that were never handled come back once; Abandoned-message notices fold into one, and operator sends fail fast; The coordination tool states its message limits and reminder rules</td>
+</tr>
+<tr>
+<th scope="row">Releases</th>
+<td class="num">1</td>
+<td>Release latency receipts work with main-push publication</td>
+</tr>
+<tr>
+<th scope="row">Slack and Cloud</th>
+<td class="num">2</td>
+<td><code>cas violet</code> uses the saved Violet credentials; The Cassy Cloud apps menu closes after Explorer opens</td>
+</tr>
+<tr>
+<th scope="row">Other</th>
+<td class="num">1</td>
+<td>CLI error lines and <code>cas config list</code> are readable on light themes</td>
 </tr>
 <tr>
 <th scope="row">Total</th>
-<td class="num">3</td>
-<td>2 issue-bearing surfaces</td>
+<td class="num">28</td>
+<td>7 areas</td>
 </tr>
-</tbody></table></div><p>Sources: <a href="https://github.com/Richards-LLC/cassy/pull/1226">release PR #1226</a>, <a href="https://github.com/Richards-LLC/cassy/blob/a80e319f127df8e1c64e9c1932b9ab301364689d/CHANGELOG.md">CHANGELOG at the release commit</a>, and the linked issue records in the fixes ledger. Retrieved 16 October 2026 at 05:11 UTC.</p></details></section>
+</tbody></table></div><p>Source: CHANGELOG <code>CHANGELOG.md</code>, release-notes draft <code>docs/release-notes/2026-10-16-v3.58.0-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.58.0; retrieved 2026-10-16T14:02:47Z.</p></details>
+<div class="stats"><div class="stat"><span class="stat-value">28</span><span class="stat-label">Changes shipped</span><p>25 fixed, 2 added, 1 changed; tests and docs not counted</p></div>
+<div class="stat"><span class="stat-value">3</span><span class="stat-label">GitHub issues closed</span><p>Closed from PR #1226 opening to 15 min after merge</p></div>
+<div class="stat"><span class="stat-value">80 m 27 s</span><span class="stat-label">Cut → published</span><p>Release PR #1226 opened at 03:47:00Z to publication at 05:07:27Z</p></div>
+<div class="stat"><span class="stat-value">3 m 13 s</span><span class="stat-label">Merged → published</span><p>Main landing at 05:04:14Z to release publication at 05:07:27Z</p></div>
+<div class="stat"><span class="stat-value">1</span><span class="stat-label">Merge-queue repairs</span><p>One ejection on a Commander journey; repaired by a product fix and re-queued at 04:47:30Z</p></div></div><div class="method"><p>Changes and GitHub issues are counted separately. A change is one titled entry in the v3.58.0 CHANGELOG section; tests and documentation entries are listed under the hood but not counted. A GitHub issue counts when release PR #1226 or the CHANGELOG section references it and it closed between the PR opening (03:47:00Z) and 15 minutes after its merge (05:19:14Z). Issues are closed by hand shortly after the merge, so a report run inside that window waits for referenced issues that are still open. The cut and merge rows use GitHub&#x27;s PR <code>createdAt</code> and <code>mergedAt</code>, the merge-queue re-entry time and the release <code>publishedAt</code>; the merge queue ejected the release once on a Commander journey, repaired by a product fix and re-queued at 04:47:30Z. Not measured for this release: green to published, request to published, blockers, lesson recurrence, manual interventions.</p></div></section>
 <!-- section: users -->
 <section class="report-section users" data-section="users"><div class="section-top"><h2>What you can do now</h2><span class="section-no">02 / 06</span></div><section class="theme theme-1"><div class="theme-label"><span class="eyebrow">01</span><h3>Messages arrive</h3></div><div class="changes">
 <article class="change"><h4>Messages mid-task</h4><div class="pair"><p class="was"><span class="state">Was</span>instructions to a busy helper waited 15 minutes, then were dropped.</p><p class="now"><span class="state">Now</span>the helper sees them at its next step.</p></div></article>
@@ -188,48 +246,73 @@ pre{background:var(--surface);color:var(--ink);padding:4mm;white-space:pre-wrap}
 <article class="change"><h4>Readable CLI colour</h4><div class="pair"><p class="was"><span class="state">Was</span>error lines at 3.08:1 contrast, colour under <code>NO_COLOR</code>, and ✗ under <code>LC_ALL=C</code>.</p><p class="now"><span class="state">Now</span>mark-only colour, <code>NO_COLOR</code> honoured, <code>[ERROR]</code> fallback, and config text at ≥4.5:1.</p></div></article>
 <article class="change"><h4>Terminal QA symlinks</h4><div class="pair"><p class="was"><span class="state">Was</span>comparing <code>argv[1]</code> with <code>import.meta.url</code> skipped <code>main()</code> through a symlink.</p><p class="now"><span class="state">Now</span>the guard compares realpaths.</p></div></article>
 <article class="change"><h4>Commander copy and app switcher</h4><div class="pair"><p class="was"><span class="state">Was</span>permission copy was duplicated, and the switcher popover stayed open after Explorer.</p><p class="now"><span class="state">Now</span>consolidated rail copy; <code>hidePopover</code> on activation with focus kept.</p></div></article>
-<article class="change"><h4>Transcript scroll pin</h4><div class="pair"><p class="was"><span class="state">Was</span>the 5 s heartbeat render could pin the transcript to the tail before the reader&#x27;s scroll event landed, so &quot;Load earlier turns&quot; snapped back.</p><p class="now"><span class="state">Now</span><code>pinUnlessUnseen</code> waits one animation frame, so the reader&#x27;s pending scroll event claims the position; a re-mount still pins before paint.</p></div></article>
+<article class="change"><h4>Transcript scroll pin</h4><div class="pair"><p class="was"><span class="state">Was</span>the 5 s heartbeat render could pin the transcript to the tail before the reader&#x27;s scroll event landed, so &quot;Load earlier turns&quot; snapped back.</p><p class="now"><span class="state">Now</span><code>pinUnlessUnseen</code> defers the pin by one animation frame and re-checks the reader&#x27;s position.</p></div></article>
 <article class="change"><h4>Release latency receipt</h4><div class="pair"><p class="was"><span class="state">Was</span>the receipt required a tag-push <code>release.yml</code> run and exited 1.</p><p class="now"><span class="state">Now</span>main-push and gate-green starts; the report adds &quot;Main to published&quot;.</p></div></article>
 <article class="change"><h4>Honest test proofs</h4><div class="pair"><p class="was"><span class="state">Was</span>named-test runs inherited the host PATH, and two tests read the live /proc.</p><p class="now"><span class="state">Now</span>PATH is limited to toolchain plus <code>/usr/bin:/bin</code>; probes are injected.</p></div></article>
 <article class="change"><h4>Multi-supervisor spec</h4><div class="pair"><p class="was"><span class="state">Was</span>there was no protocol for cross-supervisor claims or staging merges.</p><p class="now"><span class="state">Now</span>a design spec proposes claims, a merge lock and an ownership view; not yet built.</p></div></article>
 </div></section></section>
 <!-- section: ledger -->
-<section class="report-section ledger" data-section="ledger"><div class="section-top"><h2>Fixes ledger</h2><span class="section-no">04 / 06</span></div><div class="table-wrap"><table><caption>Issue register · 3 verified closures</caption><thead><tr>
+<section class="report-section ledger" data-section="ledger"><div class="section-top"><h2>Fixes ledger</h2><span class="section-no">04 / 06</span></div><div class="table-wrap"><table><caption>GitHub issues closed with this release · 3</caption><thead><tr>
 <th scope="col">Issue</th>
-<th scope="col">State</th>
+<th scope="col">Title</th>
 <th scope="col">Closed</th>
-<th scope="col">Theme</th>
+<th scope="col">Area</th>
 </tr></thead><tbody>
 <tr>
-<th scope="row"><a href="https://github.com/Richards-LLC/cassy/issues/1225">#1225</a></th>
-<td>CLOSED</td>
-<td>2026-10-16T05:11:12Z</td>
-<td>Stall checks</td>
+<th scope="row"><a href="https://github.com/Richards-LLC/cassy/issues/1196">#1196</a></th>
+<td>Director floods the supervisor with &#x27;Message &lt;id&gt; to operator abandoned: target no longer belongs to factory session&#x27; notices (one per message, ~20 in 1h)</td>
+<td>2026-10-16T05:11:14Z</td>
+<td>Sessions</td>
 </tr>
 <tr>
 <th scope="row"><a href="https://github.com/Richards-LLC/cassy/issues/1223">#1223</a></th>
-<td>CLOSED</td>
+<td>Normal supervisor→worker messages often not surfaced to Claude workers (only interrupts/task notes land)</td>
 <td>2026-10-16T05:11:11Z</td>
-<td>Messages</td>
+<td>Sessions</td>
 </tr>
 <tr>
-<th scope="row"><a href="https://github.com/Richards-LLC/cassy/issues/1196">#1196</a></th>
-<td>CLOSED</td>
-<td>2026-10-16T05:11:14Z</td>
-<td>Messages</td>
+<th scope="row"><a href="https://github.com/Richards-LLC/cassy/issues/1225">#1225</a></th>
+<td>supervisor_stalled nags &#x27;merge now&#x27; for an awaiting_merge task whose delivery is already contained in the epic</td>
+<td>2026-10-16T05:11:12Z</td>
+<td>Tasks</td>
 </tr>
-</tbody></table></div></section>
+</tbody></table></div>
+<p>Referenced and still open at retrieval, so not counted: <a href="https://github.com/Richards-LLC/cassy/issues/1211">#1211</a>, <a href="https://github.com/Richards-LLC/cassy/issues/1215">#1215</a>.</p>
+<p>Referenced but closed outside this release&#x27;s counting window, so not counted: <a href="https://github.com/Richards-LLC/cassy/issues/1186">#1186</a>, <a href="https://github.com/Richards-LLC/cassy/issues/1222">#1222</a>.</p></section>
 <!-- section: install -->
 <section class="report-section install" data-section="install"><div class="section-top"><h2>Install</h2><span class="section-no">05 / 06</span></div>
 <svg class="stitch" viewBox="0 0 132 16" aria-hidden="true"><circle cx="8" cy="8" r="5" fill="currentColor"/><circle cx="31" cy="8" r="5" fill="currentColor"/><circle cx="54" cy="8" r="5" fill="currentColor"/><circle cx="77" cy="8" r="5" fill="currentColor"/><circle cx="100" cy="8" r="5" fill="currentColor"/><circle cx="123" cy="8" r="5" fill="currentColor"/></svg><pre><code>cas update --yes --version 3.58.0</code></pre>
-<ul>
-<li>macOS ARM64 — <a href="https://github.com/Richards-LLC/cassy/releases/download/v3.58.0/cas-aarch64-apple-darwin.tar.gz">download archive</a>, SHA-256 <code>0fcbeeba67927fcca021056d64245cbd9213e3f5a30b495cdfd3e19833534a18</code>, 32,710,754 bytes.</li>
-<li>Linux x86_64 — <a href="https://github.com/Richards-LLC/cassy/releases/download/v3.58.0/cas-x86_64-unknown-linux-gnu.tar.gz">download archive</a>, SHA-256 <code>07e7c5d777d6f18ea0173fd512f35121a735bd55d0eca0ec19dda76e08817c1b</code>, 36,634,647 bytes.</li>
-</ul></section>
+<div class="table-wrap"><table><caption>Release assets</caption><thead><tr>
+<th scope="col">Asset</th>
+<th scope="col">Digest</th>
+<th scope="col" class="num">Size</th>
+</tr></thead><tbody>
+<tr>
+<th scope="row">cas-aarch64-apple-darwin.tar.gz</th>
+<td>sha256:0fcbeeba67927fcca021056d64245cbd9213e3f5a30b495cdfd3e19833534a18</td>
+<td class="num">32710754</td>
+</tr>
+<tr>
+<th scope="row">cas-x86_64-unknown-linux-gnu.tar.gz</th>
+<td>sha256:07e7c5d777d6f18ea0173fd512f35121a735bd55d0eca0ec19dda76e08817c1b</td>
+<td class="num">36634647</td>
+</tr>
+</tbody></table></div></section>
 <!-- section: provenance -->
-<section class="report-section provenance" data-section="provenance"><div class="section-top"><h2>Evidence and scope</h2><span class="section-no">06 / 06</span></div><p>The report covers the v3.58.0 runtime published from release commit <code>a80e319f127df8e1c64e9c1932b9ab301364689d</code> (tag v3.58.0). The closure window is the issues referenced by <a href="https://github.com/Richards-LLC/cassy/pull/1226">PR #1226</a> that closed after its merge at 05:04:14Z on 16 October 2026. The changelog is at <a href="https://github.com/Richards-LLC/cassy/blob/a80e319f127df8e1c64e9c1932b9ab301364689d/CHANGELOG.md">the release commit</a>, the published release is <a href="https://github.com/Richards-LLC/cassy/releases/tag/v3.58.0">v3.58.0</a>, and the user-facing wording follows the release-notes draft <code>docs/release-notes/2026-10-16-v3.58.0-slack.md</code>.</p>
-<p>Timing sources: GitHub PR #1226 (<code>createdAt</code> 03:47:00Z, <code>mergedAt</code> 05:04:14Z) and release <code>publishedAt</code> 05:07:27Z. The merge queue ejected the first attempt on a Commander journey (HUB-J4, &quot;Load earlier turns&quot;). The cause was a product race in the transcript&#x27;s scroll pin, fixed and re-queued at 04:47:30Z, the one repair cycle. No release-latency receipt exists under <code>~/.cas/artifacts/release/</code> for v3.58.0, so green-to-published, request-to-published and stage timings are unavailable and no budget verdict is claimed. Retrieved 16 October 2026 at 05:11 UTC.</p>
-<p>Not counted as closures: #1215 (peer coordination; part e shipped here) and #1222 (the loaded-proof parser; addressed in part) are still open, #1211 (the factory TUI architecture) is open, and #1186 closed on 14 October before this release. Dots count issue closures, not impact, effort, or severity.</p></section>
+<section class="report-section provenance" data-section="provenance"><div class="section-top"><h2>Evidence and scope</h2><span class="section-no">06 / 06</span></div><p>Retrieved: 2026-10-16T14:02:47Z.</p>
+<p>Source: CHANGELOG <code>CHANGELOG.md</code>, release-notes draft <code>docs/release-notes/2026-10-16-v3.58.0-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.58.0; retrieved 2026-10-16T14:02:47Z.</p>
+<p>Each change is placed in a product area by the words in its title, then its text; a change that matches no area is listed under Other. Correct an area in the Change map table before rendering.</p>
+<p>Release PR: &lt;https://github.com/Richards-LLC/cassy/pull/1226&gt; (merged 2026-10-16T05:04:14Z).</p>
+<p>Release-notes draft: <code>docs/release-notes/2026-10-16-v3.58.0-slack.md</code>.</p>
+<p>CHANGELOG source: <code>CHANGELOG.md</code>.</p>
+<p>GitHub release: &lt;https://github.com/Richards-LLC/cassy/releases/tag/v3.58.0&gt; (published or unknown).</p>
+<p>Release receipt: unavailable.</p>
+<h3>Pipeline latency</h3>
+<p>Stage timings are unavailable: the latency receipt records no STAGE_SECS.</p>
+<p>Source warnings:</p>
+<ul>
+<li>release receipts: green-to-published latency is unavailable under ~/.cas/artifacts/release/</li>
+</ul></section>
 </main><footer class="page-footer"><span>Cassy v3.58.0 / Release report</span><span><a href="v3.58.0.md">Markdown source</a> · <a href="v3.58.0.pdf">Print edition</a></span></footer>
 <script>addEventListener("beforeprint",()=>document.querySelectorAll("details").forEach(panel=>{panel.open=true}));</script>
 </body></html>

@@ -22,7 +22,7 @@ publication date/time line, and a verdict paragraph. Then provide these exact
 
 1. `Change map`: claim paragraph, reading-guide paragraph, a three-column table
    (`Area | Changes | What changed`), then source paragraph(s). Each area row has
-   a positive integer count and that many plain change titles separated by `; `;
+   a positive integer count and that many plain change titles separated by semicolons;
    end with a `Total` row. Omit areas without changes: page one never shows a
    zero row. A v1 table (`Surface | Issues closed | Issue numbers`) still renders
    for older sources; its zero rows are not drawn.

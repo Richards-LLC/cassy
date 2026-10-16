@@ -4,9 +4,11 @@ Fill every angle-bracket field before rendering. Keep this brief beside the
 Markdown, HTML and PDF; append the actual review evidence after rendering.
 
 ## Single idea
+
 <One falsifiable sentence connecting the release outcome to what shipped.>
 
 ## Hero form
+
 Verdict plus a directly labelled unit-dot plot of shipped changes by product
 area. <Name the largest area and why its shape supports the sentence.> Use equal
 areas; keep the generator's area order between releases. The graph counts
@@ -14,17 +16,20 @@ changes, not effort, importance or impact. GitHub issues closed is a secondary
 figure in the hero note and the glance strip; no zero row appears on page one.
 
 ## Emotional register
+
 Assured, humane, collected: sandstone paper, regular serif verdict, system sans
 reading text, mono folio, quiet rules. <Name the project design source and mapped
 tokens, or record the bundled Petrastella fallback.>
 
 ## Distinctive move
+
 The change map: short rows of equal dots, one per shipped change, across named
 product areas, with the largest area in the verdict color. One decorative row of
 six dots returns beside install. <Describe how this edition's distribution
 changes the argument.>
 
 ## Deliberately omitted
+
 No KPI cards before the argument, logo band, network assets, invented comparison
 metrics or subjective severity bubbles. <Name this edition's missing evidence
 and the inference it cannot support.>
@@ -42,6 +47,7 @@ and the inference it cannot support.>
 | 6 | Evidence and scope | Reading column; <queries, retrieval times, limitations> |
 
 ## PDF plan
+
 <Choose A4 or Letter for the committed PDF; verify both.> Flow sections
 continuously with keep-together rules on cards and rows, not hard breaks before
 sections. Inspect every page image for clipping, orphan headings and unnecessary
@@ -62,5 +68,6 @@ or contrast below 4.5:1 for text / 3:1 for marks is a 0 and blocks completion.
 | Accessibility | <1–5> | <Both schemes, focus, JS-off, SVG alternative and table> |
 
 ## Verification receipt
+
 <Commands, exit codes, source-fidelity check, PDF page counts, all-page PNG
 review, preserved links and hashes, artifact paths, any intentional limitation.>

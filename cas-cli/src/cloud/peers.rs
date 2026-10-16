@@ -415,7 +415,7 @@ pub fn render_user_peers(peers: &[Peer]) -> String {
         let state = if peer.live { "live" } else { "stale" };
         let project = peer.project_name().unwrap_or_else(|| "unknown".to_string());
         out.push_str(&format!(
-            "  {} [{state}] {project} on {}, heartbeat {} ago\n    session {} | focus {}\n",
+            "  {} [{state}] {project} on {}, seen {} ago\n    session {} | focus {}\n",
             peer.name,
             peer.machine,
             age(peer.heartbeat_age_secs),

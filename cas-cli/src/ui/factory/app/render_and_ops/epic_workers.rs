@@ -3032,6 +3032,28 @@ mod spawn_base_tests {
     use std::process::Command;
     use tempfile::TempDir;
 
+    #[test]
+    fn cas_bfa1_spawn_batch_advances_local_base_once() {
+        let temp = TempDir::new().unwrap();
+        let origin = temp.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        init_repo(&origin);
+        let old = head_sha(&origin, "main");
+        commit_file(&origin, "new-base", "current origin");
+        let expected = head_sha(&origin, "main");
+        let repo = temp.path().join("repo");
+        assert!(Command::new("git")
+            .args(["clone", "-q", origin.to_str().unwrap(), repo.to_str().unwrap()])
+            .status().unwrap().success());
+        assert!(Command::new("git").args(["branch", "epic/batch", &old])
+            .current_dir(&repo).status().unwrap().success());
+        assert!(Command::new("git").args(["branch", "epic/batch", "main"])
+            .current_dir(&origin).status().unwrap().success());
+        let notices = (0..8).filter_map(|_| prefer_fresher_base_ref(&repo, "epic/batch").1).count();
+        assert_eq!(head_sha(&repo, "epic/batch"), expected, "spawn must advance the stale local merge-back ref");
+        assert_eq!(notices, 1, "one stale tip must not produce eight identical refresh notices");
+    }
+
     fn init_repo(dir: &std::path::Path) {
         Command::new("git")
             .args(["init", "-b", "main"])

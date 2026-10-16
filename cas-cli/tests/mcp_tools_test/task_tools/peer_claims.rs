@@ -44,6 +44,7 @@ struct FakeState {
     revive_on_lock: Option<String>,
     renew_after_lock_reads: Option<(usize, bool)>,
     change_after_lock_read: Option<(usize, Option<String>)>,
+    return_released_rows: bool,
 }
 
 /// A stateful stand-in for petra-stella-cloud's task-lock routes.
@@ -193,7 +194,8 @@ impl FakeCloud {
                 if let Some(holder) = state.revive_on_lock.take() {
                     state.statuses.insert(holder, "active".into());
                 }
-                let response = serde_json::json!({"lock": active.map(|lock| lock_json(&key, &lock))});
+                let snapshot = if state.return_released_rows { state.locks.get(&key).cloned() } else { active };
+                let response = serde_json::json!({"lock": snapshot.map(|lock| lock_json(&key, &lock))});
                 let reads = state.requests.iter().filter(|r| r.ends_with("/lock")).count();
                 if let Some((at, epoch_only)) = state.renew_after_lock_reads
                     && at == reads && let Some(lock) = state.locks.get_mut(&key)
@@ -1163,11 +1165,12 @@ async fn assert_renewal_snapshot_race(mode: &str) {
     {
         let mut state = cloud.state.lock().unwrap();
         state.requests.clear();
+        state.return_released_rows = mode == "released-row";
         state
             .statuses
             .insert(dead.agent_id.clone(), "shutdown".into());
         match mode {
-            "released" => state.change_after_lock_read = Some((1, None)),
+            "released" | "released-row" => state.change_after_lock_read = Some((1, None)),
             "reassigned" => state.change_after_lock_read = Some((1, Some(winner.agent_id.clone()))),
             "epoch" => state.renew_after_lock_reads = Some((1, true)),
             _ => unreachable!(),
@@ -1196,7 +1199,7 @@ async fn assert_renewal_snapshot_race(mode: &str) {
         assert!(report.conflicts.is_empty(), "{report:?}");
         assert_eq!(report.failed, 1, "retry is advisory: {report:?}");
         assert!(rows.is_empty(), "{rows:?}");
-        if mode == "released" {
+        if mode.starts_with("released") {
             assert!(cloud.active_lock("cas-renew-race").is_none());
         } else {
             assert_eq!(
@@ -1218,7 +1221,9 @@ async fn assert_renewal_snapshot_race(mode: &str) {
 
 #[tokio::test]
 async fn cas_50713_renewal_does_not_alarm_after_lock_released_between_reads() {
-    assert_renewal_snapshot_race("released").await;
+    for mode in ["released", "released-row"] {
+        assert_renewal_snapshot_race(mode).await;
+    }
 }
 
 #[tokio::test]

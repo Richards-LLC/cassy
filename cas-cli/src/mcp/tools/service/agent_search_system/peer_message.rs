@@ -93,6 +93,36 @@ impl CasService {
             if urgent {
                 return Err(refuse_urgent());
             }
+            // cas-d58d: under `own`, a reply to another account's supervisor
+            // of this repo is refused like a new message.
+            if envelope.scope == peer_mailbox::PeerScope::Project
+                && crate::cloud::peers::same_repo_scope(&cas_root)
+                    == crate::config::SameRepoScope::Own
+            {
+                let (root, self_id) = (cas_root.clone(), sender.id.clone());
+                let discovery =
+                    tokio::task::spawn_blocking(move || discover_peers(&root, Some(&self_id)))
+                        .await
+                        .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                let own = match discovery {
+                    Ok(PeerDiscovery::Found { peers, .. }) => {
+                        peers.iter().any(|peer| peer.agent_id == envelope.sender_agent_id)
+                    }
+                    _ => false,
+                };
+                if !own {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_REQUEST,
+                        format!(
+                            "{}@{} is not a supervisor of your own Cassy Cloud account (or its \
+                             account could not be confirmed); this project's \
+                             peers.same_repo_scope is own, so only your own supervisors are \
+                             messaged. Nothing was sent.",
+                            envelope.sender_name, envelope.machine
+                        ),
+                    ));
+                }
+            }
             let (sender_id, sender_name) = (sender.id.clone(), sender.name.clone());
             let message = self.peer_body(message, attachment).await?;
             // cas-2a5a: a reply across projects is advisory too.
@@ -160,8 +190,8 @@ impl CasService {
         let discovery = tokio::task::spawn_blocking(move || discover_peers(&root, Some(&self_id)))
             .await
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-        let peers = match discovery {
-            Ok(PeerDiscovery::Found { peers, .. }) => peers,
+        let (peers, hidden) = match discovery {
+            Ok(PeerDiscovery::Found { peers, hidden, .. }) => (peers, hidden),
             Ok(PeerDiscovery::NotLoggedIn) => {
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
@@ -188,9 +218,18 @@ impl CasService {
                 ));
             }
         };
-        let peer = peer_mailbox::resolve_peer_target(&peers, &wanted)
+        // cas-d58d: under `peers.same_repo_scope = own`, a name that is
+        // another account's supervisor of this repo is refused, never
+        // delivered and never tried as a cross-project or local target.
+        let peer = match crate::cloud::peers::resolve_same_repo_target(&peers, &hidden, &wanted)
             .map_err(|ambiguous| Self::error(ErrorCode::INVALID_PARAMS, ambiguous))?
-            .cloned();
+        {
+            crate::cloud::peers::SameRepoTarget::Peer(peer) => Some(peer.clone()),
+            crate::cloud::peers::SameRepoTarget::Refused(reason) => {
+                return Err(Self::error(ErrorCode::INVALID_REQUEST, reason));
+            }
+            crate::cloud::peers::SameRepoTarget::NotFound => None,
+        };
         let Some(peer) = peer else {
             // cas-2a5a: not a supervisor of this repo; perhaps one of
             // another project of the same user. Unknown stays local.
@@ -431,3 +470,4 @@ impl CasService {
         Ok(Self::success(text))
     }
 }
+

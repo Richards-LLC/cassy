@@ -72,6 +72,19 @@ impl Config {
                     }
                 };
             }
+            "peers.same_repo_scope" => {
+                self.peers
+                    .get_or_insert_with(PeersConfig::default)
+                    .same_repo_scope = match value.trim() {
+                    "team" => SameRepoScope::Team,
+                    "own" => SameRepoScope::Own,
+                    _ => {
+                        return Err(MemError::Parse(format!(
+                            "Invalid peers.same_repo_scope: {value}; use team or own"
+                        )));
+                    }
+                };
+            }
             "slack.wake_enabled" => {
                 self.slack.get_or_insert_with(SlackConfig::default).wake_enabled =
                     Some(value.parse().map_err(|_| {

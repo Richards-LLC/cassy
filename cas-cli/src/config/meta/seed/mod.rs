@@ -14,6 +14,7 @@ mod release;
 mod sections;
 mod skill_validation;
 mod skills;
+mod peers;
 mod slack;
 
 pub(crate) fn populate_registry(registry: &mut ConfigRegistry) {
@@ -30,6 +31,7 @@ pub(crate) fn populate_registry(registry: &mut ConfigRegistry) {
     release::register_release(registry);
     skill_validation::register_skill_validation(registry);
     skills::register_skills(registry);
+    peers::register_peers(registry);
     slack::register_slack(registry);
     hub::register_hub(registry);
 }

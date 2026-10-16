@@ -295,6 +295,10 @@ impl CloudCoordinator {
                 branch.to_string(),
             );
         }
+        // cas-d58d: peers label this supervisor with the account it runs as.
+        if let Some(email) = self.config.email.as_deref().map(str::trim).filter(|email| !email.is_empty()) {
+            metadata.insert(crate::cloud::peers::META_OWNER.to_string(), email.to_string());
+        }
         let response = ureq::post(&url)
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token()))

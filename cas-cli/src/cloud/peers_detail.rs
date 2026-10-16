@@ -110,6 +110,9 @@ pub struct PeerReport {
     pub canonical_id: Option<String>,
     pub detail: bool,
     pub peers: Vec<PeerDetail>,
+    /// Same-repo supervisors of other accounts that `peers.same_repo_scope =
+    /// own` left out of `peers` (cas-d58d).
+    pub hidden_peers: usize,
     pub error: Option<String>,
 }
 
@@ -164,6 +167,7 @@ impl PeerReport {
             detail,
             status: "ready".into(),
             peers: Vec::new(),
+            hidden_peers: 0,
             error: None,
         }
     }
@@ -399,6 +403,24 @@ pub fn discover_peer_report(
     let now = Utc::now();
     let mut supervisors = peers::repo_peers(&agents, repo, &aliases, self_id, now);
     peers::exclude_project_agents(cas_root, &mut supervisors)?;
+    // cas-d58d: every peer names its account; `own` keeps only the viewer's.
+    peers::mark_own(&mut supervisors, viewer_user_id);
+    let (mut supervisors, hidden) =
+        peers::apply_same_repo_scope(supervisors, peers::same_repo_scope(cas_root));
+    report.hidden_peers = hidden.len();
+    if let Some(selected) = selected
+        && super::peer_mailbox::resolve_peer_target(&supervisors, selected)
+            .map_err(CasError::Other)?
+            .is_none()
+        && let Some(other) = super::peer_mailbox::resolve_peer_target(&hidden, selected)
+            .map_err(CasError::Other)?
+    {
+        return Err(CasError::Other(format!(
+            "Peer supervisor '{selected}' belongs to {} (another Cassy Cloud account); \
+             peers.same_repo_scope is own, so only your own supervisors are shown",
+            peers::owner_label(other)
+        )));
+    }
     if let Some(selected) = selected {
         let peer = super::peer_mailbox::resolve_peer_target(&supervisors, selected)
             .map_err(CasError::Other)?
@@ -549,9 +571,17 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
         if report.peers.is_empty() {
             line("  no other supervisors seen in the last 24h".into());
         }
+        if report.hidden_peers > 0 {
+            line(format!(
+                "  {} supervisor{} of other accounts hidden (peers.same_repo_scope own)",
+                report.hidden_peers,
+                if report.hidden_peers == 1 { "" } else { "s" }
+            ));
+        }
         for detail in &report.peers {
             let peer = &detail.supervisor;
             line(format!("[{}] Owner {}", detail.outcome, detail.owner));
+            line(format!("  Account {}", peers::owner_label(peer)));
             line(format!("  Machine {}", peer.machine));
             line(format!(
                 "  Session {}",

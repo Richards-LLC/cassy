@@ -54,9 +54,14 @@ that does not contain reviewed staging, or an omitted task cannot reuse it. Corr
 published ledger and receipt; existing receipts cannot be edited.
 
 An integrated task without a receipt follows the normal evidence gate. A task
-that deferred evidence at park must have a valid listed receipt before it can
-close, including after its surface classification or evidence-gate setting
-changes. Skip/focus safeguards remain active for deferred parks and receipts.
+that deferred evidence at park must have a valid listed receipt or a passed
+explicit independent QA round covering its current delivery anchor before it
+can close. Pending, failed or older-tip rounds do not clear this debt. The
+obligation survives changes to surface classification, gate settings and
+`qa.mode`, and also applies to direct `task update status=closed`. A local
+target or its origin tracking ref can prove integration; a stale origin cannot
+authorize another evidence deferral for code already on the local target.
+Skip/focus safeguards remain active for deferred parks and receipts.
 Normal supervisor override and explicit QA-request authority remain available.
 
 Batch receipts and deferred obligations are local project records in

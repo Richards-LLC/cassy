@@ -10,6 +10,76 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[tokio::test]
+async fn cas_d697_round2_reassigned_implementer_cannot_record() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    let root = fx.repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    let agents = open_agent_store(&root).unwrap();
+    let mut task = tasks.get("cas-bq01").unwrap();
+    task.assignee = Some("batch-supervisor".into());
+    tasks.update(&task).unwrap();
+    agents
+        .try_claim(
+            &task.id,
+            "batch-supervisor",
+            600,
+            Some("original implementation"),
+        )
+        .unwrap();
+    agents.release_lease(&task.id, "batch-supervisor").unwrap();
+    task.assignee = Some("test-agent".into());
+    tasks.update(&task).unwrap();
+    fx.reject(serde_json::json!({}), "no self-review").await;
+}
+
+#[tokio::test]
+async fn cas_d697_round2_prior_delivery_actor_cannot_record() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    let root = fx.repo.join(".cas");
+    // An older receipt must remain binding after another worker re-delivers.
+    for worker in ["batch-supervisor", "test-agent"] {
+        let input = cas::types::WorkerCompletionReceiptInput {
+            task_id: "cas-bq01".into(),
+            worker_agent_id: worker.into(),
+            repo_selector: "project".into(),
+            source_branch: format!("factory/{worker}-cas-bq01"),
+            commit_sha: fx.staging.clone(),
+            merge_base_sha: fx.staging.clone(),
+            target_branch: "main".into(),
+            target_sha: fx.staging.clone(),
+            proof_reference: "target/test.log".into(),
+            scope_summary: "Delivery".into(),
+            artifact_path: None,
+        };
+        let receipt =
+            cas_store::build_worker_completion_receipt(&input, worker, chrono::Utc::now());
+        cas_store::create_worker_delivery(
+            &root,
+            &receipt,
+            cas::types::WorkerDeliveryState::AwaitingMerge,
+            worker,
+        )
+        .unwrap();
+    }
+    fx.reject(serde_json::json!({}), "no self-review").await;
+}
+
+#[tokio::test]
+async fn cas_d697_round2_handoff_owner_cannot_record() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get("cas-bq01").unwrap();
+    task.deliverables
+        .handoff_branches
+        .push("origin/factory/batch-supervisor-cas-bq01".into());
+    tasks.update(&task).unwrap();
+    fx.reject(serde_json::json!({}), "no self-review").await;
+}
+
+#[tokio::test]
 async fn cas_d697_round2_stale_origin_cannot_defer_integrated_delivery() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);
@@ -63,6 +133,7 @@ async fn cas_d697_round2_final_close_backstop_covers_unassigned_path() {
     let mut task = tasks.get("cas-bq01").unwrap();
     task.assignee = None;
     task.execution_note = Some("no-code".into());
+    task.external_ref = Some("https://example.test/batch-report".into());
     tasks.update(&task).unwrap();
     fx.reconfigure("mode='per_task'\nevidence_gate=false\nindependent_pass=false");
     let refused = fx.close("cas-bq01").await;
@@ -127,6 +198,13 @@ async fn cas_d697_round2_passed_explicit_qa_satisfies_deferred_close() {
         .verification(Parameters(request))
         .await
         .unwrap();
+    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
+    let pending = fx.close("cas-bq01").await;
+    assert_ne!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::Closed,
+        "{pending}"
+    );
     // Seed the trusted persisted reviewer verdict at the store seam. Existing
     // qa_record tests separately cover its full evidence-bundle validation.
     cas_store::claim_qa_pass(

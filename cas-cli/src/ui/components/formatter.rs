@@ -349,14 +349,16 @@ impl<'w> Formatter<'w> {
         self.newline()
     }
 
-    /// Print an error: `✗ message`
+    /// Print an error: `✗ message` on a styled UTF-8 terminal, `[ERROR] message` otherwise.
     pub fn error(&mut self, message: &str) -> io::Result<()> {
-        let color = self.theme.palette.text_error;
+        let label = Verdict::Error.label(self.glyphs());
         if self.mode == OutputMode::Styled {
-            self.write_colored(&format!("{} {message}", Icons::CROSS), color)?;
+            self.write_colored(label, self.theme.palette.text_error)?;
         } else {
-            write!(self.writer, "[ERROR] {message}")?;
+            self.write_raw(label)?;
         }
+        self.write_raw(" ")?;
+        self.write_text(message)?;
         self.newline()
     }
 

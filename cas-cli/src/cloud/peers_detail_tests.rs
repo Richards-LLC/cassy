@@ -164,6 +164,7 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
         .metadata
         .insert("focus".into(), format!("\u{1b}[31m\n{}", "界".repeat(100)));
     let report = PeerReport {
+        limitations: Vec::new(),
         observed_at: Utc::now(),
         cloud_presence: None,
         cloud_presence_message: String::new(),
@@ -248,6 +249,7 @@ fn cas_559c_missing_account_identity_never_means_zero_claims() {
     let agents = vec![agent("sup", "supervisor", "factory-b", "beta", REPO, 1)];
     let peers = peers::repo_peers(&agents, REPO, &[], None, Utc::now());
     let report = PeerReport {
+        limitations: Vec::new(),
         observed_at: Utc::now(),
         cloud_presence: None,
         cloud_presence_message: String::new(),
@@ -348,6 +350,7 @@ fn cas_a81c_claim_copy_uses_scoped_plain_ids_owner_names_and_missing_title_reaso
         lease(&foreign_key, owner_id, LeaseStatus::Active, 600),
     ];
     let report = PeerReport {
+        limitations: Vec::new(),
         observed_at: Utc::now(),
         cloud_presence: None,
         cloud_presence_message: String::new(),
@@ -416,6 +419,9 @@ fn cas_cd42_two_machine_inventory_preserves_private_stale_and_claim_authority() 
         target_branch: "epic/target".into(),
     });
     tasks.add(&parked).unwrap();
+    let mut unlinked = parked.clone();
+    unlinked.id = "cas-unlinked".into();
+    tasks.add(&unlinked).unwrap();
     tasks
         .add_dependency(&crate::types::Dependency::new(
             parked.id.clone(),
@@ -450,6 +456,7 @@ fn cas_cd42_two_machine_inventory_preserves_private_stale_and_claim_authority() 
         agent("private", "supervisor", "private", "gamma", REPO, 1),
     ];
     let mut local = crate::types::Agent::new("sup-a".into(), "sup-a".into());
+    local.role = crate::types::AgentRole::Supervisor;
     local.metadata = agents[0].metadata.clone();
     local
         .metadata
@@ -492,6 +499,13 @@ fn cas_cd42_two_machine_inventory_preserves_private_stale_and_claim_authority() 
     );
     let a = details.iter().find(|d| d.owner == "sup-a").unwrap();
     assert_eq!(a.work.epics[0].owner.as_deref(), Some("sup-a"));
+    assert!(
+        a.work
+            .tasks
+            .iter()
+            .any(|t| t.task_id == "cas-unlinked" && t.owner.is_none()),
+        "parking releases claims, but a unique recorded assignment remains an observation"
+    );
     assert_eq!(a.work.tasks[0].assignee.as_deref(), Some("worker-a"));
     assert!(
         a.work.tasks[0].owner.is_none(),
@@ -605,4 +619,67 @@ fn cas_cd42_pr_cache_is_bounded_and_corrupt_metadata_is_unavailable() {
         assert_eq!(details[0].work.prs_status.state, "unavailable");
         assert!(details[0].work.prs.is_empty());
     }
+}
+
+#[tokio::test]
+async fn cas_cd42_unavailable_cloud_sections_keep_observation_time_and_no_registry_writes() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let supervisor = agent("remote", "supervisor", "remote-lane", "beta", REPO, 1);
+    Mock::given(method("GET"))
+        .and(path("/api/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"agents": [supervisor]})))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/agents/locks"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("claims offline"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let endpoint = server.uri();
+    let (report, text) = tokio::task::spawn_blocking(move || {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            format!("[project]\ncanonical_id = {REPO:?}\n"),
+        )
+        .unwrap();
+        super::super::CloudConfig {
+            endpoint,
+            token: Some("fixture-token".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(&root)
+        .unwrap();
+        let report = discover_peer_report(&root, None, true, None).unwrap();
+        assert!(
+            crate::store::open_agent_store(&root)
+                .unwrap()
+                .list(None)
+                .unwrap()
+                .is_empty()
+        );
+        let text = render_peer_report(&report, 80, true);
+        (serde_json::to_value(report).unwrap(), text)
+    })
+    .await
+    .unwrap();
+    assert_eq!(report["status"], "partial");
+    assert_eq!(report["peers"][0]["claims_status"]["state"], "unavailable");
+    assert!(report["peers"][0]["claims_status"]["observed_at"].is_string());
+    assert!(text.starts_with("[WARN] 1 peer supervisor"));
+    assert!(text.contains("Claims unavailable at") && text.contains("claims offline"));
+    assert!(!text.contains("Claims  0"));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method.as_str() == "GET")
+    );
 }

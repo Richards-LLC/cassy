@@ -63,6 +63,7 @@ pub struct PeerSplit {
     pub mine: Vec<String>,
     pub theirs: Vec<String>,
     pub expires_at: DateTime<Utc>,
+    pub target_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,12 +153,20 @@ pub(crate) fn presence_agent(root: &Path, agent: &crate::types::Agent) -> crate:
         }),
     );
     // Absence clears a previously published value on the next heartbeat.
+    if agent.role != crate::types::AgentRole::Supervisor {
+        agent.metadata.insert(PR_META.into(), String::new());
+        agent
+            .metadata
+            .insert("peer_splits_v1".into(), String::new());
+        return agent;
+    }
     agent
         .metadata
         .insert(PR_META.into(), read_snapshot(root).unwrap_or_default());
     // Split records are existing repository collaboration records, never
     // private task lock payloads or titles. An unreadable inventory clears
     // old metadata rather than publishing a fresh empty section.
+    let tasks = crate::store::open_task_store_local(root).ok();
     let splits = cas_store::list_epic_splits(root)
         .ok()
         .map(|rows| SplitSnapshot {
@@ -166,6 +175,15 @@ pub(crate) fn presence_agent(root: &Path, agent: &crate::types::Agent) -> crate:
                 .into_iter()
                 .filter(|s| s.local_agent_id == agent.id)
                 .map(|s| PeerSplit {
+                    target_branch: tasks
+                        .as_ref()
+                        .and_then(|tasks| tasks.get(&s.epic_id).ok())
+                        .and_then(|t| {
+                            t.deliverables
+                                .work_target
+                                .map(|w| w.target_branch)
+                                .or(t.branch)
+                        }),
                     state: s.display_state(Utc::now()).into(),
                     id: s.id,
                     epic_id: s.epic_id,
@@ -214,6 +232,7 @@ pub struct WaitingMerge {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerWork {
+    pub inventory_scope: String,
     pub worktree_root: Option<String>,
     pub scratch_root: Option<String>,
     pub scratch_scope: Option<String>,
@@ -238,6 +257,7 @@ impl PeerWork {
     ) -> Self {
         let observed = ObservationStatus::observed(peer.last_heartbeat, now);
         Self {
+            inventory_scope: "claims, epic children and unambiguous parked assignments".into(),
             worktree_root: owner.and_then(|a| meta(a, "clone_path").map(str::to_string)),
             scratch_root: owner.and_then(|a| meta(a, "scratch_root").map(str::to_string)),
             scratch_scope: owner.and_then(|a| meta(a, "scratch_scope").map(str::to_string)),
@@ -284,6 +304,8 @@ pub(super) fn inventory(
     detail: &mut PeerDetail,
     owner: Option<&AgentInfo>,
     store: &dyn TaskStore,
+    agents: &[AgentInfo],
+    aliases: &[String],
     now: DateTime<Utc>,
 ) {
     let work = &mut detail.work;
@@ -322,10 +344,46 @@ pub(super) fn inventory(
             Err(_) => missing = true,
         }
     }
+    // Parking releases a lease. Preserve these existing delivery records as
+    // observations without promoting an assignment/name to ownership. A name
+    // shared by agents on different machines cannot associate a delivery.
+    for status in [
+        crate::types::TaskStatus::AwaitingMerge,
+        crate::types::TaskStatus::Open,
+        crate::types::TaskStatus::InProgress,
+        crate::types::TaskStatus::Blocked,
+    ] {
+        let candidates = match store.list(Some(status)) {
+            Ok(rows) => rows,
+            Err(_) => {
+                missing = true;
+                continue;
+            }
+        };
+        for task in candidates.into_iter().filter(|t| {
+            t.status == crate::types::TaskStatus::AwaitingMerge
+                || t.deliverables.parked_branch.is_some()
+        }) {
+            let Some(assignee) = task.assignee.as_deref() else {
+                continue;
+            };
+            let member = agents.iter().find(|a| a.id == assignee).or_else(|| {
+                let mut matches = agents.iter().filter(|a| a.name == assignee);
+                let first = matches.next()?;
+                matches.next().is_none().then_some(first)
+            });
+            if member.is_some_and(|a| {
+                a.id == detail.supervisor.agent_id
+                    || belongs_to_peer(a, &detail.supervisor, owner, aliases)
+            }) {
+                records.insert(task.id.clone(), task);
+            }
+        }
+    }
     work.tasks_status = ObservationStatus::at(
         if missing { "unavailable" } else { "ready" },
         Some(now),
-        missing.then_some("one or more claimed task records are not synced"),
+        missing.then_some("task inventory unavailable or claimed records not synced"),
     );
     let snapshot = owner
         .and_then(|a| meta(a, PR_META))
@@ -480,6 +538,7 @@ pub(super) fn render_work(work: &PeerWork, line: &mut impl FnMut(String)) {
         work.observations_status.state,
         time(work.observations_status.observed_at)
     ));
+    line(format!("  Scope {}", work.inventory_scope));
     line(format!(
         "  Worktree {}",
         work.worktree_root.as_deref().unwrap_or("unknown")
@@ -512,6 +571,10 @@ pub(super) fn render_work(work: &PeerWork, line: &mut impl FnMut(String)) {
         line(format!(
             "    Epic {} | peer {}",
             split.epic_id, split.peer_agent_id
+        ));
+        line(format!(
+            "    Target {}",
+            split.target_branch.as_deref().unwrap_or("unknown")
         ));
         line(format!("    Mine {}", split.mine.join(", ")));
         line(format!("    Theirs {}", split.theirs.join(", ")));

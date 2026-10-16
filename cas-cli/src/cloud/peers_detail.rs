@@ -101,6 +101,7 @@ pub struct PeerEpicSplit {
 pub struct PeerReport {
     pub status: String,
     pub observed_at: DateTime<Utc>,
+    pub limitations: Vec<String>,
     pub cloud_presence: Option<super::presence::PresenceRecord>,
     pub cloud_presence_message: String,
     pub mailbox_status: String,
@@ -138,6 +139,10 @@ impl PeerReport {
             .collect();
         Self {
             observed_at: now,
+            limitations: vec![
+                "Read-only: shows conflicts; does not prevent them.".into(),
+                "Remote names are observations, not local spawn targets.".into(),
+            ],
             cloud_presence: self_id.and_then(|id| super::presence::load(cas_root, id)),
             cloud_presence_message: peers::presence_line(cas_root, self_id),
             mailbox_status,
@@ -322,7 +327,7 @@ pub fn assemble_peer_details(
                 claims,
                 workers,
             };
-            work::inventory(&mut detail, owner, tasks, now);
+            work::inventory(&mut detail, owner, tasks, agents, aliases, now);
             detail
         })
         .collect()
@@ -357,7 +362,14 @@ pub fn discover_peer_report(
     let coordinator = super::CloudCoordinator::new(config.clone())?
         .with_canonical_id(Some(repo.to_string()))
         .with_timeout(peers::DISCOVERY_TIMEOUT);
-    let agents = coordinator.list_agent_infos()?;
+    let agents = match coordinator.list_agent_infos() {
+        Ok(agents) => agents,
+        Err(error) => {
+            report.status = "lookup_failed".into();
+            report.error = Some(error.to_string());
+            return Ok(report);
+        }
+    };
     // Without project= the server returns only agents owned by this token.
     // Never infer account authority from a project-visible self row: it may
     // be absent (operator CLI) or belong to another team member.
@@ -623,8 +635,9 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
         }
     }
     if report.detail {
-        line("Read-only: shows conflicts; does not prevent them.".into());
-        line("Remote names are observations, not local spawn targets.".into());
+        for limitation in &report.limitations {
+            line(limitation.clone());
+        }
         line(format!("Observed {}", report.observed_at.to_rfc3339()));
     }
     for presence_line in report.cloud_presence_message.lines() {

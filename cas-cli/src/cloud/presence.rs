@@ -760,6 +760,9 @@ mod round5_tests {
                 },
             );
         }
+        // Start with an existing directory generation: enqueue must exercise
+        // the changed-generation comparison, rather than the None fallback.
+        drop(super::super::shutdown::presence_lease(&root).unwrap().unwrap());
         let mut snapshot = super::super::shutdown::Snapshot::load(&root);
         super::super::shutdown::enqueue(&root, &agent, "same", &server.uri()).unwrap();
         let endpoint = server.uri();

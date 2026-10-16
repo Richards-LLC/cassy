@@ -280,6 +280,7 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
     env.set("CAS_PROJECT_ROOTS", &projects);
     env.set("CAS_ROOT", &roots[0]);
     let old = cas_types::violet_compatibility::violet_compatibility().legacy_token_prefix.to_owned() + "_CASSY_PROXY";
+    // pin: the legacy Authorization wire shape is the upgrade fixture input.
     std::fs::write(env.home().join(".claude.json"), serde_json::json!({"mcpServers":{"violet":{
         "url":cas_types::violet_compatibility::violet_hub_url(),
         "headers":{"Authorization":format!("Bearer ${{{old}}}")}}}}).to_string()).unwrap();

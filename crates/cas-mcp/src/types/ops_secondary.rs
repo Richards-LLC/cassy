@@ -972,6 +972,11 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub json: Option<bool>,
 
+    /// cas-2a5a: `all` lists every supervisor of the caller's own account.
+    #[schemars(description = "peers only: `all` lists your account's supervisors in every project")]
+    #[serde(default)]
+    pub scope: Option<String>,
+
     // ========== Shared Fields ==========
     /// Agent ID, worktree ID, or branch name
     #[schemars(description = "Agent ID or worktree ID/branch name")]

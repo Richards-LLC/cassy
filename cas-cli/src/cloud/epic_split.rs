@@ -1075,6 +1075,7 @@ mod tests {
             in_reply_to: None,
             created_at: Utc::now().to_rfc3339(),
             attempts: 1,
+            scope: Default::default(),
         }
     }
 

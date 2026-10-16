@@ -932,6 +932,7 @@ impl CasService {
                     req.urgent.unwrap_or(false),
                     req.kind.as_deref(),
                     req.blocker.unwrap_or(false),
+                    req.attachment.as_deref(),
                 )
                 .await?
         {

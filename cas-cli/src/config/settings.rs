@@ -544,6 +544,9 @@ impl Default for OrchestrationConfig {
 /// Factory mode configuration for supervisor task assignment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactoryConfig {
+    /// Claude launch options shared by initial, dynamic and recycled agents.
+    #[serde(default)]
+    pub claude: cas_types::factory_claude::FactoryClaudeConfig,
     /// Resource denials applied to every factory worker, across harnesses.
     #[serde(flatten)]
     pub worker_policy: cas_types::factory_worker_policy::FactoryWorkerPolicy,
@@ -972,6 +975,7 @@ impl Default for FactoryConfig {
     fn default() -> Self {
         Self {
             worker_policy: Default::default(),
+            claude: Default::default(),
             worker_denied_clis: default_worker_denied_clis(),
             worker_denied_mcp_tools: default_worker_denied_mcp_tools(),
             artifacts_root: None,

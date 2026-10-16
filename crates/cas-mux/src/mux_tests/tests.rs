@@ -226,6 +226,7 @@ fn cas_678d_factory_launch_uses_private_value_instead_of_shell_expression() {
 #[tokio::test]
 async fn declared_worker_credentials_reach_claude_and_codex_from_env_or_file_cas_82bc() {
     let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
     let project = tempfile::tempdir().unwrap();
     let root = project.path().join(".cas");
     std::fs::create_dir_all(&root).unwrap();
@@ -261,7 +262,7 @@ async fn declared_worker_credentials_reach_claude_and_codex_from_env_or_file_cas
             assert!(!worker.env_remove.iter().any(|name| name == "GITHUB_TOKEN" || name == "VERCEL_TOKEN"));
             assert!(env_value(worker, "CAS_FACTORY_WORKER_CREDENTIAL_WARNING").is_none());
             assert!(env_value(worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
-            assert!(!worker.args.iter().any(|arg| arg == "--strict-mcp-config"));
+            assert_eq!(worker.args.iter().any(|arg| arg == "--strict-mcp-config"), cli == SupervisorCli::Claude);
             let mut probe = worker.clone();
             probe.command = "/bin/sh".into();
             probe.args = vec!["-c".into(),
@@ -287,6 +288,7 @@ async fn declared_worker_credentials_reach_claude_and_codex_from_env_or_file_cas
 #[test]
 fn missing_declared_worker_credential_warns_without_refusing_cas_82bc() {
     let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
     env.remove("GITHUB_TOKEN");
     env.remove("CAS_WORKER_GITHUB_READ_TOKEN");
     let credentials = env.home().join("credentials.env");
@@ -314,6 +316,7 @@ fn missing_declared_worker_credential_warns_without_refusing_cas_82bc() {
 #[tokio::test]
 async fn supervisor_only_credential_conflict_warns_and_denies_cas_82bc() {
     let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
     env.set("VERCEL_TOKEN", "operator-fixture");
     env.set("GH_TOKEN", "operator-fixture");
     env.set("CAS_WORKER_GITHUB_READ_TOKEN", "read-token-fixture");
@@ -385,6 +388,7 @@ fn credential_allowlist_cannot_override_factory_identity_cas_82bc() {
 #[test]
 fn factory_supervisor_only_mcp_and_env_isolate_claude_and_codex_gh_1047() {
     let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
     let project = tempfile::tempdir().unwrap();
     let cas_root = project.path().join(".cas");
     let worktree = project.path().join("worker");
@@ -450,7 +454,7 @@ auth = "env:DEPLOY_FIXTURE_TOKEN"
         assert_eq!(std::fs::read(worktree.join(".mcp.json")).unwrap(), before, "existing worker configuration is untouched");
         assert!(materialized["mcpServers"].get("vercel").is_none());
         assert!(materialized["mcpServers"].get("neon").is_none());
-        assert!(materialized["mcpServers"].get("context7").is_some());
+        assert_eq!(materialized["mcpServers"].get("context7").is_some(), cli == SupervisorCli::Codex);
         assert!(materialized["mcpServers"].get("cas").is_some());
         match cli {
             SupervisorCli::Claude => {
@@ -475,7 +479,8 @@ auth = "env:DEPLOY_FIXTURE_TOKEN"
 /// including forms where the harness is not the third argument.
 #[test]
 fn worker_resource_policy_uses_effective_command_for_nice_wrappers_gh_1047() {
-    let _env = TestEnvGuard::temp_home();
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
     let project = tempfile::tempdir().unwrap();
     let cas_root = project.path().join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
@@ -675,6 +680,7 @@ fn codex_env_denials_read_selected_home_and_nested_project_layers_gh_1047() {
 #[tokio::test]
 async fn supervisor_only_env_is_absent_in_spawned_worker_process_gh_1047() {
     let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
     let project = tempfile::tempdir().unwrap();
     let cas_root = project.path().join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
@@ -1276,6 +1282,7 @@ fn worker_gets_the_read_only_github_token_and_never_the_operators() {
 #[tokio::test]
 async fn machine_global_protected_proxy_credentials_do_not_reach_worker_descendants() {
     let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
     let home = tempfile::tempdir().expect("temporary home");
     let config_home = tempfile::tempdir().expect("temporary config home");
     let global_config = config_home.path().join("code-mode-mcp/config.toml");
@@ -3785,4 +3792,167 @@ async fn a_held_submit_gate_holds_the_cr_until_it_opens() {
     }
     pane.input_drained_for_test();
     assert_eq!(recorded.0.lock().unwrap().as_slice(), b"payload\r");
+}
+
+#[tokio::test]
+async fn cas_569f_claude_role_options_and_cas_only_scope() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--name,--remote-control,--fallback-model,--mcp-config,--strict-mcp-config");
+    env.set("CAS_FACTORY_NICE_WORKER", "0");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"), "[factory.claude]\nremote_control = true\nfallback_model = 'sonnet'\n").unwrap();
+    let source = project.path().join(".mcp.json");
+    let original = serde_json::json!({"mcpServers": {
+        "cas": {"command": "fixture-cas", "env": {"KEEP": "yes"}},
+        "external": {"command": "must-not-discover"}
+    }}).to_string();
+    std::fs::write(&source, &original).unwrap();
+    let configs = Mux::factory_pane_configs(&MuxConfig {
+        cwd: project.path().into(), cas_root: Some(root.clone()),
+        workers: 1, worker_cli: SupervisorCli::Claude,
+        supervisor_cli: SupervisorCli::Claude, include_director: false,
+        ..Default::default()
+    });
+    for (name, pane) in &configs {
+        assert!(env_value(pane, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        let value = |flag| pane.args.windows(2).find(|pair| pair[0] == flag).map(|pair| pair[1].as_str());
+        assert_eq!(value("--name"), Some(name.as_str()));
+        assert_eq!(value("--fallback-model"), Some("sonnet"));
+        if env_value(pane, "CAS_AGENT_ROLE") == Some("worker") {
+            assert!(!pane.args.iter().any(|arg| arg == "--remote-control"));
+            assert!(pane.args.iter().any(|arg| arg == "--strict-mcp-config"));
+            let path = value("--mcp-config").unwrap();
+            let document: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let servers = document["mcpServers"].as_object().unwrap();
+            assert_eq!(servers.keys().collect::<Vec<_>>(), vec!["cas"]);
+            assert_eq!(servers["cas"]["command"], "fixture-cas");
+            assert_eq!(servers["cas"]["env"]["KEEP"], "yes");
+            #[cfg(unix)] {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+            }
+        } else {
+            assert_eq!(value("--remote-control"), Some(name.as_str()));
+            assert!(!pane.args.iter().any(|arg| arg == "--strict-mcp-config"));
+            assert!(env_value(pane, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").is_none());
+        }
+        let mut probe = pane.clone();
+        probe.command = "/bin/sh".into();
+        probe.args.splice(0..0, ["-c".into(), "printf 'arg=%s\\n' \"$@\"".into(), "fixture-claude".into()]);
+        let mut pty = crate::pty::Pty::spawn("claude-argv-probe", probe).unwrap();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut output = Vec::new();
+            loop {
+                match pty.recv().await {
+                    Some(crate::pty::PtyEvent::Output(bytes)) => output.extend(bytes),
+                    Some(crate::pty::PtyEvent::Exited(code)) => { assert_eq!(code, Some(0)); break; }
+                    Some(crate::pty::PtyEvent::Error(error)) => panic!("{error}"),
+                    None => panic!("argv fixture ended without exit status"),
+                }
+            }
+            String::from_utf8_lossy(&output).replace("\r\n", "\n")
+        }).await.expect("bounded local argv fixture");
+        assert!(output.contains(&format!("arg=--name\narg={name}\n")));
+        assert!(output.contains("arg=--fallback-model\narg=sonnet\n"));
+        assert_eq!(output.contains("arg=--remote-control\n"), env_value(pane, "CAS_AGENT_ROLE") == Some("supervisor"));
+    }
+    assert_eq!(std::fs::read_to_string(source).unwrap(), original);
+}
+
+#[test]
+fn cas_569f_claude_unsupported_and_denied_launches_refuse_before_spawn() {
+    let mut env = TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    for (flags, options, worker_error, supervisor_error) in [
+        ("", "", true, false),
+        ("--mcp-config", "", true, false),
+        ("--strict-mcp-config", "", true, false),
+        ("--mcp-config,--strict-mcp-config", "[factory.claude]\nremote_control=true", false, true),
+        ("--mcp-config,--strict-mcp-config", "[factory.claude]\nfallback_model='sonnet'", true, true),
+        ("--mcp-config,--strict-mcp-config", "[factory]\nsupervisor_only_mcp=['cas']", true, false),
+        ("--mcp-config,--strict-mcp-config", "[factory.claude]\nremote_control='invalid'", true, true),
+    ] {
+        env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", flags);
+        std::fs::write(root.join("config.toml"), options).unwrap();
+        let configs = Mux::factory_pane_configs(&MuxConfig {
+            cwd: project.path().into(), cas_root: Some(root.clone()), workers: 1,
+            worker_cli: SupervisorCli::Claude, supervisor_cli: SupervisorCli::Claude,
+            include_director: false, ..Default::default()
+        });
+        for (_, pane) in configs {
+            let is_worker = env_value(&pane, "CAS_AGENT_ROLE") == Some("worker");
+            let should_refuse = if is_worker {worker_error} else {supervisor_error};
+            assert_eq!(env_value(&pane, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_some(), should_refuse,
+                "flags={flags}, options={options}, worker={is_worker}");
+            if should_refuse {
+                assert!(crate::pty::Pty::spawn("refused-before-discovery", pane).is_err());
+            }
+        }
+    }
+}
+
+#[test]
+fn cas_569f_defaults_and_native_cas_preserve_environment_denials() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"), "[factory]\nsupervisor_only_env=['CAS_ROOT']").unwrap();
+    let configs = Mux::factory_pane_configs(&MuxConfig {
+        cwd: project.path().into(), cas_root: Some(root.clone()), workers: 1,
+        worker_cli: SupervisorCli::Claude, supervisor_cli: SupervisorCli::Claude,
+        include_director: false, ..Default::default()
+    });
+    for (_, pane) in configs {
+        assert!(env_value(&pane, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        for absent in ["--name", "--remote-control", "--fallback-model"] {
+            assert!(!pane.args.contains(&absent.to_string()));
+        }
+        if env_value(&pane, "CAS_AGENT_ROLE") == Some("worker") {
+            let document: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("worker-mcp/worker-1.json")).unwrap()).unwrap();
+            let server = &document["mcpServers"]["cas"];
+            assert_eq!(server["command"], "cas");
+            assert_eq!(server["args"], serde_json::json!(["serve"]));
+            assert!(server["env"].get("CAS_ROOT").is_none());
+            assert!(pane.env_remove.contains(&"CAS_ROOT".into()));
+            assert_eq!(env_value(&pane, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"), Some("1"));
+        }
+    }
+}
+
+#[test]
+fn cas_569f_dynamic_claude_launch_keeps_account_team_and_factory_identity() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--name,--fallback-model,--mcp-config,--strict-mcp-config");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"), "[factory.claude]\nfallback_model='haiku'\n").unwrap();
+    let account = env.home().join("selected-account");
+    std::fs::create_dir_all(&account).unwrap();
+    let teams = crate::pty::TeamsSpawnConfig {
+        team_name: "fixture-team".into(), agent_id: "dynamic@fixture-team".into(),
+        agent_name: "dynamic".into(), agent_color: "blue".into(),
+        agent_type: "general-purpose".into(), parent_session_id: Some("lead-session".into()),
+        lead_session_id: None, settings_path: Some("fixture-settings.json".into()),
+    };
+    let config = MuxConfig { factory_session: Some("factory-569f".into()), ..Default::default() };
+    let mux = Mux::factory_state_for_test(&config);
+    let spec = WorkerSpec { config_dir: Some(account.display().to_string()), ..WorkerSpec::builtin_default() };
+    let pane = mux.build_add_worker_config("dynamic", project.path().into(), Some(&root), "supervisor", Some(&teams), Some(spec));
+    assert!(env_value(&pane, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+    for (flag, value) in [("--name", "dynamic"), ("--fallback-model", "haiku"),
+        ("--team-name", "fixture-team"), ("--settings", "fixture-settings.json"),
+        ("--disallowedTools", "AskUserQuestion"), ("--permission-mode", "bypassPermissions")] {
+        assert!(pane.args.windows(2).any(|pair| pair == [flag, value]), "missing {flag} {value}");
+    }
+    assert!(pane.args.contains(&"--strict-mcp-config".into()));
+    assert_eq!(env_value(&pane, "CLAUDE_CONFIG_DIR"), account.to_str());
+    assert_eq!(env_value(&pane, "CAS_FACTORY_SESSION"), Some("factory-569f"));
+    assert_eq!(env_value(&pane, "CAS_SUPERVISOR_NAME"), Some("supervisor"));
 }

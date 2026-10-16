@@ -974,6 +974,8 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.worker_build_jobs", "6", "6"),
         ("factory.cargo_build_jobs", "5", "5"),
         ("factory.nice_cargo", "false", "false"),
+        ("factory.claude.remote_control", "true", "true"),
+        ("factory.claude.fallback_model", " sonnet,haiku ", "sonnet,haiku"),
         ("factory.warn_stale_assignment", "false", "false"),
         ("factory.block_stale_assignment", "false", "false"),
         ("factory.stale_threshold_commits", "3", "3"),
@@ -1475,6 +1477,20 @@ fn unusable_origin_does_not_infer_component_or_parent_cas_f398() {
             .project
             .is_none()
     );
+}
+
+#[test]
+fn cas_569f_claude_config_rejects_invalid_input_and_clears_fallback() {
+    let mut config = Config::default();
+    config.set("factory.claude.fallback_model", "sonnet").unwrap();
+    assert!(config.set("factory.claude.fallback_model", "sonnet\nhaiku").is_err());
+    assert_eq!(config.get("factory.claude.fallback_model").as_deref(), Some("sonnet"));
+    assert!(config.set("factory.claude.remote_control", "invalid").is_err());
+    assert!(!config.factory().claude.remote_control);
+    config.set("factory.claude.fallback_model", "").unwrap();
+    assert!(config.factory().claude.fallback_model.is_none());
+    let invalid = "[factory.claude]\nfallback_model=\"sonnet\\nhaiku\"";
+    assert!(toml::from_str::<Config>(invalid).is_err());
 }
 
 /// cas-3f93: `factory.scratch_root` is unset by default, refuses a relative

@@ -159,6 +159,8 @@ impl Config {
                 qa.telemetry_sweep.unwrap_or_default(),
             ),
             // Factory section (cas-1a05): the keys `get` and `set` accept.
+            ("factory.claude.remote_control".into(), factory.claude.remote_control.to_string()),
+            ("factory.claude.fallback_model".into(), factory.claude.fallback_model.clone().unwrap_or_default()),
             ("factory.commander_mirror_enabled".to_string(), factory.commander_mirror_enabled.to_string()),
             ("factory.write_roots".to_string(), factory.write_roots.join(",")),
             ("factory.supervisor_only_mcp".to_string(), factory.worker_policy.supervisor_only_mcp.join(",")),

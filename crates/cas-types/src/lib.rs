@@ -48,6 +48,7 @@ mod loop_state;
 mod preview;
 pub mod factory_scratch;
 pub mod factory_worker_policy;
+pub mod factory_claude;
 mod prompt;
 pub mod provenance;
 mod public_identifier;

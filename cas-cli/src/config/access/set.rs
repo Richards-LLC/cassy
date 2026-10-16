@@ -168,6 +168,14 @@ impl Config {
                     MemError::Parse(format!("Invalid integer value for factory.target_cache_retention_count: {value}"))
                 })?;
             }
+            "factory.claude.remote_control" => {
+                let enabled = value.parse().map_err(|_| MemError::Other(format!("Invalid boolean value for {key}: {value}")))?;
+                self.factory.get_or_insert_with(FactoryConfig::default).claude.remote_control = enabled;
+            }
+            "factory.claude.fallback_model" => {
+                let model = cas_types::factory_claude::FactoryClaudeConfig::parse_fallback(value).map_err(MemError::Other)?;
+                self.factory.get_or_insert_with(FactoryConfig::default).claude.fallback_model = model;
+            }
             "factory.nice_cargo" => {
                 self.factory.get_or_insert_with(FactoryConfig::default).nice_cargo =
                     value.parse().map_err(|_| MemError::Parse(format!(

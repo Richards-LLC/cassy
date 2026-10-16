@@ -196,7 +196,12 @@ pub(super) fn finish_worker_config(
     if !warning.is_empty() {
         config.env.push((cas_pty::WORKER_CREDENTIAL_WARNING_ENV.into(), warning));
     }
-    if !policy.is_empty() {
+    let claude = config.effective_command() == "claude";
+    if claude && (!cas_pty::claude_supports_flag("--mcp-config") || !cas_pty::claude_supports_flag("--strict-mcp-config")) {
+        config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), "Claude worker isolation requires --mcp-config and --strict-mcp-config; upgrade the installed Claude CLI before spawning".into()));
+        return;
+    }
+    if claude || !policy.is_empty() {
         // Grok discovers original project/user MCP configuration and has no
         // supported per-launch isolation override. Other unsupported native
         // harnesses must also refuse, before Pty::spawn can start discovery.
@@ -210,7 +215,9 @@ pub(super) fn finish_worker_config(
             "factory worker resource denials; tasks needing these resources route to supervisor");
         let worker = config.env.iter().rev().find_map(|(key, value)| (key == "CAS_AGENT_NAME").then_some(value.clone())).unwrap_or_else(|| "worker".into());
         if let Some(root) = cas_root {
-            match crate::worker_resources::prepare_worker_mcp(root, &worker, &policy) {
+            let scope = if claude { crate::worker_resources::McpScope::CasOnly }
+                else { crate::worker_resources::McpScope::AllowedProject };
+            match crate::worker_resources::prepare_worker_mcp(root, &worker, &policy, scope) {
                 Ok(path) => {
                     let cli = config.effective_command();
                     if cli == "claude" {
@@ -232,8 +239,10 @@ pub(super) fn finish_worker_config(
                         }
                     }
                 }
-                Err(_) => config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), "Worker MCP isolation could not be provisioned; fix the project .mcp.json and private worker-mcp directory before spawning".into())),
+                Err(error) => config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), format!("Worker MCP isolation could not be provisioned: {error}; fix the project MCP configuration/policy and private worker-mcp directory before spawning"))),
             }
+        } else if claude {
+            config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), "Claude worker isolation requires a Cassy project root; supply cas_root before spawning".into()));
         }
     }
 }

@@ -40,6 +40,15 @@ omit it to wait for all runs for that full SHA. Local events such as
 `remind_ttl_secs` defaults to 3,600 seconds for time and local-event reminders,
 and 604,800 seconds (7 days) for external events. Explicit `0` means no expiry.
 
+Supervisor stall notices use the full `epic_status` delivery containment
+computation. A parked delivery already contained in its target, including a
+rewritten or intentionally evolved delivery, gets an "awaiting worker close"
+notice instead of another merge demand. That notice is deduplicated per delivery
+and target across later epic commits and supervisor turns. Genuinely unmerged
+deliveries retain the merge reminder. Containment proofs run off the daemon
+loop and are cached by delivery metadata and local/origin tips; unknown proofs
+are retried rather than cached as merged.
+
 ## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client

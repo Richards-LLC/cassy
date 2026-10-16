@@ -2024,9 +2024,10 @@ pub(super) fn claude_turn_aware_retry_with_evidence(
 }
 
 /// Withdraw obsolete task alarms at the probe cadence, even for a busy pane.
-fn withdraw_stale_stall_nudge(
+/// Whether a daemon stall nudge's worker no longer holds its task (read
+/// only; the withdrawal is a stamp). cas-786a6: read in the selecting job.
+fn stall_nudge_task_stale(
     tasks: &dyn cas_store::TaskStore,
-    queue: &dyn cas_store::PromptQueueStore,
     row: &cas_store::QueuedPrompt,
     agents: &[cas_types::Agent],
 ) -> anyhow::Result<bool> {
@@ -2047,17 +2048,12 @@ fn withdraw_stale_stall_nudge(
         Err(cas_store::StoreError::TaskNotFound(_)) => true,
         Err(error) => return Err(error.into()),
     };
-    if stale_task {
-        queue.mark_superseded(row.id, "worker no longer holds the stalled task")?;
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(stale_task)
 }
 
 /// Read activity only when the held alarm becomes eligible for transport.
-fn withdraw_resumed_stall_nudge(
+fn stall_nudge_resumed(
     events: &dyn cas_store::EventStore,
-    queue: &dyn cas_store::PromptQueueStore,
     row: &cas_store::QueuedPrompt,
     agents: &[cas_types::Agent],
 ) -> anyhow::Result<bool> {
@@ -2077,32 +2073,9 @@ fn withdraw_resumed_stall_nudge(
     }).and_then(|path| std::fs::metadata(path).ok())
         .and_then(|metadata| metadata.modified().ok())
         .is_some_and(|modified| chrono::DateTime::<chrono::Utc>::from(modified) > row.created_at);
-    if event_activity || transcript_activity {
-        queue.mark_superseded(row.id, "worker activity resumed while the stall nudge was held")?;
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(event_activity || transcript_activity)
 }
 
-/// Persist a declined worker wake unless an observed open call pauses its budget.
-fn record_worker_wake_decline(
-    queue: &dyn cas_store::PromptQueueStore,
-    id: i64,
-    decision: WakeDecision,
-    tool_call: ToolCallEvidence,
-) -> cas_store::Result<Option<u32>> {
-    if tool_call == ToolCallEvidence::InFlight {
-        queue.record_pending_reason(
-            id,
-            cas_store::PendingReason::GatedNotReady,
-            Some("wake budget paused while the recipient has a tool call in flight"),
-        )?;
-        return Ok(None);
-    }
-    queue
-        .record_wake_gate_decline(id, &decision.status_detail())
-        .map(Some)
-}
 
 fn worker_recipient_shut_down(
     target: &str,
@@ -2121,6 +2094,169 @@ fn worker_recipient_shut_down(
         return true;
     }
     dead.contains(target) && !live.iter().any(|name| name == target)
+}
+
+/// A lifecycle envelope's task, as the selecting job read it (cas-786a6).
+#[derive(Debug, Clone)]
+pub(crate) enum LifecycleTaskRead {
+    Found(Box<cas_types::Task>),
+    NotFound,
+    Unavailable(String),
+}
+
+/// A held worker-stall nudge's premise checks, read in the selecting job
+/// (cas-786a6). `Err` is an unavailable store.
+#[derive(Debug, Clone)]
+pub(crate) struct StallNudgeRead {
+    /// The worker no longer holds the stalled task.
+    pub(crate) stale_task: Result<bool, String>,
+    /// The worker showed activity after the nudge was queued.
+    pub(crate) resumed: Result<bool, String>,
+}
+
+/// The store reads one row's delivery decision needs, read by `QueueSelect`
+/// off the loop (cas-786a6, factory loop v2 H3). Control decides from these
+/// and never opens a store for them.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RowFacts {
+    /// `wake_gate_state`: consecutive declines and the last wake attempt.
+    /// `None` when the read failed.
+    pub(crate) wake_gate: Option<(u32, Option<chrono::DateTime<chrono::Utc>>)>,
+    /// `deferred_inbox_state` (GH #751 durable handoff marker).
+    pub(crate) deferred_inbox: Option<(chrono::DateTime<chrono::Utc>, u64)>,
+    /// cas-8aee: a queued assignment whose task moved on.
+    pub(crate) assignment_stale: Option<(String, cas_types::TaskStatus)>,
+    /// cas-bc8c: the lifecycle envelope's task. `None`: no envelope, or the
+    /// task store could not be opened (delivery proceeds, as before).
+    pub(crate) lifecycle_task: Option<LifecycleTaskRead>,
+    /// cas-6eab/cas-b17c: a merge request's task and live git decision.
+    pub(crate) merge_request: Option<(
+        Option<cas_types::Task>,
+        crate::prompt_revalidation::MergeRequestDecision,
+    )>,
+    /// A daemon worker-stall nudge's premise checks.
+    pub(crate) stall_nudge: Option<StallNudgeRead>,
+}
+
+/// An operator reply for Commander clients, read and stamped by
+/// `QueueSelect` (cas-786a6).
+#[derive(Debug, Clone)]
+pub(crate) struct OperatorReplyRead {
+    pub(crate) queued: cas_store::QueuedPrompt,
+    pub(crate) device_id: String,
+    pub(crate) payload: crate::ui::factory::OperatorReplyPayload,
+    pub(crate) notice: Option<crate::ui::factory::OperatorNotice>,
+}
+
+/// Read one selected row's [`RowFacts`] on the selecting job's thread.
+fn read_row_facts(
+    cas_dir: &std::path::Path,
+    queue: &dyn cas_store::PromptQueueStore,
+    tasks: Option<&dyn cas_store::TaskStore>,
+    agents: &[cas_types::Agent],
+    row: &cas_store::QueuedPrompt,
+) -> RowFacts {
+    let mut facts = RowFacts {
+        wake_gate: queue.wake_gate_state(row.id).ok(),
+        deferred_inbox: queue.deferred_inbox_state(row.id).ok().flatten(),
+        assignment_stale: super::delivery::assignment_stale_status(cas_dir, &row.prompt, &row.target),
+        ..RowFacts::default()
+    };
+    if let Some(envelope) = crate::prompt_revalidation::parse_lifecycle_envelope(&row.prompt)
+        && let Some(tasks) = tasks
+    {
+        facts.lifecycle_task = Some(match tasks.get(&envelope.task_id) {
+            Ok(task) => LifecycleTaskRead::Found(Box::new(task)),
+            Err(cas_store::StoreError::TaskNotFound(_)) => LifecycleTaskRead::NotFound,
+            Err(error) => LifecycleTaskRead::Unavailable(error.to_string()),
+        });
+    }
+    if let Some(envelope) = crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt) {
+        use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
+        let task = tasks.and_then(|tasks| tasks.get(&envelope.task_id).ok());
+        let repo_root = task
+            .as_ref()
+            .and_then(|task| task.deliverables.work_target.clone())
+            .and_then(|work_target| resolve_repo_context(cas_dir, &work_target).ok())
+            .map(|repo| repo.repo_root)
+            .unwrap_or_else(|| cas_dir.parent().unwrap_or(cas_dir).to_path_buf());
+        let git = crate::prompt_revalidation::queued_merge_request_decision(
+            &repo_root,
+            task.as_ref(),
+            &envelope,
+        );
+        facts.merge_request = Some((task, git));
+    }
+    if row.kind.as_deref() == Some("worker_stall_nudge")
+        && row.origin == Some(cas_store::QueueOrigin::Daemon)
+    {
+        let stale_task = match tasks {
+            Some(tasks) => stall_nudge_task_stale(tasks, row, agents).map_err(|error| error.to_string()),
+            None => Err("nudge task store unavailable".to_string()),
+        };
+        let resumed = super::prompt_queue_jobs::job_thread_store("event", cas_dir, |dir| {
+            Ok(crate::store::open_event_store(dir)?)
+        })
+        .map_err(|error| format!("nudge event store unavailable: {error}"))
+        .and_then(|events| {
+            stall_nudge_resumed(events.as_ref(), row, agents).map_err(|error| error.to_string())
+        });
+        facts.stall_nudge = Some(StallNudgeRead { stale_task, resumed });
+    }
+    facts
+}
+
+/// Read and stamp the operator replies Commander clients are owed.
+fn read_operator_replies(
+    queue: &dyn cas_store::PromptQueueStore,
+    session: &str,
+) -> anyhow::Result<Vec<OperatorReplyRead>> {
+    let mut reads = Vec::new();
+    for queued in queue.peek_operator_replies(session, 10)? {
+        // `*` is the deliberate v2 fallback when no verified Commander row
+        // exists yet. The hub filters nothing for this marker and every
+        // authenticated device holding the session lease receives the
+        // unprompted turn.
+        let device_id = queued.recipient_device_id.clone().unwrap_or_else(|| "*".to_string());
+        let payload = match serde_json::from_str::<crate::ui::factory::OperatorReplyPayload>(
+            &queued.prompt,
+        ) {
+            Ok(payload)
+                if payload.device_id == device_id
+                    && (payload.schema_version == 1 || payload.schema_version == 2) =>
+            {
+                payload
+            }
+            Ok(_) => {
+                let _ = queue.mark_dropped(
+                    queued.id,
+                    Some("operator reply payload/device receipt mismatch"),
+                );
+                continue;
+            }
+            Err(error) => {
+                let _ = queue.mark_dropped(
+                    queued.id,
+                    Some("operator reply payload is not a valid schema-1 or schema-2 message"),
+                );
+                tracing::warn!(
+                    prompt_id = queued.id,
+                    %error,
+                    "discarded malformed operator reply payload"
+                );
+                continue;
+            }
+        };
+        let _ = queue.record_selected(queued.id);
+        let notice = operator_notices(queue, session, std::slice::from_ref(&queued)).remove(&queued.id);
+        reads.push(OperatorReplyRead {
+            queued,
+            device_id,
+            payload,
+            notice,
+        });
+    }
+    Ok(reads)
 }
 
 /// Factory loop v2 `QueueSelect` (cas-d2a2, spec §4.3 and §4.5 rule 1). Runs
@@ -2235,6 +2371,28 @@ pub(super) fn run_queue_select(
         // claim is taken here: the loop claims each row just before its
         // transport handoff (review round 1, H1/H2).
         selection.rows = queue.select_for_targets(&targets, Some(session), request.limit)?;
+        // cas-786a6 (H3): the decision reads for each row, here, so control
+        // decides without a store.
+        let tasks = super::prompt_queue_jobs::job_thread_store("task_local", &request.cas_dir, |dir| {
+            Ok(crate::store::open_task_store_local(dir)?)
+        })
+        .ok();
+        for row in &selection.rows {
+            let facts = read_row_facts(
+                &request.cas_dir,
+                queue.as_ref(),
+                tasks.as_deref(),
+                &registered_agents,
+                row,
+            );
+            selection.facts.insert(row.id, facts);
+        }
+    }
+    if request.operator_replies {
+        match read_operator_replies(queue.as_ref(), session) {
+            Ok(replies) => selection.operator_replies = replies,
+            Err(error) => tracing::debug!(%error, "operator replies unavailable this selection"),
+        }
     }
     selection.native_agents = native_agents;
     selection.registered_agents = registered_agents;
@@ -3862,7 +4020,7 @@ impl FactoryDaemon {
     /// re-interrupted, and a row whose pane never reacted stays pending with a
     /// truthful reason instead of being stamped Delivered on the strength of a
     /// `write()` that returned Ok (notification 7206).
-    fn resolve_urgent_wake_probes(&mut self, queue: &dyn cas_store::PromptQueueStore) {
+    fn resolve_urgent_wake_probes(&mut self) {
         if self.urgent_wake_probes.is_empty() {
             return;
         }
@@ -3890,13 +4048,22 @@ impl FactoryDaemon {
                 UrgentProbeAction::KeepProbing => {}
                 UrgentProbeAction::ConsumeRow => {
                     self.forget_row_delivery_state(row_id);
-                    if let Err(error) = Self::consume_urgent_wake_row(queue, row_id, &target) {
-                        tracing::error!(
-                            prompt_id = row_id,
-                            %error,
-                            "cas-ac7e: failed to stamp an urgent row whose wake was observed"
-                        );
-                    } else {
+                    // cas-1a54 pairing (strong observed-wake receipt, then the
+                    // transport stamp), as `consume_urgent_wake_row` does.
+                    // cas-786a6: QueueStamps in order on the row's key.
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
+                        row_id,
+                        &target,
+                        super::prompt_queue_jobs::QueueStamp::ObservedWakeReceipt,
+                    );
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
+                        row_id,
+                        &target,
+                        super::prompt_queue_jobs::QueueStamp::TransportDelivered,
+                    );
+                    {
                         tracing::info!(
                             target: "cas::coordination",
                             stage = "urgent_wake_observed",
@@ -3913,13 +4080,18 @@ impl FactoryDaemon {
                     // LIFECYCLE_RENUDGE_INTERVAL, and the row's undelivered
                     // clock keeps counting for the supervisor's escalation.
                     self.urgent_wake_probes.remove(&row_id);
-                    let _ = queue.record_pending_reason(
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
                         row_id,
-                        cas_store::PendingReason::GatedNotReady,
-                        Some(
-                            "urgent interrupt did not grant a turn — pane produced no output \
-                             within the wake observation window",
-                        ),
+                        &target,
+                        super::prompt_queue_jobs::QueueStamp::PendingReason {
+                            reason: cas_store::PendingReason::GatedNotReady,
+                            detail: Some(
+                                "urgent interrupt did not grant a turn — pane produced no output \
+                                 within the wake observation window"
+                                    .to_string(),
+                            ),
+                        },
                     );
                     tracing::warn!(
                         target: "cas::coordination",
@@ -3964,7 +4136,7 @@ impl FactoryDaemon {
     /// so the common path costs nothing.
     fn deferred_inbox_outcome_for(
         &self,
-        queue: &dyn cas_store::PromptQueueStore,
+        durable: Option<(chrono::DateTime<chrono::Utc>, u64)>,
         row_id: i64,
         target: &str,
         from: &str,
@@ -3992,8 +4164,7 @@ impl FactoryDaemon {
             // handoff marker. Without this branch a restarted daemon sees a
             // drained row as a first delivery and appends another Claude
             // inbox copy.
-            let Ok(Some((delivered_at, bytes_at_write))) = queue.deferred_inbox_state(row_id)
-            else {
+            let Some((delivered_at, bytes_at_write)) = durable else {
                 return DeferredInboxOutcome::Deliver;
             };
             let elapsed = (chrono::Utc::now() - delivered_at)
@@ -4351,7 +4522,6 @@ impl FactoryDaemon {
     /// Returns whether the supervisor was (or already had been) told.
     fn park_wake_starved_row(
         &mut self,
-        queue: &dyn cas_store::PromptQueueStore,
         queued: &cas_store::QueuedPrompt,
         pane_target: &str,
         attempts: u32,
@@ -4376,23 +4546,20 @@ impl FactoryDaemon {
         let recheck_at = chrono::Utc::now()
             + chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL)
                 .unwrap_or_else(|_| chrono::Duration::minutes(2));
-        if let Err(error) =
-            queue.park_for_busy_recipient(queued.id, Some(detail.as_str()), recheck_at)
-        {
-            tracing::warn!(
-                target: "cas::coordination",
-                message_id = queued.id,
-                %error,
-                "cas-d1659: could not park a wake-starved row; it stays pending"
-            );
-        }
+        // cas-786a6 (L4): a QueueStamp on the writer.
+        self.queue_jobs.stamp(
+            self.app.cas_dir(),
+            queued.id,
+            &queued.target,
+            super::prompt_queue_jobs::QueueStamp::ParkBusy { detail, recheck_at },
+        );
         // Live probes would keep acting on a row Cassy decided to stop
         // waking. The redelivery counters stay, so the recheck lands on the
         // same exhausted budget instead of starting a fresh one.
         self.urgent_wake_probes.remove(&queued.id);
         self.normal_delivery_probes.remove(&queued.id);
         if silent {
-            self.notify_wake_starved_supervisor(queue, queued, pane_target, attempts);
+            self.notify_wake_starved_supervisor(queued, pane_target, attempts);
         }
         tracing::info!(
             target: "cas::coordination",
@@ -4408,7 +4575,6 @@ impl FactoryDaemon {
 
     fn notify_wake_starved_supervisor(
         &self,
-        queue: &dyn cas_store::PromptQueueStore,
         queued: &cas_store::QueuedPrompt,
         pane_target: &str,
         attempts: u32,
@@ -4433,37 +4599,40 @@ impl FactoryDaemon {
         // the notice is keyed to it: one escalation per message, however many
         // rechecks find the recipient still silent.
         let dedupe_key = format!("{WAKE_STARVED_DEDUPE_PREFIX}{}", queued.id);
-        match queue.enqueue_idempotent(
-            "daemon",
-            self.app.supervisor_name(),
-            &notice,
-            Some(self.session_name.as_str()),
-            Some(&summary_line),
-            None,
-            &dedupe_key,
-            None,
-        ) {
-            Ok(cas_store::EnqueueIdempotentResult::AlreadyExists(_)) => {}
-            Ok(cas_store::EnqueueIdempotentResult::Created(id)) => {
-                super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
-                tracing::warn!(
-                    target: "cas::coordination",
-                    stage = "wake_starved_escalated",
-                    message_id = queued.id,
-                    escalation_id = id,
-                    target_agent = %pane_target,
-                    attempts,
-                    "GH #751: exhausted Claude redelivery budget and escalated a bounded notice"
-                );
+        // cas-786a6: enqueued by the store worker, off the loop.
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        let supervisor = self.app.supervisor_name().to_string();
+        let session = self.session_name.clone();
+        let (row, pane) = (queued.id, pane_target.to_string());
+        super::store_worker::submit_write("wake-budget escalation", move || {
+            let queue = crate::store::open_prompt_queue_store(&cas_dir).map_err(|error| error.to_string())?;
+            match queue.enqueue_idempotent(
+                "daemon",
+                &supervisor,
+                &notice,
+                Some(session.as_str()),
+                Some(&summary_line),
+                None,
+                &dedupe_key,
+                None,
+            ) {
+                Ok(cas_store::EnqueueIdempotentResult::AlreadyExists(_)) => Ok(()),
+                Ok(cas_store::EnqueueIdempotentResult::Created(id)) => {
+                    super::delivery::wake_daemon_after_enqueue(&cas_dir);
+                    tracing::warn!(
+                        target: "cas::coordination",
+                        stage = "wake_starved_escalated",
+                        message_id = row,
+                        escalation_id = id,
+                        target_agent = %pane,
+                        attempts,
+                        "GH #751: exhausted Claude redelivery budget and escalated a bounded notice"
+                    );
+                    Ok(())
+                }
+                Err(error) => Err(error.to_string()),
             }
-            Err(error) => tracing::error!(
-                target: "cas::coordination",
-                message_id = queued.id,
-                target_agent = %pane_target,
-                %error,
-                "GH #751: failed to enqueue wake-budget escalation"
-            ),
-        }
+        });
     }
 
     /// cas-1a54: terminalize an urgent row whose wake the pane corroborated —
@@ -6043,53 +6212,24 @@ impl FactoryDaemon {
             }))
     }
 
-    fn process_operator_replies(
-        &mut self,
-        queue: &dyn cas_store::PromptQueueStore,
-    ) -> anyhow::Result<()> {
+    /// Forward the operator replies `QueueSelect` read and stamped
+    /// (cas-786a6: the reads and stamps run in that job, not here).
+    fn forward_operator_replies(&mut self, replies: Vec<OperatorReplyRead>) {
         if self.ws_clients.is_empty() {
-            return Ok(());
+            return;
         }
-        let replies = queue.peek_operator_replies(&self.session_name, 10)?;
-        for queued in replies {
-            // `*` is the deliberate v2 fallback when no verified Commander
-            // row exists yet. The hub filters nothing for this marker and
-            // every authenticated device holding the session lease receives
-            // the unprompted turn.
-            let device_id = queued.recipient_device_id.as_deref().unwrap_or("*");
-            let payload = match serde_json::from_str::<crate::ui::factory::OperatorReplyPayload>(
-                &queued.prompt,
-            ) {
-                Ok(payload)
-                    if payload.device_id == device_id
-                        && (payload.schema_version == 1 || payload.schema_version == 2) =>
-                {
-                    payload
-                }
-                Ok(_) => {
-                    let _ = queue.mark_dropped(
-                        queued.id,
-                        Some("operator reply payload/device receipt mismatch"),
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    let _ = queue.mark_dropped(
-                        queued.id,
-                        Some("operator reply payload is not a valid schema-1 or schema-2 message"),
-                    );
-                    tracing::warn!(
-                        prompt_id = queued.id,
-                        %error,
-                        "discarded malformed operator reply payload"
-                    );
-                    continue;
-                }
-            };
-            let _ = queue.record_selected(queued.id);
-            let notice = operator_notices(queue, &self.session_name, std::slice::from_ref(&queued))
-                .remove(&queued.id);
-            if let Some(subject) = notice.as_ref().filter(|notice| !notice.resolved).and_then(|notice| notice.subject) {
+        for OperatorReplyRead {
+            queued,
+            device_id,
+            payload,
+            notice,
+        } in replies
+        {
+            if let Some(subject) = notice
+                .as_ref()
+                .filter(|notice| !notice.resolved)
+                .and_then(|notice| notice.subject)
+            {
                 self.open_operator_notices.insert(queued.id, subject);
             }
             let reply = crate::ui::factory::DaemonMessage::OperatorReply {
@@ -6097,7 +6237,7 @@ impl FactoryDaemon {
                 reply_to: payload.reply_to,
                 message: payload.message,
                 summary: payload.summary,
-                device_id: device_id.to_string(),
+                device_id: device_id.clone(),
                 operator_label: payload.operator_label,
                 kind: payload.kind,
                 attachments: payload.attachments,
@@ -6114,7 +6254,6 @@ impl FactoryDaemon {
                 "supervisor reply forwarded to the Commander hub; awaiting paired-device receipt"
             );
         }
-        Ok(())
     }
 
     /// Apply the hub's authenticated paired-device receipt to one operator
@@ -6756,6 +6895,44 @@ impl FactoryDaemon {
         }
     }
 
+    /// Persist a declined worker wake unless an observed open call pauses its
+    /// budget, and return the row's consecutive decline count. cas-786a6
+    /// (L4): the write is a QueueStamp and the count is the selection
+    /// snapshot's plus this one (selection waits for the row's stamps, so
+    /// the snapshot includes every earlier decline).
+    fn stamp_worker_wake_decline(
+        &mut self,
+        row: i64,
+        recipient: &str,
+        prior: Option<(u32, Option<chrono::DateTime<chrono::Utc>>)>,
+        decision: WakeDecision,
+        tool_call: ToolCallEvidence,
+    ) -> Option<u32> {
+        if tool_call == ToolCallEvidence::InFlight {
+            self.queue_jobs.stamp(
+                self.app.cas_dir(),
+                row,
+                recipient,
+                super::prompt_queue_jobs::QueueStamp::PendingReason {
+                    reason: cas_store::PendingReason::GatedNotReady,
+                    detail: Some(
+                        "wake budget paused while the recipient has a tool call in flight".to_string(),
+                    ),
+                },
+            );
+            return None;
+        }
+        self.queue_jobs.stamp(
+            self.app.cas_dir(),
+            row,
+            recipient,
+            super::prompt_queue_jobs::QueueStamp::WakeDecline {
+                detail: decision.status_detail(),
+            },
+        );
+        Some(prior.map_or(0, |(declines, _)| declines).saturating_add(1))
+    }
+
     /// cas-dffe bookkeeping for a context-reset command's outcome (cas-786a6:
     /// applied when its inject finishes, which may be a later pass).
     pub(super) fn finish_context_reset(
@@ -6889,6 +7066,7 @@ impl FactoryDaemon {
             worker_names: self.app.worker_names().to_vec(),
             dead_workers: self.dead_workers.clone(),
             limit: 10,
+            operator_replies: !self.ws_clients.is_empty(),
         };
         self.queue_jobs.submit_select(request, |request, generation| {
             let selection = run_queue_select(request, generation);
@@ -6921,9 +7099,14 @@ impl FactoryDaemon {
             shut_down_recipients,
             native_agents,
             rows: prompts,
+            facts: row_facts,
+            operator_replies,
         } = selection;
         tracing::trace!(target: "cas::coordination", generation, rows = prompts.len(), "delivering a QueueSelect batch");
-        for id in retargeted_rows {
+        for id in retargeted_rows
+            .into_iter()
+            .chain(self.queue_jobs.take_claim_retargeted())
+        {
             self.forget_row_delivery_state(id);
         }
         for name in &shut_down_recipients {
@@ -6939,7 +7122,7 @@ impl FactoryDaemon {
         // cas-ac7e (GH #130): settle urgent wake probes before anything else
         // selects a row, so an urgent row is consumed the moment its pane
         // proves it took the turn — and never before.
-        self.resolve_urgent_wake_probes(queue.as_ref());
+        self.resolve_urgent_wake_probes();
         self.resolve_normal_delivery_probes(queue.as_ref()).await;
         super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: commander mirror"));
         if self.last_commander_mirror_scan.is_none_or(|last| last.elapsed() >= Duration::from_secs(5)) {
@@ -6964,7 +7147,7 @@ impl FactoryDaemon {
             });
         }
         super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: operator replies"));
-        self.process_operator_replies(queue.as_ref())?;
+        self.forward_operator_replies(operator_replies);
 
         let registered_session_agents =
             registered_prompt_sweep_agents(&registered_agents, &self.session_name);
@@ -7068,26 +7251,21 @@ impl FactoryDaemon {
         }
 
         // Best-effort event recording (for external tooling acks, activity feed, playback).
-        let event_store = SqliteEventStore::open(self.app.cas_dir()).ok();
-
         // cas-f02b (GH #101): one supervisor wake per drain pass — see the
         // wake-slot comment at the decision site.
         let mut supervisor_wake_sent = false;
 
-        // Open the task handle lazily once per pass, only for an eligible nudge.
-        let mut nudge_tasks: Option<crate::Result<Arc<dyn cas_store::TaskStore>>> = None;
         self.stall_nudge_gate_checks.retain(|_, (next, _, _)| next.elapsed().as_secs() < 300);
         for selected in prompts {
             super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: row"));
-            // Review round 1, H2: the fresh per-row check stays (C3b moves it
-            // off the loop). The assignee may have changed while earlier
-            // rows were delivered, and a hook or poll may have taken the row
-            // since QueueSelect read it.
-            for id in queue.refresh_qa_rejection_targets(&self.session_name, Some(selected.id))? {
-                self.forget_row_delivery_state(id);
-            }
-            let Some(queued) = queue.queued_prompt(selected.id)? else { continue };
+            // cas-786a6 (H3): the row is decided from the QueueSelect
+            // snapshot. The fresh check of review round 1, H2 (QA retarget,
+            // re-read, transport claim) runs as the `ClaimForInject` job just
+            // before transport, and the row is injected only on a later pass
+            // once that claim came back.
+            let queued = selected;
             if queued.processed_at.is_some() { continue; }
+            let facts = row_facts.get(&queued.id).cloned().unwrap_or_default();
             // Spec §4.5 rule 2: a row whose earlier inject has not settled is
             // not delivered again, even if a selection picked it again.
             // cas-4272: a row whose terminal or delivered stamp has not landed
@@ -7106,16 +7284,19 @@ impl FactoryDaemon {
                 );
                 continue;
             }
-            let refreshed_agents;
-            let current_agents = if queued.kind.as_deref() == Some("worker_stall_nudge") {
-                &registered_agents
-            } else {
-                refreshed_agents = open_agent_store(self.app.cas_dir())?.list(None)?;
-                &refreshed_agents
-            };
-            if worker_recipient_shut_down(&queued.target, &self.dead_workers, self.app.worker_names(), &current_agents) {
-                queue.cancel_unread_for_shutdown(&queued.target, Some(&self.session_name),
-                    "wake withdrawn: recipient has shut down")?;
+            // cas-786a6: the roster QueueSelect read for this batch.
+            let current_agents = &registered_agents;
+            if worker_recipient_shut_down(&queued.target, &self.dead_workers, self.app.worker_names(), current_agents) {
+                // cas-786a6 (L4): a QueueStamp on the writer.
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(),
+                    queued.id,
+                    &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::CancelUnreadForShutdown {
+                        session: self.session_name.clone(),
+                        reason: "wake withdrawn: recipient has shut down".to_string(),
+                    },
+                );
                 self.forget_row_delivery_state(queued.id);
                 continue;
             }
@@ -7176,45 +7357,14 @@ impl FactoryDaemon {
                     merge_request_moot_guidance, merge_request_request_changes_guidance,
                 };
 
-                let task = crate::store::open_task_store_local(self.app.cas_dir())
-                    .ok()
-                    .and_then(|store| store.get(&envelope.task_id).ok());
-
-                // cas-6eab: revalidate against the branch the REQUEST names,
-                // in whichever checkout we can resolve. cas-bc8c required the
-                // task's resolved repo context to agree with the envelope's
-                // target branch and silently skipped the whole check when it
-                // didn't (or when `work_target` was unset) — a stale request
-                // then sailed through as actionable. The envelope's target is
-                // authoritative here: it is the branch the worker actually
-                // asked the supervisor to merge into. Falling back to the
-                // daemon's own checkout matches how `factory/*` and `epic/*`
-                // refs are resolved everywhere else (`.cas`'s parent).
-                let repo_root = task
-                    .as_ref()
-                    .and_then(|task| task.deliverables.work_target.clone())
-                    .and_then(|work_target| {
-                        resolve_repo_context(self.app.cas_dir(), &work_target).ok()
-                    })
-                    .map(|repo| repo.repo_root)
-                    .unwrap_or_else(|| {
-                        self.app
-                            .cas_dir()
-                            .parent()
-                            .unwrap_or(self.app.cas_dir())
-                            .to_path_buf()
-                    });
-                // cas-b17c (GH #703): the envelope's branch_tip is evidence
-                // about compose time, and a queued request can sit across
-                // further pushes, so resolve the tip live here too — through
-                // the same helper the compose path uses, so the two cannot
-                // drift apart. Falls back to the envelope tip only when the
-                // branch itself no longer resolves.
-                let git = crate::prompt_revalidation::queued_merge_request_decision(
-                    &repo_root,
-                    task.as_ref(),
-                    &envelope,
-                );
+                // cas-786a6 (H3): the task and the live git decision were read
+                // by QueueSelect for this row (cas-6eab: against the branch the
+                // REQUEST names; cas-b17c: the tip resolved live), so control
+                // decides without a store or a git call.
+                let (task, git) = facts.merge_request.clone().unwrap_or((
+                    None,
+                    crate::prompt_revalidation::MergeRequestDecision::Unverifiable,
+                ));
 
                 let (suppress_detail, guidance, summary) =
                     match merge_request_delivery_decision(task.as_ref(), &envelope, &git) {
@@ -7275,55 +7425,38 @@ impl FactoryDaemon {
                     };
 
                 if let (Some(detail), Some(guidance)) = (suppress_detail, guidance) {
-                    match queue.enqueue_urgent_with_outcome(
-                        "supervisor",
-                        &queued.source,
-                        &guidance,
-                        queued.factory_session.as_deref(),
-                        Some(summary),
-                        Some(cas_store::NotificationPriority::High),
-                        false,
-                        Some(&cas_store::QueueOrigin::Daemon),
-                    ) {
-                        Ok(_) => {
-                            super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
-                            tracing::info!(
-                                target: "cas::coordination",
-                                stage = "suppress_stale_merge_request",
-                                prompt_id = queued.id,
-                                task_id = %envelope.task_id,
-                                detail = %detail,
-                                "cas-6eab: withheld a merge request whose premise no longer holds; \
-                                 notified the worker instead"
-                            );
-                            // cas-0147 (GH #167): this is a withdrawal, not
-                            // idle-noise suppression — dead-letter it under a
-                            // name that says so. The worker has already been
-                            // told (the guidance enqueue above succeeded), so
-                            // the premise-expiry is recorded, not silent.
-                            self.queue_jobs.stamp(
-                                self.app.cas_dir(),
-                                queued.id,
-                                &queued.target,
-                                super::prompt_queue_jobs::QueueStamp::Superseded { detail: (&detail).to_string() },
-                            );
-                            continue;
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                prompt_id = queued.id,
-                                task_id = %envelope.task_id,
-                                error = %error,
-                                "cas-bc8c: worker guidance enqueue failed; retaining original merge request for delivery"
-                            );
-                        }
-                    }
+                    tracing::info!(
+                        target: "cas::coordination",
+                        stage = "suppress_stale_merge_request",
+                        prompt_id = queued.id,
+                        task_id = %envelope.task_id,
+                        detail = %detail,
+                        "cas-6eab: withholding a merge request whose premise no longer holds; \
+                         notifying the worker instead"
+                    );
+                    // cas-0147 (GH #167): a withdrawal, not idle-noise
+                    // suppression. cas-786a6: one QueueStamp tells the worker
+                    // and then supersedes the row; if the guidance cannot be
+                    // queued the row stays pending and is decided again.
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
+                        queued.id,
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::SupersedeWithGuidance {
+                            source: queued.source.clone(),
+                            session: queued.factory_session.clone(),
+                            guidance,
+                            summary: summary.to_string(),
+                            detail,
+                        },
+                    );
+                    continue;
                 }
             }
 
             if let Some(envelope) =
                 crate::prompt_revalidation::parse_lifecycle_envelope(&queued.prompt)
-                && let Ok(store) = crate::store::open_task_store_local(self.app.cas_dir())
+                && let Some(task_read) = facts.lifecycle_task.clone()
             {
                 use crate::prompt_revalidation::{
                     LifecyclePromptDecision, LifecycleStaleOutcome, lifecycle_stale_outcome,
@@ -7339,17 +7472,18 @@ impl FactoryDaemon {
                 // never got to consume the row, and reporting that as a lost
                 // relay would be a false alarm.
                 let queued_row_was_transported = queued.acked_at.is_some();
-                let decision = match store.get(&envelope.task_id) {
-                    Ok(task) => crate::prompt_revalidation::revalidate_lifecycle_prompt_against_task(
+                // cas-786a6 (H3): read by QueueSelect for this row.
+                let decision = match task_read {
+                    LifecycleTaskRead::Found(task) => crate::prompt_revalidation::revalidate_lifecycle_prompt_against_task(
                         &queued.prompt,
                         &task,
                     ),
-                    Err(cas_store::StoreError::TaskNotFound(_)) => {
+                    LifecycleTaskRead::NotFound => {
                         LifecyclePromptDecision::SuppressStale {
                             task_id: envelope.task_id.clone(),
                         }
                     }
-                    Err(error) => {
+                    LifecycleTaskRead::Unavailable(error) => {
                         tracing::warn!(
                             prompt_id = queued.id,
                             task_id = %envelope.task_id,
@@ -7409,8 +7543,12 @@ impl FactoryDaemon {
                         // a recorded FAILURE, so `worker_status` / `doctor`
                         // can name it instead of the fleet reading silence as
                         // success.
-                        let _ = queue
-                            .mark_undelivered_lifecycle_relay(queued.id, Some(notice.as_str()));
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
+                            queued.id,
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::UndeliveredRelay { notice },
+                        );
                         tracing::error!(
                             target: "cas::coordination",
                             stage = "lifecycle_relay_undelivered",
@@ -7435,13 +7573,8 @@ impl FactoryDaemon {
             // AwaitingMerge, or a terminal state, so inspect live task state at
             // this final shared transport boundary instead of injecting stale
             // work. Unreadable/missing tasks fail open.
-            if let Some((task_id, status)) =
-                super::delivery::assignment_stale_status(
-                    self.app.cas_dir(),
-                    &queued.prompt,
-                    &queued.target,
-                )
-            {
+            // cas-786a6 (H3): read by QueueSelect for this row.
+            if let Some((task_id, status)) = facts.assignment_stale.clone() {
                 let detail = format!(
                     "withdrawn before transport: assignment for {task_id} is stale because the task is {}",
                     status
@@ -7482,13 +7615,25 @@ impl FactoryDaemon {
                 }
                 // Task validity precedes the busy hold: closed/reassigned work
                 // withdraws its alarm instead of spending and parking a wake budget.
-                let tasks = nudge_tasks.get_or_insert_with(|| crate::store::open_task_store_local(self.app.cas_dir()));
-                let stale = match tasks.as_ref() {
-                    Ok(tasks) => withdraw_stale_stall_nudge(tasks.as_ref(), queue.as_ref(), &queued, current_agents),
-                    Err(error) => Err(anyhow::anyhow!("nudge task store unavailable: {error}")),
-                };
-                match stale {
-                    Ok(true) => { self.forget_row_delivery_state(queued.id); continue; }
+                // cas-786a6 (H3): both premise checks were read by QueueSelect;
+                // a withdrawal is a QueueStamp.
+                let nudge_read = facts.stall_nudge.clone().unwrap_or(StallNudgeRead {
+                    stale_task: Ok(false),
+                    resumed: Ok(false),
+                });
+                match nudge_read.stale_task {
+                    Ok(true) => {
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
+                            queued.id,
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::Superseded {
+                                detail: "worker no longer holds the stalled task".to_string(),
+                            },
+                        );
+                        self.forget_row_delivery_state(queued.id);
+                        continue;
+                    }
                     Ok(false) => {}
                     Err(error) => {
                         self.defer_stall_nudge_error(queued.id, signature, &error);
@@ -7497,10 +7642,24 @@ impl FactoryDaemon {
                 }
                 let pane = self.pane_wake_state(&queued.target);
                 if let Some(reason) = pane.veto_for_active_looking_recipient() {
-                    let decline = queue.record_pending_reason(queued.id,
-                        cas_store::PendingReason::GatedNotReady, Some(reason))
-                        .and_then(|()| record_worker_wake_decline(queue.as_ref(), queued.id,
-                            WakeDecision::deny(reason), pane.tool_call));
+                    // cas-786a6 (L4): QueueStamps; the count comes from the
+                    // selection snapshot.
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
+                        queued.id,
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::PendingReason {
+                            reason: cas_store::PendingReason::GatedNotReady,
+                            detail: Some(reason.to_string()),
+                        },
+                    );
+                    let decline: anyhow::Result<Option<u32>> = Ok(self.stamp_worker_wake_decline(
+                        queued.id,
+                        &queued.target,
+                        facts.wake_gate,
+                        WakeDecision::deny(reason),
+                        pane.tool_call,
+                    ));
                     match decline {
                         Ok(declines) => {
                             let delay = declines.map(|n| 5u64.saturating_mul(1u64 << n.min(3))).unwrap_or(15);
@@ -7510,19 +7669,26 @@ impl FactoryDaemon {
                                     && self.app.harness_for(&queued.target) == cas_mux::SupervisorCli::Claude
                                     && super::delivery::choose_channel(self.app.harness_for(&queued.target), true)
                                         == super::delivery::DeliveryChannel::TeamsInbox;
-                                self.park_wake_starved_row(queue.as_ref(), &queued, &queued.target, n, claude_inbox_target);
+                                self.park_wake_starved_row(&queued, &queued.target, n, claude_inbox_target);
                             }
                         }
                         Err(error) => self.defer_stall_nudge_error(queued.id, signature, &error),
                     }
                     continue;
                 }
-                let result = match event_store.as_ref() {
-                    Some(events) => withdraw_resumed_stall_nudge(events, queue.as_ref(), &queued, current_agents),
-                    None => Err(anyhow::anyhow!("nudge event store unavailable")),
-                };
-                match result {
-                    Ok(true) => { self.forget_row_delivery_state(queued.id); continue; }
+                match nudge_read.resumed {
+                    Ok(true) => {
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
+                            queued.id,
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::Superseded {
+                                detail: "worker activity resumed while the stall nudge was held".to_string(),
+                            },
+                        );
+                        self.forget_row_delivery_state(queued.id);
+                        continue;
+                    }
                     // Keep the cadence if a downstream delivery/wake declines.
                     // A successful transport removes this entry with the row.
                     Ok(false) => {
@@ -7589,12 +7755,8 @@ impl FactoryDaemon {
                     self.app.harness_for(pane_target),
                     true,
                 ) == super::delivery::DeliveryChannel::TeamsInbox;
-            let durable_deferred_inbox = claude_inbox_target
-                && queue
-                    .deferred_inbox_state(queued.id)
-                    .ok()
-                    .flatten()
-                    .is_some();
+            // cas-786a6 (H3): the durable marker, read by QueueSelect.
+            let durable_deferred_inbox = claude_inbox_target && facts.deferred_inbox.is_some();
             let deferred_inbox_recorded =
                 self.inbox_deferred_writes.contains_key(&queued.id) || durable_deferred_inbox;
             // A wake decline protects the current turn, but must not make the
@@ -7602,9 +7764,8 @@ impl FactoryDaemon {
             // has ended. The timestamp is durable, so this also works after a
             // daemon restart and remains bounded by each redelivery budget.
             super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: wake gate"));
-            let retry_at_turn_end = queue
-                .wake_gate_state(queued.id)
-                .ok()
+            let retry_at_turn_end = facts
+                .wake_gate
                 .and_then(|(_, last_attempt)| last_attempt)
                 .and_then(|attempt| {
                     let completed_at = self.recipient_turn_completion_after(pane_target, attempt);
@@ -7620,7 +7781,7 @@ impl FactoryDaemon {
                 queued.id,
             );
             match self.deferred_inbox_outcome_for(
-                queue.as_ref(),
+                facts.deferred_inbox,
                 queued.id,
                 target,
                 &inbox_source,
@@ -7633,28 +7794,29 @@ impl FactoryDaemon {
                     // harness took our inbox copy AND the pane then produced
                     // output. Record the strong observed-wake receipt so the
                     // consumed row does not reappear in inbox_poll.
-                    self.record_observed_wake_receipt_durable(&*queue, queued.id, &queued.target);
-                    if super::store_worker::mark_transport_delivered(
+                    // cas-786a6: QueueStamps in order on the row's key.
+                    self.queue_jobs.stamp(
                         self.app.cas_dir(),
                         queued.id,
-                    ) == super::store_worker::Persisted::Dropped
-                    {
-                        tracing::error!(
-                            prompt_id = queued.id,
-                            "cas-ceae: failed to consume a row the harness already drained"
-                        );
-                    } else {
-                        tracing::info!(
-                            target: "cas::coordination",
-                            stage = "inbox_drained",
-                            channel = "prompt_queue",
-                            message_id = queued.id,
-                            source = %queued.source,
-                            target_agent = %target,
-                            "cas-ceae/cas-ef14: harness took the inbox copy and the pane then \
-                             spoke — row consumed instead of re-written"
-                        );
-                    }
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::ObservedWakeReceipt,
+                    );
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
+                        queued.id,
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::TransportDelivered,
+                    );
+                    tracing::info!(
+                        target: "cas::coordination",
+                        stage = "inbox_drained",
+                        channel = "prompt_queue",
+                        message_id = queued.id,
+                        source = %queued.source,
+                        target_agent = %target,
+                        "cas-ceae/cas-ef14: harness took the inbox copy and the pane then \
+                         spoke — row consumed instead of re-written"
+                    );
                     continue;
                 }
                 DeferredInboxOutcome::StillPending => {
@@ -7730,8 +7892,7 @@ impl FactoryDaemon {
             // harnesses, but must not govern this Claude failure path.
             let claude_redelivery_applies = claude_inbox_target && deferred_inbox_recorded;
             if claude_redelivery_applies {
-                let (attempts, last_attempt) =
-                    queue.wake_gate_state(queued.id).unwrap_or((0, None));
+                let (attempts, last_attempt) = facts.wake_gate.unwrap_or((0, None));
                 // cas-913c: a declined wake waits for the busy turn to END
                 // instead of spending its bounded budget on re-offers the
                 // still-busy pane is certain to refuse. Three such refusals
@@ -7823,8 +7984,7 @@ impl FactoryDaemon {
                         // cas-d1659: stop waking, keep the message.
                         let pane_target = pane_target.to_string();
                         self.park_wake_starved_row(
-                            queue.as_ref(),
-                            &queued,
+                                    &queued,
                             &pane_target,
                             attempts,
                             true,
@@ -7992,16 +8152,19 @@ impl FactoryDaemon {
                                         queued.summary.as_deref(),
                                     ),
                                 };
-                            let _ = queue
-                                .mark_undelivered_lifecycle_relay(queued.id, Some(notice.as_str()));
+                            self.queue_jobs.stamp(
+                                self.app.cas_dir(),
+                                queued.id,
+                                &queued.target,
+                                super::prompt_queue_jobs::QueueStamp::UndeliveredRelay { notice },
+                            );
                         } else {
                             // cas-d1659: an ordinary message is not a relay
                             // whose premise expires. Stop re-nudging, keep the
                             // row for the recipient's next turn.
                             let pane_target = pane_target.to_string();
                             self.park_wake_starved_row(
-                                queue.as_ref(),
-                                &queued,
+                                    &queued,
                                 &pane_target,
                                 LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
                                 false,
@@ -8497,16 +8660,20 @@ impl FactoryDaemon {
                         // cas-d9a8: persist the OUTCOME KIND alongside the
                         // reason so `message_status` separates "this was never
                         // a wake" from "this was eligible and refused".
-                        match record_worker_wake_decline(
-                            queue.as_ref(), queued.id, wake_decision, pane_state.tool_call,
-                        )
+                        let declines: anyhow::Result<Option<u32>> = Ok(self.stamp_worker_wake_decline(
+                            queued.id,
+                            &queued.target,
+                            facts.wake_gate,
+                            wake_decision,
+                            pane_state.tool_call,
+                        ));
+                        match declines
                         {
                             Ok(Some(declines)) if declines >= MAX_CONSECUTIVE_WAKE_GATE_DECLINES => {
                                 // cas-d1659: a busy recipient keeps the row;
                                 // only a silent Claude recipient escalates.
                                 let pane = pane_target.to_string();
                                 self.park_wake_starved_row(
-                                    queue.as_ref(),
                                     &queued,
                                     &pane,
                                     declines,

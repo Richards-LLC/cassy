@@ -101,6 +101,7 @@ fn request(cas_dir: &Path) -> QueueSelectRequest {
         worker_names: vec!["worker-a".into()],
         dead_workers: Default::default(),
         limit: 10,
+        operator_replies: false,
     }
 }
 

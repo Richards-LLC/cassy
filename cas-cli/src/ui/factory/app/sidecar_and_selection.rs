@@ -239,26 +239,9 @@ impl FactoryApp {
             .insert(session_id.to_string(), pane_name.to_string());
     }
 
-    /// Sync session_id → pane_name mappings from the agent store
-    ///
-    /// Queries registered agents and maps their session IDs to pane names.
-    pub(super) fn sync_session_mappings(&mut self) {
-        let agent_store = match open_agent_store(&self.cas_dir) {
-            Ok(store) => store,
-            Err(e) => {
-                tracing::debug!("Failed to open agent store for session sync: {}", e);
-                return;
-            }
-        };
-
-        let agents = match agent_store.list(None) {
-            Ok(agents) => agents,
-            Err(e) => {
-                tracing::debug!("Failed to list agents for session sync: {}", e);
-                return;
-            }
-        };
-
+    /// Sync session_id → pane_name mappings from the registered agents, as
+    /// the director snapshot job read them (cas-4491f: never on the loop).
+    pub(super) fn sync_session_mappings_from(&mut self, agents: &[cas_types::Agent]) {
         // Build mapping from agent session_id (agent.id) to agent.name
         // Agent IDs in Cassy are typically the Claude session ID
         for agent in agents {

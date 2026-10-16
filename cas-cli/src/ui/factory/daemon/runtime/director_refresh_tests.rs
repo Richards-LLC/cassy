@@ -833,3 +833,118 @@ async fn c3b16_refused_reminder_scan_keeps_its_edges() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+/// A `WorkerIdle` event for a worker with a task, and cached panel data that
+/// knows the worker, so revalidation renders its prompt.
+fn idle_worker_with_task(
+    daemon: &mut FactoryDaemon,
+) -> crate::ui::factory::director::DirectorEvent {
+    let mut data = daemon.app.director_data().clone();
+    data.agent_id_to_name
+        .insert("sess-idle".into(), "idle-w".into());
+    daemon.app.set_director_data_for_test(data);
+    crate::ui::factory::director::DirectorEvent::WorkerIdle {
+        worker: "idle-w".into(),
+        active_task: Some(cas_factory::ActiveLeaseSummary {
+            task_id: "cas-1d1e".into(),
+            task_title: "parked".into(),
+            task_status: cas_types::TaskStatus::Blocked,
+            close_rejected_reason: Some("blocked on review".into()),
+            pending_qa: None,
+        }),
+    }
+}
+
+/// cas-4491f (C2b review L3): an idle-worker liveness job that dies leaves
+/// the worker unobserved. The delivery read still applies, and the worker's
+/// prompt is delivered (uncertainty delivers).
+#[tokio::test]
+async fn c4491f_failed_liveness_job_still_delivers_the_prompt() {
+    use std::sync::atomic::AtomicUsize;
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+    let event = idle_worker_with_task(&mut daemon);
+    let mut refresh = DirectorRefresh::new()
+        .with_stale_delivery_reads(Arc::new(AtomicUsize::new(0)))
+        .with_failing_liveness();
+    refresh
+        .start_delivery_read(&daemon.app, &mut daemon.queue_jobs, vec![event])
+        .unwrap();
+    let (events, inputs) = refresh
+        .take_delivery_read(&mut daemon.queue_jobs)
+        .expect("a failed liveness job does not hold the read");
+    assert!(!inputs.idle_liveness_for_test().contains_key("idle-w"));
+    let (_, prompts, _) = daemon.app.revalidate_and_prompt_for_delivery_from(&events, inputs);
+    assert!(
+        prompts.iter().any(|prompt| prompt.text.contains("idle-w")),
+        "the unobserved worker's prompt is delivered: {prompts:?}"
+    );
+}
+
+/// cas-4491f (C2b review L3): the same for a liveness job that never reports
+/// and is given up at its timeout.
+#[test]
+fn c4491f_expired_liveness_job_still_delivers_the_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+    let event = idle_worker_with_task(&mut daemon);
+    let mut refresh = DirectorRefresh::new().with_timeout(Duration::ZERO);
+    refresh.delivery.start(7);
+    refresh.idle_liveness.start(7);
+    assert!(refresh.delivery.finish(
+        7,
+        (vec![event], crate::ui::factory::app::DeliveryInputs::failed_for_test())
+    ));
+    let (events, inputs) = refresh
+        .take_delivery_read(&mut daemon.queue_jobs)
+        .expect("an expired liveness job does not hold the read");
+    assert!(inputs.idle_liveness_for_test().is_empty());
+    let (_, prompts, _) = daemon.app.revalidate_and_prompt_for_delivery_from(&events, inputs);
+    assert!(
+        prompts.iter().any(|prompt| prompt.text.contains("idle-w")),
+        "the unobserved worker's prompt is delivered: {prompts:?}"
+    );
+}
+
+/// cas-4491f (C2b review L4): a refresh due while a delivery read's liveness
+/// job runs is not dropped. It starts once the job reports, without waiting
+/// for the next due tick.
+#[tokio::test]
+async fn c4491f_refresh_requested_during_liveness_runs_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let progress = super::super::loop_watchdog::LoopProgress::new();
+    let store_worker = super::super::store_worker::global();
+    let gate = Arc::new(ReadGate::default());
+    let mut refresh = DirectorRefresh::new().with_read_gate(Arc::clone(&gate));
+    let event = crate::ui::factory::director::DirectorEvent::WorkerIdle {
+        worker: "idle-w".into(),
+        active_task: None,
+    };
+    refresh
+        .start_delivery_read(&daemon.app, &mut daemon.queue_jobs, vec![event])
+        .unwrap();
+    // The refresh tick lands while the read and its liveness job are held.
+    daemon
+        .director_refresh_pass(&mut refresh, true, store_worker, &progress)
+        .await;
+    assert!(!refresh.director.busy(), "no snapshot can start yet");
+
+    gate.open();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut applied = false;
+    while !applied {
+        assert!(Instant::now() < deadline, "the requested refresh never ran");
+        // No refresh is due on these passes: only the deferred request.
+        let woke = refresh.has_finished(&mut daemon.queue_jobs);
+        if woke {
+            applied = daemon
+                .director_refresh_pass(&mut refresh, false, store_worker, &progress)
+                .await;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}

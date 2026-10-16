@@ -2050,6 +2050,11 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     assert!(crate::cli::project_files::drift(&project, &harnesses).unwrap() > 0);
     let mut args = update_test_args();
     args.sync = true;
+    let original = cas_6718_git(&project, &["status", "--porcelain"]);
+    args.dry_run = true;
+    execute(&args, &update_test_cli(true), Some(&root)).unwrap();
+    assert_eq!(cas_6718_git(&project, &["status", "--porcelain"]), original);
+    args.dry_run = false;
     execute(&args, &update_test_cli(true), Some(&root)).unwrap();
     assert!(
         cas_6718_git(&project, &["status", "--porcelain"]).is_empty(),

@@ -354,6 +354,40 @@ impl Reconcile {
             }
             before.insert(path, working);
         }
+        if conflicts.is_empty() {
+            let dirty: Vec<_> = TRACKED
+                .iter()
+                .filter(|p| p.ends_with(".json") || p.ends_with(".toml"))
+                .filter_map(|path| {
+                    let bytes = before.get(*path)?.as_ref()?;
+                    let indexed = index
+                        .get(*path)
+                        .map(|(_, b)| b.as_slice())
+                        .unwrap_or_default();
+                    Some(Ok((
+                        path,
+                        owned_fragment(path, bytes)?,
+                        owned_fragment(path, indexed)?,
+                    )))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|(_, a, b)| a != b)
+                .collect();
+            if !dirty.is_empty() {
+                let seed = before
+                    .iter()
+                    .filter_map(|(p, b)| b.clone().map(|b| (p.clone(), b)))
+                    .collect();
+                let projected = configuration_projection(root, &seed)?;
+                for (path, local, _) in dirty {
+                    let expected = std::fs::read(projected.path().join(path)).unwrap_or_default();
+                    if local != owned_fragment(path, &expected)? {
+                        conflicts.push((*path).to_string());
+                    }
+                }
+            }
+        }
         conflicts.sort();
         conflicts.dedup();
         let staged_before = !git(root, &["diff", "--cached", "--name-only", "-z"])?.is_empty();
@@ -401,23 +435,12 @@ impl Reconcile {
         // Render configuration from the INDEX's project content, never from
         // unstaged project edits. The same writers own the same keys in both
         // trees; the temporary tree cannot register trust or push anything.
-        let temp = tempfile::tempdir()?;
-        for path in TRACKED {
-            if let Some((_, bytes)) = self.index.get(*path) {
-                let dest = temp.path().join(path);
-                std::fs::create_dir_all(dest.parent().unwrap())?;
-                std::fs::write(dest, bytes)?;
-            }
-        }
-        std::fs::create_dir_all(temp.path().join(".cas"))?;
-        if let Ok(config) = std::fs::read(root.join(".cas/config.toml")) {
-            std::fs::write(temp.path().join(".cas/config.toml"), config)?;
-        }
-        crate::cli::hook::configure_claude_hooks_for_index(temp.path(), root)?;
-        crate::cli::hook::configure_mcp_server(temp.path())?;
-        if root.join(".codex").is_dir() {
-            crate::cli::hook::config_gen::configure_codex_mcp_server(temp.path())?;
-        }
+        let seed = self
+            .index
+            .iter()
+            .map(|(p, (_, b))| (p.clone(), b.clone()))
+            .collect();
+        let temp = configuration_projection(root, &seed)?;
         for path in TRACKED {
             if ignored(path, &paths) {
                 continue;
@@ -543,6 +566,30 @@ impl Reconcile {
     }
 }
 
+fn configuration_projection(
+    root: &Path,
+    seed: &BTreeMap<String, Vec<u8>>,
+) -> Result<tempfile::TempDir> {
+    let temp = tempfile::tempdir()?;
+    for path in TRACKED {
+        if let Some(bytes) = seed.get(*path) {
+            let dest = temp.path().join(path);
+            std::fs::create_dir_all(dest.parent().unwrap())?;
+            std::fs::write(dest, bytes)?;
+        }
+    }
+    std::fs::create_dir_all(temp.path().join(".cas"))?;
+    if let Ok(config) = std::fs::read(root.join(".cas/config.toml")) {
+        std::fs::write(temp.path().join(".cas/config.toml"), config)?;
+    }
+    crate::cli::hook::configure_claude_hooks_for_index(temp.path(), root)?;
+    crate::cli::hook::configure_mcp_server(temp.path())?;
+    if root.join(".codex").is_dir() {
+        crate::cli::hook::config_gen::configure_codex_mcp_server(temp.path())?;
+    }
+    Ok(temp)
+}
+
 // Project-only edits do not become a managed-drift finding.
 fn owned_fragment(path: &str, bytes: &[u8]) -> Result<String> {
     let s = text(bytes)?;
@@ -603,7 +650,9 @@ fn owned_fragment(path: &str, bytes: &[u8]) -> Result<String> {
                 hooks.insert(event.clone(), groups.into());
             }
         }
-        owned.insert("hooks".into(), hooks.into());
+        if !hooks.is_empty() {
+            owned.insert("hooks".into(), hooks.into());
+        }
     }
     if v.pointer("/statusLine/command")
         .and_then(|v| v.as_str())

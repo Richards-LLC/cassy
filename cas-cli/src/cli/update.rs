@@ -305,6 +305,13 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         return execute_post_swap(args, cli, current_version);
     }
 
+    // A sync preview must stop before both filesystem writers and Git repair.
+    if args.sync && args.dry_run {
+        if cli.json { println!("{}", serde_json::json!({"managed_files": {"outcome":"planned"}})); }
+        else { println!("Managed files: planned; no changes written"); }
+        return Ok(());
+    }
+
     // cas-49c0: a factory worker refreshes only its own worktree. Its
     // `--sync` used to rewrite the supervisor's main checkout, and the
     // host-wide modes walk every registered project.

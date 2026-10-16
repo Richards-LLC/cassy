@@ -2298,7 +2298,7 @@ pub(crate) const FACTORY_AUTO_APPROVE_TOOLS: &[&str] = &[
     "NotebookEdit",
 ];
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ShellToken {
     Word(String),
     Operator(char),
@@ -7696,6 +7696,15 @@ mod workspace_contract_tests {
             ("sh -c 'printf \"%s\" \"$(cat src/new.rs)\"'", false),
             ("sh -c 'printf \"%s\" \"$(touch ../../config.toml)\"'", true),
             ("sh -c \"printf '%s' $?\"", false),
+            ("B=$PWD/target/debug/cas; $B --version", false),
+            ("R='env -i PATH=/usr/bin /bin/true'; $R", false),
+            ("kill $(cat target/a.pid) $(cat target/b.pid)", false),
+            ("echo $(cat src/new.rs) touch ../../config.toml", false),
+            ("echo $(touch ../../config.toml) data", true),
+            ("C=touch; $C ../../config.toml", true),
+            ("C=touch; sh -c '$C ../../config.toml'", true),
+            ("CMD=$UNKNOWN; $CMD", true),
+            ("sh -c '$UNKNOWN/tool src/new.rs'", true),
             ("cd src && printf x > new.rs", false),
             ("D=src; cd \"$D\" && printf x > new.rs", false),
             ("cd ../.. && cd worktrees/worker-e460 && printf x > local.rs", false),

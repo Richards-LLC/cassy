@@ -141,6 +141,61 @@ fn substitution_end(bytes: &[u8], mut index: usize, depth: usize) -> Option<usiz
     None
 }
 
+fn pwd_values(dirs: &Directories) -> Vec<String> {
+    dirs.iter()
+        .map(|dir| {
+            dir.as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "$PWD".into())
+        })
+        .collect()
+}
+
+/// Resolve only command-position expansions using earlier finite bindings.
+/// Expanded words are operands, not new shell operators; wrappers are then
+/// unwrapped again and all known write commands use the existing recognizers.
+fn resolve_executable(
+    tokens: &mut Vec<ShellToken>,
+    literals: &mut Vec<bool>,
+    values: &HashMap<String, Vec<String>>,
+) -> Result<(), &'static str> {
+    for _ in 0..16 {
+        let positions: Vec<_> = tokens
+            .iter()
+            .enumerate()
+            .filter_map(|(position, token)| match token {
+                ShellToken::Word(word) => Some((position, word.clone())),
+                _ => None,
+            })
+            .collect();
+        let words: Vec<_> = positions.iter().map(|(_, word)| word.clone()).collect();
+        let Some(index) = unwrapped_command_index(&words) else {
+            return Ok(());
+        };
+        let word = &words[index];
+        if !word.contains(['$', '`', '*', '?'])
+            && (!word.contains('[') || matches!(word.as_str(), "[" | "[["))
+        {
+            return Ok(());
+        }
+        let expanded = expand_factory_shell_word(word, values);
+        if expanded.len() != 1 || expanded[0] == *word {
+            return Err("an unresolved shell executable");
+        }
+        let replacement: Vec<_> = expanded[0]
+            .split_whitespace()
+            .map(|word| ShellToken::Word(word.into()))
+            .collect();
+        let position = positions[index].0;
+        literals.splice(
+            position..position + 1,
+            std::iter::repeat_n(true, replacement.len()),
+        );
+        tokens.splice(position..position + 1, replacement);
+    }
+    Err("an unresolved shell executable")
+}
+
 fn collect_script(
     script: &str,
     mut dirs: Directories,
@@ -166,11 +221,13 @@ fn collect_script(
                 .or_insert_with(|| vec![value]);
         }
     }
+    directory_values.insert("PWD".into(), pwd_values(&dirs));
     let conditional_bindings = tokens.iter().any(|token| matches!(token,
         ShellToken::Word(word) if matches!(word.as_str(), "if" | "while" | "until" | "for" | "case")));
     let mut alternatives = Vec::new();
     let mut heredocs = shell_heredoc_bodies(script).into_iter();
     let mut scopes = Vec::new();
+    let mut continuation = false;
     let mut start: usize = 0;
     for end in 0..=tokens.len() {
         let separator = match tokens.get(end) {
@@ -192,11 +249,24 @@ fn collect_script(
             statement = &statement[1..];
             statement_start += 1;
         }
+        let substitution_scope = separator == Some('(')
+            && matches!(statement.last(), Some(ShellToken::Word(word)) if word.ends_with('$'));
         let incoming = dirs.clone();
         let and_then =
             separator == Some('&') && tokens.get(end + 1) == Some(&ShellToken::Operator('&'));
         if !statement.is_empty() {
-            let mut command = render(statement);
+            let mut statement = statement.to_vec();
+            let mut statement_literals = literal_words[statement_start..end].to_vec();
+            if !continuation {
+                resolve_executable(&mut statement, &mut statement_literals, &directory_values)?;
+            }
+            let mut command = render(&statement);
+            if continuation {
+                // Words after an argument substitution continue the original
+                // command. Redirections still count, but arguments are never
+                // reclassified as executables or filesystem commands.
+                command = format!("true {command}");
+            }
             // The existing script-write recognizer needs the body attached to
             // its receiving command, rather than interpreted as shell words.
             for delimiter in heredoc_delimiters(&command) {
@@ -218,20 +288,16 @@ fn collect_script(
                 .iter()
                 .enumerate()
                 .filter_map(|(index, token)| {
-                    matches!(token, ShellToken::Word(_))
-                        .then_some(literal_words[statement_start + index])
+                    matches!(token, ShellToken::Word(_)).then_some(statement_literals[index])
                 })
                 .collect();
-            let index = unwrapped_command_index(&words);
+            let index = if continuation {
+                None
+            } else {
+                unwrapped_command_index(&words)
+            };
             let name = index.map(|index| shell_word_basename(&words[index]));
             let args = index.map(|index| &words[index + 1..]).unwrap_or(&[]);
-            if name.is_some_and(|name| {
-                name.contains(['$', '`', '*', '?'])
-                    || (name.contains('[') && !matches!(name, "[" | "[["))
-            }) {
-                return Err("an unresolved shell executable");
-            }
-
             // A cwd-changing wrapper is scoped to the invoked command. Its
             // computed directory cannot be attributed to the hook's cwd.
             let wrapper_changes_directory = words.iter().take(index.unwrap_or(0)).any(|word| {
@@ -363,7 +429,12 @@ fn collect_script(
                 }
             }
 
-            let assignments = if name == Some("export") {
+            if name == Some("cd") {
+                directory_values.insert("PWD".into(), pwd_values(&dirs));
+            }
+            let assignments = if continuation {
+                &words[..0]
+            } else if name == Some("export") {
                 args
             } else {
                 &words[..index.unwrap_or(words.len())]
@@ -417,7 +488,11 @@ fn collect_script(
                     .all(|literal| *literal);
                 Some(args.join(" "))
             } else {
-                let payload = env_split_string_payload(&words);
+                let payload = if continuation {
+                    None
+                } else {
+                    env_split_string_payload(&words)
+                };
                 if let Some(payload) = &payload {
                     let candidates: Vec<bool> = words
                         .iter()
@@ -458,25 +533,35 @@ fn collect_script(
                 if scopes.len() >= 8 {
                     return Err("a shell payload beyond the resolution limit");
                 }
-                scopes.push((dirs.clone(), alternatives.clone(), directory_values.clone()))
+                scopes.push((
+                    dirs.clone(),
+                    alternatives.clone(),
+                    directory_values.clone(),
+                    substitution_scope,
+                ));
+                continuation = false;
             }
             Some(')') => {
                 let parent = scopes.pop().ok_or("an unmatched shell scope")?;
                 dirs = parent.0;
                 alternatives = parent.1;
                 directory_values = parent.2;
+                continuation = parent.3;
             }
             Some('&') if and_then => {
+                continuation = false;
                 for directory in incoming {
                     add_directory(&mut alternatives, directory);
                 }
             }
             Some(';') | Some('|') | None => {
+                continuation = false;
                 for directory in std::mem::take(&mut alternatives) {
                     add_directory(&mut dirs, directory);
                 }
             }
             Some('&') if tokens.get(end.wrapping_sub(1)) != Some(&ShellToken::Operator('&')) => {
+                continuation = false;
                 for directory in std::mem::take(&mut alternatives) {
                     add_directory(&mut dirs, directory);
                 }

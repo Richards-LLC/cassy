@@ -2023,7 +2023,7 @@ impl FactoryApp {
             return;
         };
         let path = metadata_path(session_name);
-        if self.deferred_epic_focus_writes && false {
+        if self.deferred_epic_focus_writes {
             self.pending_epic_focus_write = Some((path, epic_id));
             return;
         }

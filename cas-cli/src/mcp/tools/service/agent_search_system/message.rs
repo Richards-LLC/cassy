@@ -145,8 +145,15 @@ pub(crate) fn queued_message_provenance_at(
         && let Some(peer) = crate::cloud::peer_mailbox::parse_envelope(&message.prompt)
     {
         // cas-f9c7: never operator authority; named for what it is.
+        // cas-2a5a: a supervisor of another project of the same account
+        // names its project.
+        let project = (peer.scope == crate::cloud::peer_mailbox::PeerScope::User)
+            .then(|| crate::cloud::peers::project_name(&peer.repo))
+            .flatten()
+            .map(|project| format!(" project={project}"))
+            .unwrap_or_default();
         return format!(
-            "[cas #{} peer-supervisor {}@{} via-cloud {age_secs}s {delivery}]",
+            "[cas #{} peer-supervisor {}@{}{project} via-cloud {age_secs}s {delivery}]",
             message.id, peer.sender_name, peer.machine
         );
     } else {
@@ -932,6 +939,7 @@ impl CasService {
                     req.urgent.unwrap_or(false),
                     req.kind.as_deref(),
                     req.blocker.unwrap_or(false),
+                    req.attachment.as_deref(),
                 )
                 .await?
         {

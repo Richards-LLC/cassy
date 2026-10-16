@@ -58,6 +58,26 @@ pub struct Peer {
     pub last_heartbeat: DateTime<Utc>,
     pub heartbeat_age_secs: i64,
     pub live: bool,
+    /// The Cassy Cloud user that registered this supervisor (cas-2a5a). The
+    /// account-wide directory lists, and the mailbox addresses, only peers
+    /// whose user is the caller's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+}
+
+impl Peer {
+    /// The short project name people type (`violet` for
+    /// `github.com/Richards-LLC/violet`), from the registered canonical id.
+    pub fn project_name(&self) -> Option<String> {
+        self.canonical_id.as_deref().and_then(project_name)
+    }
+}
+
+/// The last path segment of a canonical id, without a `.git` suffix.
+pub fn project_name(canonical_id: &str) -> Option<String> {
+    let id = canonical_id.trim().trim_end_matches('/');
+    let last = id.rsplit(['/', ':']).next()?.trim_end_matches(".git").trim();
+    (!last.is_empty()).then(|| last.to_string())
 }
 
 /// This machine's label, as registration metadata ([`META_HOSTNAME`]) and
@@ -126,51 +146,119 @@ pub fn repo_peers(
     self_id: Option<&str>,
     now: DateTime<Utc>,
 ) -> Vec<Peer> {
-    let meta = |agent: &AgentInfo, key: &str| {
-        agent
-            .metadata
-            .get(key)
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    };
     let mut peers: Vec<Peer> = agents
         .iter()
         .filter(|agent| Some(agent.id.as_str()) != self_id)
-        .filter(|agent| agent.status != "shutdown")
-        .filter(|agent| meta(agent, META_ROLE).as_deref() == Some("supervisor"))
         .filter(|agent| {
-            meta(agent, META_CANONICAL_ID).is_some_and(|repo| {
+            agent_meta(agent, META_CANONICAL_ID).is_some_and(|repo| {
                 crate::cloud::project_ids_match_with_aliases(&repo, canonical_id, alias_class)
             })
         })
-        .filter_map(|agent| {
-            let last_heartbeat = DateTime::parse_from_rfc3339(&agent.last_heartbeat)
-                .ok()?
-                .with_timezone(&Utc);
-            let heartbeat_age_secs = (now - last_heartbeat).num_seconds().max(0);
-            (heartbeat_age_secs <= PEER_LISTING_WINDOW_SECS).then(|| Peer {
-                agent_id: agent.id.clone(),
-                name: agent.name.clone(),
-                machine: meta(agent, META_HOSTNAME)
-                    .or_else(|| agent.machine_id.clone())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                machine_id: agent.machine_id.clone(),
-                session: meta(agent, META_FACTORY_SESSION),
-                canonical_id: meta(agent, META_CANONICAL_ID),
-                focus: meta(agent, META_FOCUS),
-                last_heartbeat,
-                heartbeat_age_secs,
-                // The cloud computes `stale` live (cloud PR #153).
-                live: heartbeat_age_secs <= PEER_LIVE_SECS && agent.status != "stale",
-            })
-        })
+        .filter_map(|agent| supervisor_peer(agent, now))
         .collect();
+    sort_peers(&mut peers);
+    peers
+}
+
+fn agent_meta(agent: &AgentInfo, key: &str) -> Option<String> {
+    agent
+        .metadata
+        .get(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// `agent` as a listed peer: a supervisor that has not shut down and was
+/// seen within [`PEER_LISTING_WINDOW_SECS`].
+fn supervisor_peer(agent: &AgentInfo, now: DateTime<Utc>) -> Option<Peer> {
+    if agent.status == "shutdown" || agent_meta(agent, META_ROLE).as_deref() != Some("supervisor") {
+        return None;
+    }
+    let last_heartbeat = DateTime::parse_from_rfc3339(&agent.last_heartbeat)
+        .ok()?
+        .with_timezone(&Utc);
+    let heartbeat_age_secs = (now - last_heartbeat).num_seconds().max(0);
+    (heartbeat_age_secs <= PEER_LISTING_WINDOW_SECS).then(|| Peer {
+        agent_id: agent.id.clone(),
+        name: agent.name.clone(),
+        machine: agent_meta(agent, META_HOSTNAME)
+            .or_else(|| agent.machine_id.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
+        machine_id: agent.machine_id.clone(),
+        session: agent_meta(agent, META_FACTORY_SESSION),
+        canonical_id: agent_meta(agent, META_CANONICAL_ID),
+        focus: agent_meta(agent, META_FOCUS),
+        last_heartbeat,
+        heartbeat_age_secs,
+        // The cloud computes `stale` live (cloud PR #153).
+        live: heartbeat_age_secs <= PEER_LIVE_SECS && agent.status != "stale",
+        user_id: agent
+            .user_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|user| !user.is_empty())
+            .map(str::to_string),
+    })
+}
+
+fn sort_peers(peers: &mut [Peer]) {
     peers.sort_by(|a, b| {
         b.live
             .cmp(&a.live)
             .then(a.heartbeat_age_secs.cmp(&b.heartbeat_age_secs))
             .then(a.name.cmp(&b.name))
     });
+}
+
+/// The account whose supervisors the caller may see (cas-2a5a): the user
+/// that registered `self_id`, else the single user every listed row
+/// belongs to. Fails closed: no user, or rows of more than one user with no
+/// registered caller to decide between them, lists nobody.
+pub fn caller_user_id(agents: &[AgentInfo], self_id: Option<&str>) -> Result<String, String> {
+    let user = |agent: &AgentInfo| {
+        agent
+            .user_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|user| !user.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(own) = self_id.and_then(|id| agents.iter().find(|agent| agent.id == id)) {
+        return user(own).ok_or_else(|| {
+            "Cassy Cloud did not report which account registered this supervisor; \
+             no cross-project peers are listed"
+                .to_string()
+        });
+    }
+    let users: std::collections::BTreeSet<_> = agents.iter().filter_map(user).collect();
+    match users.len() {
+        1 => Ok(users.into_iter().next().expect("one user")),
+        0 => Err("Cassy Cloud listed no account for these agents; no cross-project peers \
+                  are listed"
+            .to_string()),
+        _ => Err("Cassy Cloud listed agents of more than one account and this caller is not \
+                  registered; no cross-project peers are listed"
+            .to_string()),
+    }
+}
+
+/// Every supervisor of `owner_user_id`, in any project and on any machine,
+/// excluding `self_id` (cas-2a5a). A row of any other user, or with no user,
+/// is never listed, even when the cloud returns it (a teammate on a shared
+/// team project).
+pub fn user_peers(
+    agents: &[AgentInfo],
+    owner_user_id: &str,
+    self_id: Option<&str>,
+    now: DateTime<Utc>,
+) -> Vec<Peer> {
+    let mut peers: Vec<Peer> = agents
+        .iter()
+        .filter(|agent| Some(agent.id.as_str()) != self_id)
+        .filter_map(|agent| supervisor_peer(agent, now))
+        .filter(|peer| peer.user_id.as_deref() == Some(owner_user_id))
+        .collect();
+    sort_peers(&mut peers);
     peers
 }
 
@@ -272,6 +360,194 @@ pub fn discover_peers(
         canonical_id,
         peers,
     })
+}
+
+/// Result of the account-wide supervisor lookup (cas-2a5a).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserPeerDiscovery {
+    /// Every other supervisor of the caller's own Cassy Cloud user.
+    Found {
+        owner_user_id: String,
+        peers: Vec<Peer>,
+    },
+    /// Not logged in to Cassy Cloud: other projects' supervisors are unknowable.
+    NotLoggedIn,
+}
+
+/// Look up every live or recent supervisor of the caller's own Cassy Cloud
+/// user, in any project and on any machine (cas-2a5a).
+///
+/// The agent list is asked for without a project, which the cloud answers
+/// with the caller's own agents only (`user_id = caller`); the user filter is
+/// applied here as well, so a server that also returned a teammate's agents
+/// still lists none of them.
+pub fn discover_user_peers(
+    cas_root: &Path,
+    self_id: Option<&str>,
+) -> Result<UserPeerDiscovery, crate::error::CasError> {
+    let config = crate::cloud::CloudConfig::load_from_cas_dir(cas_root)?;
+    if !config.is_logged_in() {
+        return Ok(UserPeerDiscovery::NotLoggedIn);
+    }
+    let agents = crate::cloud::CloudCoordinator::new(config)?
+        .with_timeout(DISCOVERY_TIMEOUT)
+        .list_agent_infos()?;
+    let owner = caller_user_id(&agents, self_id).map_err(crate::error::CasError::Other)?;
+    let mut peers = user_peers(&agents, &owner, self_id, Utc::now());
+    exclude_project_agents(cas_root, &mut peers)?;
+    Ok(UserPeerDiscovery::Found {
+        owner_user_id: owner,
+        peers,
+    })
+}
+
+/// Human-readable lines for `coordination action=peers scope=all` and
+/// `cas peers --all` (cas-2a5a): a verdict line, the live supervisors to
+/// message, the stale ones collapsed to a count per project (listed in full
+/// with `verbose`), and one copyable message command.
+pub fn render_user_peers(peers: &[Peer], verbose: bool) -> String {
+    use crate::cloud::presence::wrap_line;
+    // One row per supervisor identity: a re-registration of the same name,
+    // machine and session shows once, under its freshest heartbeat.
+    let mut seen = std::collections::HashSet::new();
+    let rows: Vec<&Peer> = peers
+        .iter()
+        .filter(|peer| {
+            seen.insert((
+                peer.name.to_ascii_lowercase(),
+                peer.machine.to_ascii_lowercase(),
+                peer.session.clone(),
+            ))
+        })
+        .collect();
+    let project = |peer: &Peer| peer.project_name().unwrap_or_else(|| "unknown".to_string());
+    let projects: std::collections::BTreeSet<String> = rows.iter().map(|p| project(p)).collect();
+    let (live, stale): (Vec<&Peer>, Vec<&Peer>) = rows.iter().partition(|peer| peer.live);
+    let mut out = format!(
+        "[OK] {} supervisor{} in {} project{} | {} live\n",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" },
+        projects.len(),
+        if projects.len() == 1 { "" } else { "s" },
+        live.len(),
+    );
+    if rows.is_empty() {
+        out.push_str("  no other supervisors of your account seen in the last 24h\n");
+        return out;
+    }
+    let row = |peer: &Peer| {
+        let focus = peer
+            .focus
+            .as_deref()
+            .map(|focus| format!(" | focus {focus}"))
+            .unwrap_or_default();
+        format!(
+            "  {} {} on {}, seen {} ago\n    session {}{focus}\n",
+            peer.name,
+            project(peer),
+            peer.machine,
+            age(peer.heartbeat_age_secs),
+            peer.session.as_deref().unwrap_or("-"),
+        )
+    };
+    if live.is_empty() {
+        out.push_str("Live: none\n");
+    } else {
+        out.push_str("Live:\n");
+        for peer in &live {
+            out.push_str(&row(peer));
+        }
+    }
+    if !stale.is_empty() {
+        if verbose {
+            out.push_str("Stale, seen in the last 24h:\n");
+            for peer in &stale {
+                out.push_str(&row(peer));
+            }
+        } else {
+            let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+            for peer in &stale {
+                *counts.entry(project(peer)).or_default() += 1;
+            }
+            let counts = counts
+                .iter()
+                .map(|(project, count)| format!("{project} {count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&wrap_line(&format!(
+                "Stale, seen in the last 24h ({}): {counts}. List them with --verbose or --json.",
+                stale.len()
+            )));
+        }
+    }
+    // One copyable command, to a live supervisor if any: by project when
+    // that names exactly one live supervisor, else by name@machine.
+    if let Some(peer) = live.first().or(stale.first()) {
+        let name = project(peer);
+        let unique =
+            name != "unknown" && live.iter().filter(|other| project(other) == name).count() <= 1;
+        let target = if unique {
+            format!("supervisor:{name}")
+        } else {
+            format!("{}@{}", peer.name, peer.machine)
+        };
+        out.push_str(&wrap_line(&format!(
+            "Message one: coordination action=message target={target} summary=\"<one line>\" \
+             message=\"<text>\""
+        )));
+    }
+    out.push_str(&wrap_line(
+        "Cross-project messages are advisory: never urgent, never the operator.",
+    ));
+    out
+}
+
+/// `coordination action=peers scope=all` and `cas peers --all`: the
+/// account-wide directory as text, or as one JSON document (cas-2a5a). A
+/// failed lookup is an error in both forms, so the CLI exits non-zero.
+pub fn user_peers_report(
+    cas_root: &Path,
+    self_id: Option<&str>,
+    json: bool,
+    verbose: bool,
+) -> Result<String, crate::error::CasError> {
+    let discovery = discover_user_peers(cas_root, self_id).map_err(|error| {
+        crate::error::CasError::Other(format!("Cassy Cloud lookup failed: {error}"))
+    })?;
+    if !json {
+        return Ok(match discovery {
+            UserPeerDiscovery::Found { peers, .. } => render_user_peers(&peers, verbose),
+            UserPeerDiscovery::NotLoggedIn => crate::cloud::presence::wrap_line(
+                "[WARN] Not logged in to Cassy Cloud, so your other projects' supervisors are \
+                 unknown. Run `cas login`.",
+            ),
+        });
+    }
+    let value = match discovery {
+        UserPeerDiscovery::Found { peers, .. } => serde_json::json!({
+            "scope": "user",
+            "status": "ready",
+            "peers": peers
+                .iter()
+                .map(|peer| {
+                    let mut value = serde_json::to_value(peer).unwrap_or_default();
+                    value["project"] = serde_json::json!(peer.project_name());
+                    value
+                })
+                .collect::<Vec<_>>(),
+            "limitations": [
+                "Only supervisors of your own Cassy Cloud account are listed.",
+                "Messages across projects are advisory: never urgent, never the operator.",
+            ],
+        }),
+        UserPeerDiscovery::NotLoggedIn => serde_json::json!({
+            "scope": "user",
+            "status": "not_logged_in",
+            "peers": [],
+        }),
+    };
+    serde_json::to_string_pretty(&value)
+        .map_err(|error| crate::error::CasError::Other(error.to_string()))
 }
 
 /// The Peers section shown by `coordination action=peers`,

@@ -12,6 +12,10 @@ pub struct PeersArgs {
     /// Show one supervisor (name or name@machine); implies --detail
     #[arg(long)]
     pub peer: Option<String>,
+    /// List every supervisor of your own Cassy Cloud account, in any project
+    /// or machine (never another user's)
+    #[arg(long, conflicts_with_all = ["detail", "peer"])]
+    pub all: bool,
 }
 
 pub fn execute(args: &PeersArgs, cli: &super::Cli, cas_root: &Path) -> Result<()> {
@@ -19,6 +23,34 @@ pub fn execute(args: &PeersArgs, cli: &super::Cli, cas_root: &Path) -> Result<()
     // Read-only identity resolution: never register the CLI as an agent.
     let self_id = crate::cloud::peers::cli_self_id(cas_root)
         .or_else(|| crate::agent_id::read_session_for_mcp(cas_root).ok());
+    if args.all {
+        // cas-2a5a: the account-wide directory. A failed lookup exits 1 in
+        // text and JSON alike, as plain `cas peers` does.
+        match crate::cloud::peers::user_peers_report(
+            cas_root,
+            self_id.as_deref(),
+            cli.json,
+            cli.verbose,
+        ) {
+            Ok(text) if cli.json => println!("{text}"),
+            Ok(text) => print!("{text}"),
+            Err(error) => {
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"scope": "user", "status": "lookup_failed", "error": error.to_string()})
+                    );
+                } else {
+                    print!(
+                        "{}",
+                        crate::cloud::presence::wrap_line(&format!("[ERROR] Peers: {error}"))
+                    );
+                }
+                anyhow::bail!("Peer discovery unavailable (lookup_failed)");
+            }
+        }
+        return Ok(());
+    }
     let report = discover_peer_report(
         cas_root,
         self_id.as_deref(),

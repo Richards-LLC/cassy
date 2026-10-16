@@ -124,6 +124,7 @@ fn peer_message(id: &str, reply: bool) -> ClaimedPeerMessage {
         in_reply_to: reply.then(|| "pm-question".into()),
         created_at: Utc::now().to_rfc3339(),
         attempts: 1,
+        scope: Default::default(),
     }
 }
 
@@ -321,6 +322,7 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
         in_reply_to: Some("pm-question".into()),
         created_at: "2026-10-11T03:00:00Z".into(),
         attempts: 1,
+        scope: Default::default(),
     });
     let decide = |sender: &WakeSender, prompt: &str| {
         FactoryDaemon::supervisor_wake_decision(

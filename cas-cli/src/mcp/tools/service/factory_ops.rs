@@ -5830,6 +5830,20 @@ impl CasService {
         // Read-only: never auto-register or revive the caller for a lookup.
         let self_id = self.inner.get_registered_agent_id_read_only().ok();
         let text = tokio::task::spawn_blocking(move || {
+            // cas-2a5a: every supervisor of the caller's own account.
+            if req
+                .scope
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|scope| scope.eq_ignore_ascii_case("all"))
+            {
+                return crate::cloud::peers::user_peers_report(
+                    &cas_root,
+                    self_id.as_deref(),
+                    req.json.unwrap_or(false),
+                    req.detail.unwrap_or(false),
+                );
+            }
             if !req.detail.unwrap_or(false) && req.peer.is_none() && !req.json.unwrap_or(false) {
                 return Ok(crate::cloud::peers::peers_section(
                     &cas_root,

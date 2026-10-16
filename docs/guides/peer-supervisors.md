@@ -148,6 +148,45 @@ you when the peer's daemon claimed it. A peer message never interrupts the
 peer (`urgent=true` is refused) and carries no operator authority: the peer
 reads it as a colleague's request.
 
+### Supervisors of your other projects
+
+Supervisors in different projects of **your own** Cassy Cloud account can
+also message each other, on one machine or across machines. Supervisors of
+another user are never listed or addressable, even on a shared team project.
+
+```text
+coordination action=peers scope=all
+```
+
+```text
+[OK] 15 supervisors in 8 projects | 4 live
+Live:
+  bright-newt-56 gabber-studio on prowl, seen 13s ago
+    session gabber-studio-smooth-heron-38
+  fierce-shark-94 petra-stella-cloud on soundwave, seen 16s ago
+    session petra-stella-cloud-happy-puma-17 | focus cas-8cb0
+Stale, seen in the last 24h (11): abundant-mines 2, gabber-studio 5, ...
+  List them with --verbose or --json.
+Message one: coordination action=message target=supervisor:gabber-studio
+  summary="<one line>" message="<text>"
+Cross-project messages are advisory: never urgent, never the operator.
+```
+
+Address one by project, name, or `name@machine`. A project name that still
+names more than one supervisor is refused with every candidate listed:
+
+```text
+coordination action=message target=supervisor:gabber-studio summary="retry design?" message="How did you build the hub retry?" attachment=docs/retry.md
+```
+
+`attachment` takes a published artifact id, or a file in your checkout as
+`path` or `path@<commit>`. The recipient reads a file pointer directly when
+it is on the same machine; across machines, publish an artifact. The
+recipient sees the sender's project and machine, and the message is
+advisory: it is never urgent, cannot raise a blocker, and carries no
+operator authority. The Cloud side of this contract is
+[petra-stella-cloud#162](https://github.com/Richards-LLC/petra-stella-cloud/issues/162).
+
 ### 3. Claims keep you off each other's tasks
 
 A started task `cas-1c99`. B's spawn for it is refused before anything is

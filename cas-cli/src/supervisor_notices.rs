@@ -402,6 +402,8 @@ async fn remote_focus_conflict_delivery(
                 summary: Some("epic focus conflict".into()),
                 in_reply_to: None,
                 dedupe_key: key,
+                scope: Default::default(),
+                recipient_project_id: None,
             })
             .map(|_| ())
     })

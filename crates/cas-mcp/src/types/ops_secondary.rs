@@ -378,7 +378,7 @@ pub struct VerificationRequest {
     /// Action to perform
     #[schemars(
         schema_with = "crate::actions::verification_action_schema",
-        description = "Operation. qa_record records an independent QA reviewer's verdict, never the implementer's; qa_waive is a logged supervisor waiver; qa_request is a logged supervisor request that opens a round for a parked delivery Cassy did not judge user-facing; external_verify is registered-supervisor-only receipted external verification."
+        description = "Operation. batch_receipt records one immutable published staging ledger for PASS task_ids in qa.mode=batch (registered supervisor, no self-review). qa_record records an independent QA reviewer's verdict, never the implementer's; qa_waive is a logged supervisor waiver; qa_request opens an explicit independent round; qa_status includes batch receipts; external_verify is registered-supervisor-only receipted external verification."
     )]
     pub action: String,
 
@@ -465,7 +465,7 @@ pub struct VerificationRequest {
     pub required_checks: Option<String>,
 
     /// cas-619f: absolute path of the independent QA round's LEDGER.md.
-    #[schemars(description = "qa_record: absolute path of this round's LEDGER.md")]
+    #[schemars(description = "qa_record or batch_receipt: absolute ledger path; batch_receipt revalidates bytes against ledger_artifact_id")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ledger_path: Option<String>,
 

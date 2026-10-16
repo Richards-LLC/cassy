@@ -49,6 +49,14 @@ deliveries retain the merge reminder. Containment proofs run off the daemon
 loop and are cached by delivery metadata and local/origin tips; unknown proofs
 are retried rather than cached as merged.
 
+Worker quiet detection also counts authenticated MCP calls when they enter the
+server, and scoped dirty-file edits or commits in the registered worker checkout.
+Heartbeat and registration calls remain telemetry, so heartbeat alone cannot
+hide a quiet worker. Call activity uses the server's immutable registered actor;
+request fields naming another worker do not credit that worker. Open harness
+tool calls and live worker-owned child processes continue to count as activity;
+unrelated process trees and persistent MCP sidecars do not.
+
 ## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client

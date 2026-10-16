@@ -17,6 +17,40 @@ use crate::mcp::tools::service::CasService;
 /// routing guidance, well under 200 characters.
 pub(crate) const SERVER_INSTRUCTIONS: &str = "Cassy: tasks, memory, search and factory coordination. If these tools are deferred, load task, coordination, search and memory together before first use.";
 
+/// Activity belongs to this server's authenticated caller, never a subject
+/// named by a tool payload. Heartbeat/registration telemetry is not progress.
+fn record_worker_mcp_activity(core: &CasCore, tool: &str, action: &str) {
+    use crate::mcp::server::AgentIdentitySource;
+    use cas_types::{AgentRole, AgentStatus, Event, EventEntityType, EventType};
+    if matches!(tool, "coordination" | "agent")
+        && matches!(action, "heartbeat" | "register" | "unregister" | "session_start" | "session_end")
+    {
+        return;
+    }
+    let already_bound = core.agent_id.get().is_some();
+    let Ok(id) = core.get_registered_agent_id_read_only() else { return };
+    // A first request can resolve the registered server session from its
+    // environment/PID mapping. Public registration must never rebind it.
+    if !already_bound {
+        let _ = core.bind_agent_identity(id.clone(), AgentIdentitySource::ServerInternal);
+    }
+    if !core.has_server_internal_identity(&id) { return; }
+    let Ok(agents) = core.open_agent_store() else { return };
+    let Ok(agent) = agents.get(&id) else { return };
+    if agent.role != AgentRole::Worker || !matches!(agent.status, AgentStatus::Active | AgentStatus::Idle) {
+        return;
+    }
+    if let Ok(events) = crate::store::open_event_store(&core.cas_root) {
+        let event = Event::new(EventType::WorkerActivity, EventEntityType::Agent, &id,
+            format!("MCP activity: {tool} {action}"))
+            .with_session(&id)
+            .with_metadata(serde_json::json!({"source":"mcp_dispatch", "tool":tool, "action":action}));
+        if let Err(error) = events.record(&event) {
+            tracing::debug!(%error, "worker MCP activity could not be recorded");
+        }
+    }
+}
+
 #[allow(clippy::manual_async_fn)]
 impl ServerHandler for CasService {
     fn get_info(&self) -> ServerInfo {
@@ -316,6 +350,9 @@ impl CasService {
             .and_then(|args| args.get("action"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
+        // Before spawning the handler: a call in flight is already activity.
+        // This universal boundary also covers factory and proxy tool calls.
+        record_worker_mcp_activity(&self.inner, tool_name, action);
         let task_id = arguments
             .and_then(|args| args.get("id"))
             .and_then(serde_json::Value::as_str);
@@ -621,6 +658,39 @@ fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::potentially_mutating_call;
+
+    #[tokio::test]
+    async fn cas_6eec_activity_rejects_payload_identity_and_heartbeat_or_public_registration() {
+        use crate::mcp::server::{CasCore, AgentIdentitySource};
+        use crate::mcp::tools::service::CasService;
+        use cas_types::{Agent, AgentRole, AgentStatus};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for (index, (role, status, source, tool, action, expected)) in [
+            (AgentRole::Worker, AgentStatus::Active, AgentIdentitySource::ServerInternal, "task", "notes", true),
+            (AgentRole::Supervisor, AgentStatus::Active, AgentIdentitySource::ServerInternal, "task", "notes", false),
+            (AgentRole::Worker, AgentStatus::Active, AgentIdentitySource::PublicRegistration, "task", "notes", false),
+            (AgentRole::Worker, AgentStatus::Shutdown, AgentIdentitySource::ServerInternal, "task", "notes", false),
+            (AgentRole::Worker, AgentStatus::Active, AgentIdentitySource::ServerInternal, "coordination", "heartbeat", false),
+            (AgentRole::Worker, AgentStatus::Active, AgentIdentitySource::ServerInternal, "coordination", "register", false),
+        ].into_iter().enumerate() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let root = crate::store::init_cas_dir(dir.path()).unwrap();
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let mut caller = Agent::new_with_role(format!("caller-{index}"), format!("caller-{index}"), role);
+            caller.status = status;
+            core.open_agent_store().unwrap().register(&caller).unwrap();
+            core.bind_agent_identity(caller.id.clone(), source).unwrap();
+            let victim = Agent::new_with_role(format!("victim-{index}"), format!("victim-{index}"), AgentRole::Worker);
+            core.open_agent_store().unwrap().register(&victim).unwrap();
+            let args = serde_json::json!({"action": action, "id": victim.id, "target": victim.name, "session_id": victim.id});
+            let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+            service.call_with_deadline_and_grace(tool, args.as_object(), std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(5), async { Ok(rmcp::model::CallToolResult::success(vec![])) }).await.unwrap();
+            let events = crate::store::open_event_store(&root).unwrap();
+            assert_eq!(events.latest_worker_activity(&caller.id, &caller.name).unwrap().is_some(), expected, "case {index}");
+            assert!(events.latest_worker_activity(&victim.id, &victim.name).unwrap().is_none(), "payload must not spoof another worker's activity");
+        }
+    }
 
     #[tokio::test]
     async fn cas_6eec_mcp_dispatch_records_its_authenticated_workers_activity() {

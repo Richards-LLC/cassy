@@ -10125,9 +10125,10 @@ pub(crate) fn worker_liveness_for_agent(
 /// cas-9bf6: the execution evidence `worker_status` reports for `worker`,
 /// reused by the director's stall classifier so the two surfaces agree.
 /// `executing` is the worker_status liveness verdict (turn evidence within
-/// `stall_secs`, or a CPU-busy harness); `head_commit_age` is the age of the
-/// worker clone's HEAD commit, which a Codex worker without commit hooks
-/// leaves as its only commit evidence. `None` when the worker is unknown.
+/// `stall_secs`, or a CPU-busy harness); `worktree_activity_age` is the
+/// freshest scoped dirty-file or HEAD commit age, using the same probe as
+/// is-wedged. Only this registered worker's checkout is read.
+/// `None` when the worker is unknown.
 pub(crate) fn worker_stall_evidence(
     cas_root: &std::path::Path,
     worker: &str,
@@ -10145,21 +10146,12 @@ pub(crate) fn worker_stall_evidence(
         WorkerClonePathResolve::Ready(path) => Some(path),
         WorkerClonePathResolve::NotOnDisk { .. } => None,
     };
-    let head_commit_age = clone_path.and_then(|path| {
-        let output = std::process::Command::new("git")
-            .args(["log", "-1", "--format=%ct", "HEAD"])
-            .current_dir(path)
-            .output()
-            .ok()?;
-        let secs: i64 = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
-        let age = now.timestamp().saturating_sub(secs);
-        (age >= 0).then(|| std::time::Duration::from_secs(age as u64))
-    });
+    let worktree_activity_age = clone_path.as_deref()
+        .and_then(crate::cli::factory::wedged::worktree_recent_edit_age);
     Some(WorkerStallEvidence {
         executing: observation.state == super::worker_liveness::Liveness::Executing,
         detail: observation.detail(),
-        head_commit_age,
-        worktree_activity_age: None, // Red-first seam: dirty work is not yet consulted.
+        worktree_activity_age,
     })
 }
 
@@ -10168,7 +10160,6 @@ pub(crate) fn worker_stall_evidence(
 pub(crate) struct WorkerStallEvidence {
     pub executing: bool,
     pub detail: String,
-    pub head_commit_age: Option<std::time::Duration>,
     pub worktree_activity_age: Option<std::time::Duration>,
 }
 

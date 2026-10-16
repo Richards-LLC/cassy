@@ -3777,6 +3777,27 @@ mod tests {
         ));
         assert!(is_known_sidecar_commandline("cas", b"cas\0serve\0"));
         assert!(!is_known_sidecar_commandline("node", b"node\0server.js\0"));
+        for (command, raw) in [
+            ("cargo", b"cargo\0test\0".as_slice()),
+            ("cargo-nextest", b"cargo-nextest\0nextest\0run\0".as_slice()),
+            ("node", b"node\0node_modules/playwright/cli.js\0test\0".as_slice()),
+            ("node", b"node\0node_modules/vite/bin/vite.js\0".as_slice()),
+        ] {
+            assert!(!is_known_sidecar_commandline(command, raw), "owned build/browser job must count: {command}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cas_6eec_background_activity_excludes_another_process_tree() {
+        let mut idle_pane = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let mut unrelated_job = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let observed = background_processes_for(idle_pane.id());
+        unrelated_job.kill().unwrap();
+        unrelated_job.wait().unwrap();
+        idle_pane.kill().unwrap();
+        idle_pane.wait().unwrap();
+        assert_eq!(observed, BackgroundProcessState::Available(vec![]), "a live sibling job must not suppress this worker's quiet warning");
     }
 
     #[test]

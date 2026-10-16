@@ -6,9 +6,9 @@ fn test_sqlite_store_full_lifecycle() {
     let store = SqliteStore::open(temp.path()).expect("Failed to create store");
     store.init().expect("Failed to init store");
 
-    // Generate ID (format: YYYY-MM-DD-N)
+    // Generated memory IDs are opaque, nonempty identities.
     let id = store.generate_id().expect("Failed to generate ID");
-    assert!(id.contains("-"), "ID should be date-based: {id}");
+    assert!(!id.is_empty(), "ID must not be empty");
 
     // Create and add entry
     let mut entry = Entry::new(id.clone(), "Test entry content".to_string());

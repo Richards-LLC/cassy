@@ -1265,3 +1265,93 @@ async fn cas7a69_unified_create_and_update_accept_all_proof_target_wire_forms() 
         );
     }
 }
+
+/// cas-4d67: a proof-scope repair changes the integration destination, not
+/// the fact that this task still owns its parked, unmerged delivery.
+#[tokio::test]
+async fn cas_4d67_double_retarget_to_fresh_origin_only_epic_still_requires_merge() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
+    env.set("CAS_AGENT_ROLE", "worker");
+    let repo = temp.path();
+    let root = repo.join(".cas");
+    let remote = tempfile::tempdir().unwrap();
+    let git = |at: &std::path::Path, args: &[&str]| {
+        let output = Command::new("git").args(args).current_dir(at)
+            .env("GIT_AUTHOR_NAME", "Test").env("GIT_AUTHOR_EMAIL", "test@example.test")
+            .env("GIT_COMMITTER_NAME", "Test").env("GIT_COMMITTER_EMAIL", "test@example.test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    git(remote.path(), &["init", "-q", "--bare"]);
+    git(repo, &["init", "-q", "-b", "main"]);
+    // Stable repository identity, but every transport is a local bare fixture.
+    let url = "https://github.com/example/cas4d67-fixture.git";
+    git(repo, &["remote", "add", "origin", url]);
+    git(repo, &["config", &format!("url.{}.insteadOf", remote.path().display()), url]);
+    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    git(repo, &["add", ".gitignore"]);
+    git(repo, &["commit", "-q", "-m", "seed"]);
+    let base = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["branch", "epic/old"]);
+    git(repo, &["push", "-q", "origin", "main", "epic/old"]);
+    std::fs::write(root.join("config.toml"), "[verification]\nenabled=false\n[qa]\nindependent_pass=false\n").unwrap();
+    cas::store::known_repos::ensure_host_schema().unwrap();
+    let store = open_task_store(&root).unwrap();
+    let mut epic = cas::types::Task::new("cas-4d00".into(), "Retarget parent".into());
+    epic.task_type = TaskType::Epic;
+    epic.branch = Some("epic/old".into());
+    store.add(&epic).unwrap();
+    let service = CasService::new(core, None);
+    let created = unified_task(&service, serde_json::json!({
+        "action":"create", "title":"Retarget delivery", "epic":epic.id,
+        "risk":"none", "depth":"light", "target_repo":repo, "target_branch":"epic/old"
+    })).await;
+    let id = extract_task_id(&created).expect(&created).to_string();
+    git(repo, &["checkout", "-q", "-b", &format!("factory/test-agent-{id}")]);
+    let started = unified_task(&service, serde_json::json!({"action":"start","id":id})).await;
+    assert_eq!(store.get(&id).unwrap().status, TaskStatus::InProgress, "{started}");
+    std::fs::write(repo.join("delivery.rs"), "pub fn delivery() {}\n").unwrap();
+    git(repo, &["add", "delivery.rs"]);
+    git(repo, &["commit", "-q", "-m", &format!("fix({id}): unmerged delivery")]);
+    let delivered = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["push", "-q", "origin", "HEAD"]);
+    let first = unified_task(&service, serde_json::json!({"action":"close","id":id,"reason":"ready"})).await;
+    // pin: MERGE REQUIRED is the public gate heading and worker handoff contract.
+    assert!(first.contains("MERGE REQUIRED"), "{first}");
+    assert_eq!(store.get(&id).unwrap().status, TaskStatus::AwaitingMerge);
+    assert_eq!(store.get(&id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(delivered.as_str()));
+
+    set_test_agent_role(&root, AgentRole::Supervisor);
+    let first_fix = unified_task(&service, serde_json::json!({
+        "action":"update", "id":id, "proof_scope_fix":true,
+        "target_branch":"epic/new-short-name", "reason":"Move parked delivery after release"
+    })).await;
+    assert!(first_fix.contains("Corrected proof scope"), "{first_fix}");
+    set_test_agent_role(&root, AgentRole::Worker);
+    unified_task(&service, serde_json::json!({"action":"start","id":id})).await;
+    let target = "epic/new-generated-name";
+    git(repo, &["push", "-q", "origin", &format!("{base}:refs/heads/{target}")]);
+    assert!(!Command::new("git").args(["show-ref", "--verify", &format!("refs/heads/{target}")])
+        .current_dir(repo).output().unwrap().status.success(), "target must exist only on origin");
+    epic.branch = Some(target.into());
+    store.update(&epic).unwrap();
+    set_test_agent_role(&root, AgentRole::Supervisor);
+    let second_fix = unified_task(&service, serde_json::json!({
+        "action":"update", "id":id, "proof_scope_fix":true,
+        "target_branch":target, "reason":"Correct epic-generated target name"
+    })).await;
+    assert!(second_fix.contains("Corrected proof scope"), "{second_fix}");
+    set_test_agent_role(&root, AgentRole::Worker);
+    unified_task(&service, serde_json::json!({"action":"start","id":id})).await;
+    let refused = unified_task(&service, serde_json::json!({"action":"close","id":id,"reason":"re-park unchanged tip"})).await;
+    assert!(refused.contains("MERGE REQUIRED"), "double retarget must retain merge gate: {refused}");
+    assert_eq!(store.get(&id).unwrap().status, TaskStatus::AwaitingMerge);
+    assert!(store.get(&id).unwrap().closed_at.is_none());
+    assert!(!refused.contains("All subtasks"), "unmerged delivery must not complete its epic: {refused}");
+    assert_eq!(git(repo, &["rev-parse", &format!("origin/{target}")]), base);
+    assert!(!Command::new("git").args(["merge-base", "--is-ancestor", &delivered, &format!("origin/{target}")])
+        .current_dir(repo).status().unwrap().success(), "fixture delivery must remain unmerged");
+}

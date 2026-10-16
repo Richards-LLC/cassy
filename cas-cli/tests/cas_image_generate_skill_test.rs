@@ -1,5 +1,6 @@
 //! Distribution and routing contracts for the built-in cas-image-generate skill.
 
+use crate::test_env_guard::TestEnvGuard;
 use assert_cmd::Command;
 use predicates::prelude::*;
 use quick_xml::Reader;
@@ -10,6 +11,16 @@ use tempfile::TempDir;
 
 #[path = "support/builtin_catalog.rs"]
 mod builtin_catalog;
+
+#[path = "support/mod.rs"]
+mod support;
+
+#[test]
+fn cas_76e4_image_sync_leaves_the_worker_worktree_untouched() {
+    support::CasSandbox::new().assert_child_tests_leave_worktree_untouched(&[
+        "cas_image_generate_skill_test::cas_update_syncs_the_skill_to_all_enabled_harnesses",
+    ]);
+}
 
 fn load(relative: &str) -> &'static str {
     builtin_catalog::find_source_path(relative)
@@ -108,7 +119,10 @@ fn builtin_catalog_registers_all_mirror_entries() {
         "skills/cas-image-generate/scripts/generate-image.sh",
     ] {
         let claude = builtin_catalog::find(builtin_catalog::Flavor::Claude, relative);
-        for flavor in [builtin_catalog::Flavor::Codex, builtin_catalog::Flavor::Grok] {
+        for flavor in [
+            builtin_catalog::Flavor::Codex,
+            builtin_catalog::Flavor::Grok,
+        ] {
             assert_eq!(
                 builtin_catalog::try_find(flavor, relative),
                 Some(claude),
@@ -120,6 +134,7 @@ fn builtin_catalog_registers_all_mirror_entries() {
 
 #[test]
 fn cas_update_syncs_the_skill_to_all_enabled_harnesses() {
+    let _env = TestEnvGuard::new();
     let project = TempDir::new().unwrap();
     let home = project.path().join("home");
     let xdg = project.path().join("xdg");

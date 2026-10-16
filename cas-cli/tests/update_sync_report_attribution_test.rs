@@ -12,9 +12,24 @@
 //! These tests pin the invariant: every claimed write is attributed to the
 //! harness directory it actually landed in, and the claimed file exists there.
 
+use crate::test_env_guard::TestEnvGuard;
 use assert_cmd::Command;
 use std::path::Path;
 use tempfile::TempDir;
+
+#[path = "support/mod.rs"]
+mod support;
+
+#[test]
+fn cas_76e4_cli_cases_leave_the_worker_worktree_untouched() {
+    support::CasSandbox::new().assert_child_tests_leave_worktree_untouched(&[
+        "update_sync_report_attribution_test::sync_attributes_every_claimed_write_to_the_directory_it_landed_in",
+        "update_sync_report_attribution_test::codex_sync_reports_its_own_result_and_is_idempotent",
+        #[cfg(unix)]
+        "update_sync_report_attribution_test::unwritable_codex_destination_fails_loudly_instead_of_claiming_success",
+        "viktor_distribution_test::clean_init_and_sync_distribute_viktor_skill_and_status_never_prints_a_key",
+    ]);
+}
 
 fn cas_cmd(root: &Path) -> Command {
     let mut cmd = Command::new(cas::test_paths::cas_binary());
@@ -73,6 +88,7 @@ fn init_project(temp: &TempDir) {
 /// relative path that did not exist under `.codex`.
 #[test]
 fn sync_attributes_every_claimed_write_to_the_directory_it_landed_in() {
+    let _env = TestEnvGuard::new();
     let temp = TempDir::new().unwrap();
     init_project(&temp);
 
@@ -139,6 +155,7 @@ fn sync_attributes_every_claimed_write_to_the_directory_it_landed_in() {
 /// writes.
 #[test]
 fn codex_sync_reports_its_own_result_and_is_idempotent() {
+    let _env = TestEnvGuard::new();
     let temp = TempDir::new().unwrap();
     init_project(&temp);
 
@@ -208,6 +225,7 @@ fn codex_sync_reports_its_own_result_and_is_idempotent() {
 #[test]
 #[cfg(unix)]
 fn unwritable_codex_destination_fails_loudly_instead_of_claiming_success() {
+    let _env = TestEnvGuard::new();
     use std::os::unix::fs::PermissionsExt;
 
     let temp = TempDir::new().unwrap();

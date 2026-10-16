@@ -224,6 +224,59 @@ pub(super) const WORKER_DEATH_CORRELATION_WINDOW: std::time::Duration =
 /// to `worker_status` rather than surfacing as a fresh alarm.
 pub(super) const UNSTAMPED_WORKER_DEATH_MAX_AGE: chrono::Duration = chrono::Duration::minutes(30);
 
+/// cas-26c8 review M1/H1: after a restart, or a failed write, nothing holds
+/// a recorded death any more. For this session only:
+/// 1. a folded relay whose durable row (members already stamped in the same
+///    transaction) never got its prompt is re-driven, and
+/// 2. any per-worker worker_died row that is neither folded nor held is
+///    injected on its own.
+pub(super) fn sweep_held_worker_death_relays(
+    cas_dir: &std::path::Path,
+    agent_store: &dyn cas_store::AgentStore,
+    factory_session: &str,
+    held: &std::collections::HashSet<String>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> usize {
+    use crate::mcp::tools::service::orphan_recovery;
+    let mut redriven = 0;
+    if let Ok(queue) = crate::store::open_supervisor_queue_store(cas_dir) {
+        for supervisor in orphan_recovery::live_session_supervisors(agent_store, factory_session) {
+            let Ok(rows) = queue.list_pending_prompt_outbox(&supervisor, "workers_died_together", 20)
+            else {
+                continue;
+            };
+            for row in rows {
+                if now - row.created_at > UNSTAMPED_WORKER_DEATH_MAX_AGE {
+                    continue;
+                }
+                let Ok(payload) = serde_json::from_str::<serde_json::Value>(&row.payload) else {
+                    continue;
+                };
+                if payload.get("factory_session").and_then(serde_json::Value::as_str)
+                    != Some(factory_session)
+                {
+                    continue;
+                }
+                if matches!(
+                    super::lifecycle::redrive_folded_worker_deaths_relay(cas_dir, &payload),
+                    super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
+                ) {
+                    redriven += 1;
+                }
+            }
+        }
+    }
+    redriven
+        + orphan_recovery::sweep_unstamped_worker_deaths(
+            cas_dir,
+            agent_store,
+            factory_session,
+            held,
+            now,
+            UNSTAMPED_WORKER_DEATH_MAX_AGE,
+        )
+}
+
 /// cas-26c8: what to do with a death group after one folded-relay attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FoldedGroupStep {

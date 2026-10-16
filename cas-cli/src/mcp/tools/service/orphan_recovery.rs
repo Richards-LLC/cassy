@@ -624,20 +624,22 @@ fn relay_worker_death_payload(
     }
 }
 
-/// cas-26c8: a group's folded relay replaces these per-worker relays, so
-/// their durable rows are stamped and acknowledged and never injected.
-pub(crate) fn fold_held_worker_death(cas_root: &Path, agent_store: &dyn AgentStore, agent: &Agent) {
-    let Ok(queue) = open_supervisor_queue_store(cas_root) else {
-        return;
-    };
-    let incident = death_incident_key(agent);
-    for recipient in death_recipients(agent_store, agent) {
-        let Ok(Some(row)) = queue.get_by_transition_key(&format!("{incident}:{recipient}")) else {
-            continue;
-        };
-        let _ = queue.mark_prompt_delivered(row.id);
-        let _ = queue.ack(row.id);
-    }
+/// cas-26c8 review H1: the ids of this factory session's live supervisors.
+pub(crate) fn live_session_supervisors(agent_store: &dyn AgentStore, factory_session: &str) -> Vec<String> {
+    agent_store
+        .list(None)
+        .map(|agents| {
+            agents
+                .into_iter()
+                .filter(|a| {
+                    matches!(a.role, AgentRole::Supervisor | AgentRole::Director)
+                        && matches!(a.status, AgentStatus::Active | AgentStatus::Idle)
+                        && a.factory_session.as_deref() == Some(factory_session)
+                })
+                .map(|a| a.id)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// cas-26c8: a death's durable `worker_died` row whose prompt was never
@@ -648,6 +650,7 @@ pub(crate) fn fold_held_worker_death(cas_root: &Path, agent_store: &dyn AgentSto
 pub(crate) fn sweep_unstamped_worker_deaths(
     cas_root: &Path,
     agent_store: &dyn AgentStore,
+    factory_session: &str,
     held_incidents: &std::collections::HashSet<String>,
     now: chrono::DateTime<chrono::Utc>,
     max_age: chrono::Duration,
@@ -657,16 +660,11 @@ pub(crate) fn sweep_unstamped_worker_deaths(
     else {
         return 0;
     };
-    let supervisors = agent_store
-        .list(None)
-        .map(|agents| {
-            agents
-                .into_iter()
-                .filter(|a| matches!(a.role, AgentRole::Supervisor | AgentRole::Director))
-                .map(|a| a.id)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    // cas-26c8 review H1: factories can share one cas.db. Only this
+    // session's live supervisors are swept, so one factory never injects
+    // deaths another factory's daemon is still holding for its window, and
+    // the per-pass cost is bounded by the live supervisors, not history.
+    let supervisors = live_session_supervisors(agent_store, factory_session);
     let mut injected = 0;
     for supervisor in supervisors {
         let Ok(rows) = queue.list_pending_prompt_outbox(&supervisor, "worker_died", 20) else {
@@ -690,6 +688,9 @@ pub(crate) fn sweep_unstamped_worker_deaths(
                 continue;
             };
             let text = |key: &str| payload.get(key).and_then(serde_json::Value::as_str);
+            if text("factory_session") != Some(factory_session) {
+                continue;
+            }
             let list = |key: &str| {
                 payload
                     .get(key)

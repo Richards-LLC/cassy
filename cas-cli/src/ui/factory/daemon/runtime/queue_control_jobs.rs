@@ -358,7 +358,7 @@ impl RecipientInputs {
 struct WakeInputs {
     agents: Vec<cas_types::Agent>,
     recipients: HashMap<String, RecipientInputs>,
-    finished_at: Instant,
+    captured_at: Instant,
     worker_wait_loaded: bool,
 }
 
@@ -381,7 +381,7 @@ impl PromptPreparation {
     pub(crate) fn is_fresh(&self, now: Instant) -> bool {
         self.current
             .as_ref()
-            .is_some_and(|inputs| now.saturating_duration_since(inputs.finished_at) <= WAKE_MAX_AGE)
+            .is_some_and(|inputs| now.saturating_duration_since(inputs.captured_at) <= WAKE_MAX_AGE)
     }
     pub(crate) fn agents(&self) -> &[cas_types::Agent] {
         self.current
@@ -435,7 +435,7 @@ impl PromptPreparation {
                     }
                     _ => false,
                 });
-                if now.saturating_duration_since(inputs.finished_at) < POLL_CADENCE
+                if now.saturating_duration_since(inputs.captured_at) < POLL_CADENCE
                     && covered
                     && (!needs_wait || inputs.worker_wait_loaded)
                 {
@@ -447,7 +447,7 @@ impl PromptPreparation {
             self.pending = Some(selection);
         }
         if let Some(inputs) = self.ready.take() {
-            if now.saturating_duration_since(inputs.finished_at) <= WAKE_MAX_AGE {
+            if now.saturating_duration_since(inputs.captured_at) <= WAKE_MAX_AGE {
                 let mut selection = self.pending.take()?;
                 selection.registered_agents = inputs.agents.clone();
                 self.current = Some(inputs);
@@ -515,6 +515,10 @@ impl PromptPreparation {
         jobs.apply_completions();
         self.collect(jobs);
         if let Some(inputs) = self.ready.take() {
+            if Instant::now().saturating_duration_since(inputs.captured_at) > WAKE_MAX_AGE {
+                self.last_submitted = None;
+                return None;
+            }
             let mut selection = self.pending.take()?;
             selection.registered_agents = inputs.agents.clone();
             self.current = Some(inputs);
@@ -552,6 +556,8 @@ fn read_wake_inputs(
     recipients: &HashSet<String>,
     sender_ids: &HashSet<String>,
 ) -> Result<WakeInputs, String> {
+    // Freshness starts at the oldest observation, not when a slow read ends.
+    let captured_at = Instant::now();
     let agents = crate::store::open_agent_store(cas_dir)
         .and_then(|store| Ok(store.list(None)?))
         .map_err(|error| error.to_string())?;
@@ -652,7 +658,7 @@ fn read_wake_inputs(
     Ok(WakeInputs {
         agents,
         recipients: observations,
-        finished_at: Instant::now(),
+        captured_at,
         worker_wait_loaded: need_worker_wait,
     })
 }

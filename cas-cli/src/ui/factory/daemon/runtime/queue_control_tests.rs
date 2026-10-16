@@ -64,6 +64,17 @@ fn cas_7b6b_reset_accounts_for_dequeued_completion_before_control_applies_it() {
             .iter()
             .any(|row| row.id == id && row.state == cas_store::SpawnLifecycleState::Failed)
     });
+    assert!(
+        crate::store::open_prompt_queue_store(daemon.app.cas_dir())
+            .unwrap()
+            .peek_all(20)
+            .unwrap()
+            .iter()
+            .any(|row| row.target == daemon.app.supervisor_name()
+                && row.prompt.contains(&format!("spawn requests {id}"))
+                && row.prompt.contains("re-issue")),
+        "late cancelled requests must be named to the supervisor"
+    );
 }
 
 #[test]
@@ -412,9 +423,17 @@ fn cas_7b6b_wake_snapshot_reuses_fresh_inputs_and_refreshes_after_cadence() {
         !preparation.is_fresh(later),
         "expired evidence cannot authorize transport"
     );
+    std::thread::sleep(Duration::from_millis(110));
     assert!(
         preparation
-            .advance(&mut jobs, batch(), root, "lead".into(), vec![], later)
+            .advance(
+                &mut jobs,
+                batch(),
+                root,
+                "lead".into(),
+                vec![],
+                Instant::now()
+            )
             .is_some()
     );
     assert!(!preparation.recipient("worker-a").unwrap().wait.task_blocked);

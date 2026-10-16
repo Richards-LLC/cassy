@@ -14,7 +14,7 @@ its workers, and it cannot direct yours.
 | Presence | The first line of that section is your own cloud registration: `Cloud presence: registered …` or `Cloud presence: failing: <cause>`. |
 | Messaging | `coordination action=message target=<name>` (or `<name>@<machine>`) reaches a peer's inbox through the Cassy Cloud mailbox. Replies use `in_reply_to`; `coordination action=message_status id=<peer message id>` reads delivery. |
 | Worker peer lane | A worker may message another registered worker in the same factory session with `coordination action=message target=<worker-name>`. Each peer message is copied to the session supervisor. This is a narrow local lane, not cross-session or cross-machine worker chat. |
-| Awareness | `coordination action=peers detail=true` (or `peer=<name>`) shows a peer's focus, task claims, live workers and branches. |
+| Awareness | `cas peers --detail` (or `--peer <name>`) shows a peer's focus, task claims, live workers and branches. |
 | Claim and spawn refusal | `task start`, `task action=claim` and `spawn_workers task_id=` refuse a task another session of this repository holds, naming the holder and when its claim runs out. Nothing is queued. |
 | Epic split | `factory action=epic_split` records which children of an epic each side owns. Each side's start and spawn on the other's children is refused. |
 
@@ -78,8 +78,8 @@ with the cloud on start, retries if that fails, and refreshes its focus and
 branch on every heartbeat. `Peer mailbox: receiving.` means this factory's
 daemon is claiming peer messages.
 
-For a peer's claims, workers and branches, add `detail=true`, or `peer=<name>`
-for one peer:
+For a peer's claims, workers and branches, run `cas peers --detail`, or
+`cas peers --peer <name>` for one peer:
 
 ```text
 [OK] 1 peer supervisor | 1 live
@@ -107,8 +107,7 @@ qa7e32-b-b251eb [live]
 Peer mailbox: receiving.
 ```
 
-`cas peers --detail` (or `--peer <name>`, and `--json`) prints the same view
-from a shell.
+Add `--json` for the same report as one document with untruncated values.
 
 A supervisor also sees its live peers when its session starts, including
 after `/clear`. The block reads the same snapshot as `cas peers`:

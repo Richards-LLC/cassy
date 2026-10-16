@@ -5850,7 +5850,7 @@ async fn test_gc_report_lists_stale_temp_roots_without_deleting_them() {
 }
 
 #[tokio::test]
-async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
+async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248() {
     let env = FactoryTestEnv::new();
     let base = env.cas_root.join("durable-artifacts");
     let root = cas::config::project_factory_artifacts_root(&env.cas_root, &base);
@@ -5858,6 +5858,8 @@ async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
     let closed_id = task_store.generate_id().expect("generate closed task id");
     let mut closed = Task::new(closed_id.clone(), "closed artifact owner".to_string());
     closed.status = TaskStatus::Closed;
+    closed.closed_at = Some(chrono::Utc::now() - chrono::Duration::days(8));
+    closed.updated_at = closed.closed_at.unwrap();
     task_store.add(&closed).expect("add closed task");
     let open_id = task_store.generate_id().expect("generate open task id");
     task_store
@@ -5899,6 +5901,7 @@ async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
 
     let mut preview = factory_req("gc_cleanup");
     preview.force = Some(true);
+    preview.dry_run = Some(false);
     let preview = env.service.factory_request(Parameters(preview)).await.unwrap();
     assert!(get_text(&preview).contains("mode=review-only"));
     assert!(
@@ -5906,19 +5909,6 @@ async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
         "force alone must not delete durable proof"
     );
 
-    let mut cleanup = factory_req("gc_cleanup");
-    cleanup.force = Some(true);
-    cleanup.dry_run = Some(false);
-    let cleanup = env.service.factory_request(Parameters(cleanup)).await.unwrap();
-    let cleanup_text = get_text(&cleanup);
-    assert!(
-        cleanup_text.contains("Closed-task artifact directories removed: 1"),
-        "{cleanup_text}"
-    );
-    assert!(
-        !root.join(&closed_id).exists(),
-        "closed-task artifact should be GC'd"
-    );
     assert!(
         root.join(&open_id).exists(),
         "open task artifact must be preserved"

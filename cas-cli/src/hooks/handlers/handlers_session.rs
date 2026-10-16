@@ -297,6 +297,26 @@ pub fn handle_session_start(
         }
     }
 
+    // cas-97ff (GH #1215 §1): name the other live supervisors of this repo,
+    // from the same Cassy Cloud snapshot `cas peers` renders, so a `/clear`
+    // never hides a live peer. Supervisors only, bounded by its own deadline;
+    // an unreachable cloud is one "unknown" line, never "no peers".
+    if !suppress_custom_profile_context
+        && let Some(peers) = crate::cloud::peers_session_start::session_start_peers_for_role(
+            agent_role.as_deref(),
+            cas_root,
+            Some(input.session_id.as_str()),
+            crate::harness_policy::own_tool_prefix(),
+        )
+    {
+        assembler.append_degradable_with_priority(
+            "Live peer supervisors",
+            peers.full,
+            peers.compact,
+            DegradationPriority::Context,
+        );
+    }
+
     // cas-cd54: ambient recall is a degradable, independently hard-bounded
     // evidence segment. It stays below immutable role guidance and never
     // competes with safety banners for protected SessionStart bytes.

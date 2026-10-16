@@ -664,10 +664,6 @@ impl TaskStore for SyncingTaskStore {
         self.inner.list(status)
     }
 
-    fn epic_for_branch_excluding(&self, branch: &str, excluded: &[String]) -> Result<Option<Task>> {
-        self.inner.epic_for_branch_excluding(branch, excluded)
-    }
-
     fn list_with_suppressed(&self, status: Option<TaskStatus>) -> Result<(Vec<Task>, Vec<Task>)> {
         self.inner.list_with_suppressed(status)
     }

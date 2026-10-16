@@ -1,4 +1,7 @@
 pub(crate) mod gate_text;
+mod loaded_proof;
+#[cfg(test)]
+mod loaded_proof_tests;
 mod task_attribution;
 mod evidence_only;
 mod delivery_evolution;
@@ -860,7 +863,9 @@ fn has_platform_proof_note(notes: &str) -> bool {
 }
 
 fn has_target_scope(lower: &str) -> bool {
-    [
+    // Structured Rust scope must still declare the whole target. Non-Rust
+    // scope is explicit or uses a named runner; keep all legacy prose forms.
+    loaded_proof::has_structured_target_scope(lower) || [
         &["whole", "target"][..],
         &["entire", "target"],
         &["full", "target"],
@@ -945,42 +950,11 @@ fn platform_proof_missing_evidence(notes: &str) -> Vec<&'static str> {
 /// repeat the run at least three times. Rust and non-Rust receipts use the same
 /// typed contract while retaining common wording variants.
 fn has_loaded_proof_note(notes: &str) -> bool {
-    notes.lines().any(|line| {
-        let lower = line.to_ascii_lowercase();
-        lower.contains("loaded_proof")
-            && has_target_scope(&lower)
-            && has_parallelism_16(&lower)
-            && has_at_least_three_runs(&lower)
-            && has_passing_result(&lower)
-    })
+    loaded_proof::assess_notes(notes).any(|fields| fields.complete())
 }
 
-fn loaded_proof_missing_evidence(notes: &str) -> Vec<&'static str> {
-    let lines = notes
-        .lines()
-        .filter(|line| line.to_ascii_lowercase().contains("loaded_proof"))
-        .collect::<Vec<_>>();
-    if lines.is_empty() {
-        return vec!["typed note_type=loaded_proof"];
-    }
-
-    let mut missing = Vec::new();
-    if !lines.iter().any(|line| has_target_scope(&line.to_ascii_lowercase())) {
-        missing.push("whole/entire/full target or explicit non-Rust target");
-    }
-    if !lines.iter().any(|line| has_parallelism_16(&line.to_ascii_lowercase())) {
-        missing.push("parallelism at 16 jobs (-j16 or --jobs 16)");
-    }
-    if !lines.iter().any(|line| has_at_least_three_runs(&line.to_ascii_lowercase())) {
-        missing.push("at least 3 loops/runs");
-    }
-    if !lines.iter().any(|line| has_passing_result(&line.to_ascii_lowercase())) {
-        missing.push("passing result (PASS, SUCCESS, exit 0, or status 0)");
-    }
-    if missing.is_empty() {
-        missing.push("all required evidence on the same typed note");
-    }
-    missing
+fn loaded_proof_missing_evidence(notes: &str) -> String {
+    loaded_proof::missing_evidence(notes)
 }
 
 /// A changed Rust source file as a crate-relative module path:
@@ -2207,7 +2181,7 @@ fn declared_risk_close_gaps(task: &Task, changed_paths: &[String]) -> Vec<String
     if task.risk.contains(&TaskRisk::Concurrency) && !has_loaded_proof_note(&task.notes) {
         gaps.push(format!(
             "loaded_proof missing evidence: {}",
-            loaded_proof_missing_evidence(&task.notes).join(", ")
+            loaded_proof_missing_evidence(&task.notes)
         ));
     }
     if task.risk.contains(&TaskRisk::BlastRadius) {
@@ -2512,7 +2486,7 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
         && build_proofs == BuildProofs::Required
         && !has_loaded_proof_note(&task.notes)
     {
-        let missing = loaded_proof_missing_evidence(&task.notes).join(", ");
+        let missing = loaded_proof_missing_evidence(&task.notes);
         return Err(format!(
             "TASK CLOSE REJECTED: task {} declares risk=concurrency but its loaded_proof receipt is incomplete (missing evidence: {missing}). Add one with action=notes note_type=loaded_proof proving the whole or explicit non-Rust target under -j16 for at least 3 loops with a passing result, then retry close.",
             task.id,

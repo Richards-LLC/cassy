@@ -530,6 +530,24 @@ Late recall output is retained for the next successful response, including mail
 already consumed by the background reader. Message delivery remains asynchronous;
 use `coordination action=message_status` to inspect handoff and recipient evidence.
 
+For a gated message, status distinguishes a **held inbox** (a successful Teams
+write; surfaces at the next tool call or turn start without expiring while the
+recipient remains in the session) from a **delivery retry** (no held handoff
+recorded; transport retry budget still applies, including operator drafts).
+A fresh transport reservation clears any older inbox deferral before injecting,
+so a worker that changes harness cannot have its PTY delivery replayed by a hook.
+The actual primary channel decides whether a handoff can be held: a missing
+Teams folder falls back to PTY and never receives a new inbox deferral stamp.
+Status checks the deferral, current transport claim and absence of completed
+transport in one database snapshot; a stale marker alone cannot imply a hold.
+If the deferral stamp cannot be saved, the Teams copy remains available at the
+turn boundary and Cassy queues one supervisor warning per affected message.
+
+Abandonment digests keep the first batch within the hook's message budget by
+showing whole IDs plus an omitted-ID count. The episode's `+N more` trailer
+counts abandoned messages, including every message in a later folded batch.
+Full delivery state remains on each original message for `message_status`.
+
 Integration tests are in `cas-cli/tests/`. Key test files:
 
 - `cli_test.rs` — CLI command integration tests

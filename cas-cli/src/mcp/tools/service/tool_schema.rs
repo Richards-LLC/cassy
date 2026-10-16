@@ -92,8 +92,9 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("supersede_key", "Broadcast: newest per key wins."),
     ("sticky", "Broadcast: late joiners get it."),
     ("task_id", "Parked task for merge_request; remind: bind to task."),
-    ("notification_id", "message_ack/status: notification id; inbox_poll: read even during transport hold."),
-    ("limit", "inbox_poll: maximum rows."),
+    // cas-6ccb: polled rows can resurface once until acknowledged.
+    ("notification_id", "message_ack/message_status: the notification id. inbox_poll: read it even if transport holds it; polled rows not acked reappear once."),
+    ("limit", "inbox_poll: max rows."),
     ("name", "register/session_start: agent name."),
     ("agent_type", "register/session_start: primary, sub_agent, worker or ci."),
     ("parent_id", "register/session_start: parent agent id."),
@@ -104,7 +105,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("remind_filter", "JSON: branch_contained_in {\"commit\":\"<ref>\",\"target_branch\":\"main\"}; tag_exists {\"tag\":\"v1.0.0\"}; ci_completed {\"sha\":\"<40-hex>\",\"workflow\":\"CI\"} (workflow optional); local events e.g. {\"task_id\":\"cas-1234\"}."),
     ("remind_id", "remind_cancel: reminder id."),
     ("remind_ttl_secs", "TTL seconds: default 3600; external default 604800 (7 days); 0=never."),
-    ("cross_session", "Keep reminder across session end and task close."),
+    ("cross_session", "remind: survive session end and task close."),
 ];
 
 /// Messaging and reminder parameters the supervisor `factory` tool does not

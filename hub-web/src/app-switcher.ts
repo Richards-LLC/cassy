@@ -50,6 +50,27 @@ export function appSwitcherMarkup(href: string | null): string {
   return `<nav id="app-switcher" class="app-switcher" popover aria-label="Cassy Cloud apps"><span class="app-switcher-item" aria-current="page"><span class="app-switcher-name">Commander</span><span class="app-switcher-hint">Conversations with your supervisors</span></span>${explorer}</nav>`;
 }
 
+/**
+ * cas-2a26 (journey eval 3.51.0 F02): Explorer opens in its own tab, so once
+ * its switcher link is followed (click, tap or Enter) the menu closes in
+ * Commander's tab and focus returns to the apps button. Commander is then
+ * exactly as it was before the menu opened. `target` is the click's target;
+ * returns whether it was the switcher's Explorer link. The link's own
+ * navigation is untouched.
+ */
+export function closeAppSwitcherAfterFollow(target: EventTarget | null): boolean {
+  const link = target instanceof Element ? target.closest<HTMLAnchorElement>("#app-switcher a.app-switcher-item[href]") : null;
+  if (!link) return false;
+  const nav = link.closest<HTMLElement>("#app-switcher");
+  try {
+    nav?.hidePopover?.();
+  } catch {
+    // Already hidden: nothing to close.
+  }
+  link.ownerDocument.getElementById("app-switcher-toggle")?.focus();
+  return true;
+}
+
 /** From an open conversation's Tasks & progress: the same project in Explorer (phone and desktop). */
 export function projectExplorerLinkMarkup(href: string): string {
   return `<a class="context-explorer-link" href="${escapeHtml(href)}" target="${EXPLORER_TARGET}" rel="noopener noreferrer" referrerpolicy="no-referrer">All tasks in Explorer<span class="app-switcher-out" aria-hidden="true">↗</span><span class="sr-only"> (opens in a new tab)</span></a>`;

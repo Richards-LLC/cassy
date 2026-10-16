@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 // cas-eaa3: Commander ↔ Explorer. The switcher reaches Explorer on the cloud
 // origin for the current project and never carries a credential.
-import { describe, expect, it } from "vitest";
-import { DEFAULT_EXPLORER_ORIGIN, EXPLORER_TARGET, appSwitcherMarkup, cloudProjectId, explorerOrigin, explorerUrl } from "./app-switcher";
+import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_EXPLORER_ORIGIN, EXPLORER_TARGET, appSwitcherMarkup, closeAppSwitcherAfterFollow, cloudProjectId, explorerOrigin, explorerUrl } from "./app-switcher";
 import { cloudBrandSwitcher } from "./cloud-brand";
 
 const node = (html: string) => { const host = document.createElement("div"); host.innerHTML = html; return host.firstElementChild as HTMLElement; };
@@ -61,5 +61,31 @@ describe("appSwitcherMarkup", () => {
   it("names Explorer as unavailable when no cloud origin is configured", () => {
     const explorer = node(appSwitcherMarkup(null)).lastElementChild as HTMLElement;
     expect([explorer.tagName, explorer.getAttribute("aria-disabled")]).toEqual(["SPAN", "true"]);
+  });
+});
+
+describe("closeAppSwitcherAfterFollow", () => {
+  // cas-2a26 (journey eval 3.51.0 F02): Explorer opens in its own tab, so the
+  // menu closes in Commander's tab and focus returns to the apps button.
+  it("hides the switcher and refocuses the apps button when Explorer is followed", () => {
+    document.body.innerHTML = cloudBrandSwitcher() + appSwitcherMarkup(explorerUrl(DEFAULT_EXPLORER_ORIGIN));
+    const nav = document.getElementById("app-switcher")!;
+    const hide = vi.fn();
+    Object.assign(nav, { hidePopover: hide });
+    const link = nav.querySelector<HTMLAnchorElement>("a.app-switcher-item")!;
+    expect(closeAppSwitcherAfterFollow(link.querySelector(".app-switcher-name"))).toBe(true);
+    expect(hide).toHaveBeenCalledTimes(1);
+    expect(document.activeElement?.id).toBe("app-switcher-toggle");
+  });
+
+  it("leaves the menu alone for Commander's own row and any other click", () => {
+    document.body.innerHTML = cloudBrandSwitcher() + appSwitcherMarkup(null) + '<a id="other" href="/x">x</a>';
+    const nav = document.getElementById("app-switcher")!;
+    const hide = vi.fn();
+    Object.assign(nav, { hidePopover: hide });
+    for (const target of [nav.querySelector('[aria-current="page"]'), nav.querySelector('[aria-disabled="true"]'), document.getElementById("other"), null]) {
+      expect(closeAppSwitcherAfterFollow(target)).toBe(false);
+    }
+    expect(hide).not.toHaveBeenCalled();
   });
 });

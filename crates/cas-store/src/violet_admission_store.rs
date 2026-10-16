@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(pending[0].id, notice_id);
         assert!(pending[0].prompt.contains(&row.delivery_id));
         assert!(!pending[0].prompt.contains("ASK BODY"));
-        assert_eq!(pending[0].origin_kind.as_deref(), Some("daemon"));
+        assert_eq!(pending[0].origin, Some(QueueOrigin::Daemon));
         let reopened = SqliteVioletAdmissionStore::open(root.path()).unwrap();
         assert_eq!(reopened.recover_known(&binding, VioletConsumption::Queued).unwrap(), recovered);
         assert!(queue.peek_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10).unwrap().is_empty());
@@ -391,7 +391,7 @@ mod tests {
             (SELECT COUNT(*) FROM prompt_queue),a.registration_id,q.processed_at
             FROM violet_admissions a JOIN prompt_queue q ON q.id=a.prompt_id", [],
             |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
-        assert_eq!(before, (1, row.registration_id, None));
+        assert_eq!(before, (1, row.registration_id.clone(), None));
         db.execute_batch("DROP TRIGGER fail_recovery").unwrap();
         assert_eq!(store.recover_known(&successor(&row), VioletConsumption::Queued).unwrap().admission.prompt_id, first.prompt_id);
     }

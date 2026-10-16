@@ -5,7 +5,6 @@ use std::sync::RwLock;
 use chrono::Utc;
 
 use crate::store::Store;
-use crate::store::mock::id_counter::IdCounter;
 use crate::types::{Entry, EntryType, MemoryTier, Scope};
 use cas_store::{Result, StoreError};
 
@@ -14,7 +13,6 @@ use cas_store::{Result, StoreError};
 pub struct MockStore {
     entries: RwLock<HashMap<String, Entry>>,
     archived: RwLock<HashMap<String, Entry>>,
-    id_counter: IdCounter,
     cas_dir: PathBuf,
     error_on_next: RwLock<Option<StoreError>>,
 }
@@ -31,7 +29,6 @@ impl MockStore {
         Self {
             entries: RwLock::new(HashMap::new()),
             archived: RwLock::new(HashMap::new()),
-            id_counter: IdCounter::default(),
             cas_dir: PathBuf::from("/tmp/cas-mock"),
             error_on_next: RwLock::new(None),
         }
@@ -80,9 +77,7 @@ impl Store for MockStore {
 
     fn generate_id(&self) -> Result<String> {
         self.check_error()?;
-        let date = Utc::now().format("%Y-%m-%d");
-        let counter = self.id_counter.next();
-        Ok(format!("{date}-{counter:03}"))
+        Ok(Entry::generate_id())
     }
 
     fn add(&self, entry: &Entry) -> Result<()> {

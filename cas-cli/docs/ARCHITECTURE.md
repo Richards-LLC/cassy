@@ -66,6 +66,20 @@ Cassy stores agent-facing knowledge in seven distinct surfaces. They are not tie
 | **Artifacts** | Files a task published — a PDF report, a capture, a log bundle — with the digest and size measured locally before upload. The pre-signed upload URL is never stored; `cloud_url` is the durable location the server returns at complete. | `artifacts` table; bytes live at their original path and, once uploaded, in Cloud storage | `artifact` MCP tool, `cas artifact publish` | `artifact action=show`/`list`, `cas artifact show\|list` |
 | **Patterns** | Cross-project personal/team conventions. | **Not local** — Cassy Cloud, reached over the `/api/patterns` HTTP surface | `pattern` MCP tool | `pattern` MCP tool (requires login) |
 
+Memory entries use opaque `mem-` IDs containing 128 random bits, generated at
+the shared `Entry::generate_id` seam by SQLite, Markdown and mock stores. Legacy
+`YYYY-MM-DD-N` IDs remain readable and syncable. Both personal and team pulls
+preserve independent legacy memories when a counter ID collides: different
+immutable creation timestamps plus different titles or bodies cause the incoming
+memory to receive a deterministic recovery ID, derived from the old ID and its
+creation instant. The incumbent stays intact, and an attributable recovered row
+is queued in the pull's own scope. An unchanged replay does not enqueue it again.
+Matching creation timestamps retain ordinary last-write-wins editing; independent
+historical births at exactly the same timestamp cannot be distinguished from
+edits with the legacy fields. Identical title/body duplicates still dedupe.
+Alias folding itself belongs to Cloud (tracked in petra-stella-cloud#163), which
+must preserve distinct rows before they reach the client.
+
 Two properties of the knowledge surface are load-bearing and easy to get wrong:
 
 - **Bodies never enter SQLite.** `knowledge_pages_fts` is a *contentless* FTS5 table (`content=''`, `contentless_delete=1`) over title + snippet + body: the inverted index lives in the DB, the prose only ever lives on disk. That is what makes the pages greppable with ordinary tools and keeps the database small.

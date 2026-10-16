@@ -13,6 +13,7 @@ use crate::error::CasError;
 use crate::types::{Entry, Rule, Skill};
 
 mod knowledge;
+mod entry_identity;
 pub use knowledge::{
     KNOWLEDGE_ENTITY, KnowledgePageRecord, KnowledgePullReport, knowledge_share_scope,
 };
@@ -26,6 +27,8 @@ mod team_push;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod entry_collision_tests;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct PushBacklog {

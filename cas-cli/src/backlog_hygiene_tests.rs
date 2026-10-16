@@ -250,3 +250,27 @@ fn session_start_block_shows_evidence_and_close_calls_within_its_cap() {
     assert!(compact.contains("cas doctor"), "{compact}");
     assert!(session_start_block(&BacklogReport::default()).is_none());
 }
+
+/// Supervisor startup only: a worker's SessionStart never carries the block,
+/// and a supervisor's does once the backlog holds a finding.
+#[test]
+fn session_start_block_is_for_supervisors_only() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let store = crate::store::open_task_store_local(&cas_root).unwrap();
+    let mut epic = Task::new("cas-e9".into(), "finished epic".into());
+    epic.task_type = TaskType::Epic;
+    store.add(&epic).unwrap();
+    let mut done = Task::new("cas-c9".into(), "done child".into());
+    done.status = TaskStatus::Closed;
+    done.closed_at = Some(Utc::now());
+    store.add(&done).unwrap();
+    store.add_dependency(&child("cas-c9", "cas-e9")).unwrap();
+
+    for role in [None, Some("worker")] {
+        assert!(session_start_block_for_role(role, &cas_root, Utc::now()).is_none(), "{role:?}");
+    }
+    let (full, _) = session_start_block_for_role(Some("supervisor"), &cas_root, Utc::now())
+        .expect("a supervisor sees the finished epic");
+    assert!(full.contains("task action=close id=cas-e9"), "{full}");
+}

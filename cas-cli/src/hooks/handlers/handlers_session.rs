@@ -321,10 +321,12 @@ pub fn handle_session_start(
     // says is done: tasks delivered on the default branch, epics whose
     // children all ended, tasks idle for two weeks. Report only; each close
     // goes through the ordinary gates.
-    if is_supervisor
-        && !suppress_custom_profile_context
-        && let Ok(report) = crate::backlog_hygiene::scan(cas_root, chrono::Utc::now())
-        && let Some((full, compact)) = crate::backlog_hygiene::session_start_block(&report)
+    if !suppress_custom_profile_context
+        && let Some((full, compact)) = crate::backlog_hygiene::session_start_block_for_role(
+            agent_role.as_deref(),
+            cas_root,
+            chrono::Utc::now(),
+        )
     {
         assembler.append_degradable_with_priority(
             "Backlog hygiene",

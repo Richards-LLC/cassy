@@ -389,6 +389,19 @@ pub(crate) fn session_start_block(report: &BacklogReport) -> Option<(String, Str
     Some((full, compact))
 }
 
+/// The SessionStart block for `role`: supervisors only, from a fresh scan.
+/// A scan that fails adds nothing; `cas doctor` reports the failure.
+pub(crate) fn session_start_block_for_role(
+    role: Option<&str>,
+    cas_root: &Path,
+    now: DateTime<Utc>,
+) -> Option<(String, String)> {
+    if role != Some("supervisor") {
+        return None;
+    }
+    session_start_block(&scan(cas_root, now).ok()?)
+}
+
 /// The SessionStart block's byte cap.
 pub(crate) const SESSION_START_CAP_BYTES: usize = 1_500;
 

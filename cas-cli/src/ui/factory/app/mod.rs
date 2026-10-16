@@ -2175,7 +2175,7 @@ impl FactoryApp {
         // cas-5e72: a worker exit is handled inside the daemon's PTY
         // exchange; the session-metadata write runs on the store worker, in
         // order with the epic-focus writes.
-        if self.deferred_session_metadata_writes && false {
+        if self.deferred_session_metadata_writes {
             crate::ui::factory::daemon::runtime::store_worker::global()
                 .submit("worker hold clear", clear_hold);
         } else {

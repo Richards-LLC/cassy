@@ -138,3 +138,74 @@ async fn flv2_inject_is_a_command() {
         "the urgent row is held for its wake probe or consumed on an observed wake"
     );
 }
+
+/// cas-786a6 (H3 from cas-4272): on the daemon's job lanes the fresh claim is
+/// a two-phase `ClaimForInject` (the claim job first, the inject on a later
+/// pass), the row's decision reads come with its `QueueSelect` snapshot, and
+/// no pass from selection to inject outcome makes a blocking call on the
+/// control lane.
+#[tokio::test]
+async fn flv2_inject_path_claims_in_two_phases_with_no_lane_violation() {
+    use cas_store::lane_guard::{self, Lane};
+
+    let (_root, cas_dir) = project_with_worker();
+    let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    daemon.queue_jobs =
+        super::prompt_queue_jobs::QueueJobs::start(cas_dir.clone(), daemon.app.project_scope());
+    // Opened once before the loop becomes a lane, as `run` does.
+    daemon.queue_jobs.store(&cas_dir).unwrap();
+    ready_claude_worker(&mut daemon).await;
+    let id = enqueue_urgent(&cas_dir, "urgent redirect C4A-LANES");
+
+    let lane = lane_guard::enter_lane(Lane::Control);
+    let before = lane_guard::thread_violations();
+    let started = Instant::now();
+    let mut pass = 0usize;
+    let mut claim_pass = None;
+    let mut inject_pass = None;
+    let mut slowest = Duration::ZERO;
+    let mut echoed = String::new();
+    while started.elapsed() < Duration::from_secs(8) {
+        pass += 1;
+        let at = Instant::now();
+        daemon.process_prompt_queue().await.unwrap();
+        slowest = slowest.max(at.elapsed());
+        if claim_pass.is_none() && daemon.queue_jobs.has_claim(id, WORKER) {
+            claim_pass = Some(pass);
+            assert!(
+                !daemon.app.mux.inject_pending(WORKER),
+                "the pass that submits the claim does not inject"
+            );
+        }
+        if inject_pass.is_none() && daemon.app.mux.inject_pending(WORKER) {
+            inject_pass = Some(pass);
+        }
+        echoed.push_str(&drain(&mut daemon));
+        if echoed.contains("C4A-LANES") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let violations = lane_guard::thread_violations() - before;
+    let last = lane_guard::last_thread_violation();
+    drop(lane);
+
+    assert!(echoed.contains("C4A-LANES"), "the redirect reached the pane: {echoed:?}");
+    let (claim_pass, inject_pass) = (claim_pass.expect("a claim job ran"), inject_pass.expect("the inject began"));
+    assert!(
+        inject_pass > claim_pass,
+        "the inject (pass {inject_pass}) follows the claim job (pass {claim_pass}) on a later pass"
+    );
+    assert_eq!(violations, 0, "blocking calls on the control lane; last: {last:?}");
+    assert!(slowest < Duration::from_millis(100), "slowest pass {slowest:?}");
+    assert!(
+        daemon.queue_jobs.drain_for_shutdown(&cas_dir, Duration::from_secs(5)),
+        "every stamp landed"
+    );
+    let report = open_prompt_queue_store(&cas_dir)
+        .unwrap()
+        .message_delivery_report(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.wake_attempt, cas_store::WakeAttempt::Fired, "{report:?}");
+}

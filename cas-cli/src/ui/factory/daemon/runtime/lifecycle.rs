@@ -2400,6 +2400,11 @@ impl FactoryDaemon {
         // control lane. Steps marked below and inside the prompt queue and
         // the director apply reach the watchdog, and blocking calls made on
         // this thread are reported (report mode).
+        // cas-786a6: the loop's prompt-queue handle is opened (schema init
+        // once) before this thread becomes a lane; later passes reuse it.
+        if let Err(error) = self.queue_jobs.store(self.app.cas_dir()) {
+            tracing::warn!(%error, "prompt queue store unavailable at loop start; opened on first use");
+        }
         let _loop_lane = loop_progress.attach(super::loop_watchdog::Lane::Control);
         let mut last_reset_check = std::time::Instant::now();
         // GH #1165: store writes whose result the loop does not need on the

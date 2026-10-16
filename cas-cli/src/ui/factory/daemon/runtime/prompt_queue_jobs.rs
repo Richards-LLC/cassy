@@ -1893,6 +1893,13 @@ impl QueueJobs {
         }
     }
 
+    /// Whether a claim job for `(row, recipient)` is out or came back
+    /// untaken (tests).
+    #[cfg(test)]
+    pub(crate) fn has_claim(&self, row: i64, recipient: &str) -> bool {
+        self.claims.contains_key(&(row, recipient.to_string()))
+    }
+
     /// Rows claim jobs re-targeted since the last call.
     pub(crate) fn take_claim_retargeted(&mut self) -> Vec<i64> {
         std::mem::take(&mut self.claim_retargeted)

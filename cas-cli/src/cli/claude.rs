@@ -618,6 +618,18 @@ fn execute_command(command: &ClaudeCommand) -> Result<()> {
                 "Logging in Claude account config: {}",
                 profile_dir.display()
             );
+            // cas-e1f4 QA F07: a login creates an account dir too, and it
+            // links to the shared base like one the picker creates.
+            if profile != "main" && crate::accounts::Provider::Claude.base_dir(&home).is_dir() {
+                let linked = crate::accounts::link_new_account(
+                    crate::accounts::Provider::Claude,
+                    &home,
+                    &profile_dir,
+                )?;
+                if !linked.is_empty() {
+                    eprintln!("Linked shared config from ~/.cas/claude-base: {}", linked.join(", "));
+                }
+            }
 
             let login_args = std::iter::once(OsString::from("auth"))
                 .chain(std::iter::once(OsString::from("login")))

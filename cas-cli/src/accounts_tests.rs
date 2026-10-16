@@ -57,6 +57,8 @@ fn claude_home() -> tempfile::TempDir {
     write(&h.join(".claude-a@x.cmo/projects/p/t.jsonl"), "typo transcript");
     // Not an account.
     write(&h.join(".claude-a@x.com.lock/.claude.json"), "{}");
+    // An empty shared folder, as ~/.claude/workflows is on soundwave (QA F01).
+    std::fs::create_dir_all(main.join("workflows")).unwrap();
     home
 }
 
@@ -127,7 +129,12 @@ fn cas_e1f4_dry_run_lists_planned_links_merges_and_conflicts() {
     assert!(text.contains("from 5 account dirs"), "{text}");
     assert!(flat.contains("Retire ~/.claude: login a@x.com duplicates .claude-a@x.com"), "{text}");
     assert!(flat.contains("Rename ~/.claude-alt to ~/.claude-b@x.com: unique login"), "{text}");
-    assert!(flat.contains("Conflict settings.json from ~/.claude-alt: kept as settings.json.from-claude-alt"), "{text}");
+    // cas-e1f4 QA F03: the conflict line says which copy every account now reads.
+    assert!(flat.contains("Conflict settings.json: every account now reads ~/.claude's copy; ~/.claude-alt's is kept beside it as settings.json.from-claude-alt"), "{text}");
+    // cas-e1f4 QA F01: an empty shared folder is created and linked in the first run.
+    assert_eq!(plan.empty_dirs, ["workflows"]);
+    assert!(flat.contains("Create empty shared folders in the base: workflows"), "{text}");
+    assert!(links.contains(&(".claude-c@x.com", "workflows")));
     assert!(flat.contains("Merge commands from ~/.claude-a@x.com: 1 file"), "{text}");
     assert!(text.contains("Link ~/.claude-a@x.com: "), "{text}");
     assert!(text.lines().all(|line| line.chars().count() <= 80), "{text}");
@@ -312,4 +319,89 @@ fn cas_e1f4_codex_retires_the_default_home_by_its_token_email() {
     assert_eq!(std::fs::read_to_string(p.join("AGENTS.md")).unwrap(), "shared");
     assert_eq!(std::fs::read_to_string(p.join("installation_id")).unwrap(), "id-p");
     assert!(super::plan(Provider::Codex, h).unwrap().is_empty());
+}
+
+/// Every path under `home` except Cassy's own state, with its bytes or link
+/// target, for byte-for-byte restore checks.
+fn snapshot(home: &Path) -> BTreeMap<String, String> {
+    let mut found = BTreeMap::new();
+    for entry in walkdir::WalkDir::new(home).follow_links(false).sort_by_file_name() {
+        let entry = entry.unwrap();
+        let rel = entry.path().strip_prefix(home).unwrap().to_string_lossy().into_owned();
+        if rel.is_empty() || rel == ".cas" || rel.starts_with(".cas/") {
+            continue;
+        }
+        let kind = entry.file_type();
+        let value = if kind.is_symlink() {
+            format!("link {}", std::fs::read_link(entry.path()).unwrap().display())
+        } else if kind.is_dir() {
+            "dir".to_string()
+        } else {
+            format!("file {}", String::from_utf8_lossy(&std::fs::read(entry.path()).unwrap()))
+        };
+        found.insert(rel, value);
+    }
+    found
+}
+
+#[test]
+fn cas_e1f4_qa_f01_second_run_is_a_no_op_with_empty_shared_folders() {
+    let home = claude_home();
+    let h = home.path();
+    // Codex homes with empty agents/ and memories/, as on soundwave.
+    write(&h.join(".codex/config.toml"), "model = \"x\"\n");
+    std::fs::create_dir_all(h.join(".codex/agents")).unwrap();
+    std::fs::create_dir_all(h.join(".codex/memories")).unwrap();
+    write(&h.join(".codex-p@x.com/auth.json"), "{}");
+    for provider in Provider::ALL {
+        apply(&plan(provider, h).unwrap(), h, "20261016T170000Z").unwrap();
+        let again = plan(provider, h).unwrap();
+        assert!(again.is_empty(), "{}", render_plan(&again, h));
+        assert!(drift(provider, h).unwrap().is_empty(), "doctor is quiet right after one apply");
+    }
+    assert!(std::fs::read_link(h.join(".claude-a@x.com/workflows")).is_ok());
+    assert!(std::fs::read_link(h.join(".codex-p@x.com/memories")).is_ok());
+}
+
+#[test]
+fn cas_e1f4_qa_f02_restore_is_byte_for_byte_on_every_path() {
+    // The soundwave layout (retire path) ...
+    let home = claude_home();
+    let h = home.path();
+    let before = snapshot(h);
+    let applied = apply(&plan(Provider::Claude, h).unwrap(), h, "20261016T170001Z").unwrap();
+    assert!(std::process::Command::new("bash").arg(&applied.restore).status().unwrap().success());
+    assert_eq!(snapshot(h), before);
+
+    // ... and the rename path: ~/.claude holds a unique login, and its own
+    // .claude.json differs from ~/.claude.json.
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    write(&h.join(".claude.json"), "{\"oauthAccount\":{\"emailAddress\":\"unique@x.com\"},\"homeLevel\":true}");
+    write(&h.join(".claude/.claude.json"), "{\"oauthAccount\":{\"emailAddress\":\"unique@x.com\"},\"insideDir\":true}");
+    write(&h.join(".claude/.credentials.json"), "CRED-default");
+    write(&h.join(".claude/commands/a.md"), "default-a");
+    login(&h.join(".claude-other@x.com"), "other@x.com");
+    write(&h.join(".claude-other@x.com/commands/a.md"), "other-a");
+    let before = snapshot(h);
+    let plan = plan(Provider::Claude, h).unwrap();
+    assert!(plan.dir_changes.contains(&DirChange::Rename {
+        label: ".claude".into(),
+        to: ".claude-unique@x.com".into(),
+    }));
+    // pin: the dry run says the login file is copied in and how undo restores it.
+    assert!(render_plan(&plan, h).replace("\n  ", " ").contains(
+        "~/.claude.json is copied in as its login file (its own .claude.json kept as .claude.json.pre-link; undo restores it)"
+    ));
+    let applied = apply(&plan, h, "20261016T170002Z").unwrap();
+    let renamed = h.join(".claude-unique@x.com");
+    assert_eq!(
+        std::fs::read(renamed.join(".claude.json")).unwrap(),
+        std::fs::read(h.join(".claude.json")).unwrap(),
+        "the renamed account reads the default login"
+    );
+    // pin: the renamed account keeps its own credentials.
+    assert_eq!(std::fs::read_to_string(renamed.join(".credentials.json")).unwrap(), "CRED-default");
+    assert!(std::process::Command::new("bash").arg(&applied.restore).status().unwrap().success());
+    assert_eq!(snapshot(h), before, "every login file comes back byte for byte");
 }

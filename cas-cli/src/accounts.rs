@@ -229,6 +229,10 @@ pub struct Merge {
     /// Only [`MergeKind::SideBySide`] is a conflict a person reviews.
     pub conflict: bool,
     pub kind: MergeKind,
+    /// For a conflict: the account whose copy the base keeps at `rel`, which
+    /// every account reads from now on; `None` when the base already had it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_from: Option<String>,
 }
 
 /// How a differing copy of `rel` is resolved (cas-e1f4, measured on the
@@ -286,6 +290,9 @@ pub struct Plan {
     pub accounts: Vec<AccountDir>,
     pub dir_changes: Vec<DirChange>,
     pub merges: Vec<Merge>,
+    /// Shared folders that exist only empty in some account: created empty in
+    /// the base so they are linked in the first run (cas-e1f4 QA F01).
+    pub empty_dirs: Vec<String>,
     pub links: Vec<Link>,
     /// Reported only, never acted on (e.g. a directory named for one email
     /// holding another email's login).
@@ -297,6 +304,7 @@ impl Plan {
         !self.create_base
             && self.dir_changes.is_empty()
             && self.merges.is_empty()
+            && self.empty_dirs.is_empty()
             && self.links.is_empty()
     }
 
@@ -433,6 +441,10 @@ pub fn plan(provider: Provider, home: &Path) -> Result<Plan> {
     // Merge every account's shared items into the base, defaults first.
     let mut planned: HashMap<String, [u8; 32]> = HashMap::new();
     let mut planned_time: HashMap<String, std::time::SystemTime> = HashMap::new();
+    // The account each planned base file comes from (conflict lines name it).
+    let mut planned_from: HashMap<String, String> = HashMap::new();
+    // Shared items some account has as a real directory, even an empty one.
+    let mut dir_items: BTreeSet<String> = BTreeSet::new();
     let mut seen_sources: BTreeSet<PathBuf> = BTreeSet::new();
     let base_canonical = base.canonicalize().ok();
     let mut merges = Vec::new();
@@ -449,6 +461,9 @@ pub fn plan(provider: Provider, home: &Path) -> Result<Plan> {
             {
                 continue;
             }
+            if canonical.is_dir() {
+                dir_items.insert((*item).to_string());
+            }
             for (rel, file) in files_under(&canonical, item)? {
                 let digest = digest(&file)?;
                 let existing = match planned.get(&rel) {
@@ -462,18 +477,20 @@ pub fn plan(provider: Provider, home: &Path) -> Result<Plan> {
                         }
                     }
                 };
-                let merge = |rel: String, to: String, kind: MergeKind| Merge {
+                let merge = |rel: String, to: String, kind: MergeKind, base_from: Option<String>| Merge {
                     account: account.label.clone(),
                     rel,
                     to,
                     conflict: kind == MergeKind::SideBySide,
                     kind,
+                    base_from,
                 };
                 match existing {
                     None => {
                         planned.insert(rel.clone(), digest);
                         planned_time.insert(rel.clone(), modified(&file));
-                        merges.push(merge(rel.clone(), rel, MergeKind::Copy));
+                        planned_from.insert(rel.clone(), account.label.clone());
+                        merges.push(merge(rel.clone(), rel, MergeKind::Copy, None));
                     }
                     Some(existing) if existing == digest => {}
                     Some(_) => match resolution(&rel) {
@@ -485,12 +502,12 @@ pub fn plan(provider: Provider, home: &Path) -> Result<Plan> {
                             if modified(&file) > current {
                                 planned.insert(rel.clone(), digest);
                                 planned_time.insert(rel.clone(), modified(&file));
-                                merges.push(merge(rel.clone(), rel, MergeKind::Newest));
+                                merges.push(merge(rel.clone(), rel, MergeKind::Newest, None));
                             }
                         }
                         kind @ (MergeKind::UnionLines | MergeKind::JsonUnion) => {
                             planned.insert(rel.clone(), digest);
-                            merges.push(merge(rel.clone(), rel, kind));
+                            merges.push(merge(rel.clone(), rel, kind, None));
                         }
                         _ => {
                             let to = side_by_side(&rel, &account.label);
@@ -498,7 +515,8 @@ pub fn plan(provider: Provider, home: &Path) -> Result<Plan> {
                                 continue;
                             }
                             planned.insert(to.clone(), digest);
-                            merges.push(merge(rel, to, MergeKind::SideBySide));
+                            let base_from = planned_from.get(&rel).cloned();
+                            merges.push(merge(rel, to, MergeKind::SideBySide, base_from));
                         }
                     },
                 }
@@ -510,10 +528,19 @@ pub fn plan(provider: Provider, home: &Path) -> Result<Plan> {
     // account directory.
     let base_has = |item: &str| {
         base.join(item).exists()
+            || dir_items.contains(item)
             || planned
                 .keys()
                 .any(|rel| rel == item || rel.starts_with(&format!("{item}/")))
     };
+    let empty_dirs: Vec<String> = dir_items
+        .iter()
+        .filter(|item| {
+            !base.join(item.as_str()).exists()
+                && !planned.keys().any(|rel| rel.starts_with(&format!("{item}/")))
+        })
+        .cloned()
+        .collect();
     let mut links = Vec::new();
     for (label, account) in &keep {
         for item in provider.shared() {
@@ -549,6 +576,7 @@ pub fn plan(provider: Provider, home: &Path) -> Result<Plan> {
         accounts,
         dir_changes,
         merges,
+        empty_dirs,
         links,
         notes,
     })
@@ -716,6 +744,9 @@ pub fn apply(plan: &Plan, home: &Path, stamp: &str) -> Result<Applied> {
         merged += 1;
         conflicts += usize::from(merge.conflict);
     }
+    for item in &plan.empty_dirs {
+        std::fs::create_dir_all(plan.base.join(item))?;
+    }
     for item in plan.provider.shared() {
         // An empty shared directory still becomes a linkable base entry.
         let original = plan
@@ -745,18 +776,24 @@ pub fn apply(plan: &Plan, home: &Path, stamp: &str) -> Result<Applied> {
             std::fs::rename(&from, &target).with_context(|| {
                 format!("could not rename {} to {}", from.display(), target.display())
             })?;
-            // The default Claude login lives beside the directory.
+            undo.push(format!("mv {} {}", quote(&target), quote(&from)));
+            // The default Claude login lives beside the directory. Undo (it
+            // runs before the rename is reversed) puts the directory's own
+            // login file back byte for byte (cas-e1f4 QA F02).
             if plan.provider == Provider::Claude && label == ".claude" {
                 let login = home.join(".claude.json");
                 if login.is_file() {
                     let inside = target.join(".claude.json");
+                    let kept = target.join(".claude.json.pre-link");
                     if inside.exists() {
-                        std::fs::rename(&inside, target.join(".claude.json.pre-link"))?;
+                        std::fs::rename(&inside, &kept)?;
+                        undo.push(format!("mv -f {} {}", quote(&kept), quote(&inside)));
+                    } else {
+                        undo.push(format!("rm -f {}", quote(&inside)));
                     }
                     std::fs::copy(&login, &inside)?;
                 }
             }
-            undo.push(format!("mv {} {}", quote(&target), quote(&from)));
         }
     }
 
@@ -1053,9 +1090,18 @@ pub fn render_plan(plan: &Plan, home: &Path) -> String {
     if plan.create_base {
         out.push_str(&wrap_line(&format!("Create {}", short(&plan.base))));
     }
+    if !plan.empty_dirs.is_empty() {
+        out.push_str(&wrap_line(&format!(
+            "Create empty shared folders in the base: {}",
+            plan.empty_dirs.join(", ")
+        )));
+    }
     for change in &plan.dir_changes {
         out.push_str(&wrap_line(&match change {
             DirChange::Retire { label, reason } => format!("Retire ~/{label}: {reason}"),
+            DirChange::Rename { label, to } if plan.provider == Provider::Claude && label == ".claude" => format!(
+                "Rename ~/{label} to ~/{to}: unique login; ~/.claude.json is copied in as its login file (its own .claude.json kept as .claude.json.pre-link; undo restores it)"
+            ),
             DirChange::Rename { label, to } => format!("Rename ~/{label} to ~/{to}: unique login"),
         }));
     }
@@ -1099,8 +1145,12 @@ pub fn render_plan(plan: &Plan, home: &Path) -> String {
     // Every conflict a person reviews, listed in full: they are few once
     // caches, memory indexes and registries merge themselves.
     for merge in plan.conflicts() {
+        let kept = match &merge.base_from {
+            Some(from) => format!("every account now reads ~/{from}'s copy"),
+            None => "every account now reads the base's existing copy".to_string(),
+        };
         out.push_str(&wrap_line(&format!(
-            "Conflict {} from ~/{}: kept as {}",
+            "Conflict {}: {kept}; ~/{}'s is kept beside it as {}",
             merge.rel, merge.account, merge.to
         )));
     }

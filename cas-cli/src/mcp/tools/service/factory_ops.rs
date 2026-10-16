@@ -1688,7 +1688,9 @@ fn format_undelivered_relay_section_at(
     rows: &[cas_store::UndeliveredLifecycleRelay],
     now: chrono::DateTime<chrono::Utc>,
 ) -> String {
-    let _ = now;
+    // cas-5871: a relay older than a day is counted with the action that
+    // clears it; listing it on every call buried the live ones.
+    let stale_before = now - chrono::Duration::hours(24);
     let actionable = rows
         .iter()
         .filter(|row| {
@@ -1700,13 +1702,16 @@ fn format_undelivered_relay_section_at(
     if actionable.is_empty() {
         return String::new();
     }
-    let total = actionable.len();
-    let displayed = actionable.len().min(10);
+    let (recent, stale): (Vec<_>, Vec<_>) = actionable
+        .into_iter()
+        .partition(|row| row.created_at >= stale_before);
+    let total = recent.len() + stale.len();
+    let displayed = recent.len().min(10);
     let mut out = String::new();
     out.push_str(&format!(
         "🔴 UNDELIVERED SUPERVISOR RELAY ({total} total; displaying {displayed}) — these never reached you:\n",
     ));
-    for row in actionable.into_iter().take(displayed) {
+    for row in recent.into_iter().take(displayed) {
         let what = row
             .summary
             .as_deref()
@@ -1731,6 +1736,28 @@ fn format_undelivered_relay_section_at(
         if let Some(detail) = &row.detail {
             out.push_str(&format!("    {detail}\n"));
         }
+    }
+    if !stale.is_empty() {
+        let acks = stale
+            .iter()
+            .filter_map(|row| row.source.rsplit(':').next()?.parse::<i64>().ok())
+            .map(|id| format!("`coordination action=message_ack notification_id={id}`"))
+            .collect::<Vec<_>>();
+        out.push_str(&format!(
+            "  + {} older than 24 h (oldest {}), not listed. Check each task, then clear it{}\n",
+            stale.len(),
+            stale
+                .iter()
+                .map(|row| row.created_at)
+                .min()
+                .map(|at| at.format("%Y-%m-%d").to_string())
+                .unwrap_or_default(),
+            if acks.is_empty() {
+                " with `message_ack` on its relay".to_string()
+            } else {
+                format!(": {}", acks.join(", "))
+            }
+        ));
     }
     out.push_str(
         "  These lanes may still be waiting on you. Open each task directly \
@@ -4119,6 +4146,9 @@ impl CasService {
                 // bounded maximum as worker-death coalescing so task-free
                 // informational deaths cannot occupy the ten-row display cap.
                 let _ = queue.reconcile_terminal_lifecycle_relays();
+                // cas-5871: a relay to a supervisor whose session has ended
+                // can no longer be acted on by anyone it was for.
+                let _ = queue.reconcile_ended_session_lifecycle_relays();
                 queue
                     .list_undelivered_lifecycle_relays(
                         super::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT,

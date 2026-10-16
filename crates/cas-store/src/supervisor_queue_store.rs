@@ -209,7 +209,9 @@ pub trait SupervisorQueueStore: Send + Sync {
     /// `older_than_secs` ago, in one IMMEDIATE transaction (cas-f207).
     ///
     /// Finished means: an outbox row (`transition_key` set) whose prompt was
-    /// delivered, or a pull row (no key) that was processed. Pending and
+    /// delivered, a pull row (no key) that was processed, or a
+    /// `reminder_fired` record, whose delivery is its prompt_queue row
+    /// (cas-5871). Pending and
     /// undelivered rows stay. Attention keys stay while their session has a
     /// registered non-shutdown agent; old delivered keys from ended sessions
     /// age out. Missing registry/session evidence stays conservative.
@@ -363,10 +365,14 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
             // Only stamp once — preserve original delivery time on replay.
+            // cas-5871: the prompt IS this row's delivery, so the row is
+            // consumed too; an explicit ack that came first keeps its time.
             conn.execute(
                 "UPDATE supervisor_queue
-                 SET prompt_delivered_at = ?
-                 WHERE id = ? AND prompt_delivered_at IS NULL",
+                 SET prompt_delivered_at = COALESCE(prompt_delivered_at, ?1),
+                     processed_at = COALESCE(processed_at, ?1)
+                 WHERE id = ?2
+                   AND (prompt_delivered_at IS NULL OR processed_at IS NULL)",
                 params![now, notification_id],
             )?;
             Ok(())
@@ -629,6 +635,9 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
                      WHERE created_at < ?1
                        AND (
                            (transition_key IS NULL AND processed_at IS NOT NULL)
+                           -- cas-5871: a reminder is delivered through
+                           -- prompt_queue; its row here is only a record.
+                           OR (transition_key IS NULL AND event_type = 'reminder_fired')
                            OR (transition_key IS NOT NULL
                                AND prompt_delivered_at IS NOT NULL
                                AND (transition_key NOT LIKE 'worker-attention:%'

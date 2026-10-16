@@ -10949,16 +10949,17 @@ pub(super) fn fire_reminder(
 
     // Enqueue to notification queue (for web UI / structured data).
     // Notify the owner so they know their reminder fired.
-    if let Some(queue) = supervisor_queue {
-        if let Err(e) = queue.notify(
-            &reminder.owner_id,
-            "reminder_fired",
-            &payload,
-            cas_store::NotificationPriority::Normal,
-        ) {
-            tracing::error!("Failed to enqueue reminder notification: {}", e);
-        }
-    }
+    let record_id = supervisor_queue.as_ref().and_then(|queue| {
+        queue
+            .notify(
+                &reminder.owner_id,
+                "reminder_fired",
+                &payload,
+                cas_store::NotificationPriority::Normal,
+            )
+            .inspect_err(|e| tracing::error!("Failed to enqueue reminder notification: {}", e))
+            .ok()
+    });
 
     // Enqueue to prompt queue for PTY injection into the resolved recipient.
     if let Some(queue) = prompt_queue {
@@ -11035,6 +11036,13 @@ pub(super) fn fire_reminder(
         if let Err(e) = enqueued {
             tracing::error!("Failed to enqueue reminder prompt: {}", e);
         } else {
+            // cas-5871: the prompt row is the delivery; the record is
+            // consumed, or it would sit unprocessed forever.
+            if let (Some(records), Some(id)) = (supervisor_queue, record_id)
+                && let Err(error) = records.ack(id)
+            {
+                tracing::warn!(reminder = reminder.id, %error, "could not consume the reminder record");
+            }
             super::delivery::wake_daemon_after_enqueue(cas_dir);
             tracing::info!(
                 "Fired reminder #{} → {} ({}): {}",
@@ -11499,10 +11507,24 @@ mod tests {
             // pin: external reminder descriptions persist the observed tag and exact ref.
             "external condition satisfied: tag v9.99.0 exists at refs/tags/v9.99.0@0123456789012345678901234567890123456789"
         );
-        let notifications = supervisor_store.peek("supervisor-1", 10).unwrap();
+        // cas-5871: the record is written, and consumed once the prompt is
+        // queued, so it is no longer pending.
+        let records = || -> Vec<(String, String, Option<String>)> {
+            let conn = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+            let mut stmt = conn
+                .prepare("SELECT event_type, payload, processed_at FROM supervisor_queue")
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let notifications = records();
         assert_eq!(notifications.len(), 1);
-        assert_eq!(notifications[0].event_type, "reminder_fired");
-        assert!(notifications[0].payload.contains("tag_exists"));
+        assert_eq!(notifications[0].0, "reminder_fired");
+        assert!(notifications[0].1.contains("tag_exists"));
+        assert!(notifications[0].2.is_some(), "consumed once delivered");
+        assert!(supervisor_store.peek("supervisor-1", 10).unwrap().is_empty());
         let prompts = prompt_store.peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].target, "new-supervisor");
@@ -11522,7 +11544,7 @@ mod tests {
             Some(&context),
             temp.path(),
         );
-        assert_eq!(supervisor_store.peek("supervisor-1", 10).unwrap().len(), 1);
+        assert_eq!(records().len(), 1);
         assert_eq!(prompt_store.peek_all(10).unwrap().len(), 1);
     }
 

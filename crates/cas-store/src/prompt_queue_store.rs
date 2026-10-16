@@ -7993,6 +7993,39 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
+    fn reconcile_ended_session_lifecycle_relays(&self) -> Result<usize> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = ImmediateTx::new(&conn)?;
+            // Without a registry there is no evidence a session ended.
+            if !agents_table_exists(&tx)? {
+                return Ok(0);
+            }
+            let now = Utc::now().to_rfc3339();
+            let reconciled = tx.execute(
+                "UPDATE prompt_queue
+                 SET acked_at = ?, acked_via = 'session_ended_reconciled'
+                 WHERE transport_delivered_at IS NULL
+                   AND acked_at IS NULL
+                   AND source LIKE 'lifecycle-wake:%'
+                   AND highest_stage IN ('suppressed', 'dropped', 'abandoned')
+                   AND NULLIF(factory_session, '') IS NOT NULL
+                   AND EXISTS (
+                       SELECT 1 FROM agents
+                       WHERE agents.factory_session = prompt_queue.factory_session
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM agents
+                       WHERE agents.factory_session = prompt_queue.factory_session
+                         AND agents.status <> 'shutdown'
+                   )",
+                params![now],
+            )?;
+            tx.commit()?;
+            Ok(reconciled)
+        })
+    }
+
     fn undelivered_lifecycle_relay_count(&self) -> Result<usize> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let count: i64 = conn.query_row(

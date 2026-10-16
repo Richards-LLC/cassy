@@ -10162,9 +10162,10 @@ pub(crate) fn worker_liveness_for_agent(
 /// cas-9bf6: the execution evidence `worker_status` reports for `worker`,
 /// reused by the director's stall classifier so the two surfaces agree.
 /// `executing` is the worker_status liveness verdict (turn evidence within
-/// `stall_secs`, or a CPU-busy harness); `head_commit_age` is the age of the
-/// worker clone's HEAD commit, which a Codex worker without commit hooks
-/// leaves as its only commit evidence. `None` when the worker is unknown.
+/// `stall_secs`, or a CPU-busy harness); `worktree_activity_age` is the
+/// freshest scoped dirty-file or HEAD commit age, using the same probe as
+/// is-wedged. Only this registered worker's checkout is read.
+/// `None` when the worker is unknown.
 pub(crate) fn worker_stall_evidence(
     cas_root: &std::path::Path,
     worker: &str,
@@ -10182,20 +10183,12 @@ pub(crate) fn worker_stall_evidence(
         WorkerClonePathResolve::Ready(path) => Some(path),
         WorkerClonePathResolve::NotOnDisk { .. } => None,
     };
-    let head_commit_age = clone_path.and_then(|path| {
-        let output = std::process::Command::new("git")
-            .args(["log", "-1", "--format=%ct", "HEAD"])
-            .current_dir(path)
-            .output()
-            .ok()?;
-        let secs: i64 = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
-        let age = now.timestamp().saturating_sub(secs);
-        (age >= 0).then(|| std::time::Duration::from_secs(age as u64))
-    });
+    let worktree_activity_age = clone_path.as_deref()
+        .and_then(crate::cli::factory::wedged::worktree_recent_edit_age);
     Some(WorkerStallEvidence {
         executing: observation.state == super::worker_liveness::Liveness::Executing,
         detail: observation.detail(),
-        head_commit_age,
+        worktree_activity_age,
     })
 }
 
@@ -10204,7 +10197,7 @@ pub(crate) fn worker_stall_evidence(
 pub(crate) struct WorkerStallEvidence {
     pub executing: bool,
     pub detail: String,
-    pub head_commit_age: Option<std::time::Duration>,
+    pub worktree_activity_age: Option<std::time::Duration>,
 }
 
 pub(crate) fn worker_liveness_rows(
@@ -11747,6 +11740,38 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cas_6eec_stall_evidence_counts_only_the_workers_scoped_edits_and_commits() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let repo = root.join("worktrees/active-codex");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(&repo)
+                .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z").output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-b", "factory/active-codex"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.test"]);
+        std::fs::write(repo.join("app"), "base\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "old task baseline"]);
+        let mut worker = cas_types::Agent::new_with_role("codex-owned-session".into(), "active-codex".into(), cas_types::AgentRole::Worker);
+        worker.metadata.insert("clone_path".into(), repo.to_string_lossy().into());
+        worker.metadata.insert("worker_cli".into(), "codex".into());
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        // Outside file churn cannot masquerade as this worker's work.
+        std::fs::write(project.path().join("unrelated-file"), "outside worker\n").unwrap();
+        let quiet = worker_stall_evidence(&root, "active-codex", chrono::Utc::now(), 600).unwrap();
+        assert!(quiet.worktree_activity_age.is_some_and(|age| age.as_secs() > 600));
+        std::fs::write(repo.join("app"), "editing now\n").unwrap();
+        let active = worker_stall_evidence(&root, "active-codex", chrono::Utc::now(), 600).unwrap();
+        assert!(active.worktree_activity_age.is_some_and(|age| age.as_secs() < 5), "fresh worker edit must veto quiet: {active:?}");
+    }
 
     async fn spawn_build_check_case(
         session: &str,

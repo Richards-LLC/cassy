@@ -1324,7 +1324,7 @@ pub(crate) fn run_worker_health_probe(
             now,
             request.threshold_secs as i64,
         )
-        .map(|evidence| (evidence.executing, evidence.head_commit_age))
+        .map(|evidence| (evidence.executing, evidence.worktree_activity_age))
         .unwrap_or((false, None))
     } else {
         (false, None)
@@ -1351,8 +1351,8 @@ pub(crate) fn run_worker_health_probe(
 }
 
 /// cas-9bf6: the stall verdict and the activity it saw, from the transcript
-/// signals plus `worker_status` execution evidence `(executing, HEAD commit
-/// age)`. A worker executing, or with a commit inside the window, is active,
+/// signals plus `worker_status` execution evidence `(executing, scoped edit/commit
+/// age)`. A worker executing, editing or committing inside the window is active,
 /// not stalled.
 fn stall_verdict(
     transcript_confirms: bool,

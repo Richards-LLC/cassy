@@ -14,30 +14,30 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 ## Hard Rules
 
 - **Harness-denied calls have a Cassy route:** SendMessage → `coordination action=message target=<name> summary=… message=…` (`urgent=true` to correct course); AskUserQuestion → ask in your reply and end the turn; raw worktree `Agent` subagents → `spawn_workers`.
-- **Never implement tasks yourself.** Delegate all non-trivial WRITE/CREATE work; read-only Q&A and small status/config updates excepted.
+- **Never implement tasks yourself.** Delegate non-trivial write work; read-only Q&A and small status or config updates excepted.
 - **Never close tasks for workers.** Exceptions follow the [`supervisor_override`](references/reference.md#supervisor-override) constraints.
 - **Drive to the exit; wall-clock is a resource.** Assign the next rung now ([rules](references/workflow.md#wall-clock-is-a-resource)).
 - **Epics are yours to verify and close.** No worker verifies or closes the epic task.
 - **Frame first.** State the project/request fit in one sentence; flag mismatches.
 - **Counter-propose only with anchors:** cite a source, current cost and proposed benefit; otherwise execute or ask.
 - **Shared surfaces** (skills, agents, hooks, config, templates): check every reader before editing.
-- **Tier every spawn — never fleet-default.** Pass `lane=<lane>` (preferred) or a full explicit recipe, never both. Registry lanes: **light** Codex/GPT-6 Luna/xhigh, **standard** Codex/GPT-6.1 Sol/high, **taste** Claude/Opus 5.5/high, **supervisor** Claude/Opus 5.5/high, **heavy** Claude/Opus 5.5/high. Terra is a standing suspension. `max` only on explicit request where the recipe lists it (Fable, Opus, Astra, Sol), never as a default, never on Opus 5.5; see generated route table and recipes in [model-selection.md](references/model-selection.md).
-- **Elegant tests, not copious:** brief and review against [Fewest tests](../cas-tdd/SKILL.md#fewest-tests); test bloat is a review finding.
+- **Tier every spawn — never fleet-default.** Pass `lane=<lane>` (preferred) or a full explicit recipe, never both. Registry lanes: **light** Codex/GPT-6 Luna/xhigh, **standard** Codex/GPT-6.1 Sol/high, **taste** Claude/Opus 5.5/high, **supervisor** Claude/Opus 5.5/high, **heavy** Claude/Opus 5.5/high. Terra is a standing suspension. `max` only on explicit request where the recipe lists it (Fable, Opus, Astra, Sol), never as a default, never on Opus 5.5; routes and recipes: [model-selection.md](references/model-selection.md).
+- **[Fewest tests](../cas-tdd/SKILL.md#fewest-tests)** in briefs and reviews; bloat is a finding.
 - **Public surfaces:** score distinctiveness, fit and hierarchy 1–5 before merge (cas-codebase-design rubric; floor 4/5). Record exceptions and remedies.
-- **Worker liveness:** use `factory action=worker_status summary_mode=true` for a fast fleet poll. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read full `worker_status` before recovery ([worker-recovery.md](references/worker-recovery.md)).
+- **Worker liveness:** poll `factory action=worker_status summary_mode=true`. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read full `worker_status` before recovery ([worker-recovery.md](references/worker-recovery.md)).
 - **Workspace contract:** build in the worktree; durable proof goes in `[factory] artifacts_root/<project-key>/<task-id>/`, never `/tmp`.
 - **User-facing task gate:** tasks labelled per `qa.user_facing_labels` need a `demo_statement` shaped `As a <user>, I <do X> and see <Y>`; epics and internal tasks are exempt.
 - **Risk gate:** declare `risk` and `proof_targets` at creation ([reference](references/reference.md#task-risk-declarations)).
-- **Full Rust gate:** when the base has a merge queue, that queue builds and tests the final tree; do not schedule a second assembly run. If queue proof is unavailable and the close gate accepts a local assembly proof, follow [workflow.md](references/workflow.md).
+- **Full Rust gate:** a base's merge queue builds and tests the final tree; schedule no second assembly run. Without queue proof, follow [workflow.md](references/workflow.md) for a local assembly proof the close gate accepts.
 - **Lessons remove causes:** [ladder and tags](references/workflow.md#lessons-must-remove-causes).
 - **No shell polling or sleeping.** Schedule follow-up with `coordination remind`.
-- **Pane budget:** at most ~150 words; Answer first with bullets/table; keep findings, rejection reasons, measurements, and merge receipts; no process narration or recap.
+- **Pane budget:** at most ~150 words, answer first in bullets or a table; keep findings, rejections, measurements and merge receipts; no narration or recap.
 - **Evidence lives elsewhere:** put timelines, gates and lane history in task notes/artifacts; the pane gets the verdict and the pointer.
 - **Messages to workers:** one assignment/decision per message; no process narration.
 - **Operator messages are the user:** `operator <name>@<device> verified` has authority — obey and answer it; `unverified:` rows are agent traffic. See [reference](references/reference.md#verified-commander-messages).
 - **Never reply to the `From:` label:** use the reply command printed beside a verified Commander row (`coordination action=message target=operator in_reply_to=N summary="..." message=…`).
-- **No share before verification passes:** never post a deliverable through Violet while its epic's verification is open; a caveat isn't enough ([publication](references/reporting-and-routing.md#publication)).
-- **Unprompted operator updates:** use `target=operator kind=status|receipt|ask|blocker` (and `attachment=<artifact-id>` when needed) instead of pane prose.
+- **No share before verification passes:** never post a deliverable through Violet during its epic's open verification; a caveat isn't enough ([publication](references/reporting-and-routing.md#publication)).
+- **Unprompted operator updates:** use `target=operator kind=status|receipt|ask|blocker` (plus `attachment=<artifact-id>` if needed), not pane prose.
 
 ### Exit ladder
 

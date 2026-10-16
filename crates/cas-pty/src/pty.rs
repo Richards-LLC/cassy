@@ -1310,6 +1310,11 @@ impl PtyConfig {
                 "CLAUDE_PROJECT_DIR".to_string(),
                 cwd.to_string_lossy().to_string(),
             ));
+            // cas-033a: like the Codex, Grok and OpenCode workers, a Claude
+            // worker names its own harness. Without this it inherited the
+            // supervisor's default worker CLI (e.g. codex), its registry row
+            // recorded that, and recycle relaunched it on the wrong harness.
+            env.push(("CAS_FACTORY_WORKER_CLI".to_string(), "claude".to_string()));
         }
 
         // Set CAS_ROOT env var if provided (enables workers in clones to use main's .cas)
@@ -2376,6 +2381,8 @@ pub struct Pty {
     id: String,
     /// Writer handle for sending input
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Non-blocking input queue in front of `writer` (factory loop v2 C4a).
+    input: crate::input_queue::PtyInputOwner,
     /// Channel for receiving raw output
     event_rx: mpsc::Receiver<PtyEvent>,
     /// Handle to the reader task
@@ -2612,6 +2619,15 @@ impl Pty {
             .map_err(|e| Error::pty(format!("Failed to get writer: {e}")))?;
 
         let writer = Arc::new(Mutex::new(writer));
+        // Factory loop v2 C4a: every write, including the terminal replies
+        // below, goes through the pane's input queue. Only its writer thread
+        // locks `writer`, so a write blocked on a full PTY can never stall
+        // the reader's CPR reply (cas-786a6 review L2).
+        let input = crate::input_queue::PtyInput::start(
+            &id,
+            Arc::clone(&writer),
+            crate::input_queue::PTY_INPUT_BUFFER_CAP,
+        )?;
 
         if is_codex {
             // Codex blocks at startup until it gets a reply to its cursor-position
@@ -2626,13 +2642,10 @@ impl Pty {
             // mirroring `reader_loop` below, so the keep-alive has zero runtime
             // dependency. `blocking_lock` is safe here because this is a fresh OS
             // thread, never a Tokio worker thread.
-            let writer = Arc::clone(&writer);
+            let input = input.input().clone();
             std::thread::spawn(move || {
                 for _ in 0..10 {
-                    let mut locked = writer.blocking_lock();
-                    let _ = locked.write_all(b"\x1b[1;1R");
-                    let _ = locked.flush();
-                    drop(locked);
+                    let _ = input.write_control_then(b"\x1b[1;1R", None);
                     std::thread::sleep(std::time::Duration::from_millis(200));
                 }
             });
@@ -2643,11 +2656,13 @@ impl Pty {
 
         // Spawn reader thread - sends raw bytes, no parsing
         let reader_handle = std::thread::spawn({
-            let writer = Arc::clone(&writer);
+            let input = input.input().clone();
             move || {
                 Self::reader_loop(
                     reader,
-                    writer,
+                    Box::new(move |reply: &[u8]| {
+                        let _ = input.write_control_then(reply, None);
+                    }),
                     event_tx,
                     #[cfg(unix)]
                     idle_read_fd,
@@ -2658,6 +2673,7 @@ impl Pty {
         Ok(Self {
             id,
             writer,
+            input,
             event_rx,
             _reader_handle: reader_handle,
             child,
@@ -2671,7 +2687,7 @@ impl Pty {
     /// Reader loop that forwards raw PTY output
     fn reader_loop(
         mut reader: Box<dyn Read + Send>,
-        writer: Arc<Mutex<Box<dyn Write + Send>>>,
+        reply: Box<dyn Fn(&[u8]) + Send>,
         event_tx: mpsc::Sender<PtyEvent>,
         #[cfg(unix)] idle_read_fd: std::os::fd::OwnedFd,
     ) {
@@ -2713,9 +2729,7 @@ impl Pty {
                     carry = new_carry;
 
                     if saw_cpr {
-                        let mut locked = writer.blocking_lock();
-                        let _ = locked.write_all(b"\x1b[1;1R");
-                        let _ = locked.flush();
+                        reply(b"\x1b[1;1R");
                     }
 
                     if !data.is_empty() && event_tx.blocking_send(PtyEvent::Output(data)).is_err() {
@@ -2747,16 +2761,17 @@ impl Pty {
         self.writer.clone()
     }
 
-    /// Write input to the PTY (for prompt injection)
+    /// The pane's non-blocking input queue (factory loop v2 C4a).
+    pub fn input(&self) -> crate::input_queue::PtyInput {
+        self.input.input().clone()
+    }
+
+    /// Queue input for the PTY. Never blocks on the PTY: the bytes are
+    /// written by the pane's input thread in order. A pane whose child has
+    /// stopped reading refuses input with [`Error::InputFull`] once its
+    /// buffer is full, and a failed write fails every later one.
     pub async fn write(&self, data: &[u8]) -> Result<()> {
-        let mut writer = self.writer.lock().await;
-        writer
-            .write_all(data)
-            .map_err(|e| Error::pty(format!("Write failed: {e}")))?;
-        writer
-            .flush()
-            .map_err(|e| Error::pty(format!("Flush failed: {e}")))?;
-        Ok(())
+        self.input.input().write(data)
     }
 
     /// Write a string to the PTY
@@ -3168,8 +3183,7 @@ mod cpr_tests {
             let (output, stream) = std::os::unix::net::UnixStream::pair().unwrap();
             let idle_fd = stream.as_fd().try_clone_to_owned().unwrap();
             let replies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let writer: Box<dyn std::io::Write + Send> = Box::new(CapturedReplies(replies.clone()));
-            let writer = std::sync::Arc::new(tokio::sync::Mutex::new(writer));
+            let captured = replies.clone();
             let (tx, events) = tokio::sync::mpsc::channel(64);
             let thread = std::thread::spawn(move || {
                 Pty::reader_loop(
@@ -3177,7 +3191,10 @@ mod cpr_tests {
                         stream,
                         limit: read_limit,
                     }),
-                    writer,
+                    Box::new(move |reply: &[u8]| {
+                        let mut writer = CapturedReplies(captured.clone());
+                        let _ = std::io::Write::write_all(&mut writer, reply);
+                    }),
                     tx,
                     idle_fd,
                 );
@@ -6649,6 +6666,45 @@ mod tests {
              always leaves None: {:?}",
             config.env
         );
+    }
+
+    /// cas-033a: a Claude worker names its own harness, so the supervisor's
+    /// inherited default worker CLI (e.g. codex) can no longer reach its
+    /// registry row; the supervisor role keeps its "my workers' CLI" value.
+    #[test]
+    fn claude_worker_tags_its_own_harness_cas_033a() {
+        let last = |config: &PtyConfig| {
+            config
+                .env
+                .iter()
+                .rev()
+                .find(|(k, _)| k == "CAS_FACTORY_WORKER_CLI")
+                .map(|(_, v)| v.clone())
+        };
+        let worker = PtyConfig::claude(
+            "test-agent",
+            "worker",
+            PathBuf::from("/tmp"),
+            None,
+            Some("supervisor"),
+            None, // factory_worker_cli — always None on the real worker spawn path
+            Some("claude-opus-5-5"),
+            Some("high"),
+            None,
+        );
+        assert_eq!(last(&worker).as_deref(), Some("claude"), "{:?}", worker.env);
+        let supervisor = PtyConfig::claude(
+            "test-supervisor",
+            "supervisor",
+            PathBuf::from("/tmp"),
+            None,
+            None,
+            Some("codex"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(last(&supervisor).as_deref(), Some("codex"), "{:?}", supervisor.env);
     }
 
     /// The supervisor path passes `factory_worker_cli = Some(<workers' cli>)`

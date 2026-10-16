@@ -249,6 +249,7 @@ mod m270_entries_purge_harness_prompt_captures;
 mod m271_worker_activity_indexes;
 mod m272_prompt_queue_recipient_seen_teams_body_fallback;
 mod m273_prompt_queue_recipient_seen_poll_settled;
+mod m274_prompt_queue_recipient_seen_delivered_at;
 pub(crate) use m262_tasks_normalize_proof_targets::normalize_legacy_proof_targets;
 
 /// All migrations in order. IDs must be sequential and never reused.
@@ -535,6 +536,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m271_worker_activity_indexes::MIGRATION,
     m272_prompt_queue_recipient_seen_teams_body_fallback::MIGRATION,
     m273_prompt_queue_recipient_seen_poll_settled::MIGRATION,
+    m274_prompt_queue_recipient_seen_delivered_at::MIGRATION,
 ];
 
 #[cfg(test)]

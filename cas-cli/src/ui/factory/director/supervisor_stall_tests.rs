@@ -359,13 +359,13 @@ fn supervisor_tool_activity_resets_actionable_idle_clock() {
 #[test]
 fn merged_close_blocked_stall_wakes_for_changed_delivery_without_refiring_same_state() {
     let start = Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
-    let merged = |target_tip: &str| SupervisorActionableState::MergeCloseBlocked {
+    let merged = |anchor: &str| SupervisorActionableState::MergeCloseBlocked {
         tasks: vec![MergedCloseBlockedTask {
             task_id: "cas-merged".into(),
             factory_branch: "factory/gold-fox".into(),
-            anchor: "anchor-sha".into(),
+            anchor: anchor.into(),
             target_branch: "epic/cas-epic".into(),
-            target_tip: target_tip.into(),
+            target_tip: "target-tip".into(),
             close_rejection: "already merged".into(),
         }],
     };

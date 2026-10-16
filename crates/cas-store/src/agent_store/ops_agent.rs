@@ -279,12 +279,18 @@ impl SqliteAgentStore {
             let conn = self.lock_conn()?;
             let tx = ImmediateTx::new(&conn)?;
 
-            // Get agent name before deleting (for event summary)
-            let agent_name: Option<String> = tx
-                .query_row("SELECT name FROM agents WHERE id = ?", params![id], |row| {
-                    row.get(0)
-                })
-                .optional()?;
+            // Keep only routing identity in the retirement event: SessionEnd
+            // deletes the registry row, but peer mail may still name this ID.
+            let identity: Option<serde_json::Value> = tx.query_row(
+                "SELECT name, role, machine_id, factory_session, registered_at FROM agents WHERE id = ?",
+                params![id], |row| Ok(serde_json::json!({
+                    "name": row.get::<_, String>(0)?,
+                    "role": row.get::<_, String>(1)?,
+                    "machine_id": row.get::<_, Option<String>>(2)?,
+                    "factory_session": row.get::<_, Option<String>>(3)?,
+                    "registered_at": row.get::<_, String>(4)?,
+                })),
+            ).optional()?;
 
             // Release all leases first (due to foreign key)
             tx.execute(
@@ -302,15 +308,18 @@ impl SqliteAgentStore {
             }
 
             // Record event for sidecar activity feed (use name if available, else id)
-            let display_name = agent_name
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| id.to_string());
+            let display_name = identity
+                .as_ref()
+                .and_then(|v| v["name"].as_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or(id);
             let event = Event::new(
                 EventType::AgentShutdown,
                 EventEntityType::Agent,
                 id,
                 format!("Agent unregistered: {display_name}"),
-            );
+            )
+            .with_metadata(serde_json::json!({"retired_agent": identity}));
             let _ = record_event_with_conn(&tx, &event);
 
             // Capture event for recording playback
@@ -320,6 +329,7 @@ impl SqliteAgentStore {
             Ok(())
         }) // with_write_retry
     }
+
     pub(crate) fn agent_list(&self, status: Option<AgentStatus>) -> Result<Vec<Agent>> {
         let conn = self.lock_conn()?;
 

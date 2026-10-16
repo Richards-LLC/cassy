@@ -12,6 +12,11 @@ pub enum Error {
     #[error("PTY error: {0}")]
     Pty(String),
 
+    /// The pane's input buffer is full: its child is not reading. The pane
+    /// takes no more input until it does (factory loop v2 C4a).
+    #[error("PTY input buffer full ({buffered} of {cap} bytes unwritten)")]
+    InputFull { buffered: usize, cap: usize },
+
     /// IO error
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

@@ -122,6 +122,11 @@ mod tests {
                     .up
                     .iter(),
             )
+            .chain(
+                super::super::m274_prompt_queue_recipient_seen_delivered_at::MIGRATION
+                    .up
+                    .iter(),
+            )
         {
             migrated.execute(sql, []).unwrap();
         }

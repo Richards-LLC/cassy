@@ -64,6 +64,8 @@ pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
         lifecycle_redelivery_counts: HashMap::new(),
         inbox_deferred_writes: std::collections::HashMap::new(),
         urgent_wake_probes: HashMap::new(),
+        urgent_injects: Default::default(),
+        operator_refresh_requested: false,
         send_receipts: crate::ui::factory::daemon::runtime::send_dedupe::SendReceipts::default(),
         normal_delivery_probes: HashMap::new(),
         last_pane_output_bytes: HashMap::new(),
@@ -330,4 +332,88 @@ async fn daemon_provisioning_deadline_retires_only_stalled_generation() {
     daemon.process_pending_spawns().await;
     assert_eq!(daemon.spawn_task.as_ref().unwrap().0, "next-worker");
     daemon.cancel_provisioning();
+}
+
+/// cas-d741 AC3: a spawn that fails in provisioning ends its request row
+/// `failed` with the reason, so worker_status's "Recent spawn requests" says
+/// FAILED and why, rather than "queued — UNCONFIRMED" with the cause only in
+/// the session log. The supervisor is still told.
+#[test]
+fn provisioning_failure_marks_the_spawn_request_failed_with_its_reason_cas_d741() {
+    use cas_store::SpawnQueueStore;
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let queue = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
+    let request_id = queue
+        .enqueue_spawn(
+            1,
+            &["clever-panther-60".to_string()],
+            true,
+            None,
+            Some("provision-test"),
+            None,
+        )
+        .unwrap();
+    let reason = "Worker 'clever-panther-60': worktree exists but git reports branch \
+                  'factory/clever-panther-60-cas-9db0b'";
+    // The daemon reports inside a loop pass whose store budget is often
+    // spent while another writer holds the database (GH #1165).
+    let db = cas_dir.join("cas.db");
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        held_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        conn.execute_batch("COMMIT").unwrap();
+    });
+    held_rx.recv().unwrap();
+    {
+        let _spent = cas_store::wait_budget::bound_waits_until(Instant::now());
+        super::queue_and_events::report_provision_failure(
+            &cas_dir,
+            "provision-test",
+            "supervisor",
+            Some(request_id),
+            "clever-panther-60",
+            reason,
+        );
+    }
+    blocker.join().unwrap();
+
+    let row_state = || {
+        rusqlite::Connection::open(cas_dir.join("cas.db"))
+            .unwrap()
+            .query_row(
+                "SELECT spawn_state, spawn_detail FROM spawn_queue WHERE id = ?1",
+                [request_id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .unwrap()
+    };
+    let failed = cas_store::SpawnLifecycleState::Failed.as_str();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while row_state().0.as_deref() != Some(failed) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (state, detail) = row_state();
+    assert_eq!(state.as_deref(), Some(failed), "{detail:?}");
+    assert_eq!(detail.as_deref(), Some(reason));
+
+    let request = format!("request {request_id}");
+    let notified = || {
+        crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap()
+            .iter()
+            // pin: the supervisor notice must name the request id so it can be matched to worker_status.
+            .any(|row| row.target == "supervisor" && row.prompt.contains(&request))
+    };
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !notified() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(notified(), "the supervisor is told the spawn failed");
 }

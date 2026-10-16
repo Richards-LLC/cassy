@@ -37,6 +37,7 @@ mod pane;
 mod pty;
 mod render;
 mod spec;
+pub mod submit_gate;
 pub mod worker_resources;
 
 pub use backend::{
@@ -45,7 +46,7 @@ pub use backend::{
 pub use error::{Error, Result};
 pub use harness::{HarnessCapabilities, SupervisorCli};
 pub use input_stream::{BracketedPasteTracker, StreamByteClass, key_stream_marks_submit};
-pub use mux::{InjectOutcome, Mux, MuxConfig, MuxEvent};
+pub use mux::{InjectCompletion, InjectOutcome, InjectStart, InjectTicket, Mux, MuxConfig, MuxEvent};
 pub use opencode::{
     OPENCODE_PLUGIN_FILE_NAME, OPENCODE_PLUGIN_SOURCE, OPENCODE_STATE_DIRECTORY,
     OPENCODE_STATE_SCHEMA_VERSION, OpenCodeEventOutcome, OpenCodeLiveness, OpenCodeLivenessVerdict,

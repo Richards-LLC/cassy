@@ -87,6 +87,9 @@ impl NudgeReport {
 pub(crate) enum ContextResetDelivery {
     /// The harness's reset command was typed into the pane.
     Injected,
+    /// The turn break went out; the command follows once the pane settles,
+    /// reported by `Mux::advance_injects` under this ticket (cas-786a6).
+    Started(cas_mux::InjectTicket),
     /// The pane is not ready for injection yet — retry on a later tick.
     NotReady,
     /// The recipient's harness has no verified in-place reset command. This is
@@ -572,17 +575,74 @@ pub(crate) fn register_pty_machine_payload(
     source: &str,
     notification_id: Option<i64>,
 ) {
-    if let Err(error) = crate::hooks::delivery_provenance::register(
-        cas_dir,
-        recipient,
-        payload,
-        crate::hooks::delivery_provenance::origin_for_source(source),
-        notification_id,
-    ) {
-        // Do not make the durable queue unavailable because its supplemental
-        // hook metadata failed; retries will submit a freshly registered turn.
-        tracing::error!(%error, source, "failed to register machine prompt provenance");
+    let register = {
+        let (cas_dir, recipient, payload, source) = (
+            cas_dir.to_path_buf(),
+            recipient.to_string(),
+            payload.to_string(),
+            source.to_string(),
+        );
+        move || {
+            if let Err(error) = crate::hooks::delivery_provenance::register(
+                &cas_dir,
+                &recipient,
+                &payload,
+                crate::hooks::delivery_provenance::origin_for_source(&source),
+                notification_id,
+            ) {
+                // Do not make the durable queue unavailable because its
+                // supplemental hook metadata failed; retries will submit a
+                // freshly registered turn.
+                tracing::error!(%error, source = %source, "failed to register machine prompt provenance");
+            }
+        }
+    };
+    // cas-786a6 review M5: the envelope write (create_dir_all, prune,
+    // sync_data, rename) never runs on a daemon lane. It goes to a writer
+    // thread of its own, which takes milliseconds; the hook reads the
+    // envelope only after the payload is typed and submitted (an urgent
+    // inject's settle, or a normal inject's 150-500 ms submit delay). Off a
+    // lane (the CLI, tests) it runs at once, as before.
+    if cas_store::lane_guard::current_lane().is_some() {
+        // Review round 2, L1: the recipient's next submit CR waits (in its
+        // detached task, at most 2 s) until the envelope is written.
+        let gate = cas_mux::submit_gate::SubmitGate::new();
+        cas_mux::submit_gate::hold_next_submit(recipient, gate.clone());
+        provenance_writer().submit(Box::new(move || {
+            register();
+            gate.open();
+        }));
+    } else {
+        register();
     }
+}
+
+/// The daemon's provenance-envelope writer: one thread, in order.
+struct ProvenanceWriter(std::sync::Mutex<std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>>);
+
+impl ProvenanceWriter {
+    fn submit(&self, job: Box<dyn FnOnce() + Send>) {
+        let sender = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Err(std::sync::mpsc::SendError(job)) = sender.send(job) {
+            // The writer thread is gone; never lose the envelope.
+            job();
+        }
+    }
+}
+
+fn provenance_writer() -> &'static ProvenanceWriter {
+    static WRITER: std::sync::OnceLock<ProvenanceWriter> = std::sync::OnceLock::new();
+    WRITER.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        let _ = std::thread::Builder::new()
+            .name("factory-provenance-writer".into())
+            .spawn(move || {
+                for job in receiver {
+                    job();
+                }
+            });
+        ProvenanceWriter(std::sync::Mutex::new(sender))
+    })
 }
 
 /// Commander controls that both daemon client transports route through the
@@ -1388,13 +1448,17 @@ impl FactoryDaemon {
             "lifecycle-wake:context-reset",
             None,
         );
+        // cas-786a6: the settle is a per-pane state, not an inline await.
+        // A destructive control: no composer preservation, as before.
         match self
             .app
             .mux
-            .interrupt_and_inject(&pane_target, command, settle)
+            .begin_interrupt_and_inject(&pane_target, command, settle, false)
             .await
         {
-            Ok(()) => ContextResetDelivery::Injected,
+            Ok(cas_mux::InjectStart::Started(ticket)) => ContextResetDelivery::Started(ticket),
+            // Another urgent inject is settling on this pane.
+            Ok(cas_mux::InjectStart::Deferred) => ContextResetDelivery::NotReady,
             Err(error) => ContextResetDelivery::Failed {
                 detail: format!("pane inject failed: {error}"),
             },

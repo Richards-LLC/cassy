@@ -38,6 +38,31 @@ use crate::ui::factory::director::{
 /// the `CiStatus` jobs.
 pub(crate) type LaneCiCache = Arc<Mutex<HashMap<(String, String), (std::time::Instant, bool)>>>;
 
+/// The full epic-status verdict for a parked delivery is immutable while its
+/// delivery metadata and local/origin tips stay fixed. Unknowns are retried.
+pub(crate) type DeliveryContainmentCache = Arc<Mutex<HashMap<String, bool>>>;
+
+fn cached_containment(
+    cache: &DeliveryContainmentCache,
+    key: String,
+    compute: impl FnOnce() -> Option<bool>,
+) -> Option<bool> {
+    if let Ok(entries) = cache.lock()
+        && let Some(merged) = entries.get(&key)
+    {
+        return Some(*merged);
+    }
+    // No lock across Git or content proof work.
+    let merged = compute()?;
+    if let Ok(mut entries) = cache.lock() {
+        if entries.len() >= 256 {
+            entries.clear();
+        }
+        entries.insert(key, merged);
+    }
+    Some(merged)
+}
+
 /// The store half of one parked delivery's evidence (read lane).
 #[derive(Debug, Clone)]
 pub(crate) struct ParkedFacts {
@@ -51,6 +76,8 @@ pub(crate) struct ParkedFacts {
     parked_branch: Option<String>,
     anchor: Option<String>,
     close_rejection: String,
+    /// Preserve the same delivery/snapshot metadata epic_status evaluates.
+    record: Option<cas_types::Task>,
 }
 
 /// Store facts by task id.
@@ -60,7 +87,7 @@ pub(crate) type ParkedFactsMap = HashMap<String, ParkedFacts>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GitEvidence {
     /// The facts this was computed from; different facts make it stale.
-    inputs: (String, Option<String>, Option<String>, Option<String>),
+    inputs: (String, Option<String>, Option<String>, Option<String>, Option<String>),
     /// The delivery branch and commit a merge-now alert names (cas-58d3).
     delivery: (String, Option<String>),
     /// Lane CI still running (cas-207e).
@@ -89,12 +116,15 @@ pub(crate) struct DeliveryEvidence {
 pub(crate) type DeliveryEvidenceMap = HashMap<String, DeliveryEvidence>;
 
 impl ParkedFacts {
-    fn inputs(&self) -> (String, Option<String>, Option<String>, Option<String>) {
+    fn inputs(&self) -> (String, Option<String>, Option<String>, Option<String>, Option<String>) {
         (
             self.worker.clone(),
             self.parked_branch.clone(),
             self.anchor.clone(),
             self.target.clone(),
+            self.record.as_ref().and_then(|record| {
+                serde_json::to_string(&(record.status, &record.assignee, &record.deliverables)).ok()
+            }),
         )
     }
 
@@ -223,6 +253,7 @@ impl StallEvidenceRequest {
                 .as_ref()
                 .and_then(|record| last_close_rejection_reason(&record.notes))
                 .unwrap_or_else(|| "MERGE REQUIRED".to_string()),
+            record: record.clone(),
             task: parked.task,
         }
     }
@@ -236,6 +267,7 @@ pub(crate) struct CiStatusRequest {
     repo_root: PathBuf,
     facts: Vec<ParkedFacts>,
     lane_ci_pending: LaneCiCache,
+    containment: DeliveryContainmentCache,
 }
 
 impl CiStatusRequest {
@@ -244,12 +276,14 @@ impl CiStatusRequest {
         repo_root: PathBuf,
         facts: &ParkedFactsMap,
         lane_ci_pending: LaneCiCache,
+        containment: DeliveryContainmentCache,
     ) -> Option<Self> {
         let facts: Vec<ParkedFacts> = facts.values().filter(|f| f.needs_git()).cloned().collect();
         (!facts.is_empty()).then_some(Self {
             repo_root,
             facts,
             lane_ci_pending,
+            containment,
         })
     }
 
@@ -271,15 +305,10 @@ impl CiStatusRequest {
             |branch| crate::git_evidence::resolve_branch_sha(repo_root, branch),
             |anchor, tip| git_is_ancestor(repo_root, anchor, tip),
         );
-        let ci_pending = self.delivery_ci_pending(facts, &delivery);
-        let merged_close_blocked = if ci_pending {
-            None
-        } else {
-            facts
-                .target
-                .as_deref()
-                .and_then(|target| self.merged_close_blocked(facts, &delivery.0, target))
-        };
+        // A contained delivery no longer needs lane CI or another merge.
+        let merged_close_blocked = facts.target.as_deref()
+            .and_then(|target| self.merged_close_blocked(facts, &delivery, target));
+        let ci_pending = merged_close_blocked.is_none() && self.delivery_ci_pending(facts, &delivery);
         GitEvidence {
             inputs: facts.inputs(),
             delivery,
@@ -311,26 +340,58 @@ impl CiStatusRequest {
         pending
     }
 
-    /// Merged-close-blocked evidence only when the delivery anchor is already
-    /// reachable from the resolved target. Missing git evidence is unknown,
-    /// which keeps the merge demand rather than inventing a merged verdict.
+    /// Use the same full per-child containment computation as epic_status,
+    /// including rewritten and intentionally evolved deliveries. Cache by
+    /// immutable delivery metadata and every local/origin ref it measures.
+    /// All of this runs on the external lane; the stall tick only does lookups.
     fn merged_close_blocked(
         &self,
         facts: &ParkedFacts,
-        factory_branch: &str,
+        delivery: &(String, Option<String>),
         target_branch: &str,
     ) -> Option<MergedCloseBlockedTask> {
         let repo_root: &Path = &self.repo_root;
-        let target_tip = crate::git_evidence::resolve_branch_sha(repo_root, target_branch)?;
-        let anchor = facts.anchor.as_deref()?;
-        let anchor_sha = crate::git_evidence::resolve_branch_sha(repo_root, anchor)?;
-        if !git_is_ancestor(repo_root, &anchor_sha, &target_tip) {
+        let record = facts.record.as_ref()?;
+        let target_branch = record.deliverables.work_target.as_ref()
+            .map(|target| target.target_branch.trim()).filter(|target| !target.is_empty())
+            .unwrap_or(target_branch);
+        let resolve = |branch: &str| crate::git_evidence::resolve_branch_sha(repo_root, branch);
+        let target_tip = resolve(target_branch).or_else(|| resolve(&format!("origin/{target_branch}")))?;
+        let mut refs = vec![target_branch.to_string(), delivery.0.clone()];
+        refs.extend(record.deliverables.parked_branch.clone());
+        refs.extend(record.assignee.as_ref().map(|worker| format!("factory/{worker}")));
+        refs.sort();
+        refs.dedup();
+        let tips: Vec<_> = refs.into_iter().flat_map(|branch| {
+            let origin = format!("origin/{branch}");
+            [(branch.clone(), resolve(&branch)), (origin.clone(), resolve(&origin))]
+        }).collect();
+        let key = serde_json::to_string(&(&self.repo_root, &record.id, facts.inputs(), &tips)).ok()?;
+        let merged = cached_containment(&self.containment, key, || {
+            use crate::mcp::tools::core::task::lifecycle::close_ops::{
+                collect_epic_branch_statuses_with_options, EpicStatusOptions,
+            };
+            let collection = collect_epic_branch_statuses_with_options(
+                std::slice::from_ref(record), target_branch, repo_root,
+                EpicStatusOptions { offset: 0, limit: Some(1), summary: false, budget: std::time::Duration::from_secs(2) },
+            );
+            // Never store a verdict under tips that moved during its proof.
+            if tips.iter().any(|(branch, tip)| resolve(branch) != *tip) {
+                return None;
+            }
+            let row = collection.statuses.first()?;
+            if row.refs_unresolved || row.content_check_error.is_some() {
+                return None;
+            }
+            Some(row.unmerged_count == 0 && row.dropped_paths.is_empty())
+        })?;
+        if !merged {
             return None;
         }
         Some(MergedCloseBlockedTask {
             task_id: facts.task.id.clone(),
-            factory_branch: factory_branch.to_string(),
-            anchor: anchor.to_string(),
+            factory_branch: delivery.0.clone(),
+            anchor: facts.anchor.clone().or_else(|| delivery.1.clone())?,
             target_branch: target_branch.to_string(),
             target_tip,
             close_rejection: facts.close_rejection.clone(),
@@ -426,6 +487,118 @@ pub(crate) fn evidence_merged_close_blocked(
 mod tests {
     use super::*;
 
+    #[test]
+    fn cas_f439_containment_cache_retries_unknown_and_invalidates_changed_tips() {
+        let cache = DeliveryContainmentCache::default();
+        let computations = std::cell::Cell::new(0);
+        let compute = |result| {
+            computations.set(computations.get() + 1);
+            result
+        };
+        assert_eq!(cached_containment(&cache, "delivery-a:target-a".into(), || compute(None)), None);
+        assert_eq!(cached_containment(&cache, "delivery-a:target-a".into(), || compute(Some(true))), Some(true));
+        assert_eq!(cached_containment(&cache, "delivery-a:target-a".into(), || panic!("unchanged tips must not walk Git again")), Some(true));
+        assert_eq!(cached_containment(&cache, "delivery-b:target-a".into(), || compute(Some(false))), Some(false));
+        assert_eq!(cached_containment(&cache, "delivery-b:target-b".into(), || compute(Some(true))), Some(true));
+        assert_eq!(computations.get(), 4);
+    }
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git").args(args).current_dir(repo).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn cas_f439_contained_deliveries_await_worker_close() {
+        use crate::ui::factory::director::{
+            SupervisorActionableState, SupervisorStallTracker, supervisor_actionable_state_with_classifiers,
+        };
+        use crate::mcp::tools::core::task::lifecycle::close_ops::collect_epic_branch_statuses;
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-b", "main"]);
+        git(repo, &["config", "user.name", "Fixture"]);
+        git(repo, &["config", "user.email", "fixture@example.test"]);
+        std::fs::write(repo.join("app"), "base\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-m", "base"]);
+        git(repo, &["checkout", "-b", "factory/wa-cas-a"]);
+        std::fs::write(repo.join("app"), "delivered\n").unwrap();
+        git(repo, &["commit", "-am", "cas-a: delivery"]);
+        let anchor = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-b", "epic/x", "main"]);
+        std::fs::write(repo.join("other"), "epic work\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-m", "other task"]);
+
+        let mut facts = parked("cas-a", "wa", None);
+        facts.anchor = Some(anchor.clone());
+        let mut child = cas_types::Task::new("cas-a".into(), "delivery".into());
+        child.status = cas_types::TaskStatus::AwaitingMerge;
+        child.assignee = Some("wa".into());
+        child.deliverables.parked_branch = facts.parked_branch.clone();
+        child.deliverables.factory_branch_anchor = facts.anchor.clone();
+        facts.record = Some(child.clone());
+        let ci = LaneCiCache::default();
+        let containment = DeliveryContainmentCache::default();
+        ci.lock().unwrap().insert(("factory/wa-cas-a".into(), anchor.clone()), (std::time::Instant::now(), false));
+        let classify = |facts: &ParkedFacts| {
+            let request = CiStatusRequest::new(repo.into(), &HashMap::from([("cas-a".into(), facts.clone())]), Arc::clone(&ci), Arc::clone(&containment)).unwrap();
+            let git = request.run();
+            let evidence = combine(&HashMap::from([("cas-a".into(), facts.clone())]), &git);
+            let mut data = DirectorData {
+                ready_tasks: Vec::new(), in_progress_tasks: Vec::new(), epic_tasks: Vec::new(),
+                agents: Vec::new(), activity: Vec::new(), agent_id_to_name: HashMap::new(),
+                changes: Vec::new(), git_loaded: false, reminders: Vec::new(),
+                epic_closed_counts: HashMap::new(), start_gated_task_ids: Default::default(),
+            };
+            data.in_progress_tasks.push(facts.task.clone());
+            let mut epic = facts.task.clone();
+            epic.id = "cas-epic".into();
+            epic.status = cas_types::TaskStatus::InProgress;
+            epic.task_type = cas_types::TaskType::Epic;
+            epic.branch = Some("epic/x".into());
+            data.epic_tasks.push(epic);
+            supervisor_actionable_state_with_classifiers(&data, Some("cas-epic"), "supervisor", &Default::default(), Utc::now(), 600,
+                |task, worker| evidence_delivery(&evidence, task, worker),
+                |task, _, target, _| evidence_merged_close_blocked(&evidence, task, target),
+                |task, worker| evidence_hold(&evidence, task, worker))
+        };
+        assert!(collect_epic_branch_statuses(&[child.clone()], "epic/x", repo)[0].unmerged_count > 0);
+        assert!(matches!(classify(&facts), Some(SupervisorActionableState::MergeBranches { .. })), "genuinely unmerged delivery stays merge-now");
+
+        git(repo, &["cherry-pick", &anchor]);
+        // A rewritten delivery has the same app tree on its target, without
+        // the reviewed anchor's ancestry. epic_status already reconciles it.
+        let row = collect_epic_branch_statuses(&[child], "epic/x", repo).remove(0);
+        assert_eq!(row.unmerged_count, 0, "fixture must match epic_status: {row:?}");
+        let state = classify(&facts).expect("contained delivery needs a close notice");
+        assert!(!matches!(state, SupervisorActionableState::MergeBranches { .. }), "contained delivery cannot demand another merge: {state:?}");
+        assert!(state.next_step_text().contains("awaiting worker close"));
+        let now = Utc::now();
+        let mut tracker = SupervisorStallTracker::default();
+        let activity = Some(now - chrono::Duration::seconds(600));
+        assert!(tracker.observe(Some(state.clone()), activity, false, now, 600).wake.is_some());
+        assert!(tracker.observe(Some(state.clone()), activity, false, now + chrono::Duration::seconds(1200), 600).wake.is_none());
+        // Advancing unrelated epic work and supervisor tool activity cannot
+        // create another close demand for the same contained delivery.
+        std::fs::write(repo.join("other"), "later epic work\n").unwrap();
+        git(repo, &["commit", "-am", "later task"]);
+        let advanced = classify(&facts).unwrap();
+        assert_eq!(state.merged_close_blocked_relay_key(), advanced.merged_close_blocked_relay_key());
+        assert!(tracker.observe(Some(advanced), Some(now), false, now + chrono::Duration::seconds(1800), 600).wake.is_none());
+
+        // Legacy tasks can lack an anchor while their actual delivery tip is merged.
+        git(repo, &["merge", "-s", "ours", "--no-edit", "factory/wa-cas-a"]);
+        facts.anchor = None;
+        facts.record.as_mut().unwrap().deliverables.factory_branch_anchor = None;
+        let state = classify(&facts).unwrap();
+        assert!(!matches!(state, SupervisorActionableState::MergeBranches { .. }), "merged live tip cannot demand another merge: {state:?}");
+    }
+
     fn parked(task_id: &str, worker: &str, store_hold: Option<DeliveryHold>) -> ParkedFacts {
         ParkedFacts {
             task: TaskSummary {
@@ -447,6 +620,7 @@ mod tests {
             parked_branch: Some(format!("factory/{worker}-{task_id}")),
             anchor: Some("abc123".into()),
             close_rejection: "MERGE REQUIRED".into(),
+            record: None,
         }
     }
 
@@ -499,9 +673,9 @@ mod tests {
         assert_eq!(combined["cas-d"].hold, Some(DeliveryHold::EvidencePending));
 
         // Only deliveries without a store hold need the external job.
-        let request = CiStatusRequest::new(PathBuf::from("/nonexistent"), &facts, LaneCiCache::default())
+        let request = CiStatusRequest::new(PathBuf::from("/nonexistent"), &facts, LaneCiCache::default(), DeliveryContainmentCache::default())
             .expect("three deliveries need git evidence");
         assert_eq!(request.facts.len(), 3);
-        assert!(CiStatusRequest::new(PathBuf::new(), &ParkedFactsMap::new(), LaneCiCache::default()).is_none());
+        assert!(CiStatusRequest::new(PathBuf::new(), &ParkedFactsMap::new(), LaneCiCache::default(), DeliveryContainmentCache::default()).is_none());
     }
 }

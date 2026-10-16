@@ -3,6 +3,8 @@ use crate::ui::factory::daemon::imports::*;
 /// The daemon's refresh tick: reminders and GitHub watcher results are
 /// handled at this cadence.
 pub(super) const DAEMON_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+/// How often the loop runs while an urgent inject is settling (cas-786a6).
+const URGENT_INJECT_POLL_MS: u64 = 25;
 
 /// Stable identity for one alarm episode, independent of delivery retries.
 /// Session scope belongs to the caller's outer key. Tuple encoding prevents
@@ -60,37 +62,34 @@ fn enqueue_worker_attention_relay_for_episode(
         actionable_idle_secs,
     } = event
     {
-        if let Some(stable_key) = next_step.merged_close_blocked_relay_key() {
-            let stable_key = merged_close_blocked_status_key(cas_dir, next_step)
-                .map(|status_key| format!("{stable_key}:status:{status_key}"))
-                .unwrap_or(stable_key);
-            let task_id = match next_step {
-                crate::ui::factory::director::SupervisorActionableState::MergeCloseBlocked {
-                    tasks,
-                } if tasks.len() == 1 => Some(tasks[0].task_id.as_str()),
-                crate::ui::factory::director::SupervisorActionableState::MergeQueue {
-                    merged_close_blocked: tasks,
-                    ..
-                } if tasks.len() == 1 => Some(tasks[0].task_id.as_str()),
-                _ => None,
+        if next_step.merged_close_blocked_relay_key().is_some() {
+            // Each delivery owns one durable notice, even when the mixed queue
+            // gains another task or the supervisor/daemon starts a new turn.
+            let tasks = match next_step {
+                crate::ui::factory::director::SupervisorActionableState::MergeCloseBlocked { tasks }
+                | crate::ui::factory::director::SupervisorActionableState::MergeQueue {
+                    merged_close_blocked: tasks, ..
+                } => tasks,
+                _ => unreachable!("merged relay key requires merged tasks"),
             };
-            let detail = |prefix: &str| {
-                format!(
-                    "Supervisor actionable-idle for {}m. {}",
-                    actionable_idle_secs / 60,
-                    next_step.next_step_text_for(prefix)
-                )
-            };
-            let merged = enqueue_worker_attention_relay_detail_with_key(
-                cas_dir,
-                "merged_close_blocked",
-                "supervisor",
-                task_id,
-                Some(*actionable_idle_secs),
-                detail,
-                occurrence,
-                Some(&stable_key),
-            );
+            let mut merged = WorkerAttentionRelayOutcome::Pending;
+            let mut pending = false;
+            for task in tasks {
+                let single = crate::ui::factory::director::SupervisorActionableState::MergeCloseBlocked {
+                    tasks: vec![task.clone()],
+                };
+                let stable_key = single.merged_close_blocked_relay_key().unwrap();
+                let outcome = enqueue_worker_attention_relay_detail_with_key(
+                    cas_dir, "merged_close_blocked", "supervisor", Some(&task.task_id),
+                    Some(*actionable_idle_secs),
+                    |prefix| format!("Supervisor actionable-idle for {}m. {}",
+                        actionable_idle_secs / 60, single.next_step_text_for(prefix)),
+                    occurrence, Some(&stable_key),
+                );
+                pending |= matches!(outcome, WorkerAttentionRelayOutcome::Pending);
+                merged = outcome;
+            }
+            if pending { merged = WorkerAttentionRelayOutcome::Pending; }
 
             // A mixed queue still needs the old genuinely-unmerged merge
             // demand. Its occurrence-based key preserves the prior refire
@@ -177,39 +176,7 @@ fn enqueue_worker_attention_relay_for_episode(
     )
 }
 
-/// Add the task-store's update identity to a merged-close-blocked relay key.
-/// The actionable enum only contains AwaitingMerge tasks, so the persisted
-/// status/update pair is the status-cycle boundary that permits a new relay
-/// after a task leaves and later re-enters that state. Missing store evidence
-/// preserves the base anchor/target-tip dedupe key.
-fn merged_close_blocked_status_key(
-    cas_dir: &std::path::Path,
-    next_step: &crate::ui::factory::director::SupervisorActionableState,
-) -> Option<String> {
-    let tasks = match next_step {
-        crate::ui::factory::director::SupervisorActionableState::MergeCloseBlocked { tasks }
-        | crate::ui::factory::director::SupervisorActionableState::MergeQueue {
-            merged_close_blocked: tasks,
-            ..
-        } => tasks,
-        _ => return None,
-    };
-    let store = crate::store::open_task_store_cached(cas_dir).ok()?;
-    let mut generations = tasks
-        .iter()
-        .map(|task| {
-            let current = store.get(&task.task_id).ok()?;
-            Some(format!(
-                "{}:{}:{}",
-                task.task_id,
-                current.status,
-                current.updated_at.to_rfc3339()
-            ))
-        })
-        .collect::<Option<Vec<_>>>()?;
-    generations.sort();
-    Some(generations.join("|"))
-}
+
 
 /// Persist one confirmed worker stoppage through the same durable supervisor
 /// relay used by director-detected idle and stall events.  This is deliberately
@@ -1793,6 +1760,43 @@ mod worker_attention_tests {
             .contains("merge the ready delivery branch(es)"));
     }
 
+    #[test]
+    fn cas_f439_close_notices_dedupe_each_delivery_across_queue_changes() {
+        use crate::ui::factory::director::{DirectorEvent, MergedCloseBlockedTask, SupervisorActionableState};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "contained-close-test");
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "contained-close-test");
+        let mut delivery = MergedCloseBlockedTask {
+            task_id: "cas-first".into(), factory_branch: "factory/worker-cas-first".into(),
+            anchor: "first-anchor".into(), target_branch: "epic/x".into(), target_tip: "target-a".into(),
+            close_rejection: "MERGE REQUIRED".into(),
+        };
+        let event = |state, occurrence: &str| DirectorEvent::SupervisorStalled {
+            next_step: state, occurrence: occurrence.into(), actionable_idle_secs: 600,
+        };
+        assert!(matches!(enqueue_worker_attention_relay(&cas_dir, &event(
+            SupervisorActionableState::MergeCloseBlocked { tasks: vec![delivery.clone()] }, "first")),
+            WorkerAttentionRelayOutcome::Persisted { .. }));
+        delivery.target_tip = "target-b".into();
+        let mut second = delivery.clone();
+        second.task_id = "cas-second".into();
+        second.anchor = "second-anchor".into();
+        assert!(matches!(enqueue_worker_attention_relay(&cas_dir, &event(
+            SupervisorActionableState::MergeCloseBlocked { tasks: vec![delivery, second] }, "later")),
+            WorkerAttentionRelayOutcome::Persisted { .. }));
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 2, "each contained delivery gets one notice, even as the queue changes");
+        for row in rows {
+            // pin: the supervisor's delivered instruction must request close, not another merge (GH #1225).
+            assert!(row.prompt.contains("awaiting worker close"));
+            // pin: a contained delivery must never receive the executable merge-now instruction (GH #1225).
+            assert!(!row.prompt.contains("merge the ready delivery branch(es)"));
+        }
+    }
+
     /// cas-d9a8: the fail-safe for supervisor traffic that is not wake-shaped.
     /// A blocker or verification handoff stays inbox-only — waking on those
     /// would mean waking on a keyword — so CAS reports the unread COUNT
@@ -2213,6 +2217,8 @@ impl FactoryDaemon {
             lifecycle_redelivery_counts: HashMap::new(),
             inbox_deferred_writes: std::collections::HashMap::new(),
             urgent_wake_probes: HashMap::new(),
+            urgent_injects: Default::default(),
+            operator_refresh_requested: false,
             send_receipts: crate::ui::factory::daemon::runtime::send_dedupe::SendReceipts::default(),
             normal_delivery_probes: HashMap::new(),
             last_pane_output_bytes: HashMap::new(),
@@ -2416,6 +2422,10 @@ impl FactoryDaemon {
         // control lane. Steps marked below and inside the prompt queue and
         // the director apply reach the watchdog, and blocking calls made on
         // this thread are reported (report mode).
+        // cas-786a6: the loop's prompt-queue handle is opened (schema init
+        // once) before this thread becomes a lane, and claims a previous
+        // daemon never handed off are released.
+        self.release_orphaned_claims_at_start();
         let _loop_lane = loop_progress.attach(super::loop_watchdog::Lane::Control);
         let mut last_reset_check = std::time::Instant::now();
         // GH #1165: store writes whose result the loop does not need on the
@@ -2502,6 +2512,10 @@ impl FactoryDaemon {
             // This stays outside process_prompt_queue so a deferred inject
             // never blocks the input loop that can make its target clean.
             self.app.mux.flush_deferred_injections().await;
+            // cas-786a6 (factory loop v2 C4a): urgent injects whose pane has
+            // settled type their payload now. A settle is a per-pane state;
+            // no pass waits for one.
+            self.advance_urgent_injects().await;
 
             // Poll prompt queue (on notification or timer)
             loop_progress.enter(super::loop_watchdog::LoopPhase::PromptQueue);
@@ -2560,7 +2574,9 @@ impl FactoryDaemon {
             // Periodic Cassy data refresh
             loop_progress.enter(super::loop_watchdog::LoopPhase::Refresh);
             let mut refreshed = false;
-            let refresh_due = last_refresh.elapsed() >= refresh_interval;
+            // cas-786a6: Ctrl+R asks for the next snapshot now.
+            let refresh_due = last_refresh.elapsed() >= refresh_interval
+                || std::mem::take(&mut self.operator_refresh_requested);
             if refresh_due || director_refresh.has_finished(&mut self.queue_jobs) {
                 // Collect a completed GitHub Actions snapshot in the background.
                 // No supervisor action is required to notice a red run: the
@@ -3064,6 +3080,13 @@ impl FactoryDaemon {
                 8
             } else {
                 500 // Headless: no rendering needed, sleep longer
+            };
+            // cas-786a6: a settling urgent inject is advanced promptly; its
+            // readiness is judged once per pass.
+            let sleep_ms = if self.app.mux.has_pending_injects() {
+                sleep_ms.min(URGENT_INJECT_POLL_MS)
+            } else {
+                sleep_ms
             };
             let sleep_dur = Duration::from_millis(sleep_ms);
             if let Some(ref mut notify) = self.notify_rx {

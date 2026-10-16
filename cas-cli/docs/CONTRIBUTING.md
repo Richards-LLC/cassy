@@ -40,6 +40,15 @@ omit it to wait for all runs for that full SHA. Local events such as
 `remind_ttl_secs` defaults to 3,600 seconds for time and local-event reminders,
 and 604,800 seconds (7 days) for external events. Explicit `0` means no expiry.
 
+Supervisor stall notices use the full `epic_status` delivery containment
+computation. A parked delivery already contained in its target, including a
+rewritten or intentionally evolved delivery, gets an "awaiting worker close"
+notice instead of another merge demand. That notice is deduplicated per delivery
+and target across later epic commits and supervisor turns. Genuinely unmerged
+deliveries retain the merge reminder. Containment proofs run off the daemon
+loop and are cached by delivery metadata and local/origin tips; unknown proofs
+are retried rather than cached as merged.
+
 ## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client
@@ -173,6 +182,24 @@ within five minutes and must match both the peer's factory session and machine.
 A missing branch is shown as unknown. Worker details are read-only: these rows
 do not register remote workers locally or make them message or spawn targets.
 Cloud failures are reported as unavailable, never as an empty claim list.
+Peer mail follows a supervisor's name, stable machine identity and named
+factory session across a restart. Different factories remain distinct even
+when their supervisors have the same name on the same machine. A live
+successor claims verified retired addresses from this project's
+registry and unregister history; Cloud message IDs still deduplicate local
+admission. A reused live identity, worker, different machine or ambiguous
+successor is not a retired address. When multiple live peers share a displayed
+address, message-target ambiguity lists distinct agent IDs that can be used as
+explicit targets. Legacy deleted rows without retirement identity cannot be
+safely recovered from a name alone. Their bodies are not admitted; the daemon
+sends an idempotent reply asking the sender to resend to the current supervisor
+ID, then rejects the original. If feedback fails, the original remains unacked
+for retry. Retirement recovery uses a seven-day window and at most 100 retired
+recipients per tick, separately from current recipients. History lookup failure
+or truncation is a mailbox warning; current verified addresses keep receiving.
+Failed claim batches remain visible while successful batches are admitted and
+acknowledged.
+
 Cloud locks are private to one user account: a team peer on another account shows
 `Claims not visible (different account)` and worker tasks as `not visible`.
 If the caller's account identity is unknown, the report says so. JSON includes

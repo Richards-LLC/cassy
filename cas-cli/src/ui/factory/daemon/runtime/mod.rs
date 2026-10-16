@@ -16,6 +16,9 @@ mod relay_jobs_tests;
 #[cfg(test)]
 mod delivery_matrix_tests;
 mod gui_client;
+pub(crate) mod inject_commands;
+#[cfg(test)]
+mod inject_command_tests;
 mod injection_events;
 pub(crate) mod lifecycle;
 #[cfg(test)]
@@ -27,6 +30,8 @@ mod output;
 pub(super) mod pane_size;
 #[cfg(test)]
 mod provisioning_tests;
+#[cfg(test)]
+mod reminder_wake_tests;
 pub mod queue_and_events;
 pub(super) mod relay;
 pub(crate) mod render_scheduler;

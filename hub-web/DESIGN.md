@@ -331,6 +331,7 @@ with no component rules, machine accents or dark wells. The hub serves it at
 ## Typography
 
 - Display (`--font-display`) inherits the Iowan/Palatino/Georgia house serif for the connection verdict sentences; body (`--font-ui`) inherits Inter/system sans; identifiers (`--font-mono`) inherit JetBrains/IBM Plex/system mono.
+- Commander bundles Inter and JetBrains Mono (`src/fonts.css`; latin subsets of the variable fonts, OFL 1.1, `src/fonts/LICENSE.*.txt`, served as `/commander/inter.woff2` and `/commander/jetbrains-mono.woff2`), so every host renders the designed body and mono faces. `font-display: swap` shows the system fallback until a face loads. The display serif is not bundled.
 - `--fs-xs` is the house 12px eyebrow, `--fs-base` the 14px caption, `--fs-md` the 15px ledger and `--fs-lg` the 21px lede. Pane/session metadata uses the retained 13px `--fs-meta` console step.
 - `--fs-verdict` clamps the house title to 24px–34px at 3vw; the brief gives that slot 1.1 line-height and −.015em tracking. It is available for the screen units; existing headings still consume `--fs-lg` or `--fs-md`.
 - `--tracking-label` inherits the house .08em eyebrow tracking. Weights are 400/500/600; the 500 hero-number weight is available for pairing code; ordinary copy stays 400 and headings top out at 600.

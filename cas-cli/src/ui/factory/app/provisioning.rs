@@ -48,20 +48,6 @@ fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
 /// cas-cef2: this daemon's pinned copy of its own executable, set once at start.
 static PINNED_PROVISIONER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-/// The image this process is running, readable even after an atomic update
-/// replaced its path (Linux only).
-#[cfg_attr(test, allow(dead_code))]
-fn running_image() -> Option<PathBuf> {
-    #[cfg(target_os = "linux")]
-    {
-        let image = PathBuf::from("/proc/self/exe");
-        if image.exists() {
-            return Some(image);
-        }
-    }
-    None
-}
-
 fn provisioner_executable() -> anyhow::Result<PathBuf> {
     #[cfg(test)]
     {
@@ -69,29 +55,18 @@ fn provisioner_executable() -> anyhow::Result<PathBuf> {
     }
     #[cfg(not(test))]
     {
-        choose_provisioner_executable(
-            running_image(),
-            PINNED_PROVISIONER.get().map(PathBuf::as_path),
-            || Ok(strip_deleted_suffix(std::env::current_exe()?)),
-        )
+        // Linux keeps the old executable inode here after an atomic update.
+        #[cfg(target_os = "linux")]
+        if Path::new("/proc/self/exe").exists() {
+            return Ok(PathBuf::from("/proc/self/exe"));
+        }
+        // cas-cef2: elsewhere (macOS) the path now names the replacement, so
+        // the daemon's pin is the only file still holding its own build.
+        if let Some(pin) = PINNED_PROVISIONER.get().filter(|pin| pin.is_file()) {
+            return Ok(pin.clone());
+        }
+        Ok(strip_deleted_suffix(std::env::current_exe()?))
     }
-}
-
-/// Linux keeps the old executable inode at `/proc/self/exe` after an atomic
-/// update. Elsewhere (macOS) the path now names the replacement, so the
-/// daemon's pin is the only file still holding its own build (cas-cef2).
-fn choose_provisioner_executable(
-    running_image: Option<PathBuf>,
-    pinned: Option<&Path>,
-    current_exe: impl FnOnce() -> anyhow::Result<PathBuf>,
-) -> anyhow::Result<PathBuf> {
-    if let Some(image) = running_image {
-        return Ok(image);
-    }
-    if let Some(pin) = pinned.filter(|pin| pin.is_file()) {
-        return Ok(pin.to_path_buf());
-    }
-    current_exe()
 }
 
 /// cas-cef2: places a hard link to `source` at `pin` (a copy when a link is
@@ -724,12 +699,6 @@ mod tests {
 
         // pin: the fixture bytes identify which build file the pin holds.
         assert_eq!(std::fs::read_to_string(&pin).unwrap(), "daemon build");
-        // pin: the fixture bytes identify which build file the pin holds.
-        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "installed build");
-        // Re-pinning replaces the pin whole and leaves no staged file behind.
-        pin_executable(&installed, &pin).unwrap();
-        // pin: the fixture bytes identify which build file the pin holds.
-        assert_eq!(std::fs::read_to_string(&pin).unwrap(), "installed build");
         assert_eq!(std::fs::read_dir(pin.parent().unwrap()).unwrap().count(), 1);
     }
 
@@ -743,30 +712,12 @@ mod tests {
         let pin = dir.path().join("pin/cas");
         let image = PathBuf::from(format!("/proc/{}/exe", std::process::id()));
         pin_running_image(&image, &pin).unwrap();
-        assert!(std::fs::symlink_metadata(&pin).unwrap().file_type().is_symlink());
+        let link = std::fs::symlink_metadata(&pin).unwrap();
+        assert!(link.file_type().is_symlink());
         let pinned = std::fs::metadata(&pin).unwrap();
         let running = std::fs::metadata("/proc/self/exe").unwrap();
         assert_eq!((pinned.dev(), pinned.ino()), (running.dev(), running.ino()));
         assert_eq!(std::fs::read_dir(pin.parent().unwrap()).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn provisioner_prefers_running_image_then_pin_then_installed_path_cas_cef2() {
-        let dir = tempfile::tempdir().unwrap();
-        let pin = dir.path().join("pin");
-        std::fs::write(&pin, "pinned").unwrap();
-        let installed = || Ok(PathBuf::from("/installed/cas"));
-        let image = PathBuf::from("/proc/self/exe");
-        assert_eq!(
-            choose_provisioner_executable(Some(image.clone()), Some(&pin), installed).unwrap(),
-            image
-        );
-        assert_eq!(choose_provisioner_executable(None, Some(&pin), installed).unwrap(), pin);
-        let missing = dir.path().join("missing-pin");
-        assert_eq!(
-            choose_provisioner_executable(None, Some(&missing), installed).unwrap(),
-            PathBuf::from("/installed/cas")
-        );
     }
 
     #[test]

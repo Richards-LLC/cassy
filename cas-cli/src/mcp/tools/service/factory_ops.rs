@@ -12128,7 +12128,8 @@ mod tests {
         session: &str,
         daemon_build_hash: Option<&str>,
         provisioner_build: Option<&str>,
-    ) -> (String, Vec<cas_store::SpawnRequest>) {
+        pinned_build: Option<&str>,
+    ) -> (Result<String, String>, Vec<cas_store::SpawnRequest>) {
         use cas_store::SpawnQueueStore;
         use cas_types::TaskType;
 
@@ -12160,6 +12161,15 @@ mod tests {
             )
             .expect("write session metadata");
         }
+        // cas-cef2: the daemon's pinned provisioner, reporting `pinned_build`.
+        #[cfg(unix)]
+        if let Some(pinned_build) = pinned_build {
+            use std::os::unix::fs::PermissionsExt;
+            let pin = crate::ui::factory::provisioner_pin_path(session);
+            std::fs::create_dir_all(pin.parent().unwrap()).unwrap();
+            std::fs::write(&pin, format!("#!/bin/sh\necho {pinned_build}\n")).unwrap();
+            std::fs::set_permissions(&pin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
         #[cfg(feature = "mcp-proxy")]
@@ -12178,17 +12188,20 @@ mod tests {
                 req,
                 provisioner_build,
             )
-            .await
-            .expect("spawn is queued when build identity is inconclusive");
+            .await;
         let receipt = response
-            .content
-            .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
-                _ => None,
+            .map(|response| {
+                response
+                    .content
+                    .into_iter()
+                    .filter_map(|content| match content.raw {
+                        rmcp::model::RawContent::Text(text) => Some(text.text),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .map_err(|error| error.to_string());
         let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
         (receipt, queue.peek(10).expect("read spawn queue"))
     }
@@ -12196,8 +12209,9 @@ mod tests {
     #[tokio::test]
     async fn missing_factory_session_metadata_skips_build_check_and_queues_spawn() {
         let (receipt, queue) =
-            spawn_build_check_case("missing-metadata-1174", None, Some("known-provisioner"))
+            spawn_build_check_case("missing-metadata-1174", None, Some("known-provisioner"), None)
                 .await;
+        let receipt = receipt.expect("spawn is queued when build identity is inconclusive");
 
         assert!(
             receipt.contains(
@@ -12211,7 +12225,8 @@ mod tests {
     #[tokio::test]
     async fn unprobeable_provisioner_identity_skips_build_check_and_queues_spawn() {
         let (receipt, queue) =
-            spawn_build_check_case("unprobeable-1174", Some("known-daemon"), None).await;
+            spawn_build_check_case("unprobeable-1174", Some("known-daemon"), None, None).await;
+        let receipt = receipt.expect("spawn is queued when build identity is inconclusive");
 
         assert!(
             receipt.contains(
@@ -12220,6 +12235,37 @@ mod tests {
             "receipt should explain why the early check was skipped: {receipt}"
         );
         assert_eq!(queue.len(), 1, "an unprobeable provisioner must not refuse spawn");
+    }
+
+    /// cas-cef2 (GH #1242): `cas update` replaced the binary under a running
+    /// daemon and spawn refused for the rest of the session. The daemon
+    /// provisions from its pin, so the check judges the pin: an upgraded
+    /// installed binary still spawns, and a pin of another build is still
+    /// refused (#1174).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_judges_the_daemons_pinned_build_not_the_installed_binary_cas_cef2() {
+        let (receipt, queue) = spawn_build_check_case(
+            "pinned-cef2",
+            Some("ee41e82"),
+            Some("f15ccb5"),
+            Some("ee41e82"),
+        )
+        .await;
+        assert!(receipt.is_ok(), "{receipt:?}");
+        assert_eq!(queue.len(), 1);
+
+        let (refusal, queue) = spawn_build_check_case(
+            "foreign-pin-cef2",
+            Some("ee41e82"),
+            Some("ee41e82"),
+            Some("other-build"),
+        )
+        .await;
+        let refusal = refusal.expect_err("a pin of another build must not provision");
+        assert!(refusal.contains("provision_build_mismatch"), "{refusal}");
+        assert!(refusal.contains("other-build"), "{refusal}");
+        assert!(queue.is_empty());
     }
 
     #[tokio::test]
@@ -12283,136 +12329,6 @@ mod tests {
 
         let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
         assert!(queue.peek(10).expect("read spawn queue").is_empty());
-    }
-
-    /// cas-cef2 (GH #1242): `cas update` replaced the binary under a running
-    /// daemon (daemon ee41e82, installed f15ccb5), and spawn_workers refused
-    /// for the rest of the session. The daemon pins its own executable when it
-    /// starts and provisions from that pin, so the check probes the pin.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn upgraded_binary_under_a_pinned_daemon_still_queues_spawn_cas_cef2() {
-        use cas_types::TaskType;
-        use std::os::unix::fs::PermissionsExt;
-
-        let _env = crate::test_support::TestEnvGuard::temp_home();
-        let project = tempfile::tempdir().expect("temp project");
-        let cas_root = crate::store::init_cas_dir(project.path()).expect("CAS root");
-        let tasks = crate::store::open_task_store(&cas_root).expect("open task store");
-        tasks.init().expect("initialize task store");
-        let mut epic = cas_types::Task::new("cas-cef2-epic".into(), "pinned build".into());
-        epic.task_type = TaskType::Epic;
-        tasks.add(&epic).expect("add active epic");
-        let session = "upgraded-under-daemon-cef2";
-        let mut metadata = crate::ui::factory::create_metadata(
-            session,
-            std::process::id(),
-            "supervisor",
-            &[],
-            None,
-            Some(cas_root.to_string_lossy().as_ref()),
-            None,
-        );
-        metadata.daemon_build_hash = Some("ee41e82-daemon".into());
-        let sessions = crate::ui::factory::SessionManager::new();
-        sessions.ensure_dir().expect("create session directory");
-        let metadata_path = crate::ui::factory::metadata_path(session);
-        std::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
-        // The daemon's pinned copy of its own build.
-        let pin = metadata_path
-            .parent()
-            .unwrap()
-            .join(format!("{session}.provisioner"))
-            .join("cas");
-        std::fs::create_dir_all(pin.parent().unwrap()).unwrap();
-        std::fs::write(&pin, "#!/bin/sh\necho ee41e82-daemon\n").unwrap();
-        std::fs::set_permissions(&pin, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let core = CasCore::with_daemon(cas_root.clone(), None, None);
-        #[cfg(feature = "mcp-proxy")]
-        let service = CasService::new(core, None);
-        #[cfg(not(feature = "mcp-proxy"))]
-        let service = CasService::new(core);
-        let req: FactoryRequest = serde_json::from_value(serde_json::json!({
-            "action": "spawn_workers",
-            "count": 1,
-            "cli": "grok"
-        }))
-        .unwrap();
-        let response = service
-            .factory_spawn_workers_in_with_provisioner_build(
-                &crate::ops::fleet::FleetContext::operator(session),
-                req,
-                Some("f15ccb5-installed"),
-            )
-            .await;
-        let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
-        assert!(response.is_ok(), "a pinned daemon build must still spawn: {response:?}");
-        assert_eq!(queue.peek(10).unwrap().len(), 1);
-    }
-
-    /// cas-cef2: the #1174 protection still holds — a pin that is not the
-    /// daemon's build is refused before anything is queued.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn pinned_provisioner_of_another_build_is_still_refused_cas_cef2() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _env = crate::test_support::TestEnvGuard::temp_home();
-        let project = tempfile::tempdir().expect("temp project");
-        let cas_root = crate::store::init_cas_dir(project.path()).expect("CAS root");
-        let tasks = crate::store::open_task_store(&cas_root).expect("open task store");
-        tasks.init().expect("initialize task store");
-        let mut epic = cas_types::Task::new("cas-cef2-epic".into(), "pinned build".into());
-        epic.task_type = cas_types::TaskType::Epic;
-        tasks.add(&epic).expect("add active epic");
-        let session = "foreign-pin-cef2";
-        let mut metadata = crate::ui::factory::create_metadata(
-            session,
-            std::process::id(),
-            "supervisor",
-            &[],
-            None,
-            Some(cas_root.to_string_lossy().as_ref()),
-            None,
-        );
-        metadata.daemon_build_hash = Some("ee41e82-daemon".into());
-        crate::ui::factory::SessionManager::new().ensure_dir().unwrap();
-        let metadata_path = crate::ui::factory::metadata_path(session);
-        std::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
-        let pin = metadata_path
-            .parent()
-            .unwrap()
-            .join(format!("{session}.provisioner"))
-            .join("cas");
-        std::fs::create_dir_all(pin.parent().unwrap()).unwrap();
-        std::fs::write(&pin, "#!/bin/sh\necho some-other-build\n").unwrap();
-        std::fs::set_permissions(&pin, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let core = CasCore::with_daemon(cas_root.clone(), None, None);
-        #[cfg(feature = "mcp-proxy")]
-        let service = CasService::new(core, None);
-        #[cfg(not(feature = "mcp-proxy"))]
-        let service = CasService::new(core);
-        let req: FactoryRequest = serde_json::from_value(serde_json::json!({
-            "action": "spawn_workers",
-            "count": 1,
-            "cli": "grok"
-        }))
-        .unwrap();
-        let error = service
-            .factory_spawn_workers_in_with_provisioner_build(
-                &crate::ops::fleet::FleetContext::operator(session),
-                req,
-                Some("ee41e82-daemon"),
-            )
-            .await
-            .expect_err("a pin of another build must not provision");
-        let message = error.to_string();
-        assert!(message.contains("provision_build_mismatch"), "{message}");
-        assert!(message.contains("some-other-build"), "{message}");
-        let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
-        assert!(queue.peek(10).unwrap().is_empty());
     }
 
     #[test]

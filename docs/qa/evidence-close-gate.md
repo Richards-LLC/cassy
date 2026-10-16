@@ -60,14 +60,16 @@ other non-Rust runners use the explicit non-Rust form. Existing prose such as
 For a non-Rust harness, record 16 actual concurrent processes/workers as
 `parallelism=16` or `concurrency=16`; `-j16`, `-j 16`, `--jobs 16` and
 `--jobs=16` also parse. These receipt spellings do not prescribe runner flags.
-Record at least three loops/runs (`loops=3`, `3 runs`, `3x`), and a passing
+Record at least three loops/runs (`loops=3`, `3 runs`, `3x` or `x3`), and a passing
 result (`result=PASS`, SUCCESS, exit 0 or status 0). An explicit failed result
 or nonzero exit/status contradicts PASS and is refused. SHA and log are optional;
 include the actual command, passed/failed counts and log path for review.
 
 Each refusal lists `parsed=[...]` and `missing=[...]` for each typed note and
 prints an accepted example. Repair one note so all four fields occur together;
-partial notes cannot be combined. No typed note reports all four fields missing.
+partial notes cannot be combined. Counts bind to their own field: `parallelism=16 loops=2`
+remains incomplete, and the 16 is never borrowed as a loop count. Prose such as
+`16 jobs 3 loops` remains supported. No typed note reports all four fields missing.
 The hook-installed worker guidance reaches the same grammar through
 `cas-worker/references/close-gate.md`. Factory Rust loaded execution continues
 to defer to supervisor assembly; this documents the existing gate without adding

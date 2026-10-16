@@ -760,25 +760,21 @@ fn proof_numeric_tokens(field: &str) -> Vec<&str> {
     tokens
 }
 
-fn proof_number_has_owner(tokens: &[&str], index: usize) -> bool {
-    index.checked_sub(1).is_some_and(|previous| {
-        matches!(
-            tokens[previous],
-            "=" | ":"
-                | "j"
-                | "jobs"
-                | "parallelism"
-                | "concurrency"
-                | "loop"
-                | "loops"
-                | "run"
-                | "runs"
-                | "iteration"
-                | "iterations"
-                | "time"
-                | "times"
-        )
-    })
+fn is_proof_numeric_label(token: &str) -> bool {
+    matches!(
+        token,
+        "j" | "jobs"
+            | "parallelism"
+            | "concurrency"
+            | "loop"
+            | "loops"
+            | "run"
+            | "runs"
+            | "iteration"
+            | "iterations"
+            | "time"
+            | "times"
+    )
 }
 
 fn has_adjacent_number<F>(text: &str, label: &str, predicate: F) -> bool
@@ -787,28 +783,46 @@ where
 {
     text.split([';', ',', '|']).any(|field| {
         let tokens = proof_numeric_tokens(field);
-        tokens.iter().enumerate().any(|(index, token)| {
-            if *token != label {
-                return false;
+        let mut owned = vec![false; tokens.len()];
+        for (index, token) in tokens.iter().enumerate() {
+            if !is_proof_numeric_label(token) {
+                continue;
             }
-            let number_matches = |token: &str| token.parse::<u32>().ok().is_some_and(&predicate);
-            if tokens
+            let number_at = |index: usize| {
+                tokens
+                    .get(index)
+                    .and_then(|token| token.parse::<u32>().ok())
+                    .map(|number| (index, number))
+            };
+            let value = if tokens
                 .get(index + 1)
                 .is_some_and(|token| matches!(*token, "=" | ":"))
             {
-                // An explicit field takes only its own value, never the
-                // preceding field's value or a later unrelated number.
-                return tokens
-                    .get(index + 2)
-                    .is_some_and(|token| number_matches(token));
+                // Explicit fields take only their own right-hand value.
+                number_at(index + 2)
+            } else {
+                // Prefer an unclaimed preceding prose value ("16 jobs 3
+                // loops"). Otherwise consume the following value ("jobs 16
+                // loops 3"). A value cannot belong to both labels.
+                index
+                    .checked_sub(1)
+                    .filter(|previous| {
+                        !owned[*previous]
+                            && !previous
+                                .checked_sub(1)
+                                .is_some_and(|before| matches!(tokens[before], "=" | ":"))
+                    })
+                    .and_then(number_at)
+                    .or_else(|| number_at(index + 1))
+            };
+            if let Some((index, number)) = value {
+                owned[index] = true;
+                if *token == label && predicate(number) {
+                    return true;
+                }
             }
-            tokens
-                .get(index + 1)
-                .is_some_and(|token| number_matches(token))
-                || index.checked_sub(1).is_some_and(|previous| {
-                    number_matches(tokens[previous]) && !proof_number_has_owner(&tokens, previous)
-                })
-        })
+        }
+        false
     })
 }
 

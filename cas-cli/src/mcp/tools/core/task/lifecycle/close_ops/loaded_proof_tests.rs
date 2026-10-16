@@ -126,7 +126,7 @@ const ISSUE_FORMS: &[(&str, &str)] = &[
     ),
 ];
 
-async fn exercise_close_receipts_cas_69b4(receipts: &[(&str, &str)], accepted: bool) {
+async fn exercise_close_receipts_cas_69b4(receipts: &[(&str, &str)], missing: Option<&str>) {
     use crate::mcp::CasService;
     use crate::store::{
         open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
@@ -191,7 +191,7 @@ async fn exercise_close_receipts_cas_69b4(receipts: &[(&str, &str)], accepted: b
             .collect::<Vec<_>>()
             .join("\n");
         let persisted = store.get(&task.id).unwrap();
-        if accepted {
+        if missing.is_none() {
             assert_ne!(response.is_error, Some(true), "{name}: {receipt}: {text}");
             assert_eq!(persisted.status, TaskStatus::Closed, "{name}: {text}");
             assert!(
@@ -205,19 +205,17 @@ async fn exercise_close_receipts_cas_69b4(receipts: &[(&str, &str)], accepted: b
                 "{name}: accepted {receipt}: {text}"
             );
             assert_eq!(persisted.status, TaskStatus::InProgress, "{name}: {text}");
+            let missing = format!("missing=[{}]", missing.unwrap());
             assert!(
-                text.contains("loaded_proof") && text.contains("missing=[loops]"),
+                text.contains("loaded_proof") && text.contains(&missing),
                 "{name}: {text}"
             );
-            assert!(
-                text.contains("parsed=[target, parallelism, result]"),
-                "{name}: {text}"
-            );
+            assert!(text.contains("parsed=[target,"), "{name}: {text}");
             assert!(text.contains("Accepted example:"), "{name}: {text}");
             assert!(
                 declared_risk_close_gaps(&persisted, &[])
                     .join(";")
-                    .contains("missing=[loops]"),
+                    .contains(&missing),
                 "{name}: audit differs"
             );
         }
@@ -261,14 +259,14 @@ async fn cas_69b4_close_handler_refuses_borrowed_loop_counts() {
                 "whole target -j16 receipt=48 loops=2 result=PASS",
             ),
         ],
-        false,
+        Some("loops"),
     )
     .await;
 }
 
 #[tokio::test]
 async fn cas_69b4_close_handler_accepts_issue_receipt_forms() {
-    exercise_close_receipts_cas_69b4(ISSUE_FORMS, true).await;
+    exercise_close_receipts_cas_69b4(ISSUE_FORMS, None).await;
 }
 
 #[test]
@@ -400,4 +398,171 @@ async fn mcp_typed_note_persistence_preserves_issue_receipt_for_close_and_audit(
     validate_risk_close_proofs(&persisted, &[], dir.path())
         .expect("real typed-note write/reload must satisfy the production close gate");
     assert!(declared_risk_close_gaps(&persisted, &[]).is_empty());
+}
+
+// Fixture families accepted before cas-69b4. Keep this inventory explicit so
+// narrowing numeric ownership cannot silently drop valid prose/field forms.
+const LEGACY_FORMS: &[(&str, &str)] = &[
+    (
+        "numeric fields",
+        "whole target parallelism=16 loops=3 result=PASS",
+    ),
+    ("reverse prose fields", "whole target 16 jobs 3 loops; PASS"),
+    ("forward prose fields", "whole target jobs 16 loops 3; PASS"),
+    ("loop prose first", "whole target 3 loops 16 jobs; PASS"),
+    (
+        "reverse parallelism",
+        "whole target 16 parallelism; 3 loops; PASS",
+    ),
+    (
+        "reverse concurrency",
+        "whole target 16 concurrency; 3 loops; PASS",
+    ),
+    ("jobs colon", "whole target jobs: 16 loops: 3 result=PASS"),
+    (
+        "concurrency colon",
+        "whole target concurrency:16 runs:4 result=PASS",
+    ),
+    (
+        "parallelism colon",
+        "whole target parallelism:16 runs:4 result=PASS",
+    ),
+    ("option compact", "whole target -j16; 3 loops; PASS"),
+    ("option spaced", "entire suite; -j 16; runs 1 2 3; status=0"),
+    ("long option spaced", "full suite --jobs 16; 3x; SUCCESS"),
+    (
+        "long option equals",
+        "non-Rust target: pnpm test --jobs=16; three runs; status 0",
+    ),
+    (
+        "greater run count",
+        "whole target cargo test -j16; loops: 32; result=SUCCESS",
+    ),
+    ("punctuated fields", "full target | 16 jobs, 3 runs; PASS"),
+    (
+        "structured full",
+        "target=full parallelism=16 loops=3 result=PASS",
+    ),
+    (
+        "structured entire",
+        "target=entire parallelism=16 loops=3 result=PASS",
+    ),
+    (
+        "structured whole",
+        "target=whole target cargo test -j16; 3 loops; PASS",
+    ),
+    (
+        "structured vitest",
+        "target=vitest src/example.test.ts parallelism=16 loops=3 result=PASS",
+    ),
+    (
+        "structured jest",
+        "target=jest tests/example.test.js concurrency=16 loops=4 exit=0",
+    ),
+    (
+        "structured pytest",
+        "target=pytest tests/test_example.py parallelism=16 loops=3 result=PASS",
+    ),
+    (
+        "structured go",
+        "target=go test ./... parallelism=16 loops=3 result=PASS",
+    ),
+    (
+        "explicit custom runner",
+        "target=explicit non-Rust (custom-runner a) --jobs=16 3x; SUCCESS",
+    ),
+];
+
+#[tokio::test]
+async fn cas_69b4_close_handler_preserves_legacy_receipt_families() {
+    exercise_close_receipts_cas_69b4(LEGACY_FORMS, None).await;
+}
+
+#[tokio::test]
+async fn cas_69b4_close_handler_refuses_borrowed_parallelism() {
+    exercise_close_receipts_cas_69b4(
+        &[
+            (
+                "loops before jobs",
+                "whole target loops=16 jobs=2 result=PASS",
+            ),
+            (
+                "jobs before loops",
+                "whole target jobs=2 loops=16 result=PASS",
+            ),
+            (
+                "loops before parallelism",
+                "whole target loops=16 parallelism=2 result=PASS",
+            ),
+            (
+                "loops before concurrency",
+                "whole target loops=16 concurrency: 2 result=PASS",
+            ),
+            (
+                "unknown assigned count",
+                "whole target receipt=16 jobs 2; 3 loops; PASS",
+            ),
+        ],
+        Some("parallelism"),
+    )
+    .await;
+}
+
+#[test]
+fn cas_69b4_numeric_and_word_run_aliases_keep_their_own_values() {
+    for label in [
+        "loop",
+        "loops",
+        "run",
+        "runs",
+        "iteration",
+        "iterations",
+        "time",
+        "times",
+    ] {
+        for runs in [
+            format!("{label}=3"),
+            format!("{label}: 4"),
+            format!("{label} 3"),
+            format!("3 {label}"),
+            format!("three {label}"),
+        ] {
+            let receipt = format!("whole target; -j16; {runs}; PASS");
+            validate_risk_close_proofs(&concurrency_task(&receipt), &[], std::path::Path::new("."))
+                .expect(&receipt);
+        }
+        for runs in [
+            format!("{label}=2"),
+            format!("{label}: 2"),
+            format!("{label} 2"),
+        ] {
+            let receipt = format!("whole target jobs=16 {runs} result=PASS");
+            let error = validate_risk_close_proofs(
+                &concurrency_task(&receipt),
+                &[],
+                std::path::Path::new("."),
+            )
+            .expect_err(&receipt);
+            assert!(error.contains("missing=[loops]"), "{receipt}: {error}");
+        }
+    }
+    for runs in [
+        "x0",
+        "x2",
+        "2x",
+        "x3lookalike",
+        "lookalikex3",
+        "x4294967296",
+        "loops=4294967296",
+    ] {
+        let receipt = format!("whole target; -j16; {runs}; PASS");
+        let error =
+            validate_risk_close_proofs(&concurrency_task(&receipt), &[], std::path::Path::new("."))
+                .expect_err(&receipt);
+        assert!(error.contains("missing=[loops]"), "{receipt}: {error}");
+        assert!(
+            error.contains("3x or x3"),
+            "accepted forms missing: {error}"
+        );
+    }
 }

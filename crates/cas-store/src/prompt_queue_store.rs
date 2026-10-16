@@ -4554,7 +4554,8 @@ fn recipient_action_satisfies_alarm_on_conn(conn: &Connection, prompt_id: i64) -
     let exists = |name: &str| -> Result<bool> {
         Ok(conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
-            [name], |row| row.get(0),
+            [name],
+            |row| row.get(0),
         )?)
     };
     let mut action = String::new();
@@ -4565,17 +4566,24 @@ fn recipient_action_satisfies_alarm_on_conn(conn: &Connection, prompt_id: i64) -
                   AND outbound.origin_agent_id = recipient.id
                   AND outbound.factory_session = q.factory_session
                   AND lower(outbound.source) <> lower(outbound.target)
-                  AND julianday(outbound.created_at) > julianday(q.transport_delivered_at))".to_string(),
+                  AND julianday(outbound.created_at) > julianday(q.transport_delivered_at))"
+                .to_string(),
         ];
         if exists("events")? {
-            evidence.push("EXISTS (SELECT 1 FROM events note
+            evidence.push(
+                "EXISTS (SELECT 1 FROM events note
                 WHERE note.event_type = 'task_note_added' AND note.session_id = recipient.id
-                  AND julianday(note.created_at) > julianday(q.transport_delivered_at))".into());
+                  AND julianday(note.created_at) > julianday(q.transport_delivered_at))"
+                    .into(),
+            );
         }
         if exists("task_lease_history")? {
-            evidence.push("EXISTS (SELECT 1 FROM task_lease_history lease
+            evidence.push(
+                "EXISTS (SELECT 1 FROM task_lease_history lease
                 WHERE lease.agent_id = recipient.id AND lease.event_type IN ('claimed', 'released')
-                  AND julianday(lease.timestamp) > julianday(q.transport_delivered_at))".into());
+                  AND julianday(lease.timestamp) > julianday(q.transport_delivered_at))"
+                    .into(),
+            );
         }
         action = format!("OR (q.transport_delivered_at IS NOT NULL AND EXISTS (
             SELECT 1 FROM agents recipient
@@ -4583,13 +4591,15 @@ fn recipient_action_satisfies_alarm_on_conn(conn: &Connection, prompt_id: i64) -
                AND (recipient.name = q.target OR (q.target = 'supervisor' AND recipient.role = 'supervisor'))
                AND ({})))", evidence.join(" OR "));
     }
-    Ok(conn.query_row(&format!(
-        "SELECT EXISTS(SELECT 1 FROM prompt_queue q WHERE q.id = ?
-            AND (lower(q.source) = lower(q.target) {action}))"),
-        [prompt_id], |row| row.get(0),
+    Ok(conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM prompt_queue q WHERE q.id = ?
+            AND (lower(q.source) = lower(q.target) {action}))"
+        ),
+        [prompt_id],
+        |row| row.get(0),
     )?)
 }
-
 fn require_operator_session(target: &str, factory_session: Option<&str>) -> Result<()> {
     if target.trim().eq_ignore_ascii_case("operator")
         && factory_session.is_none_or(|session| session.trim().is_empty())

@@ -1,13 +1,13 @@
-//! Off-by-default worker visibility for Commander streams (cas-6261).
+//! Worker visibility for Commander streams (cas-6261, cas-f285).
 //!
-//! The operator asked for a Hub that shows supervisors only: worker panes on a
-//! phone crowd the list and cost bandwidth for terminals nobody is reading.
-//! The multiplexer can already filter frames by pane id, but a viewer cannot
-//! name pane ids before the daemon's Welcome arrives, so this gate learns the
-//! worker pane ids from Welcome/StateUpdate frames as they pass and then hides
-//! those panes and drops their output until the viewer explicitly asks for
-//! workers (`workers=1` on the attach URL or `"workers": true` on the machine
-//! subscribe envelope).
+//! Commander shows supervisors only: worker panes on a phone crowd the list
+//! and cost bandwidth for terminals nobody is reading, and the conversation
+//! reads its supervisor's pane alone. The multiplexer can already filter
+//! frames by pane id, but a viewer cannot name pane ids before the daemon's
+//! Welcome arrives, so this gate learns the worker pane ids from
+//! Welcome/StateUpdate frames as they pass and then hides those panes and
+//! drops their output. There is no way to reveal them: the Terminal view's
+//! "Show workers" that asked for it is gone (cas-0546).
 
 use std::collections::HashSet;
 
@@ -15,29 +15,22 @@ use super::{ProxyFrame, ProxyFrameKind};
 
 #[derive(Debug, Default)]
 pub struct WorkerGate {
-    reveal: bool,
     workers: HashSet<String>,
 }
 
 impl WorkerGate {
-    pub fn new(reveal: bool) -> Self {
-        Self {
-            reveal,
-            workers: HashSet::new(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Number of worker panes currently hidden by this gate.
     pub fn hidden_workers(&self) -> usize {
-        if self.reveal { 0 } else { self.workers.len() }
+        self.workers.len()
     }
 
     /// Pass a frame through the gate. Returns `None` when the frame belongs to
     /// a hidden worker pane; state frames come back with worker panes removed.
     pub fn admit(&mut self, frame: ProxyFrame) -> Option<ProxyFrame> {
-        if self.reveal {
-            return Some(frame);
-        }
         match frame.kind {
             ProxyFrameKind::Output | ProxyFrameKind::PaneKeyframe => {
                 let hidden = frame
@@ -192,7 +185,7 @@ mod tests {
 
     #[test]
     fn default_gate_hides_worker_panes_and_their_output() {
-        let mut gate = WorkerGate::new(false);
+        let mut gate = WorkerGate::new();
         let admitted = gate.admit(welcome()).expect("welcome passes");
         let value: serde_json::Value = serde_json::from_slice(&admitted.bytes).unwrap();
         let panes = value["Welcome"]["state"]["panes"].as_array().unwrap();
@@ -213,18 +206,8 @@ mod tests {
     }
 
     #[test]
-    fn revealed_gate_passes_everything_unchanged() {
-        let mut gate = WorkerGate::new(true);
-        let original = welcome();
-        let admitted = gate.admit(original.clone()).unwrap();
-        assert_eq!(admitted.bytes, original.bytes);
-        assert!(gate.admit(output("worker-1")).is_some());
-        assert_eq!(gate.hidden_workers(), 0);
-    }
-
-    #[test]
     fn state_update_replaces_the_hidden_roster() {
-        let mut gate = WorkerGate::new(false);
+        let mut gate = WorkerGate::new();
         gate.admit(welcome()).unwrap();
         gate.admit(proxy_frame(DaemonMessage::StateUpdate {
             state: SessionState {

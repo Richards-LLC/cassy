@@ -40,7 +40,7 @@ test("The Raw output drawer opens read-only over the conversation and closes", a
 
 test("A lost connection keeps the thread under the banner and says why the actions wait", async ({ page }) => {
   await page.goto("/?fixture=connection-fatal-browser");
-  const banner = page.locator("#pane-grid > .terminal-disconnected-banner");
+  const banner = page.locator("#conversation-stage > .terminal-disconnected-banner");
   await expect(banner).toBeVisible();
   await expect(banner).toContainText("Lost connection to Atlas · Linux.");
   await expect(page.getByRole("log")).toContainText("The project badge stays visible");

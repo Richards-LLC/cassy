@@ -213,11 +213,7 @@ pub fn required_scope(message: &ClientMessage) -> Option<Scope> {
         | ClientMessage::FocusNext
         | ClientMessage::FocusPrev
         | ClientMessage::Resize { .. } => Some(Scope::PaneInput),
-        // Reporting the viewport is part of observing a pane, not terminal
-        // input. The lease policy is enforced separately: an unleased pane
-        // may follow an observer, while a leased pane follows its controller.
-        ClientMessage::ResizePane { .. }
-        | ClientMessage::RequestPaneKeyframe { .. }
+        ClientMessage::RequestPaneKeyframe { .. }
         | ClientMessage::ScrollbackRequest { .. }
         | ClientMessage::ConversationHistoryRequest { .. }
         | ClientMessage::OperatorReplyPersisted { .. } => Some(Scope::PaneRead),
@@ -229,7 +225,9 @@ pub fn required_scope(message: &ClientMessage) -> Option<Scope> {
         | ClientMessage::SpawnShell { .. }
         | ClientMessage::KillShell { .. } => Some(Scope::FactoryManage),
         // The legacy focused-pane interrupt is intentionally never exposed.
-        ClientMessage::Interrupt => None,
+        // Commander never sizes a pane (cas-0546, cas-f285): pane geometry
+        // belongs to the operator's local dashboard, so no viewer may set it.
+        ClientMessage::Interrupt | ClientMessage::ResizePane { .. } => None,
         ClientMessage::Attach { .. }
         | ClientMessage::Detach
         | ClientMessage::GetState
@@ -1473,24 +1471,6 @@ impl AuthStore {
             .leases
             .get(session)
             .is_some_and(|lease| lease.device_id == context.device_id && lease.expires_at >= now))
-    }
-
-    /// Whether this viewer owns the shared PTY geometry for a session.
-    ///
-    /// With no controller, any pane reader may establish a usable viewport.
-    /// Once a controller lease exists, only that device may resize; otherwise
-    /// a phone observer could unexpectedly reflow a desktop controller's TUI.
-    pub fn may_resize_panes(
-        &self,
-        context: &AuthContext,
-        session: &str,
-        now: DateTime<Utc>,
-    ) -> Result<bool> {
-        if !context.has(Scope::PaneRead) {
-            return Ok(false);
-        }
-        let lease = self.lease_status(context, session, now)?;
-        Ok(lease.controller_device_id.is_none() || lease.held_by_me)
     }
 
     pub fn audit(

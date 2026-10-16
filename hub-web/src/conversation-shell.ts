@@ -470,35 +470,18 @@ export function applyActionAvailability(button: HTMLButtonElement | null, note: 
 }
 
 /**
- * The host a session's pane surface lives in (cas-0546). The surface is
- * internal plumbing — it keeps the attach, the keyframes and the raw text the
- * Raw output drawer reads — so its host renders nothing: hidden (display
- * none, also pinned in styles.css), inert, and out of the accessibility tree.
+ * The open thread's stage: the visible slot the conversation mounts in
+ * (cas-f285: no pane host or terminal surface beside it). An existing slot
+ * is kept, so a heartbeat never remounts the thread.
  */
-export function createPaneHost(document: Document): HTMLElement {
-  const host = document.createElement("div");
-  host.className = "pane-host";
-  host.hidden = true;
-  host.setAttribute("inert", "");
-  host.setAttribute("aria-hidden", "true");
-  return host;
-}
-
-/**
- * The open thread's stage inside the grid: a visible slot the conversation
- * mounts in, and beside it — never around it — the hidden pane host. Existing
- * nodes are kept, so a heartbeat never remounts the thread.
- */
-export function ensureConversationStage(grid: HTMLElement): { slot: HTMLElement; host: HTMLElement } {
+export function ensureConversationStage(grid: HTMLElement): HTMLElement {
   let slot = grid.querySelector<HTMLElement>(":scope > .conversation-thread-slot");
-  let host = grid.querySelector<HTMLElement>(":scope > .pane-host");
-  if (!slot || !host) {
+  if (!slot) {
     slot = grid.ownerDocument.createElement("div");
     slot.className = "conversation-mount conversation-thread-slot";
-    host = createPaneHost(grid.ownerDocument);
-    grid.replaceChildren(slot, host);
+    grid.replaceChildren(slot);
   }
-  return { slot, host };
+  return slot;
 }
 
 /** The Raw output drawer's contents; main.ts mounts the transcript in its body. */
@@ -516,7 +499,7 @@ export interface ConversationRegions {
 
 /**
  * The conversation shell, with an open thread's regions in their slots: the
- * grid (thread, connection card and hidden pane host), the composer, the
+ * stage (the thread and its connection card), the composer, the
  * session's status and its attention.
  */
 export function arrangeConversationShell(document: Document, model: ConversationShellModel, regions: ConversationRegions = {}): HTMLElement {

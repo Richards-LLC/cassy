@@ -192,9 +192,6 @@ dotenvy = "0.15"
         "index.html",
         "app.js",
         "app.css",
-        "ghostty-vt.wasm",
-        "ghostty-write-pty.wasm",
-        "symbols.woff2",
         "inter.woff2",
         "jetbrains-mono.woff2",
     ] {

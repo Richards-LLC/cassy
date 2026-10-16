@@ -17,11 +17,20 @@ use std::time::Instant;
 #[derive(Default)]
 pub(crate) struct PoisonJobs {
     pub(crate) generation: u64,
+    pub(crate) stopping: bool,
     epochs: HashMap<String, Arc<AtomicBool>>,
     pub(crate) pointers: HashMap<String, PendingPointer>,
     pub(crate) idle_relayed: HashSet<i64>,
 }
 impl PoisonJobs {
+    pub(crate) fn stop(&mut self) {
+        self.stopping = true;
+        self.generation = self.generation.wrapping_add(1);
+        for live in self.epochs.values() {
+            live.store(false, Ordering::Release);
+        }
+        self.epochs.clear();
+    }
     pub(crate) fn epoch(&mut self, pane: &str) -> Arc<AtomicBool> {
         self.epochs
             .entry(pane.to_string())

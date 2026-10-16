@@ -4390,6 +4390,7 @@ impl FactoryDaemon {
         // cas-d2a2: queue stamps run on the StoreWorker through the queue
         // job lanes; drain the lanes first so no critical stamp is still
         // waiting on a lane while the StoreWorker reports idle (jobs.rs).
+        let pointers_idle = self.finish_pointer_jobs_for_shutdown(timeout);
         let queue_cas_dir = self.app.cas_dir().to_path_buf();
         if !self.queue_jobs.drain_for_shutdown(&queue_cas_dir, timeout) {
             tracing::warn!("prompt-queue job lanes still busy at shutdown");
@@ -4403,7 +4404,7 @@ impl FactoryDaemon {
                 "factory store worker still busy at shutdown"
             );
         }
-        idle
+        idle && pointers_idle
     }
 
     /// Hand the latest epic-focus write to the store worker (cas-5e72).

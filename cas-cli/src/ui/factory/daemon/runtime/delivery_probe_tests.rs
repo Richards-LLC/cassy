@@ -713,7 +713,9 @@ async fn cas_cc89_shutdown_releases_a_pointer_claim_waiting_on_the_writer() {
     let root = daemon.app.cas_dir().to_path_buf();
     daemon.queue_jobs = prompt_queue_jobs::QueueJobs::start_with_private_writer(root, None);
     let release = hold_lane(&mut daemon, jobs::Lane::Write);
-    daemon.fallback_unsurfaced_teams_pointers(queue.as_ref()).await;
+    daemon
+        .fallback_unsurfaced_teams_pointers(queue.as_ref())
+        .await;
     let deadline = Instant::now() + Duration::from_secs(5);
     let key = format!("teams-fallback:{row}:worker-a:claim");
     while !daemon.relay_jobs.writing(&key) {
@@ -728,7 +730,9 @@ async fn cas_cc89_shutdown_releases_a_pointer_claim_waiting_on_the_writer() {
     let worker = super::super::store_worker::StoreWorker::start();
     assert!(daemon.finish_shutdown_writes(&worker, Duration::from_secs(3)));
     releasing.join().unwrap();
-    assert!(!queue.teams_body_fallback_claimed(row, "worker-a").unwrap(),
-        "shutdown must not leave a durable claim without scheduling its body");
+    assert!(
+        !queue.teams_body_fallback_claimed(row, "worker-a").unwrap(),
+        "shutdown must not leave a durable claim without scheduling its body"
+    );
     assert!(daemon.queue_jobs.poison_jobs.pointers.is_empty());
 }

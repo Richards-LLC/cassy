@@ -4366,7 +4366,7 @@ impl FactoryDaemon {
 
     fn decide_pointer_read(&mut self, generation: u64, rows: Vec<(cas_store::QueuedPrompt, String)>) {
         use super::poison_sweep_jobs::{PendingPointer, PointerPhase, PointerWork};
-        if generation != self.queue_jobs.poison_jobs.generation { return; }
+        if self.queue_jobs.poison_jobs.stopping || generation != self.queue_jobs.poison_jobs.generation { return; }
         let Some(primary) = self.teams.as_ref().map(|team| Arc::new(team.snapshot())) else { return; };
         let recipients = self.teams_pointer_recipients();
         let workers = self.app.worker_names().to_vec();
@@ -4391,6 +4391,24 @@ impl FactoryDaemon {
                 phase: PointerPhase::Claim, retry_at: Instant::now(),
             });
         }
+    }
+
+    /// Shutdown is outside the control loop. Cancel unsent bodies and settle
+    /// claim/file/release completions before closing the shared job lanes.
+    pub(super) fn finish_pointer_jobs_for_shutdown(&mut self, timeout: Duration) -> bool {
+        self.queue_jobs.poison_jobs.stop();
+        let deadline = Instant::now() + timeout;
+        while !self.queue_jobs.poison_jobs.pointers.is_empty() {
+            self.drain_relay_jobs();
+            if self.queue_jobs.poison_jobs.pointers.is_empty() { return true; }
+            if Instant::now() >= deadline {
+                tracing::warn!(pending = self.queue_jobs.poison_jobs.pointers.len(),
+                    "Teams pointer phases still pending at shutdown");
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
     }
 
     fn advance_pointer_jobs(&mut self) {

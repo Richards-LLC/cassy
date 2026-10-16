@@ -272,7 +272,8 @@ pub fn register_now(
         save(cas_root, &record);
         return record;
     }
-    let previous = load(cas_root, &agent.id);
+    let previous =
+        load(cas_root, &agent.id).filter(|record| record.last_attempt_at >= agent.registered_at);
     let focus = current_focus(agent);
     let branch = current_branch(cas_root, agent);
     let mut coordinator = coordinator.clone().with_timeout(PRESENCE_TIMEOUT);
@@ -363,10 +364,11 @@ pub fn tick(
             TickAction::Registered,
         );
     };
-    if record
-        .registered_at
-        .is_none_or(|at| at < agent.registered_at)
-        && record.state == PresenceState::Registered
+    if record.last_attempt_at < agent.registered_at
+        || (record
+            .registered_at
+            .is_none_or(|at| at < agent.registered_at)
+            && record.state == PresenceState::Registered)
     {
         return outcome(
             register_now(coordinator, cas_root, agent, now),

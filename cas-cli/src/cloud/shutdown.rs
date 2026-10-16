@@ -21,6 +21,8 @@ const TTL_HOURS: i64 = 24;
 struct Intent {
     agent_id: String,
     session_id: String,
+    #[serde(default)]
+    harness_pid: Option<u32>,
     endpoint: String,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
@@ -79,6 +81,7 @@ pub(crate) fn enqueue(
         &Intent {
             agent_id: agent.id.clone(),
             session_id: session.into(),
+            harness_pid: harness_pid(agent),
             endpoint: endpoint.into(),
             created_at: now,
             expires_at: now + chrono::Duration::hours(TTL_HOURS),
@@ -91,23 +94,53 @@ pub(crate) fn enqueue(
     )
 }
 
-/// Fence only this incarnation. Legacy intents are superseded by a newer
-/// registration too; filesystem failures must remain distinguishable from end.
+fn harness_pid(agent: &Agent) -> Option<u32> {
+    // SessionStart records the harness itself; MCP records itself plus its parent.
+    agent.ppid.or(agent.pid)
+}
+
+fn supersedes(intent: &Intent, agent: &Agent) -> bool {
+    let session = agent.cc_session_id.as_deref();
+    session.is_some_and(|session| session != intent.session_id)
+        || (agent.registered_at > intent.created_at
+            && (session == Some(intent.session_id.as_str())
+                || intent
+                    .harness_pid
+                    .zip(harness_pid(agent))
+                    .is_some_and(|(old, new)| old != new)))
+}
+
+/// A fresh MCP auto-reinsert is still the ended harness, not a SessionStart.
+/// Include older incarnation files so NULL-session automatic rows cannot escape
+/// their fence just by getting a new registration timestamp.
 pub(crate) fn is_ended(root: &Path, agent: &Agent) -> Result<bool, String> {
     let session = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
-    for file in [
+    let direct = [
         incarnation_path(root, agent, session),
         path(root, &agent.id, session),
-    ] {
+    ];
+    let mut candidates =
+        paths(root).map_err(|error| format!("shutdown intent unavailable: {error}"))?;
+    candidates.extend(direct.iter().cloned());
+    candidates.sort();
+    candidates.dedup();
+    for file in candidates {
         match read(&file) {
             Ok(intent)
-                if agent.registered_at <= intent.created_at && Utc::now() < intent.expires_at =>
+                if intent.agent_id == agent.id
+                    && !supersedes(&intent, agent)
+                    && Utc::now() < intent.expires_at =>
             {
                 return Ok(true);
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("shutdown intent unavailable: {error}")),
+            Err(error) if direct.contains(&file) => {
+                return Err(format!("shutdown intent unavailable: {error}"));
+            }
+            Err(error) => {
+                tracing::warn!(path=%file.display(), %error, "unreadable cloud shutdown intent")
+            }
         }
     }
     Ok(false)
@@ -166,6 +199,11 @@ pub(crate) fn health(root: &Path, now: DateTime<Utc>) -> String {
         let mut pending = 0;
         let mut expired = 0;
         let mut causes = Vec::new();
+        let agents = if root.join("cas.db").is_file() {
+            Some(crate::store::open_agent_store(root).map_err(std::io::Error::other)?)
+        } else {
+            None
+        };
         for path in paths(root)? {
             let intent = match read(&path) {
                 Ok(intent) => intent,
@@ -173,6 +211,13 @@ pub(crate) fn health(root: &Path, now: DateTime<Utc>) -> String {
                 Err(error) => return Err(error),
             };
             if intent.completed_at.is_some() {
+                continue;
+            }
+            if agents
+                .as_ref()
+                .and_then(|store| store.get(&intent.agent_id).ok())
+                .is_some_and(|agent| supersedes(&intent, &agent))
+            {
                 continue;
             }
             if now >= intent.expires_at {
@@ -272,7 +317,7 @@ pub(crate) fn drain(
                 }
                 false
             }
-            Ok(intent) => now >= intent.next_retry_at || now >= intent.expires_at,
+            Ok(_) => true,
             Err(error) => {
                 tracing::warn!(path=%file.display(), %error, "unreadable cloud shutdown intent");
                 false
@@ -315,13 +360,10 @@ pub(crate) fn drain(
                 continue;
             }
         };
-        if current.is_some_and(|agent| {
-            agent.registered_at > intent.created_at
-                || agent
-                    .cc_session_id
-                    .as_deref()
-                    .is_some_and(|session| session != intent.session_id)
-        }) {
+        if current
+            .as_ref()
+            .is_some_and(|agent| supersedes(&intent, agent))
+        {
             intent.completed_at = Some(now);
             intent.cause = "superseded by a new local registration".into();
         } else if now >= intent.expires_at {

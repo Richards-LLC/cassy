@@ -268,6 +268,9 @@ pub(crate) fn register_session_start_agent(
     if !reused {
         agent.name = name;
     }
+    if agent.status == AgentStatus::Shutdown {
+        agent.registered_at = Utc::now();
+    }
     agent.status = AgentStatus::Active;
     agent.pid = Some(cc_pid);
     agent.ppid = None;
@@ -361,9 +364,9 @@ pub struct EmbeddedDaemon {
     /// PID → session ID mapping for hooks to look up their session
     /// Key is Claude Code's PID, value is the session ID
     pid_sessions: RwLock<std::collections::HashMap<u32, String>>,
-    /// The in-flight cloud presence upkeep (cas-f707). One at a time: a tick
-    /// that finds the previous one still running skips its turn.
+    /// The owned cloud presence worker, coalescing kicks while requests run.
     presence_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    presence_pending: Arc<std::sync::Mutex<Option<std::collections::BTreeSet<String>>>>,
     #[cfg(test)]
     presence_kick_count: std::sync::atomic::AtomicUsize,
 }
@@ -417,6 +420,7 @@ impl EmbeddedDaemon {
             agent_id: RwLock::new(None),
             pid_sessions: RwLock::new(std::collections::HashMap::new()),
             presence_task: tokio::sync::Mutex::new(None),
+            presence_pending: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             presence_kick_count: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -503,8 +507,8 @@ impl EmbeddedDaemon {
     /// Start one cloud presence tick for `agent_id` in the background
     /// ([`crate::cloud::presence::tick`]): register when unregistered, due
     /// for a retry or refocused; otherwise heartbeat, re-registering when
-    /// the cloud answers 404/401. Skipped when the previous tick still runs
-    /// or the project has no cloud coordinator.
+    /// the cloud answers 404/401. Busy kicks coalesce by agent and run after
+    /// current work; projects without a coordinator have no cloud work.
     async fn kick_cloud_presence(&self, agent_id: String) {
         #[cfg(test)]
         self.presence_kick_count.fetch_add(1, Ordering::Relaxed);
@@ -512,53 +516,60 @@ impl EmbeddedDaemon {
             return;
         };
         let mut slot = self.presence_task.lock().await;
-        if slot.as_ref().is_some_and(|task| !task.is_finished()) {
-            return;
+        {
+            let mut pending = self.presence_pending.lock().expect("presence pending");
+            if let Some(ids) = pending.as_mut() {
+                ids.insert(agent_id);
+                return;
+            }
+            *pending = Some(std::collections::BTreeSet::from([agent_id]));
         }
         let cas_root = self.config.cas_root.clone();
+        let pending = Arc::clone(&self.presence_pending);
         *slot = Some(tokio::task::spawn_blocking(move || {
-            if let Err(error) = crate::cloud::shutdown::drain(&cas_root, &coordinator, Utc::now()) {
-                tracing::warn!(%error, "cloud shutdown drain failed");
-            }
-            let Ok(store) = open_agent_store(&cas_root) else {
-                return;
-            };
-            let Ok(agent) = store.get(&agent_id) else {
-                return;
-            };
-            let short = &agent_id[..8.min(agent_id.len())];
-            match crate::cloud::presence::tick(&coordinator, &cas_root, &agent, Utc::now()) {
-                crate::cloud::presence::TickAction::Registered => {
-                    eprintln!("[Cassy] Cloud registered agent: {short}");
+            loop {
+                let ids = {
+                    let mut state = pending.lock().expect("presence pending");
+                    let ids = state.as_mut().expect("presence worker owns pending");
+                    if ids.is_empty() {
+                        // Clearing and observing idle use the same mutex as kicks:
+                        // a kick at worker exit must start a new worker, not vanish.
+                        *state = None;
+                        break;
+                    }
+                    std::mem::take(ids)
+                };
+                if let Err(error) = crate::cloud::shutdown::drain(&cas_root, &coordinator, Utc::now()) {
+                    tracing::warn!(%error, "cloud shutdown drain failed");
                 }
-                crate::cloud::presence::TickAction::Reregistered => {
-                    eprintln!("[Cassy] Cloud re-registered agent after a refused heartbeat: {short}");
+                let Ok(store) = open_agent_store(&cas_root) else { continue; };
+                for agent_id in ids {
+                    let Ok(agent) = store.get(&agent_id) else { continue; };
+                    let short = &agent_id[..8.min(agent_id.len())];
+                    match crate::cloud::presence::tick(&coordinator, &cas_root, &agent, Utc::now()) {
+                        crate::cloud::presence::TickAction::Registered => {
+                            eprintln!("[Cassy] Cloud registered agent: {short}");
+                        }
+                        crate::cloud::presence::TickAction::Reregistered => {
+                            eprintln!("[Cassy] Cloud re-registered agent after a refused heartbeat: {short}");
+                        }
+                        crate::cloud::presence::TickAction::Failed(cause) => {
+                            tracing::warn!(agent_id = %short, %cause, "cloud presence failing; will retry");
+                        }
+                        crate::cloud::presence::TickAction::Heartbeat
+                        | crate::cloud::presence::TickAction::Waiting => {}
+                    }
                 }
-                crate::cloud::presence::TickAction::Failed(cause) => {
-                    tracing::warn!(agent_id = %short, %cause, "cloud presence failing; will retry");
-                }
-                crate::cloud::presence::TickAction::Heartbeat
-                | crate::cloud::presence::TickAction::Waiting => {}
             }
         }));
     }
 
-    /// Wait until no cloud presence tick is in flight. The slot stays
-    /// occupied while waiting, so a concurrent kick still skips (as in
-    /// production); a brief first sleep lets already-spawned kicks run.
+    /// Wait for all coalesced cloud presence work, including kicks at worker exit.
     #[cfg(test)]
     pub(crate) async fn await_cloud_presence(&self) {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         loop {
-            let running = self
-                .presence_task
-                .lock()
-                .await
-                .as_ref()
-                .is_some_and(|task| !task.is_finished());
-            if !running {
-                return;
-            }
+            if self.presence_pending.lock().expect("presence pending").is_none() { return; }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
@@ -1901,8 +1912,6 @@ impl EmbeddedDaemon {
     /// failures under SQLite lock contention can cause workers to be
     /// incorrectly marked stale in multi-agent factory sessions.
     async fn send_agent_heartbeat(&self) {
-        // Temporary L5 negative control: reinstate the reviewed duplicate kick.
-        self.kick_cloud_presence(String::new()).await;
         if let Ok(store) = open_agent_store(&self.config.cas_root) {
             // If we don't have an agent_id yet, try to adopt one by PID.
             // This handles the factory case where another daemon owns the

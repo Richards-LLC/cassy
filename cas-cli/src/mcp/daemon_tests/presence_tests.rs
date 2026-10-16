@@ -981,6 +981,9 @@ async fn cas_4ac8_round3_failed_unregister_real_start_is_new_incarnation() {
         &crate::hooks::HookInput {session_id: id.into(), ..Default::default()}, Some(&root)))
         .await.unwrap().unwrap();
     assert!(agents.get(id).is_ok(), "fixture must retain the failed-delete row");
+    let root = fx.cas_root.clone();
+    let result = tokio::task::spawn_blocking(move || crate::hooks::handlers::cleanup_agent_leases(&root, id)).await.unwrap();
+    assert!(result.is_none(), "unregister failure must be reported, not returned as successful cleanup");
     let resumed = daemon_for(&fx.cas_root);
     session_start(&resumed, id, "resuming").await;
     let current = agents.get(id).unwrap();
@@ -1004,6 +1007,7 @@ async fn cas_4ac8_round3_session_start_burst_keeps_pending_registrations() {
     }
     daemon.await_cloud_presence().await;
     let state = fx.cloud.state();
+    assert_eq!(state.registrations.len(), 3);
     for id in ["burst-one", "burst-two", "burst-three"] {
         assert!(state.agents.contains_key(id), "lost pending SessionStart for {id}");
     }

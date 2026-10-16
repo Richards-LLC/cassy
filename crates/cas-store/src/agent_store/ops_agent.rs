@@ -163,6 +163,11 @@ pub(crate) fn register_agent_with_conn(conn: &Connection, agent: &Agent) -> Resu
             cc_session_id = COALESCE(excluded.cc_session_id, agents.cc_session_id),
             parent_id = excluded.parent_id,
             machine_id = excluded.machine_id,
+            -- A failed SessionEnd delete can leave a shutdown row behind.
+            -- Only a harness SessionStart may advance that incarnation;
+            -- automatic MCP registration has no harness session id.
+            registered_at = CASE WHEN agents.status = 'shutdown' AND excluded.cc_session_id IS NOT NULL
+                THEN excluded.registered_at ELSE agents.registered_at END,
             last_heartbeat = excluded.last_heartbeat,
             active_tasks = excluded.active_tasks,
             metadata = excluded.metadata,

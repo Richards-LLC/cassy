@@ -128,9 +128,15 @@ at session startup and on its off-loop presence heartbeat, including when it has
 no owned active agent. If no daemon starts, cleanup waits for the next daemon.
 Intents are keyed by agent, harness session and registration timestamp. Presence
 requests share a nonblocking read lease; shutdown takes the exclusive lease.
-A resumed session with a newer registration supersedes older cleanup, including
-legacy intents, and its own SessionEnd creates separate cleanup. Startup replies
-without waiting for Cloud work.
+A resumed session with a newer registration and a matching harness session (or
+a different harness PID) supersedes older cleanup, including legacy intents, and
+its own SessionEnd creates separate cleanup. Automatic MCP reinsertion after
+`/clear` remains fenced when it has the same harness and no session id. Startup
+replies without waiting for Cloud work; concurrent startup requests coalesce by
+agent and are drained after the current presence pass. A retained shutdown row
+advances its registration timestamp only on a harness SessionStart. A resumed
+incarnation resets old presence backoff, and superseded cleanup disappears from
+health even before its scheduled retry.
 
 Shutdown, claim release and peer ACK retry HTTP 429 up to three attempts within
 five seconds (or a caller's shorter budget). `Retry-After` seconds and HTTP dates

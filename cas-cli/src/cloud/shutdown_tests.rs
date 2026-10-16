@@ -326,7 +326,24 @@ fn cas_4ac8_round3_scheduled_intent_is_superseded_before_due() {
     let mut resumed = ended_agent("resumed", "same");
     resumed.registered_at = Utc::now();
     open_agent_store(&root).unwrap().register(&resumed).unwrap();
-    assert!(health(&root, Utc::now()).is_empty(), "live resume must not show pending shutdown");
+    assert!(
+        health(&root, Utc::now()).is_empty(),
+        "live resume must not show pending shutdown"
+    );
     drain(&root, &client("http://example.invalid"), Utc::now()).unwrap();
     assert!(read(&file).unwrap().completed_at.is_some());
+}
+
+#[test]
+fn cas_4ac8_round3_only_a_new_harness_can_supersede_without_session_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut old = ended_agent("pid-bound", "same");
+    old.pid = Some(42);
+    super::enqueue(temp.path(), &old, "same", "http://example.invalid").unwrap();
+    let mut automatic = Agent::new(old.id.clone(), "automatic".into());
+    automatic.pid = Some(99);
+    automatic.ppid = Some(42);
+    assert!(is_ended(temp.path(), &automatic).unwrap());
+    automatic.ppid = Some(43);
+    assert!(!is_ended(temp.path(), &automatic).unwrap());
 }

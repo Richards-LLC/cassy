@@ -208,7 +208,11 @@ pub(crate) fn cleanup_agent_leases(
     let _ = agent_store.clear_working_epics(&agent.id);
 
     // Unregister the agent (delete from database)
-    let _ = agent_store.unregister(&agent.id);
+    if let Err(error) = agent_store.unregister(&agent.id) {
+        tracing::error!(agent_id = %agent.id, %error,
+            "SessionEnd unregister failed; durable cloud cleanup retained");
+        return None;
+    }
 
     if released_task_ids.is_empty() {
         return Some(released_task_ids);

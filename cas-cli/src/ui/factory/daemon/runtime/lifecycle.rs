@@ -3551,7 +3551,7 @@ impl FactoryDaemon {
             && (refresh.has_pending_deliverability()
                 || prompts
                     .iter()
-                    .any(crate::ui::factory::app::prompt_needs_fresh_recheck))
+                    .any(crate::ui::factory::app::prompt_needs_inject_read))
         {
             match refresh.start_deliverability_check(
                 &self.app,
@@ -3583,7 +3583,7 @@ impl FactoryDaemon {
                 &delivery_events,
                 refresh_started,
                 store_worker,
-                None,
+                Some(crate::ui::factory::app::AssignmentRead::NotAssignment),
             )
             .await;
         }

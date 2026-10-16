@@ -600,6 +600,7 @@ impl DirectorRefresh {
     pub(crate) fn start_director_read(&mut self, app: &FactoryApp, jobs: &mut QueueJobs) {
         self.poll(jobs);
         if self.director.busy() || self.delivery_busy() {
+            self.refresh_requested = true;
             return;
         }
         self.refresh_requested = false;

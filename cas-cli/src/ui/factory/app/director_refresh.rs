@@ -650,9 +650,8 @@ impl FactoryApp {
         // cas-4491f: the agents and the epic focus arrived with the snapshot
         // job; nothing here reads a store or a file.
         // Sync session_id → pane_name mappings from the registered agents.
-        let _ = load.all_agents.as_deref();
-        if let Ok(agents) = crate::store::open_agent_store(&self.cas_dir).and_then(|s| Ok(s.list(None)?)) {
-            timed("session mappings", || self.sync_session_mappings_from(&agents));
+        if let Some(agents) = load.all_agents.as_deref() {
+            timed("session mappings", || self.sync_session_mappings_from(agents));
         }
         if let Some(focus) = load.focus {
             timed("epic focus", || self.apply_epic_focus(focus));

@@ -43,7 +43,7 @@ pub(crate) mod task_dialog_load;
 pub(crate) use director_refresh::{
     timed as timed_refresh_step, DeliverabilityRequest, DeliveryInputs, DeliveryRequest,
     AssignmentRead, DirectorRefreshLoad, DirectorRefreshRequest, IdleLivenessMap,
-    IdleLivenessRequest, prompt_needs_fresh_recheck, prompt_needs_inject_read,
+    IdleLivenessRequest, prompt_needs_inject_read,
 };
 
 pub(crate) use branch_visibility::BranchAheadBehind;

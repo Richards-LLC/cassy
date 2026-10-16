@@ -126,7 +126,6 @@ pub(crate) struct RelayJobs {
     generation: u64,
     /// Job keys in flight, with when they were submitted.
     in_flight: HashMap<String, Instant>,
-    inline: Vec<RelayOutput>,
     /// Test hook: give up in-flight jobs after this.
     #[cfg(test)]
     pub(crate) timeout_override: Option<Duration>,
@@ -209,10 +208,9 @@ impl RelayJobs {
         let key = spec.key.clone();
         // Marked first: an inline runtime finishes the job inside submit.
         self.in_flight.insert(key.clone(), Instant::now());
-        let _ = (jobs, spec);
-        self.in_flight.remove(&key);
-        self.inline.push(work());
-        let submitted = Submitted::Queued;
+        let submitted = jobs.submit_external(spec, move || {
+            Box::new(work()) as Box<dyn std::any::Any + Send>
+        });
         match submitted {
             Submitted::Queued | Submitted::QueuedBehindKey | Submitted::QueuedDroppedOldest { .. } => true,
             refused => {
@@ -238,7 +236,7 @@ impl RelayJobs {
     /// (panicked, dropped, or timed out) free their keys.
     pub(crate) fn take(&mut self, jobs: &mut QueueJobs) -> Vec<RelayOutput> {
         jobs.apply_completions();
-        let mut outputs = std::mem::take(&mut self.inline);
+        let mut outputs = Vec::new();
         for result in jobs.take_external_completions_where(is_relay_kind) {
             if let Some(output) = self.accept(result) {
                 outputs.push(output);

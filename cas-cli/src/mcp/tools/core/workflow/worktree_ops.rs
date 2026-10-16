@@ -3545,6 +3545,7 @@ impl CasCore {
         // Carries the target-sync line from inside the merge branch out to the
         // receipt; empty when nothing needed reconciling.
         let mut reconcile_note = String::new();
+        let mut pushed_source_note = String::new();
         let merge_commit = if reconciled_delivery {
             crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
                 &cwd,
@@ -3619,7 +3620,31 @@ impl CasCore {
             }
             reconcile_note = describe_target_reconcile(&worktree.parent_branch, &reconcile);
 
-            let merge_result = if transactional_delivery.is_some() {
+            // A parked pushed ref is independent of the worker's next task.
+            // Only the preserving path may bypass the source checkout gate;
+            // exact origin/anchor agreement is verified inside the manager.
+            let parked_anchor = transactional_delivery.as_ref()
+                .map(|(receipt, _)| receipt.commit_sha.as_str())
+                .or_else(|| scoped_task.as_ref()
+                    .filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge)
+                    .and_then(|task| task.deliverables.factory_branch_anchor.as_deref()));
+            let dirty_pushed_anchor = if !force && !do_cleanup && source_worktree_live {
+                let dirty = manager.git().classify_dirty_status(&worktree.path)
+                    .map_err(|error| worktree_merge_mcp_error(error.into(), &worktree.branch, &worktree.parent_branch))?;
+                parked_anchor.filter(|_| dirty.is_blocked())
+            } else {
+                None
+            };
+            let merge_result = if let Some(anchor) = dirty_pushed_anchor {
+                let result = manager.merge_pushed_delivery_preserving_worktree(&mut worktree, anchor);
+                if result.is_ok() {
+                    pushed_source_note = format!(
+                        "\nSource: pushed ref origin/{} @ {anchor}; worker worktree left untouched (isolated merge, cleanup=false).",
+                        worktree.branch,
+                    );
+                }
+                result
+            } else if transactional_delivery.is_some() {
                 // Persisted delivery state must separate a successful Git
                 // merge from destructive cleanup.
                 manager.merge_preserving_worktree(&mut worktree, force, do_cleanup)
@@ -3985,6 +4010,7 @@ impl CasCore {
         };
 
         let cleanup_note = worktree_merge_cleanup_note(do_cleanup);
+        reconcile_note.push_str(&pushed_source_note);
 
         // cas-5ee0 (GH #137): resolve push state for the non-transactional
         // path (the transactional one already published, before its close).
@@ -4114,6 +4140,9 @@ impl CasCore {
                     "{ci_prefix}{trunk_notice}{ci_policy_notice}"
                 )),
             );
+            if !pushed_source_note.is_empty() {
+                close_result.content.push(Content::text(pushed_source_note));
+            }
             if !push_outcome.is_published() {
                 close_result.content.push(Content::text(push_note));
             }

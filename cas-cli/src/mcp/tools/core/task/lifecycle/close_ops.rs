@@ -21844,19 +21844,41 @@ pub(crate) fn run_declared_pre_close_hook(
         });
     let (execution_root, worktree_branch, task_tip, lint_parent) = match worker_worktree_path {
         Some(path) => {
-            let branch = git_branch_name(path).ok_or_else(|| {
+            let head_branch = git_branch_name(path).ok_or_else(|| {
                 "PRE-CLOSE HOOK CONTEXT REJECTED: task worktree has detached or unreadable HEAD"
                     .to_string()
             })?;
+            // cas-a7ed: a parked task is measured on its own delivery branch.
+            // While it awaits merge the worker's shared worktree may already
+            // be on its next task's per-task branch; that checkout is neither
+            // this task's evidence nor a history rewrite, and its tip is
+            // never offered as this task's receipt.
+            // A task that names no delivery branch keeps measuring HEAD.
+            let candidates = task_delivery_branch_candidates(task);
+            let own_ref: Option<String> = if task.status == TaskStatus::AwaitingMerge
+                && !candidates.is_empty()
+                && !candidates.contains(&head_branch)
+            {
+                task_delivery_branch(path, task)
+            } else {
+                Some("HEAD".to_string())
+            };
+            let measure_ref = own_ref.clone().unwrap_or_else(|| "HEAD".to_string());
+            let branch = if measure_ref == "HEAD" {
+                head_branch
+            } else {
+                measure_ref.trim_start_matches("origin/").to_string()
+            };
+            let own_tip = || own_ref.as_deref().and_then(|own| resolve_branch_sha(path, own));
             let parked_anchor = task.deliverables.factory_branch_anchor.as_deref();
             let mut reanchored = false;
             let tip = normalized_receipt
                 .clone()
                 .or_else(|| {
                     let anchor = parked_anchor?;
-                    let current_tip = resolve_branch_sha(path, "HEAD");
+                    let current_tip = resolve_branch_sha(path, &measure_ref);
                     let anchor_reachable = git_ref_exists(path, anchor)
-                        && git_commit_is_ancestor(path, anchor, "HEAD");
+                        && git_commit_is_ancestor(path, anchor, &measure_ref);
                     if anchor_reachable {
                         return Some(anchor.to_string());
                     }
@@ -21880,7 +21902,7 @@ pub(crate) fn run_declared_pre_close_hook(
                     }
                     Some(anchor.to_string())
                 })
-                .or_else(|| resolve_branch_sha(path, "HEAD"))
+                .or_else(|| resolve_branch_sha(path, &measure_ref))
                 .ok_or_else(|| {
                     "PRE-CLOSE HOOK CONTEXT REJECTED: cannot resolve task-owned commit tip"
                         .to_string()
@@ -21892,7 +21914,7 @@ pub(crate) fn run_declared_pre_close_hook(
                     return Err(stale_rebased_anchor_rejection(
                         &task.id,
                         anchor,
-                        resolve_branch_sha(path, "HEAD").as_deref(),
+                        own_tip().as_deref(),
                         &repo_context.target_branch,
                     ));
                 }
@@ -21908,7 +21930,7 @@ pub(crate) fn run_declared_pre_close_hook(
                     live_target_source,
                 ));
             }
-            let reachable_from_worktree = git_commit_is_ancestor(path, &tip, "HEAD");
+            let reachable_from_worktree = git_commit_is_ancestor(path, &tip, &measure_ref);
             let receipt_reachable_from_target =
                 normalized_receipt.as_deref().is_some_and(|receipt| {
                     target_contains(path, receipt)
@@ -21920,7 +21942,7 @@ pub(crate) fn run_declared_pre_close_hook(
                     return Err(stale_rebased_anchor_rejection(
                         &task.id,
                         anchor,
-                        resolve_branch_sha(path, "HEAD").as_deref(),
+                        own_tip().as_deref(),
                         &repo_context.target_branch,
                     ));
                 }
@@ -37459,6 +37481,68 @@ mod zero_change_close_tests {
         )
         .expect("local target merge must satisfy the local_merge pre-close hook");
         assert_eq!(evidence.task_tip.as_deref(), Some(anchor.as_str()));
+    }
+
+    /// cas-a7ed: a parked task `A` for worker `test-worker` whose delivery
+    /// lives on its per-task branch, with the shared worktree already
+    /// switched to the next task's per-task branch (as the factory flow
+    /// tells a worker to do while A awaits merge). Returns A and B's tip.
+    fn next_task_checkout_fixture_cas_a7ed(p: &Path, merge_a: bool) -> (Task, String, String) {
+        let mut task = Task::new("cas-a7ed-a".into(), "parked delivery".into());
+        task.assignee = Some("test-worker".into());
+        task.status = TaskStatus::AwaitingMerge;
+        let a_branch = crate::factory_isolation::worker_task_branch("test-worker", &task.id);
+        git(p, &["checkout", "-q", "-b", &a_branch, "main"]);
+        let anchor = commit_file(p, "a.rs", "feat(cas-a7ed-a): delivery A");
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        task.deliverables.parked_branch = Some(a_branch.clone());
+        git(p, &["checkout", "-q", "main"]);
+        let base = head_sha(p);
+        if merge_a {
+            git(p, &["merge", "--no-ff", "-q", &a_branch, "-m", "merge A"]);
+        }
+        let b_branch = crate::factory_isolation::worker_task_branch("test-worker", "cas-a7ed-b");
+        git(p, &["checkout", "-q", "-b", &b_branch, &base]);
+        let b_tip = commit_file(p, "b.rs", "feat(cas-a7ed-b): next task B");
+        (task, anchor, b_tip)
+    }
+
+    /// cas-a7ed AC1: re-closing merged task A while the worktree is on task
+    /// B's per-task branch measures A's own branch and passes, without a
+    /// branch switch.
+    #[test]
+    fn reclose_measures_the_tasks_own_branch_not_the_next_tasks_checkout_cas_a7ed() {
+        let dir = init_worker_repo();
+        let p = dir.path();
+        let (task, anchor, _b_tip) = next_task_checkout_fixture_cas_a7ed(p, true);
+        let evidence = run_declared_pre_close_hook(&task, &declared_main_context(p), Some(p), None, false)
+            .expect("a merged parked task re-closes from another task's checkout");
+        assert_eq!(evidence.task_tip.as_deref(), Some(anchor.as_str()));
+        assert_eq!(
+            evidence.worktree_branch.as_deref(),
+            Some(crate::factory_isolation::worker_task_branch("test-worker", &task.id).as_str())
+        );
+    }
+
+    /// cas-a7ed AC2/AC3: a genuine rewrite of A's own branch is still refused,
+    /// and the remediation names A's rewritten tip, never task B's tip.
+    #[test]
+    fn rewritten_own_branch_is_refused_without_naming_the_next_tasks_tip_cas_a7ed() {
+        let dir = init_worker_repo();
+        let p = dir.path();
+        let (task, anchor, b_tip) = next_task_checkout_fixture_cas_a7ed(p, false);
+        let a_branch = crate::factory_isolation::worker_task_branch("test-worker", &task.id);
+        // Rewrite A's branch: the anchor leaves every branch.
+        git(p, &["checkout", "-q", &a_branch]);
+        git(p, &["reset", "-q", "--hard", "main"]);
+        let rewritten = commit_file(p, "a2.rs", "feat(cas-a7ed-a): rewritten delivery");
+        git(p, &["checkout", "-q", crate::factory_isolation::worker_task_branch("test-worker", "cas-a7ed-b").as_str()]);
+        let error = run_declared_pre_close_hook(&task, &declared_main_context(p), Some(p), None, false)
+            .expect_err("a rewritten own branch must still be refused");
+        assert!(error.contains("history rewrite"), "{error}");
+        assert!(error.contains(&anchor), "{error}");
+        assert!(error.contains(&rewritten), "names A's own tip: {error}");
+        assert!(!error.contains(&b_tip), "never names another task's tip: {error}");
     }
 
     /// cas-f1f4 (GH #1087): commit `name` on the current branch of `dir`.

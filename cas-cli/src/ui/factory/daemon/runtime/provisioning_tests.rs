@@ -64,6 +64,7 @@ pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
         inbox_deferred_writes: std::collections::HashMap::new(),
         urgent_wake_probes: HashMap::new(),
         urgent_injects: Default::default(),
+        operator_refresh_requested: false,
         send_receipts: crate::ui::factory::daemon::runtime::send_dedupe::SendReceipts::default(),
         normal_delivery_probes: HashMap::new(),
         last_pane_output_bytes: HashMap::new(),

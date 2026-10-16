@@ -2198,6 +2198,7 @@ impl FactoryDaemon {
             inbox_deferred_writes: std::collections::HashMap::new(),
             urgent_wake_probes: HashMap::new(),
             urgent_injects: Default::default(),
+            operator_refresh_requested: false,
             send_receipts: crate::ui::factory::daemon::runtime::send_dedupe::SendReceipts::default(),
             normal_delivery_probes: HashMap::new(),
             last_pane_output_bytes: HashMap::new(),
@@ -2553,7 +2554,9 @@ impl FactoryDaemon {
             // Periodic Cassy data refresh
             loop_progress.enter(super::loop_watchdog::LoopPhase::Refresh);
             let mut refreshed = false;
-            let refresh_due = last_refresh.elapsed() >= refresh_interval;
+            // cas-786a6: Ctrl+R asks for the next snapshot now.
+            let refresh_due = last_refresh.elapsed() >= refresh_interval
+                || std::mem::take(&mut self.operator_refresh_requested);
             if refresh_due || director_refresh.has_finished(&mut self.queue_jobs) {
                 // Collect a completed GitHub Actions snapshot in the background.
                 // No supervisor action is required to notice a red run: the

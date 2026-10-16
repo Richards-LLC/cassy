@@ -879,3 +879,29 @@ async fn cas_4ac8_session_end_does_not_wait_for_slow_cloud() {
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
     assert!(crate::cloud::peers::presence_line(&fx.cas_root, None).contains("shutdown pending"));
 }
+
+#[tokio::test]
+async fn cas_4ac8_session_start_replies_before_slow_cleanup() {
+    use wiremock::matchers::{method, path};
+    let (fx, daemon) = fixture("cas-571d").await;
+    session_start(&daemon, "ending-fast-reply", "ending").await;
+    daemon.await_cloud_presence().await;
+    Mock::given(method("POST"))
+        .and(path("/api/agents/ending-fast-reply/shutdown"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"released_locks": 0}))
+            .set_delay(std::time::Duration::from_secs(1)))
+        .with_priority(1).expect(1).mount(&fx._server).await;
+    let root = fx.cas_root.clone();
+    tokio::task::spawn_blocking(move || crate::hooks::handlers::handle_session_end(
+        &crate::hooks::HookInput {session_id: "ending-fast-reply".into(), ..Default::default()}, Some(&root)))
+        .await.unwrap().unwrap();
+    let started = std::time::Instant::now();
+    // Use the real handler without the fixture helper's eventual-cloud wait.
+    daemon.handle_socket_event(DaemonEvent::SessionStart {
+        session_id: "successor-fast-reply".into(), agent_name: Some("successor".into()),
+        agent_role: Some("supervisor".into()), cc_pid: our_cc_pid(), clone_path: None,
+    }).await;
+    assert!(started.elapsed() < std::time::Duration::from_millis(500), "reply waited {:?}", started.elapsed());
+    daemon.await_cloud_presence().await;
+    assert_eq!(fx.cloud.state().registrations.len(), 2);
+}

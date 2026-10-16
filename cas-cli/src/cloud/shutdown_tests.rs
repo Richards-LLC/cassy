@@ -168,3 +168,77 @@ fn cas_4ac8_shutdown_health_footer() {
         include_str!("../../../docs/design/cli/cloud-shutdown.capture.txt")
     );
 }
+
+#[tokio::test]
+async fn cas_4ac8_resume_same_session_supersedes_pending_completed_and_expired() {
+    let env = TestEnvGuard::temp_home();
+    let root = init_cas_dir(env.home()).unwrap();
+    let server = MockServer::start().await;
+    for state in ["pending", "completed", "expired"] {
+        enqueue(&root, state, "same-session", &server.uri()).unwrap();
+        let file = path(&root, state, "same-session");
+        let mut intent = read(&file).unwrap();
+        if state == "completed" { intent.completed_at = Some(Utc::now()); }
+        if state == "expired" { intent.expires_at = Utc::now() - chrono::Duration::seconds(1); }
+        write(&file, &intent, false).unwrap();
+        let mut resumed = Agent::new(state.into(), state.into());
+        resumed.cc_session_id = Some("same-session".into());
+        resumed.registered_at = intent.created_at + chrono::Duration::seconds(1);
+        open_agent_store(&root).unwrap().register(&resumed).unwrap();
+        assert!(!is_ended(&root, &resumed), "{state} must allow a newer incarnation");
+    }
+    drain(&root, &client(&server.uri()), Utc::now()).unwrap();
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(health(&root, Utc::now()).is_empty());
+}
+
+#[test]
+fn cas_4ac8_presence_readers_share_lease_and_exclude_drain() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = presence_lease(temp.path()).unwrap().unwrap();
+    let second = presence_lease(temp.path()).unwrap();
+    assert!(second.is_some(), "different presence readers must run concurrently");
+    let exclusive = OpenOptions::new().read(true).write(true)
+        .open(temp.path().join(DIR).join("drain.lock")).unwrap();
+    assert!(exclusive.try_lock_exclusive().is_err());
+    drop(first); drop(second);
+    exclusive.try_lock_exclusive().unwrap();
+    assert!(presence_lease(temp.path()).unwrap().is_none());
+}
+
+#[test]
+fn cas_4ac8_completed_only_drain_needs_no_lease_or_store() {
+    let env = TestEnvGuard::temp_home();
+    let root = env.home();
+    enqueue(root, "ended", "session", "http://example.invalid").unwrap();
+    let file = path(root, "ended", "session");
+    let mut intent = read(&file).unwrap();
+    intent.completed_at = Some(Utc::now());
+    write(&file, &intent, false).unwrap();
+    drain(root, &client("http://example.invalid"), Utc::now()).unwrap();
+    assert!(!root.join(DIR).join("drain.lock").exists());
+}
+
+#[test]
+fn cas_4ac8_unreadable_intent_reports_io_error() {
+    let env = TestEnvGuard::temp_home();
+    let root = env.home();
+    let mut agent = Agent::new("ended".into(), "ended".into());
+    agent.cc_session_id = Some("session".into());
+    let file = path(root, "ended", "session");
+    std::fs::create_dir_all(&file).unwrap();
+    let outcome = crate::cloud::presence::tick(&client("http://example.invalid"), root, &agent, Utc::now());
+    assert!(matches!(outcome, crate::cloud::presence::TickAction::Failed(ref cause) if cause.contains("shutdown intent")), "{outcome:?}");
+}
+
+#[test]
+fn cas_4ac8_retry_after_is_capped_for_seconds_and_http_dates() {
+    for value in ["86400".to_string(), u64::MAX.to_string(),
+        (Utc::now() + chrono::Duration::days(365)).to_rfc2822()] {
+        // Response construction from raw HTTP retains the real header parser.
+        let raw = format!("HTTP/1.1 429 Too Many Requests\r\nRetry-After: {value}\r\nContent-Length: 0\r\n\r\n");
+        let response: ureq::Response = raw.parse().unwrap();
+        assert_eq!(rate_limit::retry_after(&response), Some(std::time::Duration::from_secs(900)), "{value}");
+        drop(response);
+    }
+}

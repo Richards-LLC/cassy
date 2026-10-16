@@ -154,6 +154,9 @@ impl SpawnIngress {
                     return Box::new(());
                 }
                 let result = poll_spawn_queue(&request);
+                if let Err(error) = &result {
+                    tracing::error!(%error, "cas-2702: spawn queue poll failed");
+                }
                 let mut handoff = state.lock().unwrap();
                 if let Some(reason) = handoff.cancelled {
                     drop(handoff);
@@ -364,6 +367,41 @@ struct WakeInputs {
     unknown_fallback: bool,
 }
 
+struct WakeReadOutcome {
+    inputs: Result<WakeInputs, String>,
+    unknown: WakeInputs,
+}
+
+fn unknown_wake_inputs(recipients: &HashSet<String>, captured_at: Instant) -> WakeInputs {
+    let until = chrono::Utc::now()
+        + chrono::Duration::from_std(super::queue_and_events::CLAUDE_FIRST_PROMPT_GRACE).unwrap();
+    WakeInputs {
+        agents: vec![],
+        recipients: recipients
+            .iter()
+            .map(|name| {
+                (
+                    name.clone(),
+                    RecipientInputs {
+                        latest: Default::default(),
+                        tool_call: ToolCallEvidence::Unknown,
+                        has_transcript: false,
+                        wait: WorkerWaitState {
+                            harness_waiting_for_input: false,
+                            task_blocked: false,
+                        },
+                        active_until: None,
+                        first_prompt_until: Some(until),
+                    },
+                )
+            })
+            .collect(),
+        captured_at,
+        worker_wait_loaded: false,
+        unknown_fallback: true,
+    }
+}
+
 /// Owns the raw batch until its off-loop evidence is ready. All batches pass
 /// here, including claim-only batches reconstructed from carried RowFacts.
 #[derive(Default)]
@@ -375,6 +413,7 @@ pub(crate) struct PromptPreparation {
     ready: Option<WakeInputs>,
     current: Option<WakeInputs>,
     unusable_reads: u8,
+    fallback: Option<WakeInputs>,
     #[cfg(test)]
     pub(crate) read_delay: Duration,
 }
@@ -390,17 +429,13 @@ impl PromptPreparation {
         })
     }
 
-    fn take_usable(
-        &mut self,
-        workers: &[String],
-        supervisor: &str,
-        now: Instant,
-    ) -> Option<QueueSelection> {
+    fn take_usable(&mut self, now: Instant) -> Option<QueueSelection> {
         if let Some(inputs) = self.ready.take() {
             if now.saturating_duration_since(inputs.captured_at) <= WAKE_MAX_AGE {
                 let mut selection = self.pending.take()?;
                 selection.registered_agents = inputs.agents.clone();
                 self.current = Some(inputs);
+                self.fallback = None;
                 self.unusable_reads = 0;
                 return Some(selection);
             }
@@ -410,45 +445,16 @@ impl PromptPreparation {
             return None;
         }
         let selection = self.pending.take()?;
-        let mut recipients = HashMap::new();
-        let until = chrono::Utc::now()
-            + chrono::Duration::from_std(super::queue_and_events::CLAUDE_FIRST_PROMPT_GRACE)
-                .unwrap();
-        for row in &selection.rows {
-            let names = if row.target == "all_workers" {
-                workers.to_vec()
-            } else if row.target == "supervisor" {
-                vec![supervisor.to_owned()]
-            } else {
-                vec![row.target.clone()]
-            };
-            for name in names {
-                recipients.insert(
-                    name,
-                    RecipientInputs {
-                        latest: Default::default(),
-                        tool_call: ToolCallEvidence::Unknown,
-                        has_transcript: false,
-                        wait: WorkerWaitState {
-                            harness_waiting_for_input: false,
-                            task_blocked: false,
-                        },
-                        active_until: None,
-                        first_prompt_until: Some(until),
-                    },
-                );
-            }
-        }
-        // Unavailable evidence is not sender authority or proof of silence.
-        // Retain the selection's roster for routing, but grant no registered
-        // sender privileges from an unreadable or old wake snapshot.
-        self.current = Some(WakeInputs {
+        // The job prepared Unknown observations as well as its read result.
+        // Releasing an unusable batch does no store/transcript work on control
+        // and grants no registered sender privileges from stale evidence.
+        self.current = Some(self.fallback.take().unwrap_or(WakeInputs {
             agents: vec![],
-            recipients,
+            recipients: HashMap::new(),
             captured_at: now,
             worker_wait_loaded: false,
             unknown_fallback: true,
-        });
+        }));
         self.unusable_reads = 0;
         tracing::warn!(
             "wake inputs unavailable after 3 attempts; releasing batch with Unknown evidence"
@@ -520,7 +526,7 @@ impl PromptPreparation {
             self.unusable_reads = 0;
             self.pending = Some(selection);
         }
-        if let Some(selection) = self.take_usable(&workers, &supervisor, now) {
+        if let Some(selection) = self.take_usable(now) {
             return Some(selection);
         }
         if self.pending.is_none()
@@ -577,7 +583,10 @@ impl PromptPreparation {
                     captured_at,
                 );
                 super::delivery::wake_daemon_after_enqueue(&cas_dir);
-                Box::new(inputs)
+                Box::new(WakeReadOutcome {
+                    inputs,
+                    unknown: unknown_wake_inputs(&recipients, captured_at),
+                })
             },
         );
         if matches!(
@@ -594,7 +603,7 @@ impl PromptPreparation {
         self.last_submitted = Some(now);
         jobs.apply_completions();
         self.collect(jobs);
-        self.take_usable(&workers, &supervisor, Instant::now())
+        self.take_usable(Instant::now())
     }
 
     fn collect(&mut self, jobs: &mut QueueJobs) {
@@ -605,18 +614,19 @@ impl PromptPreparation {
             self.in_flight = None;
             self.unusable_reads = self.unusable_reads.saturating_add(1);
             match result.outcome {
-                Ok(ExternalOutcome::Done(value)) => match value
-                    .downcast::<Result<WakeInputs, String>>()
-                {
-                    Ok(value) => match *value {
-                        Ok(inputs) => {
-                            self.unusable_reads = self.unusable_reads.saturating_sub(1);
-                            self.ready = Some(inputs);
+                Ok(ExternalOutcome::Done(value)) => match value.downcast::<WakeReadOutcome>() {
+                    Ok(value) => {
+                        self.fallback = Some(value.unknown);
+                        match value.inputs {
+                            Ok(inputs) => {
+                                self.unusable_reads = self.unusable_reads.saturating_sub(1);
+                                self.ready = Some(inputs);
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "prompt wake inputs unavailable; retaining batch")
+                            }
                         }
-                        Err(error) => {
-                            tracing::warn!(%error, "prompt wake inputs unavailable; retaining batch")
-                        }
-                    },
+                    }
                     Err(_) => tracing::error!("invalid prompt wake input result; retaining batch"),
                 },
                 _ => tracing::warn!("prompt wake input job did not complete; retaining batch"),

@@ -9668,10 +9668,7 @@ impl FactoryDaemon {
         let Some(batch) = ready else {
             return Ok(());
         };
-        let batch = batch.map_err(|error| {
-            tracing::error!(%error, "cas-2702: spawn queue poll failed");
-            anyhow::anyhow!("{error}")
-        })?;
+        let batch = batch.map_err(|error| anyhow::anyhow!("{error}"))?;
         for (id, _) in batch.stalled {
             self.reported_stalled_spawn_requests.insert(id);
         }

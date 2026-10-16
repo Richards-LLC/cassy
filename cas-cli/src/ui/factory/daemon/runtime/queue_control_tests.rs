@@ -18,6 +18,81 @@ fn cas_7b6b_round2_park_uses_prepared_evidence_under_c6_enforcement() {
     );
 }
 
+#[test]
+fn cas_7b6b_round2_spawn_request_is_built_only_when_submission_is_possible() {
+    use super::super::queue_control_jobs::{SpawnIngress, SpawnPollRequest};
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let writer = super::super::prompt_queue_jobs::tests::TestWriter::start(true);
+    let mut jobs = super::super::prompt_queue_jobs::tests::jobs_on(&writer);
+    let mut ingress = SpawnIngress::default();
+    let mut builds = 0;
+    for _ in 0..8 {
+        ingress.advance(
+            &mut jobs,
+            || {
+                builds += 1;
+                SpawnPollRequest {
+                    cas_dir: root.clone(),
+                    session: "s".into(),
+                    supervisor: "lead".into(),
+                    scan_stalls: false,
+                    reported: Default::default(),
+                }
+            },
+            Instant::now(),
+        );
+    }
+    assert_eq!(
+        builds, 1,
+        "held poll must not clone inputs on every control pass"
+    );
+    ingress.cancel(&mut jobs, "test shutdown", true);
+    writer.open();
+    assert!(jobs.drain_for_shutdown(&root, Duration::from_secs(5)));
+}
+
+#[test]
+fn cas_7b6b_round2_spawn_poll_failure_keeps_cas2702_error_diagnostic() {
+    #[derive(Clone)]
+    struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+    let id = queue
+        .enqueue_spawn(1, &[], false, None, Some("provision-test"), None)
+        .unwrap();
+    let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+    conn.execute("UPDATE spawn_queue SET action=x'00' WHERE id=?", [id])
+        .unwrap();
+    let mut daemon = super::super::provisioning_tests::daemon(&root);
+    let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::ERROR)
+        .with_writer(move || Capture(sink.clone()))
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        assert!(daemon.enqueue_spawn_requests().is_err())
+    });
+    let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(
+        log.contains("ERROR") && log.contains("cas-2702"),
+        "poll failures remain visible: {log}"
+    );
+}
+
 fn unusable_read_fixture() -> (
     tempfile::TempDir,
     std::path::PathBuf,

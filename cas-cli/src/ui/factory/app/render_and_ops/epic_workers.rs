@@ -860,9 +860,10 @@ fn prefer_fresher_base_ref(
     if !ref_exists(repo_root, base) || !ref_exists(repo_root, &remote) {
         return (None, None);
     }
-    let local_sha = short_sha(repo_root, base);
-    let remote_sha = short_sha(repo_root, &remote);
-    if local_sha == remote_sha && local_sha != "unknown" {
+    let (Some(local_sha), Some(remote_sha)) = (full_sha(repo_root, base), full_sha(repo_root, &remote)) else {
+        return (None, None);
+    };
+    if local_sha == remote_sha {
         return (None, None);
     }
 
@@ -875,8 +876,8 @@ fn prefer_fresher_base_ref(
             let git = crate::worktree::GitOperations::new(repo_root.to_path_buf());
             let advance = git.advance_local_branch(
                 base,
-                &full_sha(repo_root, base).expect("resolved local base"),
-                &full_sha(repo_root, &remote).expect("resolved remote base"),
+                &local_sha,
+                &remote_sha,
             );
             let state = match advance {
                 Ok(()) => "The local branch was fast-forwarded to the fetched tip.".to_string(),

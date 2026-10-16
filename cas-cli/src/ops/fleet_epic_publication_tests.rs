@@ -201,3 +201,52 @@ fn cas_bfa1_focus_creates_missing_local_lane_at_base() {
         );
     });
 }
+
+#[test]
+fn cas_bfa1_dirty_checkout_and_unreachable_origin_are_preserved() {
+    with_fixture(|repo, origin, root, _| {
+        git(repo, &["checkout", "epic/unpublished"]);
+        let old = git(repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("base"), "uncommitted work").unwrap();
+        let receipt = focus(root);
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), old);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("base")).unwrap(),
+            "uncommitted work"
+        );
+        assert!(
+            git(
+                origin,
+                &[
+                    "ls-remote",
+                    "--heads",
+                    origin.to_str().unwrap(),
+                    "refs/heads/epic/unpublished"
+                ]
+            )
+            .is_empty()
+        );
+        assert!(
+            receipt.contains("UNVERIFIED") && receipt.contains("tracked changes"),
+            "{receipt}"
+        );
+    });
+    with_fixture(|repo, _, root, _| {
+        let old = git(repo, &["rev-parse", "epic/unpublished"]);
+        git(
+            repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "/nonexistent/cas-bfa1-origin.git",
+            ],
+        );
+        let receipt = focus(root);
+        assert_eq!(git(repo, &["rev-parse", "epic/unpublished"]), old);
+        assert!(
+            receipt.contains("UNVERIFIED") && receipt.contains("origin presence"),
+            "{receipt}"
+        );
+    });
+}

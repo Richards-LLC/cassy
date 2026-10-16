@@ -993,8 +993,8 @@ fn enqueue_spawn_warning_notice(
             "director", supervisor_name, &message, Some(factory_session), Some(&summary),
             None, &format!("spawn-base-refreshed:{identity}"), Some(&cas_store::QueueOrigin::Daemon),
         )? {
-            cas_store::EnqueueIdempotentResult::Created(id)
-            | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+            cas_store::EnqueueIdempotentResult::Created(id) => id,
+            cas_store::EnqueueIdempotentResult::AlreadyExists(id) => return Ok(id),
         }
     } else {
         queue.enqueue_with_summary("director", supervisor_name, &message, Some(factory_session), Some(&summary))?

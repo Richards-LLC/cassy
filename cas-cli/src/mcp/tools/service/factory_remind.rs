@@ -2,7 +2,9 @@ use crate::mcp::tools::service::imports::*;
 
 const EXTERNAL_BRANCH_CONTAINED_EVENT: &str = "branch_contained_in";
 const EXTERNAL_TAG_EXISTS_EVENT: &str = "tag_exists";
-use crate::ui::factory::daemon::runtime::ci_watch::EXTERNAL_CI_COMPLETED_EVENT;
+use crate::ui::factory::daemon::runtime::ci_watch::{
+    EXTERNAL_CI_COMPLETED_EVENT, external_filter_string,
+};
 
 /// GH #1208: default lifetime of an external (`branch_contained_in`,
 /// `tag_exists`, `ci_completed`) reminder when `remind_ttl_secs` is omitted.
@@ -42,21 +44,6 @@ fn is_external_reminder_event(event_type: &str) -> bool {
         event_type,
         EXTERNAL_BRANCH_CONTAINED_EVENT | EXTERNAL_TAG_EXISTS_EVENT | EXTERNAL_CI_COMPLETED_EVENT
     )
-}
-
-fn external_filter_string(
-    filter: &serde_json::Value,
-    names: &[&str],
-) -> Option<String> {
-    let object = filter.as_object()?;
-    names.iter().find_map(|name| {
-        object
-            .get(*name)
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
-            .map(str::to_string)
-    })
 }
 
 /// GH #1207: the `remind_filter` contract of one external event. `required`

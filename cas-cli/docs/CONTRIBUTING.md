@@ -12,6 +12,34 @@ This key is operator-only and defaults to `true`. It controls automatic
 supervisor reply capture; terminal questions and explicit messages addressed
 to the operator continue to be recorded. Existing conversation history is retained.
 
+## Coordination messages and reminders
+
+Message bodies default to 1,200 characters, or 2,500 for blocker and merge
+requests; task note bodies default to 1,500. These limits are configurable via
+`factory.message_max_chars`, `factory.message_max_chars_escalation` and
+`factory.note_max_chars`. An over-limit supervisor message to an agent spills
+to an artifact. Messages to `operator` or `commander:<label>` are refused when
+over the limit; publish the longer content as an artifact and send its reference.
+
+External event reminders require `cross_session=true` and a JSON `remind_filter`:
+
+| Event | Filter example |
+| --- | --- |
+| `branch_contained_in` | `{"commit":"<sha-or-ref>","target_branch":"main"}` |
+| `tag_exists` | `{"tag":"v1.0.0"}` |
+| `ci_completed` | `{"sha":"<full-40-character-sha>","workflow":"CI"}` |
+
+For branch containment, `branch_tip`, `branch` and `sha` are aliases of `commit`;
+`target` is an alias of `target_branch`. Creation and execution both select the
+first nonempty string without internal whitespace, in that order. A malformed
+preferred field does not hide a usable alias. Remote target spellings such as
+`origin/main` normalize to `main`. For CI reminders, `workflow` is optional;
+omit it to wait for all runs for that full SHA. Local events such as
+`task_completed` accept subset filters, for example `{"task_id":"cas-1234"}`.
+
+`remind_ttl_secs` defaults to 3,600 seconds for time and local-event reminders,
+and 604,800 seconds (7 days) for external events. Explicit `0` means no expiry.
+
 ## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client

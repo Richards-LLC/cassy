@@ -1663,7 +1663,7 @@ mod worker_attention_tests {
     }
 
     #[test]
-    fn lifecycle_recovery_missing_and_shutdown_recipient_preserve_relay_policy() {
+    fn lifecycle_recovery_missing_and_shutdown_recipient_route_to_operator() {
         let _env = crate::test_support::TestEnvGuard::with_vars(&[
             ("CAS_FACTORY_SESSION", "recovery-unknown"),
             ("CAS_FACTORY_SUPERVISOR_CLI", "codex"),
@@ -1674,17 +1674,14 @@ mod worker_attention_tests {
             worker: "gold-fox".into(),
             active_task: None,
         };
-        assert_eq!(
+        assert!(matches!(
             enqueue_worker_attention_relay(&cas_dir, &event),
-            WorkerAttentionRelayOutcome::Pending
-        );
-        assert!(
-            crate::store::open_prompt_queue_store(&cas_dir)
-                .unwrap()
-                .peek_all(10)
-                .unwrap()
-                .is_empty()
-        );
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        let initial = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].target, "operator");
+        assert_eq!(initial[0].factory_session.as_deref(), Some("recovery-unknown"));
         register_supervisor(&cas_dir, "recovery-unknown");
         let agents = crate::store::open_agent_store(&cas_dir).unwrap();
         let mut supervisor = agents.get("supervisor-id").unwrap();
@@ -1693,8 +1690,8 @@ mod worker_attention_tests {
             .metadata
             .insert("supervisor_cli".into(), "unknown".into());
         agents.update(&supervisor).unwrap();
-        // Owning-supervisor resolution already retains shutdown rows as the
-        // last candidate. Rendering must neither drop nor authorize that row.
+        // A newly registered but shutdown row cannot capture the same event;
+        // the operator fallback is idempotent and remains harness-neutral.
         assert!(matches!(
             enqueue_worker_attention_relay(&cas_dir, &event),
             WorkerAttentionRelayOutcome::Persisted { .. }
@@ -1704,6 +1701,7 @@ mod worker_attention_tests {
             .peek_all(10)
             .unwrap();
         assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "operator");
         assert!(
             rows[0]
                 .prompt

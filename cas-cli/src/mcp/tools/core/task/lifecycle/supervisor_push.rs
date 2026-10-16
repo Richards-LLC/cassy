@@ -633,7 +633,13 @@ fn lifecycle_notice_owner(
         return None;
     }
     let recipient = resolve_notice_recipient(agents, session);
-    Some((OwningSupervisor { agent_id: recipient.id.clone(), name: recipient.name.clone() }, recipient))
+    Some((
+        OwningSupervisor {
+            agent_id: recipient.id.clone(),
+            name: recipient.name.clone(),
+        },
+        recipient,
+    ))
 }
 
 /// The supervisor name a factory session's metadata file records, if any.
@@ -811,7 +817,8 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
     branch_tip: Option<&str>,
 ) -> Result<LifecyclePushResult, String> {
     let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
-    let Some((supervisor, recipient)) = lifecycle_notice_owner(agent_store, factory_session.as_deref())
+    let Some((supervisor, recipient)) =
+        lifecycle_notice_owner(agent_store, factory_session.as_deref())
     else {
         return Ok(LifecyclePushResult::NoSupervisor);
     };
@@ -1257,7 +1264,9 @@ fn deliver_lifecycle_outbox_row_with_agents(
     // immediately before admitting the prompt, including legacy outbox rows.
     let recipient = match agents {
         Some(agents) => Some(crate::supervisor_notices::resolve(
-            &agents.list(None).map_err(|e| format!("lifecycle recipient registry unavailable: {e}"))?,
+            &agents
+                .list(None)
+                .map_err(|e| format!("lifecycle recipient registry unavailable: {e}"))?,
             payload.get("supervisor_name").and_then(|v| v.as_str()),
             factory_session,
         )),
@@ -1278,7 +1287,15 @@ fn deliver_lifecycle_outbox_row_with_agents(
         factory_session,
         occurrence_id,
         branch_tip,
-        recipient.as_ref().map(|r| r.name.as_str()).unwrap_or_else(|| payload.get("recipient_target").and_then(|v| v.as_str()).unwrap_or("supervisor")),
+        recipient
+            .as_ref()
+            .map(|r| r.name.as_str())
+            .unwrap_or_else(|| {
+                payload
+                    .get("recipient_target")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("supervisor")
+            }),
         match recipient.as_ref() {
             Some(recipient) => recipient.session.as_deref(),
             None => match payload.get("recipient_factory_session") {

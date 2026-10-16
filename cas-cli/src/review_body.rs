@@ -4,9 +4,6 @@ use cas_types::Task;
 use std::path::Path;
 use std::process::Command;
 
-/// Red-first stub (cas-8b0e).
-const CAS_8B0E_RED_STUB: bool = true;
-
 const TEMPLATE: &str = include_str!("../../docs/review/pr-body.md");
 
 pub(crate) struct ReviewBody<'a> {
@@ -93,9 +90,6 @@ pub(crate) fn task_evidence(task: &Task) -> String {
 
 /// cas-8b0e: the worker return contract's `proof:` and `ci:` lines.
 pub(crate) fn contract_evidence(message: &str) -> Vec<String> {
-    if CAS_8B0E_RED_STUB {
-        return Vec::new();
-    }
     message
         .lines()
         .filter_map(|line| {
@@ -124,9 +118,6 @@ pub(crate) fn merge_request_review(
     head: &str,
     worker_message: &str,
 ) -> String {
-    if CAS_8B0E_RED_STUB {
-        return delivery_body(repo, Some(task), base, head, None, None, None).unwrap_or_default();
-    }
     let (summary, details) = match delivery_summary(repo, base, head) {
         Ok(summary) => (summary, String::new()),
         Err(error) => (

@@ -1425,7 +1425,15 @@ impl SqlitePromptQueueStore {
             } else { None };
             if let Some((task_id, status)) = terminal {
                 let detail = format!("lifecycle relay for {task_id} superseded by terminal task state {status} at recipient drain");
-                Self::atomic_stage_stamp_in_tx(tx, prompt.id, DeliveryStage::Suppressed,
+                // A transported/polled row already reached a sibling terminal
+                // rank. Retain that forensic stage; only an early-stage row
+                // can advance to Suppressed. The acknowledgement below retires
+                // replay eligibility without inventing a delivery transition.
+                let stage = Self::read_highest_stage(tx, prompt.id)?;
+                let stage = if stage.rank() >= DeliveryStage::Suppressed.rank() {
+                    stage
+                } else { DeliveryStage::Suppressed };
+                Self::atomic_stage_stamp_in_tx(tx, prompt.id, stage,
                     AtomicStampOpts {
                         reason: Some(PendingReason::SupersededStale), detail: Some(&detail), set_processed: true,
                         broadcast_attempted: None, broadcast_succeeded: None, broadcast_failed: None,

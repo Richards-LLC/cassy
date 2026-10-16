@@ -368,8 +368,12 @@ fn agent_and_event_reads_stay_in_budget_while_the_connection_is_held_cas_ee9ab()
 /// reminder pass on the loop stays under the #1165 pass limit. Before the fix
 /// it ran one `git fetch` per reminder inline, here at least 5 × 400 ms. The
 /// fetches still happen, on the scanner thread, and their failures back off.
+///
+/// spec-4c5b §7 gate test (C2, cas-223f): the pass touches no store at all.
+/// Reminder expiry, the due read and firing run as a `ReminderScan` job on
+/// the write lane, and a due time reminder still fires.
 #[tokio::test]
-async fn reminder_pass_never_waits_for_external_git_fetches() {
+async fn flv2_external_reminders_never_on_lane() {
     const EXTERNAL_REMINDERS: usize = 5;
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
@@ -412,15 +416,62 @@ async fn reminder_pass_never_waits_for_external_git_fetches() {
             .unwrap();
     }
 
+    // A time reminder whose owner has shut down falls back to this
+    // factory's supervisor, so it has a recipient without a director read.
+    let mut gone = cas_types::Agent::new("gone".into(), "gone-worker".into());
+    agents.register(&gone).unwrap();
+    gone.status = cas_types::AgentStatus::Shutdown;
+    agents.update(&gone).unwrap();
+    let due = reminders
+        .create_with_scope(
+            "gone",
+            None,
+            "due now",
+            cas_store::ReminderTriggerType::Time,
+            Some(chrono::Utc::now() - chrono::Duration::minutes(1)),
+            None,
+            None,
+            0,
+            None,
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+
     let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    // Real job lanes: the fixture runs queue jobs inline, on this thread.
+    daemon.queue_jobs =
+        super::prompt_queue_jobs::QueueJobs::start(cas_dir.clone(), daemon.app.project_scope());
     assert_eq!(daemon.app.project_path(), project);
+    let violations = wait_budget::store_access_violations();
     let started = Instant::now();
-    daemon.process_reminders(&[]);
+    {
+        let _forbid = wait_budget::forbid_store_access();
+        daemon.process_reminders(&[]);
+    }
     let pass = started.elapsed();
     assert!(
         pass < PASS_LATENCY_LIMIT,
         "reminders step took {pass:?} with {EXTERNAL_REMINDERS} pending external reminders"
     );
+    assert_eq!(
+        wait_budget::store_access_violations(),
+        violations,
+        "the reminder pass read the store on the loop: {:?}",
+        wait_budget::last_store_access_violation()
+    );
+    // The due time reminder fires from the ReminderScan job.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while reminders
+        .get_due_time_reminders()
+        .unwrap()
+        .iter()
+        .any(|reminder| reminder.id == due)
+    {
+        assert!(Instant::now() < deadline, "the due reminder never fired");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
     // The scan ran off the loop: every branch was fetched, failed, and is
     // now backing off. No condition was true, so nothing fired.
@@ -438,8 +489,12 @@ async fn reminder_pass_never_waits_for_external_git_fetches() {
 
     // A second pass inside the interval neither waits nor starts a scan.
     let started = Instant::now();
-    daemon.process_reminders(&[]);
+    {
+        let _forbid = wait_budget::forbid_store_access();
+        daemon.process_reminders(&[]);
+    }
     assert!(started.elapsed() < PASS_LATENCY_LIMIT);
+    assert_eq!(wait_budget::store_access_violations(), violations);
     assert!(daemon.external_wake.wait_for_scan(Duration::ZERO).is_none());
 }
 

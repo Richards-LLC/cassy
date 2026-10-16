@@ -2205,6 +2205,7 @@ impl FactoryDaemon {
             spawn_cancellation: None,
             last_spawn_queue_stall_scan: None,
             external_wake: Default::default(),
+            reminder_scan_generation: 0,
             pending_ci_wakes: Vec::new(),
             reported_stalled_spawn_requests: std::collections::HashSet::new(),
         })
@@ -2402,8 +2403,12 @@ impl FactoryDaemon {
         // spot run on one ordered background thread, and the task-sync repair
         // the cached task store skips on open runs on its own schedule.
         let store_worker = super::store_worker::global();
-        // cas-ee9ab: the refresh's store reads, on their own thread.
+        // cas-ee9ab / cas-223f: the refresh's store reads, health probes and
+        // re-checks run as jobs on the daemon's one job runtime (the queue's),
+        // never on this loop. Stall confirmation asks for probes instead of
+        // running them.
         let mut director_refresh = super::director_refresh::DirectorRefresh::new();
+        self.app.set_deferred_worker_health_probes(true);
         let _task_sync_reconcile = super::store_worker::spawn_task_sync_reconcile(
             self.app.cas_dir().to_path_buf(),
             Arc::clone(&self.shutdown),
@@ -2537,7 +2542,7 @@ impl FactoryDaemon {
             loop_progress.enter(super::loop_watchdog::LoopPhase::Refresh);
             let mut refreshed = false;
             let refresh_due = last_refresh.elapsed() >= refresh_interval;
-            if refresh_due || director_refresh.has_finished() {
+            if refresh_due || director_refresh.has_finished(&mut self.queue_jobs) {
                 // Collect a completed GitHub Actions snapshot in the background.
                 // No supervisor action is required to notice a red run: the
                 // completed result below becomes a lifecycle-wake relay.
@@ -3056,6 +3061,38 @@ impl FactoryDaemon {
             }
         }
 
+        // cas-223f review M4: prompts waiting for their fresh re-check are not
+        // dropped at shutdown. Finished re-checks are delivered as decided;
+        // ones that never reported are re-checked here, as the inject loop
+        // did before cas-223f.
+        let (rechecked, unchecked) = director_refresh
+            .drain_deliverability(&mut self.queue_jobs, Duration::from_secs(2));
+        for batch in rechecked {
+            let super::factory_jobs::DeliverabilityBatch {
+                prompts,
+                events,
+                refresh_started,
+            } = batch;
+            for (prompt, deliverable) in prompts {
+                if !deliverable {
+                    log_dropped_stale_prompt(&prompt);
+                    continue;
+                }
+                self.inject_director_prompt(prompt, &events, refresh_started, store_worker)
+                    .await;
+            }
+        }
+        for pending in unchecked {
+            for prompt in pending.prompts {
+                if !self.app.prompt_is_still_deliverable(&prompt) {
+                    log_dropped_stale_prompt(&prompt);
+                    continue;
+                }
+                self.inject_director_prompt(prompt, &pending.events, pending.refresh_started, store_worker)
+                    .await;
+            }
+        }
+        drop(director_refresh);
         // cas-d2a2: queue stamps run on the StoreWorker through the queue
         // job lanes; drain the lanes first so no critical stamp is still
         // waiting on a lane while the StoreWorker reports idle (jobs.rs).
@@ -3204,7 +3241,7 @@ impl FactoryDaemon {
             .parent()
             .unwrap_or(self.app.cas_dir())
             .to_path_buf();
-        let request = self.app.delivery_request();
+        let request = self.app.delivery_request(&[]);
         self.queue_jobs.submit_inbox_retraction(
             "supervisor",
             teams.inbox_pruner(),
@@ -3238,17 +3275,38 @@ impl FactoryDaemon {
     ) -> bool {
         loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshDirector);
         let refresh_started = std::time::Instant::now();
+        // cas-223f: health probes that finished since the last pass feed this
+        // pass's stall confirmation.
+        let (reports, failed) = refresh.take_health_reports(&mut self.queue_jobs);
+        for report in reports {
+            self.app.apply_worker_health_report(report);
+        }
+        for (worker, task) in failed {
+            self.app.clear_worker_health_probe(&worker, &task);
+        }
+        // cas-223f review M1: the git half of the stall evidence arrives from
+        // its own job on the external lane.
+        if let Some(evidence) = refresh.take_ci_status(&mut self.queue_jobs) {
+            self.app.apply_ci_status(evidence);
+        }
         if due {
-            crate::ui::factory::app::timed_refresh_step("start director read", || refresh.start_director_read(&self.app));
+            crate::ui::factory::app::timed_refresh_step("start director read", || refresh.start_director_read(&self.app, &mut self.queue_jobs));
         }
         let mut refreshed = false;
-        if let Some(load) = refresh.take_director_read() {
+        if let Some(load) = refresh.take_director_read(&mut self.queue_jobs) {
             refreshed = true;
-            match crate::ui::factory::app::timed_refresh_step("apply director read", || self.app.apply_director_refresh(load)) {
+            let applied = crate::ui::factory::app::timed_refresh_step("apply director read", || self.app.apply_director_refresh(load));
+            let requests = self.app.take_worker_health_requests();
+            for (worker, task) in refresh.submit_health_probes(&self.app, &mut self.queue_jobs, requests) {
+                self.app.clear_worker_health_probe(&worker, &task);
+            }
+            refresh.start_ci_status(&self.app, &mut self.queue_jobs);
+            match applied {
                 // cas-627f: an idle tick with zero events never reads the
                 // store again; the relays and follow-up still run.
                 Ok(events) if events.is_empty() => {
                     self.deliver_director_events(
+                        refresh,
                         events,
                         (Vec::new(), Vec::new(), None),
                         refresh_started,
@@ -3259,19 +3317,9 @@ impl FactoryDaemon {
                     .await;
                 }
                 Ok(events) => {
-                    if let Err(events) = refresh.start_delivery_read(&self.app, events) {
-                        // No reader: revalidate against a read on this pass.
-                        loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshDelivery);
-                        let delivery = self.app.revalidate_and_prompt_for_delivery(&events);
-                        self.deliver_director_events(
-                            events,
-                            delivery,
-                            refresh_started,
-                            tick_interval_ms,
-                            store_worker,
-                            loop_progress,
-                        )
-                        .await;
+                    if let Err(events) = refresh.start_delivery_read(&self.app, &mut self.queue_jobs, events) {
+                        self.deliver_without_jobs(refresh, events, refresh_started, tick_interval_ms, store_worker, loop_progress)
+                            .await;
                     }
                 }
                 Err(error) => {
@@ -3279,7 +3327,19 @@ impl FactoryDaemon {
                 }
             }
         }
-        if let Some((events, inputs)) = refresh.take_delivery_read() {
+        let mut delivery = refresh.take_delivery_read(&mut self.queue_jobs);
+        // cas-223f review round 2, M3: a read without fresh data is retried
+        // before its events are delivered unrevalidated; never revalidated
+        // against the cache.
+        if let Some((events, inputs)) = delivery.take() {
+            if inputs.is_fresh() {
+                refresh.note_fresh_delivery_read();
+                delivery = Some((events, inputs));
+            } else if let Some(events) = refresh.retry_stale_delivery(events) {
+                delivery = Some((events, inputs));
+            }
+        }
+        if let Some((events, inputs)) = delivery {
             // cas-627f: one unfiltered read, taken after detection, shared by
             // revalidation and prompt generation. See
             // `revalidate_and_prompt_for_delivery` doc comment.
@@ -3288,6 +3348,7 @@ impl FactoryDaemon {
                 .app
                 .revalidate_and_prompt_for_delivery_from(&events, inputs);
             self.deliver_director_events(
+                refresh,
                 events,
                 delivery,
                 refresh_started,
@@ -3297,15 +3358,66 @@ impl FactoryDaemon {
             )
             .await;
         }
+        // Events waiting for a delivery read (detected while one ran, or
+        // re-queued after one failed) start on any pass where the slot is
+        // free, not only after a successful read (review round 2, M2).
+        if let Err(events) = refresh.start_delivery_backlog(&self.app, &mut self.queue_jobs) {
+            self.deliver_without_jobs(refresh, events, refresh_started, tick_interval_ms, store_worker, loop_progress)
+                .await;
+        }
+        // cas-223f: prompts whose fresh re-check (`RevalidateFresh`) finished.
+        for batch in refresh.take_deliverability(&mut self.queue_jobs) {
+            loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshInject);
+            let super::factory_jobs::DeliverabilityBatch {
+                prompts,
+                events,
+                refresh_started,
+            } = batch;
+            for (prompt, deliverable) in prompts {
+                if !deliverable {
+                    log_dropped_stale_prompt(&prompt);
+                    continue;
+                }
+                self.inject_director_prompt(prompt, &events, refresh_started, store_worker)
+                    .await;
+            }
+        }
         refreshed
+    }
+
+    /// Last resort when the job runtime could not start its lanes: revalidate
+    /// against a read on this pass, as before cas-ee9ab.
+    async fn deliver_without_jobs(
+        &mut self,
+        refresh: &mut super::director_refresh::DirectorRefresh,
+        events: Vec<crate::ui::factory::director::DirectorEvent>,
+        refresh_started: std::time::Instant,
+        tick_interval_ms: f64,
+        store_worker: &super::store_worker::StoreWorker,
+        loop_progress: &super::loop_watchdog::LoopProgress,
+    ) {
+        tracing::warn!("factory job runtime unavailable; revalidating on the loop");
+        loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshDelivery);
+        let delivery = self.app.revalidate_and_prompt_for_delivery(&events);
+        self.deliver_director_events(
+            refresh,
+            events,
+            delivery,
+            refresh_started,
+            tick_interval_ms,
+            store_worker,
+            loop_progress,
+        )
+        .await;
     }
 
     /// Record, relay and deliver one batch of revalidated director events,
     /// and run the refresh follow-up (epic transitions, reminders, cloud
     /// state, inbox retraction). Runs once per applied director read.
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     async fn deliver_director_events(
         &mut self,
+        refresh: &mut super::director_refresh::DirectorRefresh,
         events: Vec<crate::ui::factory::director::DirectorEvent>,
         delivery: (
             Vec<crate::ui::factory::director::DirectorEvent>,
@@ -3411,201 +3523,248 @@ impl FactoryDaemon {
 
         // Inject prompts (config already checked in generate_prompt)
         loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshInject);
-        for prompt in prompts {
-            if !self.app.prompt_is_still_deliverable(&prompt) {
-                tracing::info!(
-                    target: "cas::coordination",
-                    stage = "drop_stale_taskless_worker_before_injection",
-                    worker = prompt.drop_if_worker_assigned.as_deref().unwrap_or(""),
-                    "dropped taskless-worker alert because assignment landed after batch revalidation"
-                );
-                continue;
-            }
-            // A routine nudge has one queryable row and uses the queue's
-            // busy-recipient gate. Never write it directly into a Teams inbox.
-            if let Some(task_id) = prompt.stall_nudge_task.clone() {
-                let event = delivery_events.iter().find(|event| matches!(event,
-                    crate::ui::factory::director::DirectorEvent::WorkerStalled {
-                        worker, task_id: event_task, escalate: false, ..
-                    } if worker == &prompt.target && event_task == &task_id));
-                let episode_start = event.and_then(|event| self.app.worker_attention_episode_start(event));
-                let cas_dir = self.app.cas_dir().to_path_buf();
-                let session = self.session_name.clone();
-                store_worker.submit("worker stall nudge", move || {
-                    if let Err(error) = enqueue_stall_nudge_prompt(&cas_dir, &session, &prompt, episode_start) {
-                        tracing::warn!(%error, "worker stall nudge enqueue failed");
-                    }
-                });
-                continue;
-            }
-            // GH #682: the event snapshot was read before this
-            // loop. Re-read assignment state at the final direct
-            // transport boundary so a task that moved beyond Open
-            // in that gap cannot receive stale `task start`
-            // boilerplate.
-            if let Some((task_id, status)) = super::delivery::assignment_stale_status(
-                self.app.cas_dir(),
-                &prompt.text,
-                &prompt.target,
+        // cas-223f: a prompt that must be re-checked right before transport
+        // (a retractable alert, or a taskless-worker alert that drops once the
+        // worker is assigned) waits for a fresh read as a `RevalidateFresh`
+        // job, after this tick's epic merges. The whole batch waits with it
+        // so prompts keep their order.
+        if prompts
+            .iter()
+            .any(crate::ui::factory::app::prompt_needs_fresh_recheck)
+        {
+            match refresh.start_deliverability_check(
+                &self.app,
+                &mut self.queue_jobs,
+                prompts,
+                delivery_events.clone(),
+                refresh_started,
             ) {
-                tracing::info!(
-                    target: "cas::coordination",
-                    stage = "suppress_terminal_assignment",
-                    target_agent = %prompt.target,
-                    task_id = %task_id,
-                    status = %status,
-                    "cas-2b0b: suppressed a direct assignment for a terminal task"
-                );
-                continue;
-            }
-            // Task mutations and director snapshots share one durable
-            // assignment row; a late tick cannot duplicate the wake.
-            if let Some(task_id) = crate::prompt_revalidation::assignment_solicited_task_id(&prompt.text) {
-                if let Ok(task) = crate::store::open_task_store_cached(self.app.cas_dir())
-                    .and_then(|store| store.get(&task_id).map_err(crate::CasError::from))
-                {
-                    match crate::task_assignment::enqueue(self.app.cas_dir(), &task) {
-                        Ok(_) => continue,
-                        Err(error) => tracing::warn!(%error, "assignment enqueue failed; retaining director fallback"),
+                Ok(()) => return,
+                Err(prompts) => {
+                    // No job lanes: re-check on this pass, as before.
+                    for prompt in prompts {
+                        if !self.app.prompt_is_still_deliverable(&prompt) {
+                            log_dropped_stale_prompt(&prompt);
+                            continue;
+                        }
+                        self.inject_director_prompt(prompt, &delivery_events, refresh_started, store_worker)
+                            .await;
                     }
+                    return;
                 }
             }
-            // cas-ae6d (GH #100): a loss-intolerant prompt (today:
-            // the assignment wake-up) bound for a PTY pane that is
-            // not ready for injection goes to the durable
-            // prompt_queue instead of being written into a pane
-            // that silently swallows it during harness startup.
-            // The director lane has no readiness gate and no
-            // retry; the queue lane has both. Claude-under-teams
-            // recipients are unaffected — their inbox write is
-            // durable by construction, which is exactly why the
-            // same assignment woke a claude worker while codex
-            // workers were left idle.
-            let pane_was_unready = self.route_director_prompt_to_queue(&prompt);
-            if pane_was_unready {
-                match self.enqueue_director_prompt(&prompt) {
-                    Ok(id) => {
-                        tracing::info!(
-                            target: "cas::coordination",
-                            stage = "director_prompt_queued",
-                            channel = "prompt_queue",
-                            target_agent = %prompt.target,
-                            prompt_id = id,
-                            "director prompt parked on the durable queue because the recipient's PTY pane is not ready"
-                        );
-                        continue;
-                    }
-                    Err(e) => tracing::warn!(
-                        target: "cas::coordination",
-                        stage = "director_prompt_queue_failed",
-                        target_agent = %prompt.target,
-                        error = %e,
-                        "durable enqueue failed; attempting direct injection instead"
-                    ),
-                }
-            }
-            // cas-f9e8 telemetry: measure director prompt
-            // injection latency from the start of this refresh
-            // tick to the completion of the inbox write. This
-            // is Channel C's send→deliver envelope and is the
-            // number that tells us whether refresh_interval
-            // needs to be lowered for the P99 SLO.
-            let inject_started = std::time::Instant::now();
-            // Recipient-aware routing (cas-b68a): a director event aimed
-            // at a Codex agent must reach its PTY, not a Claude inbox.
-            let inject_result = self
-                .deliver_to_worker(
-                    &prompt.target,
-                    super::teams::DIRECTOR_AGENT_NAME,
-                    &prompt.text,
-                    None,
-                    // D-4 (cas-405f): pass the director's config.json color so
-                    // the inbox bubble matches the registered team entry.
-                    Some(super::teams::DIRECTOR_AGENT_COLOR),
-                    // cas-ed6c: tag WorkerIdle-class alerts so a
-                    // later sweep can retract them if the named
-                    // worker gains a real assignment before the
-                    // recipient ever reads the queued row.
-                    prompt.retract_worker.as_deref(),
-                    // cas-e48f: tag MERGE REQUIRED alerts so a
-                    // later sweep can retract them if this task's
-                    // merge lands (or it leaves AwaitingMerge)
-                    // before the recipient ever reads the row.
-                    prompt.retract_task.as_deref(),
-                    // cas-06ca: carry the epic occurrence identity
-                    // through transport so unread completion rows
-                    // can be retracted if live state advances.
-                    prompt.retract_epic.as_deref(),
-                )
+        }
+        for prompt in prompts {
+            self.inject_director_prompt(prompt, &delivery_events, refresh_started, store_worker)
                 .await;
-            let inject_ms = inject_started.elapsed().as_secs_f64() * 1000.0;
-            let total_ms = refresh_started.elapsed().as_secs_f64() * 1000.0;
-            // cas-ae6d: a durable prompt that did not actually land
-            // (transport error, or a composer-dirty deferral this
-            // lane cannot retry) is re-queued rather than lost.
-            //
-            // `pane_was_unready` means we only reached this direct
-            // inject because the durable enqueue itself failed.
-            // `Mux::inject` reports Delivered as soon as the write
-            // syscall returns, so a pane still flushing its startup
-            // input buffer yields a delivered-looking write that the
-            // harness never sees. Do not let that count as durable
-            // delivery — retry it, and if the queue is still
-            // unwritable, say so loudly rather than silently.
-            let delivered = super::delivery::durable_delivery_landed(
-                matches!(inject_result, Ok(cas_mux::InjectOutcome::Delivered)),
-                pane_was_unready,
+        }
+    }
+
+    /// Route one revalidated director prompt to its recipient: a stall nudge
+    /// to the durable queue, an assignment through the assignment row, an
+    /// unready pane through the queue, and everything else straight to the
+    /// recipient's inbox or PTY.
+    async fn inject_director_prompt(
+        &mut self,
+        prompt: crate::ui::factory::director::Prompt,
+        delivery_events: &[crate::ui::factory::director::DirectorEvent],
+        refresh_started: std::time::Instant,
+        store_worker: &super::store_worker::StoreWorker,
+    ) {
+        // A routine nudge has one queryable row and uses the queue's
+        // busy-recipient gate. Never write it directly into a Teams inbox.
+        if let Some(task_id) = prompt.stall_nudge_task.clone() {
+            let event = delivery_events.iter().find(|event| matches!(event,
+                crate::ui::factory::director::DirectorEvent::WorkerStalled {
+                    worker, task_id: event_task, escalate: false, ..
+                } if worker == &prompt.target && event_task == &task_id));
+            let episode_start = event.and_then(|event| self.app.worker_attention_episode_start(event));
+            let cas_dir = self.app.cas_dir().to_path_buf();
+            let session = self.session_name.clone();
+            store_worker.submit("worker stall nudge", move || {
+                if let Err(error) = enqueue_stall_nudge_prompt(&cas_dir, &session, &prompt, episode_start) {
+                    tracing::warn!(%error, "worker stall nudge enqueue failed");
+                }
+            });
+            return;
+        }
+        // GH #682: the event snapshot was read before this
+        // loop. Re-read assignment state at the final direct
+        // transport boundary so a task that moved beyond Open
+        // in that gap cannot receive stale `task start`
+        // boilerplate.
+        if let Some((task_id, status)) = super::delivery::assignment_stale_status(
+            self.app.cas_dir(),
+            &prompt.text,
+            &prompt.target,
+        ) {
+            tracing::info!(
+                target: "cas::coordination",
+                stage = "suppress_terminal_assignment",
+                target_agent = %prompt.target,
+                task_id = %task_id,
+                status = %status,
+                "cas-2b0b: suppressed a direct assignment for a terminal task"
             );
-            if super::delivery::needs_durable_followup(delivered, prompt.durable_retry)
+            return;
+        }
+        // Task mutations and director snapshots share one durable
+        // assignment row; a late tick cannot duplicate the wake.
+        if let Some(task_id) = crate::prompt_revalidation::assignment_solicited_task_id(&prompt.text) {
+            if let Ok(task) = crate::store::open_task_store_cached(self.app.cas_dir())
+                .and_then(|store| store.get(&task_id).map_err(crate::CasError::from))
             {
-                match self.enqueue_director_prompt(&prompt) {
-                    Ok(id) => tracing::info!(
+                match crate::task_assignment::enqueue(self.app.cas_dir(), &task) {
+                    Ok(_) => return,
+                    Err(error) => tracing::warn!(%error, "assignment enqueue failed; retaining director fallback"),
+                }
+            }
+        }
+        // cas-ae6d (GH #100): a loss-intolerant prompt (today:
+        // the assignment wake-up) bound for a PTY pane that is
+        // not ready for injection goes to the durable
+        // prompt_queue instead of being written into a pane
+        // that silently swallows it during harness startup.
+        // The director lane has no readiness gate and no
+        // retry; the queue lane has both. Claude-under-teams
+        // recipients are unaffected — their inbox write is
+        // durable by construction, which is exactly why the
+        // same assignment woke a claude worker while codex
+        // workers were left idle.
+        let pane_was_unready = self.route_director_prompt_to_queue(&prompt);
+        if pane_was_unready {
+            match self.enqueue_director_prompt(&prompt) {
+                Ok(id) => {
+                    tracing::info!(
                         target: "cas::coordination",
-                        stage = "director_prompt_requeued",
+                        stage = "director_prompt_queued",
                         channel = "prompt_queue",
                         target_agent = %prompt.target,
                         prompt_id = id,
-                        "director prompt re-queued after a direct delivery attempt did not land"
-                    ),
-                    Err(e) => tracing::warn!(
-                        target: "cas::coordination",
-                        stage = "director_prompt_requeue_failed",
-                        target_agent = %prompt.target,
-                        error = %e,
-                        "durable re-queue failed; assignment wake-up may be lost"
-                    ),
+                        "director prompt parked on the durable queue because the recipient's PTY pane is not ready"
+                    );
+                    return;
                 }
-            }
-            match inject_result {
-                Ok(cas_mux::InjectOutcome::Delivered) => tracing::info!(
-                    target: "cas::coordination",
-                    stage = "delivered",
-                    channel = "director_events",
-                    target_agent = %prompt.target,
-                    inject_ms,
-                    refresh_to_deliver_ms = total_ms,
-                    "director prompt delivered to inbox"
-                ),
-                Ok(cas_mux::InjectOutcome::DeferredComposerDirty) => tracing::info!(
-                    target: "cas::coordination",
-                    stage = "composer_inject_deferred",
-                    channel = "director_events",
-                    target_agent = %prompt.target,
-                    inject_ms,
-                    "director prompt deferred before any PTY write because the operator composer is dirty"
-                ),
                 Err(e) => tracing::warn!(
                     target: "cas::coordination",
-                    stage = "deliver_failed",
-                    channel = "director_events",
+                    stage = "director_prompt_queue_failed",
                     target_agent = %prompt.target,
-                    inject_ms,
                     error = %e,
-                    "director prompt inject failed"
+                    "durable enqueue failed; attempting direct injection instead"
                 ),
             }
         }
+        // cas-f9e8 telemetry: measure director prompt
+        // injection latency from the start of this refresh
+        // tick to the completion of the inbox write. This
+        // is Channel C's send→deliver envelope and is the
+        // number that tells us whether refresh_interval
+        // needs to be lowered for the P99 SLO.
+        let inject_started = std::time::Instant::now();
+        // Recipient-aware routing (cas-b68a): a director event aimed
+        // at a Codex agent must reach its PTY, not a Claude inbox.
+        let inject_result = self
+            .deliver_to_worker(
+                &prompt.target,
+                super::teams::DIRECTOR_AGENT_NAME,
+                &prompt.text,
+                None,
+                // D-4 (cas-405f): pass the director's config.json color so
+                // the inbox bubble matches the registered team entry.
+                Some(super::teams::DIRECTOR_AGENT_COLOR),
+                // cas-ed6c: tag WorkerIdle-class alerts so a
+                // later sweep can retract them if the named
+                // worker gains a real assignment before the
+                // recipient ever reads the queued row.
+                prompt.retract_worker.as_deref(),
+                // cas-e48f: tag MERGE REQUIRED alerts so a
+                // later sweep can retract them if this task's
+                // merge lands (or it leaves AwaitingMerge)
+                // before the recipient ever reads the row.
+                prompt.retract_task.as_deref(),
+                // cas-06ca: carry the epic occurrence identity
+                // through transport so unread completion rows
+                // can be retracted if live state advances.
+                prompt.retract_epic.as_deref(),
+            )
+            .await;
+        let inject_ms = inject_started.elapsed().as_secs_f64() * 1000.0;
+        let total_ms = refresh_started.elapsed().as_secs_f64() * 1000.0;
+        // cas-ae6d: a durable prompt that did not actually land
+        // (transport error, or a composer-dirty deferral this
+        // lane cannot retry) is re-queued rather than lost.
+        //
+        // `pane_was_unready` means we only reached this direct
+        // inject because the durable enqueue itself failed.
+        // `Mux::inject` reports Delivered as soon as the write
+        // syscall returns, so a pane still flushing its startup
+        // input buffer yields a delivered-looking write that the
+        // harness never sees. Do not let that count as durable
+        // delivery — retry it, and if the queue is still
+        // unwritable, say so loudly rather than silently.
+        let delivered = super::delivery::durable_delivery_landed(
+            matches!(inject_result, Ok(cas_mux::InjectOutcome::Delivered)),
+            pane_was_unready,
+        );
+        if super::delivery::needs_durable_followup(delivered, prompt.durable_retry)
+        {
+            match self.enqueue_director_prompt(&prompt) {
+                Ok(id) => tracing::info!(
+                    target: "cas::coordination",
+                    stage = "director_prompt_requeued",
+                    channel = "prompt_queue",
+                    target_agent = %prompt.target,
+                    prompt_id = id,
+                    "director prompt re-queued after a direct delivery attempt did not land"
+                ),
+                Err(e) => tracing::warn!(
+                    target: "cas::coordination",
+                    stage = "director_prompt_requeue_failed",
+                    target_agent = %prompt.target,
+                    error = %e,
+                    "durable re-queue failed; assignment wake-up may be lost"
+                ),
+            }
+        }
+        match inject_result {
+            Ok(cas_mux::InjectOutcome::Delivered) => tracing::info!(
+                target: "cas::coordination",
+                stage = "delivered",
+                channel = "director_events",
+                target_agent = %prompt.target,
+                inject_ms,
+                refresh_to_deliver_ms = total_ms,
+                "director prompt delivered to inbox"
+            ),
+            Ok(cas_mux::InjectOutcome::DeferredComposerDirty) => tracing::info!(
+                target: "cas::coordination",
+                stage = "composer_inject_deferred",
+                channel = "director_events",
+                target_agent = %prompt.target,
+                inject_ms,
+                "director prompt deferred before any PTY write because the operator composer is dirty"
+            ),
+            Err(e) => tracing::warn!(
+                target: "cas::coordination",
+                stage = "deliver_failed",
+                channel = "director_events",
+                target_agent = %prompt.target,
+                inject_ms,
+                error = %e,
+                "director prompt inject failed"
+            ),
+        }
     }
+}
+
+/// A prompt its fresh re-check found stale.
+fn log_dropped_stale_prompt(prompt: &crate::ui::factory::director::Prompt) {
+    tracing::info!(
+        target: "cas::coordination",
+        stage = "drop_stale_taskless_worker_before_injection",
+        worker = prompt.drop_if_worker_assigned.as_deref().unwrap_or(""),
+        "dropped taskless-worker alert because assignment landed after batch revalidation"
+    );
 }
 
 #[cfg(test)]

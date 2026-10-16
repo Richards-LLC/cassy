@@ -4043,6 +4043,11 @@ impl FactoryDaemon {
     ) -> bool {
         loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshDirector);
         let refresh_started = std::time::Instant::now();
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        self.relay_jobs.submit_external_work_reconciliation(
+            &mut self.queue_jobs,
+            move || super::external_work_reconcile_jobs::reconcile_due(&cas_dir),
+        );
         // cas-223f: health probes that finished since the last pass feed this
         // pass's stall confirmation.
         let (reports, failed) = refresh.take_health_reports(&mut self.queue_jobs);

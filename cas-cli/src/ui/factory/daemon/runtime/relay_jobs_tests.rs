@@ -109,6 +109,104 @@ async fn settle_relays(daemon: &mut FactoryDaemon) {
     }
 }
 
+struct ReconcileCloud {
+    lookup: std::result::Result<serde_json::Value, crate::coordination::external_work::RemoteError>,
+    lookups: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::coordination::external_work::CloudCoordinationPort for ReconcileCloud {
+    fn post(&self, _path: &str, _payload: &serde_json::Value, _timeout: Duration) -> std::result::Result<serde_json::Value, crate::coordination::external_work::RemoteError> {
+        Err(crate::coordination::external_work::RemoteError::unavailable("reconciliation must use operation lookup, not replay the mutation"))
+    }
+
+    fn lookup(&self, _request_id: &str, _registration_id: &str, _timeout: Duration) -> std::result::Result<serde_json::Value, crate::coordination::external_work::RemoteError> {
+        self.lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.lookup.clone()
+    }
+}
+
+struct ReconcileViolet;
+
+impl crate::coordination::external_work::VioletThreadResolver for ReconcileViolet {
+    fn resolve(&self, _external_ref: &str, _timeout: Duration) -> std::result::Result<serde_json::Value, crate::coordination::external_work::RemoteError> {
+        Err(crate::coordination::external_work::RemoteError::unavailable("journaled wire rows do not need Violet resolution"))
+    }
+}
+
+fn due_external_work_service(
+    cas_dir: &std::path::Path,
+    lookup: std::result::Result<serde_json::Value, crate::coordination::external_work::RemoteError>,
+) -> (
+    crate::coordination::external_work::ExternalWorkService,
+    crate::coordination::external_work::SqliteRequestJournal,
+    std::sync::Arc<ReconcileCloud>,
+    String,
+) {
+    use crate::coordination::external_work::{ExternalWorkService, OperationContext, SqliteRequestJournal};
+    let journal = SqliteRequestJournal::open(cas_dir).unwrap();
+    let request_id = "00000081-2222-4222-8222-000000000081".to_string();
+    journal.prepare(&request_id, "release_claim", &serde_json::json!({
+        "resource_id":"00000b01-1111-4111-8111-000000000b01", "expected_generation":1
+    })).unwrap();
+    journal.set_wire_request(&request_id, &serde_json::json!({
+        "request_id":request_id.clone(), "expected_generation":1
+    })).unwrap();
+    journal.begin_attempt(&request_id).unwrap();
+    journal.record_result(&request_id, &serde_json::json!({
+        "schema":"cassy.coordination/v1", "code":"outcome_unknown",
+        "receipt":{"request_id":request_id.clone()}
+    }), Some(Duration::ZERO)).unwrap();
+    let cloud = std::sync::Arc::new(ReconcileCloud { lookup, lookups: std::sync::atomic::AtomicUsize::new(0) });
+    let service = ExternalWorkService::new(
+        journal.clone(), cloud.clone(), std::sync::Arc::new(ReconcileViolet),
+        OperationContext { project_id: "github.com/richards-llc/cassy".into(), registration_id: "reg-supervisor-alpha-01".into() },
+    );
+    (service, journal, cloud, request_id)
+}
+
+#[tokio::test]
+async fn external_work_reconcile_job_runs_due_row_without_turn_or_hook() {
+    let (_dir, cas_dir) = project_with_worker();
+    let request_id = "00000081-2222-4222-8222-000000000081";
+    let (service, journal, cloud, request_id) = due_external_work_service(&cas_dir, Ok(serde_json::json!({
+        "schema":"cassy.coordination/v1", "code":"released",
+        "receipt":{"request_id":request_id}
+    })));
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let now_ms = chrono::Utc::now().timestamp_millis() + 50;
+    {
+        let pass = LoopPass::start();
+        assert!(daemon.relay_jobs.submit_external_work_reconciliation(&mut daemon.queue_jobs, move || {
+            super::external_work_reconcile_jobs::reconcile_service_due(&service, now_ms)
+        }));
+        pass.assert_no_io("external-work reconciliation submission");
+    }
+    settle_relays(&mut daemon).await;
+    assert_eq!(cloud.lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(journal.get(&request_id).unwrap().unwrap().stage, "terminal");
+}
+
+#[tokio::test]
+async fn external_work_reconcile_job_reschedules_cloud_outage() {
+    use crate::coordination::external_work::RemoteError;
+    let (_dir, cas_dir) = project_with_worker();
+    let (service, journal, cloud, request_id) = due_external_work_service(&cas_dir, Err(RemoteError::unavailable("Cloud is offline")));
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let now_ms = chrono::Utc::now().timestamp_millis() + 50;
+    {
+        let pass = LoopPass::start();
+        assert!(daemon.relay_jobs.submit_external_work_reconciliation(&mut daemon.queue_jobs, move || {
+            super::external_work_reconcile_jobs::reconcile_service_due(&service, now_ms)
+        }));
+        pass.assert_no_io("external-work outage reconciliation submission");
+    }
+    settle_relays(&mut daemon).await;
+    let row = journal.get(&request_id).unwrap().unwrap();
+    assert_eq!(row.stage, "retry_wait");
+    assert!(row.next_retry_ms.is_some_and(|retry_at| retry_at > now_ms - 50));
+    assert_eq!(cloud.lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn c4491f_usage_limit_relay_reads_nothing_on_the_loop() {
     let (_dir, cas_dir) = project_with_worker();

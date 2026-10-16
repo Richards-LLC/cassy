@@ -17,7 +17,9 @@ use uuid::Uuid;
 pub const CONTRACT_SCHEMA: &str = "cassy.coordination/v1";
 pub const TOTAL_REMOTE_BUDGET: Duration = Duration::from_secs(8);
 pub const CALL_REMOTE_BUDGET: Duration = Duration::from_secs(5);
-pub const RECONCILE_BATCH_LIMIT: usize = 8;
+// A daemon reconciliation job has the shared eight-second budget. Reconcile
+// one operation per job so a multi-row batch cannot multiply that wait.
+pub const RECONCILE_BATCH_LIMIT: usize = 1;
 
 pub const EXTERNAL_WORK_SCHEMA_STATEMENTS: &[&str] = &[
     r#"
@@ -262,6 +264,24 @@ impl SqliteRequestJournal {
             .lock()
             .map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
         load_operation(&*conn, request_id)
+    }
+
+    pub fn has_due(&self, now_ms: i64) -> Result<bool, JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
+        conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM external_work_operations
+                WHERE stage IN ('prepared','retry_wait','dispatching')
+                  AND (next_retry_ms IS NULL OR next_retry_ms <= ?1)
+                  AND (lease_until_ms IS NULL OR lease_until_ms <= ?1)
+             )",
+            [now_ms],
+            |row| row.get(0),
+        )
+        .map_err(|error| JournalError::Storage(error.to_string()))
     }
 
     /// Atomically lease a bounded batch of due reconciliation operations.

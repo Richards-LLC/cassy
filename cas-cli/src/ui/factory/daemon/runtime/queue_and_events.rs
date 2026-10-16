@@ -3965,6 +3965,13 @@ impl FactoryDaemon {
                             );
                         }
                     }
+                    RelayOutput::ExternalWorkReconciled(Ok(count)) if count > 0 => {
+                        tracing::debug!(count, "reconciled due external-work journal operation(s)");
+                    }
+                    RelayOutput::ExternalWorkReconciled(Ok(_)) => {}
+                    RelayOutput::ExternalWorkReconciled(Err(error)) => {
+                        tracing::warn!(%error, "external-work reconciliation job failed; retrying on a later daemon pass");
+                    }
                 }
             }
         }

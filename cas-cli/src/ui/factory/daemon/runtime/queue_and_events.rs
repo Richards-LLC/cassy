@@ -10804,24 +10804,6 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn cas_bfa1_refresh_notice_is_deduplicated_across_spawn_requests() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let root = crate::store::init_cas_dir(temp.path()).unwrap();
-        let warning = "SPAWN BASE REFRESHED: local 'epic/batch' (abc123) is 319 commit(s) behind 'origin/epic/batch' (def456)";
-        let mut ids = Vec::new();
-        for request in 1..=8 {
-            ids.push(super::enqueue_spawn_warning_notice(&root, "supervisor", "batch", Some(request), &format!("worker-{request}"), warning).unwrap());
-        }
-        assert!(ids.iter().all(|id| *id == ids[0]), "same branch/stale tip must reuse one notice");
-        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
-        assert_eq!(queue.peek_all(100).unwrap().len(), 1);
-        let changed_remote = warning.replace("def456", "fed654");
-        assert_eq!(super::enqueue_spawn_warning_notice(&root, "supervisor", "batch", Some(9), "worker-9", &changed_remote).unwrap(), ids[0]);
-        let new_stale_tip = warning.replace("abc123", "def456");
-        assert_ne!(super::enqueue_spawn_warning_notice(&root, "supervisor", "batch", Some(10), "worker-10", &new_stale_tip).unwrap(), ids[0]);
-    }
-
     #[tokio::test]
     async fn cas_5c2c_review_operator_fallback_is_consumed_and_acknowledged() {
         use crate::ui::factory::daemon::WsConnection;

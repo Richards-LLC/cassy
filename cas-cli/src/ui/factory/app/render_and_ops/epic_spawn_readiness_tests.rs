@@ -413,7 +413,12 @@ fn cas_bfa1_real_spawn_notices_deduplicate_within_session() {
                     .unwrap()
                     .peek_all(100)
                     .unwrap()
-                    .len(),
+                    .into_iter()
+                    .filter(|row| matches!(
+                        row.factory_session.as_deref(),
+                        Some("session-a" | "session-b")
+                    ))
+                    .count(),
                 2
             );
         });

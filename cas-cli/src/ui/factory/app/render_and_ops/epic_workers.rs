@@ -5286,6 +5286,10 @@ mod spawn_base_tests {
     fn no_code_spawn_refuses_diverged_epic_before_worktree_cut_cas_a075() {
         for offline in [false, true] {
             super::spawn_readiness_tests::with_fixture(|fixture| {
+                let tasks = open_task_store_cached(&fixture.root).unwrap();
+                let mut child = tasks.get("cas-round2-child").unwrap();
+                child.execution_note = Some("no-code".into());
+                tasks.update(&child).unwrap();
                 super::spawn_readiness_tests::git(&fixture.repo, &["checkout", "epic/round2"]);
                 super::spawn_readiness_tests::commit(&fixture.repo, "epic-only");
                 super::spawn_readiness_tests::git(&fixture.repo, &["checkout", "main"]);

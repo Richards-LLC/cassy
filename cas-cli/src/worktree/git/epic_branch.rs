@@ -167,7 +167,6 @@ impl GitOperations {
             Err(error) => return Err(error.clone()),
         };
         if remote_present {
-            self.fetch_branch(branch).map_err(|e| e.to_string())?;
             let remote = self
                 .resolve_commit(&format!("origin/{branch}"))
                 .ok_or_else(|| format!("fetched epic '{branch}' has no tracking commit"))?;

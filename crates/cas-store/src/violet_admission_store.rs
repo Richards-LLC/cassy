@@ -404,6 +404,25 @@ pub enum VioletConsumption {
     Consumed,
 }
 
+impl VioletConsumption {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::DispatchUncertain => "dispatch_uncertain",
+            Self::Consumed => "consumed",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "dispatch_uncertain" => Ok(Self::DispatchUncertain),
+            "consumed" => Ok(Self::Consumed),
+            _ => Err(StoreError::Other("unknown Violet consumption state".into())),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VioletRecoveryReceipt {
     pub admission: VioletAdmissionReceipt,
@@ -447,8 +466,93 @@ pub struct SqliteVioletAdmissionStore {
 impl SqliteVioletAdmissionStore {
     /// Apply a validated successor receipt without inferring unread from a
     /// dead process. Local recipient and transport evidence remains binding.
-    pub fn recover_known(&self, _binding: &VioletAdmissionRebind, _remote: VioletConsumption) -> Result<VioletRecoveryReceipt> {
-        Err(StoreError::Other("known consumption recovery is not implemented".into()))
+    pub fn recover_known(&self, binding: &VioletAdmissionRebind, remote: VioletConsumption) -> Result<VioletRecoveryReceipt> {
+        validate_rebind(binding)?;
+        let receipt = crate::shared_db::with_immediate_write_txn_pooled(&self.queue.conn, |tx| {
+            let current: Option<(i64, String, i64, String, String, String, Option<i64>)> = tx.query_row(
+                "SELECT prompt_id,registration_id,delivery_generation,factory_session,recipient,consumption,recovery_prompt_id
+                 FROM violet_admissions WHERE delivery_id=?1 AND occurrence_id=?2
+                   AND reader_slot_id=?3 AND project_id=?4",
+                params![binding.delivery_id,binding.occurrence_id,binding.reader_slot_id,binding.project_id],
+                |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))
+            ).optional()?;
+            let Some((prompt_id, registration, generation, session, recipient, stored, mut recovery_prompt_id)) = current else {
+                return Err(StoreError::NotFound("known local Violet admission; remote discovery required".into()));
+            };
+            let same_route = registration == binding.registration_id
+                && generation == binding.delivery_generation
+                && session == binding.factory_session && recipient == binding.recipient;
+            if !same_route && (generation != binding.expected_generation
+                || generation.checked_add(i64::from(registration != binding.registration_id)) != Some(binding.delivery_generation)) {
+                return Err(StoreError::Other("stale Violet delivery generation on recovery".into()));
+            }
+            // Recipient-side full surfacing is distinct from a daemon's
+            // transport handoff. Selection alone is conservatively uncertain.
+            let (surfaced, touched): (bool, bool) = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM prompt_queue_recipient_seen
+                     WHERE prompt_id=q.id AND recipient=?2
+                       AND source IN ('hook_surfaced','inbox_poll','observed_wake')),
+                   selected_at IS NOT NULL OR processed_at IS NOT NULL
+                     OR transport_delivered_at IS NOT NULL
+                     OR EXISTS(SELECT 1 FROM prompt_queue_recipient_seen WHERE prompt_id=q.id)
+                     OR EXISTS(SELECT 1 FROM prompt_queue_recipient_transport WHERE prompt_id=q.id)
+                 FROM prompt_queue q WHERE id=?1",
+                params![prompt_id,recipient], |r|Ok((r.get(0)?,r.get(1)?))
+            )?;
+            let evidence = if surfaced { VioletConsumption::Consumed }
+                else if touched { VioletConsumption::DispatchUncertain }
+                else { VioletConsumption::Queued };
+            let consumption = remote.max(VioletConsumption::parse(&stored)?).max(evidence);
+            if consumption == VioletConsumption::Queued {
+                tx.execute("UPDATE prompt_queue SET target=?2,factory_session=?3 WHERE id=?1",
+                    params![prompt_id,binding.recipient,binding.factory_session])?;
+            } else {
+                // Preserve transport/recipient history and its monotonic stage.
+                // A retired ask is history, never an inbox item for either process.
+                SqlitePromptQueueStore::atomic_stage_stamp_in_tx(tx, prompt_id, DeliveryStage::Suppressed,
+                    AtomicStampOpts { reason: Some(PendingReason::SupersededStale),
+                        detail: Some("Violet successor recovery retired the original ask"), set_processed: true,
+                        broadcast_attempted: None, broadcast_succeeded: None, broadcast_failed: None })?;
+                tx.execute("UPDATE prompt_queue SET target='violet-admission-history' WHERE id=?1", [prompt_id])?;
+                if consumption == VioletConsumption::DispatchUncertain {
+                    if let Some(notice_id) = recovery_prompt_id {
+                        // Move the existing notice; never reset its read or
+                        // transport receipts, even on a further successor.
+                        tx.execute("UPDATE prompt_queue SET target=?2,factory_session=?3 WHERE id=?1",
+                            params![notice_id,binding.recipient,binding.factory_session])?;
+                    } else {
+                        let reference = serde_json::to_string(&binding.delivery_id)
+                            .map_err(|error|StoreError::Other(error.to_string()))?;
+                        let prompt = format!("Managed Slack recovery notice. Admission {reference} may already have reached the previous supervisor. Do not replay its ask. Inspect the verified thread and obtain current claim authority before acting.");
+                        let key = serde_json::to_string(&["violet-recovery", &binding.delivery_id])
+                            .map_err(|error|StoreError::Other(error.to_string()))?;
+                        tx.execute("INSERT INTO prompt_queue
+                            (source,target,prompt,created_at,factory_session,summary,priority,urgent,dedupe_key,origin_kind)
+                            VALUES ('violet-recovery',?1,?2,?3,?4,'Managed Slack recovery',?5,0,?6,'daemon')",
+                            params![binding.recipient,prompt,Utc::now().to_rfc3339(),binding.factory_session,
+                                i32::from(NotificationPriority::High),key])?;
+                        recovery_prompt_id = Some(tx.last_insert_rowid());
+                        let _ = capture_message_event(tx, "violet-recovery", &binding.recipient);
+                    }
+                } else if let Some(notice_id) = recovery_prompt_id {
+                    // A later authoritative consumed receipt retires a pending
+                    // uncertainty notice without inventing a recipient read.
+                    tx.execute("UPDATE prompt_queue SET target='violet-admission-history',
+                        processed_at=COALESCE(processed_at,?2) WHERE id=?1",
+                        params![notice_id,Utc::now().to_rfc3339()])?;
+                }
+            }
+            tx.execute("UPDATE violet_admissions SET registration_id=?2,delivery_generation=?3,
+                factory_session=?4,recipient=?5,consumption=?6,recovery_prompt_id=?7,ack_pending=0 WHERE delivery_id=?1",
+                params![binding.delivery_id,binding.registration_id,binding.delivery_generation,
+                    binding.factory_session,binding.recipient,consumption.as_str(),recovery_prompt_id])?;
+            Ok(VioletRecoveryReceipt { admission: VioletAdmissionReceipt {
+                delivery_id: binding.delivery_id.clone(), prompt_id, created: false }, consumption, recovery_prompt_id })
+        })?;
+        if receipt.consumption != VioletConsumption::Consumed {
+            self.queue.signal_inbox(&binding.recipient);
+        }
+        Ok(receipt)
     }
 
     pub fn open(cas_dir: &Path) -> Result<Self> {
@@ -469,23 +573,7 @@ impl SqliteVioletAdmissionStore {
     /// rebind. Any local dispatch/read evidence requires consumption recovery,
     /// not this unread path. In-flight dispatch still requires a runtime fence.
     pub fn adopt_unread(&self, binding: &VioletAdmissionRebind) -> Result<VioletAdmissionReceipt> {
-        if [
-            &binding.delivery_id,
-            &binding.occurrence_id,
-            &binding.reader_slot_id,
-            &binding.project_id,
-            &binding.registration_id,
-            &binding.factory_session,
-            &binding.recipient,
-        ]
-        .iter()
-        .any(|value| value.trim().is_empty())
-            || binding.expected_generation < 1
-        {
-            return Err(StoreError::Other(
-                "invalid Violet rebind identity or generation".into(),
-            ));
-        }
+        validate_rebind(binding)?;
         let (receipt, moved) = crate::shared_db::with_immediate_write_txn_pooled(
             &self.queue.conn,
             |tx| {
@@ -739,6 +827,16 @@ impl SqliteVioletAdmissionStore {
         }
         Ok(receipt)
     }
+}
+
+fn validate_rebind(binding: &VioletAdmissionRebind) -> Result<()> {
+    if [&binding.delivery_id, &binding.occurrence_id, &binding.reader_slot_id,
+        &binding.project_id, &binding.registration_id, &binding.factory_session, &binding.recipient]
+        .iter().any(|value|value.trim().is_empty()) || binding.expected_generation < 1
+        || binding.delivery_generation < 1 {
+        return Err(StoreError::Other("invalid Violet rebind identity or generation".into()));
+    }
+    Ok(())
 }
 
 fn slack_timestamp_parts(value: &str) -> Result<(&str, &str)> {

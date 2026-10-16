@@ -1267,6 +1267,74 @@ fn system_b_merge_source(id: &str, task_id: Option<&str>) -> (String, String) {
     (token.to_string(), format!("factory/{token}"))
 }
 
+/// Red-first stub (cas-7ce6).
+const CAS_7CE6_RED_STUB: bool = true;
+
+/// cas-7ce6: the branch that holds a parked task's reviewed `anchor`.
+///
+/// - `Ok(None)`: merge `source` as asked.
+/// - `Ok(Some(branch))`: merge the task's own delivery branch
+///   `<source>-<task>` (local, or created from `origin/`). It is chosen when
+///   `source` no longer contains the anchor (the worker moved it on to its
+///   next task), or when `source` has moved past the anchor while the
+///   delivery branch sits exactly on it (stacked work on top).
+/// - `Err`: `source` does not contain the anchor and no delivery branch
+///   does either, so merging it would not deliver this task.
+///
+/// An anchor or source that does not resolve here is left to the existing
+/// checks.
+fn parked_merge_source(
+    git: &crate::worktree::GitOperations,
+    source: &str,
+    task_id: &str,
+    anchor: &str,
+) -> Result<Option<String>, String> {
+    if CAS_7CE6_RED_STUB {
+        return Ok(None);
+    }
+    let (Some(tip), Some(anchor_sha)) = (git.resolve_commit(source), git.resolve_commit(anchor))
+    else {
+        return Ok(None);
+    };
+    let contains_anchor = git.is_ancestor(&anchor_sha, &tip);
+    if tip == anchor_sha {
+        return Ok(None);
+    }
+    let suffix = format!("-{task_id}");
+    let candidate = (!source.ends_with(&suffix)).then(|| format!("{source}{suffix}"));
+    if let Some(candidate) = candidate.as_deref() {
+        let local = git.resolve_commit(&format!("refs/heads/{candidate}"));
+        let remote = git.resolve_commit(&format!("refs/remotes/origin/{candidate}"));
+        let found = local.clone().or(remote);
+        let usable = found.as_deref().is_some_and(|found| {
+            if contains_anchor {
+                found == anchor_sha
+            } else {
+                git.is_ancestor(&anchor_sha, found)
+            }
+        });
+        if usable {
+            if local.is_none() {
+                git.create_branch_from(candidate, found.as_deref().unwrap_or_default())
+                    .map_err(|error| {
+                        format!("Cannot create local {candidate} from origin: {error}")
+                    })?;
+            }
+            return Ok(Some(candidate.to_string()));
+        }
+    }
+    if contains_anchor {
+        return Ok(None);
+    }
+    Err(format!(
+        "⚠️ PARKED DELIVERY NOT ON SOURCE: {source} @ {} does not contain {task_id}'s reviewed \
+         anchor {anchor}; the worker has likely moved it on to its next task. Merge the task's \
+         own delivery branch instead (`worktree_merge id={source}{suffix} task_id={task_id}`), \
+         after pushing the anchor there if it is missing. No merge was attempted.",
+        &tip[..tip.len().min(12)]
+    ))
+}
+
 /// A branch-only merge request can name its task through the canonical
 /// `factory/<worker>-<task-id>` suffix. The task row still authorizes it.
 fn per_task_merge_identity(id: &str) -> Option<(&str, &str)> {
@@ -3138,6 +3206,31 @@ impl CasCore {
                 message: Cow::from(refusal),
                 data: None,
             });
+        }
+
+        // cas-7ce6: a stacked worker moves its branch on to the next task, so
+        // the branch tip is not the parked task's reviewed SHA. Merge the
+        // task's own delivery branch when it holds that SHA, and refuse rather
+        // than merge another task's work under this task's name.
+        if transactional_delivery.is_none()
+            && let Some(task_id) = task_id
+            && let Some(anchor) = self
+                .open_task_store()
+                .ok()
+                .and_then(|store| store.get(task_id).ok())
+                .and_then(|task| task.deliverables.factory_branch_anchor)
+        {
+            match parked_merge_source(manager.git(), &worktree.branch, task_id, &anchor) {
+                Ok(Some(delivery_branch)) => worktree.branch = delivery_branch,
+                Ok(None) => {}
+                Err(refusal) => {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(refusal),
+                        data: None,
+                    });
+                }
+            }
         }
 
         // A stale System-A row is not a live worktree. Preserve the legacy
@@ -5615,5 +5708,117 @@ mod stale_checkout_receipt_tests {
         let mut second = String::new();
         append_stale_checkout_notes(&mut second, &manager);
         assert_eq!(second, "");
+    }
+}
+
+#[cfg(test)]
+mod cas_7ce6_parked_merge_source_tests {
+    use super::parked_merge_source;
+    use crate::worktree::GitOperations;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn commit(path: &Path, file: &str) -> String {
+        std::fs::write(path.join(file), file).expect("write");
+        git(path, &["add", file]);
+        git(path, &["commit", "-qm", file]);
+        git(path, &["rev-parse", "HEAD"])
+    }
+
+    /// A worker lane with a parked anchor, then the worker's next task.
+    fn stacked_lane() -> (tempfile::TempDir, String) {
+        let repo = tempfile::tempdir().expect("repo");
+        let path = repo.path();
+        git(path, &["init", "-q", "-b", "main"]);
+        git(path, &["config", "user.email", "cas-test@example.invalid"]);
+        git(path, &["config", "user.name", "Cassy Test"]);
+        commit(path, "base");
+        git(path, &["checkout", "-qb", "factory/w"]);
+        let anchor = commit(path, "parked");
+        (repo, anchor)
+    }
+
+    /// cas-7ce6 AC: after the worker moves its branch on to the next task, a
+    /// merge for the parked task resolves its own delivery branch at the
+    /// reviewed SHA, never the moving worker tip.
+    #[test]
+    fn moved_worker_branch_merges_the_parked_delivery_branch() {
+        let (repo, anchor) = stacked_lane();
+        let path = repo.path();
+        let ops = GitOperations::new(path.to_path_buf());
+        assert_eq!(parked_merge_source(&ops, "factory/w", "cas-park", &anchor), Ok(None));
+
+        git(path, &["branch", "factory/w-cas-park", &anchor]);
+        git(path, &["reset", "-q", "--hard", "main"]);
+        commit(path, "next-task");
+        assert_eq!(
+            parked_merge_source(&ops, "factory/w", "cas-park", &anchor),
+            Ok(Some("factory/w-cas-park".to_string()))
+        );
+
+        // Only origin has it: a local branch is created at origin's tip.
+        git(path, &["update-ref", "refs/remotes/origin/factory/w-cas-park", &anchor]);
+        git(path, &["branch", "-D", "factory/w-cas-park"]);
+        assert_eq!(
+            parked_merge_source(&ops, "factory/w", "cas-park", &anchor),
+            Ok(Some("factory/w-cas-park".to_string()))
+        );
+        assert_eq!(git(path, &["rev-parse", "factory/w-cas-park"]), anchor);
+    }
+
+    /// cas-7ce6: work stacked on top of the parked SHA is never merged under
+    /// the parked task's name when its delivery branch sits on the anchor.
+    #[test]
+    fn stacked_work_on_top_prefers_the_exact_delivery_branch() {
+        let (repo, anchor) = stacked_lane();
+        let path = repo.path();
+        let ops = GitOperations::new(path.to_path_buf());
+        commit(path, "stacked-next-task");
+        assert_eq!(
+            parked_merge_source(&ops, "factory/w", "cas-park", &anchor),
+            Ok(None),
+            "no delivery branch: the containing source merges as before"
+        );
+        git(path, &["branch", "factory/w-cas-park", &anchor]);
+        assert_eq!(
+            parked_merge_source(&ops, "factory/w", "cas-park", &anchor),
+            Ok(Some("factory/w-cas-park".to_string()))
+        );
+    }
+
+    /// cas-7ce6 (the cas-06f5 symptom): a source that lacks the task's
+    /// anchor, with no delivery branch holding it, is refused instead of
+    /// being reported as a merge.
+    #[test]
+    fn source_without_the_anchor_is_refused() {
+        let (repo, anchor) = stacked_lane();
+        let path = repo.path();
+        let ops = GitOperations::new(path.to_path_buf());
+        git(path, &["reset", "-q", "--hard", "main"]);
+        commit(path, "next-task");
+        let refusal = parked_merge_source(&ops, "factory/w", "cas-park", &anchor)
+            .expect_err("source lacks the anchor");
+        assert!(refusal.contains(&anchor), "{refusal}");
+        assert!(refusal.contains("id=factory/w-cas-park task_id=cas-park"), "{refusal}");
+
+        // A per-task source is never re-suffixed.
+        git(path, &["checkout", "-qb", "factory/w-cas-park"]);
+        assert!(parked_merge_source(&ops, "factory/w-cas-park", "cas-park", &anchor).is_err());
     }
 }

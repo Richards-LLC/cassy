@@ -37,6 +37,40 @@ user-facing change they never ran.
 | Bypass | `supervisor_override=true` with a non-empty reason from a live supervisor (the existing mechanism). It is logged as a `✅ DECISION` note that names the gate. |
 | Config | `qa.evidence_gate` (bool, default `true`) in cas-619f's `[qa]` section. |
 
+## Loaded-proof receipt grammar (risk=concurrency)
+
+When the existing risk close gate requires loaded execution, submit
+`task action=notes id=<task-id> note_type=loaded_proof` with this single-line body,
+replacing the target with the complete target actually exercised:
+
+```text
+LOADED_PROOF: target=explicit non-Rust (vitest src/example.test.ts + jest tests/example.test.js) parallelism=16 loops=3 result=PASS
+```
+
+The four parsed fields are target, parallelism, loops and result. Structured
+whole-target scopes are `target=whole`, `target=entire` and `target=full`, with
+an optional `target` word after the scope. Non-Rust scopes use
+`target=explicit non-Rust (...)`, or the explicitly supported runner forms
+`target=vitest ...`, `target=jest ...`, `target=pytest ...` and `target=go test ...`.
+A Rust module/test-filter `target=` value does not prove whole-target scope;
+other non-Rust runners use the explicit non-Rust form. Existing prose such as
+`non-Rust target: pnpm test` and `whole/entire/full target` remain accepted.
+For a non-Rust harness, record 16 actual concurrent processes/workers as
+`parallelism=16` or `concurrency=16`; `-j16`, `-j 16`, `--jobs 16` and
+`--jobs=16` also parse. These receipt spellings do not prescribe runner flags.
+Record at least three loops/runs (`loops=3`, `3 runs`, `3x`), and a passing
+result (`result=PASS`, SUCCESS, exit 0 or status 0). An explicit failed result
+or nonzero exit/status contradicts PASS and is refused. SHA and log are optional;
+include the actual command, passed/failed counts and log path for review.
+
+Each refusal lists `parsed=[...]` and `missing=[...]` for each typed note and
+prints an accepted example. Repair one note so all four fields occur together;
+partial notes cannot be combined. No typed note reports all four fields missing.
+The hook-installed worker guidance reaches the same grammar through
+`cas-worker/references/close-gate.md`. Factory Rust loaded execution continues
+to defer to supervisor assembly; this documents the existing gate without adding
+another check or requiring a SHA.
+
 ## 1. Eligibility (shared with cas-619f)
 
 The gate uses the same predicate as the independent QA pass, so a delivery

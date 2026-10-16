@@ -1650,3 +1650,159 @@ fn a_tool_call_does_not_replay_a_body_being_typed_into_the_pane_cas_a1ed() {
     assert_eq!(worker.receipt(id), Some(cas_store::SurfacingSource::TransportClaimed));
     assert_eq!(worker.receipt(plain), Some(cas_store::SurfacingSource::TransportClaimed));
 }
+
+/// cas-6ccb (GH #1215 §3.4): `inbox_poll` marks rows seen before its response
+/// is read, so a row polled mid-turn and not acted on was lost. A polled row
+/// the agent never acknowledged is shown once more at its next turn, labelled
+/// as such; a row it acknowledged with message_ack is not, and nothing is
+/// repeated inside the polling turn or after the one repeat.
+#[test]
+fn cas_6ccb_a_polled_unacked_row_is_shown_once_more_and_an_acked_one_is_not() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+
+    let first_turn = worker.start_turn("working through cas-x");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let kept = "Rebase onto v43, then re-run the named tests.";
+    let acked = "FYI: lane CI is green.";
+    let kept_id = store.enqueue_with_session("supervisor", WORKER, kept, SESSION).unwrap();
+    let acked_id = store.enqueue_with_session("supervisor", WORKER, acked, SESSION).unwrap();
+    // Mid-turn, the agent polls both (what `inbox_poll` runs) and acks one.
+    let polled = store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap();
+    assert_eq!(polled.len(), 2);
+    store.ack(acked_id).unwrap();
+    let same_turn = worker.tool_call();
+    assert!(!same_turn.contains(kept) && !same_turn.contains(acked), "{first_turn}{same_turn}");
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let next_turn = worker.take_turn("continuing my work");
+    assert_eq!(next_turn.matches(kept).count(), 1, "{next_turn}");
+    assert!(!next_turn.contains(acked), "an acknowledged row is not repeated: {next_turn}");
+    assert!(next_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{next_turn}");
+    assert_eq!(
+        store.recipient_receipt(kept_id, WORKER).unwrap(),
+        Some(cas_store::SurfacingSource::HookSurfaced)
+    );
+    assert_eq!(
+        store.recipient_receipt(acked_id, WORKER).unwrap(),
+        Some(cas_store::SurfacingSource::InboxPoll)
+    );
+
+    let after = worker.take_turn("still working");
+    assert!(!after.contains(kept) && !after.contains("[not acknowledged]"), "once: {after}");
+}
+
+/// cas-6ccb: a Claude Teams member's next turn may be a teammate-message
+/// turn, which fires no UserPromptSubmit; its tool boundary shows the
+/// polled-but-unacked row once instead.
+#[test]
+fn cas_6ccb_a_teammate_turn_shows_a_polled_unacked_row_at_its_tool_boundary() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+
+    worker.start_turn("working through cas-x");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let kept = "Hold the merge until the QA pass lands.";
+    let kept_id = store.enqueue_with_session("supervisor", WORKER, kept, SESSION).unwrap();
+    assert_eq!(store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap().len(), 1);
+    assert!(!worker.tool_call().contains(kept));
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let next = "Also: rebase first.";
+    let next_id = store.enqueue_with_session("supervisor", WORKER, next, SESSION).unwrap();
+    deliver_to_claude_worker(&store, &mut worker, next_id, next);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let teammate_turn = worker.next_teammate_turn().unwrap();
+    assert_eq!(teammate_turn.matches(kept).count(), 1, "{teammate_turn}");
+    assert!(teammate_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{teammate_turn}");
+    assert_eq!(teammate_turn.matches(next).count(), 1, "{teammate_turn}");
+    assert!(!worker.take_turn("continuing my work").contains(kept));
+}
+
+/// cas-6ccb review: the repeat does not wait for new mail. A turn no prompt
+/// hook served (a teammate-message turn) shows the polled-but-unacked row at
+/// its first tool call even when nothing new was enqueued; the next tool call
+/// and the next turn do not repeat it.
+#[test]
+fn cas_6ccb_the_repeat_runs_once_per_turn_without_new_mail() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+
+    worker.start_turn("working through cas-x");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let kept = "Keep the flag operator-only.";
+    let kept_id = store.enqueue_with_session("supervisor", WORKER, kept, SESSION).unwrap();
+    assert_eq!(store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap().len(), 1);
+    // Every later tool call in the polling turn runs the mail check.
+    assert!(!worker.tool_call().contains(kept));
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let turn = worker.take_turn_without_prompt_hook("<teammate-message teammate_id=\"peer\">\nping\n</teammate-message>");
+    assert_eq!(turn.matches(kept).count(), 1, "{turn}");
+    assert!(turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{turn}");
+    assert!(turn.contains("one-time repeat"), "{turn}");
+    assert!(!worker.tool_call().contains(kept));
+    assert!(!worker.take_turn("continuing my work").contains(kept));
+}
+
+/// cas-6ccb review: an acknowledgement in any form ends the repeat:
+/// message_ack, a reply with in_reply_to (which acks the row), or a later
+/// message to the sender that implies a reply (`assumed_seen`).
+#[test]
+fn cas_6ccb_a_reply_to_the_sender_ends_the_repeat() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+
+    worker.start_turn("working through cas-x");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let answered = "Which epic should this target?";
+    store.enqueue_with_session("supervisor", WORKER, answered, SESSION).unwrap();
+    assert_eq!(store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap().len(), 1);
+    // The worker answers the supervisor (reply inference, cas-dcf2).
+    let reply_at = chrono::Utc::now();
+    store
+        .ack_delivered_for_recipient(&[WORKER], &["supervisor"], Some(SESSION), reply_at)
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let next_turn = worker.take_turn("continuing my work");
+    assert!(!next_turn.contains(answered), "{next_turn}");
+}
+
+/// cas-6ccb review: a polled row that this turn's pointer also names gets one
+/// note. Shown in full as the repeat, it is not also "[already shown]".
+#[test]
+fn cas_6ccb_a_repeat_named_by_the_turn_pointer_gets_one_note() {
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    let (_temp, cas_root) = teams_member_root();
+    let store = store_at_root(&cas_root);
+    let mut worker = ClaudeTeamsWorkerDouble::new(&cas_root);
+
+    worker.start_turn("working through cas-x");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let body = "Ship the dedupe, then close the issue.";
+    let id = store.enqueue_with_session("supervisor", WORKER, body, SESSION).unwrap();
+    assert!(store.claim_recipient_transport(id, WORKER).unwrap());
+    let wake = crate::ui::factory::daemon::runtime::delivery::pointer_wake_payload("supervisor", Some(id));
+    // The agent polls the row by the id its pointer named.
+    assert_eq!(store.poll_named_for_recipient(WORKER, Some(SESSION), &[id]).unwrap().len(), 1);
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let woken = worker.take_turn(&wake);
+    assert_eq!(woken.matches(body).count(), 1, "{woken}");
+    assert!(woken.contains(&format!("[not acknowledged] Message #{id}")), "{woken}");
+    assert!(!woken.contains(&format!("[already shown] Message #{id}")), "{woken}");
+}

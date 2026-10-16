@@ -1,0 +1,22 @@
+---
+source: cas-cli/src/review_body.rs
+expression: review
+---
+## Summary
+
+```text
+<BASE>
+  -> <HEAD>
+M	input.txt
+```
+
+## Evidence
+
+- ci: 38827289892 green
+- proof: cas-store prompt_queue_store:: 226/226; check: PASS abc
+
+## Merge Danger
+
+**Risk:** —
+
+**Door:** —

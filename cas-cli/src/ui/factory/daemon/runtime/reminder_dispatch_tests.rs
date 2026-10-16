@@ -278,15 +278,16 @@ async fn cas_f265_delegated_reminder_retains_sender_and_failure_accounting() {
         .lifecycle_redelivery_counts
         .insert(rows[0].id, LIFECYCLE_MAX_RENUDGE_ATTEMPTS);
     daemon.process_prompt_queue().await.unwrap();
-    assert_eq!(
-        queue
-            .message_delivery_report(rows[0].id)
-            .unwrap()
-            .unwrap()
-            .stage,
-        cas_store::DeliveryStage::Abandoned,
-        "delegated reminders retain the existing relay failure policy"
-    );
+    // cas-af23: the inter-agent wake failure stays visible, but a spent
+    // budget cannot prove a delegated reminder's premise expired.
+    let report = queue.message_delivery_report(rows[0].id).unwrap().unwrap();
+    assert_ne!(report.stage, cas_store::DeliveryStage::Abandoned, "{report:?}");
+    let detail = report.pending_detail.unwrap();
+    assert!(detail.contains(&format!("notification_id={}", rows[0].id)), "{detail}");
+    assert!(detail.contains("wake retries exhausted"), "{detail}");
+    assert!(!detail.contains("expired premise"), "{detail}");
+    assert!(queue.poll_unseen_for_recipient(&rows[0].target, Some(&daemon.session_name), 20)
+        .unwrap().iter().any(|row| row.id == rows[0].id));
 }
 
 #[tokio::test(flavor = "current_thread")]

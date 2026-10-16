@@ -2166,10 +2166,8 @@ pub(super) enum LifecycleRedelivery {
     /// The recipient acknowledged this notification; redelivery must stop
     /// permanently, not merely pause.
     StopAcknowledged,
-    /// cas-7787 (GH #160): the row has burned its whole retry budget without
-    /// ever reaching the recipient. Stop retrying AND record the failure —
-    /// the audience is gone, and a relay nobody will ever read must not keep
-    /// re-waking forever.
+    /// The row spent its wake budget without a recipient read. Stop active
+    /// wakes and record the failure; current/unknown premises remain readable.
     StopUndelivered,
 }
 
@@ -2185,9 +2183,9 @@ pub(super) enum LifecycleRedelivery {
 /// The bound exists to make the two ends EXHAUSTIVE. Before it, a relay whose
 /// task never left `awaiting_merge` had no terminal state at all: the
 /// staleness suppressor only fires when the task moves on, so a lane parked
-/// behind a supervisor who never returned would retry forever. Terminating on
-/// budget exhaustion is what guarantees every relay reaches exactly one of
-/// delivered or visibly-failed, and never a third silent path.
+/// behind a supervisor who never returned would retry forever. Wake exhaustion
+/// records a visible failure and stops active wakes. A current or unknown task
+/// premise stays readable for the next hook or inbox poll.
 pub(super) const LIFECYCLE_MAX_RENUDGE_ATTEMPTS: u32 = 20;
 
 /// cas-d732 (GH #119): decide whether a pending lifecycle row may be
@@ -2206,8 +2204,8 @@ pub(super) const LIFECYCLE_MAX_RENUDGE_ATTEMPTS: u32 = 20;
 /// cas-7787 (GH #160): `attempts` is how many times this row has already been
 /// (re)delivered without arriving. Once it exceeds
 /// [`LIFECYCLE_MAX_RENUDGE_ATTEMPTS`] the row stops retrying and is reported
-/// as a failure, so the pending set stays bounded and no relay can end in
-/// silence.
+/// as a failure. The body remains readable unless a separate premise check
+/// proves it obsolete.
 pub(super) fn lifecycle_redelivery_decision(
     acked: bool,
     last_attempt: Option<std::time::Instant>,
@@ -5184,11 +5182,20 @@ impl FactoryDaemon {
         escalate: bool,
     ) -> bool {
         let self_reminder = self_addressed_reminder(queued);
+        let supervisor_recipient = pane_target.eq_ignore_ascii_case(self.app.supervisor_name());
         let silent = !self_reminder
+            && !supervisor_recipient
             && escalate
             && wake_starved_needs_supervisor(self.prepared_wake_evidence(pane_target));
         let detail = if self_reminder {
             "self reminder waiting for the next turn or wake recheck; no inter-agent alarm".to_string()
+        } else if supervisor_recipient {
+            crate::prompt_revalidation::exhausted_wake_notice(
+                queued.id,
+                &queued.prompt,
+                queued.summary.as_deref(),
+                attempts,
+            )
         } else if silent {
             format!(
                 "wake budget spent after {attempts} attempts and the recipient's transcript has been \
@@ -8579,11 +8586,8 @@ impl FactoryDaemon {
                         &queued.prompt,
                         &task,
                     ),
-                    LifecycleTaskRead::NotFound => {
-                        LifecyclePromptDecision::SuppressStale {
-                            task_id: envelope.task_id.clone(),
-                        }
-                    }
+                    // Missing state cannot prove that the task moved on.
+                    LifecycleTaskRead::NotFound => LifecyclePromptDecision::Deliver,
                     LifecycleTaskRead::Unavailable(error) => {
                         tracing::warn!(
                             prompt_id = queued.id,
@@ -9241,39 +9245,22 @@ impl FactoryDaemon {
                             );
                             continue;
                         }
-                        // cas-7787 (GH #160): the retry budget is gone and the
-                        // relay never arrived. Stop retrying — an audience
-                        // that has not appeared in 20 minutes is not going to
-                        // — but terminate as a RECORDED FAILURE so the row
-                        // becomes visible in worker_status/doctor rather than
-                        // lingering as a zombie or vanishing into silence.
-                        // cas-3dcb: a death relay has no task_id, and reporting
-                        // one as "(unknown task)" would bury the one fact the
-                        // supervisor needs — which worker is gone.
+                        // cas-af23 / GH #1241: the earlier premise checks are
+                        // the only authority to withdraw an obsolete task
+                        // message. A spent wake budget says nothing about the
+                        // task; keep its body available to hooks and inbox_poll.
+                        // Preserve the dedicated worker-death failure report.
                         if Self::row_is_supervisor_wake(
-                    &wake_sender,
-                    self.app.supervisor_name(),
-                    &queued.source,
-                    &queued.prompt,
-                ) {
-                            let notice =
-                                match crate::prompt_revalidation::parse_worker_died_envelope(
-                                    &queued.prompt,
-                                ) {
-                                    Some(envelope) => {
-                                        crate::prompt_revalidation::undelivered_worker_died_notice(
-                                            &envelope.worker_name,
-                                        )
-                                    }
-                                    None => crate::prompt_revalidation::undelivered_relay_notice(
-                                        &crate::prompt_revalidation::parse_lifecycle_envelope(
-                                            &queued.prompt,
-                                        )
-                                        .map(|envelope| envelope.task_id)
-                                        .unwrap_or_else(|| "(unknown task)".to_string()),
-                                        queued.summary.as_deref(),
-                                    ),
-                                };
+                            &wake_sender,
+                            self.app.supervisor_name(),
+                            &queued.source,
+                            &queued.prompt,
+                        ) && let Some(envelope) =
+                            crate::prompt_revalidation::parse_worker_died_envelope(&queued.prompt)
+                        {
+                            let notice = crate::prompt_revalidation::undelivered_worker_died_notice(
+                                &envelope.worker_name,
+                            );
                             self.queue_jobs.stamp(
                                 self.app.cas_dir(),
                                 queued.id,
@@ -9281,12 +9268,11 @@ impl FactoryDaemon {
                                 super::prompt_queue_jobs::QueueStamp::UndeliveredRelay { notice },
                             );
                         } else {
-                            // cas-d1659: an ordinary message is not a relay
-                            // whose premise expires. Stop re-nudging, keep the
-                            // row for the recipient's next turn.
+                            // Stop re-nudging; a live or unknown premise stays
+                            // queued for the recipient's next turn.
                             let pane_target = pane_target.to_string();
                             self.park_wake_starved_row(
-                                    &queued,
+                                &queued,
                                 &pane_target,
                                 LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
                                 false,
@@ -14792,9 +14778,9 @@ mod tests {
             attempts, LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
             "the retry budget must be spent exactly once before the failure arm"
         );
-        // And the terminal arm is the LOUD one: the daemon call site maps
-        // StopUndelivered to `mark_undelivered_lifecycle_relay` + a
-        // tracing::error!, which is what puts it in worker_status/doctor.
+        // The failure arm stops active wakes. Current/unknown task messages
+        // retain their body and an exhaustion detail for the next inbox poll;
+        // a worker-death relay keeps its dedicated terminal failure report.
         assert_eq!(
             lifecycle_redelivery_decision(
                 false,
@@ -20085,3 +20071,7 @@ mod delivery_probe_tests;
 #[cfg(test)]
 #[path = "reminder_dispatch_tests.rs"]
 mod reminder_dispatch_tests;
+
+#[cfg(test)]
+#[path = "relay_retry_exhaustion_tests.rs"]
+mod relay_retry_exhaustion_tests;

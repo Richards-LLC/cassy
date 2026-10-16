@@ -8975,12 +8975,17 @@ mod tests {
     fn cas_1ba0_fresh_transport_claim_retires_a_previous_inbox_deferral() {
         let (_temp, store) = create_test_store();
         let session = "factory-1ba0";
-        for token_api in [false, true] {
-            let id = store
-                .enqueue_with_session("supervisor", "worker-1", "decision", session)
-                .unwrap();
+        for (token_api, urgent) in [(false, false), (true, false), (true, true)] {
+            let id = if urgent {
+                store.enqueue_urgent("supervisor", "worker-1", "redirect", Some(session), None, None, true)
+            } else {
+                store.enqueue_with_session("supervisor", "worker-1", "decision", session)
+            }.unwrap();
             assert!(store.claim_recipient_transport(id, "worker-1").unwrap());
             store.record_deferred_inbox(id, 123).unwrap();
+            assert!(!store.claim_recipient_transport(id, "worker-1").unwrap());
+            assert_eq!(store.deferred_inbox_state(id).unwrap().unwrap().1, 123,
+                "a refused reservation must leave a held Teams copy eligible");
             store.release_recipient_transport(id, "worker-1").unwrap();
             if token_api {
                 assert!(
@@ -9020,6 +9025,10 @@ mod tests {
             // A new Teams write may defer again; only that new handoff is eligible.
             store.record_deferred_inbox(id, 456).unwrap();
             assert_eq!(store.deferred_inbox_state(id).unwrap().unwrap().1, 456);
+            if urgent {
+                store.mark_transport_delivered(id).unwrap();
+                continue;
+            }
             assert_eq!(
                 store
                     .surface_unseen_for_recipient_without_transport_delivery(

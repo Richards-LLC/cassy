@@ -3591,9 +3591,14 @@ impl CasService {
                 let held_inbox = if r.stage == cas_store::DeliveryStage::Gated
                     && r.pending_reason == Some(cas_store::PendingReason::GatedNotReady)
                 {
-                    queue.deferred_inbox_state(notification_id)
-                        .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
-                            format!("Failed to query deferred inbox status: {error}")))?
+                    queue
+                        .deferred_inbox_state(notification_id)
+                        .map_err(|error| {
+                            Self::error(
+                                ErrorCode::INTERNAL_ERROR,
+                                format!("Failed to query deferred inbox status: {error}"),
+                            )
+                        })?
                         .is_some()
                 } else {
                     false

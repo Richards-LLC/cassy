@@ -549,6 +549,13 @@ class Run:
             ("claim", self.names["bw"], "task", {"action": "claim", "id": task_id}),
             ("spawn", self.names["b"], "factory", {"action": "spawn_workers", "count": 1, "task_id": task_id}),
         ]:
+            if action == "spawn":
+                # Refused starts/claims leave no lease but can retain the
+                # local assignee. Clear it so spawn reaches the peer guard.
+                cleared = self.b.tool(self.names["b"], "task", action="update", id=task_id, assignee="")
+                evidence["spawn_unassign"] = cleared
+                if cleared.get("is_error"):
+                    raise StepFailed("could not clear the refused local assignment before spawn")
             refused = self.b.tool(agent, tool, **arguments)
             evidence[action] = refused
             text = refused.get("text", "")
@@ -560,15 +567,22 @@ class Run:
             raise StepFailed("team-held task was admitted to the spawn queue")
 
     def step_spawn_refused(self, evidence, notes):
-        task_id = self.ctx.get("task_id") or self.shared_task(evidence)
+        if not self.ctx.get("task_id"):
+            self.step_claim_refused(evidence, notes)
+        task_id = self.ctx["task_id"]
+        cleared = self.b.tool(self.names["b"], "task", action="update", id=task_id, assignee="")
+        evidence["spawn_unassign"] = cleared
+        if cleared.get("is_error"):
+            raise StepFailed("could not clear the refused local assignment before spawn")
         before = self.b.call("spawn-count", "--run-dir", self.b.run_dir)["spawn_queue_rows"]
         reply = self.b.tool(self.names["b"], "factory", action="spawn_workers", count=1, task_id=task_id)
         after = self.b.call("spawn-count", "--run-dir", self.b.run_dir)["spawn_queue_rows"]
         evidence.update(reply=reply, spawn_queue_before=before, spawn_queue_after=after)
         if after != before:
             raise StepFailed(f"spawn was queued ({before} -> {after} rows) for a task a peer holds")
-        if not reply.get("is_error") and "HELD BY A PEER" not in reply.get("text", ""):
-            raise StepFailed("spawn_workers was not refused")
+        text = reply.get("text", "")
+        if "HELD BY A PEER" not in text or self.names["a"] not in text:
+            raise StepFailed("spawn_workers was not refused naming the peer")
 
     def message(self, machine, agent, target, summary, body, **extra):
         return machine.tool(agent, "coordination", action="message", target=target, summary=summary,

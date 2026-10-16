@@ -119,6 +119,7 @@ class TeamClaimsProbeTest(unittest.TestCase):
         class Machine:
             def __init__(self):
                 self.run_dir = "/sandbox-fixture"
+                self.assigned = False
                 self.counts = iter([0, int(queued)])
             def call(self, *args, **kwargs):
                 return {"spawn_queue_rows": next(self.counts)}
@@ -130,7 +131,10 @@ class TeamClaimsProbeTest(unittest.TestCase):
                         "claims": [] if missing else [{"task_id": "cas-held", "agent_name": "alpha"}],
                     }]})}
                 if args["action"] == "update":
+                    self.assigned = bool(args.get("assignee"))
                     return {"text": "updated", "is_error": False}
+                if name == "factory" and self.assigned:
+                    return {"text": "already assigned to live worker beta-worker", "is_error": True}
                 return {"text": "HELD BY A PEER alpha on alpha-host (account account-a)", "is_error": True}
         run.a = Machine()
         run.b = Machine()

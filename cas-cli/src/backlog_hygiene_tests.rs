@@ -231,6 +231,20 @@ fn sample_report() -> BacklogReport {
             assignee: None,
             idle_days: 20,
         }],
+        stale_citations: (0..5)
+            .map(|n| StaleCitations {
+                task_id: format!("cas-s{n}"),
+                title: format!("stale task {n}"),
+                status: "open".into(),
+                gone: vec![GoneCitation {
+                    kind: CitationKind::File,
+                    cited: format!("cas-cli/src/removed_{n}.rs"),
+                    removed_in: "abc123456".into(),
+                    removed_on: "2026-10-01".into(),
+                }],
+            })
+            .collect(),
+        citations_unchecked: 0,
     }
 }
 
@@ -273,4 +287,122 @@ fn session_start_block_is_for_supervisors_only() {
     let (full, _) = session_start_block_for_role(Some("supervisor"), &cas_root, Utc::now())
         .expect("a supervisor sees the finished epic");
     assert!(full.contains("task action=close id=cas-e9"), "{full}");
+}
+
+// ---- cas-d9038: kind 4, tasks whose cited code is all gone ----
+
+/// Paths need a directory and an extension; `:line` drops; URLs, absolute
+/// paths and bare words are not citations. Qualified symbols keep their path.
+#[test]
+fn extract_citations_reads_paths_and_qualified_symbols() {
+    let text = "Fix `cas-cli/src/cloud/peers.rs:402` and crates/cas-store/src/lib.rs (see \
+                https://github.com/acme/repo/blob/main/src/x.rs and /home/me/repo/src/y.rs). \
+                The bug is in close_ops::message_references_task and \
+                crate::cloud::peers::render_user_peers; also README.md, Cargo.toml, \
+                cas-cli/src/cloud/peers.rs again, and std::fmt.";
+    let (files, symbols) = extract_citations(text);
+    assert_eq!(files, vec!["cas-cli/src/cloud/peers.rs", "crates/cas-store/src/lib.rs"]);
+    assert_eq!(
+        symbols,
+        vec!["close_ops::message_references_task", "crate::cloud::peers::render_user_peers"],
+        "short trailing segments like `fmt` are too common to test"
+    );
+}
+
+/// A tree with history: one file deleted, one symbol renamed, one kept.
+fn repo_with_removals() -> (tempfile::TempDir, std::path::PathBuf) {
+    let temp = tempfile::TempDir::new().unwrap();
+    let repo = temp.path().to_path_buf();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/old_module.rs"), "pub fn legacy_entry() {}\n").unwrap();
+    std::fs::write(repo.join("src/lib.rs"), "pub fn old_helper_name() {}\npub fn kept_helper() {}\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "initial"]);
+    git(&repo, &["rm", "-q", "src/old_module.rs"]);
+    git(&repo, &["commit", "-q", "-m", "remove the old module"]);
+    std::fs::write(repo.join("src/lib.rs"), "pub fn new_helper_name() {}\npub fn kept_helper() {}\n").unwrap();
+    git(&repo, &["commit", "-q", "-am", "rename the helper"]);
+    (temp, repo)
+}
+
+fn open_task(id: &str, description: &str) -> Task {
+    let mut task = Task::new(id.into(), format!("title of {id}"));
+    task.description = description.into();
+    task.created_at = Utc::now() - Duration::days(1);
+    task
+}
+
+/// Acceptance 1 and 2: a task citing a deleted file and a renamed symbol is
+/// reported with each removal dated; a task citing live code, a task with no
+/// citations, and a task citing code git never had are not.
+#[test]
+fn stale_citations_reports_only_tasks_whose_cited_code_is_all_gone() {
+    let (_temp, repo) = repo_with_removals();
+    let tasks = vec![
+        open_task("cas-gone", "Fix src/old_module.rs and crate::lib::old_helper_name."),
+        open_task("cas-live", "Touch src/lib.rs and crate::lib::kept_helper."),
+        open_task("cas-mixed", "src/old_module.rs moved; see crate::lib::kept_helper."),
+        open_task("cas-none", "Make the dashboard friendlier."),
+        open_task("cas-planned", "Add src/brand_new_module.rs with crate::lib::future_helper."),
+    ];
+    let (found, unchecked) = stale_citations(&repo, "main", &tasks, CitationBudget::DOCTOR);
+    assert_eq!(unchecked, 0);
+    let ids: Vec<&str> = found.iter().map(|f| f.task_id.as_str()).collect();
+    assert_eq!(ids, vec!["cas-gone"], "{found:#?}");
+    let gone = &found[0].gone;
+    assert_eq!(gone.len(), 2, "{gone:#?}");
+    assert_eq!((gone[0].kind, gone[0].cited.as_str()), (CitationKind::File, "src/old_module.rs"));
+    assert_eq!((gone[1].kind, gone[1].cited.as_str()), (CitationKind::Symbol, "crate::lib::old_helper_name"));
+    for citation in gone {
+        assert!(!citation.removed_in.is_empty() && citation.removed_on.len() == 10, "{citation:?}");
+    }
+    assert_ne!(gone[0].removed_in, gone[1].removed_in, "each removal is its own commit");
+    let line = stale_citation_line(&found[0]);
+    assert!(line.contains("src/old_module.rs") && line.contains(&gone[0].removed_in), "{line}");
+    assert!(line.contains("old_helper_name") && line.contains("review"), "{line}");
+    assert!(!line.contains("action=close"), "never a close call: {line}");
+}
+
+/// Closed tasks and epics are not read; the task cap counts the rest.
+#[test]
+fn stale_citations_reads_only_open_non_epic_tasks_within_the_cap() {
+    let (_temp, repo) = repo_with_removals();
+    let mut closed = open_task("cas-closed", "src/old_module.rs");
+    closed.status = TaskStatus::Closed;
+    let mut epic = open_task("cas-epic", "src/old_module.rs");
+    epic.task_type = TaskType::Epic;
+    let tasks = vec![closed, epic, open_task("cas-a", "src/old_module.rs"), open_task("cas-b", "src/old_module.rs")];
+    let budget = CitationBudget { max_tasks: 1, ..CitationBudget::DOCTOR };
+    let (found, unchecked) = stale_citations(&repo, "main", &tasks, budget);
+    assert_eq!(found.len(), 1);
+    assert_eq!(unchecked, 1);
+}
+
+/// Acceptance 3: with many findings the doctor-facing summary and the
+/// SessionStart block stay within budget, and kind 4 has its own line.
+#[test]
+fn stale_citations_stay_within_the_session_start_budget() {
+    let mut report = sample_report();
+    report.stale_citations = (0..60)
+        .map(|n| StaleCitations {
+            task_id: format!("cas-s{n}"),
+            title: "x".repeat(200),
+            status: "open".into(),
+            gone: (0..8)
+                .map(|m| GoneCitation {
+                    kind: CitationKind::Symbol,
+                    cited: format!("crate::very::long::module::path::symbol_{m}_{}", "y".repeat(60)),
+                    removed_in: "abc123456".into(),
+                    removed_on: "2026-10-01".into(),
+                })
+                .collect(),
+        })
+        .collect();
+    let (full, compact) = session_start_block(&report).unwrap();
+    assert!(full.len() <= SESSION_START_CAP_BYTES, "{} bytes", full.len());
+    assert!(compact.len() <= SESSION_START_CAP_BYTES);
+    assert!(full.lines().next().unwrap().contains("60 citing removed code"), "{full}");
+    let line = stale_citation_line(&report.stale_citations[0]);
+    assert!(line.len() <= 400, "one entry is bounded: {} bytes", line.len());
 }

@@ -10,6 +10,32 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[tokio::test]
+async fn cas_d697_round2_historical_anchor_actor_cannot_record() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    let old = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let output = Command::new("git")
+        .args(["commit", "--allow-empty", "-qm", "prior implementation"])
+        .current_dir(&fx.repo)
+        .env("GIT_AUTHOR_NAME", "batch-supervisor")
+        .env("GIT_AUTHOR_EMAIL", "prior@example.test")
+        .env("GIT_COMMITTER_NAME", "batch-supervisor")
+        .env("GIT_COMMITTER_EMAIL", "prior@example.test")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let historical = git(&fx.repo, &["rev-parse", "HEAD"]);
+    git(&fx.repo, &["reset", "--hard", &old]);
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get("cas-bq01").unwrap();
+    task.deliverables
+        .historical_factory_branch_anchors
+        .push(historical);
+    tasks.update(&task).unwrap();
+    fx.reject(serde_json::json!({}), "no self-review").await;
+}
+
+#[tokio::test]
 async fn cas_d697_round2_reassigned_implementer_cannot_record() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);
@@ -143,6 +169,18 @@ async fn cas_d697_round2_final_close_backstop_covers_unassigned_path() {
         "{refused}"
     );
     assert!(refused.contains("deferred evidence"), "{refused}");
+    let request = serde_json::from_value(serde_json::json!({
+        "action":"close", "id":"cas-bq01", "supervisor_override":true,
+        "reason":"authorized close override cannot erase deferred evidence"
+    }))
+    .unwrap();
+    let overridden = extract_text(fx.supervisor.task(Parameters(request)).await.unwrap());
+    assert_ne!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::Closed,
+        "{overridden}"
+    );
+    assert!(overridden.contains("deferred evidence"), "{overridden}");
 }
 
 #[tokio::test]

@@ -18,7 +18,13 @@ failed or unreviewed tasks remain open.
 Publish the ledger using `artifact action=publish task_id=<batch-task-or-epic>
 path=<absolute-ledger-path>`. Cloud storage is optional: a locally published
 artifact is sufficient. A live registered supervisor who did not implement
-any listed task records the receipt through the verification MCP tool:
+any listed task records the receipt through the verification MCP tool. Prior
+lease owners, completion-receipt workers, QA-round implementers, preserved
+factory branch owners and exact Git actors on delivery anchor history also
+count as implementers after reassignment. Integration and verification alone
+do not count as implementation.
+
+Use the verification MCP tool:
 
 ```json
 {
@@ -34,8 +40,9 @@ Every task must belong to this project and have its own recorded delivery
 anchor. Each anchor must be an ancestor of `staging_sha`, and that staging
 commit must be on the task's configured target branch. Configure staging as
 the delivery target when staging is the integration destination. A SHA on an
-unrelated branch, or a SHA absent from the available origin target, does not
-establish containment. Refresh target refs before recording.
+unrelated branch does not establish containment. Containment uses the merge
+gate's local-or-origin rule, so a stale origin does not hide local integration.
+Refresh target refs before recording.
 
 The runtime verifies nonempty UTF-8 ledger bytes against the published
 artifact's size and SHA-256. It stores an immutable receipt with project,

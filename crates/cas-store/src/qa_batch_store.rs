@@ -122,9 +122,103 @@ pub fn qa_batch_receipts_for_task(
         .collect())
 }
 
+/// Every recorded implementer identity, across all assignment/delivery cycles.
+/// Read existing audit tables without installing schemas or truncating history.
+/// Integration/verifier event actors are deliberately excluded: merging or
+/// verifying another worker's delivery does not make someone its implementer.
+pub fn qa_task_implementation_actors(root: &Path, task: &str) -> Result<Vec<String>> {
+    let conn = crate::shared_db::shared_connection(&root.join("cas.db"))?;
+    let guard = crate::shared_db::lock_connection(&conn)?;
+    let mut actors = std::collections::BTreeSet::new();
+    for (table, columns) in [
+        ("task_leases", &["agent_id"][..]),
+        ("task_lease_history", &["agent_id", "previous_agent_id"][..]),
+        (
+            "worker_completion_receipts",
+            &["worker_agent_id", "worker_name"][..],
+        ),
+        ("qa_passes", &["implementer_agent_id"][..]),
+    ] {
+        let exists: bool = guard.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            continue;
+        }
+        for column in columns {
+            // Table/column identifiers above are compile-time constants.
+            let mut stmt = guard.prepare(&format!(
+                "SELECT DISTINCT {column} FROM {table} WHERE task_id=?1 AND {column} IS NOT NULL"
+            ))?;
+            for actor in stmt.query_map([task], |row| row.get::<_, String>(0))? {
+                let actor = actor?;
+                if !actor.trim().is_empty() {
+                    actors.insert(actor);
+                }
+            }
+        }
+    }
+    Ok(actors.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qa_batch_store_all_recorded_implementation_actors_cas_d697() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            qa_task_implementation_actors(root.path(), "cas-one")
+                .unwrap()
+                .is_empty()
+        );
+        let conn = rusqlite::Connection::open(root.path().join("cas.db")).unwrap();
+        conn.execute_batch("CREATE TABLE task_lease_history(task_id TEXT, agent_id TEXT, previous_agent_id TEXT);
+            CREATE TABLE worker_completion_receipts(task_id TEXT, worker_agent_id TEXT, worker_name TEXT);
+            CREATE TABLE qa_passes(task_id TEXT, implementer_agent_id TEXT);").unwrap();
+        conn.execute(
+            "INSERT INTO task_lease_history VALUES ('cas-one','old-owner','transferred-from')",
+            [],
+        )
+        .unwrap();
+        for _ in 0..120 {
+            conn.execute(
+                "INSERT INTO task_lease_history VALUES ('cas-one','new-owner',NULL)",
+                [],
+            )
+            .unwrap();
+        }
+        conn.execute("INSERT INTO worker_completion_receipts VALUES ('cas-one','delivery-id','delivery-name')", []).unwrap();
+        conn.execute(
+            "INSERT INTO worker_completion_receipts VALUES ('cas-one','new-owner','new-owner')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO qa_passes VALUES ('cas-one','qa-implementer')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_lease_history VALUES ('cas-other','unrelated',NULL)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            qa_task_implementation_actors(root.path(), "cas-one").unwrap(),
+            vec![
+                "delivery-id",
+                "delivery-name",
+                "new-owner",
+                "old-owner",
+                "qa-implementer",
+                "transferred-from"
+            ]
+        );
+    }
 
     fn receipt(id: &str, project: &str, tasks: &[&str]) -> QaBatchReceipt {
         QaBatchReceipt {

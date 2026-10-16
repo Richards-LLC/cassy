@@ -9689,12 +9689,10 @@ impl CasCore {
 
         // Every non-park transition to Closed owes persisted batch debt,
         // including ProceedWithNote and paths without an assignee or surface.
-        if !supervisor_override {
-            if let Err(message) = crate::qa_batch::ensure_deferred_close(
-                &self.cas_root, &task, req.commit_receipt.as_deref(),
-            ) {
-                return Ok(Self::tool_error(message));
-            }
+        if let Err(message) = crate::qa_batch::ensure_deferred_close(
+            &self.cas_root, &task, req.commit_receipt.as_deref(),
+        ) {
+            return Ok(Self::tool_error(message));
         }
 
         // Proceed with close

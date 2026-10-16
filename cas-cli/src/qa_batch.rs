@@ -174,15 +174,66 @@ pub(crate) fn prepare_receipt(
             .assignee
             .as_deref()
             .ok_or_else(|| format!("task {id} has no implementer"))?;
-        let implementer_id =
-            crate::mcp::tools::core::task::resolve_agent_identity(agents.as_ref(), implementer);
-        if implementer == recorder.id
-            || implementer == recorder.name
-            || implementer_id.is_some_and(|a| a.id == recorder.id)
+        let (repo, target) = task_context(root, &task)?;
+        let mut actors =
+            cas_store::qa_task_implementation_actors(root, id).map_err(|e| e.to_string())?;
+        actors.push(implementer.into());
+        for branch in task
+            .deliverables
+            .parked_branch
+            .iter()
+            .chain(task.deliverables.handoff_branches.iter())
         {
+            let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+            if let Some(owner) = branch.strip_prefix("factory/") {
+                actors.push(
+                    owner
+                        .strip_suffix(&format!("-{}", task.id))
+                        .unwrap_or(owner)
+                        .into(),
+                );
+            }
+        }
+        // Historical anchors retain identity evidence even after reassignment
+        // or branch deletion. Only exact Git actor identities count; ancestry
+        // alone never makes an integrator an implementer.
+        for anchor in task
+            .deliverables
+            .factory_branch_anchor
+            .iter()
+            .chain(task.deliverables.historical_factory_branch_anchors.iter())
+            .chain(
+                task.deliverables
+                    .declined_factory_branch_anchors
+                    .iter()
+                    .flatten(),
+            )
+        {
+            if let Some(anchor) = commit(&repo, anchor) {
+                let out = Command::new("git")
+                    .args(["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", &anchor])
+                    .current_dir(&repo)
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                if !out.status.success() {
+                    return Err(format!("task {id}: cannot read delivery actors"));
+                }
+                actors.extend(
+                    String::from_utf8_lossy(&out.stdout)
+                        .trim()
+                        .split('\0')
+                        .map(str::to_owned),
+                );
+            }
+        }
+        if actors.iter().any(|actor| {
+            actor == &recorder.id
+                || actor == &recorder.name
+                || crate::mcp::tools::core::task::resolve_agent_identity(agents.as_ref(), actor)
+                    .is_some_and(|agent| agent.id == recorder.id)
+        }) {
             return Err(format!("no self-review: recorder implemented {id}"));
         }
-        let (repo, target) = task_context(root, &task)?;
         let anchor = task
             .deliverables
             .factory_branch_anchor

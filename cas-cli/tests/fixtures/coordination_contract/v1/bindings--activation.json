@@ -1,0 +1,226 @@
+{
+  "contract": "cassy.coordination/v1",
+  "surface": "bindings.activation",
+  "method": "GET",
+  "path": "/api/coordination/bindings/activation",
+  "spec": "\u00a711, \u00a712(a).7",
+  "cases": [
+    {
+      "name": "strictly activated binding beside an unmanaged v1 binding",
+      "request": {
+        "query": {
+          "registration_id": "reg-supervisor-beta-08"
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Strict-activation evidence for each binding of your project follows.",
+          "bindings": [
+            {
+              "binding": {
+                "id": "0000b1d1-1111-4111-8111-00000000b1d1",
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "project_id": "github.com/richards-llc/cassy",
+                "mode": "managed",
+                "verified": true,
+                "fence_generation": 1,
+                "activated_at": "2026-10-16T13:50:00.000Z",
+                "legacy_fenced_at": "2026-10-16T13:50:00.000Z"
+              },
+              "strict_activation": "evidenced",
+              "v1": {
+                "publication": "fenced",
+                "leasing": "fenced",
+                "late_ack": "refused",
+                "outstanding": {
+                  "pending": 0,
+                  "leased": 0,
+                  "unexpired_leases": 0
+                }
+              },
+              "fence_receipt": {
+                "id": "0000ac71-1111-4111-8111-00000000ac71",
+                "outcome": "activated",
+                "prior_mode": "legacy",
+                "fence_generation": 1,
+                "attempted_at": "2026-10-16T13:50:00.000Z",
+                "quiescence": {
+                  "quiet_window_secs": 300,
+                  "attested_v1_consumers": [],
+                  "blocking_v1_leases": 0,
+                  "blocking_v1_consumers": []
+                },
+                "settled": {
+                  "migrated_v1_rows": 2,
+                  "retired_v1_rows": 1,
+                  "invalidated_v1_leases": 1
+                }
+              },
+              "latest_attempt": {
+                "id": "0000ac71-1111-4111-8111-00000000ac71",
+                "outcome": "activated",
+                "prior_mode": "legacy",
+                "fence_generation": 1,
+                "attempted_at": "2026-10-16T13:50:00.000Z",
+                "quiescence": {
+                  "quiet_window_secs": 300,
+                  "attested_v1_consumers": [],
+                  "blocking_v1_leases": 0,
+                  "blocking_v1_consumers": []
+                },
+                "settled": {
+                  "migrated_v1_rows": 2,
+                  "retired_v1_rows": 1,
+                  "invalidated_v1_leases": 1
+                }
+              }
+            },
+            {
+              "binding": {
+                "id": "0000b1d2-1111-4111-8111-00000000b1d2",
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08LEGACY1",
+                "project_id": "github.com/richards-llc/cassy",
+                "mode": "legacy",
+                "verified": true,
+                "fence_generation": 0,
+                "activated_at": null,
+                "legacy_fenced_at": null
+              },
+              "strict_activation": "not_requested",
+              "v1": {
+                "publication": "open",
+                "leasing": "open",
+                "late_ack": "accepted",
+                "outstanding": {
+                  "pending": 1,
+                  "leased": 0,
+                  "unexpired_leases": 0
+                }
+              },
+              "fence_receipt": null,
+              "latest_attempt": null
+            }
+          ],
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "none"
+          }
+        }
+      }
+    },
+    {
+      "name": "activation refused while legacy intake is live",
+      "request": {
+        "query": {
+          "registration_id": "reg-supervisor-beta-08"
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Strict-activation evidence for each binding of your project follows.",
+          "bindings": [
+            {
+              "binding": {
+                "id": "0000b1d1-1111-4111-8111-00000000b1d1",
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "project_id": "github.com/richards-llc/cassy",
+                "mode": "legacy",
+                "verified": true,
+                "fence_generation": 0,
+                "activated_at": null,
+                "legacy_fenced_at": null
+              },
+              "strict_activation": "refused",
+              "v1": {
+                "publication": "open",
+                "leasing": "open",
+                "late_ack": "accepted",
+                "outstanding": {
+                  "pending": 0,
+                  "leased": 1,
+                  "unexpired_leases": 1
+                }
+              },
+              "fence_receipt": null,
+              "latest_attempt": {
+                "id": "0000ac72-1111-4111-8111-00000000ac72",
+                "outcome": "refused",
+                "prior_mode": "legacy",
+                "fence_generation": 0,
+                "attempted_at": "2026-10-16T13:55:00.000Z",
+                "quiescence": {
+                  "quiet_window_secs": 300,
+                  "attested_v1_consumers": [],
+                  "blocking_v1_leases": 1,
+                  "blocking_v1_consumers": [
+                    "machine:legacy"
+                  ]
+                },
+                "settled": {
+                  "migrated_v1_rows": 0,
+                  "retired_v1_rows": 0,
+                  "invalidated_v1_leases": 0
+                }
+              }
+            }
+          ],
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "none"
+          }
+        }
+      }
+    },
+    {
+      "name": "registration of another account",
+      "request": {
+        "query": {
+          "registration_id": "reg-supervisor-alpha-01"
+        }
+      },
+      "response": {
+        "status": 404,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "not_found",
+          "guidance": "No supervisor registration with this ID belongs to you.",
+          "reason": "unknown_registration",
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "none"
+          }
+        }
+      }
+    }
+  ]
+}

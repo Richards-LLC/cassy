@@ -57,5 +57,16 @@
         "sha256": "2b2b7f3ae836a41582f7dc4642f31a01867264a1a7e640188f72cce5cbed49e6"
       }
     }
+  },
+  "vendored_cloud_recovery": {
+    "source": "Richards-LLC/petra-stella-cloud",
+    "ref": "193102bbe54518f2e70584a86a862bde7d9fcf48",
+    "path": "tests/contracts/coordination/v1",
+    "note": "Copied byte for byte from PR #169 (Cloud #167), additive recovery/activation read surfaces. Original v1 fixture pins remain unchanged.",
+    "files": {
+      "deliveries--recover.json": "42eecad5645a474c8ac113a1df68166b92a77e251b2cbf68ec91e238731cce6f",
+      "deliveries--lookup.json": "47b96eda6e699bd05a2ad5cd2a231320cbd79f94dd3b9d0d2950ec701f19a27a",
+      "bindings--activation.json": "a896a51a0b49e8ee39e7537a70ab70f6abb07325f62f83934854490ed396a524"
+    }
   }
 }

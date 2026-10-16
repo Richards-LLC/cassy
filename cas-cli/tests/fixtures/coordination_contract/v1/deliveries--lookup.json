@@ -1,0 +1,179 @@
+{
+  "contract": "cassy.coordination/v1",
+  "surface": "deliveries.lookup",
+  "method": "GET",
+  "path": "/api/coordination/activity/deliveries/{id}",
+  "spec": "\u00a75, \u00a712(a).3",
+  "cases": [
+    {
+      "name": "target lookup after rebind",
+      "request": {
+        "path_params": {
+          "id": "0000de1b-1111-4111-8111-00000000de1b"
+        },
+        "query": {
+          "registration_id": "reg-supervisor-beta-08"
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Resume this admission; do not re-admit.",
+          "admission": {
+            "delivery": {
+              "id": "0000de1b-1111-4111-8111-00000000de1b",
+              "occurrence_id": "00000cc1-1111-4111-8111-000000000cc1",
+              "reader_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+              "registration_id": "reg-supervisor-beta-08",
+              "route_kind": "unclaimed_fanout",
+              "route_generation": 0,
+              "delivery_generation": 2,
+              "status": "admitted",
+              "consumption": "unread"
+            },
+            "admitted_at": "2026-10-16T13:59:41.000Z",
+            "target": {
+              "resource_id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "message_ts": "1760616000.123456",
+              "permalink": "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456?thread_ts=1760616000.123456"
+            },
+            "recovery": {
+              "rebind_required": false,
+              "mode": "resume"
+            }
+          },
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "proceed",
+            "delivery": {
+              "id": "0000de1b-1111-4111-8111-00000000de1b",
+              "occurrence_id": "00000cc1-1111-4111-8111-000000000cc1",
+              "reader_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+              "registration_id": "reg-supervisor-beta-08",
+              "route_kind": "unclaimed_fanout",
+              "route_generation": 0,
+              "delivery_generation": 2,
+              "status": "admitted",
+              "consumption": "unread"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "consumed admission does not replay",
+      "request": {
+        "path_params": {
+          "id": "0000de1d-1111-4111-8111-00000000de1d"
+        },
+        "query": {
+          "registration_id": "reg-supervisor-beta-08"
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Consumption recorded; this admission will not replay.",
+          "admission": {
+            "delivery": {
+              "id": "0000de1d-1111-4111-8111-00000000de1d",
+              "occurrence_id": "00000cc4-1111-4111-8111-000000000cc4",
+              "reader_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+              "registration_id": "reg-supervisor-beta-07",
+              "route_kind": "unclaimed_fanout",
+              "route_generation": 0,
+              "delivery_generation": 1,
+              "status": "admitted",
+              "consumption": "consumed"
+            },
+            "admitted_at": "2026-10-16T13:59:55.000Z",
+            "target": {
+              "resource_id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "message_ts": "1760616120.000400",
+              "permalink": "https://richards-llc.slack.com/archives/C08COORD01/p1760616120000400?thread_ts=1760616000.123456"
+            },
+            "recovery": {
+              "rebind_required": false,
+              "mode": "none"
+            }
+          },
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "none",
+            "delivery": {
+              "id": "0000de1d-1111-4111-8111-00000000de1d",
+              "occurrence_id": "00000cc4-1111-4111-8111-000000000cc4",
+              "reader_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+              "registration_id": "reg-supervisor-beta-07",
+              "route_kind": "unclaimed_fanout",
+              "route_generation": 0,
+              "delivery_generation": 1,
+              "status": "admitted",
+              "consumption": "consumed"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "foreign, unknown or not yet admitted delivery",
+      "request": {
+        "path_params": {
+          "id": "0000de2a-1111-4111-8111-00000000de2a"
+        },
+        "query": {
+          "registration_id": "reg-supervisor-beta-08"
+        }
+      },
+      "response": {
+        "status": 404,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "not_found",
+          "guidance": "No admission with this ID belongs to your supervisor; lease pending deliveries with claim instead.",
+          "reason": "unknown_delivery",
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "none"
+          }
+        }
+      }
+    }
+  ]
+}

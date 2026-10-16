@@ -28,6 +28,9 @@ const FIXTURES: &[(&str, &str)] = &[
     fixture!("activity--observe.json"),
     fixture!("deliveries--rebind.json"),
     fixture!("deliveries--receipts.json"),
+    fixture!("deliveries--recover.json"),
+    fixture!("deliveries--lookup.json"),
+    fixture!("bindings--activation.json"),
     fixture!("external_work--claim.json"),
     fixture!("external_work--complete.json"),
     fixture!("external_work--handoff_offer.json"),
@@ -44,6 +47,11 @@ const FIXTURES: &[(&str, &str)] = &[
 ];
 
 const MANIFEST: &str = include_str!("../../tests/fixtures/coordination_contract/v1/MANIFEST.json");
+const CLOUD_RECOVERY_VENDORED: &[(&str, &str)] = &[
+    fixture!("deliveries--recover.json"),
+    fixture!("deliveries--lookup.json"),
+    fixture!("bindings--activation.json"),
+];
 const VIOLET_VENDORED: &[(&str, &str)] = &[
     fixture!("violet/activity--observe.json"),
     fixture!("violet/external_work--reply_intents.json"),
@@ -225,6 +233,16 @@ fn cas_c423_vendored_violet_contract_is_unchanged() {
     for (name, text) in VIOLET_VENDORED {
         let sha = format!("{:x}", Sha256::digest(text.as_bytes()));
         assert_eq!(sha, pinned[*name]["sha256"].as_str().unwrap(), "{name}");
+    }
+}
+
+#[test]
+fn cas_c423_cloud_successor_and_activation_fixtures_are_unchanged() {
+    let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
+    let source = &manifest["vendored_cloud_recovery"];
+    assert_eq!(source["ref"], "193102bbe54518f2e70584a86a862bde7d9fcf48");
+    for (name, text) in CLOUD_RECOVERY_VENDORED {
+        assert_eq!(format!("{:x}", Sha256::digest(text.as_bytes())), source["files"][*name].as_str().unwrap(), "{name}");
     }
 }
 

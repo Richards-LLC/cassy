@@ -48,9 +48,9 @@ impl Fixture {
             repo_selector: "project:fixture".into(), target_branch: "epic/test".into(),
         });
         crate::store::open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
-        crate::store::open_agent_store(&cas_dir).unwrap().register(
-            &cas_types::Agent::new("merge-w".into(), "merge-w".into())
-        ).unwrap();
+        let mut worker = cas_types::Agent::new("merge-w".into(), "merge-w".into());
+        worker.role = cas_types::AgentRole::Worker;
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
         let mut data = DirectorData::load_with_stores_for_project(&cas_dir, None, false, None, None).unwrap();
         data.agent_id_to_name.insert("merge-w".into(), "merge-w".into());
         let mut app = FactoryApp::for_test_at(cas_dir.clone());

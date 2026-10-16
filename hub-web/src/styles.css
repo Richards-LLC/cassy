@@ -50,6 +50,11 @@ button:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--bg-h
 button:disabled,
 button[aria-disabled="true"] { opacity: .42; cursor: not-allowed; }
 
+/* System palettes replace button fills; keep the house controls recognizable. */
+@media (forced-colors: active) {
+  button { border: var(--line-width) solid ButtonBorder; }
+}
+
 .status-row,
 .attention-item,
 .palette-command { transition: background-color 100ms ease; }

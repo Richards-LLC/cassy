@@ -134,7 +134,8 @@ fn cas_8235_update_preserves_custom_refs_and_a_usable_default() {
         result.unwrap();
         if mode == "unregistered" {
             assert!(output.contains("missing_registered_violet_credential"), "{output}");
-            assert!(root.parent().unwrap().join(".claude/skills/cas-worker/SKILL.md").is_file());
+            // pin: the installed builtin path proves sync progressed past Violet.
+        assert!(root.parent().unwrap().join(".claude/skills/cas-worker/SKILL.md").is_file());
         }
         assert_eq!(std::fs::read_to_string(path).unwrap(), original, "{mode}");
         assert!(!output.contains("cas-8235-private-fixture"));
@@ -225,6 +226,7 @@ fn cas_8235_review_proxy_refusals_warn_and_continue_sync_and_doctor() {
         assert!(output.contains("warning: Violet"), "{mode}: {output}");
         assert!(!output.contains("private-malformed-value"));
         assert_eq!(std::fs::read_to_string(&user).unwrap(), original);
+        // pin: the installed builtin path proves sync progressed past Violet.
         assert!(root.parent().unwrap().join(".claude/skills/cas-worker/SKILL.md").is_file());
         let row = crate::cli::integrate::violet::doctor_row_from_env(None).unwrap();
         assert_eq!(row.severity, crate::cli::integrate::violet::DoctorSeverity::Warning, "{row:?}");
@@ -301,6 +303,7 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
     assert_eq!(report.failed_count, 0, "{output}");
     for root in &roots {
         assert!(std::fs::read_to_string(root.join("proxy.toml")).unwrap().contains("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"), "{output}");
+        // pin: the installed builtin path proves sync progressed past Violet.
         assert!(root.parent().unwrap().join(".claude/skills/cas-worker/SKILL.md").is_file());
     }
     assert!(!output.contains("cas-8235-private-fixture"));

@@ -426,6 +426,7 @@ fn cli_release_report_resolves_main_config_from_a_git_worktree() {
     // pin: the operator reads Eastern 12-hour times (cas-5389)
     assert!(source.contains("Published 9 September 2026 · 12:51 PM ET"));
     assert!(!source.contains("UTC"), "{source}");
+    // pin: front matter stays a machine date in UTC (cas-5389)
     assert!(source.contains("date: 2026-09-09\n"));
     assert!(source.contains("The release is ready to inspect."));
     // pin: generated Markdown rows are render.py's input contract (cas-7860)

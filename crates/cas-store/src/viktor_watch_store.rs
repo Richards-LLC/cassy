@@ -337,6 +337,18 @@ impl SqliteViktorWatchStore {
 mod tests {
     use super::*;
 
+    /// cas-1bc7: the daemon tick's expiry with nothing due takes no write
+    /// lock, so it never queues behind another writer.
+    #[test]
+    fn cas_1bc7_expire_with_nothing_due_takes_no_write_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteViktorWatchStore::open(temp.path()).unwrap();
+        let held = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+        held.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let _budget = crate::wait_budget::bound_waits_for(std::time::Duration::from_millis(150));
+        assert_eq!(store.expire_stale().unwrap(), 0);
+    }
+
     #[test]
     fn records_deduplicates_and_quarantines_task_watches() {
         let temp = tempfile::tempdir().unwrap();

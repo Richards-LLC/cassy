@@ -18230,3 +18230,74 @@ mod cas_6ccb_poll_settled_tests {
         assert_eq!(report.recipient_poll_settled.as_deref(), Some("withheld by inbox_poll: done"));
     }
 }
+
+/// cas-1bc7: under write contention (the many-agent harness's background
+/// writers), every write-lock acquisition on a tool call's path queues behind
+/// the holder. An empty inbox poll, a stale sweep with nothing due and a
+/// re-open's init must not take the write lock at all.
+#[cfg(test)]
+mod cas_1bc7_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Another connection holds the write lock until dropped.
+    fn foreign_writer(dir: &Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(dir.join("cas.db")).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        conn
+    }
+
+    fn store() -> (TempDir, SqlitePromptQueueStore) {
+        let temp = TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        (temp, store)
+    }
+
+    /// Run `f` with a short wait budget, so a write-lock wait fails fast
+    /// instead of sleeping out the 5 s busy timeout.
+    fn within_budget<T>(f: impl FnOnce() -> T) -> T {
+        let _budget = crate::wait_budget::bound_waits_for(std::time::Duration::from_millis(150));
+        f()
+    }
+
+    #[test]
+    fn cas_1bc7_empty_inbox_drains_take_no_write_lock() {
+        let (temp, store) = store();
+        // Mail for someone else is not this recipient's.
+        store.enqueue("supervisor", "worker-b", "not yours").unwrap();
+        let _held = foreign_writer(temp.path());
+        let polled = within_budget(|| store.poll_unseen_for_recipient("worker-a", None, 10));
+        assert!(polled.unwrap().is_empty(), "an empty poll answers without the write lock");
+        let surfaced = within_budget(|| store.surface_unseen_for_recipient("worker-a", None, 10));
+        assert!(surfaced.unwrap().is_empty(), "so does an empty turn-hook drain");
+    }
+
+    #[test]
+    fn cas_1bc7_a_nonempty_drain_still_receipts_once() {
+        let (_temp, store) = store();
+        let id = store.enqueue("supervisor", "worker-a", "real work").unwrap();
+        let first = store.poll_unseen_for_recipient("worker-a", None, 10).unwrap();
+        assert_eq!(first.iter().map(|row| row.id).collect::<Vec<_>>(), vec![id]);
+        assert!(
+            store.poll_unseen_for_recipient("worker-a", None, 10).unwrap().is_empty(),
+            "the receipt written under the lock still retires the row"
+        );
+    }
+
+    #[test]
+    fn cas_1bc7_stale_sweep_with_nothing_due_takes_no_write_lock() {
+        let (temp, store) = store();
+        store.enqueue("supervisor", "worker-a", "fresh").unwrap();
+        let _held = foreign_writer(temp.path());
+        let expired = within_budget(|| store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS));
+        assert!(expired.unwrap().is_empty());
+    }
+
+    #[test]
+    fn cas_1bc7_reopen_init_takes_no_write_lock() {
+        let (temp, store) = store();
+        let _held = foreign_writer(temp.path());
+        within_budget(|| store.init()).expect("init with nothing to upgrade writes nothing");
+    }
+}

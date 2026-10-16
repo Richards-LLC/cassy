@@ -580,7 +580,8 @@ fn read_wake_inputs(
     };
     let mut observations = HashMap::new();
     for name in recipients {
-        let Some(agent) = agents.iter().find(|agent| agent.name == *name) else {
+        let Some(agent) = crate::cli::factory::wedged::preferred_worker_registration(&agents, name)
+        else {
             observations.insert(
                 name.clone(),
                 RecipientInputs {

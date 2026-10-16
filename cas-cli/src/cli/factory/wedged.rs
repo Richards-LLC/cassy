@@ -1071,6 +1071,22 @@ pub(crate) fn overlay_opencode_liveness(
     }
 }
 
+/// GH #160: pane names survive harness restarts. Prefer an Active identity
+/// over Stale, then the newest registration within that status. Wake input
+/// jobs and CLI evidence resolution must select the same transcript owner.
+pub(crate) fn preferred_worker_registration<'a>(
+    agents: &'a [cas_types::Agent],
+    worker_name: &str,
+) -> Option<&'a cas_types::Agent> {
+    use cas_types::AgentStatus;
+    let rank = |status| if status == AgentStatus::Active { 0 } else { 1 };
+    agents.iter()
+        .filter(|agent| agent.name == worker_name
+            && matches!(agent.status, AgentStatus::Active | AgentStatus::Stale))
+        .min_by(|a, b| rank(a.status).cmp(&rank(b.status))
+            .then_with(|| b.registered_at.cmp(&a.registered_at)))
+}
+
 /// Resolve `(pid, clone_path, session_id, transcript_path)` for a worker by
 /// name. Reads the active agent row from AgentStore. Returns an error if the
 /// worker is unknown or has no registered PID — the verbs treat that as a
@@ -1079,36 +1095,13 @@ pub(crate) fn resolve_worker(cas_root: &Path, worker_name: &str) -> Result<Resol
     use cas_store::{AgentStore, SqliteAgentStore};
     use cas_types::AgentStatus;
     let store = SqliteAgentStore::open(cas_root).with_context(|| "open agent store")?;
-    let mut matches: Vec<_> = [AgentStatus::Active, AgentStatus::Stale]
+    let matches: Vec<_> = [AgentStatus::Active, AgentStatus::Stale]
         .iter()
         .flat_map(|s| store.list(Some(*s)).unwrap_or_default())
         .filter(|a| a.name == worker_name)
         .collect();
-    // Same name could be registered Stale + Active — prefer Active, then the
-    // most recently registered identity.
-    //
-    // cas-7787 (GH #160): a harness session restart re-registers the same pane
-    // name under a new agent id, so "Active" alone does not pick one row. The
-    // sort used to stop there, leaving the winner to `sort_by_key`'s
-    // stability — i.e. to whatever `ORDER BY registered_at DESC` happened to
-    // yield across two separate `list()` calls. Whoever loses that toss is a
-    // superseded session whose transcript is frozen, and a frozen transcript
-    // reads as "tool call still in flight" forever, which permanently vetoes
-    // the supervisor wake gate. Break the tie on registration recency so the
-    // live session is the one whose transcript is treated as evidence.
-    matches.sort_by(|a, b| {
-        let rank = |s: AgentStatus| match s {
-            AgentStatus::Active => 0,
-            AgentStatus::Stale => 1,
-            _ => 2,
-        };
-        rank(a.status)
-            .cmp(&rank(b.status))
-            .then_with(|| b.registered_at.cmp(&a.registered_at))
-    });
-    let agent = matches
-        .into_iter()
-        .next()
+    let agent = preferred_worker_registration(&matches, worker_name)
+        .cloned()
         .ok_or_else(|| anyhow!("no worker named `{worker_name}` in agent store"))?;
     let pid = agent.pid;
     let clone_path = agent.metadata.get("clone_path").cloned();

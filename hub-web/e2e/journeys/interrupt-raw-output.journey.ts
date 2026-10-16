@@ -144,6 +144,7 @@ test("HUB-J18 interrupt or read the supervisor from its conversation", async ({ 
     await interrupt.click();
     // Taking it over is never silent: this hub-admin pairing forces the
     // take, and the toast names the device control was taken from.
+    // pin: the confirmation must name the device taken over and the interrupted supervisor.
     await expect(toast).toHaveText("Took control from Studio iPad. Interrupted the cas-src supervisor.");
     expect(hub.leaseTakes.filter((take) => take.force)).toEqual([{ machine: "atlas", session: PELICAN, force: true, status: 200 }]);
     expect(interrupts(hub)).toHaveLength(2);
@@ -153,6 +154,36 @@ test("HUB-J18 interrupt or read the supervisor from its conversation", async ({ 
     await readRawOutput(page, hub, false);
     await expectOnlyTheThread(page);
   });
+});
+
+test("HUB-J18 Interrupt recovers when the first lease read is still pending", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "hub-admin"] } });
+  hub.holdLease(PELICAN, "Studio iPad");
+  const leaseRead = hub.holdNextLeaseRead(PELICAN);
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const interrupt = page.getByRole("button", { name: "Interrupt the cas-src supervisor", exact: true });
+  const toast = page.locator("#toast");
+
+  try {
+    await journey.open();
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(interrupt).toBeVisible();
+    await leaseRead.started;
+
+    await interrupt.click();
+    await hub.waitFor(() => hub.leaseTakes.length >= 1);
+    expect(hub.leaseTakes[0]).toMatchObject({ session: PELICAN, force: false, status: 409 });
+    leaseRead.release();
+
+    await expect(toast).toHaveText("Took control from Studio iPad. Interrupted the cas-src supervisor.");
+    expect(hub.leaseTakes).toEqual([
+      { machine: "atlas", session: PELICAN, force: false, status: 409 },
+      { machine: "atlas", session: PELICAN, force: true, status: 200 },
+    ]);
+    expect(interrupts(hub)).toHaveLength(1);
+  } finally {
+    leaseRead.release();
+  }
 });
 
 for (const [width, colorScheme] of [[390, "light"], [390, "dark"], [1280, "dark"]] as const) {

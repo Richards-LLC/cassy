@@ -34,7 +34,7 @@ import { syncContextRail, waitingOnOperator } from "./context-rail";
 import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionUrl, coalesceAttention, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { renderAttentionPanel } from "./attention-view";
-import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
+import { HubConnectionSupervisor, HubRequestError, type ConnectionState, type HubMachineInfo } from "./connection";
 import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, machineConnectionLabel, UNSTEADY, UNSTEADY_SENTENCE, type AttachSnapshot } from "./connection-state";
 import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, attachInProgress, showOpeningInto, disconnectedView, fatalConnectionRecovery, lostConnectionBanner, outageControlsReason, outageRefusal, pairingControlsReason, pairingLostBanner, pairingRefusal, unsteadyBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
@@ -2214,10 +2214,12 @@ async function interruptSupervisor(): Promise<void> {
   interruptsInFlight.add(key);
   try {
     const lease = leases.get(key);
-    const holder = lease && !lease.held_by_me ? lease.controller_label ?? undefined : undefined;
+    let holder = lease && !lease.held_by_me ? lease.controller_label ?? undefined : undefined;
     if (lease?.held_by_me !== true) {
       const force = Boolean(holder && machine.scopes.includes("hub-admin"));
-      if (!await takeControlForMessage(machine, session, force)) {
+      const take = await takeControlForInterrupt(machine, session, force);
+      holder ??= take.holder;
+      if (!take.taken) {
         toast(holder
           ? `${holder} is in control of this session. Interrupt works once it releases control, or from a pairing with administrator access, which can take over.`
           : "Couldn't take control of this session to interrupt it. Check that it's live, then try again.", { thread: key });
@@ -2913,6 +2915,36 @@ async function takeControlForMessage(machine: StoredMachine, session: string, fo
   await loadLease(machine.id, session);
   noteControlTaken(machine.id, session);
   return leases.get(sessionKey(machine.id, session))?.held_by_me === true;
+}
+
+/**
+ * An Interrupt pressed before the initial lease read can get a fresh 409 from
+ * the hub while the cached holder is still unknown. Read that lease, then
+ * either force the take on an admin pairing or return the named holder for
+ * the refusal toast (cas-04e8).
+ */
+async function takeControlForInterrupt(machine: StoredMachine, session: string, force = false): Promise<{ taken: boolean; holder?: string }> {
+  const key = sessionKey(machine.id, session);
+  try {
+    await connections.get(machine.id)?.requestControl(session, force);
+  } catch (error) {
+    if (force || !(error instanceof HubRequestError) || error.status !== 409) return { taken: false };
+    await loadLease(machine.id, session);
+    const lease = leases.get(key);
+    const holder = lease && !lease.held_by_me ? lease.controller_label ?? undefined : undefined;
+    if (!holder || !machine.scopes.includes("hub-admin")) return { taken: false, holder };
+    try {
+      await connections.get(machine.id)?.requestControl(session, true);
+    } catch {
+      return { taken: false, holder };
+    }
+    await loadLease(machine.id, session);
+    noteControlTaken(machine.id, session);
+    return { taken: leases.get(key)?.held_by_me === true, holder };
+  }
+  await loadLease(machine.id, session);
+  noteControlTaken(machine.id, session);
+  return { taken: leases.get(key)?.held_by_me === true };
 }
 
 /**

@@ -565,11 +565,8 @@ describe("binding Cassy Cloud browser invariants", () => {
   // Consumer: Commander application render and event handlers (main.ts), operating the conversation header.
   it("takes control for an interrupt as a send does, and says when it took it from another device", async () => {
     const source = await readSource("main.ts");
-    expect(source).toContain('const force = Boolean(holder && machine.scopes.includes("hub-admin"));');
-    expect(source).toContain("if (!await takeControlForMessage(machine, session, force)) {");
-    expect(source).toContain('const took = holder ? `Took control from ${holder}. ` : "";');
-    expect(source).toContain("toast(`${took}Interrupted ${supervisorPhrase(machine.id, session)}.`, { thread: key });");
-    expect(source).toContain("Interrupt works once it releases control, or from a pairing with administrator access, which can take over.");
+    // Interrupt's stale-lease recovery is covered through the real bundle in
+    // HUB-J18, including a 409 arriving before the holder read completes.
   });
 
   // Contract: never caches an asynchronously-created terminal against a detached render.

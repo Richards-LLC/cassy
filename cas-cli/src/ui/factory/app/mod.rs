@@ -1566,6 +1566,10 @@ impl FactoryApp {
         // durable attention relay delivers it below), so its busy-worker
         // guard does not apply on this path.
         let unfiltered_data = loaded_data.unwrap_or_else(|_| self.unfiltered_director_data.clone());
+        let merge_now = self.merge_alert_retries.clock();
+        for event in events {
+            self.merge_alert_retries.remember(event, merge_now);
+        }
 
         // cas-9fff: pass session-focused epic so EpicAllSubtasksClosed can
         // use session-affinity routing (not just epic_verification_owner).
@@ -1636,6 +1640,7 @@ impl FactoryApp {
             // lane, alongside this delivery read, never on the loop.
             let ready = if let Some(task_id) = merge_alert::task_id(event) {
                 let Some(ready) = merge_alerts.remove(task_id) else { continue; };
+                if !self.merge_alert_retries.actionable(&ready, merge_now) { continue; }
                 Some(ready)
             } else { None };
             let merge_alert_evidence = ready.as_ref().map(|ready| &ready.evidence);
@@ -1674,10 +1679,15 @@ impl FactoryApp {
                     if !self.event_detector.merge_alert_should_emit(
                         &ready.evidence.task_id, &ready.tip, ready.ci,
                     ) { continue; }
-                    if ready.ci == "failure" {
+                    if matches!(ready.ci, "failure" | "unknown") {
                         let prefix = self.supervisor_cli.backend().capabilities().tool_prefix;
+                        let decision = if ready.ci == "unknown" {
+                            "CI unknown for 10 minutes. Supervisor decision needed: inspect the missing workflow or unavailable CI service and confirm appropriate validation before merging."
+                        } else {
+                            "CI failed. Supervisor decision needed: request changes, or explicitly review and override red CI before merging."
+                        };
                         let text = format!(
-                            "CI failed for task {} on {} at {}. Supervisor decision needed: request changes, or explicitly review and override red CI before merging.\n{} unmerged commit(s) vs {} at {}.\nLive task: `{prefix}task action=show id={}`",
+                            "{decision}\nTask {} on {} at {}.\n{} unmerged commit(s) vs {} at {}.\nLive task: `{prefix}task action=show id={}`",
                             ready.evidence.task_id, ready.evidence.factory_branch, ready.tip,
                             ready.evidence.unmerged_count, ready.evidence.checked_epic_ref,
                             ready.evidence.epic_sha, ready.evidence.task_id,

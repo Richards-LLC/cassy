@@ -724,9 +724,10 @@ impl FactoryApp {
                 // event before unrelated database activity occurs.
                 // cas-3b16: read with the snapshot, off the loop.
                 timed("worker holds", || self.apply_snapshot_worker_holds());
-                return Ok(timed("supervisor stall", || self.detect_supervisor_stall())
-                    .into_iter()
-                    .collect());
+                let mut events: Vec<_> = timed("supervisor stall", || self.detect_supervisor_stall())
+                    .into_iter().collect();
+                events.extend(self.merge_alert_retry_events_at(self.merge_alert_retries.clock()));
+                return Ok(events);
             }
         };
 
@@ -761,6 +762,12 @@ impl FactoryApp {
                 .detect_changes(&self.unfiltered_director_data, self.epic_state.epic_id())
         });
         events.extend(timed("supervisor stall", || self.detect_supervisor_stall()));
+        let retries = self.merge_alert_retry_events_at(self.merge_alert_retries.clock());
+        for retry in retries {
+            if !events.iter().any(|event| super::merge_alert::task_id(event) == super::merge_alert::task_id(&retry)) {
+                events.push(retry);
+            }
+        }
 
         // Now filter to current session (agents + tasks scoped to active epic)
         if db_changed {

@@ -93,6 +93,7 @@ impl Fixture {
         data.agent_id_to_name
             .insert("merge-w".into(), "merge-w".into());
         let mut app = FactoryApp::for_test_at(cas_dir.clone());
+        app.add_worker_name_for_test("merge-w");
         app.set_director_data_for_test(data);
         let event = DirectorEvent::WorkerIdle {
             worker: "merge-w".into(),
@@ -242,7 +243,11 @@ fn cas_9efb_missing_ci_has_one_bounded_unknown_decision() {
     f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
     let prompts = f.relay();
     assert_eq!(prompts.len(), 1, "missing CI");
-    assert!(prompts[0].text.contains("CI unknown"), "{}", prompts[0].text);
+    assert!(
+        prompts[0].text.contains("CI unknown"),
+        "{}",
+        prompts[0].text
+    );
     assert!(f.relay().is_empty());
     f.ci(Some("success"));
     assert_eq!(f.relay().len(), 1, "later settled CI is a new decision");
@@ -257,22 +262,75 @@ fn cas_9efb_missing_ci_retries_without_a_new_worker_idle_event() {
     assert!(f.relay().is_empty());
     let before_minute = now + chrono::Duration::seconds(59);
     assert!(f.app.merge_alert_retry_events_at(before_minute).is_empty());
-    let retries = f.app.merge_alert_retry_events_at(now + chrono::Duration::minutes(1));
-    assert_eq!(retries.len(), 1, "the consumed WorkerIdle event must be retried each minute");
+    let retries = f
+        .app
+        .merge_alert_retry_events_at(now + chrono::Duration::minutes(1));
+    assert_eq!(
+        retries.len(),
+        1,
+        "the consumed WorkerIdle event must be retried each minute"
+    );
     let at_minute = now + chrono::Duration::minutes(1);
     assert!(f.app.merge_alert_retry_events_at(at_minute).is_empty());
     f.ci(Some("success"));
+    f.app.merge_alert_retries.now = Some(at_minute);
     let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
     assert_eq!(prompts.len(), 1);
 }
 
 #[test]
+fn cas_9efb_missing_ci_retry_survives_an_unchanged_director_snapshot() {
+    let mut f = Fixture::new();
+    let load = f.app.director_refresh_request().read(None);
+    f.app.apply_director_refresh(load).unwrap();
+    let now = Utc::now();
+    f.ci(None);
+    f.app.merge_alert_retries.now = Some(now);
+    assert!(f.relay().is_empty());
+    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(1));
+    let load = f.app.director_refresh_request().read(None);
+    let events = f.app.apply_director_refresh(load).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| super::merge_alert::task_id(event) == Some("cas-9efb-test"))
+    );
+    f.ci(Some("success"));
+    let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+    assert_eq!(prompts.len(), 1);
+}
+
+#[test]
+fn cas_9efb_missing_ci_fallback_never_turns_pending_into_a_merge_demand() {
+    let mut f = Fixture::new();
+    let now = Utc::now();
+    f.ci(None);
+    f.app.merge_alert_retries.now = Some(now);
+    assert!(f.relay().is_empty());
+    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(30));
+    assert!(f.relay().is_empty(), "pending stays silent");
+}
+
+#[test]
 fn cas_9efb_docs_only_and_cancelled_ci_have_terminal_decisions() {
     let mut f = Fixture::new();
-    std::fs::write(f.app.cas_dir.join("ci.json"), serde_json::json!({"check_runs": [{
-        "name": "Docs Lint", "status": "completed", "conclusion": "success",
-    }]}).to_string()).unwrap();
-    assert_eq!(f.relay().len(), 1, "Docs Lint is sufficient for a docs-only delivery");
+    git(f.repo.path(), &["reset", "--hard", "epic/test"]);
+    std::fs::write(f.repo.path().join("README.md"), "Documentation delivery\n").unwrap();
+    git(f.repo.path(), &["add", "README.md"]);
+    git(f.repo.path(), &["commit", "-qm", "docs delivery"]);
+    std::fs::write(
+        f.app.cas_dir.join("ci.json"),
+        serde_json::json!({"check_runs": [{
+            "name": "Docs Lint", "status": "completed", "conclusion": "success",
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        f.relay().len(),
+        1,
+        "Docs Lint is sufficient for a docs-only delivery"
+    );
     f.ci(Some("cancelled"));
     let cancelled = f.relay();
     assert_eq!(cancelled.len(), 1);

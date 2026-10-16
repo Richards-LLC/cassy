@@ -134,13 +134,12 @@ pub(crate) enum RelayOutput {
         worker: String,
         at: Option<chrono::DateTime<chrono::Utc>>,
         death: Option<super::queue_and_events::DeferredWorkerDeath>,
-        /// cas-58a3: the crashed worker's reap and worktree check, run next.
-        cleanup: Option<crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanup>,
+        /// The record's job key, for the crash cleanup waiting on it.
+        record_key: String,
     },
     /// cas-58a3: a crashed worker's reap and worktree check finished.
     WorkerCrashCleaned {
-        worker: String,
-        at: Option<chrono::DateTime<chrono::Utc>>,
+        cleanup_key: String,
         outcome: crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanupOutcome,
     },
     /// cas-58a3: a store write with nothing for the loop to apply.
@@ -182,6 +181,11 @@ pub(crate) struct RelayJobs {
     /// Test hook: give up in-flight reads after this.
     #[cfg(test)]
     pub(crate) timeout_override: Option<Duration>,
+    /// cas-58a3 review M1: crashed workers' reaps and worktree checks not yet
+    /// applied, by cleanup key. Each runs after its death record reports, or
+    /// at once if that record was refused or vanished, and is resubmitted
+    /// until it reports, so a reap is never lost.
+    pub(crate) crash_cleanups: HashMap<String, PendingCrashCleanup>,
     /// cas-ff42 L3: recorded-death rows the sweep already reported giving
     /// up on, so each is warned about once.
     pub(crate) death_sweep_given_up: std::collections::HashSet<i64>,
@@ -202,6 +206,19 @@ pub(crate) struct RelayJobs {
             &crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanup,
         ) -> crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanupOutcome,
     >,
+}
+
+/// cas-58a3: one crashed worker's cleanup and what it waits for.
+#[derive(Debug)]
+pub(crate) struct PendingCrashCleanup {
+    pub(crate) worker: String,
+    /// Its exit in the correlation window, if it waits there.
+    pub(crate) at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The death record still awaited, by job key; `None` once it reported.
+    pub(crate) record_key: Option<String>,
+    pub(crate) cleanup: crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanup,
+    /// Submissions so far; after the cap the cleanup is given up, loudly.
+    pub(crate) attempts: u32,
 }
 
 /// The shape of `record_worker_death_io`, for the cas-ff42 test hook.
@@ -262,9 +279,9 @@ impl RelayJobs {
         self.submit(jobs, spec, read)
     }
 
-    /// cas-58a3: run `work`, a write that is file and process I/O rather
+    /// cas-58a3: run `work`, a write that is file, process and git I/O rather
     /// than store writes (a crashed worker's reap and worktree check), on the
-    /// blocking lane, so slow git never holds up the store worker. Like a
+    /// External lane, so slow git never holds up the store worker. Like a
     /// write it is never given up and its key is `RelayWrite:<key>`. Returns
     /// whether it was submitted.
     pub(crate) fn submit_blocking_write(
@@ -280,7 +297,9 @@ impl RelayJobs {
         let spec = JobSpec {
             kind: RELAY_WRITE,
             key,
-            lane: Lane::Blocking,
+            // cas-58a3 review L1: git status and worktree removal are slow
+            // external calls, so they run on the External lane.
+            lane: Lane::External,
             criticality: Criticality::Critical,
             generation: self.next_generation(),
             budget: CRASH_CLEANUP_BUDGET,

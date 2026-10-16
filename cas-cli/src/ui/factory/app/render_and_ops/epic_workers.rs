@@ -2326,8 +2326,12 @@ impl FactoryApp {
         let worker_name = match name {
             Some(name) => name.to_string(),
             None => {
-                let existing: std::collections::HashSet<&str> =
-                    self.worker_names.iter().map(String::as_str).collect();
+                let existing: std::collections::HashSet<&str> = self
+                    .worker_names
+                    .iter()
+                    .chain(self.crash_cleanups_pending.iter())
+                    .map(String::as_str)
+                    .collect();
                 let mut candidate = generate_unique(1)[0].clone();
                 let mut attempts = 0;
                 while existing.contains(candidate.as_str()) && attempts < 100 {
@@ -2343,6 +2347,11 @@ impl FactoryApp {
                 vec![("success", "false"), ("reason", "worker_exists")],
             );
             anyhow::bail!("Worker '{worker_name}' already exists");
+        }
+        if self.crash_cleanup_pending(&worker_name) {
+            anyhow::bail!(
+                "Worker '{worker_name}' is still being cleaned up after its exit; retry once its reap and worktree check finish"
+            );
         }
         Ok(WorkerSpawnContext {
             worker_name,
@@ -2839,6 +2848,9 @@ impl FactoryApp {
     /// worktree reclaim check, which must not run inside the daemon loop's
     /// enforced PTY exchange (C6).
     pub fn mark_worker_crashed_in_memory(&mut self, name: &str) -> CrashCleanup {
+        // cas-58a3 review H1: the name stays reserved until its cleanup is
+        // applied (or abandoned), so no respawn shares its scope or worktree.
+        self.crash_cleanups_pending.insert(name.to_string());
         // Remove from worker tracking
         self.worker_names.retain(|n| n != name);
 
@@ -2870,9 +2882,22 @@ impl FactoryApp {
         }
     }
 
+    /// cas-58a3 review H1: whether `name`'s crash cleanup is still pending.
+    /// Respawn and named spawn treat such a name as busy.
+    pub fn crash_cleanup_pending(&self, name: &str) -> bool {
+        self.crash_cleanups_pending.contains(name)
+    }
+
+    /// cas-58a3 review H1: release a name whose crash cleanup will never be
+    /// applied (it was given up), so the name can be spawned again.
+    pub fn abandon_crash_cleanup(&mut self, name: &str) {
+        self.crash_cleanups_pending.remove(name);
+    }
+
     /// cas-58a3: the loop half after [`crash_cleanup_io`] reports: forget a
     /// reclaimed worktree, and surface a preserved or failed one.
     pub fn apply_crash_cleanup(&mut self, name: &str, outcome: CrashCleanupOutcome) {
+        self.crash_cleanups_pending.remove(name);
         match outcome.worktree {
             None | Some(Ok(RemoveOutcome::NotTracked)) => {}
             Some(Ok(RemoveOutcome::Removed)) => {
@@ -2957,6 +2982,14 @@ impl FactoryApp {
             "factory_worker_respawn_requested",
             vec![("worktrees_enabled", bool_prop(self.worktrees_enabled()))],
         );
+
+        // cas-58a3 review H1: a crashed worker's late cleanup would act on the
+        // respawn's scope and worktree.
+        if self.crash_cleanup_pending(name) {
+            anyhow::bail!(
+                "Worker '{name}' is still being cleaned up after its exit; retry once its reap and worktree check finish"
+            );
+        }
 
         // Check if worker is already active
         if self.worker_names.contains(&name.to_string()) {

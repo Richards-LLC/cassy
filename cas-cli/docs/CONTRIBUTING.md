@@ -152,9 +152,11 @@ admission. A reused live identity, worker, different machine or ambiguous
 successor is not a retired address. When multiple live peers share a displayed
 address, message-target ambiguity lists distinct agent IDs that can be used as
 explicit targets. Legacy deleted rows without retirement identity cannot be
-safely recovered from a name alone; resend to the current peer address. History
-lookup failure or truncation appears in mailbox health while current verified
-addresses continue receiving.
+safely recovered from a name alone. Their bodies are not admitted; the daemon
+sends an idempotent reply asking the sender to resend to the current supervisor
+ID, then rejects the original. If feedback fails, the original remains unacked
+for retry. History lookup failure or truncation appears in mailbox health while
+current verified addresses continue receiving.
 
 Cloud locks are private to one user account: a team peer on another account shows
 `Claims not visible (different account)` and worker tasks as `not visible`.

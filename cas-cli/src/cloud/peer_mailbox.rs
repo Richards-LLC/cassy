@@ -460,27 +460,60 @@ struct RetiredRecipient {
     registered_at: chrono::DateTime<chrono::Utc>,
 }
 
-fn retired_recipients(cas_root: &Path) -> Result<(Vec<RetiredRecipient>, Option<String>), String> {
+#[derive(Clone)]
+struct UnverifiedRetirement {
+    id: String,
+    name: String,
+}
+
+#[derive(Default)]
+struct RecipientHistory {
+    verified: Vec<RetiredRecipient>,
+    unverified: Vec<UnverifiedRetirement>,
+    warning: Option<String>,
+}
+
+fn retired_recipients(cas_root: &Path) -> Result<RecipientHistory, String> {
     const HISTORY_LIMIT: usize = 10_000;
-    let events = crate::store::open_event_store(cas_root)
-        .map_err(|e| e.to_string())?
+    let events = crate::store::open_event_store(cas_root).map_err(|e| e.to_string())?
         .list_by_type(crate::types::EventType::AgentShutdown, HISTORY_LIMIT)
         .map_err(|e| e.to_string())?;
-    let warning = (events.len() == HISTORY_LIMIT).then(||
-        "retired peer identity history reached its limit; older addresses were not checked".into());
-    let retired = events
-        .into_iter()
-        .filter_map(|event| {
-            if event.entity_type != crate::types::EventEntityType::Agent {
-                return None;
-            }
-            let mut identity: RetiredRecipient =
-                serde_json::from_value(event.metadata?.get("retired_agent")?.clone()).ok()?;
+    let mut history = RecipientHistory::default();
+    if events.len() == HISTORY_LIMIT {
+        history.warning = Some("retired peer identity history reached its limit; older addresses were not checked".into());
+    }
+    for event in events {
+        if event.entity_type != crate::types::EventEntityType::Agent { continue; }
+        let identity = event.metadata.as_ref().and_then(|v| v.get("retired_agent"))
+            .and_then(|v| serde_json::from_value::<RetiredRecipient>(v.clone()).ok());
+        if let Some(mut identity) = identity {
             identity.id = event.entity_id;
-            Some(identity)
-        })
-        .collect();
-    Ok((retired, warning))
+            history.verified.push(identity);
+        } else if let Some(name) = event.summary.strip_prefix("Agent unregistered: ")
+            .map(str::trim).filter(|name| !name.is_empty()) {
+            // This proves only that a local ID was retired, not its role or
+            // machine. It authorizes inspection/feedback, never body admission.
+            history.unverified.push(UnverifiedRetirement { id: event.entity_id, name: name.into() });
+        }
+    }
+    Ok(history)
+}
+
+fn send_unverified_address_notice(
+    mailbox: &dyn PeerMailbox, author: &crate::types::Agent, message: &ClaimedPeerMessage,
+) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let machine = author.machine_id.as_deref().unwrap_or("unknown");
+    let body = format!(
+        "PEER DELIVERY NEEDS RESEND: message {} targeted retired ID {}, whose role and machine cannot be verified. Its body was not admitted. If you intended supervisor {}@{}, resend the original message to current supervisor ID {} using coordination action=message target={} summary=\"resend\" message=\"<original message>\".",
+        message.id, message.recipient_agent_id, author.name, machine, author.id, author.id);
+    let dedupe_key = format!("{:x}", Sha256::digest(format!("unverified-recipient:{}:{}", message.id, author.id)));
+    mailbox.send(&PeerSend {
+        project_id: message.project_id.clone(), sender_agent_id: author.id.clone(),
+        recipient_agent_id: message.sender_agent_id.clone(), body,
+        summary: Some("Retired peer address: resend to current supervisor ID".into()),
+        in_reply_to: Some(message.id.clone()), dedupe_key,
+    }).map(|_| ()).map_err(|error| format!("cannot notify sender to resend message {} to {}: {error}", message.id, author.id))
 }
 
 fn live_supervisor(agent: &crate::types::Agent) -> bool {
@@ -634,7 +667,7 @@ pub fn deliver_claimed_with(
         alias_class,
         factory_session,
         consumer_id,
-        &[],
+        &RecipientHistory::default(),
         on_admitted,
     )
 }
@@ -648,7 +681,7 @@ fn deliver_claimed_with_history(
     alias_class: &[String],
     factory_session: &str,
     consumer_id: &str,
-    retired: &[RetiredRecipient],
+    history: &RecipientHistory,
     on_admitted: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<(), String>,
 ) -> DeliveryReport {
     let mut report = DeliveryReport::default();
@@ -661,12 +694,17 @@ fn deliver_claimed_with_history(
             return report;
         }
     };
-    let (routes, errors) = recipient_routes(&all, retired, factory_session);
+    let (routes, errors) = recipient_routes(&all, &history.verified, factory_session);
     report.errors.extend(errors);
-    if routes.is_empty() {
-        return report;
-    }
-    let recipient_ids: Vec<_> = routes.keys().cloned().collect();
+    let inspections: BTreeMap<_, _> = history.unverified.iter()
+        .filter(|old| !all.iter().any(|a| a.id == old.id) && !routes.contains_key(&old.id))
+        .filter_map(|old| all.iter().filter(|a| live_supervisor(a)
+            && a.factory_session.as_deref() == Some(factory_session)
+            && a.name.eq_ignore_ascii_case(&old.name))
+            .max_by_key(|a| (a.registered_at, &a.id))
+            .map(|author| (old.id.clone(), author))).collect();
+    if routes.is_empty() && inspections.is_empty() { return report; }
+    let recipient_ids: Vec<_> = routes.keys().chain(inspections.keys()).cloned().collect();
     let project_ids: Vec<String> = std::iter::once(canonical_id.to_string())
         .chain(alias_class.iter().cloned())
         .collect();
@@ -706,6 +744,18 @@ fn deliver_claimed_with_history(
             canonical_id,
             alias_class,
         );
+        if same_repo && let Some(author) = inspections.get(&message.recipient_agent_id) {
+            // Never forward an untyped legacy body. Confirm actionable,
+            // idempotent sender feedback before terminally rejecting it.
+            match send_unverified_address_notice(mailbox, author, message) {
+                Ok(()) => {
+                    report.rejected += 1;
+                    acks.push((message.id.clone(), PeerAckOutcome::Rejected));
+                }
+                Err(error) => report.errors.push(error), // Leave original unacked for retry.
+            }
+            continue;
+        }
         let Some(recipient) = recipient.filter(|_| same_repo) else {
             report.rejected += 1;
             acks.push((message.id.clone(), PeerAckOutcome::Rejected));

@@ -131,9 +131,9 @@ impl PeerMailboxRuntime {
             }
             // cas-4736: record epic split proposals and answers before ack.
             let cas_dir = self.cas_dir.clone();
-            let (retired, history_error) = match retired_recipients(&self.cas_dir) {
-                Ok((retired, warning)) => (retired, warning),
-                Err(error) => (Vec::new(), Some(format!("retired peer identity lookup failed: {error}"))),
+            let history = match retired_recipients(&self.cas_dir) {
+                Ok(history) => history,
+                Err(error) => RecipientHistory { warning: Some(format!("retired peer identity lookup failed: {error}")), ..Default::default() },
             };
             let mut report = deliver_claimed_with_history(
                 &mailbox,
@@ -143,7 +143,7 @@ impl PeerMailboxRuntime {
                 &crate::cloud::project_aliases_from_config_toml(&self.cas_dir),
                 &self.factory_session,
                 &self.consumer_id,
-                &retired,
+                &history,
                 &move |recipient, message| {
                     match crate::cloud::epic_split::ingest(&cas_dir, recipient, message)? {
                         crate::cloud::epic_split::Ingested::Ignored(why) => {
@@ -157,7 +157,7 @@ impl PeerMailboxRuntime {
                     Ok(())
                 },
             );
-            if let Some(error) = history_error { report.errors.push(error); }
+            if let Some(error) = history.warning { report.errors.push(error); }
             Ok(report)
         };
         let mut report = run().unwrap_or_else(|error| DeliveryReport {

@@ -12,6 +12,7 @@ and a before/after capture set under `captures/`.
 | `cas artifact list` | [cas-artifact.brief.md](cas-artifact.brief.md) | — | [captures/after/cas-artifact-list](captures/after/cas-artifact-list/report.md) |
 | `cas artifact show` | [cas-artifact.brief.md](cas-artifact.brief.md) | — | [captures/after/cas-artifact-show](captures/after/cas-artifact-show/report.md) |
 | `cas factory status` | [cas-factory-status.brief.md](cas-factory-status.brief.md) | [captures/before/cas-factory-status](captures/before/cas-factory-status/report.md) | [captures/after/cas-factory-status](captures/after/cas-factory-status/report.md) |
+| `cas` error renderer | [cas-error.brief.md](cas-error.brief.md) | — | [captures/after/cas-error-renderer](captures/after/cas-error-renderer/report.md) |
 
 Each capture directory keeps the 80-column `.html` that stacks the four palettes (open it in a
 browser to see the light and dark renders side by side), the ANSI-stripped 80-column dark and
@@ -34,6 +35,9 @@ node scripts/terminal-qa.mjs --label cas-artifact-list --json-flag --json \
   --out docs/design/cli/captures/after/cas-artifact-list -- cas artifact list --task <task-id>
 node scripts/terminal-qa.mjs --label cas-artifact-show --json-flag --json \
   --out docs/design/cli/captures/after/cas-artifact-show -- cas artifact show <artifact-id>
+node scripts/terminal-qa.mjs --label cas-error-renderer \
+  --out docs/design/cli/captures/after/cas-error-renderer -- \
+  cas config import /tmp/cas-d0b1-missing-config.toml
 ```
 
 The `before` set was produced the same way from the binary built at `eda3dfd1`, the last

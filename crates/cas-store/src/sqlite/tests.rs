@@ -183,42 +183,20 @@ fn test_list_decayable_excludes_in_context_and_archive_tiers() {
     assert_eq!(ids, vec!["cold", "working"]);
 }
 
-/// A cloud-synced row can be present without the local daily sequence having
-/// advanced past it.  The next locally-generated ID must skip every existing
-/// ID for today, not retry the stale sequence value indefinitely.
+/// New global IDs coexist with unchanged legacy IDs, including restored rows.
 #[test]
-fn test_generate_id_skips_foreign_same_day_entries_after_stale_sequence() {
+fn test_generate_id_keeps_legacy_rows_readable() {
     let temp = TempDir::new().unwrap();
     let store = SqliteStore::open(temp.path()).unwrap();
     store.init().unwrap();
-
-    let today = Utc::now().format("%Y-%m-%d").to_string();
     for suffix in [16, 38, 41] {
-        let entry = Entry::new(format!("{today}-{suffix}"), "synced elsewhere".to_string());
+        let entry = Entry::new(format!("2026-10-15-{suffix}"), "synced elsewhere".into());
         store.add(&entry).unwrap();
     }
-
-    // Simulate a restored/local sequence that has not observed the synced
-    // entries. The old implementation returned `today-38`, colliding with a
-    // row above and reproducing the live `remember` failure.
-    let sequence_name = format!("entry:{today}");
-    store.generate_id().unwrap(); // lazily creates the sequence table
-    store
-        .conn
-        .lock()
-        .unwrap()
-        .execute(
-            "INSERT INTO id_sequences (name, next_val) VALUES (?1, 37)
-             ON CONFLICT(name) DO UPDATE SET next_val = excluded.next_val",
-            [&sequence_name],
-        )
-        .unwrap();
-
     let id = store.generate_id().unwrap();
-    assert_eq!(id, format!("{today}-42"));
-    store
-        .add(&Entry::new(id, "new local memory".to_string()))
-        .unwrap();
+    store.add(&Entry::new(id, "new local memory".into())).unwrap();
+    assert_eq!(store.list().unwrap().len(), 4);
+    assert_eq!(store.get("2026-10-15-38").unwrap().content, "synced elsewhere");
 }
 
 #[test]

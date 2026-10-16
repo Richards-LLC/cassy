@@ -174,28 +174,7 @@ impl Store for MarkdownStore {
     }
 
     fn generate_id(&self) -> Result<String> {
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        let pattern = format!("{today}-");
-
-        let mut max = 0;
-        if self.entries_dir.exists() {
-            for entry in fs::read_dir(&self.entries_dir)? {
-                let entry = entry?;
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with(&pattern) {
-                    if let Some(num_str) = name
-                        .strip_prefix(&pattern)
-                        .and_then(|s| s.strip_suffix(".md"))
-                    {
-                        if let Ok(num) = num_str.parse::<i32>() {
-                            max = max.max(num);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(format!("{}-{:03}", today, max + 1))
+        Ok(Entry::generate_id())
     }
 
     fn add(&self, entry: &Entry) -> Result<()> {

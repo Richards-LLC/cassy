@@ -20,45 +20,7 @@ impl SqliteStore {
         Ok(())
     }
     pub(crate) fn store_generate_id(&self) -> Result<String> {
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        // Use a per-day sequence key so IDs reset daily (e.g., "entry:2026-03-30")
-        let seq_name = format!("entry:{today}");
-        let id_pattern = format!("{today}-[0-9]*");
-        let suffix_start = (today.len() + 2) as i64; // SQLite SUBSTR positions are 1-indexed.
-
-        loop {
-            let next_num = crate::shared_db::next_sequence_val(&conn, &seq_name)?;
-            let max_existing: Option<i64> = conn.query_row(
-                "SELECT MAX(CASE
-                    WHEN id GLOB ?1 THEN CAST(SUBSTR(id, ?2) AS INTEGER)
-                 END)
-                 FROM entries",
-                params![&id_pattern, suffix_start],
-                |row| row.get(0),
-            )?;
-
-            // Synced or restored rows do not advance the local sequence. Keep
-            // the counter above every same-day entry before handing an ID to a
-            // caller, otherwise a deterministic retry can return the same
-            // colliding slug again.
-            if max_existing.is_none_or(|max| next_num > max) {
-                return Ok(format!("{today}-{next_num}"));
-            }
-
-            conn.execute(
-                "INSERT INTO id_sequences (name, next_val) VALUES (?1, ?2)
-                 ON CONFLICT(name) DO UPDATE SET next_val =
-                    CASE
-                        WHEN next_val < excluded.next_val THEN excluded.next_val
-                        ELSE next_val
-                    END",
-                params![
-                    &seq_name,
-                    max_existing.expect("max existing ID is present after collision check")
-                ],
-            )?;
-        }
+        Ok(Entry::generate_id())
     }
     pub(crate) fn store_add(&self, entry: &Entry) -> Result<()> {
         let timer = TraceTimer::new();

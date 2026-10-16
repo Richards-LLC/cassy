@@ -7,6 +7,12 @@ use crate::entry::{
 use crate::scope::Scope;
 
 impl Entry {
+    /// Mint a memory identity independent of the checkout and its counters.
+    /// Existing IDs remain opaque strings; no legacy rows are rewritten.
+    pub fn generate_id() -> String {
+        format!("mem-{:032x}", rand::random::<u128>())
+    }
+
     /// Create a new entry with the given content (defaults to project scope)
     pub fn new(id: String, content: String) -> Self {
         Self::with_scope(id, content, Scope::Project)

@@ -661,6 +661,12 @@ fn cas_639c_review_future_book_version_is_refused_without_overwrite() {
 #[test]
 fn cas_639c_review_clean_end_stops_only_own_watches_and_blocks_later_ticks() {
     let fx = Fixture::new();
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    crate::cloud::CloudConfig {
+        endpoint: format!("http://{}", server.server_addr()),
+        token: Some("cas-639c-fixture-token".into()),
+        ..Default::default()
+    }.save_user().unwrap();
     let relay = FakeRelay::new();
     let mut first = fx.wake("first", t0());
     relay.publish(mention("C1", 0));
@@ -677,8 +683,128 @@ fn cas_639c_review_clean_end_stops_only_own_watches_and_blocks_later_ticks() {
     );
     assert!(saved.watch("C2", "second").unwrap().is_active());
     let before = std::fs::read(&fx.watch_path).unwrap();
+    let requests = std::thread::spawn(move || {
+        let request = server.recv_timeout(Duration::from_millis(200)).unwrap();
+        if let Some(request) = request {
+            request.respond(tiny_http::Response::from_string(r#"{"events":[],"denied":[]}"#)).unwrap();
+            true
+        } else { false }
+    });
     assert!(runtime.tick_blocking().0.errors.is_empty());
+    assert!(!requests.join().unwrap(), "stopped runtime contacted Cloud with valid credentials");
     assert_eq!(std::fs::read(&fx.watch_path).unwrap(), before);
+}
+
+#[test]
+fn cas_639c_round3_truncated_peer_receipt_preserves_live_watch() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut peer = fx.wake("peer", t0());
+    relay.publish(mention("C1", 0));
+    peer.poll_once(&relay, &fx.queue, true, at(10));
+    let mut actor = fx.wake("actor", at(20));
+    // save_metadata truncates before writing; this is an ambiguous live receipt.
+    std::fs::write(crate::ui::factory::session::metadata_path("peer"), b"{\"name\":").unwrap();
+    actor.poll_once(&relay, &fx.queue, true, at(30));
+    assert!(WatchBook::read(&fx.watch_path).unwrap().watch("C1", "peer").unwrap().is_active());
+}
+
+#[test]
+fn cas_639c_round3_listing_error_preserves_peer_watch() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut peer = fx.wake("peer", t0());
+    relay.publish(mention("C1", 0));
+    peer.poll_once(&relay, &fx.queue, true, at(10));
+    let mut actor = fx.wake("actor", at(20));
+    let sessions = crate::ui::factory::session::sessions_dir();
+    std::fs::rename(&sessions, sessions.with_extension("saved")).unwrap();
+    std::fs::write(&sessions, b"not a directory").unwrap();
+    assert!(crate::ui::factory::session::SessionManager::new().list_sessions_read_only().is_err());
+    actor.poll_once(&relay, &fx.queue, true, at(30));
+    assert!(WatchBook::read(&fx.watch_path).unwrap().watch("C1", "peer").unwrap().is_active());
+}
+
+#[test]
+fn cas_639c_round3_shutdown_is_bounded_and_next_tick_finishes_stop() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut wake = fx.wake("first", t0());
+    relay.publish(mention("C1", 0));
+    wake.poll_once(&relay, &fx.queue, true, at(10));
+    let runtime = std::sync::Arc::new(VioletWakeRuntime::start(fx._temp.path(), "first", "supervisor").unwrap());
+    let guard = runtime.state.lock().unwrap();
+    let (send, recv) = std::sync::mpsc::channel();
+    let stop = runtime.clone();
+    let thread = std::thread::spawn(move || { send.send(stop.stop_blocking()).unwrap(); });
+    let bounded = recv.recv_timeout(Duration::from_millis(500));
+    drop(guard);
+    thread.join().unwrap();
+    assert!(bounded.is_ok(), "shutdown waited on an in-flight tick's mutex");
+    assert!(runtime.tick_blocking().0.errors.is_empty());
+    assert_eq!(WatchBook::read(&fx.watch_path).unwrap().watch("C1", "first").unwrap().stop_reason.as_deref(), Some("session_end"));
+}
+
+#[test]
+fn cas_639c_round3_lifecycle_scope_drop_ends_own_watches() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut wake = fx.wake("first", t0());
+    relay.publish(mention("C1", 0));
+    wake.poll_once(&relay, &fx.queue, true, at(10));
+    {
+        // The lifecycle owns this runtime through Arc. Dropping its last handle
+        // must end watches even on an early return before explicit shutdown.
+        let _runtime = std::sync::Arc::new(VioletWakeRuntime::start(fx._temp.path(), "first", "supervisor").unwrap());
+    }
+    assert_eq!(WatchBook::read(&fx.watch_path).unwrap().watch("C1", "first").unwrap().stop_reason.as_deref(), Some("session_end"));
+}
+
+#[test]
+fn cas_639c_round3_busy_foreign_thread_does_not_wake_owner_twice() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut owner = fx.wake("owner", t0());
+    relay.publish(mention("C1", 0));
+    owner.poll_once(&relay, &fx.queue, true, at(10));
+    let mut claimant = fx.wake("claimant", at(20));
+    for batch in 0..3 {
+        for item in 0..20 {
+            relay.publish(envelope(PROJECT, "C1", "thread_reply", 25 + batch * 20 + item, 0, "U2"));
+        }
+        claimant.poll_once(&relay, &fx.queue, false, at(100 + batch * 70));
+    }
+    assert_eq!(owner.apply_sweep(&fx.queue, "C1", read(&[(25, 0, Some("U2"))]), at(300)), SweepOutcome::Quiet);
+}
+
+#[test]
+fn cas_639c_round3_thread_state_is_bounded_and_reopen_is_fresh() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut owner = fx.wake("owner", t0());
+    relay.publish(mention("C1", 0));
+    owner.poll_once(&relay, &fx.queue, true, at(10));
+    // A perpetually busy watch must still have bounded ownership state.
+    let messages: Vec<_> = (1..=250).map(|n| (n, n, Some("U2"))).collect();
+    owner.apply_sweep(&fx.queue, "C1", read(&messages), at(300));
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    assert!(saved.watch("C1", "owner").unwrap().watched_thread_roots.len() <= 200);
+    let mut claimant = fx.wake("claimant", at(310));
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 350, 250, "U2"));
+    claimant.poll_once(&relay, &fx.queue, false, at(360));
+    owner.stop_idle(&fx.queue, at(4000));
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    let stopped = saved.watch("C1", "owner").unwrap();
+    assert!(!stopped.is_active());
+    assert!(stopped.watched_thread_roots.is_empty());
+    assert!(stopped.violet_thread_roots.is_empty());
+    assert!(stopped.foreign_seen_keys.is_empty());
+    relay.publish(mention("C1", 4100));
+    owner.poll_once(&relay, &fx.queue, true, at(4110));
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    let reopened = saved.watch("C1", "owner").unwrap();
+    assert_eq!(reopened.watched_thread_roots, BTreeSet::from([ts(4100)]));
+    assert!(reopened.foreign_seen_keys.is_empty());
 }
 
 fn race_wait_for(path: &Path) -> Result<(), String> {

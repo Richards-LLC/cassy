@@ -1435,6 +1435,47 @@ mod tests {
         SqliteRequestJournal::open_connection(Connection::open_in_memory().unwrap()).unwrap()
     }
 
+    #[test]
+    fn cas_c423_reconciliation_leaves_delivery_jobs_and_other_readers_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = SqliteRequestJournal::open(root.path()).unwrap();
+        let context = OperationContext {
+            project_id: "github.com/richards-llc/cassy".into(),
+            registration_id: "reg-supervisor-alpha-01".into(),
+        };
+        let local = json!({"project_id":context.project_id,
+            "actor":{"registration_id":context.registration_id}});
+        for (id, kind, input) in [
+            ("delivery-rebind", "delivery_rebind", local.clone()),
+            ("delivery-receipt", "delivery_receipt", local.clone()),
+            ("other-reader", "release_claim", json!({"project_id":context.project_id,
+                "actor":{"registration_id":"reg-other-reader"}})),
+            ("other-project", "release_claim", json!({"project_id":"github.com/other/repo",
+                "actor":{"registration_id":context.registration_id}})),
+        ] {
+            journal.prepare(id, kind, &input).unwrap();
+            journal.set_wire_request(id, &json!({"request_id":id})).unwrap();
+            journal.record_result(id, &json!({"code":"outcome_unknown"}), Some(Duration::ZERO)).unwrap();
+        }
+        let cloud = Arc::new(FakeCloud::new(journal.clone()));
+        let service = service(cloud.clone(), Arc::new(FakeViolet::ok()), journal.clone());
+        assert!(service.reconcile_due(Utc::now().timestamp_millis() + 1000).unwrap().is_empty());
+        assert!(cloud.lookups.lock().unwrap().is_empty());
+        let db = Connection::open(root.path().join("cas.db")).unwrap();
+        let untouched: i64 = db.query_row("SELECT COUNT(*) FROM external_work_operations
+            WHERE attempts=0 AND lease_token IS NULL AND stage='retry_wait'", [], |r|r.get(0)).unwrap();
+        assert_eq!(untouched, 4, "foreign kinds and actors must not be leased or settled");
+        let input = ExternalWorkCommand::ReleaseClaim {
+            resource_id: RESOURCE_ID.into(), expected_generation: 1,
+            request_id: Some(REQUEST_ID.into()),
+        }.input(&context);
+        journal.prepare(REQUEST_ID, "release_claim", &input).unwrap();
+        journal.set_wire_request(REQUEST_ID, &json!({"request_id":REQUEST_ID})).unwrap();
+        journal.record_result(REQUEST_ID, &json!({"code":"outcome_unknown"}), Some(Duration::ZERO)).unwrap();
+        assert_eq!(service.reconcile_due(Utc::now().timestamp_millis() + 1000).unwrap().len(), 1);
+        assert_eq!(*cloud.lookups.lock().unwrap(), vec![REQUEST_ID]);
+    }
+
     fn fixture(name: &str) -> Value {
         let source = match name {
             "claim" => include_str!(

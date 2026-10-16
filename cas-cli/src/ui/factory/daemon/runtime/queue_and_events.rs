@@ -8232,7 +8232,7 @@ impl FactoryDaemon {
         super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: poison sweep"));
         if prompt_poison_sweep_due(self.last_prompt_poison_sweep, now) {
             self.last_prompt_poison_sweep = Some(now);
-            self.run_prompt_poison_sweep(queue.as_ref(), &valid_target_names).await;
+            self.run_prompt_poison_sweep(queue.as_ref(), &valid_target_names.iter().cloned().collect::<Vec<_>>()).await;
         }
 
         if !prompts.is_empty() {

@@ -372,6 +372,8 @@ pub(crate) struct PromptPreparation {
     last_submitted: Option<Instant>,
     ready: Option<WakeInputs>,
     current: Option<WakeInputs>,
+    #[cfg(test)]
+    pub(crate) read_delay: Duration,
 }
 
 impl PromptPreparation {
@@ -487,6 +489,8 @@ impl PromptPreparation {
             .collect();
         self.generation += 1;
         let generation = self.generation;
+        #[cfg(test)]
+        let read_delay = self.read_delay;
         let submitted = jobs.submit_external(
             JobSpec {
                 kind: WAKE_GATE_READ,
@@ -497,7 +501,11 @@ impl PromptPreparation {
                 budget: Duration::from_millis(100),
             },
             move || {
-                let inputs = read_wake_inputs(&cas_dir, &supervisor, &recipients, &sender_ids);
+                let captured_at = Instant::now();
+                #[cfg(test)]
+                std::thread::sleep(read_delay);
+                let inputs =
+                    read_wake_inputs(&cas_dir, &supervisor, &recipients, &sender_ids, captured_at);
                 super::delivery::wake_daemon_after_enqueue(&cas_dir);
                 Box::new(inputs)
             },
@@ -555,9 +563,8 @@ fn read_wake_inputs(
     supervisor: &str,
     recipients: &HashSet<String>,
     sender_ids: &HashSet<String>,
+    captured_at: Instant,
 ) -> Result<WakeInputs, String> {
-    // Freshness starts at the oldest observation, not when a slow read ends.
-    let captured_at = Instant::now();
     let agents = crate::store::open_agent_store(cas_dir)
         .and_then(|store| Ok(store.list(None)?))
         .map_err(|error| error.to_string())?;

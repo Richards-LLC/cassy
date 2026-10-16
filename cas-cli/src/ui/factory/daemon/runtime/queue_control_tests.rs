@@ -1,6 +1,122 @@
 use super::*;
 use cas_store::wait_budget;
 
+#[test]
+fn cas_7b6b_round2_park_uses_prepared_evidence_under_c6_enforcement() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let mut daemon = super::super::provisioning_tests::daemon(&root);
+    let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+    let id = queue.enqueue("supervisor", "worker-a", "decision").unwrap();
+    let row = queue.queued_prompt(id).unwrap().unwrap();
+    daemon.queue_jobs = super::super::prompt_queue_jobs::QueueJobs::start(root, None);
+    let _lane =
+        super::super::loop_watchdog::enforce_test_lane(cas_store::lane_guard::Lane::Control);
+    assert!(
+        !daemon.park_wake_starved_row(&row, "worker-a", 3, true),
+        "missing prepared recipient must be treated as booting, without reading the store"
+    );
+}
+
+fn unusable_read_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    super::super::prompt_queue_jobs::QueueSelection,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    crate::store::open_agent_store(&root)
+        .unwrap()
+        .register(&cas_types::Agent::new(
+            "worker-id".into(),
+            "worker-a".into(),
+        ))
+        .unwrap();
+    let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+    let id = queue
+        .enqueue("supervisor", "worker-a", "retained decision")
+        .unwrap();
+    let batch = super::super::prompt_queue_jobs::QueueSelection {
+        rows: vec![queue.queued_prompt(id).unwrap().unwrap()],
+        ..Default::default()
+    };
+    (temp, root, batch)
+}
+
+#[test]
+fn cas_7b6b_round2_failed_reads_eventually_release_batch_with_unknown_evidence() {
+    let (_temp, root, batch) = unusable_read_fixture();
+    let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+    conn.execute("UPDATE agents SET name=x'00' WHERE id='worker-id'", [])
+        .unwrap();
+    let mut jobs = super::super::prompt_queue_jobs::QueueJobs::inline();
+    let mut preparation = super::super::queue_control_jobs::PromptPreparation::default();
+    let mut raw = Some(batch);
+    let mut released = None;
+    for n in 0..8 {
+        released = preparation.advance(
+            &mut jobs,
+            raw.take(),
+            root.clone(),
+            "lead".into(),
+            vec![],
+            Instant::now() + Duration::from_millis(n * 101),
+        );
+        if released.is_some() {
+            break;
+        }
+    }
+    assert!(
+        released.is_some(),
+        "persistent read errors must not retain a batch forever"
+    );
+    assert_eq!(
+        preparation.recipient("worker-a").unwrap().tool_call,
+        ToolCallEvidence::Unknown
+    );
+    assert!(!preparation.has_pending());
+}
+
+#[test]
+fn cas_7b6b_round2_slow_reads_eventually_release_batch_off_the_loop() {
+    let (_temp, root, batch) = unusable_read_fixture();
+    let mut jobs = super::super::prompt_queue_jobs::QueueJobs::start(root.clone(), None);
+    let mut preparation = super::super::queue_control_jobs::PromptPreparation::default();
+    // Delay the actual background reader, including its real SQLite read.
+    preparation.read_delay = Duration::from_millis(275);
+    let mut raw = Some(batch);
+    let mut released = None;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        {
+            let _lane = super::super::loop_watchdog::enforce_test_lane(
+                cas_store::lane_guard::Lane::Control,
+            );
+            released = preparation.advance(
+                &mut jobs,
+                raw.take(),
+                root.clone(),
+                "lead".into(),
+                vec![],
+                Instant::now(),
+            );
+        }
+        if released.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        released.is_some(),
+        "consistently >250ms reads must not retain a batch forever"
+    );
+    assert_eq!(
+        preparation.recipient("worker-a").unwrap().tool_call,
+        ToolCallEvidence::Unknown
+    );
+    assert!(!preparation.has_pending());
+}
+
 fn settle_until(mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !done() {

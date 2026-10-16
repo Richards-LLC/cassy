@@ -1624,6 +1624,10 @@ pub enum SupervisorWakeClass {
     /// daemon already coalesces it per channel. Daemon-stamped only: no
     /// registered sender can raise it.
     SlackActivity,
+    /// cas-835e: a reminder the daemon fired (`Reminder #<id>:`), stamped
+    /// with the daemon's origin. Daemon-stamped only: the same words from any
+    /// other sender, or quoted inside another row, carry no wake authority.
+    Reminder,
 }
 
 impl SupervisorWakeClass {
@@ -5338,7 +5342,7 @@ impl FactoryDaemon {
     /// (`awaiting_merge`) from a progress FYI (`closed`), and dropping it
     /// would start waking supervisors for exactly the noise cas-dab2 stopped.
     /// On any other sender the string is not consulted.
-    fn supervisor_wake_class(
+    pub(crate) fn supervisor_wake_class(
         sender: &WakeSender,
         supervisor_name: &str,
         source: &str,
@@ -5625,6 +5629,9 @@ impl FactoryDaemon {
             }
             SupervisorWakeClass::SlackActivity => {
                 "supervisor pane is quiet and the row is CAS-relayed Slack activity for this project"
+            }
+            SupervisorWakeClass::Reminder => {
+                "supervisor pane is quiet and the row is a reminder the daemon fired"
             }
         })
     }
@@ -10596,7 +10603,7 @@ fn run_reminder_scan(scan: ReminderScanInput) {
     }
 }
 
-fn fire_reminder(
+pub(super) fn fire_reminder(
     reminder: &cas_store::Reminder,
     reminder_store: &std::sync::Arc<dyn cas_store::ReminderStore>,
     supervisor_queue: &Option<std::sync::Arc<dyn cas_store::SupervisorQueueStore>>,

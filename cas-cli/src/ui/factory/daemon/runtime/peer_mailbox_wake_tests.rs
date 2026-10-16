@@ -37,7 +37,7 @@ impl crate::cloud::peer_mailbox::PeerMailbox for ClaimedMailbox {
     }
 }
 
-async fn peer_fixture() -> (tempfile::TempDir, FactoryDaemon) {
+pub(super) async fn peer_fixture() -> (tempfile::TempDir, FactoryDaemon) {
     use std::time::{Duration, Instant};
     let root = tempfile::tempdir().unwrap();
     let cas = crate::store::init_cas_dir(root.path()).unwrap();

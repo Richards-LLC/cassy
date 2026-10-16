@@ -1085,12 +1085,10 @@ fn a_superseded_claim_job_releases_its_claim() {
     writer.open();
     // Job 1 claims; job 2 then finds a bare claim. Job 1's late token is
     // released rather than overwritten.
-    let mut claimed = false;
-    settle(&mut jobs, |_| {
-        let held = claim_source(&cas_dir, row, "worker-a").is_some();
-        claimed |= held;
-        claimed && !held
-    });
+    // Job 2 comes back (it ran after job 1, so job 1's result is applied
+    // too), then job 1's late claim is released.
+    settle(&mut jobs, |jobs| jobs.claim_resolved(&cas_dir, "s", row, "worker-a", "worker-a"));
+    settle(&mut jobs, |_| claim_source(&cas_dir, row, "worker-a").is_none());
     assert_eq!(
         jobs.claim_for_inject(&cas_dir, "s", row, "worker-a", "worker-a"),
         ClaimStep::NotClaimed,

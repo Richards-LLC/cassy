@@ -1387,6 +1387,74 @@ pub(crate) mod tests {
     use std::collections::HashMap;
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    fn fake_neonctl(cases: &str) -> crate::test_env_guard::TestEnvGuard {
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let bin = env.home().join("neonctl");
+        fs::write(&bin, format!("#!/bin/sh\ncase \"$*\" in\n{cases}\n*) echo 'unexpected neonctl arguments' >&2; exit 9;;\nesac\n")).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
+        env.set("PATH", env.home().to_path_buf());
+        env
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn neonctl_lists_organizations_without_mcp() {
+        let _env = fake_neonctl(r#"'orgs list --output json') echo '[{"id":"org-fixture","name":"Fixture"}]';;"#);
+        let orgs = LiveNeonClient::new().list_organizations().unwrap();
+        assert_eq!(orgs, vec![NeonOrg { id: "org-fixture".into(), name: "Fixture".into() }]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn neonctl_lists_projects_in_selected_organization() {
+        let _env = fake_neonctl(r#"'projects list --org-id org-fixture --output json') echo '[{"id":"fixture-project","name":"Fixture"}]';;"#);
+        let projects = LiveNeonClient::new().list_projects("org-fixture").unwrap();
+        assert_eq!(projects, vec![NeonProject { id: "fixture-project".into(), name: "Fixture".into() }]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn neonctl_project_detail_initializes_skills_without_mcp() {
+        let _env = fake_neonctl(r#"
+'projects get fixture-project --output json') echo '{"id":"fixture-project","name":"Fixture"}';;
+'branches list --project-id fixture-project --output json') echo '[{"id":"br-fixture","name":"main","default":true}]';;
+'databases list --project-id fixture-project --branch br-fixture --output json') echo '[{"name":"custom_db"}]';;
+"#);
+        let repo = tempfile::tempdir().unwrap();
+        write_pkg_with_neon_dep(repo.path());
+        let outcome = init(repo.path(), &LiveNeonClient::new(), InitChoices {
+            org_id: Some("org-fixture".into()), project_id: Some("fixture-project".into()), ..Default::default()
+        }).unwrap();
+        assert_eq!(outcome.status, IntegrationStatus::Configured);
+        for path in [CLAUDE_SKILL, CURSOR_SKILL, CLAUDE_QUERIES] {
+            let skill = fs::read_to_string(repo.path().join(path)).unwrap();
+            assert!(skill.contains("neonctl"), "{path}: {skill}");
+            assert!(!skill.contains("mcp__neon") && !skill.contains("mcp-neon"), "{path}: {skill}");
+        }
+        let payload = parse_keep_payload(&fs::read_to_string(repo.path().join(CLAUDE_SKILL)).unwrap()).unwrap();
+        assert_eq!(payload.database_name, "custom_db");
+        assert!(payload.branches.iter().any(|(_, id)| id == "br-fixture"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn neonctl_branch_presence_distinguishes_missing_from_failed_lookup() {
+        let _env = fake_neonctl(r#"
+'branches list --project-id fixture-project --output json') echo '[{"id":"br-fixture","name":"main","default":true}]';;
+'branches list --project-id denied-project --output json') echo 'unauthorized' >&2; exit 1;;
+'branches list --project-id malformed-project --output json') echo '[{"name":"no-id"}]';;
+'branches list --project-id invalid-json --output json') echo 'not JSON';;
+"#);
+        let client = LiveNeonClient::new();
+        assert!(client.describe_branch("org-fixture", "fixture-project", "br-fixture").unwrap());
+        assert!(!client.describe_branch("org-fixture", "fixture-project", "br-missing").unwrap());
+        for project in ["denied-project", "malformed-project", "invalid-json"] {
+            assert!(client.describe_branch("org-fixture", project, "br-fixture").is_err(), "{project}");
+        }
+    }
+
     /// In-memory fake satisfying [`NeonClient`].
     pub struct FakeNeonClient {
         pub orgs: Vec<NeonOrg>,

@@ -9,6 +9,183 @@ use rmcp::handler::server::wrapper::Parameters;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[test]
+fn override_debt_documentation_cas_5129a() {
+    let guide = include_str!("../../../../docs/qa/batch-qa.md");
+    assert!(guide.contains("supervisor_override=true does not clear batch QA debt"));
+    assert!(!guide.contains(
+        "Normal supervisor override and explicit QA-request authority remain available."
+    ));
+}
+
+async fn squash_deferred_delivery_cas_5129a(receipt: bool) {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    fx.unmerge();
+    let parked = fx.close("cas-bq01").await;
+    let root = fx.repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::AwaitingMerge,
+        "{parked}"
+    );
+    if receipt {
+        // The pre-squash integrated staging remains on origin/main, while
+        // local main is subsequently squash-merged. Both are authoritative.
+        git(
+            &fx.repo,
+            &["update-ref", "refs/remotes/origin/main", &fx.staging],
+        );
+        fx.record().await;
+    } else {
+        let request = serde_json::from_value(serde_json::json!({
+            "action":"qa_request", "task_id":"cas-bq01", "summary":"Review before squash"
+        }))
+        .unwrap();
+        fx.supervisor
+            .verification(Parameters(request))
+            .await
+            .unwrap();
+        cas_store::claim_qa_pass(
+            &root,
+            "cas-bq01",
+            "independent-reviewer",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        cas_store::resolve_qa_pass(
+            &root,
+            "cas-bq01",
+            "independent-reviewer",
+            cas::types::QaVerdict::Approved,
+            "Reviewed delivery before squash",
+            None,
+            fx.ledger.to_str().unwrap(),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    }
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "--squash", &fx.staging]);
+    git(
+        &fx.repo,
+        &["commit", "-qm", "cas-bq01: squash integration batch"],
+    );
+    let squash = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let anchor = tasks
+        .get("cas-bq01")
+        .unwrap()
+        .deliverables
+        .factory_branch_anchor
+        .unwrap();
+    assert_ne!(squash, anchor);
+    let ancestry = Command::new("git")
+        .args(["merge-base", "--is-ancestor", &anchor, &squash])
+        .current_dir(&fx.repo)
+        .status()
+        .unwrap();
+    assert_eq!(
+        ancestry.code(),
+        Some(1),
+        "squash must break commit ancestry"
+    );
+    git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
+    let request = serde_json::from_value::<TaskCloseRequest>(serde_json::json!({
+        "id":"cas-bq01", "commit_receipt":squash, "reason":"Reviewed squash delivery"
+    }))
+    .unwrap();
+    let closed = extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::Closed,
+        "{closed}"
+    );
+    assert!(
+        tasks
+            .get("cas-bq01")
+            .unwrap()
+            .notes
+            .contains("QA evidence scoped to delivery anchor")
+    );
+    // A real but unrelated target commit must never be mapped to the anchor.
+    let request = serde_json::from_value::<TaskCloseRequest>(serde_json::json!({
+        "id":"cas-bq02", "commit_receipt":git(&fx.repo, &["rev-parse", "main^1"]),
+        "reason":"Unrelated target receipt must stay refused"
+    }))
+    .unwrap();
+    let unrelated = extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
+    assert_ne!(
+        tasks.get("cas-bq02").unwrap().status,
+        TaskStatus::Closed,
+        "{unrelated}"
+    );
+    assert!(
+        unrelated.contains("QA evidence ledger is missing: no ledger at"),
+        "unrelated receipt must not inherit the reviewed task's QA: {unrelated}"
+    );
+}
+
+#[tokio::test]
+async fn squash_close_with_passed_qa_cas_5129a() {
+    squash_deferred_delivery_cas_5129a(false).await;
+}
+
+#[tokio::test]
+async fn squash_close_with_batch_receipt_cas_5129a() {
+    squash_deferred_delivery_cas_5129a(true).await;
+}
+
+#[tokio::test]
+async fn unreviewed_squash_cannot_clear_debt_cas_5129a() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    fx.unmerge();
+    let parked = fx.close("cas-bq01").await;
+    let root = fx.repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::AwaitingMerge,
+        "{parked}"
+    );
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "--squash", &fx.staging]);
+    git(
+        &fx.repo,
+        &[
+            "commit",
+            "-qm",
+            "unrelated squash containing the delivery's files",
+        ],
+    );
+    let squash = git(&fx.repo, &["rev-parse", "HEAD"]);
+    git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
+    let request = serde_json::from_value::<TaskCloseRequest>(serde_json::json!({
+        "id":"cas-bq01", "commit_receipt":squash, "reason":"Unreviewed squash"
+    }))
+    .unwrap();
+    let refused = extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
+    assert!(
+        refused.contains("deferred evidence at its batch park"),
+        "{refused}"
+    );
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::AwaitingMerge
+    );
+    assert!(
+        cas_store::list_qa_passes(&root, "cas-bq01")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        cas_store::list_qa_batch_receipts(&root, "batch-project")
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn cas_d697_round2_historical_anchor_actor_cannot_record() {
     let mut env = TestEnvGuard::temp_home();

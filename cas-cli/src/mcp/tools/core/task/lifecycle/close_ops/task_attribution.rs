@@ -614,7 +614,7 @@ pub(super) fn delivery_base(
 /// every path of the anchor's attributed delivery, return the anchor. QA then
 /// judges the task's own delivery, as the recorded integration-batch receipt
 /// path already does. Anything else returns `None` and keeps the receipt.
-pub(super) fn squash_receipt_qa_anchor(
+pub(crate) fn squash_receipt_qa_anchor(
     repo: &Path,
     target: &str,
     window: &TaskCommitReceiptWindow,

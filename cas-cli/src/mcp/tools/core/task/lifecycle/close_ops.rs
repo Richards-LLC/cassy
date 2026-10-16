@@ -3,6 +3,7 @@ mod loaded_proof;
 #[cfg(test)]
 mod loaded_proof_tests;
 mod task_attribution;
+pub(crate) use task_attribution::squash_receipt_qa_anchor;
 mod evidence_only;
 mod delivery_evolution;
 mod snapshot_approval;
@@ -9690,7 +9691,7 @@ impl CasCore {
         // Every non-park transition to Closed owes persisted batch debt,
         // including ProceedWithNote and paths without an assignee or surface.
         if let Err(message) = crate::qa_batch::ensure_deferred_close(
-            &self.cas_root, &task, req.commit_receipt.as_deref(),
+            &self.cas_root, &task, req.commit_receipt.as_deref(), commit_receipt_window.as_ref(),
         ) {
             return Ok(Self::tool_error(message));
         }
@@ -21350,6 +21351,15 @@ pub(crate) fn run_declared_pre_close_hook(
         &repo_context.target_branch,
         task.delivery_mode,
     );
+    // The merge gate accepts either integration view for push deliveries.
+    // Preserve local_merge's deliberately local-only authority.
+    let target_contains = |repo: &std::path::Path, commit: &str| {
+        if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+            git_commit_is_ancestor(repo, commit, &live_target_ref)
+        } else {
+            commit_is_merged_into_parent(repo, commit, &repo_context.target_branch)
+        }
+    };
     let normalized_receipt = commit_receipt
         .map(|receipt| resolve_task_commit_receipt_sha(receipt_repo, receipt))
         .transpose()
@@ -21435,7 +21445,7 @@ pub(crate) fn run_declared_pre_close_hook(
             let reachable_from_worktree = git_commit_is_ancestor(path, &tip, "HEAD");
             let receipt_reachable_from_target =
                 normalized_receipt.as_deref().is_some_and(|receipt| {
-                    git_commit_is_ancestor(path, receipt, &live_target_ref)
+                    target_contains(path, receipt)
                 });
             if !reachable_from_worktree && !receipt_reachable_from_target {
                 if normalized_receipt.is_none()
@@ -21515,10 +21525,10 @@ pub(crate) fn run_declared_pre_close_hook(
                     && parked_anchor_delivery_ref(&repo_context.repo_root, task, tip).is_some()
             };
             let receipt_is_pushed_recovery = supervisor_override
-                && !git_commit_is_ancestor(&repo_context.repo_root, tip, &live_target_ref)
+                && !target_contains(&repo_context.repo_root, tip)
                 && normalized_receipt.is_some()
                 && validate_pushed_task_receipt(task, repo_context, tip).is_ok();
-            if !git_commit_is_ancestor(&repo_context.repo_root, tip, &live_target_ref)
+            if !target_contains(&repo_context.repo_root, tip)
                 && !anchor_is_unmerged_delivery()
                 && !receipt_is_pushed_recovery
             {
@@ -36707,6 +36717,45 @@ mod zero_change_close_tests {
             git_common_dir: dir.join(".git"),
             target_branch: "main".to_string(),
         }
+    }
+
+    fn local_target_receipt_fixture_cas_5129a(with_worktree: bool) {
+        let dir = init_worker_repo();
+        let repo = dir.path();
+        let seed = head_sha(repo);
+        commit_file(repo, "delivery.rs", "cas-5129a: delivery");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "--no-ff", "-qm", "integrate locally", "factory/test-worker"]);
+        let integrated = head_sha(repo);
+        git(repo, &["update-ref", "refs/remotes/origin/main", &seed]);
+        git(repo, &["checkout", "-q", "factory/test-worker"]);
+        assert!(commit_is_merged_into_parent(repo, &integrated, "main"));
+        assert!(!git_commit_is_ancestor(repo, &integrated, "origin/main"));
+        assert!(!git_commit_is_ancestor(repo, &integrated, "HEAD"));
+        let mut task = Task::new("cas-5129a".into(), "Local integration".into());
+        task.status = TaskStatus::AwaitingMerge;
+        let evidence = run_declared_pre_close_hook(&task, &declared_main_context(repo),
+            with_worktree.then_some(repo), Some(&integrated), false)
+            .expect("receipt on local target must pass even with stale origin");
+        assert_eq!(evidence.task_tip.as_deref(), Some(integrated.as_str()));
+
+        git(repo, &["branch", "-f", "main", &seed]);
+        git(repo, &["update-ref", "refs/remotes/origin/main", &integrated]);
+        task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
+        let error = run_declared_pre_close_hook(&task, &declared_main_context(repo),
+            with_worktree.then_some(repo), Some(&integrated), false)
+            .expect_err("origin-only receipt must not authorize local_merge");
+        assert!(error.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{error}");
+    }
+
+    #[test]
+    fn local_target_receipt_with_worktree_cas_5129a() {
+        local_target_receipt_fixture_cas_5129a(true);
+    }
+
+    #[test]
+    fn local_target_receipt_without_worktree_cas_5129a() {
+        local_target_receipt_fixture_cas_5129a(false);
     }
 
     /// GH #887: local_merge uses the local target checkout as its authority.

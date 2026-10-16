@@ -365,9 +365,14 @@ fn agent_and_event_reads_stay_in_budget_while_the_connection_is_held_cas_ee9ab()
 }
 
 /// GH #1208: with pending external reminders whose origin is slow, the
-/// reminder pass on the loop stays under the #1165 pass limit. Before the fix
-/// it ran one `git fetch` per reminder inline, here at least 5 × 400 ms. The
-/// fetches still happen, on the scanner thread, and their failures back off.
+/// reminder pass on the loop runs no fetch. Before the fix it ran one
+/// `git fetch` per reminder inline, here at least 5 × 400 ms. The fetches
+/// still happen, on the scanner thread, and their failures back off.
+///
+/// cas-3b16 (C2 review round 1, L8): the pass is bounded by one fetch
+/// (400 ms), not the 100 ms pass limit. An inline fetch costs at least that by
+/// construction, so the bound catches the regression without depending on how
+/// fast this host runs the rest of the pass; pass latency receipts are C6's.
 ///
 /// spec-4c5b §7 gate test (C2, cas-223f): the pass touches no store at all.
 /// Reminder expiry, the due read and firing run as a `ReminderScan` job on
@@ -375,6 +380,8 @@ fn agent_and_event_reads_stay_in_budget_while_the_connection_is_held_cas_ee9ab()
 #[tokio::test]
 async fn flv2_external_reminders_never_on_lane() {
     const EXTERNAL_REMINDERS: usize = 5;
+    /// What one fetch against the test origin costs (`sleep 0.4`).
+    const ONE_FETCH: Duration = Duration::from_millis(400);
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
     let project = dir.path();
@@ -452,8 +459,8 @@ async fn flv2_external_reminders_never_on_lane() {
     }
     let pass = started.elapsed();
     assert!(
-        pass < PASS_LATENCY_LIMIT,
-        "reminders step took {pass:?} with {EXTERNAL_REMINDERS} pending external reminders"
+        pass < ONE_FETCH,
+        "reminders step took {pass:?} with {EXTERNAL_REMINDERS} pending external reminders: a fetch ran on the loop"
     );
     assert_eq!(
         wait_budget::store_access_violations(),
@@ -493,7 +500,7 @@ async fn flv2_external_reminders_never_on_lane() {
         let _forbid = wait_budget::forbid_store_access();
         daemon.process_reminders(&[]);
     }
-    assert!(started.elapsed() < PASS_LATENCY_LIMIT);
+    assert!(started.elapsed() < ONE_FETCH);
     assert_eq!(wait_budget::store_access_violations(), violations);
     assert!(daemon.external_wake.wait_for_scan(Duration::ZERO).is_none());
 }

@@ -24,9 +24,17 @@
 //! (it panicked, the runtime dropped it, or it outlived
 //! [`factory_jobs::in_flight_timeout`]) frees its slot so the next pass
 //! retries, and a late result for a slot already given up is ignored.
+//!
+//! The idle-worker liveness a delivery read is revalidated with (agent store,
+//! transcripts, `/proc`) runs beside it as a job on the blocking lane under
+//! the same generation (cas-3b16); the read is applied once both report, and
+//! a liveness job that fails leaves those workers unobserved (uncertain, so
+//! their prompts are delivered).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::sync::Arc;
 
 use super::factory_jobs::{self, DeliverabilityBatch, FactoryJobOutput};
 use super::jobs::{JobResult, Submitted};
@@ -34,15 +42,70 @@ use super::prompt_queue_jobs::{ExternalOutcome, QueueJobs};
 use crate::ui::factory::app::delivery_evidence::GitEvidenceMap;
 use crate::ui::factory::app::{
     DeliverabilityRequest, DeliveryInputs, DeliveryRequest, DirectorRefreshLoad,
-    DirectorRefreshRequest, FactoryApp,
+    DirectorRefreshRequest, FactoryApp, IdleLivenessMap,
 };
 use crate::ui::factory::director::{
     DirectorEvent, DirectorStores, Prompt, WorkerHealthReport, WorkerHealthRequest,
 };
 
-/// Consecutive failed delivery reads before their events are delivered as
-/// detected (review round 2, M3).
-const MAX_FAILED_DELIVERY_READS: u32 = 3;
+/// How many times a delivery read that came back without fresh data is
+/// retried before its events are delivered as detected (review round 2, M3).
+/// A batch gets one read plus this many retries: four reads in all
+/// (cas-3b16, review round 3, L-c).
+const MAX_DELIVERY_READ_RETRIES: u32 = 3;
+
+/// A gate a test holds every background read on, so a "slow" read finishes
+/// exactly when the test opens it instead of after a sleep (cas-3b16, review
+/// round 3, L-d).
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ReadGate {
+    open: std::sync::Mutex<bool>,
+    opened: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl ReadGate {
+    pub(crate) fn open(&self) {
+        *self.open.lock().unwrap() = true;
+        self.opened.notify_all();
+    }
+
+    fn wait(&self) {
+        let mut open = self.open.lock().unwrap();
+        while !*open {
+            open = self.opened.wait(open).unwrap();
+        }
+    }
+}
+
+/// What a background read does before its real work: nothing in
+/// production; in tests, sleep a fixed delay, wait for a [`ReadGate`], or
+/// die (a job that never reports).
+#[derive(Clone, Default)]
+struct ReadHook {
+    delay: Duration,
+    #[cfg(test)]
+    gate: Option<Arc<ReadGate>>,
+    #[cfg(test)]
+    panics: bool,
+}
+
+impl ReadHook {
+    fn run(&self, what: &str) {
+        if !self.delay.is_zero() {
+            std::thread::sleep(self.delay);
+        }
+        #[cfg(test)]
+        {
+            if let Some(gate) = &self.gate {
+                gate.wait();
+            }
+            assert!(!self.panics, "test: the {what} died");
+        }
+        let _ = what;
+    }
+}
 
 /// A job whose result the loop is waiting for.
 struct Slot<T> {
@@ -97,7 +160,7 @@ impl<T> Slot<T> {
     fn expire(&mut self, timeout: Duration) -> bool {
         if self
             .in_flight
-            .is_some_and(|(_, since)| since.elapsed() > timeout)
+            .is_some_and(|(_, since)| since.elapsed() >= timeout)
         {
             self.in_flight = None;
             return true;
@@ -139,6 +202,9 @@ pub(crate) struct DirectorRefresh {
     generation: u64,
     director: Slot<DirectorRefreshLoad>,
     delivery: Slot<(Vec<DirectorEvent>, DeliveryInputs)>,
+    /// The idle-worker liveness observed beside the delivery read in flight,
+    /// on the blocking lane, under the read's generation (cas-3b16).
+    idle_liveness: Slot<IdleLivenessMap>,
     /// The events riding on the delivery read in flight, re-queued if the
     /// read never reports.
     delivery_events: Vec<DirectorEvent>,
@@ -159,11 +225,15 @@ pub(crate) struct DirectorRefresh {
     /// [`factory_jobs::in_flight_timeout`].
     #[cfg(test)]
     timeout_override: Option<Duration>,
-    /// Test hook: sleep this long inside every background read.
-    read_delay: Duration,
-    /// Test hook: every background read panics.
+    /// Test hook run inside every background read.
+    hook: ReadHook,
+    /// Test hook: every delivery read comes back without fresh data; counts
+    /// the reads.
     #[cfg(test)]
-    panic_reads: bool,
+    stale_delivery_reads: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    /// Late results ignored because their job was already given up (tests).
+    #[cfg(test)]
+    pub(crate) late_results_ignored: usize,
 }
 
 impl DirectorRefresh {
@@ -172,6 +242,7 @@ impl DirectorRefresh {
             generation: 0,
             director: Slot::default(),
             delivery: Slot::default(),
+            idle_liveness: Slot::default(),
             delivery_events: Vec::new(),
             delivery_backlog: Vec::new(),
             deliverability_pending: HashMap::new(),
@@ -183,34 +254,56 @@ impl DirectorRefresh {
             failed_delivery_reads: 0,
             #[cfg(test)]
             timeout_override: None,
-            read_delay: Duration::ZERO,
+            hook: ReadHook::default(),
             #[cfg(test)]
-            panic_reads: false,
+            stale_delivery_reads: None,
+            #[cfg(test)]
+            late_results_ignored: 0,
         }
     }
 
     /// Model a read job that dies without a result.
     #[cfg(test)]
     pub(crate) fn with_panicking_reads(mut self) -> Self {
-        self.panic_reads = true;
+        self.hook.panics = true;
         self
     }
 
     #[cfg(test)]
-    fn panics(&self) -> bool {
-        self.panic_reads
-    }
-
-    #[cfg(not(test))]
-    fn panics(&self) -> bool {
-        false
+    pub(crate) fn set_panicking_reads(&mut self, panics: bool) {
+        self.hook.panics = panics;
     }
 
     /// Model a slow store: every read sleeps `delay` first.
     #[cfg(test)]
     pub(crate) fn with_read_delay(mut self, delay: Duration) -> Self {
-        self.read_delay = delay;
+        self.hook.delay = delay;
         self
+    }
+
+    /// Model a slow store deterministically: every read waits for `gate`.
+    #[cfg(test)]
+    pub(crate) fn with_read_gate(mut self, gate: Arc<ReadGate>) -> Self {
+        self.hook.gate = Some(gate);
+        self
+    }
+
+    /// Model a store whose delivery reads keep failing; counts them.
+    #[cfg(test)]
+    pub(crate) fn with_stale_delivery_reads(
+        mut self,
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        self.stale_delivery_reads = Some(reads);
+        self
+    }
+
+    /// A late result for a job already given up was ignored.
+    fn ignored_late(&mut self) {
+        #[cfg(test)]
+        {
+            self.late_results_ignored += 1;
+        }
     }
 
     fn next_generation(&mut self) -> u64 {
@@ -264,6 +357,7 @@ impl DirectorRefresh {
             FactoryJobOutput::DirectorSnapshot(load) => {
                 if !self.director.finish(generation, load) {
                     tracing::debug!(generation, "late director snapshot ignored");
+                    self.ignored_late();
                 }
             }
             FactoryJobOutput::Delivery(events, inputs) => {
@@ -271,6 +365,13 @@ impl DirectorRefresh {
                     self.delivery_events.clear();
                 } else {
                     tracing::debug!(generation, "late delivery read ignored; its events were re-queued");
+                    self.ignored_late();
+                }
+            }
+            FactoryJobOutput::IdleLiveness(liveness) => {
+                if !self.idle_liveness.finish(generation, liveness) {
+                    tracing::debug!(generation, "late idle-worker liveness ignored");
+                    self.ignored_late();
                 }
             }
             FactoryJobOutput::Deliverability(batch) => {
@@ -278,6 +379,7 @@ impl DirectorRefresh {
                     self.deliverability_ready.push(batch);
                 } else {
                     tracing::debug!(generation, "late prompt re-check ignored; its prompts were delivered");
+                    self.ignored_late();
                 }
             }
             FactoryJobOutput::WorkerHealth(report) => {
@@ -309,8 +411,13 @@ impl DirectorRefresh {
             }
             factory_jobs::DELIVERY_READ_KEY => {
                 if self.delivery.fail(generation) {
+                    self.idle_liveness = Slot::default();
                     self.requeue_delivery_events();
                 }
+            }
+            // The read applies without it: those workers stay unobserved.
+            factory_jobs::IDLE_LIVENESS_KEY => {
+                self.idle_liveness.fail(generation);
             }
             factory_jobs::DELIVERABILITY_KEY => {
                 if let Some(pending) = self.deliverability_pending.remove(&generation) {
@@ -362,14 +469,15 @@ impl DirectorRefresh {
 
     /// A delivery read came back without fresh data (review round 2, M3).
     /// Its events wait for another fresh read, up to
-    /// [`MAX_FAILED_DELIVERY_READS`] in a row; after that they are handed
-    /// back to be delivered as detected, so a store that keeps failing cannot
-    /// hold supervisor notices forever.
+    /// [`MAX_DELIVERY_READ_RETRIES`] retries in a row (so four reads in
+    /// all); when the last retry fails too they are handed back to be
+    /// delivered as detected, so a store that keeps failing cannot hold
+    /// supervisor notices forever.
     pub(crate) fn retry_stale_delivery(
         &mut self,
         events: Vec<DirectorEvent>,
     ) -> Option<Vec<DirectorEvent>> {
-        if self.failed_delivery_reads < MAX_FAILED_DELIVERY_READS {
+        if self.failed_delivery_reads < MAX_DELIVERY_READ_RETRIES {
             self.failed_delivery_reads += 1;
             tracing::warn!(
                 attempt = self.failed_delivery_reads,
@@ -406,18 +514,24 @@ impl DirectorRefresh {
             .expire(revalidate_timeout)
         {
             tracing::warn!("delivery read never reported; its events wait for the next one");
+            self.idle_liveness = Slot::default();
             self.requeue_delivery_events();
+        }
+        if self.idle_liveness.expire(health_timeout) {
+            tracing::warn!("idle-worker liveness never reported; delivering without it");
         }
         if self.ci_status.expire(ci_timeout) {
             tracing::warn!("CI status job never reported; retrying next pass");
         }
         let deliverability_timeout = revalidate_timeout;
-        let expired: Vec<u64> = self
+        let mut expired: Vec<u64> = self
             .deliverability_pending
             .iter()
-            .filter(|(_, pending)| pending.since.elapsed() > deliverability_timeout)
+            .filter(|(_, pending)| pending.since.elapsed() >= deliverability_timeout)
             .map(|(generation, _)| *generation)
             .collect();
+        // Oldest first, so prompts keep their order (cas-3b16, L7).
+        expired.sort_unstable();
         for generation in expired {
             if let Some(pending) = self.deliverability_pending.remove(&generation) {
                 tracing::warn!("prompt re-check never reported; delivering its prompts");
@@ -427,7 +541,7 @@ impl DirectorRefresh {
         let expired: Vec<String> = self
             .health_in_flight
             .iter()
-            .filter(|(_, probe)| probe.since.elapsed() > health_timeout)
+            .filter(|(_, probe)| probe.since.elapsed() >= health_timeout)
             .map(|(key, _)| key.clone())
             .collect();
         for key in expired {
@@ -442,9 +556,9 @@ impl DirectorRefresh {
     /// delivery read the loop can start now (review round 2, M2).
     pub(crate) fn has_finished(&mut self, jobs: &mut QueueJobs) -> bool {
         self.poll(jobs);
-        (!self.delivery_backlog.is_empty() && !self.delivery.busy())
+        (!self.delivery_backlog.is_empty() && !self.delivery_busy())
             || self.director.ready.is_some()
-            || self.delivery.ready.is_some()
+            || self.delivery_ready()
             || self.ci_status.ready.is_some()
             || !self.deliverability_ready.is_empty()
             || !self.health_ready.is_empty()
@@ -456,22 +570,18 @@ impl DirectorRefresh {
     /// next detection.
     pub(crate) fn start_director_read(&mut self, app: &FactoryApp, jobs: &mut QueueJobs) {
         self.poll(jobs);
-        if self.director.busy() || self.delivery.busy() {
+        if self.director.busy() || self.delivery_busy() {
             return;
         }
         let request: DirectorRefreshRequest = app.director_refresh_request();
-        let delay = self.read_delay;
-        let panics = self.panics();
+        let hook = self.hook.clone();
         let generation = self.next_generation();
         // Marked first: an inline runtime finishes the job inside submit.
         self.director.start(generation);
         let submitted = jobs.submit_external_read(
             factory_jobs::director_snapshot_spec(generation),
             move |stores: Option<&DirectorStores>| {
-                if !delay.is_zero() {
-                    std::thread::sleep(delay);
-                }
-                assert!(!panics, "test: the snapshot read died");
+                hook.run("snapshot read");
                 Box::new(FactoryJobOutput::DirectorSnapshot(request.read(stores)))
             },
         );
@@ -530,13 +640,17 @@ impl DirectorRefresh {
         events: Vec<DirectorEvent>,
     ) -> Result<(), Vec<DirectorEvent>> {
         self.poll(jobs);
-        if self.delivery.busy() {
+        if self.delivery_busy() {
             self.delivery_backlog.extend(events);
             return Ok(());
         }
-        let request: DeliveryRequest = app.delivery_request(&events);
-        let delay = self.read_delay;
-        let panics = self.panics();
+        let mut request: DeliveryRequest = app.delivery_request(&events);
+        // cas-3b16: the liveness scan (agent store, transcripts, `/proc`)
+        // runs beside the read on the blocking lane, not on the read lane.
+        let liveness = request.take_idle_liveness();
+        let hook = self.hook.clone();
+        #[cfg(test)]
+        let stale_reads = self.stale_delivery_reads.clone();
         let generation = self.next_generation();
         self.delivery_events = events.clone();
         let carried = events;
@@ -544,16 +658,24 @@ impl DirectorRefresh {
         let submitted = jobs.submit_external_read(
             factory_jobs::delivery_read_spec(generation),
             move |stores: Option<&DirectorStores>| {
-                if !delay.is_zero() {
-                    std::thread::sleep(delay);
+                hook.run("delivery read");
+                #[cfg(test)]
+                if let Some(reads) = stale_reads {
+                    reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    return Box::new(FactoryJobOutput::Delivery(
+                        carried,
+                        DeliveryInputs::failed_for_test(),
+                    ));
                 }
-                assert!(!panics, "test: the delivery read died");
                 let inputs = request.read(stores);
                 Box::new(FactoryJobOutput::Delivery(carried, inputs))
             },
         );
         match submitted {
             Submitted::Queued | Submitted::QueuedBehindKey => {
+                if let Some(liveness) = liveness {
+                    self.start_idle_liveness(jobs, generation, liveness);
+                }
                 self.poll(jobs);
                 Ok(())
             }
@@ -565,13 +687,52 @@ impl DirectorRefresh {
         }
     }
 
+    /// Observe the idle workers' liveness on the blocking lane, under the
+    /// delivery read's generation. If the runtime refuses it, the read is
+    /// applied without it (those workers are unobserved, so delivered).
+    fn start_idle_liveness(
+        &mut self,
+        jobs: &mut QueueJobs,
+        generation: u64,
+        request: crate::ui::factory::app::IdleLivenessRequest,
+    ) {
+        let hook = self.hook.clone();
+        self.idle_liveness.start(generation);
+        let submitted = jobs.submit_external(factory_jobs::idle_liveness_spec(generation), move || {
+            hook.run("idle-worker liveness");
+            Box::new(FactoryJobOutput::IdleLiveness(request.read()))
+        });
+        if !matches!(submitted, Submitted::Queued | Submitted::QueuedBehindKey) {
+            tracing::warn!(?submitted, "idle-worker liveness refused by the job runtime");
+            self.idle_liveness.fail(generation);
+        }
+    }
+
+    /// A delivery read (or the liveness observed beside it) is in flight or
+    /// waiting to be applied.
+    fn delivery_busy(&self) -> bool {
+        self.delivery.busy() || self.idle_liveness.busy()
+    }
+
+    /// The delivery read reported, and so did its liveness job (or that
+    /// failed).
+    fn delivery_ready(&self) -> bool {
+        self.delivery.ready.is_some() && self.idle_liveness.in_flight.is_none()
+    }
+
+    /// Prompt re-checks are still waiting; a later batch must wait behind
+    /// them to keep prompt order (cas-3b16, C2 review round 1, L7).
+    pub(crate) fn has_pending_deliverability(&self) -> bool {
+        !self.deliverability_pending.is_empty() || !self.deliverability_ready.is_empty()
+    }
+
     /// Start the delivery read for events that waited behind the last one.
     pub(crate) fn start_delivery_backlog(
         &mut self,
         app: &FactoryApp,
         jobs: &mut QueueJobs,
     ) -> Result<(), Vec<DirectorEvent>> {
-        if self.delivery.busy() || self.delivery_backlog.is_empty() {
+        if self.delivery_busy() || self.delivery_backlog.is_empty() {
             return Ok(());
         }
         let events = std::mem::take(&mut self.delivery_backlog);
@@ -583,7 +744,14 @@ impl DirectorRefresh {
         jobs: &mut QueueJobs,
     ) -> Option<(Vec<DirectorEvent>, DeliveryInputs)> {
         self.poll(jobs);
-        self.delivery.ready.take()
+        if !self.delivery_ready() {
+            return None;
+        }
+        let (events, mut inputs) = self.delivery.ready.take()?;
+        if let Some(liveness) = self.idle_liveness.ready.take() {
+            inputs.set_idle_liveness(liveness);
+        }
+        Some((events, inputs))
     }
 
     /// Resolve the git half of the supervisor-stall evidence as a `CiStatus`
@@ -626,7 +794,7 @@ impl DirectorRefresh {
     ) -> Result<(), Vec<Prompt>> {
         let request: DeliverabilityRequest = app.deliverability_request();
         let generation = self.next_generation();
-        let delay = self.read_delay;
+        let hook = self.hook.clone();
         // Recorded first: an inline runtime finishes the job inside submit.
         self.deliverability_pending.insert(
             generation,
@@ -640,9 +808,7 @@ impl DirectorRefresh {
         let submitted = jobs.submit_external_read(
             factory_jobs::deliverability_spec(generation),
             move |stores: Option<&DirectorStores>| {
-                if !delay.is_zero() {
-                    std::thread::sleep(delay);
-                }
+                hook.run("prompt re-check");
                 let verdicts = request.read(stores, &prompts);
                 Box::new(FactoryJobOutput::Deliverability(DeliverabilityBatch {
                     prompts: prompts.into_iter().zip(verdicts).collect(),
@@ -673,8 +839,10 @@ impl DirectorRefresh {
     /// Shutdown (review M4): wait up to `timeout` for prompt re-checks still
     /// in flight. Returns the finished batches and the re-checks that never
     /// reported, which the caller re-checks itself before injecting, as the
-    /// inject loop did before cas-223f. No prompt is dropped.
-    pub(crate) fn drain_deliverability(
+    /// inject loop did before cas-223f. No prompt is dropped. Waits on the
+    /// runtime's timer, never by blocking the loop's thread (cas-3b16, C2
+    /// review round 2, L1).
+    pub(crate) async fn drain_deliverability(
         &mut self,
         jobs: &mut QueueJobs,
         timeout: Duration,
@@ -685,7 +853,7 @@ impl DirectorRefresh {
             if self.deliverability_pending.is_empty() || Instant::now() >= deadline {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(5));
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let mut pending: Vec<(u64, PendingDeliverability)> =
             self.deliverability_pending.drain().collect();

@@ -42,7 +42,8 @@ pub(crate) mod task_dialog_load;
 
 pub(crate) use director_refresh::{
     timed as timed_refresh_step, DeliverabilityRequest, DeliveryInputs, DeliveryRequest,
-    DirectorRefreshLoad, DirectorRefreshRequest, prompt_needs_fresh_recheck,
+    DirectorRefreshLoad, DirectorRefreshRequest, IdleLivenessMap, IdleLivenessRequest,
+    prompt_needs_fresh_recheck,
 };
 
 pub(crate) use branch_visibility::BranchAheadBehind;
@@ -933,6 +934,17 @@ pub struct FactoryApp {
     /// `CiStatus` job on the external lane. The stall check joins the two in
     /// memory and only looks them up.
     git_evidence: delivery_evidence::GitEvidenceMap,
+    /// cas-3b16: the session metadata the supervisor-stall check reads, from
+    /// the latest director snapshot job (never read on the loop).
+    session_progress: SessionProgressRead,
+    /// The supervisor-stall tracker this process last computed. Only this
+    /// daemon writes it, and its write lands off the loop, so a snapshot read
+    /// before the write lands must not roll it back.
+    supervisor_stall_tracker: Option<crate::ui::factory::director::SupervisorStallTracker>,
+    /// A changed tracker waiting to be written to the session metadata
+    /// ([`Self::take_supervisor_stall_write`]).
+    pending_supervisor_stall_write:
+        Option<(PathBuf, crate::ui::factory::director::SupervisorStallTracker)>,
     /// Director panel data. **Mutated in place** by
     /// `filter_director_agents_to_current_session()` on every `db_changed`
     /// tick — scoped to the currently-tracked epic for TUI display purposes.
@@ -1398,7 +1410,9 @@ impl FactoryApp {
             blocks_deps,
             idle_liveness,
             facts,
+            session: session_progress,
         } = inputs;
+        let session_progress = session_progress.unwrap_or_default();
         // cas-223f review M3: revalidation joins the fresh read's store facts
         // with the latest git evidence. It never falls back to cached facts.
         let evidence = facts
@@ -1414,9 +1428,29 @@ impl FactoryApp {
         let delivery_state_is_authoritative = loaded_data.is_ok();
         // cas-223f review round 2, M3: revalidation never decides from the
         // cache. The daemon retries a failed fresh read first; when it keeps
-        // failing, every event is delivered as detected. The cached snapshot
-        // (the one the events were detected from) then only renders prompt
-        // text: it never filters, retracts or suppresses an event.
+        // failing, every event is delivered as detected: no event is
+        // filtered, no merge alert is checked for freshness and no inbox
+        // sweep runs.
+        //
+        // cas-3b16 (C2 review round 3, L-a/L-b): the prompts are then
+        // rendered from the cached snapshot, the latest one applied. It is
+        // never older than the snapshot an event was detected from and can be
+        // newer (a director snapshot may apply between a failed read and its
+        // retry). Rendering still drops a prompt whose own claim that snapshot
+        // contradicts; these are the only decisions the cache makes:
+        // - `TaskCompleted`: the prompt says the task is Open again. A task
+        //   the cache shows in progress or gone has no true prompt to send;
+        //   its close notice is the lifecycle relay's (GH #1124).
+        // - `EpicAllSubtasksClosed`: the prompt says every subtask is closed,
+        //   which a reopened subtask in the cache disproves (it would be false
+        //   advice to close the epic).
+        // - `WorkerIdle` with a task, `WorkerStalled` and `AgentRegistered`:
+        //   the live-session and already-busy guards, which read the
+        //   session-scoped panel data (`director_data`) on every path, fresh
+        //   read or not.
+        // `WorkerIdle` without a task never reaches rendering here (the
+        // durable attention relay delivers it below), so its busy-worker
+        // guard does not apply on this path.
         let unfiltered_data = loaded_data.unwrap_or_else(|_| self.unfiltered_director_data.clone());
 
         // cas-9fff: pass session-focused epic so EpicAllSubtasksClosed can
@@ -1442,7 +1476,12 @@ impl FactoryApp {
                     )
                 } else if matches!(event, DirectorEvent::SupervisorStalled { .. }) {
                     let evidence = evidence.clone().unwrap_or_default();
-                    self.supervisor_stall_event_is_current(event, &unfiltered_data, &evidence)
+                    self.supervisor_stall_event_is_current(
+                        event,
+                        &unfiltered_data,
+                        &evidence,
+                        &session_progress,
+                    )
                         .then(|| event.clone())
                 } else {
                     revalidate_event_for_delivery_with_focus(
@@ -1540,11 +1579,11 @@ impl FactoryApp {
                 snapshot_at,
             ) {
                 if let DirectorEvent::WorkerIdle { worker, .. } = event {
-                    // cas-223f: observed off the loop with the delivery read.
-                    let observation = match idle_liveness.get(worker) {
-                        Some(observed) => observed.clone(),
-                        None => super::director::idle_worker_liveness(&self.cas_dir, worker),
-                    };
+                    // cas-223f: observed off the loop beside the delivery read
+                    // (cas-3b16: on the blocking lane). A worker it could not
+                    // observe is uncertain, and an uncertain prompt is
+                    // delivered; it is never observed here, on the loop.
+                    let observation = idle_liveness.get(worker).cloned().flatten();
                     if let Some(observation) = observation {
                         if !super::director::apply_idle_liveness(&mut prompt, worker, &observation)
                         {
@@ -1616,7 +1655,15 @@ impl FactoryApp {
         {
             self.git_evidence = request.run();
         }
-        self.apply_director_refresh(load)
+        let events = self.apply_director_refresh(load);
+        // The daemon writes a changed stall tracker on its store worker;
+        // a synchronous refresh writes it here.
+        if let Some((path, tracker)) = self.take_supervisor_stall_write()
+            && let Err(error) = persist_session_metadata_supervisor_stall_at(&path, &tracker)
+        {
+            tracing::warn!(%error, "failed to persist supervisor stall metric");
+        }
+        events
     }
 
     /// Factory loop v2 (cas-223f): stall confirmation asks for worker
@@ -1647,10 +1694,14 @@ impl FactoryApp {
         use cas_store::ReminderStatus;
 
         let session = self.factory_session.as_deref()?;
-        let (last_call, mut tracker) = supervisor_progress_from_session_metadata_named(session)?;
+        // cas-3b16: the session metadata arrived with the snapshot job; this
+        // only looks it up. The tracker this process last computed wins over
+        // the file, whose write may not have landed yet.
+        let (last_call, file_tracker) = self.session_progress.progress.clone()?;
+        let mut tracker = self.supervisor_stall_tracker.clone().unwrap_or(file_tracker);
         let before = tracker.clone();
         let now = Utc::now();
-        let held_workers = worker_holds_from_session_metadata_named(session).unwrap_or_default();
+        let held_workers = self.session_progress.held_workers.clone().unwrap_or_default();
         // cas-223f: the git, CI and task-store evidence arrived with the
         // snapshot; this only looks it up.
         let evidence = delivery_evidence::combine(&self.parked_facts, &self.git_evidence);
@@ -1689,11 +1740,12 @@ impl FactoryApp {
             self.supervisor_stall_after_secs,
         );
         if tracker != before {
+            // Written off the loop: the daemon hands it to the store worker,
+            // a synchronous refresh writes it in place.
             let path = crate::ui::factory::session::metadata_path(session);
-            if let Err(error) = persist_session_metadata_supervisor_stall_at(&path, &tracker) {
-                tracing::warn!(%error, "failed to persist supervisor stall metric");
-            }
+            self.pending_supervisor_stall_write = Some((path, tracker.clone()));
         }
+        self.supervisor_stall_tracker = Some(tracker);
         observation.wake.map(|next_step| DirectorEvent::SupervisorStalled {
             next_step,
             occurrence: now.to_rfc3339(),
@@ -1706,6 +1758,7 @@ impl FactoryApp {
         event: &DirectorEvent,
         data: &DirectorData,
         evidence: &delivery_evidence::DeliveryEvidenceMap,
+        session_progress: &SessionProgressRead,
     ) -> bool {
         let DirectorEvent::SupervisorStalled {
             next_step,
@@ -1715,10 +1768,11 @@ impl FactoryApp {
         else {
             return false;
         };
-        let Some(session) = self.factory_session.as_deref() else {
+        if self.factory_session.is_none() {
             return false;
-        };
-        let Some((last_call, _)) = supervisor_progress_from_session_metadata_named(session) else {
+        }
+        // cas-3b16: read with the fresh delivery read, off the loop.
+        let Some((last_call, _)) = session_progress.progress.clone() else {
             return false;
         };
         let Ok(detected_at) = occurrence.parse::<DateTime<Utc>>() else {
@@ -1727,7 +1781,7 @@ impl FactoryApp {
         if last_call.is_some_and(|last| last > detected_at) {
             return false;
         }
-        let held_workers = worker_holds_from_session_metadata_named(session).unwrap_or_default();
+        let held_workers = session_progress.held_workers.clone().unwrap_or_default();
         self.supervisor_actionable_from_evidence(data, evidence, &held_workers, Utc::now())
             .as_ref()
             == Some(next_step)
@@ -1933,7 +1987,30 @@ impl FactoryApp {
         let Some(held_workers) = worker_holds_from_session_metadata_named(session_name) else {
             return;
         };
+        self.apply_worker_holds(&held_workers);
+    }
 
+    /// The holds the latest snapshot job read (cas-3b16); unavailable
+    /// metadata keeps the current holds.
+    pub(super) fn apply_snapshot_worker_holds(&mut self) {
+        if self.factory_session.is_none() {
+            return;
+        }
+        let Some(held_workers) = self.session_progress.held_workers.clone() else {
+            return;
+        };
+        self.apply_worker_holds(&held_workers);
+    }
+
+    /// A changed supervisor-stall tracker to write to the session metadata,
+    /// off the loop (cas-3b16).
+    pub(crate) fn take_supervisor_stall_write(
+        &mut self,
+    ) -> Option<(PathBuf, crate::ui::factory::director::SupervisorStallTracker)> {
+        self.pending_supervisor_stall_write.take()
+    }
+
+    fn apply_worker_holds(&mut self, held_workers: &HashSet<String>) {
         for worker in self.worker_names.clone() {
             if held_workers.contains(&worker) && !self.event_detector.is_worker_held(&worker) {
                 self.event_detector.mark_worker_hold(&worker);
@@ -3139,6 +3216,35 @@ pub(crate) fn supervisor_progress_from_session_metadata_named(
         metadata.last_supervisor_mcp_call_at,
         metadata.supervisor_stall,
     ))
+}
+
+/// One read of the session metadata the supervisor-stall check and the
+/// worker-hold gate use (cas-3b16: taken by the snapshot and delivery jobs,
+/// never on the loop).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SessionProgressRead {
+    /// The supervisor's last MCP call and the persisted stall tracker;
+    /// `None` when the metadata is unavailable or malformed.
+    pub(crate) progress: Option<(
+        Option<chrono::DateTime<chrono::Utc>>,
+        crate::ui::factory::director::SupervisorStallTracker,
+    )>,
+    /// The worker hold set; `None` when the metadata is unavailable.
+    pub(crate) held_workers: Option<HashSet<String>>,
+}
+
+/// Read [`SessionProgressRead`] for one factory session. Blocks on the file.
+pub(crate) fn session_progress_named(session: &str) -> SessionProgressRead {
+    let Some(metadata) = fs::read_to_string(crate::ui::factory::session::metadata_path(session))
+        .ok()
+        .and_then(|data| serde_json::from_str::<SessionMetadata>(&data).ok())
+    else {
+        return SessionProgressRead::default();
+    };
+    SessionProgressRead {
+        progress: Some((metadata.last_supervisor_mcp_call_at, metadata.supervisor_stall)),
+        held_workers: Some(metadata.held_workers.into_iter().collect()),
+    }
 }
 
 pub(crate) fn persist_session_metadata_supervisor_stall_at(
@@ -4462,6 +4568,57 @@ mod tests {
             app.event_detector.is_worker_held(worker),
             "unchanged-DB refresh must apply the durable hold before idle detection"
         );
+    }
+
+    /// cas-3b16 (C2 review round 2, L1): the session metadata the hold gate
+    /// and the supervisor-stall check use is read by the snapshot job. The
+    /// loop applies that read; it never reads the file itself.
+    #[test]
+    fn c3b16_snapshot_applies_the_session_metadata_its_job_read() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let _guard = TestEnvGuard::with_vars(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("CAS_FACTORY_SESSION", "session-read-off-loop"),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let worker = "lively-crow";
+        let session = "session-read-off-loop";
+        let path = crate::ui::factory::session::metadata_path(session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let metadata = crate::ui::factory::session::create_metadata(
+            session,
+            1,
+            "supervisor",
+            &[worker.to_string()],
+            None,
+            None,
+            None,
+        );
+        std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+        super::persist_session_metadata_worker_hold_at(&path, worker, true).unwrap();
+
+        let mut app = super::FactoryApp::for_test();
+        app.cas_dir = cas_dir.clone();
+        app.factory_session = Some(session.to_string());
+        app.worker_names = vec![worker.to_string()];
+        app.event_detector.add_worker(worker.to_string());
+        app.director_data.git_loaded = true;
+        app.last_db_fingerprint = Some(super::CasDbFingerprint::from_cas_dir(&cas_dir));
+        app.last_git_refresh = std::time::Instant::now();
+
+        // The job reads the hold; the file moves on before the loop applies.
+        let load = app.director_refresh_request().read(None);
+        super::persist_session_metadata_worker_hold_at(&path, worker, false).unwrap();
+        assert!(app.apply_director_refresh(load).unwrap().is_empty());
+        assert!(
+            app.event_detector.is_worker_held(worker),
+            "the loop applied the job's read, not a read of its own"
+        );
+        // The next snapshot job reads the release.
+        let load = app.director_refresh_request().read(None);
+        app.apply_director_refresh(load).unwrap();
+        assert!(!app.event_detector.is_worker_held(worker));
     }
 
     /// cas-728b simplify pass: hoisted from two near-identical PTY scaffolds

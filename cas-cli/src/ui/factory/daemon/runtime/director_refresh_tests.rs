@@ -1,6 +1,7 @@
 //! cas-ee9ab: a slow store never extends a daemon loop pass.
 use super::super::super::imports::*;
-use super::DirectorRefresh;
+use super::{DirectorRefresh, ReadGate};
+use std::sync::Arc;
 
 /// A test daemon on real job lanes (the provisioning fixture runs queue jobs
 /// inline, which would put every job back on the loop).
@@ -238,7 +239,7 @@ async fn c2_failed_snapshot_frees_its_slot() {
         "a dead snapshot job must not hold the slot"
     );
     // The next pass starts a fresh one, which now succeeds.
-    refresh.panic_reads = false;
+    refresh.set_panicking_reads(false);
     refresh.start_director_read(&daemon.app, &mut daemon.queue_jobs);
     assert!(refresh.take_director_read(&mut daemon.queue_jobs).is_some());
 }
@@ -261,7 +262,7 @@ async fn c2_failed_delivery_read_requeues_its_events() {
     assert!(refresh.take_delivery_read(&mut daemon.queue_jobs).is_none());
     assert!(!refresh.delivery.busy());
     assert_eq!(refresh.delivery_backlog.len(), 1, "the event waits for the next read");
-    refresh.panic_reads = false;
+    refresh.set_panicking_reads(false);
     refresh
         .start_delivery_backlog(&daemon.app, &mut daemon.queue_jobs)
         .unwrap();
@@ -279,7 +280,8 @@ async fn c2_shutdown_hands_back_pending_rechecks() {
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
     let mut daemon = daemon_on_lanes(&cas_dir);
-    let mut refresh = DirectorRefresh::new().with_read_delay(Duration::from_millis(500));
+    let gate = Arc::new(ReadGate::default());
+    let mut refresh = DirectorRefresh::new().with_read_gate(Arc::clone(&gate));
     let alert = crate::ui::factory::director::Prompt {
         target: "supervisor".into(),
         text: "worker-a is idle".into(),
@@ -299,10 +301,14 @@ async fn c2_shutdown_hands_back_pending_rechecks() {
             Instant::now(),
         )
         .unwrap();
-    let (done, pending) = refresh.drain_deliverability(&mut daemon.queue_jobs, Duration::ZERO);
+    let (done, pending) = refresh
+        .drain_deliverability(&mut daemon.queue_jobs, Duration::ZERO)
+        .await;
     assert!(done.is_empty());
     assert_eq!(pending.len(), 1, "the unfinished re-check is handed back");
     assert_eq!(pending[0].prompts[0].text, alert.text);
+
+    gate.open();
 
     refresh
         .start_deliverability_check(
@@ -313,8 +319,9 @@ async fn c2_shutdown_hands_back_pending_rechecks() {
             Instant::now(),
         )
         .unwrap();
-    let (done, pending) =
-        refresh.drain_deliverability(&mut daemon.queue_jobs, Duration::from_secs(10));
+    let (done, pending) = refresh
+        .drain_deliverability(&mut daemon.queue_jobs, Duration::from_secs(10))
+        .await;
     assert!(pending.is_empty());
     assert_eq!(done.len(), 1, "a re-check that finishes during the drain is delivered");
 }
@@ -392,7 +399,7 @@ async fn c2_requeued_events_start_on_a_quiet_pass() {
         .unwrap();
     assert!(refresh.take_delivery_read(&mut daemon.queue_jobs).is_none());
     assert_eq!(refresh.delivery_backlog.len(), 1);
-    refresh.panic_reads = false;
+    refresh.set_panicking_reads(false);
     assert!(
         refresh.has_finished(&mut daemon.queue_jobs),
         "waiting events wake the refresh pass"
@@ -407,8 +414,9 @@ async fn c2_requeued_events_start_on_a_quiet_pass() {
     assert!(!refresh.delivery.busy(), "and its read was delivered");
 }
 
-/// Review round 2, M3: a delivery read without fresh data is retried, and
-/// only after repeated failures are its events delivered as detected.
+/// Review round 2, M3: a delivery read without fresh data is retried three
+/// times (four reads in all), and only then are its events delivered as
+/// detected.
 #[test]
 fn c2_stale_delivery_read_retries_before_delivering() {
     let mut refresh = DirectorRefresh::new();
@@ -457,9 +465,12 @@ async fn c2_expired_delivery_read_requeues_and_ignores_the_late_result() {
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
     let mut daemon = daemon_on_lanes(&cas_dir);
+    let gate = Arc::new(ReadGate::default());
+    // cas-3b16 (L-d): the read holds on a gate and the timeout is zero, so
+    // the read times out on the first poll, whatever the machine's speed.
     let mut refresh = DirectorRefresh::new()
-        .with_read_delay(Duration::from_millis(400))
-        .with_timeout(Duration::from_millis(50));
+        .with_read_gate(Arc::clone(&gate))
+        .with_timeout(Duration::ZERO);
     let event = crate::ui::factory::director::DirectorEvent::WorkerIdle {
         worker: "slow-worker".into(),
         active_task: None,
@@ -467,15 +478,28 @@ async fn c2_expired_delivery_read_requeues_and_ignores_the_late_result() {
     refresh
         .start_delivery_read(&daemon.app, &mut daemon.queue_jobs, vec![event])
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(refresh.take_delivery_read(&mut daemon.queue_jobs).is_none());
-    assert!(!refresh.delivery.busy(), "the timed-out read freed its slot");
+    assert!(!refresh.delivery_busy(), "the timed-out read freed its slot");
     assert_eq!(refresh.delivery_backlog.len(), 1, "its event waits for the next read");
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    refresh.timeout_override = Some(Duration::from_secs(30));
+    gate.open();
+    // The read and the liveness job beside it both report late.
+    wait_for_late_results(&mut refresh, &mut daemon, 2).await;
     assert!(
         refresh.take_delivery_read(&mut daemon.queue_jobs).is_none(),
         "the late result is ignored"
     );
+}
+
+/// Poll until `count` late results were ignored. The deadline is a hang
+/// guard, not a timing margin: the outcome never depends on it.
+async fn wait_for_late_results(refresh: &mut DirectorRefresh, daemon: &mut FactoryDaemon, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while refresh.late_results_ignored < count {
+        refresh.has_finished(&mut daemon.queue_jobs);
+        assert!(Instant::now() < deadline, "the late results never arrived");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 /// Review round 2, L3: a prompt re-check that outlives its timeout delivers
@@ -485,9 +509,10 @@ async fn c2_expired_recheck_delivers_and_ignores_the_late_result() {
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
     let mut daemon = daemon_on_lanes(&cas_dir);
+    let gate = Arc::new(ReadGate::default());
     let mut refresh = DirectorRefresh::new()
-        .with_read_delay(Duration::from_millis(400))
-        .with_timeout(Duration::from_millis(50));
+        .with_read_gate(Arc::clone(&gate))
+        .with_timeout(Duration::ZERO);
     let alert = crate::ui::factory::director::Prompt {
         target: "supervisor".into(),
         text: "worker-a is idle".into(),
@@ -501,11 +526,12 @@ async fn c2_expired_recheck_delivers_and_ignores_the_late_result() {
     refresh
         .start_deliverability_check(&daemon.app, &mut daemon.queue_jobs, vec![alert], Vec::new(), Instant::now())
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
     let batches = refresh.take_deliverability(&mut daemon.queue_jobs);
     assert_eq!(batches.len(), 1);
     assert!(batches[0].prompts.iter().all(|(_, deliverable)| *deliverable));
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    refresh.timeout_override = Some(Duration::from_secs(30));
+    gate.open();
+    wait_for_late_results(&mut refresh, &mut daemon, 1).await;
     assert!(
         refresh.take_deliverability(&mut daemon.queue_jobs).is_empty(),
         "the late verdicts are ignored"
@@ -580,20 +606,21 @@ async fn c2_coalesced_snapshot_after_timeout_still_applies() {
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
     let mut daemon = daemon_on_lanes(&cas_dir);
+    let gate = Arc::new(ReadGate::default());
     let mut refresh = DirectorRefresh::new()
-        .with_read_delay(Duration::from_millis(400))
-        .with_timeout(Duration::from_millis(50));
+        .with_read_gate(Arc::clone(&gate))
+        .with_timeout(Duration::ZERO);
     refresh.start_director_read(&daemon.app, &mut daemon.queue_jobs);
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(refresh.take_director_read(&mut daemon.queue_jobs).is_none());
     assert!(!refresh.director.busy(), "the timed-out snapshot freed its slot");
 
-    // The first job still runs, so this submit coalesces into its rerun.
+    // The first job is held on the gate, so this submit coalesces into its
+    // rerun. Keep the coalesced job from timing out while it waits.
+    refresh.timeout_override = Some(Duration::from_secs(30));
     refresh.start_director_read(&daemon.app, &mut daemon.queue_jobs);
     assert!(refresh.director.busy(), "a coalesced submit stays in flight");
     let in_flight = refresh.director.in_flight.map(|(generation, _)| generation);
-    // Keep the coalesced job from timing out while the first one finishes.
-    refresh.timeout_override = Some(Duration::from_secs(30));
+    gate.open();
     let deadline = Instant::now() + Duration::from_secs(10);
     let load = loop {
         if let Some(load) = refresh.take_director_read(&mut daemon.queue_jobs) {
@@ -605,4 +632,204 @@ async fn c2_coalesced_snapshot_after_timeout_still_applies() {
     drop(load);
     assert!(in_flight.is_some());
     assert!(!refresh.director.busy());
+}
+
+/// cas-3b16 (C2 review round 3, L-c): the lifecycle wiring of the stale-read
+/// retry. A batch whose delivery reads keep coming back without fresh data
+/// gets one read plus three retries, each started by a refresh pass, and is
+/// then delivered as detected; no fifth read is started.
+#[tokio::test]
+async fn c3b16_lifecycle_retries_a_stale_delivery_read_three_times_then_delivers() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+    let progress = super::super::loop_watchdog::LoopProgress::new();
+    let store_worker = super::super::store_worker::global();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut refresh = DirectorRefresh::new().with_stale_delivery_reads(Arc::clone(&reads));
+    let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
+        task_id: "cas-b10c".into(),
+        task_title: "blocked".into(),
+        worker: "retry-worker".into(),
+    };
+    refresh
+        .start_delivery_read(&daemon.app, &mut daemon.queue_jobs, vec![event])
+        .unwrap();
+    for pass in 1..=6 {
+        daemon
+            .director_refresh_pass(&mut refresh, false, store_worker, &progress)
+            .await;
+        let expected = (pass + 1).min(4);
+        assert_eq!(reads.load(Ordering::SeqCst), expected, "reads after pass {pass}");
+    }
+    assert!(refresh.delivery_backlog.is_empty(), "the batch was delivered");
+    assert!(!refresh.delivery_busy(), "and no read is left in flight");
+    assert_eq!(refresh.failed_delivery_reads, 0, "the retry count starts over");
+}
+
+/// cas-3b16 (C2 review round 2, L2): the idle-worker liveness scan (agent
+/// store, transcripts, `/proc`) runs on the blocking lane beside the delivery
+/// read, never on the read lane, and the read is applied with its result.
+#[tokio::test]
+async fn c3b16_idle_liveness_runs_on_the_blocking_lane() {
+    use super::super::jobs::Lane;
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let gate = Arc::new(ReadGate::default());
+    let mut refresh = DirectorRefresh::new().with_read_gate(Arc::clone(&gate));
+    let event = crate::ui::factory::director::DirectorEvent::WorkerIdle {
+        worker: "idle-w".into(),
+        active_task: None,
+    };
+    refresh
+        .start_delivery_read(&daemon.app, &mut daemon.queue_jobs, vec![event])
+        .unwrap();
+
+    // Both jobs hold on the gate, so each is seen running on its lane.
+    let lanes = daemon.queue_jobs.job_lanes().expect("real job lanes");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (read_lane, blocking_lane) = loop {
+        let running: Vec<_> = lanes
+            .lane_stats()
+            .into_iter()
+            .filter_map(|stats| stats.running)
+            .collect();
+        let on = |lane: Lane| running.iter().find(|job| job.lane == lane).map(|job| job.key.clone());
+        if let (Some(read), Some(blocking)) = (on(Lane::Read), on(Lane::Blocking)) {
+            break (read, blocking);
+        }
+        assert!(Instant::now() < deadline, "the jobs never ran: {running:?}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert_eq!(read_lane, super::super::factory_jobs::DELIVERY_READ_KEY);
+    assert_eq!(blocking_lane, super::super::factory_jobs::IDLE_LIVENESS_KEY);
+    assert!(
+        refresh.take_delivery_read(&mut daemon.queue_jobs).is_none(),
+        "nothing applies before both report"
+    );
+
+    gate.open();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (_, inputs) = loop {
+        if let Some(read) = refresh.take_delivery_read(&mut daemon.queue_jobs) {
+            break read;
+        }
+        assert!(Instant::now() < deadline, "the delivery read never applied");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert!(
+        inputs.idle_liveness_for_test().contains_key("idle-w"),
+        "the read is joined with the liveness observed beside it"
+    );
+}
+
+/// cas-3b16 (C2 review round 1, L7): a prompt batch with nothing to re-check
+/// waits behind an earlier batch whose re-check is still running, so prompts
+/// are injected in the order they were generated.
+#[tokio::test]
+async fn c3b16_later_prompt_batch_waits_behind_a_pending_recheck() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    let progress = super::super::loop_watchdog::LoopProgress::new();
+    let store_worker = super::super::store_worker::global();
+    let gate = Arc::new(ReadGate::default());
+    let mut refresh = DirectorRefresh::new().with_read_gate(Arc::clone(&gate));
+    let prompt = |text: &str, drop_if_worker_assigned: Option<&str>| crate::ui::factory::director::Prompt {
+        target: "supervisor".into(),
+        text: text.into(),
+        stall_nudge_task: None,
+        retract_worker: None,
+        retract_task: None,
+        retract_epic: None,
+        drop_if_worker_assigned: drop_if_worker_assigned.map(str::to_string),
+        durable_retry: false,
+    };
+    for batch in [prompt("first", Some("worker-a")), prompt("second", None)] {
+        daemon
+            .deliver_director_events(
+                &mut refresh,
+                Vec::new(),
+                (Vec::new(), vec![batch], None),
+                Instant::now(),
+                0.0,
+                store_worker,
+                &progress,
+            )
+            .await;
+    }
+    assert_eq!(
+        refresh.deliverability_pending.len(),
+        2,
+        "the second batch waits behind the first instead of being injected"
+    );
+
+    gate.open();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut order = Vec::new();
+    while order.len() < 2 {
+        for batch in refresh.take_deliverability(&mut daemon.queue_jobs) {
+            order.extend(batch.prompts.into_iter().map(|(prompt, deliverable)| {
+                assert!(deliverable);
+                prompt.text
+            }));
+        }
+        assert!(Instant::now() < deadline, "the re-checks never finished");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(order, vec!["first".to_string(), "second".to_string()]);
+}
+
+/// cas-3b16 (C2 review round 2, L2): a reminder pass carrying edges (this
+/// tick's director events) still fires their reminders when the job runtime
+/// refuses the scan; edges are consumed once and must not be lost.
+#[tokio::test]
+async fn c3b16_refused_reminder_scan_keeps_its_edges() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    // The reminder's owner has shut down, so it falls back to this factory's
+    // supervisor and has a recipient without a director read.
+    let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+    let mut gone = cas_types::Agent::new("gone".into(), "gone-worker".into());
+    agents.register(&gone).unwrap();
+    gone.status = cas_types::AgentStatus::Shutdown;
+    agents.update(&gone).unwrap();
+    let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
+        task_id: "cas-ed9e".into(),
+        task_title: "edge".into(),
+        worker: "edge-worker".into(),
+    };
+    let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
+    reminders
+        .create_with_scope(
+            "gone",
+            None,
+            "the task blocked",
+            cas_store::ReminderTriggerType::Event,
+            None,
+            Some(event.event_type()),
+            None,
+            0,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    daemon.queue_jobs.close_lanes_for_test();
+    daemon.process_reminders(&[event.clone()]);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !reminders
+        .get_event_reminders(event.event_type())
+        .unwrap()
+        .is_empty()
+    {
+        assert!(Instant::now() < deadline, "the refused scan's event reminder never fired");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

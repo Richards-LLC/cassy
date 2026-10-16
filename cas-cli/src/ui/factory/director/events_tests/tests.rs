@@ -3648,3 +3648,62 @@ fn flv2_worker_health_probe_single_flight() {
     );
     assert_eq!(detector.stall_probe_count, 0, "no probe ran on the detector's thread");
 }
+
+/// cas-3b16 (C2 review round 2, L1): with deferred probes, stall confirmation
+/// never stats a transcript on the loop. A cached verdict is invalidated by a
+/// write the snapshot job saw (its fingerprints), and a snapshot read older
+/// than the probe is not mistaken for a write.
+#[test]
+fn c3b16_deferred_stall_check_reads_no_transcript_on_the_loop() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("transcript.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"assistant\"}\n").unwrap();
+    let probed_at = std::time::SystemTime::now() - Duration::from_secs(60);
+    std::fs::File::options()
+        .write(true)
+        .open(&transcript)
+        .unwrap()
+        .set_modified(probed_at)
+        .unwrap();
+    let probed = transcript_fingerprint(&transcript);
+    assert!(probed.is_some());
+
+    let now = chrono::Utc::now();
+    let mut detector = DirectorEventDetector::new(vec!["w".into()], "supervisor".into());
+    detector.set_deferred_health_probes(true);
+    detector.apply_worker_health_report(WorkerHealthReport {
+        worker: "w".into(),
+        task: "cas-t".into(),
+        confirmed: true,
+        transcript_path: Some(transcript.clone()),
+        fingerprint: probed,
+        activity: None,
+        delay_secs: 60,
+        requested_at: now,
+    });
+    assert_eq!(detector.stall_transcript_paths(), vec![transcript.clone()]);
+
+    // The worker writes. Nothing on the loop looks at the file, so the
+    // cached verdict holds until a snapshot job reads the new fingerprint.
+    std::fs::write(&transcript, "{\"type\":\"assistant\"}\n{\"type\":\"user\"}\n").unwrap();
+    let later = now + chrono::Duration::seconds(1);
+    assert_eq!(detector.transcript_confirms_stall("w", "cas-t", later, 300), Some(true));
+    assert!(detector.take_worker_health_requests().is_empty());
+
+    // A snapshot read from before the probe is not a write.
+    let older = Some((probed_at - Duration::from_secs(30), 1));
+    detector.observe_transcript_fingerprints([(transcript.clone(), older)].into_iter().collect());
+    assert_eq!(detector.transcript_confirms_stall("w", "cas-t", later, 300), Some(true));
+    assert!(detector.take_worker_health_requests().is_empty());
+
+    // The snapshot job saw the write: the verdict is invalidated and probed
+    // again from scratch.
+    detector.observe_transcript_fingerprints(
+        [(transcript.clone(), transcript_fingerprint(&transcript))].into_iter().collect(),
+    );
+    assert_eq!(detector.transcript_confirms_stall("w", "cas-t", later, 300), None);
+    let requests = detector.take_worker_health_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].delay_secs, 5, "a write restarts the backoff");
+    assert_eq!(detector.stall_probe_count, 0, "no probe ran on the detector's thread");
+}

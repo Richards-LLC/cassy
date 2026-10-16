@@ -2028,6 +2028,14 @@ fn cas_6718_drifted_project(home: &Path) -> PathBuf {
     let path = project.join(".claude").join(builtin.path);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, builtin.content).unwrap();
+    // A prior legitimate sync may have refreshed a still-tracked projection.
+    let store = crate::store::open_rule_store(&project.join(".cas")).unwrap();
+    let mut rule = crate::types::Rule::new("rule-fixture".into(), "Previous source content".into());
+    rule.status = crate::types::RuleStatus::Proven;
+    rule.helpful_count = 1;
+    store.add(&rule).unwrap();
+    let syncer = crate::sync::Syncer::with_defaults(&project);
+    syncer.sync_rule(&rule).unwrap();
     cas_6718_git(&project, &["init", "-q"]);
     cas_6718_git(
         &project,
@@ -2036,6 +2044,9 @@ fn cas_6718_drifted_project(home: &Path) -> PathBuf {
     cas_6718_git(&project, &["config", "user.name", "Fixture"]);
     cas_6718_git(&project, &["add", "."]);
     cas_6718_git(&project, &["commit", "-qm", "project baseline"]);
+    rule.content = "Current authoritative source content".into();
+    store.update(&rule).unwrap();
+    syncer.sync_rule(&rule).unwrap();
     project
 }
 
@@ -2063,6 +2074,7 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     for path in [
         ".claude/skills/cas/SKILL.md",
         ".claude/skills/cas-tdd/SKILL.md",
+        ".claude/rules/cas/rule-fixture.md",
         "AGENTS.md",
     ] {
         assert!(project.join(path).is_file());

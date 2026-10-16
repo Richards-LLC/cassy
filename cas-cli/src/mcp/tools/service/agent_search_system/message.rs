@@ -6239,7 +6239,7 @@ mod cas_89e1_post_merge_message_type_tests {
         let cas_root = temp.path().join(".cas");
         std::fs::create_dir_all(&cas_root).expect("Cassy root");
         let store = cas_store::SqlitePromptQueueStore::open(&cas_root).expect("prompt queue");
-        store.init().expect("init prompt queue");
+        cas_store::PromptQueueStore::init(&store).expect("init prompt queue");
         let session = "factory-refusal";
         let written = chrono::Utc::now();
         let write = |cas_root: &std::path::Path, last_pass_at: chrono::DateTime<chrono::Utc>| {

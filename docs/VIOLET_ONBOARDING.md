@@ -215,25 +215,41 @@ have everyone update their credentials file and restart their clients and
 
 ## Factory channel watches
 
-Factory sessions on the same clone share the Violet watch book, with separate
-watch entries for each session and channel. A daemon reloads state and updates
-its own watch set under a lock; starting a second session leaves live peer
-watches intact.
-Watches are stopped for another session only when its daemon metadata confirms
-that the daemon is gone. Missing or unreadable metadata is kept conservatively.
+From 3.59, factory sessions on the same clone share
+`.cas/violet/watches.v2.json` (format version 2), with separate watch entries for
+each session and channel. Each mutation reloads state under a shared lock.
+Starting a second session leaves live peer watches intact. Clean shutdown stops
+its own watches. After a successful session listing, a deleted metadata receipt
+also retires the old session's watches; unreadable listings or an existing but
+incomplete receipt do not prove a live daemon is gone.
+
+The first authenticated use migrates `violet/watches.json` into the v2 book
+without changing the legacy file. Later starts use only the v2 book. Daemons
+from 3.58 and older keep their own legacy watches until upgraded; upgrade and
+restart every daemon on a clone for coordinated watch behavior. Older binaries
+cannot overwrite the v2 path, and v2 readers refuse future format versions.
 
 Activity on a thread already recorded in a watch goes to that watch's owning
-session, even when another session claims it from Cloud. Unknown threads retain
-the claiming session's normal behavior. This is local watch routing; it does
-not add outgoing-post tracking or Cloud thread claims.
+session, even when another session claims it from Cloud. The first durable wake
+on an unknown thread claims that root under the lock, so later readers and
+replies use one owner. This is local watch routing; it does not add outgoing-post
+tracking or Cloud thread claims.
 
 After enqueueing a known owner's reply, the claimant may refresh that watch's
-activity timestamp and dedupe keys under the same lock. It does not start or
-stop the owner's watches, alter other watches, or advance the channel-wide
+activity timestamp and bounded dedupe keys for that thread under the same lock.
+A busy thread cannot evict the owner's keys for other threads. Admission does
+not start or stop the owner's watches, alter other watches, or advance the channel-wide
 read cursor past unread messages on other threads.
 
-An enabled wake consumer started before Cloud login retries credentials on its
-15-second tick. Run `cas login`; the factory daemon does not need a restart.
+Without Cloud credentials, ticks create no watch book or claim-failure finding.
+An enabled consumer checks credentials on its 15-second tick; after `cas login`
+the factory daemon starts receiving without a restart.
+
+A corrupt native book is durably quarantined as `watches.v2.json.corrupt`
+(numbered if necessary), then replaced with fresh state. Doctor names the
+quarantine. Inspect and archive or remove that file after review to clear the
+finding. A corrupt legacy file is left unchanged, with a quarantine copy;
+recovery never writes an older daemon's file.
 
 ## Consumer test channel
 

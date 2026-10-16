@@ -496,6 +496,33 @@ impl WatchBook {
         let (bytes, legacy) = match std::fs::read(path) {
             Ok(bytes) => (bytes, false),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A crash/write failure after quarantine must not import the
+                // old binary's legacy state again on the recovery retry.
+                let prefix = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                let quarantine =
+                    std::fs::read_dir(path.parent().ok_or("watch path has no parent")?)
+                        .map_err(|e| e.to_string())?
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .find(|entry| {
+                            entry
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| {
+                                    name.starts_with(prefix) && name.ends_with(".corrupt")
+                                })
+                        });
+                if let Some(quarantine) = quarantine {
+                    let book = Self {
+                        quarantined_book: Some(quarantine),
+                        ..Self::default()
+                    };
+                    book.save(path)?;
+                    return Ok(book);
+                }
                 let legacy = path.with_file_name("watches.json");
                 match std::fs::read(&legacy) {
                     Ok(bytes) => (bytes, true),
@@ -1406,7 +1433,7 @@ pub(crate) enum WatchHealth {
     Warning,
 }
 
-/// Read `<cas_dir>/violet/watches.json`. `None` when push-wake never ran here.
+/// Read the native v2 book. `None` when authenticated push-wake never ran here.
 pub(crate) fn watch_status(cas_dir: &Path, now: DateTime<Utc>) -> Option<VioletWatchStatus> {
     let book = WatchBook::read(&WatchBook::path(cas_dir))?;
     let secs = |at: DateTime<Utc>| (now - at).num_seconds().max(0);

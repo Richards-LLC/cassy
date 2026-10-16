@@ -544,6 +544,32 @@ fn cas_639c_review_corrupt_book_is_quarantined_and_recovered_with_doctor_finding
 }
 
 #[test]
+fn cas_639c_review_interrupted_quarantine_retry_does_not_remigrate_legacy() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut old = fx.wake("old", t0());
+    relay.publish(mention("C1", 0));
+    old.poll_once(&relay, &fx.queue, true, at(10));
+    let legacy_path = fx.watch_path.with_file_name("watches.json");
+    let legacy = std::fs::read(&fx.watch_path).unwrap();
+    std::fs::write(&legacy_path, &legacy).unwrap();
+    std::fs::write(&fx.watch_path, b"{corrupt native").unwrap();
+    let blocked_tmp = fx.watch_path.with_extension("json.tmp");
+    std::fs::create_dir(&blocked_tmp).unwrap();
+    let mut next = fx.wake("next", at(20));
+    relay.publish(mention("C2", 21));
+    let failed = next.poll_once(&relay, &fx.queue, true, at(30));
+    assert!(!failed.errors.is_empty());
+    assert_eq!(failed.held, 1);
+    std::fs::remove_dir(&blocked_tmp).unwrap();
+    assert_eq!(next.poll_once(&relay, &fx.queue, true, at(40)).wakes, 1);
+    let recovered = WatchBook::read(&fx.watch_path).unwrap();
+    assert!(recovered.watch("C1", "old").is_none());
+    assert!(recovered.watch("C2", "next").unwrap().is_active());
+    assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy);
+}
+
+#[test]
 fn cas_639c_review_foreign_hot_thread_cannot_evict_cold_thread_dedupe() {
     let fx = Fixture::new();
     let relay = FakeRelay::new();

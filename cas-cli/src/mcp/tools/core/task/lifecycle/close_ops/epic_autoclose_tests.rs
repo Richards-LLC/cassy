@@ -186,3 +186,146 @@ fn cas_7f60_dead_owner_is_adoptable_with_evidence() {
     both.push(agent("id-dead-2", "old-sup", Active, 5));
     assert_eq!(dead_owner_adoption("old-sup", &both, now), None);
 }
+
+struct HandlerClose {
+    is_error: bool,
+    text: String,
+    task: Task,
+}
+
+/// The 2026-10-16 cleanup shape through the real handler: an epic owned by a
+/// dead supervisor session, whose branch `epic/gone` exists neither locally
+/// nor on origin, with one terminal child whose lane is deleted and whose
+/// recorded delivery is `child_on_main` ? on origin/main : nowhere on main.
+/// The live supervisor closes it with no receipt, no owner transfer and no
+/// override.
+#[cfg(unix)]
+async fn close_finished_epic(child_on_main: bool) -> HandlerClose {
+    use crate::mcp::CasService;
+    use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store};
+    use cas_types::{Agent, AgentRole, AgentStatus, Dependency, DependencyType};
+
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let bare = tempfile::tempdir().unwrap();
+    git(bare.path(), &["init", "-q", "--bare"]);
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    git(p, &["init", "-q", "-b", "main"]);
+    commit_file(p, "seed.txt");
+    git(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+    git(p, &["push", "-q", "origin", "main"]);
+    git(p, &["checkout", "-q", "-b", "factory/alpha"]);
+    commit_file(p, "delivery.rs");
+    let anchor = {
+        let out = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(p).output().unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    git(p, &["checkout", "-q", "main"]);
+    if child_on_main {
+        git(p, &["merge", "-q", "--no-ff", "-m", "ship alpha", "factory/alpha"]);
+        git(p, &["push", "-q", "origin", "main"]);
+    }
+    // The lane is gone locally and was never on origin; the anchor object
+    // stays in the repository, as it does after a squash or merge.
+    git(p, &["branch", "-D", "factory/alpha"]);
+    if !child_on_main {
+        // Keep the unlanded commit reachable so it is measurable.
+        git(p, &["tag", "unlanded-alpha", &anchor]);
+    }
+
+    let cas_dir = p.join(".cas");
+    std::fs::create_dir_all(&cas_dir).unwrap();
+    env.set("CAS_ROOT", &cas_dir);
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    std::fs::write(cas_dir.join("config.toml"), "[verification]\nenabled = false\n").unwrap();
+    open_store(&cas_dir).unwrap().init().unwrap();
+    open_rule_store(&cas_dir).unwrap().init().unwrap();
+    open_skill_store(&cas_dir).unwrap().init().unwrap();
+    let store = open_task_store(&cas_dir).unwrap();
+    store.init().unwrap();
+    let agents = open_agent_store(&cas_dir).unwrap();
+    agents.init().unwrap();
+    let mut dead = Agent::new_with_role("old-sup-id".into(), "old-sup".into(), AgentRole::Supervisor);
+    dead.status = AgentStatus::Shutdown;
+    dead.last_heartbeat = Utc::now() - chrono::Duration::hours(3);
+    agents.register(&dead).unwrap();
+    let actor = "cas-7f60-supervisor";
+    agents
+        .register(&Agent::new_with_role(actor.into(), "live-sup".into(), AgentRole::Supervisor))
+        .unwrap();
+    let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing(actor.into());
+    let service = CasService::new(core, None);
+
+    let epic = Task {
+        id: "cas-7f60-epic".to_string(),
+        title: "finished epic".to_string(),
+        task_type: TaskType::Epic,
+        status: TaskStatus::Open,
+        branch: Some("epic/gone".to_string()),
+        epic_verification_owner: Some("old-sup-id".to_string()),
+        risk: vec![TaskRisk::None],
+        ..Default::default()
+    };
+    store.add(&epic).unwrap();
+    let mut child = Task {
+        id: "cas-7f60-child".to_string(),
+        title: "shipped child".to_string(),
+        status: TaskStatus::Closed,
+        assignee: Some("alpha".to_string()),
+        ..Default::default()
+    };
+    child.deliverables.factory_branch_anchor = Some(anchor);
+    child.deliverables.parked_branch = Some("factory/alpha".to_string());
+    store.add(&child).unwrap();
+    store
+        .add_dependency(&Dependency::new(child.id.clone(), epic.id.clone(), DependencyType::ParentChild))
+        .unwrap();
+
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "close",
+        "id": epic.id,
+        "reason": "all children terminal; content shipped to main",
+    }))
+    .unwrap();
+    let response = service.task(Parameters(request)).await.unwrap();
+    let text = response
+        .content
+        .iter()
+        .filter_map(|content| match &content.raw {
+            rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    HandlerClose {
+        is_error: response.is_error == Some(true),
+        text,
+        task: store.get(&epic.id).unwrap(),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cas_7f60_finished_epic_closes_with_dead_owner_and_gone_branch() {
+    let run = close_finished_epic(true).await;
+    assert!(!run.is_error, "{}", run.text);
+    assert_eq!(run.task.status, TaskStatus::Closed, "{}", run.text);
+    assert_eq!(
+        run.task.epic_verification_owner.as_deref(),
+        Some("cas-7f60-supervisor"),
+        "the live supervisor adopted the epic"
+    );
+    // pin: the adoption is logged with the dead owner's evidence.
+    assert!(run.task.notes.contains("adopted") && run.task.notes.contains("old-sup"), "{}", run.task.notes);
+    // pin: the gone epic branch is judged on the default branch, on the record.
+    assert!(run.task.notes.contains("epic/gone"), "{}", run.task.notes);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cas_7f60_gone_branch_with_unlanded_child_is_still_refused() {
+    let run = close_finished_epic(false).await;
+    assert_ne!(run.task.status, TaskStatus::Closed, "{}", run.text);
+    assert!(run.text.contains("cas-7f60-child"), "{}", run.text);
+}

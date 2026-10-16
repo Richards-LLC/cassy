@@ -142,6 +142,148 @@ mod tests {
             assert_eq!(count, 0, "{table} must roll back");
         }
     }
+
+    #[test]
+    fn cas_c423_store_ack_settlement_fences_old_tokens_and_foreign_registrations() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        let mut row = input();
+        store.admit(&row).unwrap();
+        let old = store
+            .pending_acknowledgements(&row.registration_id, &row.project_id)
+            .unwrap()
+            .remove(0);
+        row.lease_token = "replacement-token".into();
+        store.admit(&row).unwrap();
+        assert!(
+            !store
+                .settle_acknowledgement(&old, &row.registration_id, &row.project_id)
+                .unwrap()
+        );
+        let pending = store
+            .pending_acknowledgements(&row.registration_id, &row.project_id)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(
+            store
+                .pending_acknowledgements("foreign-registration", &row.project_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !store
+                .settle_acknowledgement(&pending[0], "foreign-registration", &row.project_id)
+                .unwrap()
+        );
+        assert!(
+            store
+                .settle_acknowledgement(&pending[0], &row.registration_id, &row.project_id)
+                .unwrap()
+        );
+        assert!(
+            store
+                .pending_acknowledgements(&row.registration_id, &row.project_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn cas_c423_store_independent_connections_race_one_admission_and_keep_cursor_monotonic() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut threads = vec![];
+        for _ in 0..2 {
+            // Bypass the process connection pool to exercise the SQLite writer
+            // fence across genuinely independent handles, as on two processes.
+            let conn = Connection::open(root.path().join("cas.db")).unwrap();
+            conn.busy_timeout(crate::SQLITE_BUSY_TIMEOUT).unwrap();
+            let queue = SqlitePromptQueueStore::with_connection(std::sync::Arc::new(
+                std::sync::Mutex::new(conn),
+            ));
+            let separate = SqliteVioletAdmissionStore { queue };
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                separate.admit(&input()).unwrap()
+            }));
+        }
+        let receipts: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(receipts[0].prompt_id, receipts[1].prompt_id);
+        assert_ne!(receipts[0].created, receipts[1].created);
+        let mut older = input();
+        older.delivery_id = "older-delivery".into();
+        older.occurrence_id = "older-occurrence".into();
+        older.message_ts = "1760616042.000199".into();
+        store.admit(&older).unwrap();
+        let db = Connection::open(root.path().join("cas.db")).unwrap();
+        let cursor = || {
+            db.query_row("SELECT message_ts FROM violet_admission_cursors", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(cursor(), input().message_ts);
+        older.delivery_id = "newer-delivery".into();
+        older.occurrence_id = "newer-occurrence".into();
+        older.message_ts = "1760616042.0002001".into();
+        store.admit(&older).unwrap();
+        assert_eq!(cursor(), older.message_ts, "preserve all timestamp digits");
+    }
+
+    fn successor(row: &VioletAdmissionInput) -> VioletAdmissionRebind {
+        VioletAdmissionRebind {
+            delivery_id: row.delivery_id.clone(),
+            occurrence_id: row.occurrence_id.clone(),
+            reader_slot_id: row.reader_slot_id.clone(),
+            project_id: row.project_id.clone(),
+            registration_id: "registration-successor".into(),
+            expected_generation: 1,
+            delivery_generation: 2,
+            factory_session: "factory-successor".into(),
+            recipient: "supervisor-successor".into(),
+        }
+    }
+
+    #[test]
+    fn cas_c423_store_known_unread_rebind_moves_same_queue_row_and_fences_predecessor() {
+        let root = tempfile::tempdir().unwrap();
+        let row = input();
+        let first = SqliteVioletAdmissionStore::open(root.path())
+            .unwrap()
+            .admit(&row)
+            .unwrap();
+        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        let binding = successor(&row);
+        let adopted = store.adopt_unread(&binding).unwrap();
+        assert_eq!(adopted.prompt_id, first.prompt_id);
+        assert!(!adopted.created);
+        assert_eq!(
+            store.adopt_unread(&binding).unwrap(),
+            adopted,
+            "lost local result is idempotent"
+        );
+        let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+        assert!(
+            queue
+                .peek_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10)
+                .unwrap()
+                .is_empty()
+        );
+        let resumed = queue
+            .peek_unseen_for_recipient(&binding.recipient, Some(&binding.factory_session), 10)
+            .unwrap();
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].id, first.prompt_id);
+        assert!(
+            store.admit(&row).is_err(),
+            "old generation cannot refresh its token after adoption"
+        );
+        let mut stale = binding.clone();
+        stale.registration_id = "racing-successor".into();
+        assert!(store.adopt_unread(&stale).is_err());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +298,21 @@ pub struct VioletAdmissionAck {
     pub delivery_id: String,
     pub delivery_generation: i64,
     pub lease_token: String,
+}
+
+/// Apply only a validated Cloud rebind receipt for an existing local unread
+/// admission. This is not discovery, ownership, or dispatch authorization.
+#[derive(Debug, Clone)]
+pub struct VioletAdmissionRebind {
+    pub delivery_id: String,
+    pub occurrence_id: String,
+    pub reader_slot_id: String,
+    pub project_id: String,
+    pub registration_id: String,
+    pub expected_generation: i64,
+    pub delivery_generation: i64,
+    pub factory_session: String,
+    pub recipient: String,
 }
 
 pub struct SqliteVioletAdmissionStore {
@@ -175,6 +332,12 @@ impl SqliteVioletAdmissionStore {
             Ok(())
         })?;
         Ok(Self { queue })
+    }
+
+    pub fn adopt_unread(&self, _binding: &VioletAdmissionRebind) -> Result<VioletAdmissionReceipt> {
+        Err(StoreError::Other(
+            "unread adoption is not implemented".into(),
+        ))
     }
 
     /// Includes admissions already acknowledged remotely: a lost response must

@@ -365,14 +365,10 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
             // Only stamp once — preserve original delivery time on replay.
-            // cas-5871: the prompt IS this row's delivery, so the row is
-            // consumed too; an explicit ack that came first keeps its time.
             conn.execute(
                 "UPDATE supervisor_queue
-                 SET prompt_delivered_at = COALESCE(prompt_delivered_at, ?1),
-                     processed_at = COALESCE(processed_at, ?1)
-                 WHERE id = ?2
-                   AND (prompt_delivered_at IS NULL OR processed_at IS NULL)",
+                 SET prompt_delivered_at = ?
+                 WHERE id = ? AND prompt_delivered_at IS NULL",
                 params![now, notification_id],
             )?;
             Ok(())
@@ -882,8 +878,7 @@ mod tests {
             } => {}
             other => panic!("expected AlreadyExists prompt_delivered=true, got {other:?}"),
         }
-        // cas-5871: a delivered outbox row is consumed, not pending forever.
-        assert_eq!(store.pending_count("sup-a").unwrap(), 0);
+        assert_eq!(store.pending_count("sup-a").unwrap(), 1);
         // Different session key is a separate event (isolation).
         store
             .notify_idempotent(
@@ -895,7 +890,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(store.pending_count("sup-b").unwrap(), 1);
-        assert_eq!(store.pending_count("sup-a").unwrap(), 0);
+        assert_eq!(store.pending_count("sup-a").unwrap(), 1);
     }
 
     #[test]
@@ -1235,11 +1230,12 @@ mod tests {
     }
 
 
-    /// cas-5871: an outbox row whose prompt was delivered is consumed. All
-    /// 116 task_lifecycle rows of one session sat at processed_at NULL with
-    /// their prompts delivered, so every pending view counted them forever.
+    /// cas-5871: an outbox row is consumed by its prompt delivery, not by
+    /// `processed_at`, which stays the supervisor's acknowledgement (`ack`
+    /// refuses an already-processed row). Retention finishes a delivered
+    /// task_lifecycle row once it ages out, so it does not stay forever.
     #[test]
-    fn a_delivered_outbox_row_is_consumed_cas_5871() {
+    fn a_delivered_lifecycle_row_ages_out_and_keeps_its_ack_slot_cas_5871() {
         let (_temp, store) = create_test_store();
         let id = match store
             .notify_idempotent(
@@ -1254,12 +1250,16 @@ mod tests {
             NotifyIdempotentResult::Created(id) => id,
             other => panic!("{other:?}"),
         };
-        assert_eq!(store.pending_count("supervisor-1").unwrap(), 1);
         store.mark_prompt_delivered(id).unwrap();
-        let row = store.get(id).unwrap().unwrap();
-        assert!(row.prompt_delivered_at.is_some());
-        assert!(row.processed_at.is_some(), "delivered is consumed");
-        assert_eq!(store.pending_count("supervisor-1").unwrap(), 0);
+        assert!(store.get(id).unwrap().unwrap().processed_at.is_none(), "not acknowledged yet");
+        store.ack(id).unwrap();
+        {
+            let aged = (Utc::now() - chrono::Duration::days(15)).to_rfc3339();
+            let conn = store.conn.lock().unwrap();
+            conn.execute("UPDATE supervisor_queue SET created_at = ?1", params![aged]).unwrap();
+        }
+        assert_eq!(store.prune_finished_batch(14 * 24 * 60 * 60, 10).unwrap(), 1);
+        assert!(store.get(id).unwrap().is_none());
     }
 
     /// cas-5871: 2,942 reminder_fired rows since May were never consumed. The

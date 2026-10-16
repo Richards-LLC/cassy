@@ -3649,13 +3649,11 @@ impl SqlitePromptQueueStore {
                 tx,
                 &sender,
                 session.as_deref(),
-                &format!(
-                    "{} messages to {targets} were abandoned ({reasons}); ids {ids}",
-                    notices.len()
-                ),
+                &abandonment_batch_notice(&notices, &targets, &reasons),
                 &format!("{} messages to {targets} abandoned", notices.len()),
                 &format!("delivery-abandoned:batch:{ids}"),
                 operator,
+                notices.len() as u64,
             )?;
         }
         Ok(())
@@ -3724,6 +3722,7 @@ impl SqlitePromptQueueStore {
             &format!("Message {message_id} to {recipient} abandoned"),
             &format!("delivery-abandoned:{message_id}"),
             is_operator_target(recipient),
+            1,
         )
     }
 
@@ -3753,6 +3752,7 @@ impl SqlitePromptQueueStore {
         summary: &str,
         dedupe_key: &str,
         operator: bool,
+        message_count: u64,
     ) -> Result<()> {
         let now = Utc::now();
         let window_start = abandonment_window_start(now).to_rfc3339();
@@ -3795,7 +3795,7 @@ impl SqlitePromptQueueStore {
                 "UPDATE prompt_queue
                     SET prompt = ?2, summary = 'Messages abandoned (episode continues)'
                   WHERE id = ?1",
-                params![id, fold_abandonment_line(prompt, notice)],
+                params![id, fold_abandonment_line(prompt, notice, message_count)],
             )?;
             return Ok(());
         }
@@ -3813,11 +3813,7 @@ impl SqlitePromptQueueStore {
             return Ok(());
         } else {
             (
-                format!(
-                    "Update since the last Commander abandonment notice this hour: {notice}\n\
-                     Further Commander abandonments this hour are recorded on each message \
-                     (`message_status`) without another notice."
-                ),
+                abandonment_update_notice(notice),
                 format!("Update: {summary}"),
                 format!(
                     "{update_prefix}{}",
@@ -3855,10 +3851,54 @@ fn abandonment_window_start(now: DateTime<Utc>) -> DateTime<Utc> {
     DateTime::from_timestamp(start, 0).unwrap_or(now)
 }
 
+fn abandonment_update_notice(notice: &str) -> String {
+    format!(
+        "Update since the last Commander abandonment notice this hour: {notice}\n\
+         Further Commander abandonments this hour are recorded on each message \
+         (`message_status`) without another notice."
+    )
+}
+
+/// Keep whole IDs while reserving room for the episode overflow trailer and
+/// the Commander update wrapper. The total still names every abandoned row;
+/// omitted IDs remain available through each original message's status.
+fn abandonment_batch_notice(notices: &[AbandonedSenderNotice], targets: &str, reasons: &str) -> String {
+    let reserve = abandonment_update_notice("").chars().count()
+        + format!("\n+{}{ABANDONMENT_MORE_SUFFIX}", u64::MAX).chars().count();
+    let omission = |count| format!(" ({count} ids omitted; see `message_status`)");
+    let header = format!("{} messages to {targets} were abandoned ({reasons})", notices.len());
+    // Pathological target/reason lists must not consume the space for even
+    // one complete ID and its omission count. Ordinary headers stay whole.
+    let header_budget = HOOK_SURFACE_BUDGET_CHARS
+        .saturating_sub(HOOK_SURFACE_ROW_OVERHEAD_CHARS + reserve
+            + omission(notices.len()).chars().count() + "; ids ".len()
+            + i64::MIN.to_string().len() + 1);
+    let mut body = if header.chars().count() > header_budget {
+        let mut short: String = header.chars().take(header_budget.saturating_sub(1)).collect();
+        short.push('…');
+        short
+    } else {
+        header
+    };
+    body.push_str("; ids ");
+    for (index, notice) in notices.iter().enumerate() {
+        let separator = if index == 0 { "" } else { ", " };
+        let candidate = format!("{body}{separator}{}", notice.prompt_id);
+        let left = notices.len() - index - 1;
+        let suffix = if left == 0 { String::new() } else { omission(left) };
+        if hook_surface_cost(&candidate) + suffix.chars().count() + reserve > HOOK_SURFACE_BUDGET_CHARS {
+            body.push_str(&omission(notices.len() - index));
+            break;
+        }
+        body = candidate;
+    }
+    body
+}
+
 /// GH #1196: fold `notice` into an unread episode `prompt`. Lines are added
 /// while the result, with room for the trailer, still fits a hook surface
 /// ([`fits_hook_surface`]); after that a `+N more` trailer counts the rest.
-fn fold_abandonment_line(prompt: &str, notice: &str) -> String {
+fn fold_abandonment_line(prompt: &str, notice: &str, message_count: u64) -> String {
     let (body, more) = match prompt.rsplit_once('\n') {
         Some((head, last)) if last.starts_with('+') && last.ends_with(ABANDONMENT_MORE_SUFFIX) => (
             head,
@@ -3872,7 +3912,7 @@ fn fold_abandonment_line(prompt: &str, notice: &str) -> String {
     if more == 0 && fits_hook_surface(&format!("{with_line}\n+{}{ABANDONMENT_MORE_SUFFIX}", u64::MAX)) {
         with_line
     } else {
-        format!("{body}\n+{}{ABANDONMENT_MORE_SUFFIX}", more + 1)
+        format!("{body}\n+{}{ABANDONMENT_MORE_SUFFIX}", more.saturating_add(message_count))
     }
 }
 

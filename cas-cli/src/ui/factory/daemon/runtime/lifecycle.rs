@@ -2403,8 +2403,23 @@ impl FactoryDaemon {
         // this thread are reported (report mode).
         // cas-786a6: the loop's prompt-queue handle is opened (schema init
         // once) before this thread becomes a lane; later passes reuse it.
-        if let Err(error) = self.queue_jobs.store(self.app.cas_dir()) {
-            tracing::warn!(%error, "prompt queue store unavailable at loop start; opened on first use");
+        match self.queue_jobs.store(self.app.cas_dir()) {
+            // cas-786a6 review M2 (spec §4.5 rule 5): claims a previous
+            // daemon took but never handed off are released before this one
+            // claims anything, so its rows are offered again.
+            Ok(queue) => match queue.release_orphaned_transport_claims(&self.session_name) {
+                Ok(0) => {}
+                Ok(released) => tracing::warn!(
+                    target: "cas::coordination",
+                    released,
+                    factory_session = %self.session_name,
+                    "released transport claims a previous daemon never handed off"
+                ),
+                Err(error) => tracing::warn!(%error, "could not release orphaned transport claims"),
+            },
+            Err(error) => {
+                tracing::warn!(%error, "prompt queue store unavailable at loop start; opened on first use");
+            }
         }
         let _loop_lane = loop_progress.attach(super::loop_watchdog::Lane::Control);
         let mut last_reset_check = std::time::Instant::now();

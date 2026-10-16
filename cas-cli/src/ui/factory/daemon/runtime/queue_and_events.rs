@@ -8356,9 +8356,16 @@ impl FactoryDaemon {
                         &queued.target,
                     ) {
                         super::prompt_queue_jobs::ClaimStep::Claimed(token) => token,
-                        // Another channel already holds it for this worker.
-                        super::prompt_queue_jobs::ClaimStep::NotClaimed => {
+                        // The worker already has it: delivered earlier, or
+                        // taken by its hook or poll.
+                        super::prompt_queue_jobs::ClaimStep::HandedOff => {
                             tally.succeeded += 1;
+                            continue;
+                        }
+                        // Review M2: a bare claim is not a delivery.
+                        super::prompt_queue_jobs::ClaimStep::NotClaimed => {
+                            tally.failed += 1;
+                            tally.notes.push(format!("{name}: transport claim held; not handed off"));
                             continue;
                         }
                         // A member whose pane just became ready: next pass.
@@ -8468,7 +8475,8 @@ impl FactoryDaemon {
                         self.queue_jobs.carry_claimed_row(queued.clone(), facts.clone());
                         continue;
                     }
-                    super::prompt_queue_jobs::ClaimStep::NotClaimed => continue,
+                    super::prompt_queue_jobs::ClaimStep::HandedOff
+                    | super::prompt_queue_jobs::ClaimStep::NotClaimed => continue,
                 };
                 let inject_generation = match self.queue_jobs.admit_claimed(
                     self.app.cas_dir(),

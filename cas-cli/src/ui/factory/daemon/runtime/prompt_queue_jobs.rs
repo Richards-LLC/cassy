@@ -159,11 +159,7 @@ impl QueueStamp {
                 .release_recipient_transport_claim(row, recipient, *claim_token)
                 .map(drop),
             Self::TransportDelivered => queue.mark_transport_delivered(row),
-            Self::TransportReceipt => queue.record_recipient_surfaced(
-                row,
-                recipient,
-                cas_store::SurfacingSource::TransportClaimed,
-            ),
+            Self::TransportReceipt => queue.record_recipient_transport_delivered(row, recipient),
             Self::PendingReason { reason, detail } => {
                 queue.record_pending_reason(row, *reason, detail.as_deref())
             }
@@ -296,7 +292,10 @@ pub(crate) struct QueueSelection {
 pub(crate) enum ClaimOutcome {
     /// The transport claim was taken: the row may be injected on its next pass.
     Claimed(cas_store::ClaimToken),
-    /// A hook, a poll or an earlier handoff that keeps its claim holds the row.
+    /// The recipient already has the row: a delivered handoff, a hook or a
+    /// poll (review M2).
+    HandedOff,
+    /// A bare transport claim nobody handed off holds the row.
     NotClaimed,
     /// The fresh re-read found the row consumed, gone or re-addressed.
     Stale,
@@ -309,6 +308,10 @@ pub(crate) enum ClaimOutcome {
 pub(crate) struct ClaimDone {
     pub(crate) row: i64,
     pub(crate) recipient: String,
+    /// The claim job's generation: only the job control waits for may
+    /// deliver its claim; any other `Claimed` token is released (review M1).
+    pub(crate) generation: u64,
+    pub(crate) cas_dir: PathBuf,
     pub(crate) outcome: ClaimOutcome,
     /// Rows the QA retarget moved; control forgets their state.
     pub(crate) retargeted: Vec<i64>,
@@ -316,7 +319,8 @@ pub(crate) struct ClaimDone {
 
 #[derive(Debug, Clone)]
 enum ClaimState {
-    Pending(Instant),
+    /// A claim job of this generation is out.
+    Pending(Instant, u64),
     Ready(ClaimOutcome, Instant),
 }
 
@@ -327,7 +331,9 @@ pub(crate) enum ClaimStep {
     Claimed(cas_store::ClaimToken),
     /// The claim job has not come back; the row waits for a later pass.
     Waiting,
-    /// Not claimed (another channel holds the row, or it went stale).
+    /// The recipient already has the row (review M2).
+    HandedOff,
+    /// Not claimed: a bare claim holds the row, or it went stale.
     NotClaimed,
 }
 
@@ -345,6 +351,7 @@ pub(crate) fn run_claim_for_inject(
     row: i64,
     recipient: &str,
     target: &str,
+    generation: u64,
 ) -> ClaimDone {
     let result = (|| -> anyhow::Result<(ClaimOutcome, Vec<i64>)> {
         let queue = job_thread_prompt_queue(cas_dir)?;
@@ -357,6 +364,7 @@ pub(crate) fn run_claim_for_inject(
         }
         let outcome = match queue.claim_recipient_transport_token(row, recipient)? {
             Some(token) => ClaimOutcome::Claimed(token),
+            None if queue.recipient_handed_off(row, recipient)? => ClaimOutcome::HandedOff,
             None => ClaimOutcome::NotClaimed,
         };
         Ok((outcome, retargeted))
@@ -368,6 +376,8 @@ pub(crate) fn run_claim_for_inject(
     ClaimDone {
         row,
         recipient: recipient.to_string(),
+        generation,
+        cas_dir: cas_dir.to_path_buf(),
         outcome,
         retargeted,
     }
@@ -1416,11 +1426,33 @@ impl QueueJobs {
                 }
                 QueueJobOutcome::Claimed(done) => {
                     self.claim_retargeted.extend(done.retargeted);
-                    // A claim nobody takes is released by `expire_claims`.
-                    self.claims.insert(
-                        (done.row, done.recipient),
-                        ClaimState::Ready(done.outcome, Instant::now()),
+                    let key = (done.row, done.recipient);
+                    let awaited = matches!(
+                        self.claims.get(&key),
+                        Some(ClaimState::Pending(_, generation)) if *generation == done.generation
                     );
+                    if awaited {
+                        // A claim nobody takes is released by `expire_claims`.
+                        self.claims
+                            .insert(key, ClaimState::Ready(done.outcome, Instant::now()));
+                    } else if let ClaimOutcome::Claimed(claim_token) = done.outcome {
+                        // Review M1: a superseded or expired job's claim is
+                        // never left holding the row.
+                        tracing::debug!(
+                            target: "cas::coordination",
+                            message_id = key.0,
+                            recipient = %key.1,
+                            generation = done.generation,
+                            "factory loop v2: releasing a claim nobody waits for"
+                        );
+                        self.submit_stamp(
+                            &done.cas_dir,
+                            key.0,
+                            &key.1,
+                            0,
+                            QueueStamp::ReleaseClaim { claim_token },
+                        );
+                    }
                 }
                 QueueJobOutcome::Mirrored(state) => {
                     #[cfg(test)]
@@ -1783,6 +1815,7 @@ impl QueueJobs {
         };
         match outcome {
             ClaimOutcome::Claimed(token) => ClaimStep::Claimed(token),
+            ClaimOutcome::HandedOff => ClaimStep::HandedOff,
             ClaimOutcome::NotClaimed | ClaimOutcome::Stale => ClaimStep::NotClaimed,
             ClaimOutcome::Failed(error) => {
                 tracing::warn!(
@@ -1836,10 +1869,19 @@ impl QueueJobs {
             target.to_string(),
         );
         // Pending first: inline, the job's result is applied after this.
-        self.claims
-            .insert((row, recipient.to_string()), ClaimState::Pending(Instant::now()));
+        self.claims.insert(
+            (row, recipient.to_string()),
+            ClaimState::Pending(Instant::now(), generation),
+        );
         let submitted = self.submit_job(spec, false, move || {
-            let done = run_claim_for_inject(&job_dir, &job_session, row, &job_recipient, &job_target);
+            let done = run_claim_for_inject(
+                &job_dir,
+                &job_session,
+                row,
+                &job_recipient,
+                &job_target,
+                generation,
+            );
             // Wake the loop: the row's next selection can inject it.
             ready.store(true, Ordering::Release);
             QueueJobOutcome::Claimed(done)
@@ -1875,7 +1917,7 @@ impl QueueJobs {
     pub(crate) fn expire_claims(&mut self, cas_dir: &Path, now: Instant) {
         let mut released = Vec::new();
         self.claims.retain(|(row, recipient), state| match state {
-            ClaimState::Pending(since) => {
+            ClaimState::Pending(since, _) => {
                 now.saturating_duration_since(*since) < INJECT_OUTCOME_TIMEOUT
             }
             ClaimState::Ready(outcome, since) => {
@@ -1955,7 +1997,7 @@ impl QueueJobs {
             for ((claim_row, _), state) in claims {
                 if claim_row == id {
                     any = true;
-                    pending |= matches!(state, ClaimState::Pending(_));
+                    pending |= matches!(state, ClaimState::Pending(..));
                 }
             }
             if !any {

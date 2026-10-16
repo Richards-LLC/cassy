@@ -7121,51 +7121,62 @@ impl FactoryDaemon {
             self.enqueue_delivery_stalled_bounces(queue.as_ref());
             self.relay_idle_unacked_messages(queue.as_ref());
             self.escalate_undelivered_supervisor_relays(queue.as_ref());
-            if let Ok(expired) = queue.abandon_ineligible_session_targets(
-                &valid_targets,
-                &self.session_name,
-                cas_store::PROMPT_RETRY_MAX_AGE_SECS,
-            ) {
-                if expired > 0 {
-                    tracing::warn!(
-                        expired,
-                        factory_session = %self.session_name,
-                        "abandoned aged prompt_queue rows for targets outside the live session"
-                    );
-                }
-            }
-
-            // cas-d047 (GH #69): the sweep above only covers rows tagged with
-            // THIS session whose target left the roster. The item that was
-            // actually delivered months late was neither — an untagged
-            // (NULL-session) row addressed to a worker name that a later
-            // session happened to reuse. Age is the property that makes such a
-            // row undeliverable, so bound it directly and name every row that
-            // gets quarantined.
-            match queue.expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS) {
-                Ok(stale) => {
-                    for row in &stale {
+            // cas-786a6 (H3): the two pure-store sweeps run on the store
+            // worker, off the loop.
+            let cas_dir = self.app.cas_dir().to_path_buf();
+            let session = self.session_name.clone();
+            let targets: Vec<String> = valid_targets.iter().map(|target| target.to_string()).collect();
+            super::store_worker::submit_write("prompt queue poison sweep", move || {
+                let queue = super::prompt_queue_jobs::job_thread_prompt_queue(&cas_dir)
+                    .map_err(|error| error.to_string())?;
+                let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
+                if let Ok(expired) = queue.abandon_ineligible_session_targets(
+                    &targets,
+                    &session,
+                    cas_store::PROMPT_RETRY_MAX_AGE_SECS,
+                ) {
+                    if expired > 0 {
                         tracing::warn!(
-                            prompt_id = row.id,
-                            source = %row.source,
-                            target = %row.target,
-                            created_at = %row.created_at.to_rfc3339(),
-                            age_secs = (chrono::Utc::now() - row.created_at).num_seconds(),
-                            factory_session = ?row.factory_session,
-                            "cas-d047: quarantined stale prompt_queue item instead of delivering \
-                             it — it was queued more than the staleness TTL ago and never \
-                             consumed by any recipient"
+                            expired,
+                            factory_session = %session,
+                            "abandoned aged prompt_queue rows for targets outside the live session"
                         );
                     }
                 }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "cas-d047: stale prompt_queue sweep failed; stale rows stay withheld \
-                         from delivery by the selection guard"
-                    );
+
+                // cas-d047 (GH #69): the sweep above only covers rows tagged with
+                // THIS session whose target left the roster. The item that was
+                // actually delivered months late was neither — an untagged
+                // (NULL-session) row addressed to a worker name that a later
+                // session happened to reuse. Age is the property that makes such a
+                // row undeliverable, so bound it directly and name every row that
+                // gets quarantined.
+                match queue.expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS) {
+                    Ok(stale) => {
+                        for row in &stale {
+                            tracing::warn!(
+                                prompt_id = row.id,
+                                source = %row.source,
+                                target = %row.target,
+                                created_at = %row.created_at.to_rfc3339(),
+                                age_secs = (chrono::Utc::now() - row.created_at).num_seconds(),
+                                factory_session = ?row.factory_session,
+                                "cas-d047: quarantined stale prompt_queue item instead of delivering \
+                                 it — it was queued more than the staleness TTL ago and never \
+                                 consumed by any recipient"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "cas-d047: stale prompt_queue sweep failed; stale rows stay withheld \
+                             from delivery by the selection guard"
+                        );
+                    }
                 }
-            }
+                Ok::<(), String>(())
+            });
         }
 
         if !prompts.is_empty() {

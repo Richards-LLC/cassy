@@ -814,9 +814,14 @@ mod tests {
     /// which reads `/proc` and does not exist on other targets (GH #93).
     #[cfg(target_os = "linux")]
     fn plant_orphan(cwd: &Path) -> u32 {
+        plant_orphan_command(cwd, "sleep 120 >/dev/null 2>&1 </dev/null & echo $!")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn plant_orphan_command(cwd: &Path, command: &str) -> u32 {
         let output = Command::new("sh")
             .arg("-c")
-            .arg("sleep 120 >/dev/null 2>&1 </dev/null & echo $!")
+            .arg(command)
             .current_dir(cwd)
             .output()
             .expect("spawn orphan");
@@ -1079,7 +1084,22 @@ mod tests {
         let worktree = cas_root.join("worktrees/worker-a");
         std::fs::create_dir_all(&worktree).unwrap();
 
-        let pid = plant_orphan(&worktree);
+        // A wrapper sharing the runner's group must lose its child without
+        // signalling that shared group (the npm-exec/node shape from GH #1248).
+        let pid = plant_orphan_command(&worktree,
+            "sh -c 'sleep 120 & echo $! > gc-child.pid; wait' >/dev/null 2>&1 </dev/null & echo $!");
+        let _wrapper = PlantedProcess(pid);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let child = loop {
+            if let Some(child) = std::fs::read_to_string(worktree.join("gc-child.pid"))
+                .ok().and_then(|pid| pid.trim().parse::<u32>().ok()) {
+                break child;
+            }
+            assert!(Instant::now() < deadline, "wrapper did not publish its child pid");
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        let _child = PlantedProcess(child);
+        assert_eq!(read_proc_stat(child).expect("child stat").ppid, pid);
         let live_sessions = HashSet::new();
         let protected = HashSet::new();
 
@@ -1104,21 +1124,20 @@ mod tests {
             "a preview must never kill: pid {pid} should still be alive"
         );
 
-        // Authorized run reaps it.
+        assert!(crate::mcp::daemon::pid_alive(child), "preview killed the child");
+
+        // Authorized run reaps the wrapper and its fingerprinted child.
         let done = cleanup(&cas_root, &report, true);
         assert_eq!(done.killed, vec![pid], "errors: {:?}", done.errors);
 
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && crate::mcp::daemon::pid_alive(pid) {
-            std::thread::sleep(Duration::from_millis(25));
+        for victim in [pid, child] {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline && read_proc_stat(victim).is_some_and(|s| s.state != 'Z') {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            assert!(read_proc_stat(victim).is_none_or(|s| s.state == 'Z'),
+                "wrapper {pid} and child {child} must both be dead; survivor {victim}");
         }
-        // A killed child of init is reaped by init, so the pid disappears.
-        assert!(
-            !crate::mcp::daemon::pid_alive(pid)
-                || read_proc_stat(pid).map(|s| s.state) == Some('Z'),
-            "orphan {pid} should be dead after an authorized cleanup"
-        );
-        kill_if_alive(pid);
     }
 
     #[cfg(target_os = "linux")]

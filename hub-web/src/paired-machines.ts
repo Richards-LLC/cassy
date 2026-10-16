@@ -43,18 +43,15 @@ function fleetPermissionMarkup(id: string, kind: 'operate' | 'manage', name: str
   const state = gate.allowed ? 'Allowed' : gate.state;
   // cas-a217: say which permission allows Commander write grants.
   const also = kind === 'manage' ? '<p class="field-hint fleet-permission-also">Also needed to grant a task write access outside its worktree.</p>' : '';
-  const head = `<p class="fleet-permission-head"><span class="fleet-permission-name">${escapeHtml(name)}</span> <span class="fleet-permission-state" id="fleet-state-${key}">${escapeHtml(state)}</span></p>${also}`;
-  if (gate.allowed) return `<div class="fleet-permission" data-permission="${kind}" data-allowed="true">${head}</div>`;
+  const head = `<p class="fleet-permission-head"><span class="fleet-permission-name">${escapeHtml(name)}</span> <span class="fleet-permission-state" id="fleet-state-${key}">${escapeHtml(state)}</span></p>`;
+  if (gate.allowed) return `<div class="fleet-permission" data-permission="${kind}" data-allowed="true">${head}${also}</div>`;
   const reason = `<p class="field-hint fleet-permission-reason" id="fleet-reason-${key}">${escapeHtml(gate.reason)}</p>`;
-  // The control the permission unlocks reads as unavailable, and says why,
-  // but it is never the only cue: the state and the way to get it are words.
-  const control = kind === 'manage'
-    ? `<button type="button" class="fleet-permission-control" aria-disabled="true" aria-describedby="fleet-state-${key} fleet-reason-${key}">Stop and restart</button>`
-    : '';
+  // GH #1220: a disabled lookalike suggested a fleet action. The permission
+  // name and its reason are followed directly by the actual re-pair command.
   const grant = gate.grantable
     ? `<div class="fleet-permission-grant"><button type="button" class="fleet-permission-allow" data-fleet-allow="${escapeHtml(id)}" aria-describedby="fleet-reason-${key}">Allow managing workers</button></div>`
     : `<p class="field-hint fleet-permission-invite" id="fleet-invite-${key}">Run this on ${escapeHtml(label)} and open the link it prints in this browser:</p><div class="pair-code-actions fleet-permission-command"><code>${commandTokensMarkup(gate.command)}</code><button type="button" class="fleet-permission-copy" data-command="${escapeHtml(gate.command)}" aria-describedby="fleet-invite-${key}">Copy command</button></div>`;
-  return `<div class="fleet-permission" data-permission="${kind}" data-allowed="false">${head}${reason}${control}${grant}</div>`;
+  return `<div class="fleet-permission" data-permission="${kind}" data-allowed="false">${head}${reason}${also}${grant}</div>`;
 }
 
 /** The Fleet permissions block of one paired machine. */
@@ -206,9 +203,5 @@ function renderFleetPermissions(node: HTMLElement, row: PairedMachineRow, action
       try { await actions.allowManagingWorkers?.(row.id); } finally { allow.disabled = false; delete allow.dataset.confirm; allow.textContent = 'Allow managing workers'; }
     };
     allow.onblur = () => { delete allow.dataset.confirm; allow.textContent = 'Allow managing workers'; };
-  }
-  for (const control of block.querySelectorAll<HTMLButtonElement>('.fleet-permission-control')) {
-    // Unavailable but focusable, so its description is reachable; a press does nothing.
-    control.onclick = (event) => event.preventDefault();
   }
 }

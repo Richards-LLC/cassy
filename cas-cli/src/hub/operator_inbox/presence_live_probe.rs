@@ -77,6 +77,7 @@ fn presence_live_root_is_private_and_refuses_reuse() {
     let parent = tempfile::tempdir().unwrap();
     let root = parent.path().join("cas-e3dd-live-test");
     create_live_root(&root).unwrap();
+    crate::hub::MachineIdentityStore::new(&root).load().unwrap();
     crate::hub::ensure_private_dir(&root.join("operator-inbox")).unwrap();
     #[cfg(unix)]
     {

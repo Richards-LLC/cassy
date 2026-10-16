@@ -4,7 +4,7 @@
 //! distributed agent coordination across multiple machines.
 
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::cloud::CloudConfig;
 use crate::error::CasError;
@@ -703,14 +703,20 @@ impl CloudCoordinator {
     ///
     /// The list is ordered by creation time, newest first, so a long-lived
     /// supervisor can sit past the first page; every page is read, up to
-    /// [`MAX_AGENT_PAGES`].
+    /// [`MAX_AGENT_PAGES`]. The timeout bounds the entire paginated read,
+    /// rather than restarting for each page (cas-50713).
     pub fn list_agent_infos(&self) -> Result<Vec<AgentInfo>, CasError> {
         let mut agents = Vec::new();
         let mut cursor: Option<(String, String, Option<String>)> = None;
+        let deadline = Instant::now() + self.timeout;
         for _ in 0..MAX_AGENT_PAGES {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(CasError::Other("List agents budget exhausted".into()));
+            }
             let mut request = self.project_query(
                 ureq::get(&format!("{}/api/agents", self.config.endpoint))
-                    .timeout(self.timeout)
+                    .timeout(remaining)
                     .set("Authorization", &format!("Bearer {}", self.token()))
                     .query("limit", &AGENT_PAGE_LIMIT.to_string()),
             );

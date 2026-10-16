@@ -9,6 +9,7 @@ mod commander_mirror;
 pub(crate) use commander_mirror::MirrorScanState;
 pub(crate) mod delivery;
 pub(crate) mod director_refresh;
+pub(crate) mod factory_jobs;
 #[cfg(test)]
 mod delivery_matrix_tests;
 mod gui_client;

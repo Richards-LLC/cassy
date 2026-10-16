@@ -9,17 +9,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use cas_mux::{Mux, PaneKind};
-use cas_store::TaskStore;
 use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 
 use super::director::{
-    DeliveryHold, DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
-    MergeAlertFreshness, MergedCloseBlockedTask, PanelAreas, Prompt, SidecarFocus, ViewMode,
-    blocker_note_after_park, check_merge_alert_freshness, generate_prompt_at,
-    hold_decision_after_park, prompt_is_still_deliverable,
-    revalidate_event_for_delivery_with_context, revalidate_event_for_delivery_with_focus,
-    supervisor_actionable_state_with_classifiers, task_delivery_ref,
+    DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
+    MergeAlertFreshness, PanelAreas, Prompt, SidecarFocus, ViewMode, check_merge_alert_freshness,
+    generate_prompt_at, revalidate_event_for_delivery_with_context,
+    revalidate_event_for_delivery_with_focus, supervisor_actionable_state_with_classifiers,
 };
 use crate::store::open_prompt_queue_store;
 use crate::types::Worktree;
@@ -34,6 +31,7 @@ use crate::ui::widgets::TreeItemType;
 use crate::worktree::WorktreeManager;
 
 mod branch_visibility;
+pub(crate) mod delivery_evidence;
 mod director_refresh;
 mod imports;
 mod init;
@@ -43,7 +41,8 @@ mod sidecar_and_selection;
 pub(crate) mod task_dialog_load;
 
 pub(crate) use director_refresh::{
-    timed as timed_refresh_step, DeliveryInputs, DeliveryRequest, DirectorRefreshLoad, DirectorRefreshRequest,
+    timed as timed_refresh_step, DeliverabilityRequest, DeliveryInputs, DeliveryRequest,
+    DirectorRefreshLoad, DirectorRefreshRequest, prompt_needs_fresh_recheck,
 };
 
 pub(crate) use branch_visibility::BranchAheadBehind;
@@ -925,7 +924,15 @@ pub struct FactoryApp {
     director_stores: Option<DirectorStores>,
     /// cas-207e: lane CI of parked deliveries by (branch, tip). A settled
     /// result is final for its tip; a pending one is re-read after a minute.
-    lane_ci_pending: std::sync::Mutex<HashMap<(String, String), (std::time::Instant, bool)>>,
+    lane_ci_pending: delivery_evidence::LaneCiCache,
+    /// Factory loop v2 (cas-223f): the store half of the supervisor-stall
+    /// evidence for the focused epic's parked deliveries, read with each
+    /// director snapshot on the read lane.
+    parked_facts: delivery_evidence::ParkedFactsMap,
+    /// The git half (delivery tips, lane CI, merged state), from the latest
+    /// `CiStatus` job on the external lane. The stall check joins the two in
+    /// memory and only looks them up.
+    git_evidence: delivery_evidence::GitEvidenceMap,
     /// Director panel data. **Mutated in place** by
     /// `filter_director_agents_to_current_session()` on every `db_changed`
     /// tick — scoped to the currently-tracked epic for TUI display purposes.
@@ -1369,7 +1376,7 @@ impl FactoryApp {
             return (Vec::new(), Vec::new(), None);
         }
         let inputs = self
-            .delivery_request()
+            .delivery_request(events)
             .read(self.director_stores.as_ref());
         self.revalidate_and_prompt_for_delivery_from(events, inputs)
     }
@@ -1389,7 +1396,14 @@ impl FactoryApp {
         let DeliveryInputs {
             data: loaded_data,
             blocks_deps,
+            idle_liveness,
+            facts,
         } = inputs;
+        // cas-223f review M3: revalidation joins the fresh read's store facts
+        // with the latest git evidence. It never falls back to cached facts.
+        let evidence = facts
+            .as_ref()
+            .map(|facts| delivery_evidence::combine(facts, &self.git_evidence));
         // cas-ae6d (GH #100): the instant the snapshot backing a "no
         // dispatchable tasks" claim was actually read. That claim is counted
         // from `director_data` (session/epic-scoped — see the comment on
@@ -1398,6 +1412,11 @@ impl FactoryApp {
         // render time would assert a freshness the data may not have.
         let snapshot_at = self.director_data_loaded_at;
         let delivery_state_is_authoritative = loaded_data.is_ok();
+        // cas-223f review round 2, M3: revalidation never decides from the
+        // cache. The daemon retries a failed fresh read first; when it keeps
+        // failing, every event is delivered as detected. The cached snapshot
+        // (the one the events were detected from) then only renders prompt
+        // text: it never filters, retracts or suppresses an event.
         let unfiltered_data = loaded_data.unwrap_or_else(|_| self.unfiltered_director_data.clone());
 
         // cas-9fff: pass session-focused epic so EpicAllSubtasksClosed can
@@ -1406,13 +1425,11 @@ impl FactoryApp {
         let delivery_events: Vec<DirectorEvent> = events
             .iter()
             .filter_map(|event| {
-                // cas-06ca: an unavailable store snapshot is uncertainty,
-                // never positive evidence that an epic-completion occurrence
-                // is stale. Preserve the event rather than suppressing it
+                // cas-06ca / cas-223f: an unavailable store snapshot is
+                // uncertainty, never positive evidence that an event is
+                // stale. Preserve every event rather than suppressing it
                 // against cached data that may itself be out of date.
-                if !delivery_state_is_authoritative
-                    && matches!(event, DirectorEvent::EpicAllSubtasksClosed { .. })
-                {
+                if !delivery_state_is_authoritative {
                     return Some(event.clone());
                 }
                 if let DirectorEvent::WorkerIdle { worker, .. } = event {
@@ -1424,7 +1441,8 @@ impl FactoryApp {
                         self.event_detector.worker_idle_since(worker),
                     )
                 } else if matches!(event, DirectorEvent::SupervisorStalled { .. }) {
-                    self.supervisor_stall_event_is_current(event, &unfiltered_data)
+                    let evidence = evidence.clone().unwrap_or_default();
+                    self.supervisor_stall_event_is_current(event, &unfiltered_data, &evidence)
                         .then(|| event.clone())
                 } else {
                     revalidate_event_for_delivery_with_focus(
@@ -1474,8 +1492,15 @@ impl FactoryApp {
             // `NotApplicable` (wrong event shape, task no longer
             // AwaitingMerge, or no resolvable epic branch) falls through to
             // `generate_prompt` unaffected, exactly as before this fix.
+            // cas-223f: without a fresh read there is nothing to check the
+            // alert against; it is delivered as detected.
+            let freshness = if delivery_state_is_authoritative {
+                check_merge_alert_freshness(event, &unfiltered_data, &repo_root)
+            } else {
+                MergeAlertFreshness::NotApplicable
+            };
             let merge_alert_evidence =
-                match check_merge_alert_freshness(event, &unfiltered_data, &repo_root) {
+                match freshness {
                     MergeAlertFreshness::NotApplicable => None,
                     // AC1: branch already carries zero unmerged commits vs
                     // the epic — drop the alert entirely rather than
@@ -1515,9 +1540,12 @@ impl FactoryApp {
                 snapshot_at,
             ) {
                 if let DirectorEvent::WorkerIdle { worker, .. } = event {
-                    if let Some(observation) =
-                        super::director::idle_worker_liveness(&self.cas_dir, worker)
-                    {
+                    // cas-223f: observed off the loop with the delivery read.
+                    let observation = match idle_liveness.get(worker) {
+                        Some(observed) => observed.clone(),
+                        None => super::director::idle_worker_liveness(&self.cas_dir, worker),
+                    };
+                    if let Some(observation) = observation {
                         if !super::director::apply_idle_liveness(&mut prompt, worker, &observation)
                         {
                             continue;
@@ -1532,21 +1560,6 @@ impl FactoryApp {
         (delivery_events, prompts, sweep_data)
     }
 
-    fn try_load_unfiltered_director_data_for_delivery(&self) -> anyhow::Result<DirectorData> {
-        let worktree_root = self.worktree_manager.as_ref().map(|m| m.worktree_root());
-        DirectorData::load_with_stores(
-            &self.cas_dir,
-            worktree_root.as_deref(),
-            false,
-            self.director_stores.as_ref(),
-        )
-    }
-
-    fn load_unfiltered_director_data_for_delivery(&self) -> DirectorData {
-        self.try_load_unfiltered_director_data_for_delivery()
-            .unwrap_or_else(|_| self.unfiltered_director_data.clone())
-    }
-
     /// Re-check a state-bearing prompt at the narrowest point before transport
     /// injection. Batch revalidation happens earlier in the tick; a worker
     /// assignment, epic close, subtask reopen, or — cas-6eab (GH #74) — the
@@ -1554,20 +1567,18 @@ impl FactoryApp {
     /// before this prompt's turn in the delivery loop. The merge case is not
     /// hypothetical: `handle_epic_change` runs merges inside the very same
     /// tick, between prompt generation and this loop.
+    ///
+    /// Always a fresh read. Failure to load authoritative state is
+    /// uncertainty: deliver. Never remove a legitimate notification based on
+    /// cached data. The daemon runs the same check as a `RevalidateFresh` job
+    /// ([`DeliverabilityRequest`], cas-223f); this synchronous form reads on
+    /// the caller's thread.
     pub(crate) fn prompt_is_still_deliverable(&self, prompt: &Prompt) -> bool {
-        if prompt.retract_epic.is_some() || prompt.retract_task.is_some() {
-            // Failure to load authoritative state is uncertainty: deliver.
-            // Never remove a legitimate notification based on cached data.
-            return self
-                .try_load_unfiltered_director_data_for_delivery()
-                .map(|data| prompt_is_still_deliverable(prompt, &data, &self.delivery_repo_root()))
-                .unwrap_or(true);
-        }
-        if prompt.drop_if_worker_assigned.is_none() {
-            return true;
-        }
-        let data = self.load_unfiltered_director_data_for_delivery();
-        prompt_is_still_deliverable(prompt, &data, &self.delivery_repo_root())
+        self.deliverability_request()
+            .read(self.director_stores.as_ref(), std::slice::from_ref(prompt))
+            .first()
+            .copied()
+            .unwrap_or(true)
     }
 
     /// The main checkout every `factory/*` and `epic/*` branch lives in — the
@@ -1575,144 +1586,6 @@ impl FactoryApp {
     /// by `close_ops`/`director.rs` (`.cas`'s parent).
     fn delivery_repo_root(&self) -> std::path::PathBuf {
         self.cas_dir.parent().unwrap_or(&self.cas_dir).to_path_buf()
-    }
-
-    /// Return merged-close-blocked evidence for a parked task only when its
-    /// task-specific delivery anchor is already reachable from the resolved
-    /// target. Missing task/Git evidence is deliberately treated as unknown,
-    /// preserving the existing merge demand rather than inventing a merged
-    /// verdict.
-    fn classify_merged_close_blocked_task(
-        &self,
-        task: &crate::ui::factory::director::TaskSummary,
-        factory_branch: &str,
-        target_branch: &str,
-        _factory_tip: Option<&str>,
-        repo_root: &Path,
-    ) -> Option<MergedCloseBlockedTask> {
-        let target_tip = crate::git_evidence::resolve_branch_sha(
-            repo_root,
-            target_branch,
-        )?;
-        let stores = self.director_stores.as_ref()?;
-        let parked = stores.task_store.get(&task.id).ok()?;
-        let anchor = parked
-            .deliverables
-            .factory_branch_anchor
-            .as_deref()
-            .map(str::trim)
-            .filter(|anchor| !anchor.is_empty())?;
-        let anchor_sha =
-            crate::git_evidence::resolve_branch_sha(
-                repo_root, anchor,
-            )?;
-        if !git_is_ancestor(repo_root, &anchor_sha, &target_tip) {
-            return None;
-        }
-
-        Some(MergedCloseBlockedTask {
-            task_id: task.id.clone(),
-            factory_branch: factory_branch.to_string(),
-            anchor: anchor.to_string(),
-            target_branch: target_branch.to_string(),
-            target_tip,
-            close_rejection: last_close_rejection_reason(&parked.notes)
-                .unwrap_or_else(|| "MERGE REQUIRED".to_string()),
-        })
-    }
-
-    /// cas-58d3: the delivery branch and commit a merge-now alert names for a
-    /// parked task, from its per-task branch, recorded parked branch and
-    /// delivery anchor rather than the worker's base branch.
-    fn resolve_task_delivery(
-        &self,
-        task: &crate::ui::factory::director::TaskSummary,
-        worker: &str,
-        repo_root: &Path,
-    ) -> (String, Option<String>) {
-        let parked = self
-            .director_stores
-            .as_ref()
-            .and_then(|stores| stores.task_store.get(&task.id).ok());
-        let deliverables = parked.as_ref().map(|parked| &parked.deliverables);
-        task_delivery_ref(
-            &task.id,
-            worker,
-            deliverables.and_then(|d| d.parked_branch.as_deref()),
-            deliverables.and_then(|d| d.factory_branch_anchor.as_deref()),
-            |branch| {
-                crate::git_evidence::resolve_branch_sha(
-                    repo_root, branch,
-                )
-            },
-            |anchor, tip| git_is_ancestor(repo_root, anchor, tip),
-        )
-    }
-
-    /// GH #896 (cas-e4f8): whether a parked delivery is deliberately waiting
-    /// on a decision, so the stall relay leaves it out of "merge now". Reads
-    /// only: the task's notes (a blocker raised after it last parked) and
-    /// the QA pass rows (a pending or claimed pass whose deadline has not
-    /// passed; the QA gate says not to merge until it records a verdict).
-    /// A held worker is handled by the caller's hold set.
-    fn classify_delivery_hold(
-        &self,
-        task: &crate::ui::factory::director::TaskSummary,
-        worker: &str,
-        repo_root: &Path,
-    ) -> Option<DeliveryHold> {
-        if let Some(stores) = self.director_stores.as_ref()
-            && let Ok(parked) = stores.task_store.get(&task.id)
-        {
-            if blocker_note_after_park(&parked.notes) {
-                return Some(DeliveryHold::BlockerNote);
-            }
-            // cas-58d3: a supervisor decision holding the merge.
-            if hold_decision_after_park(&parked.notes) {
-                return Some(DeliveryHold::SupervisorDecision);
-            }
-        }
-        let now = Utc::now();
-        if cas_store::list_qa_passes(&self.cas_dir, &task.id)
-            .ok()?
-            .into_iter()
-            .any(|pass| pass.state.is_active() && pass.deadline_at > now)
-        {
-            return Some(DeliveryHold::QaPassOpen);
-        }
-        self.delivery_ci_pending(task, worker, repo_root)
-            .then_some(DeliveryHold::LaneCiPending)
-    }
-
-    /// cas-207e: a parked delivery whose lane CI is still running is not a
-    /// ready merge. Read through a cache so the stall check stays cheap.
-    fn delivery_ci_pending(
-        &self,
-        task: &crate::ui::factory::director::TaskSummary,
-        worker: &str,
-        repo_root: &Path,
-    ) -> bool {
-        let (branch, Some(tip)) = self.resolve_task_delivery(task, worker, repo_root) else {
-            return false;
-        };
-        let key = (branch, tip);
-        let Ok(mut cache) = self.lane_ci_pending.lock() else {
-            return false;
-        };
-        if let Some((at, pending)) = cache.get(&key)
-            && (!pending || at.elapsed() < std::time::Duration::from_secs(60))
-        {
-            return *pending;
-        }
-        let target = crate::ui::factory::director::merge_target_for_task(
-            &self.unfiltered_director_data,
-            task,
-        )
-        .unwrap_or_else(|| "main".to_string());
-        let pending =
-            crate::mcp::tools::core::workflow::delivery_ci_pending(&key.0, &target, repo_root);
-        cache.insert(key, (std::time::Instant::now(), pending));
-        pending
     }
 
     /// Refresh Cassy data from stores and detect state changes
@@ -1732,7 +1605,42 @@ impl FactoryApp {
         let load = self
             .director_refresh_request()
             .read(self.director_stores.as_ref());
+        // Synchronous callers resolve the git half of the stall evidence
+        // here too; the daemon runs it as a `CiStatus` job instead.
+        if let Some(facts) = load.facts()
+            && let Some(request) = delivery_evidence::CiStatusRequest::new(
+                self.delivery_repo_root(),
+                facts,
+                std::sync::Arc::clone(&self.lane_ci_pending),
+            )
+        {
+            self.git_evidence = request.run();
+        }
         self.apply_director_refresh(load)
+    }
+
+    /// Factory loop v2 (cas-223f): stall confirmation asks for worker
+    /// health probes instead of running them on the caller's thread. The
+    /// daemon loop turns this on and runs the probes as jobs.
+    pub(crate) fn set_deferred_worker_health_probes(&mut self, deferred: bool) {
+        self.event_detector.set_deferred_health_probes(deferred);
+    }
+
+    /// Worker health probes the detector asked for since the last call.
+    pub(crate) fn take_worker_health_requests(
+        &mut self,
+    ) -> Vec<super::director::WorkerHealthRequest> {
+        self.event_detector.take_worker_health_requests()
+    }
+
+    /// Apply a finished worker health probe.
+    pub(crate) fn apply_worker_health_report(&mut self, report: super::director::WorkerHealthReport) {
+        self.event_detector.apply_worker_health_report(report);
+    }
+
+    /// A worker health probe that will not report; ask again next tick.
+    pub(crate) fn clear_worker_health_probe(&mut self, worker: &str, task: &str) {
+        self.event_detector.clear_worker_health_probe(worker, task);
     }
 
     fn detect_supervisor_stall(&mut self) -> Option<DirectorEvent> {
@@ -1743,25 +1651,14 @@ impl FactoryApp {
         let before = tracker.clone();
         let now = Utc::now();
         let held_workers = worker_holds_from_session_metadata_named(session).unwrap_or_default();
-        let repo_root = self.delivery_repo_root();
-        let actionable = supervisor_actionable_state_with_classifiers(
+        // cas-223f: the git, CI and task-store evidence arrived with the
+        // snapshot; this only looks it up.
+        let evidence = delivery_evidence::combine(&self.parked_facts, &self.git_evidence);
+        let actionable = self.supervisor_actionable_from_evidence(
             &self.unfiltered_director_data,
-            self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
-            &self.supervisor_name,
+            &evidence,
             &held_workers,
             now,
-            self.supervisor_stall_after_secs,
-            |task, worker| self.resolve_task_delivery(task, worker, &repo_root),
-            |task, factory_branch, target_branch, factory_tip| {
-                self.classify_merged_close_blocked_task(
-                    task,
-                    factory_branch,
-                    target_branch,
-                    factory_tip,
-                    &repo_root,
-                )
-            },
-            |task, worker| self.classify_delivery_hold(task, worker, &repo_root),
         );
         let supervisor_ids = self
             .unfiltered_director_data
@@ -1808,6 +1705,7 @@ impl FactoryApp {
         &self,
         event: &DirectorEvent,
         data: &DirectorData,
+        evidence: &delivery_evidence::DeliveryEvidenceMap,
     ) -> bool {
         let DirectorEvent::SupervisorStalled {
             next_step,
@@ -1830,28 +1728,33 @@ impl FactoryApp {
             return false;
         }
         let held_workers = worker_holds_from_session_metadata_named(session).unwrap_or_default();
-        let repo_root = self.delivery_repo_root();
+        self.supervisor_actionable_from_evidence(data, evidence, &held_workers, Utc::now())
+            .as_ref()
+            == Some(next_step)
+    }
+
+    /// The supervisor's next action over `data`, classifying parked
+    /// deliveries from precomputed evidence (cas-223f). No IO.
+    fn supervisor_actionable_from_evidence(
+        &self,
+        data: &DirectorData,
+        evidence: &delivery_evidence::DeliveryEvidenceMap,
+        held_workers: &HashSet<String>,
+        now: DateTime<Utc>,
+    ) -> Option<super::director::SupervisorActionableState> {
         supervisor_actionable_state_with_classifiers(
             data,
             self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
             &self.supervisor_name,
-            &held_workers,
-            Utc::now(),
+            held_workers,
+            now,
             self.supervisor_stall_after_secs,
-            |task, worker| self.resolve_task_delivery(task, worker, &repo_root),
-            |task, factory_branch, target_branch, factory_tip| {
-                self.classify_merged_close_blocked_task(
-                    task,
-                    factory_branch,
-                    target_branch,
-                    factory_tip,
-                    &repo_root,
-                )
+            |task, worker| delivery_evidence::evidence_delivery(evidence, task, worker),
+            |task, _factory_branch, target_branch, _factory_tip| {
+                delivery_evidence::evidence_merged_close_blocked(evidence, task, target_branch)
             },
-            |task, worker| self.classify_delivery_hold(task, worker, &repo_root),
+            |task, worker| delivery_evidence::evidence_hold(evidence, task, worker),
         )
-        .as_ref()
-            == Some(next_step)
     }
 
     /// Route worker panes whose registry rows are all non-live through the normal shutdown path.

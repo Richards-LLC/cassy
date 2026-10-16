@@ -98,7 +98,7 @@ mod worktree_lease_test;
 // Re-export error types
 pub use error::{Result, StoreError};
 pub use prompt_queue_store::violet_admission::{
-    VIOLET_ADMISSION_SCHEMA, VioletAdmissionInput, VioletAdmissionReceipt, SqliteVioletAdmissionStore,
+    VIOLET_ADMISSION_SCHEMA_STATEMENTS, VioletAdmissionInput, VioletAdmissionReceipt, SqliteVioletAdmissionStore,
 };
 
 pub use trace_archive::{

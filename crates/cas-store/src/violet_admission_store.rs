@@ -1,7 +1,8 @@
 //! One occurrence per logical reader, committed with its actual prompt row.
 use super::*;
 
-pub const VIOLET_ADMISSION_SCHEMA: &str = r#"
+pub const VIOLET_ADMISSION_SCHEMA_STATEMENTS: &[&str] = &[
+    r#"
 CREATE TABLE IF NOT EXISTS violet_admissions (
     delivery_id TEXT PRIMARY KEY,
     occurrence_id TEXT NOT NULL,
@@ -20,14 +21,20 @@ CREATE TABLE IF NOT EXISTS violet_admissions (
     ack_pending INTEGER NOT NULL DEFAULT 1,
     recovery_prompt_id INTEGER,
     UNIQUE(occurrence_id,reader_slot_id)
-);
+);"#,
+    r#"
 CREATE TABLE IF NOT EXISTS violet_admission_cursors (
     reader_slot_id TEXT NOT NULL,
     workspace_id TEXT NOT NULL,
     channel_id TEXT NOT NULL,
     message_ts TEXT NOT NULL,
     PRIMARY KEY(reader_slot_id,workspace_id,channel_id)
-);
+);"#,
+];
+
+// Queue/admission invariants belong to store initialization. The migration
+// runner replays only additive table/index statements for safe reconciliation.
+const VIOLET_ADMISSION_TRIGGER: &str = r#"
 CREATE TRIGGER IF NOT EXISTS violet_admission_identity_immutable
 BEFORE UPDATE OF delivery_id,occurrence_id,reader_slot_id,project_id,target_json,prompt_id
 ON violet_admissions
@@ -153,8 +160,11 @@ impl SqliteVioletAdmissionStore {
         let queue = SqlitePromptQueueStore::open(cas_dir)?;
         queue.init()?;
         crate::shared_db::with_write_retry(|| {
-            crate::shared_db::lock_connection(&queue.conn)?
-                .execute_batch(VIOLET_ADMISSION_SCHEMA)?;
+            let conn = crate::shared_db::lock_connection(&queue.conn)?;
+            for statement in VIOLET_ADMISSION_SCHEMA_STATEMENTS {
+                conn.execute(statement, [])?;
+            }
+            conn.execute_batch(VIOLET_ADMISSION_TRIGGER)?;
             Ok(())
         })?;
         Ok(Self { queue })

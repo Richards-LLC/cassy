@@ -6,11 +6,10 @@ pub const MIGRATION: Migration = Migration {
     name: "violet_reader_admissions",
     subsystem: Subsystem::Agents,
     description: "Persist occurrence/reader admissions with queue and cursor state (cas-c423)",
-    up: &[cas_store::VIOLET_ADMISSION_SCHEMA],
+    up: cas_store::VIOLET_ADMISSION_SCHEMA_STATEMENTS,
     detect: Some("SELECT CASE WHEN
         (SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN
          ('violet_admissions','violet_admission_cursors'))=2
-        AND EXISTS (SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='violet_admission_identity_immutable')
         THEN 1 ELSE 0 END"),
 };
 

@@ -1,7 +1,7 @@
 //! Known-admission recovery. Discovery on a fresh machine needs Cloud #167.
 use super::*;
 use crate::coordination::external_work::{CloudCoordinationPort, SqliteRequestJournal};
-use cas_store::{VioletAdmissionRebind, VioletAdmissionReceipt};
+use cas_store::{VioletAdmissionRebind, VioletConsumption, VioletRecoveryReceipt};
 
 pub(crate) struct KnownRebind {
     pub request_id: String,
@@ -13,13 +13,13 @@ pub(crate) struct KnownRebind {
     pub recipient: String,
 }
 
-pub(crate) fn rebind_known_unread(
+pub(crate) fn rebind_known(
     cloud: &dyn CloudCoordinationPort,
     journal: &SqliteRequestJournal,
     store: &SqliteVioletAdmissionStore,
     context: &OperationContext,
     request: &KnownRebind,
-) -> Result<VioletAdmissionReceipt, String> {
+) -> Result<VioletRecoveryReceipt, String> {
     // UUIDs are path inputs, not caller-controlled endpoint fragments.
     for id in [&request.request_id, &request.delivery_id] {
         uuid::Uuid::parse_str(id).map_err(|_| "invalid rebind request/delivery UUID")?;
@@ -124,6 +124,7 @@ pub(crate) fn rebind_known_unread(
             factory_session: request.factory_session.clone(),
             recipient: request.recipient.clone(),
         })
+        .map(|admission| VioletRecoveryReceipt { admission, consumption: VioletConsumption::Queued, recovery_prompt_id: None })
         .map_err(|error| error.to_string())
 }
 
@@ -252,13 +253,13 @@ mod tests {
         };
         let journal = SqliteRequestJournal::open(root.path()).unwrap();
         let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
-        assert!(rebind_known_unread(&cloud, &journal, &store, &context, &request).is_err());
+        assert!(rebind_known(&cloud, &journal, &store, &context, &request).is_err());
         drop(journal);
         drop(store);
         let journal = SqliteRequestJournal::open(root.path()).unwrap();
         let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
-        let adopted = rebind_known_unread(&cloud, &journal, &store, &context, &request).unwrap();
-        assert_eq!(adopted.prompt_id, original_prompt);
+        let adopted = rebind_known(&cloud, &journal, &store, &context, &request).unwrap();
+        assert_eq!(adopted.admission.prompt_id, original_prompt);
         assert_eq!(
             cloud.posts.lock().unwrap().len(),
             1,
@@ -269,7 +270,7 @@ mod tests {
             vec![request.request_id.clone()]
         );
         assert_eq!(
-            rebind_known_unread(&cloud, &journal, &store, &context, &request).unwrap(),
+            rebind_known(&cloud, &journal, &store, &context, &request).unwrap(),
             adopted
         );
         assert_eq!(
@@ -309,12 +310,62 @@ mod tests {
         };
         let journal = SqliteRequestJournal::open(root.path()).unwrap();
         let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
-        let error = rebind_known_unread(&cloud, &journal, &store, &context, &request).unwrap_err();
+        let error = rebind_known(&cloud, &journal, &store, &context, &request).unwrap_err();
         assert!(error.contains("identity"), "{error}");
         let db = rusqlite::Connection::open(root.path().join("cas.db")).unwrap();
         let recipient: String = db
             .query_row("SELECT target FROM prompt_queue", [], |r| r.get(0))
             .unwrap();
         assert_eq!(recipient, "old-supervisor");
+    }
+
+    #[test]
+    fn cas_c423_known_rebind_remote_consumption_recovers_reference_without_ask() {
+        use cas_store::PromptQueueStore;
+        for (remote, expected, notice_count) in [
+            ("dispatch_uncertain", VioletConsumption::DispatchUncertain, 1),
+            ("consumed", VioletConsumption::Consumed, 0),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (request, context, original_prompt) = setup(root.path());
+            let mut response = fixture();
+            response["receipt"]["delivery"]["consumption"] = json!(remote);
+            let cloud = Cloud { response, db: root.path().join("cas.db"),
+                lose_response: AtomicBool::new(true), posts: Mutex::new(vec![]), lookups: Mutex::new(vec![]) };
+            let journal = SqliteRequestJournal::open(root.path()).unwrap();
+            let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+            assert!(rebind_known(&cloud, &journal, &store, &context, &request).is_err());
+            let recovered = rebind_known(&cloud, &journal, &store, &context, &request).unwrap();
+            assert_eq!(recovered.admission.prompt_id, original_prompt);
+            assert_eq!(recovered.consumption, expected);
+            let queue = cas_store::SqlitePromptQueueStore::open(root.path()).unwrap();
+            let pending = queue.peek_unseen_for_recipient(&request.recipient, Some(&request.factory_session), 10).unwrap();
+            assert_eq!(pending.len(), notice_count);
+            if let Some(notice) = pending.first() {
+                assert_eq!(Some(notice.id), recovered.recovery_prompt_id);
+                assert!(notice.prompt.contains(&request.delivery_id));
+                assert!(!notice.prompt.contains("<cas-violet-activity"));
+            }
+            assert_eq!(rebind_known(&cloud, &journal, &store, &context, &request).unwrap(), recovered);
+            assert_eq!(cloud.posts.lock().unwrap().len(), 1);
+            assert_eq!(cloud.lookups.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn cas_c423_known_rebind_local_transport_evidence_overrides_remote_unread() {
+        use cas_store::PromptQueueStore;
+        let root = tempfile::tempdir().unwrap();
+        let (request, context, original_prompt) = setup(root.path());
+        let queue = cas_store::SqlitePromptQueueStore::open(root.path()).unwrap();
+        queue.mark_transport_delivered(original_prompt).unwrap();
+        let cloud = Cloud { response: fixture(), db: root.path().join("cas.db"),
+            lose_response: AtomicBool::new(false), posts: Mutex::new(vec![]), lookups: Mutex::new(vec![]) };
+        let recovered = rebind_known(&cloud, &SqliteRequestJournal::open(root.path()).unwrap(),
+            &SqliteVioletAdmissionStore::open(root.path()).unwrap(), &context, &request).unwrap();
+        assert_eq!(recovered.consumption, VioletConsumption::DispatchUncertain);
+        let pending = queue.peek_unseen_for_recipient(&request.recipient, Some(&request.factory_session), 10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_ne!(pending[0].id, original_prompt);
     }
 }

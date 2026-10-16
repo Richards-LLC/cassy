@@ -202,6 +202,7 @@ describe('fleet permissions on a paired machine (cas-d382)', () => {
     expect(manage.querySelector('.fleet-permission-state')?.textContent).toBe('Not allowed on this pairing');
     const reason = manage.querySelector('.fleet-permission-reason')!;
     const also = manage.querySelector('.fleet-permission-also')!;
+    // pin: naming the required permission before the reason is the copy contract.
     expect(reason.textContent).toBe('Needs the Stop and restart workers and sessions permission.');
     expect(reason.compareDocumentPosition(also) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(manage.querySelector('.fleet-permission-control')).toBeNull();

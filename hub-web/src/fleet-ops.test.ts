@@ -230,6 +230,7 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     const readOnly = headerControls(document, context(["machine-read", "session-read", "pane-read"]), undefined);
     expect(readOnly.querySelector(".fleet-ops-add")?.getAttribute("aria-disabled")).toBe("true");
     // cas-97d58 F06: by what it allows, never the scope id.
+    // pin: permission names are the required user-facing rail copy.
     expect(readOnly.querySelectorAll(".fleet-ops-reason")[1]?.textContent).toBe("Add worker, Focus epic: needs Manage workers and tasks.");
     expect(readOnly.querySelectorAll(".fleet-ops-reason")[1]?.textContent).not.toMatch(/factory:/);
   });
@@ -248,6 +249,7 @@ describe("the rail's controls draw that state (cas-a474)", () => {
       "Add worker, Focus epic: needs Manage workers and tasks.",
       "Write access: needs Stop and restart workers and sessions.",
     ]);
+    // pin: the instruction matches Paired machines' grant and re-pair actions.
     expect(plain.querySelector(".fleet-ops-instruction")?.textContent).toBe("In Paired machines, allow managing workers, then pair again to add the Stop and restart workers and sessions permission.");
     expect(described(plain, ".fleet-ops-add")).toEqual([
       "Not allowed on this pairing.", "Add worker, Focus epic: needs Manage workers and tasks.", "In Paired machines, allow managing workers, then pair again to add the Stop and restart workers and sessions permission.",
@@ -262,6 +264,7 @@ describe("the rail's controls draw that state (cas-a474)", () => {
       "Write access: needs Stop and restart workers and sessions.",
     ]);
     expect(operate.querySelector(".fleet-ops-add")?.hasAttribute("aria-describedby")).toBe(false);
+    // pin: the missing-scope remedy names Paired machines' actual re-pair action.
     expect(operate.querySelector(".fleet-ops-instruction")?.textContent).toBe("Pair again from Paired machines to add the Stop and restart workers and sessions permission.");
     expect(described(operate, ".fleet-ops-grant")).toEqual([
       "Not allowed on this pairing.", "Write access: needs Stop and restart workers and sessions.", "Pair again from Paired machines to add the Stop and restart workers and sessions permission.",

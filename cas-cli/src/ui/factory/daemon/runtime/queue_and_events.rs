@@ -4956,28 +4956,6 @@ impl FactoryDaemon {
         )
     }
 
-    fn recipient_mid_turn(&self, pane_target: &str) -> Option<bool> {
-        let store = open_agent_store(self.app.cas_dir()).ok()?;
-        let agent = store
-            .list(None)
-            .ok()?
-            .into_iter()
-            .find(|agent| agent.name == pane_target)?;
-        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
-        let path = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
-            self.app.cas_dir(),
-            &agent,
-        )
-        .filter(|path| path.exists())?;
-        let latest =
-            crate::mcp::tools::service::harness_observation::latest_turn_observations(&path, cli);
-        Some(match (latest.wake, latest.completion) {
-            (Some(start), Some(end)) => start.at > end.at,
-            (Some(_), None) => true,
-            _ => false,
-        })
-    }
-
     fn recipient_turn_completion_after(
         &self,
         pane_target: &str,
@@ -6737,21 +6715,7 @@ impl FactoryDaemon {
         }
     }
 
-    /// Read the current wake state for a pane. Pure read — the streak is
-    /// advanced only by [`Self::refresh_pane_quiet_samples`], so two decisions
-    /// in the same poll see the same evidence.
-    fn pane_wake_state(&self, pane_target: &str) -> PaneWakeState {
-        PaneWakeState {
-            composer_dirty: self.app.mux.pane_composer_dirty(pane_target),
-            ready_for_injection: self.app.mux.pane_ready_for_injection(pane_target),
-            silent_for: self
-                .pane_silent_since
-                .get(pane_target)
-                .map(|since| since.elapsed()),
-            tool_call: self.recipient_tool_call_evidence(pane_target),
-        }
-    }
-
+    /// Combine off-loop transcript inputs with the pane's current vetoes.
     fn prepared_pane_wake_state(&self, pane: &str) -> PaneWakeState {
         PaneWakeState {
             composer_dirty: self.app.mux.pane_composer_dirty(pane),
@@ -6774,49 +6738,6 @@ impl FactoryDaemon {
     fn prepared_wake_evidence(&self, pane: &str) -> RecipientWakeEvidence {
         self.queue_jobs.prompt_preparation.recipient(pane).map(|inputs| inputs.wake_evidence(chrono::Utc::now()))
             .unwrap_or_default()
-    }
-
-    /// Whether `pane_target`'s harness transcript shows an outstanding tool
-    /// call (cas-45c4). Uses `resolve_worker` +
-    /// `transcript_has_in_flight_tool_call` — the same pair `cas factory
-    /// is-wedged` and the director's stall detector use, so the three cannot
-    /// disagree about what "still working" means.
-    ///
-    /// Unresolvable transcript → [`ToolCallEvidence::Unknown`] (cas-9e81).
-    ///
-    /// This used to return `true` ("assume in flight") on both unresolvable
-    /// arms, on the principle that absence of telemetry is not permission to
-    /// type into someone's pane. The principle is sound; folding it into the
-    /// same value as observed evidence was not. `resolve_worker` returns
-    /// `transcript_path: None` for every pane whose Claude session lives under
-    /// a non-default `CLAUDE_CONFIG_DIR`, so on a two-account factory this
-    /// arm fired for EVERY recipient on EVERY pass — a permanent fleet-wide
-    /// veto that was indistinguishable, in the logs and in `message_status`,
-    /// from ordinary busy-recipient protection. Note the neighbours already
-    /// disagreed with it: `classify_worker` maps a missing transcript to
-    /// `in_flight = false`, and `transcript_has_in_flight_tool_call` maps a
-    /// missing FILE to `false`.
-    ///
-    /// `Unknown` keeps the caution — it is held to the conservative
-    /// sustained-silence bar — without turning "we cannot see" into "it is
-    /// busy, forever".
-    fn recipient_tool_call_evidence(&self, pane_target: &str) -> ToolCallEvidence {
-        let cas_root = self.app.cas_dir();
-        // cas-d2a2: cached per pane; the transcript is re-read only when it
-        // changed, and its path is re-resolved at most every 2 s.
-        self.queue_jobs
-            .tool_call_probes
-            .probe(
-                pane_target,
-                Instant::now(),
-                || {
-                    crate::cli::factory::wedged::resolve_worker(cas_root, pane_target)
-                        .ok()
-                        .and_then(|resolved| Some((resolved.transcript_path?, resolved.cli)))
-                },
-                crate::cli::factory::wedged::transcript_has_in_flight_tool_call,
-            )
-            .map_or(ToolCallEvidence::Unknown, ToolCallEvidence::from_transcript)
     }
 
     /// Forward pending supervisor replies to the authenticated Commander hub
@@ -8049,6 +7970,12 @@ impl FactoryDaemon {
             let queued = selected;
             if queued.processed_at.is_some() { continue; }
             let facts = row_facts.get(&queued.id).cloned().unwrap_or_default();
+            if !self.queue_jobs.prompt_preparation.is_fresh(Instant::now()) {
+                // Earlier injects/probes can outlive this batch's evidence.
+                // Claimed rows stay owned; unclaimed rows remain selectable.
+                self.queue_jobs.carry_claimed_row(queued, facts);
+                continue;
+            }
             // Spec §4.5 rule 2: a row whose earlier inject has not settled is
             // not delivered again, even if a selection picked it again.
             // cas-4272: a row whose terminal or delivered stamp has not landed

@@ -323,8 +323,24 @@ impl RecipientInputs {
     ) -> RecipientWakeEvidence {
         RecipientWakeEvidence {
             recently_active: self.tool_call == ToolCallEvidence::InFlight
-                || self.active_until.is_some_and(|until| now <= until),
-            awaiting_first_prompt: self.first_prompt_until.is_some_and(|until| now <= until),
+                || self.active_until.is_some_and(|until| {
+                    now <= until
+                        && now
+                            >= until
+                                - chrono::Duration::from_std(
+                                    super::queue_and_events::CLAUDE_ACTIVE_TRANSCRIPT_WINDOW,
+                                )
+                                .unwrap()
+                }),
+            awaiting_first_prompt: self.first_prompt_until.is_some_and(|until| {
+                now <= until
+                    && now
+                        >= until
+                            - chrono::Duration::from_std(
+                                super::queue_and_events::CLAUDE_FIRST_PROMPT_GRACE,
+                            )
+                            .unwrap()
+            }),
         }
     }
     pub(crate) fn mid_turn(&self) -> Option<bool> {
@@ -343,6 +359,7 @@ struct WakeInputs {
     agents: Vec<cas_types::Agent>,
     recipients: HashMap<String, RecipientInputs>,
     finished_at: Instant,
+    worker_wait_loaded: bool,
 }
 
 /// Owns the raw batch until its off-loop evidence is ready. All batches pass
@@ -360,6 +377,11 @@ pub(crate) struct PromptPreparation {
 impl PromptPreparation {
     pub(crate) fn has_pending(&self) -> bool {
         self.pending.is_some()
+    }
+    pub(crate) fn is_fresh(&self, now: Instant) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|inputs| now.saturating_duration_since(inputs.finished_at) <= WAKE_MAX_AGE)
     }
     pub(crate) fn agents(&self) -> &[cas_types::Agent] {
         self.current
@@ -385,6 +407,42 @@ impl PromptPreparation {
             debug_assert!(self.pending.is_none());
             if selection.rows.is_empty() {
                 return Some(selection);
+            }
+            // Consecutive batches within the read cadence reuse the same
+            // bounded snapshot rather than adding a poll interval to delivery.
+            if let Some(inputs) = self.current.as_ref() {
+                let covered = selection.rows.iter().all(|row| {
+                    if row.target == "all_workers" {
+                        workers
+                            .iter()
+                            .all(|name| inputs.recipients.contains_key(name))
+                    } else {
+                        let name = if row.target == "supervisor" {
+                            &supervisor
+                        } else {
+                            &row.target
+                        };
+                        inputs.recipients.contains_key(name)
+                    }
+                });
+                let needs_wait = selection.rows.iter().any(|row| match &row.origin {
+                    Some(cas_store::QueueOrigin::RegisteredAgent { agent_id }) => {
+                        inputs.agents.iter().any(|agent| {
+                            agent.id == *agent_id
+                                && agent.role == cas_types::AgentRole::Supervisor
+                                && agent.name.eq_ignore_ascii_case(&supervisor)
+                        })
+                    }
+                    _ => false,
+                });
+                if now.saturating_duration_since(inputs.finished_at) < POLL_CADENCE
+                    && covered
+                    && (!needs_wait || inputs.worker_wait_loaded)
+                {
+                    let mut selection = selection;
+                    selection.registered_agents = inputs.agents.clone();
+                    return Some(selection);
+                }
             }
             self.pending = Some(selection);
         }
@@ -595,5 +653,6 @@ fn read_wake_inputs(
         agents,
         recipients: observations,
         finished_at: Instant::now(),
+        worker_wait_loaded: need_worker_wait,
     })
 }

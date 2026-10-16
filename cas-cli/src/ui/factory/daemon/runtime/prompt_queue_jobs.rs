@@ -900,8 +900,6 @@ pub(crate) struct QueueJobs {
     mirror_state: Option<Box<super::MirrorScanState>>,
     config: ConfigCache,
     store: Option<Arc<dyn cas_store::PromptQueueStore>>,
-    /// Wake-gate "tool call in flight" probes, per pane.
-    pub(crate) tool_call_probes: TranscriptProbeCache<bool>,
     /// Rows with a settling stamp not yet landed, by row: the count of such
     /// stamps outstanding, and a hold deadline once one was deferred.
     settling_rows: HashMap<i64, (usize, Option<Instant>)>,
@@ -976,7 +974,6 @@ impl QueueJobs {
             mirror_state: Some(Box::default()),
             config: ConfigCache::default(),
             store: None,
-            tool_call_probes: TranscriptProbeCache::default(),
             prunes_done: 0,
             settling_rows: HashMap::new(),
             last_stamp_progress: Instant::now(),
@@ -998,7 +995,8 @@ impl QueueJobs {
 
     /// A finished job is waiting to be applied.
     pub(crate) fn has_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
+        self.ready.load(Ordering::Acquire) || self.selection.is_some()
+            || self.external.iter().any(|result| result.kind == super::queue_control_jobs::WAKE_GATE_READ)
     }
 
     pub(crate) fn config(&mut self, cas_dir: &Path) -> Arc<crate::config::Config> {

@@ -8755,12 +8755,14 @@ mod tests {
 
         let reader = SqlitePromptQueueStore::open_read_only(temp.path()).unwrap();
         assert!(decoy.exists(), "read-only diagnosis must not mutate files");
-        assert_eq!(reader.get(id).unwrap().prompt, "real queued message");
+        let rows = reader.peek_all(10).unwrap();
+        assert_eq!((rows[0].id, rows[0].prompt.as_str()), (id, "real queued message"));
 
         let reopened = SqlitePromptQueueStore::open(temp.path()).unwrap();
         reopened.init().unwrap();
         assert!(!decoy.exists(), "writable open must remove the misleading empty database");
-        assert_eq!(reopened.get(id).unwrap().prompt, "real queued message");
+        let rows = reopened.peek_all(10).unwrap();
+        assert_eq!((rows[0].id, rows[0].prompt.as_str()), (id, "real queued message"));
         assert!(temp.path().join("cas.db").metadata().unwrap().len() > 0);
         SqlitePromptQueueStore::open(temp.path()).unwrap();
         assert!(!decoy.exists(), "opening the queue must never recreate the decoy");

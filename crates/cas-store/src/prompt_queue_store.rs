@@ -260,6 +260,9 @@ pub(crate) const INBOX_POLL_ORDER_SQL: &str = "ORDER BY (q.processed_at IS NOT N
 /// recipient, the Teams ENOENT fallback, any urgent interrupt) never stamps
 /// it, so its claim stays with the transport even while its Delivered stamp
 /// lands late (cas-9568: a tool boundary never replays an injected turn).
+/// Every fresh transport reservation atomically clears a previous deferral:
+/// a same-name recipient may now use PTY, including the Teams ENOENT fallback.
+/// Only a new successful Teams write can make that reservation held again.
 macro_rules! held_teams_claim_sql {
     () => {
         "seen.source = 'transport_claimed'
@@ -4248,8 +4251,11 @@ impl SqlitePromptQueueStore {
         if recipient.trim().is_empty() {
             return Err(StoreError::Other("transport claim requires a recipient".into()));
         }
+        // Both public claim APIs use this transaction: no hook can observe
+        // the new reservation with a previous attempt's held-Teams marker.
+        let tx = crate::shared_db::ImmediateTx::new(conn)?;
         let token = transport_claim_token();
-        let changed = conn.execute(
+        let changed = tx.execute(
             "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at, source)
              SELECT id, ?, ?, 'transport_claimed' FROM prompt_queue
              WHERE id = ? AND (target = ? OR target = 'all_workers')
@@ -4262,6 +4268,14 @@ impl SqlitePromptQueueStore {
              WHERE prompt_queue_recipient_seen.source = 'transport_delivered'",
             params![recipient, token.seen_at(), prompt_id, recipient],
         )?;
+        if changed == 1 {
+            tx.execute(
+                "UPDATE prompt_queue SET deferred_inbox_at = NULL, deferred_inbox_bytes = NULL
+                 WHERE id = ?",
+                params![prompt_id],
+            )?;
+        }
+        tx.commit()?;
         Ok((changed == 1).then_some(token))
     }
 }

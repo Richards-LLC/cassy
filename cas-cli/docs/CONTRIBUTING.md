@@ -391,12 +391,13 @@ or truncation is a mailbox warning; current verified addresses keep receiving.
 Failed claim batches remain visible while successful batches are admitted and
 acknowledged.
 
-Cloud locks are private to one user account: a team peer on another account shows
-`Claims not visible (different account)` and worker tasks as `not visible`.
-If the caller's account identity is unknown, the report says so. JSON includes
-`claims_visibility`, `user_id`, `team_id` and `project_id`; an empty claims array
-is authoritative only when visibility is `same_account` and `claims_status.state`
-is `ready`. A failed lock read is `unavailable`, not an empty inventory. The viewer account
+Cloud project lock reads include teammates on the same team project (Cloud #155).
+Peer details show `Claims visible (team project)` with the owning account, agent
+and machine; start, claim and spawn refuse an active teammate claim. Personal
+projects retain account isolation. JSON includes `claims_visibility`, `user_id`,
+`team_id` and `project_id`; an empty claims array is authoritative only when
+visibility is `same_account` or `team_project` and `claims_status.state` is `ready`.
+A failed lock read is `unavailable`, not an empty inventory. The viewer account
 comes from the token-owned agent list, independently of caller session lookup.
 Operator CLI identity uses the same session/ancestor-PID lookup as status.
 Peer discovery also excludes every agent registered in this project's local

@@ -32,14 +32,12 @@ On every machine:
    messages. A supervisor without one is listed, but a send to it fails with
    `<name>@<machine> is not running a factory daemon, so it cannot receive peer messages`.
 
-**Accounts.** Discovery and messaging work across the members of a team
-project. **Task claims are visible only within one user account today.** Two
-machines logged in to the same account refuse each other's claimed work; a
-peer on another account cannot see your claims and you cannot see its, so an
-empty claim list is not proof that it is idle. Agree on ownership by message
-and record it with an epic split, which both databases enforce.
-[petra-stella-cloud#155](https://github.com/Richards-LLC/petra-stella-cloud/issues/155)
-tracks claims across team accounts.
+**Accounts.** Discovery, messaging and task claims span members of the same
+team project. Another account's held task appears in peer details with its
+owner and machine, and refuses start, claim and spawn. JSON marks these claims
+`team_project`; a failed read remains unknown. Personal projects keep per-account
+isolation. Renew and release remain owner-only, so a teammate's claim must be
+released by its owner or expire before another account can claim it.
 
 **Whose supervisors you see.** Every peer names its owning account: `owner
 you` for your own supervisors, `owner teammate <email>` for another member's
@@ -337,7 +335,7 @@ expires after `ttl_secs` (default 1800).
 | `Could not deliver to <name>@<machine> mailbox: peer message refused (404): {"error":"recipient_not_found"…}` | The cloud cannot address that recipient in this project (unknown, wrong project or not visible to you; the cloud does not say which). Not retried. | Check peers again and confirm both clones resolve to the same project. |
 | `Could not deliver to <name>@<machine> mailbox: <cause>; queued for automatic retry as peer-outbox:<id>` | A temporary failure (network, 5xx, 408, 429). The send is kept and retried for up to 15 minutes. | `coordination action=message_status id=peer-outbox:<id>` shows its state. Do not resend: the retry keeps the same identity, so the peer gets it once. |
 | Inbox notice `Message peer-outbox:<id> to <recipient> was abandoned as undeliverable: <reason>` | Retrying ran out (`retry TTL expired`) or hit a permanent refusal. | Fix the named cause, then send again. |
-| `Claims not visible (different account)` in peer details | That peer is on another Cassy Cloud account, whose claims you cannot read. | It is not idle by default. Agree on ownership by message and an epic split. |
+| `Claims visible (team project)` in peer details | Cloud authorizes the teammate's claims for this shared project. | Coordinate with the named owner before taking its work. |
 | `⛔ HELD BY A PEER — task <id> is claimed by <who> … until <time>.` | Another session of this repository holds the claim. | Message the holder. `force=true` only after it agrees or its claim is stale. |
 | `⛔ SPLIT TO A PEER — <id> belongs to peer supervisor <name>@<machine> under epic split <split> …` | The child is the other side's share. | Ask the peer, or end the split with `decision=cancel`. |
 | `⚠️  PEERS NOT CHECKED — Cassy Cloud is unreachable (<reason>), so claims on <id> from other machines could not be checked. Started on the local lease only.` | The start went ahead without the cross-machine check. | Check peers before dispatching more work on that epic. |

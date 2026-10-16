@@ -76,6 +76,7 @@ async fn remote_focus_conflict_uses_mailbox_and_operator_fallback() {
     sender.factory_session = Some("sender-session".into());
     agents.register(&sender).unwrap();
     let mut hold = PeerHold {
+        user_id: None,
         agent_id: "remote-id".into(),
         holder: None,
         expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),

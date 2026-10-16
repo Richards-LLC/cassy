@@ -519,6 +519,7 @@ def cmd_task_import(args):
 # client code) is in the executable, so a step can never be labelled active
 # for a build that lacks its code, or pending for one that has it.
 FEATURE_MARKERS = {
+    "cas-8ea7": [b"Claims visible (team project)"],
     "cas-559c": [b"Claims not visible (different account)"],
     "cas-0078": [b"cloud claim renewal failed; claiming again"],
     "cas-a19b": [b"through Cassy Cloud: no token", b"is not visible to this account (or does not exist)"],
@@ -669,8 +670,13 @@ def main():
         return 0
     if len(sys.argv) >= 2 and sys.argv[1] in MACHINE_COMMANDS:
         return machine_main(sys.argv[1:])
+    if sys.argv[1:] == ["--help"]:
+        # The scripted harness accepts these arguments. Native worker
+        # isolation probes must see them before it will launch the stub.
+        print("Scripted Claude harness: --mcp-config --strict-mcp-config --permission-mode --allowedTools --disallowedTools")
+        return 0
     if not sys.stdin.isatty():
-        # `claude --version`, `--help` and `cas init` probes.
+        # `claude --version` and `cas init` probes.
         return 0
     run_pane()
     return 0

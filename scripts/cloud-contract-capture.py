@@ -264,10 +264,10 @@ def capture_claims(cloud, run, project, a, b):
                note="returns the existing lock and does NOT extend it; use /renew")
     cloud.call("claims", "claim_conflict", "POST", f"{tasks}/{t1}/claim", expect=409,
                body={"agent_id": b, "duration_secs": 600, "reason": None},
-               note="409 names owner_agent_id and expires_at; no `status` field")
+               note="409 names owner_agent_id, user_id and expires_at")
     cloud.call("claims", "claim_with_canonical_id", "POST", f"{tasks}/{t1}/claim", expect=409,
                body={"agent_id": b, "duration_secs": 600, "canonical_id": project},
-               note="a canonical_id in the claim body is ignored")
+               note="canonical_id resolves claim project/team scope (Cloud #155)")
     cloud.call("claims", "renew", "POST", f"{tasks}/{t1}/renew", expect=200,
                body={"agent_id": a, "duration_secs": 600})
     cloud.call("claims", "get_lock", "GET", f"{tasks}/{t1}/lock", expect=200)

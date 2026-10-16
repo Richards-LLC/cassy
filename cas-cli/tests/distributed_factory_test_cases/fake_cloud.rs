@@ -35,6 +35,9 @@ use serde_json::{Value, json};
 #[derive(Default)]
 pub(super) struct State {
     pub agents: BTreeMap<String, Value>,
+    /// Explicit sandbox tokens and project memberships for two-account tests.
+    pub accounts: BTreeMap<String, String>,
+    pub team_projects: BTreeMap<String, (String, Vec<String>)>,
     pub locks: BTreeMap<String, Value>,
     pub messages: Vec<Value>,
     /// Seconds the fake's clock runs ahead of real time ([`FakeCloud::advance_clock`]).
@@ -78,7 +81,20 @@ impl FakeCloud {
                         failure.3 -= 1;
                         (failure.2, json!({"error": "Too many requests"}))
                     }
-                    None => handle(&mut state, &method, &url, &body),
+                    None => {
+                        let token = request
+                            .headers()
+                            .iter()
+                            .find(|h| h.field.equiv("Authorization"))
+                            .map(|h| h.value.as_str().trim_start_matches("Bearer "))
+                            .unwrap_or("");
+                        let user = state
+                            .accounts
+                            .get(token)
+                            .cloned()
+                            .unwrap_or_else(|| USER.into());
+                        handle(&mut state, &method, &url, &body, &user)
+                    }
                 };
                 drop(state);
                 let response = tiny_http::Response::from_string(reply.to_string())
@@ -206,7 +222,10 @@ fn render_agent(state: &State, agent: &Value) -> Value {
 fn lock_json(key: &str, lock: &Value) -> Value {
     json!({
         "id": lock["id"],
-        "task_id": key,
+        "task_id": lock["task_id"].as_str().unwrap_or(key),
+        "user_id": lock["user_id"].as_str().unwrap_or(USER),
+        "project_id": lock["project_id"],
+        "team_id": lock["team_id"],
         "agent_id": lock["agent_id"],
         "status": lock["status"],
         "expires_at": lock["expires_at"],
@@ -222,29 +241,30 @@ fn is_live(state: &State, lock: &Value) -> bool {
     lock["status"] == "active" && parse(&lock["expires_at"]).is_some_and(|at| at > state.now())
 }
 
-fn live_locks(state: &State, owner: Option<&str>) -> Vec<Value> {
+fn live_locks(state: &State, owner: Option<&str>, user: &str, project: Option<&str>) -> Vec<Value> {
     state
         .locks
         .iter()
         .filter(|(_, lock)| is_live(state, lock))
+        .filter(|(_, lock)| visible_lock(state, lock, user, project))
         .filter(|(_, lock)| owner.is_none_or(|owner| lock["agent_id"] == owner))
         .map(|(key, lock)| lock_json(key, lock))
         .collect()
 }
 
-fn handle(state: &mut State, method: &str, url: &str, body: &Value) -> (u16, Value) {
+fn handle(state: &mut State, method: &str, url: &str, body: &Value, user: &str) -> (u16, Value) {
     let path = url.split('?').next().unwrap_or(url);
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match (method, segments.as_slice()) {
-        ("POST", ["api", "agents", "register"]) => register(state, body),
-        ("GET", ["api", "agents"]) => list_agents(state, url),
+        ("POST", ["api", "agents", "register"]) => register(state, body, user),
+        ("GET", ["api", "agents"]) => list_agents(state, url, user),
         ("GET", ["api", "agents", "locks"]) => (
             200,
-            json!({"status": "success", "locks": live_locks(state, None)}),
+            json!({"status": "success", "locks": live_locks(state, None, user, query_params(url).iter().find(|(k, _)| k == "project").map(|(_, v)| v.as_str()))}),
         ),
         ("GET", ["api", "agents", id, "locks"]) => (
             200,
-            json!({"status": "success", "locks": live_locks(state, Some(id))}),
+            json!({"status": "success", "locks": live_locks(state, Some(id), user, None)}),
         ),
         ("POST", ["api", "agents", id, "heartbeat"]) => {
             let now = stamp(state.now());
@@ -284,7 +304,9 @@ fn handle(state: &mut State, method: &str, url: &str, body: &Value) -> (u16, Val
             }
             (200, json!({"released_locks": released}))
         }
-        (_, ["api", "agents", "tasks", key, action]) => claim_route(state, method, key, action, body),
+        (_, ["api", "agents", "tasks", key, action]) => {
+            claim_route(state, method, key, action, body, user)
+        }
         ("POST", ["api", "peer-messages"]) => send(state, body),
         ("POST", ["api", "peer-messages", "claim"]) => claim_messages(state, body),
         ("POST", ["api", "peer-messages", "ack"]) => ack(state, body),
@@ -300,7 +322,7 @@ fn handle(state: &mut State, method: &str, url: &str, body: &Value) -> (u16, Val
     }
 }
 
-fn register(state: &mut State, body: &Value) -> (u16, Value) {
+fn register(state: &mut State, body: &Value, user: &str) -> (u16, Value) {
     let id = body["id"].as_str().unwrap_or_default().to_string();
     let now = stamp(state.now());
     let created = state
@@ -312,9 +334,9 @@ fn register(state: &mut State, body: &Value) -> (u16, Value) {
         "id": id,
         "name": body["name"],
         "agent_type": body["agent_type"],
-        "user_id": USER,
+        "user_id": user,
         "project_id": body["metadata"]["canonical_id"],
-        "team_id": null,
+        "team_id": team_for(state, user, body["metadata"]["canonical_id"].as_str()).map(|(team, _)| team),
         "pid": body["pid"],
         "session_id": null,
         "machine_id": body["machine_id"],
@@ -328,7 +350,7 @@ fn register(state: &mut State, body: &Value) -> (u16, Value) {
 }
 
 /// `GET /api/agents`: newest first by registration, keyset-paged.
-fn list_agents(state: &State, url: &str) -> (u16, Value) {
+fn list_agents(state: &State, url: &str, user: &str) -> (u16, Value) {
     let params = query_params(url);
     let param = |name: &str| params.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone());
     let project = param("project");
@@ -344,13 +366,16 @@ fn list_agents(state: &State, url: &str) -> (u16, Value) {
         .filter(|agent| match &project {
             // `?project=<canonical id or alias>` lists that project's agents,
             // teammates included (PR #153).
-            Some(project) => cas::cloud::project_ids_match_with_aliases(
-                agent["metadata"]["canonical_id"].as_str().unwrap_or(""),
-                project,
-                &[],
-            ),
+            Some(project) => {
+                (agent["user_id"] == user || team_for(state, user, Some(project)).is_some())
+                    && cas::cloud::project_ids_match_with_aliases(
+                        agent["metadata"]["canonical_id"].as_str().unwrap_or(""),
+                        project,
+                        &[],
+                    )
+            }
             // Without it, only the caller's own agents.
-            None => agent["user_id"].as_str().is_none_or(|id| id == USER),
+            None => agent["user_id"].as_str().is_none_or(|id| id == user),
         })
         .map(|agent| render_agent(state, agent))
         .filter(|agent| status.as_deref().is_none_or(|status| agent["status"] == status))
@@ -386,58 +411,127 @@ fn list_agents(state: &State, url: &str) -> (u16, Value) {
     )
 }
 
-fn claim_route(state: &mut State, method: &str, key: &str, action: &str, body: &Value) -> (u16, Value) {
+fn team_for<'a>(
+    state: &'a State,
+    user: &str,
+    project: Option<&str>,
+) -> Option<&'a (String, Vec<String>)> {
+    let project = project?;
+    state
+        .team_projects
+        .iter()
+        .find(|(id, (_, members))| {
+            cas::cloud::project_ids_match_with_aliases(id, project, &[])
+                && members.iter().any(|m| m == user)
+        })
+        .map(|(_, team)| team)
+}
+
+fn visible_lock(state: &State, lock: &Value, user: &str, project: Option<&str>) -> bool {
+    let owner = lock["user_id"].as_str().unwrap_or(USER);
+    match project {
+        None => owner == user,
+        Some(project) => {
+            lock["project_id"]
+                .as_str()
+                .is_some_and(|id| cas::cloud::project_ids_match_with_aliases(id, project, &[]))
+                && (owner == user
+                    || team_for(state, user, Some(project))
+                        .is_some_and(|(team, _)| lock["team_id"] == *team))
+        }
+    }
+}
+
+fn claim_route(
+    state: &mut State,
+    method: &str,
+    key: &str,
+    action: &str,
+    body: &Value,
+    user: &str,
+) -> (u16, Value) {
     let agent_id = body["agent_id"].as_str().unwrap_or_default().to_string();
     let duration = body["duration_secs"].as_i64().unwrap_or(600).clamp(1, 3600);
     let now = state.now();
-    let held = state.locks.get(key).filter(|lock| is_live(state, lock)).cloned();
+    let project = body["canonical_id"]
+        .as_str()
+        .or_else(|| {
+            state
+                .agents
+                .get(&agent_id)
+                .and_then(|a| a["project_id"].as_str())
+        })
+        .map(|p| cas::cloud::canonical_project_id(p).unwrap_or_else(|| p.into()));
+    let team = team_for(state, user, project.as_deref()).map(|(team, _)| team.clone());
+    let own_key = if user == USER {
+        key.into()
+    } else {
+        format!("{user}:{key}")
+    };
+    let held = state
+        .locks
+        .iter()
+        .find(|(storage, lock)| {
+            let task = lock["task_id"].as_str().unwrap_or(storage);
+            task == key
+                && is_live(state, lock)
+                && (lock["user_id"].as_str().unwrap_or(USER) == user
+                    || (action == "claim"
+                        && team.as_ref().is_some_and(|t| lock["team_id"] == *t)
+                        && lock["project_id"].as_str() == project.as_deref()))
+        })
+        .map(|(k, v)| (k.clone(), v.clone()));
+    if method == "POST"
+        && state
+            .agents
+            .get(&agent_id)
+            .is_some_and(|a| a["user_id"] != user)
+    {
+        return (404, json!({"error": "Agent not found"}));
+    }
     match (method, action) {
         ("POST", "claim") => match held {
-            // A live lock refuses, naming the holder; `agent_id` is the holder.
-            Some(lock) if lock["agent_id"] != agent_id.as_str() => (
+            Some((_, lock)) if lock["agent_id"] != agent_id.as_str() => (
                 409,
                 json!({"status": "conflict", "result": null, "lock": null,
                        "error": "already_claimed", "owner_agent_id": lock["agent_id"],
-                       "agent_id": lock["agent_id"], "expires_at": lock["expires_at"]}),
+                       "agent_id": lock["agent_id"], "expires_at": lock["expires_at"],
+                       "user_id": lock["user_id"].as_str().unwrap_or(USER)}),
             ),
-            // A same-agent re-claim returns the lock without extending it.
-            Some(lock) => (
+            Some((_, lock)) => (
                 200,
                 json!({"status": "success", "result": "claimed", "lock": lock_json(key, &lock),
                        "error": null, "owner_agent_id": null}),
             ),
-            // Free, released or expired: a new holder, the next epoch.
             None => {
-                let epoch = state.locks.get(key).and_then(|lock| lock["epoch"].as_u64()).unwrap_or(0) + 1;
+                let epoch = state
+                    .locks
+                    .get(&own_key)
+                    .and_then(|lock| lock["epoch"].as_u64())
+                    .unwrap_or(0)
+                    + 1;
                 let lock = json!({
-                    "id": uuid::Uuid::new_v4().to_string(),
-                    "agent_id": agent_id,
-                    "status": "active",
-                    "expires_at": stamp(now + Duration::seconds(duration)),
-                    "renewed_at": stamp(now),
-                    "renewal_count": 0,
-                    "epoch": epoch,
-                    "claim_reason": body["reason"],
+                    "id": uuid::Uuid::new_v4().to_string(), "task_id": key,
+                    "agent_id": agent_id, "user_id": user, "project_id": project, "team_id": team,
+                    "status": "active", "expires_at": stamp(now + Duration::seconds(duration)),
+                    "renewed_at": stamp(now), "renewal_count": 0, "epoch": epoch, "claim_reason": body["reason"],
                 });
                 let reply = lock_json(key, &lock);
-                state.locks.insert(key.to_string(), lock);
+                state.locks.insert(own_key, lock);
                 (200, json!({"status": "success", "result": "claimed", "lock": reply,
                              "error": null, "owner_agent_id": null}))
             }
         },
         ("POST", "release") => {
-            if held.as_ref().is_some_and(|lock| lock["agent_id"] == agent_id.as_str())
-                && let Some(lock) = state.locks.get_mut(key)
+            if let Some((storage, lock)) = held
+                && lock["agent_id"] == agent_id
             {
-                lock["status"] = json!("released");
+                state.locks.get_mut(&storage).unwrap()["status"] = json!("released");
             }
             (200, json!({"status": "success"}))
         }
-        // Renew works until the lock is taken over or released (production
-        // answers 404 "once the lock has been taken over or cleaned up").
-        ("POST", "renew") => match state.locks.get(key) {
+        ("POST", "renew") => match state.locks.get_mut(&own_key) {
             Some(lock) if lock["status"] == "active" && lock["agent_id"] == agent_id.as_str() => {
-                let lock = state.locks.get_mut(key).unwrap();
                 lock["expires_at"] = json!(stamp(now + Duration::seconds(duration)));
                 lock["renewed_at"] = json!(stamp(now));
                 lock["renewal_count"] = json!(lock["renewal_count"].as_u64().unwrap_or(0) + 1);
@@ -445,7 +539,10 @@ fn claim_route(state: &mut State, method: &str, key: &str, action: &str, body: &
             }
             _ => (404, json!({"error": "No active lock found"})),
         },
-        ("GET", "lock") => (200, json!({"lock": held.map(|lock| lock_json(key, &lock))})),
+        ("GET", "lock") => (
+            200,
+            json!({"lock": held.map(|(_, lock)| lock_json(key, &lock))}),
+        ),
         _ => (404, json!({"error": "not found"})),
     }
 }
@@ -616,4 +713,31 @@ fn ack(state: &mut State, body: &Value) -> (u16, Value) {
         })
         .collect();
     (200, json!({"results": results}))
+}
+
+#[test]
+fn cas_8ea7_personal_claims_remain_account_private() {
+    use cas::cloud::CloudCoordinator;
+    use cas::types::Agent;
+    let cloud = FakeCloud::start();
+    let coordinator = |user: &str| {
+        cloud.state.lock().unwrap().accounts.insert(format!("token-{user}"), user.into());
+        let mut config = cloud.config();
+        config.token = Some(format!("token-{user}"));
+        let mut c = CloudCoordinator::new(config)
+            .unwrap()
+            .with_canonical_id(Some("github.com/acme/personal".into()));
+        c.register(&Agent::new(user.into(), format!("supervisor-{user}")))
+            .unwrap();
+        c
+    };
+    let a = coordinator("a");
+    let b = coordinator("b");
+    assert!(a.claim("cas-personal", 600, None).unwrap().is_success());
+    assert!(b.list_locks().unwrap().is_empty());
+    assert!(b.get_lock("cas-personal").unwrap().is_none());
+    assert!(b.renew("cas-personal", 600).is_err());
+    b.release("cas-personal").unwrap();
+    assert!(b.claim("cas-personal", 600, None).unwrap().is_success());
+    assert_eq!(a.get_lock("cas-personal").unwrap().unwrap().agent_id, "a");
 }

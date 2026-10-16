@@ -191,6 +191,9 @@ pub enum ClaimResult {
     AlreadyClaimed {
         task_id: String,
         held_by: String,
+        /// Cloud #155 account owning a team-project claim; local leases have none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
         expires_at: DateTime<Utc>,
     },
     /// Task doesn't exist

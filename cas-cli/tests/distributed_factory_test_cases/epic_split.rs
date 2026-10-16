@@ -47,8 +47,21 @@ fn register(machine: &TestMachine, agent: &Agent) {
 }
 
 fn side(cloud: &FakeCloud, machine_name: &str, id: &'static str, name: &str) -> Side {
+    side_account(cloud, machine_name, id, name, "test-token")
+}
+
+fn side_account(
+    cloud: &FakeCloud,
+    machine_name: &str,
+    id: &'static str,
+    name: &str,
+    token: &str,
+) -> Side {
     let machine = TestMachine::new(machine_name);
     cloud.seed(&machine.cas_dir, WIDGETS);
+    let mut config = cloud.config();
+    config.token = Some(token.into());
+    config.save_to_cas_dir(&machine.cas_dir).unwrap();
     std::fs::write(
         machine.cas_dir.join("config.toml"),
         format!(
@@ -498,4 +511,95 @@ async fn a_received_split_names_the_proposer_by_its_machine_label() {
     };
     assert_eq!(discovered, "soundwave-host", "discovery shows soundwave's own label");
     assert_eq!(received.peer_machine, discovered, "the split names soundwave by the same label");
+}
+
+/// Cloud #155: actual bearer accounts share one team project. Refusals go
+/// through real MCP handlers; the local lease and spawn queue must stay empty.
+#[tokio::test]
+async fn cas_8ea7_two_accounts_refuse_start_claim_spawn_and_show_team_claims() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    {
+        let mut state = cloud.state.lock().unwrap();
+        state.accounts.insert("token-a".into(), "account-a".into());
+        state.accounts.insert("token-b".into(), "account-b".into());
+        state.team_projects.insert(
+            WIDGETS.into(),
+            (
+                "sandbox-team".into(),
+                vec!["account-a".into(), "account-b".into()],
+            ),
+        );
+    }
+    let alpha = side_account(&cloud, "machine-alpha", "a", "alpha", "token-a");
+    let beta = side_account(&cloud, "machine-beta", "b", "beta", "token-b");
+    let claims = cas::cloud::peer_claims::PeerClaims::for_project(&alpha.machine.cas_dir).unwrap();
+    assert_eq!(
+        claims.acquire(
+            "cas-a1",
+            cas::cloud::peer_claims::ClaimKind::Task,
+            "a",
+            "alpha",
+            600,
+            &|_| false
+        ),
+        cas::cloud::peer_claims::Acquire::Claimed
+    );
+    // Assign to beta's worker so start reaches the peer check.
+    let tasks = beta.machine.task_store();
+    let mut task = tasks.get("cas-a1").unwrap();
+    task.assignee = Some("b-w".into());
+    tasks.update(&task).unwrap();
+    for refused in [
+        beta.start("cas-a1", false).await.unwrap_err(),
+        beta.claim("cas-a1").await.unwrap_err(),
+    ] {
+        assert!(
+            refused.contains("HELD BY A PEER")
+                && refused.contains("alpha")
+                && refused.contains("alpha-host")
+                && refused.contains("account-a"),
+            "{refused}"
+        );
+    }
+    let refused = beta
+        .factory(json!({"action":"spawn_workers", "count":1, "task_id":"cas-a1", "isolate":true}))
+        .await
+        .unwrap_err();
+    assert!(
+        refused.contains("HELD BY A PEER") && refused.contains("alpha-host"),
+        "{refused}"
+    );
+    assert!(
+        cas::store::open_spawn_queue_store(&beta.machine.cas_dir)
+            .unwrap()
+            .peek(10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        beta.machine
+            .agent_store()
+            .get_lease("cas-a1")
+            .unwrap()
+            .is_none()
+    );
+    let report = beta
+        .coordination(json!({"action":"peers", "peer":"alpha", "detail":true, "json":true}))
+        .await
+        .unwrap();
+    let report: Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(
+        report["peers"][0]["claims"][0]["task_id"], "cas-a1",
+        "{report}"
+    );
+    assert_eq!(report["peers"][0]["user_id"], "account-a");
+    assert_eq!(report["peers"][0]["claims_status"]["state"], "ready");
+    assert!(claims.release_own("cas-a1", "a").unwrap());
+    assert!(
+        beta.claim("cas-a1")
+            .await
+            .unwrap()
+            .contains("Task claimed:")
+    );
 }

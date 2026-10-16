@@ -68,6 +68,7 @@ HELPER_DIR = HERE / "live_check_peer_collab"
 # preflight probe finds that task's feature in both binaries (cas-937a5 F03).
 STEP_REQUIRES = {
     "peer_detail": "cas-559c",
+    "team_claims": "cas-8ea7",
     "spawn_refused": "cas-0078",
     "unknown_name": "cas-a19b",
     "epic_split": "cas-4736",
@@ -79,6 +80,7 @@ STEP_ORDER = [
     "peers_discovery",
     "peer_detail",
     "claim_refused",
+    "team_claims",
     "spawn_refused",
     "message_reply_status",
     "overcap_message_reply_status",
@@ -507,16 +509,80 @@ class Run:
         if "HELD BY A PEER" not in text or self.names["a"] not in text:
             raise StepFailed(f"prowl's claim of {task_id} was not refused naming {self.names['a']}: {text[:400]}")
 
+    def step_team_claims(self, evidence, notes):
+        """Cloud #155: use two sandbox profiles on the same team project.
+
+        Same-account and stand-in runs explicitly skip this acceptance step.
+        Pass --canonical-id for the sandbox's existing team project; a fresh
+        personal project cannot prove cross-account exclusion.
+        """
+        if self.standin:
+            raise StepSkipped("two-account team claims require the Cloud #160 sandbox profiles")
+        task_id = self.ctx.get("task_id")
+        if not task_id:
+            self.step_claim_refused(evidence, notes)
+            task_id = self.ctx["task_id"]
+        reply = self.b.tool(self.names["b"], "coordination", action="peers",
+                            peer=self.names["a"], detail=True, json=True)
+        evidence["peer_detail"] = reply
+        try:
+            peer = json.loads(reply.get("text", ""))["peers"][0]
+        except (ValueError, KeyError, IndexError) as error:
+            raise StepFailed("team claim detail did not return a peer") from error
+        if peer.get("claims_visibility") == "same_account":
+            raise StepSkipped("both profiles belong to one account; two-account proof NOT VERIFIED")
+        if peer.get("claims_visibility") != "team_project" or not peer.get("user_id"):
+            raise StepFailed("peer does not expose a team project claim owner")
+        machine = peer.get("supervisor", {}).get("machine")
+        if not machine or not any(c.get("task_id") == task_id for c in peer.get("claims", [])):
+            raise StepFailed("teammate's held task or machine is missing from peer detail")
+        evidence.update(receipt_scope="live-cloud-two-account", owner_user_id=peer["user_id"])
+        assigned = self.b.tool(self.names["b"], "task", action="update", id=task_id,
+                               assignee=self.names["bw"])
+        evidence["assignment"] = assigned
+        if assigned.get("is_error"):
+            raise StepFailed("could not assign the scratch task to the sandbox worker")
+        evidence["worker_inbox"] = self.b.tool(self.names["bw"], "coordination", action="inbox_poll")
+        before = self.b.call("spawn-count", "--run-dir", self.b.run_dir)["spawn_queue_rows"]
+        for action, agent, tool, arguments in [
+            ("start", self.names["bw"], "task", {"action": "start", "id": task_id}),
+            ("claim", self.names["bw"], "task", {"action": "claim", "id": task_id}),
+            ("spawn", self.names["b"], "factory", {"action": "spawn_workers", "count": 1, "task_id": task_id}),
+        ]:
+            if action == "spawn":
+                # Refused starts/claims leave no lease but can retain the
+                # local assignee. Clear it so spawn reaches the peer guard.
+                cleared = self.b.tool(self.names["b"], "task", action="update", id=task_id, assignee="")
+                evidence["spawn_unassign"] = cleared
+                if cleared.get("is_error"):
+                    raise StepFailed("could not clear the refused local assignment before spawn")
+            refused = self.b.tool(agent, tool, **arguments)
+            evidence[action] = refused
+            text = refused.get("text", "")
+            if not all(value in text for value in ("HELD BY A PEER", self.names["a"], machine)):
+                raise StepFailed(f"{action} did not refuse naming the teammate and machine")
+        after = self.b.call("spawn-count", "--run-dir", self.b.run_dir)["spawn_queue_rows"]
+        evidence.update(spawn_queue_before=before, spawn_queue_after=after)
+        if after != before:
+            raise StepFailed("team-held task was admitted to the spawn queue")
+
     def step_spawn_refused(self, evidence, notes):
-        task_id = self.ctx.get("task_id") or self.shared_task(evidence)
+        if not self.ctx.get("task_id"):
+            self.step_claim_refused(evidence, notes)
+        task_id = self.ctx["task_id"]
+        cleared = self.b.tool(self.names["b"], "task", action="update", id=task_id, assignee="")
+        evidence["spawn_unassign"] = cleared
+        if cleared.get("is_error"):
+            raise StepFailed("could not clear the refused local assignment before spawn")
         before = self.b.call("spawn-count", "--run-dir", self.b.run_dir)["spawn_queue_rows"]
         reply = self.b.tool(self.names["b"], "factory", action="spawn_workers", count=1, task_id=task_id)
         after = self.b.call("spawn-count", "--run-dir", self.b.run_dir)["spawn_queue_rows"]
         evidence.update(reply=reply, spawn_queue_before=before, spawn_queue_after=after)
         if after != before:
             raise StepFailed(f"spawn was queued ({before} -> {after} rows) for a task a peer holds")
-        if not reply.get("is_error") and "HELD BY A PEER" not in reply.get("text", ""):
-            raise StepFailed("spawn_workers was not refused")
+        text = reply.get("text", "")
+        if "HELD BY A PEER" not in text or self.names["a"] not in text:
+            raise StepFailed("spawn_workers was not refused naming the peer")
 
     def message(self, machine, agent, target, summary, body, **extra):
         return machine.tool(agent, "coordination", action="message", target=target, summary=summary,

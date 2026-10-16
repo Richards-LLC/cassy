@@ -9,10 +9,15 @@ use crate::ui::factory::daemon::FactoryDaemon;
 const WORKER: &str = "worker-a";
 const SESSION: &str = "provision-test";
 
-/// A Claude worker pane running `cat`, past its injection grace period.
+/// A Claude worker pane running `cat`, past its injection grace period
+/// (backdated, not slept: review L4).
 pub(super) async fn ready_claude_worker(daemon: &mut FactoryDaemon) {
+    ready_claude_worker_named(daemon, WORKER).await;
+}
+
+pub(super) async fn ready_claude_worker_named(daemon: &mut FactoryDaemon, name: &str) {
     let pty = cas_mux::Pty::spawn(
-        WORKER,
+        name,
         cas_mux::PtyConfig {
             command: "sh".into(),
             args: vec!["-c".into(), "printf ready; exec cat".into()],
@@ -24,8 +29,8 @@ pub(super) async fn ready_claude_worker(daemon: &mut FactoryDaemon) {
         },
     )
     .unwrap();
-    let pane = cas_mux::Pane::with_pty(
-        WORKER,
+    let mut pane = cas_mux::Pane::with_pty(
+        name,
         cas_mux::PaneKind::Worker,
         pty,
         24,
@@ -33,12 +38,16 @@ pub(super) async fn ready_claude_worker(daemon: &mut FactoryDaemon) {
         cas_mux::SupervisorCli::Claude,
     )
     .unwrap();
+    pane.backdate_spawn_for_test(Duration::from_secs(6));
     #[allow(deprecated)]
     daemon.app.mux.set_worker_cli(cas_mux::SupervisorCli::Claude);
     daemon.app.adopt_worker_pane_for_test(pane);
-    tokio::time::sleep(Duration::from_millis(5100)).await;
-    drain(daemon);
-    assert!(daemon.app.mux.pane_ready_for_injection(WORKER));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !daemon.app.mux.pane_ready_for_injection(name) && Instant::now() < deadline {
+        drain(daemon);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(daemon.app.mux.pane_ready_for_injection(name));
 }
 
 /// What the loop's PTY exchange does each pass: drain pane output.
@@ -52,24 +61,34 @@ pub(super) fn drain(daemon: &mut FactoryDaemon) -> String {
 }
 
 pub(super) fn project_with_worker() -> (tempfile::TempDir, std::path::PathBuf) {
+    project_with_workers(&[WORKER])
+}
+
+pub(super) fn project_with_workers(names: &[&str]) -> (tempfile::TempDir, std::path::PathBuf) {
     let root = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(root.path()).unwrap();
-    let mut worker = cas_types::Agent::new_with_role(
-        "worker-id".into(),
-        WORKER.into(),
-        cas_types::AgentRole::Worker,
-    );
-    worker.factory_session = Some(SESSION.into());
-    open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+    for name in names {
+        let mut worker = cas_types::Agent::new_with_role(
+            format!("{name}-id"),
+            (*name).into(),
+            cas_types::AgentRole::Worker,
+        );
+        worker.factory_session = Some(SESSION.into());
+        open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
+    }
     (root, cas_dir)
 }
 
 pub(super) fn enqueue_urgent(cas_dir: &std::path::Path, text: &str) -> i64 {
+    enqueue_urgent_to(cas_dir, WORKER, text)
+}
+
+pub(super) fn enqueue_urgent_to(cas_dir: &std::path::Path, target: &str, text: &str) -> i64 {
     open_prompt_queue_store(cas_dir)
         .unwrap()
         .enqueue_urgent_with_outcome(
             "supervisor",
-            WORKER,
+            target,
             text,
             Some(SESSION),
             Some(text),
@@ -206,4 +225,108 @@ async fn flv2_inject_path_claims_in_two_phases_with_no_lane_violation() {
         .unwrap()
         .unwrap();
     assert_eq!(report.wake_attempt, cas_store::WakeAttempt::Fired, "{report:?}");
+}
+
+/// Run passes, draining pane output, until `done` holds over the output or
+/// `limit` passes.
+async fn passes_until(
+    daemon: &mut FactoryDaemon,
+    limit: Duration,
+    mut done: impl FnMut(&str) -> bool,
+) -> String {
+    let started = Instant::now();
+    let mut echoed = String::new();
+    while started.elapsed() < limit {
+        daemon.process_prompt_queue().await.unwrap();
+        echoed.push_str(&drain(daemon));
+        if done(&echoed) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    echoed
+}
+
+/// cas-786a6 review L4: an urgent all-workers broadcast is a command per
+/// member; both members get the redirect after the settle and the outcome
+/// counts both.
+#[tokio::test]
+async fn urgent_broadcast_members_settle_as_commands_and_count_once() {
+    let (_root, cas_dir) = project_with_workers(&[WORKER, "worker-b"]);
+    let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    ready_claude_worker(&mut daemon).await;
+    ready_claude_worker_named(&mut daemon, "worker-b").await;
+    let id = enqueue_urgent_to(&cas_dir, "all_workers", "everyone C4A-BCAST");
+
+    let echoed = passes_until(&mut daemon, Duration::from_secs(6), |echoed| {
+        echoed.matches("C4A-BCAST").count() >= 2
+    })
+    .await;
+    assert_eq!(echoed.matches("C4A-BCAST").count(), 2, "both members typed: {echoed:?}");
+    // The outcome is stamped once the last member reports.
+    for _ in 0..20 {
+        daemon.process_prompt_queue().await.unwrap();
+    }
+    let report = open_prompt_queue_store(&cas_dir)
+        .unwrap()
+        .message_delivery_report(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (report.broadcast_attempted, report.broadcast_succeeded, report.broadcast_failed),
+        (Some(2), Some(2), Some(0)),
+        "the broadcast outcome counts both members once: {report:?}"
+    );
+    assert!(!daemon.urgent_injects.broadcasts.contains_key(&id));
+}
+
+/// cas-786a6 review M2/L4: a daemon that died between the claim and the
+/// inject leaves a bare claim. The next daemon releases it at start and
+/// delivers the row.
+#[tokio::test]
+async fn a_restart_between_claim_and_inject_releases_the_claim() {
+    let (_root, cas_dir) = project_with_worker();
+    let id = enqueue_urgent(&cas_dir, "claimed then crashed C4A-RESTART");
+    {
+        let mut first = super::provisioning_tests::daemon(&cas_dir);
+        assert!(matches!(
+            first.queue_jobs.claim_for_inject(&cas_dir, SESSION, id, WORKER, WORKER),
+            super::prompt_queue_jobs::ClaimStep::Claimed(_)
+        ));
+        // The daemon dies here: no inject, no stamp.
+    }
+    let _ = std::fs::remove_file(cas_dir.join("test.sock"));
+    let _ = std::fs::remove_file(cas_dir.join("gui.sock"));
+    let mut second = super::provisioning_tests::daemon(&cas_dir);
+    second.release_orphaned_claims_at_start();
+    ready_claude_worker(&mut second).await;
+    let echoed = passes_until(&mut second, Duration::from_secs(6), |echoed| {
+        echoed.contains("C4A-RESTART")
+    })
+    .await;
+    assert!(echoed.contains("C4A-RESTART"), "the row is delivered after the restart: {echoed:?}");
+}
+
+/// cas-786a6 review M4: an operator urgent inject that arrives while another
+/// settles on the same pane waits for it, and both are typed in order.
+#[tokio::test]
+async fn an_operator_urgent_inject_queues_behind_a_settling_one() {
+    let (_root, cas_dir) = project_with_worker();
+    let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    ready_claude_worker(&mut daemon).await;
+    let settle = Duration::from_millis(100);
+    daemon.begin_operator_urgent_inject(WORKER, "first C4A-OP1", settle).await;
+    daemon.begin_operator_urgent_inject(WORKER, "second C4A-OP2", settle).await;
+    assert_eq!(daemon.urgent_injects.operator_backlog.len(), 1, "the second waits");
+
+    let started = Instant::now();
+    let mut echoed = String::new();
+    while started.elapsed() < Duration::from_secs(5) && !echoed.contains("C4A-OP2") {
+        daemon.advance_urgent_injects().await;
+        echoed.push_str(&drain(&mut daemon));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (first, second) = (echoed.find("C4A-OP1"), echoed.find("C4A-OP2"));
+    assert!(first.is_some() && second.is_some(), "both typed: {echoed:?}");
+    assert!(first < second, "in order");
 }

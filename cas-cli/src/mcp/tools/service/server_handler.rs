@@ -17,6 +17,72 @@ use crate::mcp::tools::service::CasService;
 /// routing guidance, well under 200 characters.
 pub(crate) const SERVER_INSTRUCTIONS: &str = "Cassy: tasks, memory, search and factory coordination. If these tools are deferred, load task, coordination, search and memory together before first use.";
 
+const WORKER_MCP_ACTIVITY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Reserve before any identity/store lookup, without holding a mutex across
+/// SQLite. Concurrent clones skip an in-progress attempt; a failed attempt
+/// releases its reservation so registration or transient errors can recover.
+struct WorkerMcpActivityPermit<'a> {
+    state: &'a std::sync::Mutex<crate::mcp::server::WorkerMcpActivityState>,
+    recorded: bool,
+}
+
+impl<'a> WorkerMcpActivityPermit<'a> {
+    fn acquire(core: &'a CasCore) -> Option<Self> {
+        let mut state = core.worker_mcp_activity.lock().ok()?;
+        if state.recording || state.last_recorded_at.is_some_and(|at| at.elapsed() < WORKER_MCP_ACTIVITY_INTERVAL) {
+            return None;
+        }
+        state.recording = true;
+        Some(Self { state: &core.worker_mcp_activity, recorded: false })
+    }
+}
+
+impl Drop for WorkerMcpActivityPermit<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            if self.recorded { state.last_recorded_at = Some(std::time::Instant::now()); }
+            state.recording = false;
+        }
+    }
+}
+
+/// Activity belongs to this server's authenticated caller, never a subject
+/// named by a tool payload. Heartbeat/registration telemetry is not progress.
+fn record_worker_mcp_activity(core: &CasCore, tool: &str, action: &str) {
+    use crate::mcp::server::AgentIdentitySource;
+    use cas_types::{AgentRole, AgentStatus, Event, EventEntityType, EventType};
+    if matches!(tool, "coordination" | "agent")
+        && matches!(action, "heartbeat" | "register" | "unregister" | "session_start" | "session_end")
+    {
+        return;
+    }
+    let Some(mut permit) = WorkerMcpActivityPermit::acquire(core) else { return };
+    let already_bound = core.agent_id.get().is_some();
+    let Ok(id) = core.get_registered_agent_id_read_only() else { return };
+    // A first request can resolve the registered server session from its
+    // environment/PID mapping. Public registration must never rebind it.
+    if !already_bound {
+        let _ = core.bind_agent_identity(id.clone(), AgentIdentitySource::ServerInternal);
+    }
+    if !core.has_server_internal_identity(&id) { return; }
+    let Ok(agents) = core.open_agent_store() else { return };
+    let Ok(agent) = agents.get(&id) else { return };
+    if agent.role != AgentRole::Worker || !matches!(agent.status, AgentStatus::Active | AgentStatus::Idle) {
+        return;
+    }
+    if let Ok(events) = crate::store::open_event_store(&core.cas_root) {
+        let event = Event::new(EventType::WorkerActivity, EventEntityType::Agent, &id,
+            format!("MCP activity: {tool} {action}"))
+            .with_session(&id)
+            .with_metadata(serde_json::json!({"source":"mcp_dispatch", "tool":tool, "action":action}));
+        match events.record(&event) {
+            Ok(_) => permit.recorded = true,
+            Err(error) => tracing::debug!(%error, "worker MCP activity could not be recorded"),
+        }
+    }
+}
+
 #[allow(clippy::manual_async_fn)]
 impl ServerHandler for CasService {
     fn get_info(&self) -> ServerInfo {
@@ -316,6 +382,9 @@ impl CasService {
             .and_then(|args| args.get("action"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
+        // Before spawning the handler: a call in flight is already activity.
+        // This universal boundary also covers factory and proxy tool calls.
+        record_worker_mcp_activity(&self.inner, tool_name, action);
         let task_id = arguments
             .and_then(|args| args.get("id"))
             .and_then(serde_json::Value::as_str);
@@ -621,6 +690,115 @@ fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::potentially_mutating_call;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cas_6eec_mcp_burst_records_one_activity_across_service_clones() {
+        use crate::mcp::server::{CasCore, AgentIdentitySource};
+        use crate::mcp::tools::service::CasService;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let worker = cas_types::Agent::new_with_role("burst-worker".into(), "burst-worker".into(), cas_types::AgentRole::Worker);
+        core.open_agent_store().unwrap().register(&worker).unwrap();
+        core.bind_agent_identity(worker.id.clone(), AgentIdentitySource::ServerInternal).unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        let calls = (0..16).map(|_| {
+            let service = service.clone();
+            tokio::spawn(async move {
+                service.call_with_deadline_and_grace("task", None, std::time::Duration::from_secs(5),
+                    std::time::Duration::from_secs(5), async { Ok(rmcp::model::CallToolResult::success(vec![])) }).await.unwrap();
+            })
+        });
+        for call in futures::future::join_all(calls).await { call.unwrap(); }
+        let events = crate::store::open_event_store(&root).unwrap();
+        let rows = events.list_by_type(cas_types::EventType::WorkerActivity, 100).unwrap();
+        assert_eq!(rows.len(), 1, "rapid concurrent MCP calls must share one throttled activity row");
+        service.inner.worker_mcp_activity.lock().unwrap().last_recorded_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+        service.call_with_deadline_and_grace("task", None, std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5), async { Ok(rmcp::model::CallToolResult::success(vec![])) }).await.unwrap();
+        assert_eq!(events.list_by_type(cas_types::EventType::WorkerActivity, 100).unwrap().len(), 2,
+            "activity resumes when the 30-second interval expires");
+    }
+
+    #[test]
+    fn cas_6eec_activity_throttle_releases_failed_attempts_and_inflight_reservations() {
+        use crate::mcp::server::{CasCore, AgentIdentitySource};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.bind_agent_identity("late-worker".into(), AgentIdentitySource::ServerInternal).unwrap();
+        super::record_worker_mcp_activity(&core, "task", "notes");
+        assert!(core.worker_mcp_activity.lock().unwrap().last_recorded_at.is_none());
+        let worker = cas_types::Agent::new_with_role("late-worker".into(), "late-worker".into(), cas_types::AgentRole::Worker);
+        core.open_agent_store().unwrap().register(&worker).unwrap();
+        let permit = super::WorkerMcpActivityPermit::acquire(&core).unwrap();
+        assert!(super::WorkerMcpActivityPermit::acquire(&core.clone()).is_none(), "inflight reservation is shared");
+        drop(permit);
+        super::record_worker_mcp_activity(&core, "task", "notes");
+        assert_eq!(crate::store::open_event_store(&root).unwrap().list_by_type(cas_types::EventType::WorkerActivity, 100).unwrap().len(), 1,
+            "failed attempts must not silence a now-registered worker for 30s");
+    }
+
+    #[tokio::test]
+    async fn cas_6eec_activity_rejects_payload_identity_and_heartbeat_or_public_registration() {
+        use crate::mcp::server::{CasCore, AgentIdentitySource};
+        use crate::mcp::tools::service::CasService;
+        use cas_types::{Agent, AgentRole, AgentStatus};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for (index, (role, status, source, tool, action, expected)) in [
+            (AgentRole::Worker, AgentStatus::Active, AgentIdentitySource::ServerInternal, "task", "notes", true),
+            (AgentRole::Supervisor, AgentStatus::Active, AgentIdentitySource::ServerInternal, "task", "notes", false),
+            (AgentRole::Worker, AgentStatus::Active, AgentIdentitySource::PublicRegistration, "task", "notes", false),
+            (AgentRole::Worker, AgentStatus::Shutdown, AgentIdentitySource::ServerInternal, "task", "notes", false),
+            (AgentRole::Worker, AgentStatus::Active, AgentIdentitySource::ServerInternal, "coordination", "heartbeat", false),
+            (AgentRole::Worker, AgentStatus::Active, AgentIdentitySource::ServerInternal, "coordination", "register", false),
+        ].into_iter().enumerate() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let root = crate::store::init_cas_dir(dir.path()).unwrap();
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let mut caller = Agent::new_with_role(format!("caller-{index}"), format!("caller-{index}"), role);
+            caller.status = status;
+            core.open_agent_store().unwrap().register(&caller).unwrap();
+            core.bind_agent_identity(caller.id.clone(), source).unwrap();
+            let victim = Agent::new_with_role(format!("victim-{index}"), format!("victim-{index}"), AgentRole::Worker);
+            core.open_agent_store().unwrap().register(&victim).unwrap();
+            let args = serde_json::json!({"action": action, "id": victim.id, "target": victim.name, "session_id": victim.id});
+            let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+            service.call_with_deadline_and_grace(tool, args.as_object(), std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(5), async { Ok(rmcp::model::CallToolResult::success(vec![])) }).await.unwrap();
+            let events = crate::store::open_event_store(&root).unwrap();
+            assert_eq!(events.latest_worker_activity(&caller.id, &caller.name).unwrap().is_some(), expected, "case {index}");
+            assert!(events.latest_worker_activity(&victim.id, &victim.name).unwrap().is_none(), "payload must not spoof another worker's activity");
+        }
+    }
+
+    #[tokio::test]
+    async fn cas_6eec_mcp_dispatch_records_its_authenticated_workers_activity() {
+        use crate::mcp::tools::service::CasService;
+        use rmcp::model::CallToolResult;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        let worker = cas_types::Agent::new_with_role("worker-session".into(), "worker".into(), cas_types::AgentRole::Worker);
+        core.open_agent_store().unwrap().register(&worker).unwrap();
+        core.bind_agent_identity(worker.id.clone(), crate::mcp::server::AgentIdentitySource::ServerInternal).unwrap();
+        let events = crate::store::open_event_store(&root).unwrap();
+        let worker_id = worker.id.clone();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        service.call_with_deadline_and_grace("task", None, std::time::Duration::from_secs(5), std::time::Duration::from_secs(5), async move {
+            // A call in flight must already be visible, even before its result.
+            let activity = events.latest_worker_activity(&worker_id, "worker").unwrap()
+                .expect("authenticated MCP calls are worker activity");
+            assert_eq!(activity.session_id.as_deref(), Some(worker_id.as_str()));
+            assert_eq!(activity.event_type, cas_types::EventType::WorkerActivity);
+            assert!((chrono::Utc::now() - activity.created_at).num_seconds() < 5);
+            Ok(CallToolResult::success(vec![]))
+        }).await.unwrap();
+    }
 
     fn result_text(result: &rmcp::model::CallToolResult) -> String {
         serde_json::to_string(result).unwrap()

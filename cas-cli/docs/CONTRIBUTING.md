@@ -49,6 +49,18 @@ deliveries retain the merge reminder. Containment proofs run off the daemon
 loop and are cached by delivery metadata and local/origin tips; unknown proofs
 are retried rather than cached as merged.
 
+Worker quiet detection also counts authenticated MCP calls when they enter the
+server, and scoped dirty-file edits or commits in the registered worker checkout.
+MCP activity emits at most one event per server-bound worker every 30 seconds,
+with the throttle checked in memory before store access. This interval is much
+shorter than the default 300-second quiet threshold; concurrent calls share the
+same reservation and failed writes can retry.
+Heartbeat and registration calls remain telemetry, so heartbeat alone cannot
+hide a quiet worker. Call activity uses the server's immutable registered actor;
+request fields naming another worker do not credit that worker. Open harness
+tool calls and live worker-owned child processes continue to count as activity;
+unrelated process trees and persistent MCP sidecars do not.
+
 ## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client
@@ -193,7 +205,10 @@ address, message-target ambiguity lists distinct agent IDs that can be used as
 explicit targets. Legacy deleted rows without retirement identity cannot be
 safely recovered from a name alone. Their bodies are not admitted; the daemon
 sends an idempotent reply asking the sender to resend to the current supervisor
-ID, then rejects the original. If feedback fails, the original remains unacked
+ID, then rejects the original. This feedback-only fallback requires exactly
+one live named factory with that supervisor name in the project. Competing
+same-name factories leave legacy addresses unclaimed and warn instead.
+If feedback fails, the original remains unacked
 for retry. Retirement recovery uses a seven-day window and at most 100 retired
 recipients per tick, separately from current recipients. History lookup failure
 or truncation is a mailbox warning; current verified addresses keep receiving.

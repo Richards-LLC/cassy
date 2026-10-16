@@ -172,39 +172,35 @@ impl<'a> InboxFileLock<'a> {
     }
 }
 
-/// cas-c312: opens `path` and takes its exclusive lock, on the file that is at
-/// `path` once the lock is held. [`replace_inbox_file`] swaps the file, so a
-/// writer that waited on the old file's lock would otherwise write alongside
-/// one that locked the new file. Callers unlock through [`InboxFileLock`].
+/// cas-c312: the file every CAS inbox writer locks, beside the inbox and
+/// never renamed or removed. [`replace_inbox_file`] swaps the inbox itself,
+/// so a lock on the inbox would be left on a replaced file while the next
+/// writer locked the new one. A hidden `.cas-lock` name stays clear of
+/// `*.json` inbox scans and of a `<inbox>.lock` that other tools may use.
+pub(crate) fn inbox_lock_path(path: &std::path::Path) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}.cas-lock"))
+}
+
+/// cas-c312: takes the exclusive lock that serializes CAS writers of `path`,
+/// blocking until it is free. There is no retry or give-up path: the lock file
+/// is stable, so holding it always means holding the inbox. Callers unlock
+/// through [`InboxFileLock`].
 pub(crate) fn open_locked_inbox(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
-    for _ in 0..64 {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)?;
-        if let Err(error) = fs2::FileExt::lock_exclusive(&file) {
-            anyhow::bail!("Failed to lock inbox file {:?}: {}", path, error);
-        }
-        if locked_file_is_current(&file, path) {
-            return Ok(file);
-        }
-        let _ = fs2::FileExt::unlock(&file);
+    let lock_path = inbox_lock_path(path);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    if let Err(error) = fs2::FileExt::lock_exclusive(&file) {
+        anyhow::bail!("Failed to lock inbox file {:?}: {}", path, error);
     }
-    anyhow::bail!("inbox file {:?} kept being replaced while locking it", path)
-}
-
-#[cfg(unix)]
-fn locked_file_is_current(file: &std::fs::File, path: &std::path::Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (file.metadata(), std::fs::metadata(path)) {
-        (Ok(locked), Ok(current)) => locked.dev() == current.dev() && locked.ino() == current.ino(),
-        _ => false,
-    }
-}
-
-#[cfg(not(unix))]
-fn locked_file_is_current(_file: &std::fs::File, _path: &std::path::Path) -> bool {
-    true
+    Ok(file)
 }
 
 /// cas-c312: writes an inbox as a whole new file renamed over `path`. Inbox
@@ -602,36 +598,40 @@ pub(crate) fn reap_stranded_native_inbox_copies_in(
 /// [`InboxMessage`] — native rows carry `msgV` / `msg_id` / `type` fields the
 /// typed struct does not model and would silently drop on re-serialize.
 fn mark_inbox_rows_inert(path: &std::path::Path, log_message: &'static str) -> usize {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return 0;
-    };
-    let Ok(mut rows) = serde_json::from_str::<Vec<serde_json::Value>>(&content) else {
-        return 0;
-    };
-
-    let mut changed = 0usize;
-    for row in rows.iter_mut() {
-        let Some(obj) = row.as_object_mut() else {
-            continue;
-        };
-        if obj.get("read").and_then(|v| v.as_bool()) == Some(false) {
-            obj.insert("read".to_string(), serde_json::Value::Bool(true));
-            changed += 1;
+    // Rows go inert at most once; an inbox with nothing unread is never
+    // locked or rewritten (and gains no lock file).
+    let mark = |content: &str| -> Option<(usize, String)> {
+        let mut rows = serde_json::from_str::<Vec<serde_json::Value>>(content).ok()?;
+        let mut changed = 0usize;
+        for row in rows.iter_mut() {
+            let Some(obj) = row.as_object_mut() else {
+                continue;
+            };
+            if obj.get("read").and_then(|v| v.as_bool()) == Some(false) {
+                obj.insert("read".to_string(), serde_json::Value::Bool(true));
+                changed += 1;
+            }
         }
-    }
-    if changed == 0 {
-        return 0;
-    }
-
-    let Ok(json) = serde_json::to_string_pretty(&rows) else {
+        if changed == 0 {
+            return None;
+        }
+        serde_json::to_string_pretty(&rows).ok().map(|json| (changed, json))
+    };
+    let Some(_) = std::fs::read_to_string(path).ok().as_deref().and_then(mark) else {
         return 0;
     };
-    // Same exclusive-lock discipline as every other inbox mutation, so a
-    // concurrent harness write cannot interleave with this rewrite.
+    // Same exclusive-lock discipline as every other inbox mutation. cas-c312:
+    // re-read under the lock, so a row written since the check is kept.
+    let mut changed = 0usize;
     let write = open_locked_inbox(path)
         .map_err(|e| std::io::Error::other(e.to_string()))
         .and_then(|file| {
             let _lock = InboxFileLock::held(&file, path);
+            let content = std::fs::read_to_string(path)?;
+            let Some((count, json)) = mark(&content) else {
+                return Ok(());
+            };
+            changed = count;
             replace_inbox_file(path, json.as_bytes())
         });
     match write {
@@ -3049,10 +3049,11 @@ mod tests {
             "the injected post-lock failure must remain an I/O error: {error:#}"
         );
 
+        // cas-c312: writers serialize on the stable sibling lock file.
         let contender = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(&inbox_path)
+            .open(inbox_lock_path(&inbox_path))
             .unwrap();
         fs2::FileExt::try_lock_exclusive(&contender)
             .expect("an error exit must release LOCK_EX even while a forked child retains the fd");
@@ -3113,16 +3114,16 @@ mod tests {
         assert!(torn.is_empty(), "{} of {reads} reads saw a torn inbox: {torn:?}", torn.len());
     }
 
-    /// cas-c312: replacing the file swaps its inode, so a writer that waited
-    /// on the old inode's lock must not write alongside one holding the new
-    /// inode's lock. Concurrent writers keep every row.
+    /// cas-c312: replacing the file swaps its inode, so writers serialize on
+    /// a stable sibling lock file instead. Every contended writer waits its
+    /// turn and lands its row: none gives up, none overwrites another.
     #[test]
     fn concurrent_inbox_writers_keep_every_row_across_file_replacement_cas_c312() {
         let tmp = tempfile::tempdir().unwrap();
         c312_manager(tmp.path())
             .write_to_inbox("worker", "supervisor", "seed", None, None)
             .unwrap();
-        let writers: Vec<_> = (0..4)
+        let writers: Vec<_> = (0..8)
             .map(|writer| {
                 let root = tmp.path().to_path_buf();
                 std::thread::spawn(move || {
@@ -3142,7 +3143,14 @@ mod tests {
             &std::fs::read_to_string(tmp.path().join("inboxes/worker.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(rows.len(), 1 + 4 * 40, "a concurrent write lost rows");
+        assert_eq!(rows.len(), 1 + 8 * 40, "a concurrent write lost rows");
+        // The inbox directory holds the inbox and its lock file, nothing staged.
+        let mut entries: Vec<String> = std::fs::read_dir(tmp.path().join("inboxes"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, [".worker.json.cas-lock", "worker.json"]);
     }
 
     /// cas-ceae (GH #124): the write-time dedup guard sees only copies the

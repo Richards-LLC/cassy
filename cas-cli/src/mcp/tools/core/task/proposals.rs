@@ -417,6 +417,7 @@ impl CasCore {
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         }
         let mut reopened = Vec::new();
+        let mut kept_blocked = Vec::new();
         let mut rejected = Vec::new();
         for task_id in touched {
             let blockers = projection_store
@@ -448,12 +449,21 @@ impl CasCore {
             {
                 if let Ok(mut task) = task_store.get(&task_id) {
                     if task.status == TaskStatus::Blocked {
-                        task.status = TaskStatus::Open;
-                        task.updated_at = chrono::Utc::now();
-                        task_store.update(&task).map_err(|error| {
-                            Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
-                        })?;
-                        reopened.push(task_id);
+                        if let Some(reason) =
+                            super::block_reason::non_dependency_hold_reason(&task.notes)
+                        {
+                            super::block_reason::record_auto_unblock_skipped(&mut task, &reason);
+                            task_store.update(&task).map_err(|error| {
+                                Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
+                            })?;
+                            kept_blocked.push(format!("{task_id} — {reason}"));
+                        } else {
+                            task.status = TaskStatus::Open;
+                            task_store.update(&task).map_err(|error| {
+                                Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
+                            })?;
+                            reopened.push(task_id);
+                        }
                     }
                 }
             }
@@ -467,8 +477,13 @@ impl CasCore {
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         rejected.sort();
         rejected.dedup();
+        let kept_blocked = if kept_blocked.is_empty() {
+            "none".to_string()
+        } else {
+            kept_blocked.join("; ")
+        };
         Ok(Self::success(format!(
-            "Reconciled {} external dependency signal(s) for explicit project `{}`. Reopened: {}. Rejected handoffs still blocking: {}.",
+            "Reconciled {} external dependency signal(s) for explicit project `{}`. Reopened: {}. Kept blocked: {}. Rejected handoffs still blocking: {}.",
             feed.dependencies.len(),
             origin_project,
             if reopened.is_empty() {
@@ -476,6 +491,7 @@ impl CasCore {
             } else {
                 reopened.join(", ")
             },
+            kept_blocked,
             if rejected.is_empty() {
                 "none".into()
             } else {

@@ -3134,7 +3134,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
             reason: None,
             labels: None,
             notes: None,
-            blocked_by: Some(blocker_id.clone()),
+            blocked_by: None,
             design: None,
             acceptance_criteria: None,
             external_ref: None,
@@ -3151,7 +3151,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
 
     let _ = service
         .cas_task_update(Parameters(TaskUpdateRequest {
-            blocked_by: None,
+            blocked_by: Some(blocker_id.clone()),
             depth: None,
             id: blocked_id.clone(),
             title: None,
@@ -3168,7 +3168,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
             proof_targets: None,
             external_ref: None,
             assignee: None,
-            status: Some("blocked".to_string()),
+            status: None,
             epic: None,
             origin_project: None,
             epic_verification_owner: None,
@@ -3339,6 +3339,33 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
         .await
         .expect("decision hold note should be recorded");
 
+    let explicit_hold = service
+        .cas_task_create(Parameters(make_task_create_req("Explicit status hold")))
+        .await
+        .expect("explicit-hold task create should succeed");
+    let explicit_hold_id = extract_task_id(&extract_text(explicit_hold))
+        .expect("explicit-hold task id")
+        .to_string();
+    let add_explicit_dependency: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+        "id": explicit_hold_id.clone(),
+        "blocked_by": blocker_id.clone(),
+    }))
+    .expect("dependency update request");
+    service
+        .cas_task_update(Parameters(add_explicit_dependency))
+        .await
+        .expect("adding a blocker should mark the explicit-hold task blocked");
+    let explicit_status_hold: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+        "id": explicit_hold_id.clone(),
+        "status": "blocked",
+        "notes": "Operator hold: wait for Slack ownership to be decided.",
+    }))
+    .expect("explicit status request");
+    service
+        .cas_task_update(Parameters(explicit_status_hold))
+        .await
+        .expect("an explicit status hold should be recorded");
+
     let dispatch = cas_store::create_verification_dispatch(
         &cas_dir,
         &blocker_id,
@@ -3392,6 +3419,22 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
         close_text.contains(&dependent_id)
             && close_text.contains("operator resolves Slack ownership"),
         "close must surface the remaining hold and its reason: {close_text}"
+    );
+    assert!(
+        close_text.contains(&explicit_hold_id)
+            && close_text.contains("Operator hold: wait for Slack ownership"),
+        "close must surface an explicit status hold and its reason: {close_text}"
+    );
+    let explicit_show = service
+        .cas_task_show(Parameters(TaskShowRequest {
+            id: explicit_hold_id,
+            with_deps: false,
+        }))
+        .await
+        .expect("explicit-hold task_show should succeed");
+    assert!(
+        extract_text(explicit_show).contains("Status: Blocked"),
+        "an explicit status hold remains blocked when its dependency closes"
     );
 }
 

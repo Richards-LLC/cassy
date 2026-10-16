@@ -445,6 +445,16 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let explicit_block_status = req
+            .status
+            .as_deref()
+            .is_some_and(|status| status.eq_ignore_ascii_case("blocked"));
+        let explicit_block_reason = req
+            .notes
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(ToOwned::to_owned);
         if merged_into.is_some() && (target_repo.is_some() || target_branch.is_some() || req.epic.is_some() || req.status.is_some()) {
             return Err(McpError { code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from("INTEGRATION BATCH REJECTED: record merged_into separately from work-target, epic or status changes"), data: None });
@@ -828,6 +838,12 @@ impl CasCore {
             }
             task.deliverables.review_envelope = None;
             task.deliverables.pre_close_hook = None;
+            if task.status == TaskStatus::Blocked {
+                crate::mcp::tools::core::task::block_reason::record_hold_clear(
+                    &mut task,
+                    "supervisor corrected the blocked task's proof scope",
+                );
+            }
             task.status = TaskStatus::Open;
             task.pending_verification = false;
             task.pending_worktree_merge = false;
@@ -1758,6 +1774,31 @@ impl CasCore {
                 ) {
                     return Ok(Self::tool_error(message.to_string()));
                 }
+            }
+            if new_status == TaskStatus::Blocked && explicit_block_status {
+                // A direct status request is an operator hold, even if a
+                // dependency had already projected the task to Blocked. Store
+                // that intent in the task's append-only notes so a later
+                // dependency close cannot erase it.
+                if crate::mcp::tools::core::task::block_reason::non_dependency_hold_reason(
+                    &task.notes,
+                )
+                .is_none()
+                    || explicit_block_reason.is_some()
+                {
+                    crate::mcp::tools::core::task::block_reason::record_explicit_status_hold(
+                        &mut task,
+                        explicit_block_reason.as_deref(),
+                    );
+                    changes.push("notes");
+                }
+            }
+            if new_status == TaskStatus::Open && task.status == TaskStatus::Blocked {
+                crate::mcp::tools::core::task::block_reason::record_hold_clear(
+                    &mut task,
+                    "task status explicitly set to open",
+                );
+                changes.push("notes");
             }
             if new_status != task.status {
                 task.status = new_status;

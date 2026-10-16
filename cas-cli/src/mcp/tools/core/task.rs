@@ -1,4 +1,5 @@
 pub(crate) mod integration_batch;
+pub(crate) mod block_reason;
 mod dependencies;
 pub(crate) mod lifecycle;
 mod notes;

@@ -10317,6 +10317,7 @@ impl CasCore {
         // Auto-unblock tasks that were blocked solely by this task.
         // This keeps dependency state and task status synchronized.
         let mut auto_unblocked_tasks: Vec<String> = Vec::new();
+        let mut held_blocked_tasks: Vec<String> = Vec::new();
         if let Ok(dependents) = task_store.get_dependents(&req.id) {
             for dep in dependents
                 .iter()
@@ -10340,6 +10341,24 @@ impl CasCore {
                             .map(|blockers| blockers.is_empty())
                             .unwrap_or(false);
                     if !(local_blockers_cleared && external_blockers_cleared) {
+                        continue;
+                    }
+                    if let Some(reason) =
+                        super::super::block_reason::non_dependency_hold_reason(&dependent_task.notes)
+                    {
+                        let task_id = dependent_task.id.clone();
+                        super::super::block_reason::record_auto_unblock_skipped(
+                            &mut dependent_task,
+                            &reason,
+                        );
+                        if let Err(error) = task_store.update(&dependent_task) {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                error = %error,
+                                "dependency blockers closed but the non-dependency hold note could not be persisted"
+                            );
+                        }
+                        held_blocked_tasks.push(format!("{task_id} — {reason}"));
                         continue;
                     }
                     dependent_task.status = TaskStatus::Open;
@@ -10562,7 +10581,7 @@ impl CasCore {
                 ""
             };
 
-        let auto_unblock_msg = if auto_unblocked_tasks.is_empty() {
+        let mut auto_unblock_msg = if auto_unblocked_tasks.is_empty() {
             String::new()
         } else {
             format!(
@@ -10570,6 +10589,12 @@ impl CasCore {
                 auto_unblocked_tasks.join(", ")
             )
         };
+        if !held_blocked_tasks.is_empty() {
+            auto_unblock_msg.push_str(&format!(
+                "\n\n⏸ Kept blocked after dependency closure: {}",
+                held_blocked_tasks.join("; ")
+            ));
+        }
 
         // cas-490f: surface the actual committed delta for the task so
         // supervisors see real changes at close time. cas-203e: this must use
@@ -11117,6 +11142,12 @@ impl CasCore {
                     "task reopen rejected: a non-empty reason is required to preserve the terminal-state audit trail",
                 )
             })?;
+        if old_status == TaskStatus::Blocked {
+            super::super::block_reason::record_hold_clear(
+                &mut task,
+                "task explicitly reopened",
+            );
+        }
         task.status = TaskStatus::Open;
         if matches!(old_status, TaskStatus::Closed | TaskStatus::Cancelled) {
             // cas-cd24: closed-specific resets stay gated to the closed

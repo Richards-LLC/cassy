@@ -181,8 +181,19 @@ impl CasCore {
                             .unwrap_or_default()
                             .is_empty()
                     {
+                        if let Some(reason) =
+                            super::block_reason::non_dependency_hold_reason(&task.notes)
+                        {
+                            super::block_reason::record_auto_unblock_skipped(&mut task, &reason);
+                            task_store.update(&task).map_err(|error| {
+                                Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
+                            })?;
+                            return Ok(Self::success(format!(
+                                "Removed external dependency: {} was blocked_by {}. Task remains blocked: {}.",
+                                req.from_id, req.to_id, reason
+                            )));
+                        }
                         task.status = TaskStatus::Open;
-                        task.updated_at = chrono::Utc::now();
                         task_store.update(&task).map_err(|error| {
                             Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
                         })?;

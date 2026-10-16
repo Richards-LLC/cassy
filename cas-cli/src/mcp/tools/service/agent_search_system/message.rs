@@ -2141,35 +2141,17 @@ impl CasService {
                             ) {
                                 message = format!("{hold}\n\n{message}");
                             }
-                            let review = crate::review_body::delivery_body(
+                            // cas-8b0e: the in-band review shows the worker's
+                            // proof:/ci: lines and renders unsupplied fields
+                            // neutrally; a missing merge base keeps the task
+                            // metadata with the comparison error.
+                            let review = crate::review_body::merge_request_review(
                                 &repo.repo_root,
-                                Some(&task),
+                                &task,
                                 &target_tip,
                                 &branch_tip,
-                                None,
-                                None,
-                                None,
-                            )
-                            .unwrap_or_else(|error| {
-                                // A missing merge base does not disable the existing
-                                // typed request: still show authoritative task metadata.
-                                crate::review_body::ReviewBody {
-                                    summary: &format!(
-                                        "```text\n{} -> {}\n```",
-                                        target_tip, branch_tip
-                                    ),
-                                    before: "Baseline behavior run not supplied.",
-                                    after: "Changed behavior run not supplied.",
-                                    evidence: &crate::review_body::task_evidence(&task),
-                                    details: &format!("\nGit comparison unavailable: {error}\n"),
-                                    risk: &crate::review_body::task_risk(&task),
-                                    door: &task
-                                        .door
-                                        .map(|door| door.to_string())
-                                        .unwrap_or_else(|| "not declared".into()),
-                                }
-                                .render()
-                            });
+                                &message,
+                            );
                             message = attach_merge_request_envelope(
                                 &format!("{message}\n\n{review}"),
                                 &MergeRequestEnvelope {

@@ -1286,7 +1286,7 @@ fn merge_required_idle_prompt_text(
              {evidence_line}\
              Source branch: {factory_branch}\n\
              Merge target: {target} (protected: pull requests through the merge queue only)\n\
-             Next action — drain the merge queue before free-form user chat:\n\
+             Next action:\n\
              1. Confirm: {epic_status} and/or {list_awaiting}, and that {factory_branch} is on origin\n\
              2. Generate the body: `cas worktree pr-body --task {} --base origin/{target} --head {factory_branch} --output pr-body.md`. Add observed --before/--after results and --evidence for the QA bundle or base-vs-change run. \
              Open a pull request: `gh pr create --base {target} --head {factory_branch} --title \"Review {factory_branch}\" --body-file pr-body.md`, \
@@ -1317,7 +1317,7 @@ fn merge_required_idle_prompt_text(
          {evidence_line}\
          Source branch: {factory_branch}\n\
          Merge target: {target}\n\
-         Next action — drain the merge queue before free-form user chat:\n\
+         Next action:\n\
          1. Confirm: {epic_status} and/or {list_awaiting}\n\
          {merge_step}\n\
          3. Push {target} if remote tracking applies\n\
@@ -3518,6 +3518,50 @@ mod tests {
         assert!(target_is_protected_default("master"));
         assert!(!target_is_protected_default("staging"));
         assert!(!target_is_protected_default("epic/main-cleanup-cas-1"));
+    }
+
+    /// cas-03ff: the MERGE REQUIRED nudge names the task's resolved merge
+    /// target (the epic branch when the lane is bundled there) and never
+    /// subordinates operator chat, in either variant.
+    #[test]
+    fn merge_required_nudge_names_the_resolved_target_without_a_chat_rule() {
+        let task = ActiveLeaseSummary {
+            task_id: "cas-8d38".to_string(),
+            task_title: "Bundled lane".to_string(),
+            task_status: TaskStatus::AwaitingMerge,
+            close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+            pending_qa: None,
+        };
+        let summary = |branch: &str| TaskSummary {
+            id: "cas-8d38".to_string(),
+            title: "Bundled lane".to_string(),
+            status: TaskStatus::AwaitingMerge,
+            priority: Priority::MEDIUM,
+            assignee: Some("wise-badger-5".to_string()),
+            task_type: TaskType::Task,
+            epic: Some("cas-78de".to_string()),
+            branch: Some(branch.to_string()),
+            updated_at: None,
+            epic_verification_owner: None,
+        };
+        let mut data = make_data(0);
+        for target in ["epic/burn-down-v43-cas-3-58", "main"] {
+            data.in_progress_tasks = vec![summary(target)];
+            let text =
+                merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None);
+            assert!(text.contains(&format!("Merge target: {target}")), "{text}");
+            assert!(!text.contains("free-form"), "{text}");
+            assert!(!text.to_lowercase().contains("chat"), "{text}");
+        }
+        let bundled = {
+            data.in_progress_tasks = vec![summary("epic/burn-down-v43-cas-3-58")];
+            merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None)
+        };
+        assert!(
+            bundled.contains("git merge --no-ff factory/wise-badger-5")
+                && !bundled.contains("gh pr create"),
+            "a bundled lane merges into its epic branch, with no per-task PR: {bundled}"
+        );
     }
 
     /// cas-38d7: the AwaitingMerge data the cas-c145 relay test uses, for a

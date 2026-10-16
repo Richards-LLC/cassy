@@ -4618,7 +4618,14 @@ impl CasService {
                     task.assignee.as_deref() == Some(agent.name.as_str())
                         || task.assignee.as_deref() == Some(agent.id.as_str())
                 });
-                let worktree_status = collect_worker_worktree_status(&self.inner.cas_root, agent, held_task);
+                let worktree_status = collect_worker_worktree_status_with_timeout(
+                    &self.inner.cas_root,
+                    agent,
+                    held_task,
+                    std::time::Duration::from_secs(2),
+                    std::path::Path::new("gh"),
+                )
+                .await;
                 let clone_path = worktree_status.clone_path;
                 let clone_info = worktree_status.clone_info;
                 // cas-844bf: git introspection — branch/HEAD/ahead-behind/dirty/PR
@@ -7792,16 +7799,71 @@ fn collect_worker_worktree_status(
     agent: &cas_types::Agent,
     task: Option<&cas_types::Task>,
 ) -> WorkerWorktreeStatus {
+    collect_worker_worktree_status_with_gh(cas_root, agent, task, std::path::Path::new("gh"))
+}
+
+fn collect_worker_worktree_status_with_gh(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+    task: Option<&cas_types::Task>,
+    gh_program: &std::path::Path,
+) -> WorkerWorktreeStatus {
     match resolve_worker_clone_path(cas_root, agent) {
         WorkerClonePathResolve::Ready(path) => {
             let clone_path = path.display().to_string();
-            let mut gs = collect_worker_git_status(&path);
+            let mut gs = collect_worker_git_status_with_gh(&path, gh_program);
             if let Some(task) = task {
-                apply_task_delivery_git_status(&path, task, &agent.name, &mut gs);
+                apply_task_delivery_git_status_with_gh(
+                    &path,
+                    task,
+                    &agent.name,
+                    &mut gs,
+                    gh_program,
+                );
             }
             WorkerWorktreeStatus {
                 clone_info: format!("\n    Clone: {clone_path}"),
                 git_info: format_worker_git_status(&gs),
+                clone_path: Some(clone_path),
+            }
+        }
+        WorkerClonePathResolve::NotOnDisk { candidate, .. } => {
+            let missing_path = candidate.display().to_string();
+            WorkerWorktreeStatus {
+                clone_info: format!("\n    Clone: {missing_path} [missing-worktree]"),
+                git_info: "\n    git: missing-worktree".to_string(),
+                clone_path: Some(missing_path),
+            }
+        }
+    }
+}
+
+async fn collect_worker_worktree_status_with_timeout(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+    task: Option<&cas_types::Task>,
+    timeout: std::time::Duration,
+    gh_program: &std::path::Path,
+) -> WorkerWorktreeStatus {
+    let fallback = worker_worktree_status_timeout_fallback(cas_root, agent);
+    tokio::time::timeout(timeout, async {
+        collect_worker_worktree_status_with_gh(cas_root, agent, task, gh_program)
+    })
+    .await
+    .unwrap_or(fallback)
+}
+
+fn worker_worktree_status_timeout_fallback(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+) -> WorkerWorktreeStatus {
+    match resolve_worker_clone_path(cas_root, agent) {
+        WorkerClonePathResolve::Ready(path) => {
+            let clone_path = path.display().to_string();
+            WorkerWorktreeStatus {
+                clone_info: format!("\n    Clone: {clone_path}"),
+                git_info: "\n    git: status lookup timed out\n    PR: unknown (status lookup timed out)"
+                    .to_string(),
                 clone_path: Some(clone_path),
             }
         }
@@ -7823,6 +7885,16 @@ fn apply_task_delivery_git_status(
     task: &cas_types::Task,
     worker: &str,
     status: &mut WorkerGitStatus,
+) {
+    apply_task_delivery_git_status_with_gh(repo, task, worker, status, std::path::Path::new("gh"));
+}
+
+fn apply_task_delivery_git_status_with_gh(
+    repo: &std::path::Path,
+    task: &cas_types::Task,
+    worker: &str,
+    status: &mut WorkerGitStatus,
+    gh_program: &std::path::Path,
 ) {
     let branch = task.deliverables.parked_branch.clone().unwrap_or_else(|| {
         crate::mcp::tools::core::task::lifecycle::close_ops::close_measured_factory_branch(
@@ -7855,7 +7927,7 @@ fn apply_task_delivery_git_status(
     } else {
         "none".to_string()
     };
-    status.pr_url = collect_worker_pr_url(repo, &status.branch, &status.pushed_ref, std::path::Path::new("gh"));
+    status.pr_url = collect_worker_pr_url(repo, &status.branch, &status.pushed_ref, gh_program);
 }
 
 /// Gather the live dirty-worktree floor for `worker_activity`.
@@ -18167,6 +18239,44 @@ effort = "high"
         assert!(
             !rendered.contains("PR: none"),
             "failed gh lookup must not masquerade as no PR: {rendered}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_status_git_collection_times_out_when_gh_stalls() {
+        let tmp = setup_git_repo_with_pushed_factory_branch("slow-gh-worker");
+        let gh = write_gh_stub(tmp.path(), "#!/bin/sh\nsleep 1\n");
+        let mut agent = cas_types::Agent::new_with_role(
+            "slow-gh-session".to_string(),
+            "slow-gh-worker".to_string(),
+            AgentRole::Worker,
+        );
+        agent.metadata.insert(
+            "clone_path".to_string(),
+            tmp.path().to_string_lossy().to_string(),
+        );
+
+        let started = std::time::Instant::now();
+        let status = collect_worker_worktree_status_with_timeout(
+            tmp.path(),
+            &agent,
+            None,
+            std::time::Duration::from_millis(100),
+            &gh,
+        )
+        .await;
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(750),
+            "a slow gh subprocess must not hold up the worker_status poll: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(status.clone_path.as_deref(), Some(tmp.path().to_string_lossy().as_ref()));
+        assert!(status.git_info.contains("status lookup timed out"), "{status:?}");
+        assert!(
+            status.git_info.contains("PR: unknown (status lookup timed out)"),
+            "timeout must not claim a successful empty PR query: {status:?}"
         );
     }
 

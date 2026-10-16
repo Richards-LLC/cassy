@@ -1370,8 +1370,22 @@ impl Pane {
                 self.inject_submit_pending
                     .store(true, std::sync::atomic::Ordering::Release);
                 let submit_pending = std::sync::Arc::clone(&self.inject_submit_pending);
+                // cas-786a6 review round 2, L1: a gate held for this pane
+                // (its provenance envelope still being written) holds the CR,
+                // boundedly, in this detached task.
+                let gate = crate::submit_gate::take(&self.id);
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
+                    if let Some(gate) = gate
+                        && !gate.opened(crate::submit_gate::SUBMIT_GATE_MAX_WAIT).await
+                    {
+                        tracing::warn!(
+                            target: "cas::coordination",
+                            stage = "inject_submit_gate_timeout",
+                            target_agent = %pane_id,
+                            "submit CR sent without its provenance envelope confirmed written"
+                        );
+                    }
                     let failed_pane = pane_id.clone();
                     let report = move |error: String| {
                         tracing::warn!(

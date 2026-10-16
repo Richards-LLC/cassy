@@ -604,7 +604,14 @@ pub(crate) fn register_pty_machine_payload(
     // inject's settle, or a normal inject's 150-500 ms submit delay). Off a
     // lane (the CLI, tests) it runs at once, as before.
     if cas_store::lane_guard::current_lane().is_some() {
-        provenance_writer().submit(Box::new(register));
+        // Review round 2, L1: the recipient's next submit CR waits (in its
+        // detached task, at most 2 s) until the envelope is written.
+        let gate = cas_mux::submit_gate::SubmitGate::new();
+        cas_mux::submit_gate::hold_next_submit(recipient, gate.clone());
+        provenance_writer().submit(Box::new(move || {
+            register();
+            gate.open();
+        }));
     } else {
         register();
     }

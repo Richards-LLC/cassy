@@ -1150,6 +1150,20 @@ impl Mux {
         self.pending_injects.iter().any(|inject| inject.pane_id == pane_id)
     }
 
+    /// Whether `pane_id` has an injected payload still awaiting its submit
+    /// CR. No turn break may be typed then (review round 2, M).
+    pub fn pane_submit_pending(&self, pane_id: &str) -> bool {
+        self.panes
+            .get(pane_id)
+            .is_some_and(|pane| pane.inject_submit_pending())
+    }
+
+    /// Whether `pane_id` is busy with an inject: settling, or its payload
+    /// awaiting its submit CR. A new urgent inject waits.
+    pub fn pane_inject_busy(&self, pane_id: &str) -> bool {
+        self.inject_pending(pane_id) || self.pane_submit_pending(pane_id)
+    }
+
     /// Whether any urgent inject is waiting for its pane. The loop polls
     /// [`Self::advance_injects`] promptly while this holds.
     pub fn has_pending_injects(&self) -> bool {
@@ -1180,8 +1194,11 @@ impl Mux {
             .panes
             .get(pane_id)
             .ok_or_else(|| Error::pane_not_found(pane_id))?;
+        // Review round 2, M: never a turn break between an earlier
+        // payload and its submit CR, whatever `preserve_composer` says.
         if self.inject_pending(pane_id)
-            || (preserve_composer && (pane.is_composer_dirty() || pane.inject_submit_pending()))
+            || pane.inject_submit_pending()
+            || (preserve_composer && pane.is_composer_dirty())
         {
             tracing::info!(
                 target: "cas::coordination",

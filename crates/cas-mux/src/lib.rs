@@ -37,6 +37,7 @@ mod pane;
 mod pty;
 mod render;
 mod spec;
+pub mod submit_gate;
 pub mod worker_resources;
 
 pub use backend::{

@@ -3724,3 +3724,65 @@ async fn a_pane_closed_or_respawned_mid_settle_fails_its_inject() {
     mux.get("same").unwrap().input_drained_for_test();
     assert!(!String::from_utf8_lossy(&recorded.0.lock().unwrap()).contains("old payload"));
 }
+
+/// cas-786a6 review round 2, M: a second urgent inject on a pane waits until
+/// the first payload's submit CR is written, so the pane sees Esc, payload,
+/// CR, then Esc, payload, CR, never a turn break between a payload and its CR.
+#[tokio::test]
+async fn back_to_back_urgent_injects_never_break_between_payload_and_cr() {
+    let mut mux = Mux::new(24, 80);
+    let (pane, recorded) = recording_pane("b2b", SupervisorCli::Claude, true).await;
+    mux.add_pane(pane);
+    let floor = std::time::Duration::from_millis(20);
+    let mut started = 0;
+    let mut finished = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while finished < 2 && std::time::Instant::now() < deadline {
+        if started < 2 {
+            let payload = if started == 0 { "FIRST" } else { "SECOND" };
+            if let InjectStart::Started(_) = mux
+                .begin_interrupt_and_inject("b2b", payload, floor, false)
+                .await
+                .unwrap()
+            {
+                started += 1;
+            }
+        }
+        finished += mux.advance_injects().await.len();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(finished, 2);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while mux.pane_submit_pending("b2b") && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    mux.get("b2b").unwrap().input_drained_for_test();
+    let written = recorded.0.lock().unwrap().clone();
+    assert_eq!(
+        written,
+        b"\x1bFIRST\r\x1bSECOND\r".to_vec(),
+        "{:?}",
+        String::from_utf8_lossy(&written)
+    );
+}
+
+/// cas-786a6 review round 2, L1: a submit gate held for a pane holds the
+/// next inject's CR until it opens.
+#[tokio::test]
+async fn a_held_submit_gate_holds_the_cr_until_it_opens() {
+    let (pane, recorded) = recording_pane("gated", SupervisorCli::Claude, true).await;
+    let gate = crate::submit_gate::SubmitGate::new();
+    crate::submit_gate::hold_next_submit("gated", gate.clone());
+    pane.inject_prompt("payload").await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    pane.input_drained_for_test();
+    assert_eq!(recorded.0.lock().unwrap().as_slice(), b"payload", "no CR while the gate is shut");
+    assert!(pane.inject_submit_pending());
+    gate.open();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while pane.inject_submit_pending() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    pane.input_drained_for_test();
+    assert_eq!(recorded.0.lock().unwrap().as_slice(), b"payload\r");
+}

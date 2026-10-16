@@ -255,7 +255,10 @@ impl FactoryDaemon {
             .operator_backlog
             .iter()
             .any(|(queued, _, _)| queued == pane);
-        if queued_behind || self.app.mux.inject_pending(pane) {
+        // Review round 2, M: wait while the pane settles an inject or its
+        // payload awaits its submit CR; a turn break then would land
+        // between that payload and its CR.
+        if queued_behind || self.app.mux.pane_inject_busy(pane) {
             self.queue_operator_urgent_inject(pane, payload, settle);
             return;
         }
@@ -290,7 +293,7 @@ impl FactoryDaemon {
         let mut waiting = std::mem::take(&mut self.urgent_injects.operator_backlog);
         let mut busy = std::collections::HashSet::new();
         while let Some((pane, payload, settle)) = waiting.pop_front() {
-            if busy.contains(&pane) || self.app.mux.inject_pending(&pane) {
+            if busy.contains(&pane) || self.app.mux.pane_inject_busy(&pane) {
                 busy.insert(pane.clone());
                 self.urgent_injects.operator_backlog.push_back((pane, payload, settle));
                 continue;

@@ -16,11 +16,16 @@ pub(super) async fn ready_claude_worker(daemon: &mut FactoryDaemon) {
 }
 
 pub(super) async fn ready_claude_worker_named(daemon: &mut FactoryDaemon, name: &str) {
+    ready_claude_worker_running(daemon, name, "printf ready; exec cat").await;
+}
+
+/// A ready Claude worker pane running `script` (it must print something).
+pub(super) async fn ready_claude_worker_running(daemon: &mut FactoryDaemon, name: &str, script: &str) {
     let pty = cas_mux::Pty::spawn(
         name,
         cas_mux::PtyConfig {
             command: "sh".into(),
-            args: vec!["-c".into(), "printf ready; exec cat".into()],
+            args: vec!["-c".into(), script.into()],
             cwd: Some(std::env::temp_dir()),
             env: vec![],
             env_remove: vec![],
@@ -340,4 +345,116 @@ async fn an_operator_urgent_inject_queues_behind_a_settling_one() {
     let (first, second) = (echoed.find("C4A-OP1"), echoed.find("C4A-OP2"));
     assert!(first.is_some() && second.is_some(), "both typed: {echoed:?}");
     assert!(first < second, "in order");
+}
+
+/// cas-786a6 review M5 / round 2 L1: on a daemon lane the provenance envelope
+/// is written off the lane, and the pane's next submit CR is held until it
+/// is, so the hook that reads it at submit always finds it.
+#[test]
+fn provenance_is_written_off_the_lane_before_the_submit() {
+    use cas_store::lane_guard::{self, Lane};
+    let root = tempfile::tempdir().unwrap();
+    let payload = {
+        let _lane = lane_guard::enter_lane(Lane::Control);
+        super::delivery::prepare_pty_machine_delivery(
+            root.path(),
+            "gated-worker",
+            cas_mux::SupervisorCli::Claude,
+            "supervisor",
+            "redirect C4A-PROVENANCE",
+            Some(4242),
+        )
+    };
+    let gate = cas_mux::submit_gate::pending_submit_gate("gated-worker")
+        .expect("the next submit on this pane is held for the envelope");
+    assert!(gate.wait(Duration::from_secs(5)), "the envelope write opens the gate");
+    let provenance =
+        crate::hooks::delivery_provenance::consume(root.path(), "gated-worker", &payload)
+            .expect("the envelope is written before the submit is let go");
+    assert_eq!(provenance.notification_id, 4242);
+}
+
+/// cas-786a6 review M2 / round 2 L2: an urgent row typed by a daemon that
+/// died before the pane's reaction was observed holds a bare claim. The next
+/// daemon releases it and interrupts again: at-least-once delivery (spec §4.5
+/// rule 5), documented in delivery.md.
+#[tokio::test]
+async fn a_restart_after_an_urgent_inject_reinterrupts_once() {
+    // A pane that never reacts: no echo, so the wake probe stays open and
+    // the row stays pending under its bare claim.
+    const SILENT: &str = "stty -echo; printf ready; exec sleep 60";
+    let (_root, cas_dir) = project_with_worker();
+    let id = enqueue_urgent(&cas_dir, "urgent before crash C4A-AGAIN");
+    {
+        let mut first = super::provisioning_tests::daemon(&cas_dir);
+        ready_claude_worker_running(&mut first, WORKER, SILENT).await;
+        let started = Instant::now();
+        while !first.urgent_wake_probes.contains_key(&id) && started.elapsed() < Duration::from_secs(6) {
+            first.process_prompt_queue().await.unwrap();
+            drain(&mut first);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(first.urgent_wake_probes.contains_key(&id), "the first daemon interrupted");
+        // The daemon dies here: its in-memory probe and cadence are lost.
+    }
+    let row = open_prompt_queue_store(&cas_dir).unwrap().queued_prompt(id).unwrap().unwrap();
+    assert!(row.processed_at.is_none(), "the row waits for its wake probe");
+    let _ = std::fs::remove_file(cas_dir.join("test.sock"));
+    let _ = std::fs::remove_file(cas_dir.join("gui.sock"));
+    let mut second = super::provisioning_tests::daemon(&cas_dir);
+    second.release_orphaned_claims_at_start();
+    ready_claude_worker_running(&mut second, WORKER, SILENT).await;
+    let started = Instant::now();
+    while !second.urgent_wake_probes.contains_key(&id) && started.elapsed() < Duration::from_secs(6) {
+        second.process_prompt_queue().await.unwrap();
+        drain(&mut second);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        second.urgent_wake_probes.contains_key(&id),
+        "the restarted daemon interrupts once more (at-least-once, spec §4.5 rule 5)"
+    );
+}
+
+/// cas-786a6 review M2 / round 2 L3: a broadcast member whose row is held by
+/// a bare transport claim (never handed off) counts as failed, not
+/// succeeded.
+#[tokio::test]
+async fn a_bare_claimed_broadcast_member_counts_as_failed() {
+    let (root, cas_dir) = project_with_workers(&[WORKER, "worker-b"]);
+    let claude_config = root.path().join("claude-config");
+    std::fs::create_dir_all(claude_config.join("teams").join(SESSION).join("inboxes")).unwrap();
+    let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[(
+        "CLAUDE_CONFIG_DIR",
+        claude_config.to_str(),
+    )]);
+    let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    daemon.teams = Some(super::teams::TeamsManager::new(SESSION));
+    ready_claude_worker(&mut daemon).await;
+    ready_claude_worker_named(&mut daemon, "worker-b").await;
+    let id = enqueue_urgent_to(&cas_dir, "all_workers", "everyone C4A-BARE");
+    open_prompt_queue_store(&cas_dir)
+        .unwrap()
+        .claim_recipient_transport_token(id, "worker-b")
+        .unwrap()
+        .expect("a bare claim nobody handed off");
+
+    let echoed = passes_until(&mut daemon, Duration::from_secs(6), |echoed| {
+        echoed.contains("C4A-BARE")
+    })
+    .await;
+    assert_eq!(echoed.matches("C4A-BARE").count(), 1, "only worker-a typed: {echoed:?}");
+    for _ in 0..20 {
+        daemon.process_prompt_queue().await.unwrap();
+    }
+    let report = open_prompt_queue_store(&cas_dir)
+        .unwrap()
+        .message_delivery_report(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (report.broadcast_attempted, report.broadcast_succeeded, report.broadcast_failed),
+        (Some(2), Some(1), Some(1)),
+        "the bare claim is a failure, not a delivery: {report:?}"
+    );
 }

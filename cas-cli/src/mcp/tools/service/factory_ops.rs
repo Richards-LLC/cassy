@@ -1680,6 +1680,15 @@ fn format_assigned_task_info(
 /// Pure over its input so the wording and the empty case are unit-testable
 /// without a daemon, a queue, or a clock.
 fn format_undelivered_relay_section(rows: &[cas_store::UndeliveredLifecycleRelay]) -> String {
+    format_undelivered_relay_section_at(rows, chrono::Utc::now())
+}
+
+/// [`format_undelivered_relay_section`] at a given time (cas-5871).
+fn format_undelivered_relay_section_at(
+    rows: &[cas_store::UndeliveredLifecycleRelay],
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let _ = now;
     let actionable = rows
         .iter()
         .filter(|row| {
@@ -11322,6 +11331,40 @@ mod spawn_lifecycle_tests {
             out.contains("not evidence the work was handled"),
             "must refuse to let silence read as success: {out}"
         );
+    }
+
+    /// cas-5871: relays older than a day are counted with a cleanup hint,
+    /// not listed. Nine September relays topped every worker_status in
+    /// October and pushed the live ones down.
+    #[test]
+    fn relays_older_than_a_day_are_counted_not_listed_cas_5871() {
+        let now = chrono::Utc::now();
+        let mut old = lost_relay("CI FAILED: factory/kind-owl-50 (e528)");
+        old.source = "lifecycle-wake:2904".to_string();
+        old.created_at = now - chrono::Duration::days(16);
+        let mut older = old.clone();
+        older.source = "lifecycle-wake:2903".to_string();
+        older.prompt_id += 1;
+        let fresh = lost_relay("task_awaiting_merge: cas-fe23 (2026-10-16T02:00:00Z)");
+        let out = format_undelivered_relay_section_at(&[fresh, old, older], now);
+        assert!(out.contains("cas-fe23"), "a recent relay is listed: {out}");
+        assert!(!out.contains("kind-owl-50"), "an old relay is not listed: {out}");
+        assert!(out.contains("2 older than 24 h"), "old relays are counted: {out}");
+        assert!(
+            out.contains("message_ack notification_id=2904") && out.contains("notification_id=2903"),
+            "the hint names how to clear each one: {out}"
+        );
+
+        let only_old = format_undelivered_relay_section_at(
+            &[{
+                let mut row = lost_relay("CI FAILED: factory/kind-owl-50 (e528)");
+                row.created_at = now - chrono::Duration::days(2);
+                row
+            }],
+            now,
+        );
+        assert!(only_old.contains("1 older than 24 h"), "{only_old}");
+        assert!(!only_old.contains("kind-owl-50"), "{only_old}");
     }
 
     /// The banner must be absent when there is nothing lost — a heading that

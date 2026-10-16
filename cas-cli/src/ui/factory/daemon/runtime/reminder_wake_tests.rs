@@ -100,3 +100,60 @@ fn reminder_wake_authority_cannot_be_borrowed_cas_835e() {
     );
     assert_eq!(class(&WakeSender::Daemon, "Reminder: check CI"), None, "no id, no delivery");
 }
+
+/// cas-5871: the reminder's supervisor_queue record is consumed once its
+/// prompt is queued. 2,942 reminder_fired rows since May sat unconsumed,
+/// because the reminder itself is delivered through prompt_queue.
+#[test]
+fn a_fired_reminders_queue_record_is_consumed_once_its_prompt_is_queued_cas_5871() {
+    let temp = tempfile::tempdir().unwrap();
+    let cas = temp.path();
+    let reminders: Arc<dyn ReminderStore> =
+        Arc::new(cas_store::SqliteReminderStore::open(cas).unwrap());
+    reminders.init().unwrap();
+    let records: Arc<dyn cas_store::SupervisorQueueStore> =
+        Arc::new(cas_store::SqliteSupervisorQueueStore::open(cas).unwrap());
+    records.init().unwrap();
+    let prompts: Arc<dyn PromptQueueStore> = crate::store::open_prompt_queue_store(cas).unwrap();
+    reminders
+        .create_with_scope(
+            "sup-id",
+            None,
+            "check CI",
+            cas_store::ReminderTriggerType::Time,
+            Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+            None,
+            None,
+            0,
+            Some("s"),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+    let reminder = reminders.list_pending("sup-id").unwrap().pop().unwrap();
+    super::queue_and_events::fire_reminder(
+        &reminder,
+        &reminders,
+        &Some(Arc::clone(&records)),
+        &Some(Arc::clone(&prompts)),
+        "s",
+        "lead-sup",
+        &HashMap::from([("sup-id".to_string(), "lead-sup".to_string())]),
+        None,
+        cas,
+    );
+    assert!(
+        prompts
+            .peek_all(10)
+            .unwrap()
+            .iter()
+            .any(|row| row.prompt.contains("check CI")),
+        "the reminder is delivered"
+    );
+    assert_eq!(
+        records.pending_count("sup-id").unwrap(),
+        0,
+        "its supervisor_queue record does not stay unconsumed"
+    );
+}

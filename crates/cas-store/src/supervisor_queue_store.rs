@@ -1224,4 +1224,55 @@ mod tests {
         assert!(store.prune_finished_batch(0, 10).is_err(), "a zero window is refused");
     }
 
+
+    /// cas-5871: an outbox row whose prompt was delivered is consumed. All
+    /// 116 task_lifecycle rows of one session sat at processed_at NULL with
+    /// their prompts delivered, so every pending view counted them forever.
+    #[test]
+    fn a_delivered_outbox_row_is_consumed_cas_5871() {
+        let (_temp, store) = create_test_store();
+        let id = match store
+            .notify_idempotent(
+                "supervisor-1",
+                "task_lifecycle",
+                "{}",
+                NotificationPriority::Normal,
+                "cas-x:open:closed:s:task_closed:1",
+            )
+            .unwrap()
+        {
+            NotifyIdempotentResult::Created(id) => id,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(store.pending_count("supervisor-1").unwrap(), 1);
+        store.mark_prompt_delivered(id).unwrap();
+        let row = store.get(id).unwrap().unwrap();
+        assert!(row.prompt_delivered_at.is_some());
+        assert!(row.processed_at.is_some(), "delivered is consumed");
+        assert_eq!(store.pending_count("supervisor-1").unwrap(), 0);
+    }
+
+    /// cas-5871: 2,942 reminder_fired rows since May were never consumed. The
+    /// reminder is delivered through prompt_queue; this row is only a record,
+    /// so an aged one is finished. Any other unconsumed pull row may still be
+    /// someone's delivery and stays.
+    #[test]
+    fn an_aged_reminder_record_is_pruned_but_a_pending_pull_row_stays_cas_5871() {
+        let (_temp, store) = create_test_store();
+        let reminder = store
+            .notify("supervisor-1", "reminder_fired", "{}", NotificationPriority::Normal)
+            .unwrap();
+        let pull = store
+            .notify("supervisor-1", "worker_died", "{}", NotificationPriority::Normal)
+            .unwrap();
+        {
+            let aged = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+            let conn = store.conn.lock().unwrap();
+            conn.execute("UPDATE supervisor_queue SET created_at = ?1", params![aged])
+                .unwrap();
+        }
+        assert_eq!(store.prune_finished_batch(14 * 24 * 60 * 60, 10).unwrap(), 1);
+        assert!(store.get(reminder).unwrap().is_none(), "the aged reminder record is gone");
+        assert!(store.get(pull).unwrap().is_some(), "a pending pull row is never deleted");
+    }
 }

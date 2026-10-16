@@ -2923,6 +2923,16 @@ pub trait PromptQueueStore: Send + Sync {
     /// Returns the number of previously-unacknowledged rows reconciled.
     fn reconcile_terminal_lifecycle_relays(&self) -> Result<usize>;
 
+    /// cas-5871: reconcile terminal lifecycle relays whose factory session
+    /// has ended (no registered agent of that session is still running). The
+    /// supervisor they were for is gone, so they leave the undelivered-relay
+    /// banner. Like [`Self::reconcile_terminal_lifecycle_relays`], the
+    /// forensic row and its stage are kept; a row that may still be delivered
+    /// (not yet terminal) is never touched. Returns the rows reconciled.
+    fn reconcile_ended_session_lifecycle_relays(&self) -> Result<usize> {
+        Ok(0)
+    }
+
     /// Count all unresolved terminal or >60s pending lifecycle relays without
     /// a display cap. Status banners cannot hide backlog depth.
     fn undelivered_lifecycle_relay_count(&self) -> Result<usize>;
@@ -13693,6 +13703,61 @@ mod tests {
         assert!(prompts[0].contains(cause), "{prompts:?}");
         // pin: GH #1196: the misleading session-membership reason must not reach operator notices.
         assert!(!prompts[0].contains("factory session"), "{prompts:?}");
+    }
+
+    /// cas-5871: worker_status listed nine undelivered relays from September
+    /// sessions long ended (CI FAILED for kind-owl-50 on 2026-09-29, rolling
+    /// integration rows from 2026-09-11). A terminal relay whose session has
+    /// ended is reconciled; one from a live session, or one that may still be
+    /// delivered, stays.
+    #[test]
+    fn terminal_relays_from_ended_sessions_leave_the_banner_cas_5871() {
+        use crate::{AgentStore, SqliteAgentStore};
+        use cas_types::{Agent, AgentRole, AgentStatus};
+        let (temp, store) = create_test_store();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut live = Agent::new("live-sup".into(), "live-sup".into());
+        live.role = AgentRole::Supervisor;
+        live.factory_session = Some("live-session".into());
+        agents.register(&live).unwrap();
+        let mut gone = Agent::new("gone-sup".into(), "gone-sup".into());
+        gone.role = AgentRole::Supervisor;
+        gone.factory_session = Some("ended-session".into());
+        gone.status = AgentStatus::Shutdown;
+        agents.register(&gone).unwrap();
+
+        let relay = |session: &str, terminal: bool| {
+            let id = store
+                .enqueue_with_session("lifecycle-wake:ci-red-run:factory/kind-owl-50:e528", "supervisor", "CI FAILED", session)
+                .unwrap();
+            if terminal {
+                store.mark_undelivered_lifecycle_relay(id, Some("expired")).unwrap();
+            }
+            id
+        };
+        let ended_terminal = relay("ended-session", true);
+        let live_terminal = relay("live-session", true);
+        let ended_pending = relay("ended-session", false);
+        {
+            let aged = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+            let conn = crate::shared_db::lock_connection(&store.conn).unwrap();
+            conn.execute("UPDATE prompt_queue SET created_at = ?1", params![aged]).unwrap();
+        }
+        assert_eq!(store.undelivered_lifecycle_relay_count().unwrap(), 3);
+
+        assert_eq!(store.reconcile_ended_session_lifecycle_relays().unwrap(), 1);
+        let listed: Vec<i64> = store
+            .list_undelivered_lifecycle_relays(10)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.prompt_id)
+            .collect();
+        assert!(!listed.contains(&ended_terminal), "{listed:?}");
+        assert!(listed.contains(&live_terminal) && listed.contains(&ended_pending), "{listed:?}");
+        let kept = store.queued_prompt(ended_terminal).unwrap().unwrap();
+        assert!(kept.acked_at.is_some(), "the forensic row is kept, only reconciled");
+        assert_eq!(store.reconcile_ended_session_lifecycle_relays().unwrap(), 0, "once");
     }
 
     #[test]

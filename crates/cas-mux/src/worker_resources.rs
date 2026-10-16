@@ -128,6 +128,7 @@ fn filtered_project_mcp(
     repo: &Path,
     cas_root: &Path,
     policy: &FactoryWorkerPolicy,
+    scope: McpScope,
 ) -> std::io::Result<Vec<u8>> {
     let mut document: serde_json::Value = match std::fs::read(repo.join(".mcp.json")) {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -143,7 +144,22 @@ fn filtered_project_mcp(
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .ok_or_else(|| std::io::Error::other("project MCP servers must be an object"))?;
-    servers.retain(|name, _| !policy.denies_server(name));
+    if matches!(scope, McpScope::CasOnly) && policy.denies_server("cas") {
+        return Err(std::io::Error::other(
+            "Claude workers require the cas MCP server; supervisor_only_mcp denies cas",
+        ));
+    }
+    servers.retain(|name, _| {
+        !policy.denies_server(name) && (!matches!(scope, McpScope::CasOnly) || name == "cas")
+    });
+    // Strict scope must keep Cassy even when the operator registered it only
+    // in a local/user scope. Identity/session metadata is inherited at spawn.
+    servers.entry("cas").or_insert_with(|| {
+        serde_json::json!({
+            "command": "cas", "args": ["serve"], "env": {"CAS_ROOT": cas_root}
+        })
+    });
+    // Apply denials after synthesizing CAS too; defaults cannot regrant env.
     for server in servers.values_mut() {
         if let Some(env) = server
             .get_mut("env")
@@ -152,13 +168,6 @@ fn filtered_project_mcp(
             env.retain(|name, _| !policy.denies_env(name));
         }
     }
-    // Strict scope must keep Cassy even when the operator registered it only
-    // in a local/user scope. Identity/session metadata is inherited at spawn.
-    servers.entry("cas").or_insert_with(|| {
-        serde_json::json!({
-            "command": "cas", "args": ["serve"], "env": {"CAS_ROOT": cas_root}
-        })
-    });
     serde_json::to_vec_pretty(&document).map_err(std::io::Error::other)
 }
 
@@ -200,8 +209,14 @@ pub fn provision_project_mcp(repo: &Path, worker_name: &str) -> std::io::Result<
     if policy.is_empty() {
         return Ok(false);
     }
-    prepare_worker_mcp(&cas_root, worker_name, &policy)?;
+    prepare_worker_mcp(&cas_root, worker_name, &policy, McpScope::AllowedProject)?;
     Ok(true)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum McpScope {
+    AllowedProject,
+    CasOnly,
 }
 
 /// Prepare an explicit private config for every worker. Existing worktree
@@ -210,6 +225,7 @@ pub(crate) fn prepare_worker_mcp(
     cas_root: &Path,
     name: &str,
     policy: &FactoryWorkerPolicy,
+    scope: McpScope,
 ) -> std::io::Result<PathBuf> {
     let repo = cas_root
         .parent()
@@ -224,6 +240,9 @@ pub(crate) fn prepare_worker_mcp(
         ));
     }
     let destination = cas_root.join("worker-mcp").join(format!("{name}.json"));
-    write_private(&destination, &filtered_project_mcp(repo, cas_root, policy)?)?;
+    write_private(
+        &destination,
+        &filtered_project_mcp(repo, cas_root, policy, scope)?,
+    )?;
     Ok(destination)
 }

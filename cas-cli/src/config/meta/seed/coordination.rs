@@ -84,6 +84,17 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         keywords: &["factory", "operator", "commander", "mirror", "privacy"],
         use_cases: &["See supervisor replies without first sending a message", "Opt out of automatic supervisor reply capture"],
     });
+    for (key, name, description, value_type, default) in [
+        ("factory.claude.remote_control", "Claude Supervisor Remote Control", "Opt in to Claude Remote Control for the supervisor only. Workers remain network-quiet. Requires installed CLI support.", ConfigType::Bool, "false"),
+        ("factory.claude.fallback_model", "Claude Overload Fallback Model", "Explicit Claude fallback model for workers and supervisor. Empty clears it. Requires installed CLI support; model availability is resolved by Claude.", ConfigType::String, ""),
+    ] {
+        registry.register(ConfigMeta {
+            key, section: "factory", name, description, value_type, default,
+            constraint: Constraint::None, advanced: false, requires_feature: None,
+            keywords: &["factory", "claude", "remote", "fallback", "model"],
+            use_cases: &["Configure supported Claude launch options"],
+        });
+    }
     // FACTORY SECTION
     // ============================================================
     for (key, name, description) in [

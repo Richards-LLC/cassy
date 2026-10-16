@@ -47,7 +47,7 @@ impl SkillSyncer {
     }
 
     /// Generate the SKILL.md content for a skill
-    fn generate_skill_md(&self, skill: &Skill) -> String {
+    pub(crate) fn generate_skill_md(&self, skill: &Skill) -> String {
         let mut content = String::new();
 
         // YAML frontmatter

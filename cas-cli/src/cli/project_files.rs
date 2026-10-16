@@ -204,6 +204,33 @@ pub(crate) fn ignored_paths(root: &Path, harnesses: &[SupervisorCli]) -> Vec<Str
     paths.into_iter().collect()
 }
 
+// Exact source bytes distinguish a prior legitimate sync from a manual edit.
+// Reuse the writers' renderers; no second projection format lives here.
+fn source_projections(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+    let mut projections = BTreeMap::new();
+    let cas_dir = root.join(".cas");
+    if !cas_dir.join("cas.db").is_file() {
+        return Ok(projections);
+    }
+    let rules = crate::store::open_rule_store_local(&cas_dir)?.list()?;
+    let syncer = crate::sync::Syncer::with_defaults(root);
+    for rule in rules.iter().filter(|rule| syncer.should_sync(rule)) {
+        projections.insert(
+            format!(".claude/rules/cas/{}.md", rule.id),
+            crate::sync::Syncer::render_rule(rule).into_bytes(),
+        );
+    }
+    let skills = crate::store::open_skill_store_local(&cas_dir)?.list(None)?;
+    let syncer = crate::sync::SkillSyncer::with_defaults(root);
+    for skill in skills.iter().filter(|skill| syncer.is_enabled(skill)) {
+        projections.insert(
+            format!(".claude/skills/{}/SKILL.md", crate::sync::skills::skill_dir_name(&skill.name)),
+            syncer.generate_skill_md(skill).into_bytes(),
+        );
+    }
+    Ok(projections)
+}
+
 fn ignored(path: &str, paths: &[String]) -> bool {
     paths.iter().any(|p| {
         let p = p.trim_start_matches('/');
@@ -309,6 +336,7 @@ impl Reconcile {
         candidates.extend(index.keys().filter(|p| harness_path(p)).cloned());
         candidates
             .extend([".env.worktree.template", "scripts/worktree-boot.sh"].map(str::to_string));
+        let projections = source_projections(root)?;
         let mut before = BTreeMap::new();
         for path in candidates {
             let absolute = root.join(&path);
@@ -333,6 +361,7 @@ impl Reconcile {
                 if (cassy_body(&path, bytes) || ignored(&path, &paths))
                     && baseline.is_some_and(|b| b != bytes)
                     && !builtins::matches_shipped_project_file(&path, bytes)
+                    && projections.get(&path) != Some(bytes)
                     && bytes != crate::cli::init::CAS_SKILL.as_bytes()
                     && bytes != format!("{}\n", crate::cli::init::build_agents_section()).as_bytes()
                 {

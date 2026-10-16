@@ -280,11 +280,16 @@ pub(crate) struct SurfacingOutcome {
 /// UserPromptSubmit served. Only then does the block carry the turn-start
 /// notes (already shown, withdrawn, did not fit), which no hook has given
 /// yet; an `[already shown]` note can also come from a `[cas #N …]` envelope.
+///
+/// cas-6ccb: `polled_before` also shows, in the same block, rows read with
+/// `inbox_poll` before that turn start and never acknowledged, so one row
+/// gets one note (the repeat), not also "[already shown]".
 pub(crate) fn surface_turn_prompt_rows(
     cas_root: &Path,
     input: &HookInput,
     prompt: &str,
     first_boundary: bool,
+    polled_before: Option<chrono::DateTime<chrono::Utc>>,
     budget: &mut usize,
 ) -> Option<SurfacingOutcome> {
     if !names_wake_pointer(prompt) && !(first_boundary && !envelope_ids(prompt).is_empty()) {
@@ -296,6 +301,7 @@ pub(crate) fn surface_turn_prompt_rows(
         Surfacing::TurnPrompt {
             prompt,
             notes: first_boundary,
+            polled_before,
         },
         budget,
     )
@@ -310,9 +316,36 @@ enum Surfacing<'a> {
     TurnStart,
     ToolBoundary(Option<CurrentTurn<'a>>),
     /// cas-1f0c: a tool boundary handling the rows its turn's prompt names.
-    TurnPrompt { prompt: &'a str, notes: bool },
+    TurnPrompt {
+        prompt: &'a str,
+        notes: bool,
+        polled_before: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    /// cas-6ccb: once per turn, at a tool boundary, rows polled before the
+    /// turn began and never acknowledged (independent of new mail).
+    PolledUnacked(chrono::DateTime<chrono::Utc>),
 }
 
+/// cas-6ccb (GH #1215): once per turn, at its first tool boundary, show the
+/// direct rows this agent read with `inbox_poll` before the turn began and
+/// never acknowledged. A turn-start hook already does this for typed turns;
+/// a teammate-message turn has none, and new mail need not have arrived.
+pub(crate) fn surface_polled_unacked(
+    cas_root: &Path,
+    input: &HookInput,
+    turn_started_at: chrono::DateTime<chrono::Utc>,
+    budget: &mut usize,
+) -> Option<SurfacingOutcome> {
+    surface_factory_inbox_with_transport_delivery(
+        Some(cas_root),
+        input,
+        Surfacing::PolledUnacked(turn_started_at),
+        budget,
+    )
+}
+
+const POLLED_REPEAT_HEADER: &str = "The following message(s) are a one-time repeat of \
+     earlier inbox_poll reads you did not acknowledge.";
 const TURN_START_HEADER: &str = "The following message(s) arrived while you were not in a turn. \
      They are delivered here once — act on them now.";
 const TOOL_BOUNDARY_HEADER: &str = "The following message(s) arrived while you were working. \
@@ -341,7 +374,7 @@ fn surface_factory_inbox_with_transport_delivery(
     let turn_prompt = match &surfacing {
         Surfacing::TurnStart => Some(input.submitted_prompt().unwrap_or_default()),
         Surfacing::TurnPrompt { prompt, .. } => Some(*prompt),
-        Surfacing::ToolBoundary(_) => None,
+        Surfacing::ToolBoundary(_) | Surfacing::PolledUnacked(_) => None,
     };
     let wake_ids = turn_prompt.map(wake_named_ids).unwrap_or_default();
     // Turn-start notes go to the first hook that serves a turn: UserPromptSubmit,
@@ -360,23 +393,35 @@ fn surface_factory_inbox_with_transport_delivery(
     let mut rows: Vec<QueuedPrompt> = Vec::new();
     let mut over_budget: Vec<(i64, usize)> = Vec::new();
     let mut withheld: Vec<i64> = Vec::new();
+    let mut polled_unacked: Vec<i64> = Vec::new();
+    // cas-6ccb: a turn-start hook runs as its turn begins.
+    let turn_started = chrono::Utc::now();
     let mut drain_failed = false;
     for alias in &aliases {
         let drains = match &surfacing {
             // cas-ad92: a pointer wake names the row whose body the harness
             // holds back until the next turn boundary; surface it into the
             // wake turn first, over the daemon's transport claim.
+            // cas-6ccb (GH #1215): a row read with inbox_poll in an earlier
+            // turn and never acknowledged is shown once more.
             Surfacing::TurnStart => vec![
                 cas_store::HookDrain::WakeNamed(&wake_ids),
                 cas_store::HookDrain::Unseen,
+                cas_store::HookDrain::PolledBefore(turn_started),
             ],
             Surfacing::ToolBoundary(Some(turn)) => {
                 vec![cas_store::HookDrain::DeliveredAfter(turn.started_at)]
             }
+            Surfacing::PolledUnacked(at) => vec![cas_store::HookDrain::PolledBefore(*at)],
             Surfacing::ToolBoundary(None) => vec![cas_store::HookDrain::WithoutTransport],
-            Surfacing::TurnPrompt { .. } => vec![cas_store::HookDrain::WakeNamed(&wake_ids)],
+            Surfacing::TurnPrompt { polled_before, .. } => {
+                let mut drains = vec![cas_store::HookDrain::WakeNamed(&wake_ids)];
+                drains.extend(polled_before.map(cas_store::HookDrain::PolledBefore));
+                drains
+            }
         };
         for drain in drains {
+            let repeat_of_poll = matches!(drain, cas_store::HookDrain::PolledBefore(_));
             let remaining = SURFACE_LIMIT.saturating_sub(rows.len());
             if remaining == 0 {
                 break;
@@ -436,6 +481,9 @@ fn surface_factory_inbox_with_transport_delivery(
                     continue;
                 }
                 *budget = budget.saturating_sub(cas_store::hook_surface_cost(&row.prompt));
+                if repeat_of_poll {
+                    polled_unacked.push(row.id);
+                }
                 rows.push(row);
             }
         }
@@ -450,7 +498,15 @@ fn surface_factory_inbox_with_transport_delivery(
             .all(|(_, cost)| *cost > cas_store::HOOK_SURFACE_BUDGET_CHARS);
 
     let mut block_notes: Vec<String> = Vec::new();
+    block_notes.extend(polled_unacked_note(&polled_unacked));
     if notes {
+        // cas-6ccb: a row shown in full again gets the [not acknowledged]
+        // note, not also "[already shown]".
+        let already_shown: Vec<i64> = already_shown
+            .iter()
+            .copied()
+            .filter(|id| !rows.iter().any(|row| row.id == *id))
+            .collect();
         block_notes.extend(already_shown_note(&already_shown));
         // cas-1f0c: the wake promised this turn the body or a reason.
         let withdrawn: Vec<i64> = withheld
@@ -491,10 +547,17 @@ fn surface_factory_inbox_with_transport_delivery(
             cas_store::SurfacingSource::HookSurfaced,
         );
     }
-    let header = match surfacing {
-        Surfacing::TurnStart => TURN_START_HEADER,
-        Surfacing::ToolBoundary(_) => TOOL_BOUNDARY_HEADER,
-        Surfacing::TurnPrompt { .. } => TURN_PROMPT_HEADER,
+    // cas-6ccb: a block of repeats only says so; a mixed block keeps its
+    // header and the [not acknowledged] note names the repeats.
+    let header = if !rows.is_empty() && polled_unacked.len() == rows.len() {
+        POLLED_REPEAT_HEADER
+    } else {
+        match surfacing {
+            Surfacing::TurnStart => TURN_START_HEADER,
+            Surfacing::ToolBoundary(_) => TOOL_BOUNDARY_HEADER,
+            Surfacing::TurnPrompt { .. } => TURN_PROMPT_HEADER,
+            Surfacing::PolledUnacked(_) => POLLED_REPEAT_HEADER,
+        }
     };
     Some(SurfacingOutcome {
         text: render_block(&block_notes, &rows, header),
@@ -522,6 +585,19 @@ fn render_block(notes: &[String], rows: &[QueuedPrompt], header: &str) -> Option
         );
     }
     Some(out)
+}
+
+/// cas-6ccb (GH #1215): rows shown again because they were read with
+/// `inbox_poll` in an earlier turn and never acknowledged.
+fn polled_unacked_note(ids: &[i64]) -> Option<String> {
+    if ids.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[not acknowledged] Message {} below is a one-time repeat: you read it with inbox_poll \
+         in an earlier turn and did not acknowledge it. Skip it if you already handled it.",
+        id_list(ids)
+    ))
 }
 
 /// cas-1f0c: a row the wake named whose assignment no longer applies. Its

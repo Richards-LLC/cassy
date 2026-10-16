@@ -6351,7 +6351,8 @@ async fn inbox_poll_uses_registered_identity_and_session_and_claims_processed_un
     assert!(text.contains("processed but unacked"), "{text}");
     assert!(text.contains("legacy message"), "{text}");
     assert!(!text.contains("wrong session"), "{text}");
-    assert!(text.contains("at-most-once inbox claim"), "{text}");
+    // pin: the poll states its claim and the once-more resurfacing of unacked rows (cas-6ccb)
+    assert!(text.contains("shown once more at your next turn"), "{text}");
 
     let second = env
         .service
@@ -6362,6 +6363,76 @@ async fn inbox_poll_uses_registered_identity_and_session_and_claims_processed_un
         get_text(&second),
         "No unread messages for registered-worker"
     );
+}
+
+/// cas-6ccb (GH #1215): through MCP `inbox_poll`, a row the poll withholds as
+/// already done is settled, so the next turn's one-time repeat of polled but
+/// unacknowledged rows never brings back its body; a row shown in full is
+/// repeated. `inbox_poll notification_id=<id>` reads a row again on request.
+#[tokio::test]
+async fn inbox_poll_settles_withheld_rows_and_reads_a_named_row_again_cas_6ccb() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_NAME", Some("registered-worker")),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("registered-worker-id");
+    env.register_worker_with_id("registered-worker-id", "registered-worker", None);
+    let task_id = env.create_awaiting_merge_task("already parked", "registered-worker");
+    let queue = env.prompt_queue();
+    let brief = format!(
+        "You were spawned for task {task_id} — \"already parked\" — and it is assigned to you now.\n\
+         Start with `mcp__cas__task action=show id={task_id}`, then `mcp__cas__task action=start id={task_id}` before you change any code."
+    );
+    let stale = queue.enqueue("director", "registered-worker", &brief).unwrap();
+    let kept = queue
+        .enqueue("supervisor", "registered-worker", "rebase onto v43 before parking")
+        .unwrap();
+
+    let polled = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("inbox poll");
+    let text = get_text(&polled);
+    assert!(text.contains("rebase onto v43 before parking"), "{text}");
+    assert!(!text.contains("assigned to you now"), "{text}");
+
+    let later_turn = chrono::Utc::now() + chrono::Duration::seconds(1);
+    let repeated: Vec<i64> = queue
+        .surface_for_recipient_within_budget(
+            "registered-worker",
+            None,
+            cas_store::HookDrain::PolledBefore(later_turn),
+            10,
+            cas_store::HOOK_SURFACE_BUDGET_CHARS,
+        )
+        .unwrap()
+        .rows
+        .iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(repeated, vec![kept], "the withheld row {stale} is settled, not repeated");
+    // Settled is not acknowledged: no ack, and status says why (review M-new).
+    let report = queue.message_delivery_report(stale).unwrap().unwrap();
+    assert!(report.confirmed_at.is_none(), "{report:?}");
+    assert!(
+        report
+            .recipient_poll_settled
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("withheld by inbox_poll: assignment for")),
+        "{report:?}"
+    );
+
+    let mut named = coord_req("inbox_poll");
+    named.notification_id = Some(kept);
+    let again = get_text(
+        &env.service
+            .coordination(Parameters(named))
+            .await
+            .expect("named inbox poll"),
+    );
+    assert!(again.contains("rebase onto v43 before parking"), "{again}");
 }
 
 /// cas-5255 / GH #719: a transport-delivered row must remain recoverable by
@@ -7958,6 +8029,50 @@ async fn test_coordination_message_returned_notification_id_drives_status_query(
         status_text.contains(&format!("Message {notification_id} status:")),
         "status response must describe the same returned ID: {status_text}"
     );
+}
+
+#[tokio::test]
+async fn cas_1ba0_message_status_distinguishes_held_inbox_from_composer_retry() {
+    let env = FactoryTestEnv::new();
+    let queue = env.prompt_queue();
+    for (deferred, receipt) in [
+        (true, Some(cas_store::SurfacingSource::TransportClaimed)),
+        (false, None),
+        (true, None),
+        (true, Some(cas_store::SurfacingSource::HookSurfaced)),
+    ] {
+        let held_copy = deferred && receipt == Some(cas_store::SurfacingSource::TransportClaimed);
+        let id = queue
+            .enqueue("supervisor", "swift-fox", "decision")
+            .unwrap();
+        queue
+            .record_pending_reason(
+                id,
+                cas_store::PendingReason::GatedNotReady,
+                Some("same detail in both cases"),
+            )
+            .unwrap();
+        if let Some(receipt) = receipt {
+            queue
+                .record_recipient_surfaced(id, "swift-fox", receipt)
+                .unwrap();
+        }
+        if deferred {
+            queue.record_deferred_inbox(id, 123).unwrap();
+        }
+        let mut req = coord_msg("message_status", "swift-fox", "unused", None);
+        req.notification_id = Some(id);
+        let text = get_text(&env.service.coordination(Parameters(req)).await.unwrap());
+        if held_copy {
+            assert!(text.contains("held inbox:"), "{text}");
+            assert!(text.contains("next tool call or turn start"), "{text}");
+            assert!(!text.contains("retry budget"), "{text}");
+        } else {
+            assert!(text.contains("delivery retry:"), "{text}");
+            assert!(text.contains("900s retry budget"), "{text}");
+            assert!(!text.contains("next tool call"), "{text}");
+        }
+    }
 }
 
 /// cas-893c AC2: `message_status` must expose how long a message has been

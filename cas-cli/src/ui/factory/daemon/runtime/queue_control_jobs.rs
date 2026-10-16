@@ -428,6 +428,8 @@ pub(crate) struct PromptPreparation {
 }
 
 impl PromptPreparation {
+    pub(crate) fn forget_pane(&mut self, _pane: &str) {}
+
     pub(crate) fn wake_now(&self) -> chrono::DateTime<chrono::Utc> {
         #[cfg(test)]
         if let Some(now) = self.wake_clock {

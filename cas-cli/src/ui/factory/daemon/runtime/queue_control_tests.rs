@@ -106,6 +106,111 @@ fn assert_unknown_grace_expires(mode: &str) {
     );
 }
 
+async fn assert_replacement_gets_fresh_grace(action: Option<PendingSpawn>) {
+    use super::super::prompt_queue_jobs::{QueueJobs, QueueSelection};
+    use super::super::queue_control_jobs::PromptPreparation;
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+    let id = queue.enqueue("supervisor", "worker-a", "decision").unwrap();
+    let mut daemon = super::super::provisioning_tests::daemon(&root);
+    let mut jobs = QueueJobs::inline();
+    let mut preparation = PromptPreparation::default();
+    let first = chrono::Utc::now();
+    preparation.wake_clock = Some(first);
+    // Preserve the old prepared input as well as its first-seen map entry.
+    assert!(
+        preparation
+            .advance(
+                &mut jobs,
+                Some(QueueSelection {
+                    rows: vec![queue.queued_prompt(id).unwrap().unwrap()],
+                    ..Default::default()
+                }),
+                root.clone(),
+                "lead".into(),
+                vec![],
+                Instant::now()
+            )
+            .is_some()
+    );
+    daemon.queue_jobs.prompt_preparation = preparation;
+    {
+        let _lane =
+            super::super::loop_watchdog::enforce_test_lane(cas_store::lane_guard::Lane::Control);
+        assert!(
+            daemon
+                .prepared_wake_evidence("worker-a")
+                .awaiting_first_prompt
+        );
+        daemon.queue_jobs.prompt_preparation.wake_clock = Some(
+            first
+                + chrono::Duration::from_std(CLAUDE_FIRST_PROMPT_GRACE).unwrap()
+                + chrono::Duration::seconds(1),
+        );
+        assert!(
+            !daemon
+                .prepared_wake_evidence("worker-a")
+                .awaiting_first_prompt
+        );
+    }
+    if let Some(action) = action {
+        // Missing worker / invalid recipe prevent a real harness launch. The
+        // production handler still crosses its pane replacement boundary.
+        daemon.pending_spawns.push_back(action);
+        daemon.process_pending_spawns().await;
+    } else {
+        let _lane =
+            super::super::loop_watchdog::enforce_test_lane(cas_store::lane_guard::Lane::Control);
+        daemon.queue_jobs.prompt_preparation.forget_pane("worker-a");
+    }
+    let _lane =
+        super::super::loop_watchdog::enforce_test_lane(cas_store::lane_guard::Lane::Control);
+    assert!(
+        daemon
+            .prepared_wake_evidence("worker-a")
+            .awaiting_first_prompt,
+        "reused pane must receive fresh boot grace, not the expired snapshot's sighting"
+    );
+}
+
+#[tokio::test]
+async fn cas_7b6b_round4_forget_pane_restarts_expired_grace_under_c6() {
+    assert_replacement_gets_fresh_grace(None).await;
+}
+#[tokio::test]
+async fn cas_7b6b_round4_respawn_forgets_expired_pane_grace() {
+    assert_replacement_gets_fresh_grace(Some(PendingSpawn::Respawn("worker-a".into()))).await;
+}
+#[tokio::test]
+async fn cas_7b6b_round4_recycle_forgets_expired_pane_grace() {
+    assert_replacement_gets_fresh_grace(Some(PendingSpawn::Recycle {
+        request_id: 1,
+        name: "worker-a".into(),
+        spec: None,
+    }))
+    .await;
+}
+
+fn assert_unknown_sender_unresolvable(
+    root: &std::path::Path,
+    preparation: super::super::queue_control_jobs::PromptPreparation,
+) {
+    let mut daemon = super::super::provisioning_tests::daemon(root);
+    daemon.queue_jobs.prompt_preparation = preparation;
+    let _lane =
+        super::super::loop_watchdog::enforce_test_lane(cas_store::lane_guard::Lane::Control);
+    assert!(
+        matches!(
+            daemon.wake_sender_for(Some(&cas_store::QueueOrigin::RegisteredAgent {
+                agent_id: "worker-id".into()
+            })),
+            WakeSender::Unresolvable
+        ),
+        "Unknown fallback must grant no registered sender authority"
+    );
+}
+
 #[test]
 fn cas_7b6b_round3_missing_inputs_grace_expires_and_escalates_under_c6() {
     assert_unknown_grace_expires("missing");
@@ -307,6 +412,7 @@ fn cas_7b6b_round2_failed_reads_eventually_release_batch_with_unknown_evidence()
     assert_eq!(attempts, 3, "release after three unusable read attempts");
     assert!(preparation.allows_delivery(Instant::now() + Duration::from_secs(1)));
     assert!(!preparation.has_pending());
+    assert_unknown_sender_unresolvable(&root, preparation);
 }
 
 #[test]
@@ -351,6 +457,7 @@ fn cas_7b6b_round2_slow_reads_eventually_release_batch_off_the_loop() {
         "degraded observations must pass the delivery guard rather than carry the batch again"
     );
     assert!(!preparation.has_pending());
+    assert_unknown_sender_unresolvable(&root, preparation);
 }
 
 #[tokio::test]

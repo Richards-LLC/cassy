@@ -189,7 +189,7 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
         let usage = profile
             .usage
             .as_deref()
-            .map(|usage| format!(" · {usage}"))
+            .map(|usage| format!(": {usage}"))
             .unwrap_or_default();
         // cas-e1f4: two short lines per account, so the list fits 80 columns.
         let directory = profile

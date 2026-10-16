@@ -214,7 +214,7 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
                 profile
                     .usage
                     .as_deref()
-                    .map(|usage| format!(" · {usage}"))
+                    .map(|usage| format!(": {usage}"))
                     .unwrap_or_default()
             ),
         })

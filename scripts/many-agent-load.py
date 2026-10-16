@@ -44,8 +44,10 @@ Stdlib only; Linux only (it reads /proc).
 from __future__ import annotations
 
 import argparse
+import collections
 import datetime as dt
 import glob
+import hashlib
 import json
 import os
 import random
@@ -1018,7 +1020,10 @@ def summarize_writers(probe: EchoProbe | None, rates: list[float] | None) -> dic
                 "frames": entry["frames"],
                 "writes_per_sec": round(writes / span, 1) if span > 0 else None,
             })
-    missing = sorted(set(rates or []) - {row["configured_writes_per_sec"] for row in observed})
+    # A multiset: two writers configured at one rate need two writers seen.
+    missing = sorted((collections.Counter(rates or [])
+                      - collections.Counter(row["configured_writes_per_sec"] for row in observed)
+                      ).elements())
     return {"configured_writes_per_sec": list(rates or []), "observed": observed,
             "missing_writes_per_sec": missing, "complete": not missing}
 
@@ -1321,6 +1326,22 @@ def evaluate_slos(calls: list[dict], daemon: dict, lock_episodes: list[dict],
     return slos
 
 
+def live_agents(receipt: dict) -> int:
+    """Agents that ran the whole phase: an agent that failed is not load."""
+    return receipt["agents"] - len(receipt.get("agent_errors") or {})
+
+
+def file_sha256(path: str) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
 def flv2_receipts(receipt: dict) -> list[dict]:
     """Factory loop v2 §7 receipt rows (C6, cas-9db0b).
 
@@ -1330,8 +1351,13 @@ def flv2_receipts(receipt: dict) -> list[dict]:
     """
     rows = []
     load = receipt.get("host_load", {})
+    live = live_agents(receipt)
     context = {
         "agents": receipt["agents"],
+        "live_agents": live,
+        "cas_bin": receipt.get("cas_bin"),
+        "cas_bin_sha256": receipt.get("cas_bin_sha256"),
+        "cas_version": receipt.get("cas_version"),
         "synthetic_writers": receipt.get("synthetic_writers", {}).get(
             "configured_writes_per_sec", []),
         "background_writers": receipt["background_writers"]["writers"],
@@ -1347,7 +1373,7 @@ def flv2_receipts(receipt: dict) -> list[dict]:
             "observed_ms": daemon.get("pass_p99_ms"),
             "passes_over_100ms": daemon.get("reported", {}).get("passes_over_100ms"),
             "timed_passes": daemon.get("reported", {}).get("timed_passes"),
-            "met": bool(within) and receipt["agents"] >= 16,
+            "met": bool(within) and live >= 16,
             **context,
         })
     echo = receipt.get("key_to_echo", {})
@@ -1360,7 +1386,7 @@ def flv2_receipts(receipt: dict) -> list[dict]:
             "timeouts": echo.get("timeouts"),
             "met": (echo.get("error") is None and echo.get("p99_ms") is not None
                     and echo["p99_ms"] < SLO_KEY_TO_ECHO_P99_MS
-                    and receipt["agents"] >= 16 and bool(context["synthetic_writers"])
+                    and live >= 16 and bool(context["synthetic_writers"])
                     and receipt.get("synthetic_writers", {}).get("complete", False)),
             "writers_missing": receipt.get("synthetic_writers", {}).get("missing_writes_per_sec"),
             **context,
@@ -1481,11 +1507,13 @@ def markdown_flv2(receipt: dict) -> list[str]:
     rows = receipt.get("flv2_receipts") or []
     if rows:
         lines += ["", "### Factory loop v2 receipts", "",
+                  f"- Binary `{rows[0].get('cas_bin')}` sha256 `{rows[0].get('cas_bin_sha256')}`", "",
                   "| Receipt | Budget | Observed | Met | Host load1 (min/mean/max) |",
                   "|---|---|---|---|---|"]
         for row in rows:
             host = row["host_load1"]
-            lines.append(f"| `{row['receipt']}` | {row['budget']} | {fmt(row['observed_ms'], ' ms')} "
+            lines.append(f"| `{row['receipt']}` ({row['live_agents']}/{row['agents']} agents live) "
+                         f"| {row['budget']} | {fmt(row['observed_ms'], ' ms')} "
                          f"| {'yes' if row['met'] else '**no**'} | {host.get('load1_min')}/"
                          f"{host.get('load1_mean')}/{host.get('load1_max')} on {row['cpus']} CPUs |")
     return lines
@@ -1593,6 +1621,7 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
         "label": args.label,
         "cas_bin": args.cas_bin,
         "cas_version": cas_version(args.cas_bin),
+        "cas_bin_sha256": file_sha256(shutil.which(args.cas_bin) or args.cas_bin),
         "harness_commit": harness_commit(),
         "started_at": started_at,
         "finished_at": utc_now(),

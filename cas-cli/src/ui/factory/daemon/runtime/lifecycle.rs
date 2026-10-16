@@ -2457,6 +2457,10 @@ impl FactoryDaemon {
             loop_progress.enter(super::loop_watchdog::LoopPhase::ClientInput);
             // Input forwarding and PTY exchange must not touch the store.
             let store_free_input = cas_store::wait_budget::forbid_store_access();
+            // C6 (cas-9db0b): input forwarding and the PTY exchange are proven
+            // clean, so this lane enforces here. Outside tests a blocking call
+            // is recorded and logged once as an error; it never panics.
+            let enforced_input = cas_store::lane_guard::enforce_here();
             // Error timeout must run in daemon mode too (not only local event loop path).
             let had_error = self.app.error_message.is_some();
             self.app.check_error_timeout();
@@ -2486,6 +2490,7 @@ impl FactoryDaemon {
             let ws_activity = self.process_ws_client_input().await;
             let bytes_processed = self.exchange_terminal(&loop_progress).await;
             let had_output = bytes_processed > 0;
+            drop(enforced_input);
             drop(store_free_input);
 
             let summary_metadata = format!(
@@ -2511,6 +2516,9 @@ impl FactoryDaemon {
             // client surface had a chance to submit or clear its composer.
             // This stays outside process_prompt_queue so a deferred inject
             // never blocks the input loop that can make its target clean.
+            // C6 (cas-9db0b): the C4a inject and C3 queue pass are proven
+            // clean; the lane enforces until the queue pass ends.
+            let enforced_queue = cas_store::lane_guard::enforce_here();
             self.app.mux.flush_deferred_injections().await;
             // cas-786a6 (factory loop v2 C4a): urgent injects whose pane has
             // settled type their payload now. A settle is a per-pane state;
@@ -2545,6 +2553,7 @@ impl FactoryDaemon {
                 last_prompt_poll = std::time::Instant::now();
                 prompt_notified = false;
             }
+            drop(enforced_queue);
 
             // cas-73b5: a supervisor's `restart_spawn_queue` request is applied
             // here, at most once a second.

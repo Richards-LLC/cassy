@@ -70,10 +70,16 @@ The run passes only when all four hold:
 
 The receipt's `flv2_receipts` rows hold the two receipt budgets from spec §7 (`docs/specs/2026-10-15-factory-loop-v2.md`):
 
-- `flv2_control_pass_p99_under_100ms_with_16_agents`: the daemon pass p99, met only with at least 16 agents;
-- `flv2_key_to_echo_p99_under_50ms_under_load`: the echo p99, met only with at least 16 agents and synthetic writers.
+- `flv2_control_pass_p99_under_100ms_with_16_agents`: the daemon pass p99, met only with at least 16 live agents;
+- `flv2_key_to_echo_p99_under_50ms_under_load`: the echo p99, met only with at least 16 live agents and every configured synthetic writer delivering.
 
-Each row also records the agents, the writer rates, the pressure profile and the host's 1-minute load range with its CPU count. These are reference-host receipts, not merge gates. The factory hosts are shared, so read a receipt next to its load average and the `no_pressure` control. The factory loop v2 receipt command is:
+An agent whose `cas serve` failed is not counted as live. Writer rates compare as a multiset.
+
+Each row also records:
+- the binary path, its SHA-256 and its version;
+- the configured and live agents;
+- the writer rates and the pressure profile;
+- the host's 1-minute load range and CPU count. These are reference-host receipts, not merge gates. The factory hosts are shared, so read a receipt next to its load average and the `no_pressure` control. The factory loop v2 receipt command is:
 
 ```bash
 python3 -I scripts/many-agent-load.py --cas-bin <candidate> --label flv2-<sha> \

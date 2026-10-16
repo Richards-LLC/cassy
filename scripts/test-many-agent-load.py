@@ -5,6 +5,7 @@ No `cas` binary, daemon or database: the synthetic writer runs in a real
 pseudo-terminal, and the key-to-echo probe talks to a fake daemon GUI socket.
 """
 import argparse
+import hashlib
 import importlib.util
 import os
 import pty
@@ -222,6 +223,8 @@ class EchoProbeTest(unittest.TestCase):
         self.assertTrue(writers["complete"])
         missing = load.summarize_writers(probe, [100.0, 236.0])
         self.assertEqual((missing["complete"], missing["missing_writes_per_sec"]), (False, [236.0]))
+        twice = load.summarize_writers(probe, [100.0, 100.0])
+        self.assertEqual(twice["missing_writes_per_sec"], [100.0], "rates compare as a multiset")
 
     def test_a_lost_echo_counts_as_the_timeout(self):
         probe = self.run_probe(delay=0.0, drop_every=3)
@@ -234,6 +237,9 @@ class Receipts(unittest.TestCase):
     def receipt(self, pass_ok, echo_p99, agents=16, writers=(38.0, 63.0, 236.0)):
         return {
             "agents": agents,
+            "agent_errors": {},
+            "cas_bin": "/x/cas",
+            "cas_bin_sha256": "ab" * 32,
             "background_writers": {"writers": 2},
             "host_load": {"load1_min": 20.0, "load1_mean": 25.0, "load1_max": 30.0, "cpus": 32},
             "synthetic_writers": {"configured_writes_per_sec": list(writers),
@@ -251,12 +257,17 @@ class Receipts(unittest.TestCase):
         self.assertTrue(all(r["met"] for r in rows))
         self.assertEqual(rows[1]["host_load1"]["load1_max"], 30.0)
         self.assertEqual(rows[1]["synthetic_writers"], [38.0, 63.0, 236.0])
+        self.assertEqual((rows[0]["live_agents"], rows[0]["cas_bin_sha256"]), (16, "ab" * 32))
 
     def test_misses_and_under_specified_runs_are_not_met(self):
         self.assertFalse(load.flv2_receipts(self.receipt(True, 50.0))[1]["met"])
         self.assertFalse(load.flv2_receipts(self.receipt(False, 10.0))[0]["met"])
         self.assertFalse(load.flv2_receipts(self.receipt(True, 10.0, agents=4))[0]["met"])
         self.assertFalse(load.flv2_receipts(self.receipt(True, 10.0, writers=()))[1]["met"])
+        lost = self.receipt(True, 10.0)
+        lost["agent_errors"] = {"load-agent-11": "RuntimeError: cas serve exited (1)"}
+        self.assertEqual([r["met"] for r in load.flv2_receipts(lost)], [False, False],
+                         "15 live agents are not a 16-agent receipt")
         incomplete = self.receipt(True, 10.0)
         incomplete["synthetic_writers"]["complete"] = False
         self.assertFalse(load.flv2_receipts(incomplete)[1]["met"], "a writer never started")
@@ -267,6 +278,13 @@ class Receipts(unittest.TestCase):
         slos = load.evaluate_slos([], {"enabled": False}, [], echo)
         self.assertEqual(slos[-1]["slo"], "key -> echo p99 < 50 ms")
         self.assertFalse(slos[-1]["met"])
+
+    def test_binary_digest(self):
+        with tempfile.NamedTemporaryFile() as handle:
+            handle.write(b"cas")
+            handle.flush()
+            self.assertEqual(load.file_sha256(handle.name), hashlib.sha256(b"cas").hexdigest())
+        self.assertIsNone(load.file_sha256("/nonexistent/cas"))
 
     def test_loadavg_summary(self):
         samples = [{"load1": v, "load5": 1.0, "load15": 1.0, "at": "t"} for v in (3.0, 9.0, 6.0)]

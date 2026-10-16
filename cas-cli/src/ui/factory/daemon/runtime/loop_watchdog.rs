@@ -530,8 +530,23 @@ fn attached() -> Option<Arc<LoopProgress>> {
 pub(crate) fn enforce_test_lane(
     lane: cas_store::lane_guard::Lane,
 ) -> cas_store::lane_guard::LaneGuard {
-    cas_store::lane_guard::panic_on_enforced_violations();
+    cas_store::lane_guard::panic_on_enforced_violations_for_tests();
     cas_store::lane_guard::enforce_lane(lane)
+}
+
+/// The daemon loop's lane as `FactoryDaemon::run` holds it: attached to
+/// `progress` in report mode, then the enforced scope `run` opens around a
+/// proven-clean step (`lane_guard::enforce_here`), with this test process's
+/// enforced violations set to panic. Hold both until the step ends.
+#[cfg(test)]
+pub(crate) fn enforced_daemon_step(
+    progress: &Arc<LoopProgress>,
+    phase: LoopPhase,
+) -> (LaneAttachment, cas_store::lane_guard::ModeGuard) {
+    cas_store::lane_guard::panic_on_enforced_violations_for_tests();
+    let attachment = progress.attach(Lane::Control);
+    progress.enter(phase);
+    (attachment, cas_store::lane_guard::enforce_here())
 }
 
 /// Mark the attached lane as entering `step`. A no-op off a lane thread.

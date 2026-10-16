@@ -540,12 +540,17 @@ in the TUI. v2 extends these pieces rather than replacing them.
    *C6 status (cas-9db0b):* `lane_guard::enforce_lane` and `enforce_here`
    enforce; `enter_lane`, which the daemon loop's attachment uses, still
    reports. An enforced call panics only under a test harness (cas-store
-   `cfg(test)` or `panic_on_enforced_violations()`). Anywhere else, a debug
-   daemon run for QA included, it logs one error per site with its step. The
-   tests of passes proven clean enforce. The loop attachment moves to
-   enforce after C2c (cas-4491f) moves the relays, `inject_director_prompt`
-   and the director-apply I/O off the loop. Each violation site records the
-   step it ran in.
+   `cfg(test)` or the hidden test switch). Anywhere else, a debug daemon run
+   for QA included, it logs one error per site with its step.
+   `FactoryDaemon::run` enforces with `enforce_here` on the steps proven
+   clean: client input with the PTY exchange, and the inject/queue pass
+   (deferred and urgent injects, then the prompt queue). Tests drive those
+   steps with the lane held the way `run` holds it. A
+   `permit_store_access` exception reports rather than enforces. The rest of
+   the loop's attachment moves to enforce after C2c (cas-4491f) moves the
+   relays, `inject_director_prompt` and the director-apply I/O off the loop.
+   Each violation site records the step it ran in. Once the 64-site report
+   is full, further new sites are only counted.
 
 ## 7. Named latency tests
 

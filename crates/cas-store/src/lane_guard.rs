@@ -18,7 +18,7 @@
 //! - **Enforce** ([`enforce_lane`], or [`enforce_here`] for a scope of the
 //!   current lane; factory loop v2 C6, cas-9db0b): the call is recorded the
 //!   same way. Under a test harness (cas-store's own `cfg(test)`, or a
-//!   process that called [`panic_on_enforced_violations`]) it then panics,
+//!   process that called [`panic_on_enforced_violations_for_tests`]) it then panics,
 //!   naming the call, lane, step and site. Anywhere else, debug builds
 //!   included, it logs one error per site with the step and runs: a debug
 //!   daemon that supervisors and QA run for real must never lose its worker
@@ -86,7 +86,8 @@ impl BlockingKind {
 pub enum GuardMode {
     /// Count, record and log the call once per site, then run it.
     Report,
-    /// Panic in debug and test builds; report in release builds.
+    /// Panic under a test harness; anywhere else record the call, log one
+    /// error per site and run it.
     Enforce,
 }
 
@@ -135,15 +136,18 @@ thread_local! {
 }
 
 static TOTAL_VIOLATIONS: AtomicU64 = AtomicU64::new(0);
+static OVERFLOWED: AtomicU64 = AtomicU64::new(0);
+static OVERFLOW_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Whether an enforced violation panics: cas-store's own tests, or a test
-/// harness that asked for it ([`panic_on_enforced_violations`]).
+/// harness that asked for it ([`panic_on_enforced_violations_for_tests`]).
 static PANIC_ON_ENFORCED: AtomicBool = AtomicBool::new(cfg!(test));
 
 /// The explicit test-harness switch: from now on an enforced violation in
-/// this process panics instead of logging. Test code calls this; production
-/// code never does.
-pub fn panic_on_enforced_violations() {
+/// this process panics instead of logging. Test code calls this (cas-cli
+/// through `loop_watchdog::enforce_test_lane`); production code never does.
+#[doc(hidden)]
+pub fn panic_on_enforced_violations_for_tests() {
     PANIC_ON_ENFORCED.store(true, Ordering::Relaxed);
 }
 
@@ -218,14 +222,15 @@ pub fn enforce_lane(lane: Lane) -> LaneGuard {
     enter(lane, GuardMode::Enforce)
 }
 
-/// Restores the mode [`enforce_here`] replaced when dropped.
-#[must_use = "enforcement lasts only while the guard is alive"]
-pub struct EnforceGuard {
+/// Restores the mode [`enforce_here`] or [`report_here`] replaced when
+/// dropped.
+#[must_use = "the mode lasts only while the guard is alive"]
+pub struct ModeGuard {
     previous: Option<GuardMode>,
     _not_send: std::marker::PhantomData<*const ()>,
 }
 
-impl Drop for EnforceGuard {
+impl Drop for ModeGuard {
     fn drop(&mut self) {
         if let Some(previous) = self.previous {
             MODE.with(|mode| mode.set(previous));
@@ -233,14 +238,26 @@ impl Drop for EnforceGuard {
     }
 }
 
-/// Enforce on the lane this thread already runs until the guard drops, for
-/// a step proven clean inside a reporting lane. A no-op off a lane.
-pub fn enforce_here() -> EnforceGuard {
-    let previous = current_lane().map(|_| MODE.with(|mode| mode.replace(GuardMode::Enforce)));
-    EnforceGuard {
+fn set_mode_here(mode: GuardMode) -> ModeGuard {
+    let previous = current_lane().map(|_| MODE.with(|current| current.replace(mode)));
+    ModeGuard {
         previous,
         _not_send: std::marker::PhantomData,
     }
+}
+
+/// Enforce on the lane this thread already runs until the guard drops, for
+/// steps proven clean inside a reporting lane (the daemon loop's client
+/// input, PTY exchange and inject/queue pass). A no-op off a lane.
+pub fn enforce_here() -> ModeGuard {
+    set_mode_here(GuardMode::Enforce)
+}
+
+/// Report on the lane this thread already runs until the guard drops: a
+/// named exception inside an enforced step, such as
+/// [`crate::wait_budget::permit_store_access`]. A no-op off a lane.
+pub fn report_here() -> ModeGuard {
+    set_mode_here(GuardMode::Report)
 }
 
 /// Name the step this lane runs, for the violation report and the enforce
@@ -291,33 +308,31 @@ pub fn note_blocking_call(kind: BlockingKind, what: &'static str) {
     LAST_THREAD_VIOLATION.with(|last| last.set(Some((lane, kind, what))));
     TOTAL_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
     let key = (lane, kind, what, caller.file(), caller.line(), step);
-    let first = {
+    let recorded = {
         let mut sites = sites()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match sites.get_mut(&key) {
-            Some(entry) => {
-                entry.count += 1;
-                false
-            }
-            None => {
-                if sites.len() < SITES_KEPT {
-                    sites.insert(
-                        key,
-                        LaneViolation {
-                            lane,
-                            kind,
-                            what,
-                            site: format!("{}:{}", caller.file(), caller.line()),
-                            step,
-                            count: 1,
-                        },
-                    );
-                }
-                true
-            }
-        }
+        record_site(&mut sites, key, || LaneViolation {
+            lane,
+            kind,
+            what,
+            site: format!("{}:{}", caller.file(), caller.line()),
+            step,
+            count: 1,
+        })
     };
+    if recorded == SiteRecord::Overflow {
+        OVERFLOWED.fetch_add(1, Ordering::Relaxed);
+        if !OVERFLOW_LOGGED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                target: "cas::loop_watchdog",
+                kept = SITES_KEPT,
+                "the lane violation report is full; calls from further new sites are counted \
+                 (lane_guard::overflowed_violations) but not recorded or logged (logged once)"
+            );
+        }
+    }
+    let first = recorded == SiteRecord::First;
     let enforced = MODE.with(Cell::get) == GuardMode::Enforce;
     if enforced && enforced_violations_panic() {
         panic!(
@@ -350,6 +365,39 @@ pub fn note_blocking_call(kind: BlockingKind, what: &'static str) {
             "blocking call on a daemon lane (factory loop v2 report mode; logged once per site)"
         );
     }
+}
+
+/// What recording one call did to the site report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SiteRecord {
+    /// A new site, now recorded: log it.
+    First,
+    /// A recorded site, counted again.
+    Repeat,
+    /// A new site with the report full: counted in the overflow only, never
+    /// logged per call (cas-9db0b review M1).
+    Overflow,
+}
+
+fn record_site(
+    sites: &mut BTreeMap<SiteKey, LaneViolation>,
+    key: SiteKey,
+    violation: impl FnOnce() -> LaneViolation,
+) -> SiteRecord {
+    if let Some(entry) = sites.get_mut(&key) {
+        entry.count += 1;
+        return SiteRecord::Repeat;
+    }
+    if sites.len() >= SITES_KEPT {
+        return SiteRecord::Overflow;
+    }
+    sites.insert(key, violation());
+    SiteRecord::First
+}
+
+/// Calls from new sites the full report could not keep, in this process.
+pub fn overflowed_violations() -> u64 {
+    OVERFLOWED.load(Ordering::Relaxed)
 }
 
 /// Blocking calls reported on a lane by this thread so far.
@@ -500,6 +548,37 @@ mod tests {
         assert_eq!((site.count, site.step), (2, Some("director apply")));
     }
 
+    /// Review M1: with the report full, a new site is an overflow. It is
+    /// counted, never recorded and never "first", so it is not logged on
+    /// every call; known sites keep counting.
+    #[test]
+    fn flv2_full_site_report_counts_overflow_without_logging_each_call() {
+        let mut sites = BTreeMap::new();
+        let key = |line: u32| -> SiteKey {
+            (Lane::Io, BlockingKind::Proc, "cap test", "lane_guard.rs", line, Some("step"))
+        };
+        let violation = || LaneViolation {
+            lane: Lane::Io,
+            kind: BlockingKind::Proc,
+            what: "cap test",
+            site: "lane_guard.rs:1".to_string(),
+            step: Some("step"),
+            count: 1,
+        };
+        for line in 0..SITES_KEPT as u32 {
+            assert_eq!(record_site(&mut sites, key(line), violation), SiteRecord::First);
+        }
+        for _ in 0..3 {
+            assert_eq!(
+                record_site(&mut sites, key(SITES_KEPT as u32), violation),
+                SiteRecord::Overflow
+            );
+        }
+        assert_eq!(record_site(&mut sites, key(0), violation), SiteRecord::Repeat);
+        assert_eq!(sites.len(), SITES_KEPT);
+        assert_eq!(sites[&key(0)].count, 2);
+    }
+
     /// A report lane inside an enforcing one restores the outer lane's mode
     /// and step when it drops; [`enforce_here`] enforces a scope of a
     /// reporting lane and is a no-op off a lane.
@@ -520,6 +599,12 @@ mod tests {
             assert_eq!(current_mode(), Some(GuardMode::Report), "switching keeps the mode");
             {
                 let _clean = enforce_here();
+                assert_eq!(current_mode(), Some(GuardMode::Enforce));
+                {
+                    let _exception = report_here();
+                    assert_eq!(current_mode(), Some(GuardMode::Report));
+                    note_blocking_call(BlockingKind::Store, "named exception site");
+                }
                 assert_eq!(current_mode(), Some(GuardMode::Enforce));
             }
             assert_eq!(current_mode(), Some(GuardMode::Report));

@@ -246,6 +246,65 @@ async fn input_forwarding_exchange_and_draw_touch_no_store() {
     );
 }
 
+/// C6 review M2 (cas-9db0b): the daemon enforces on its client-input and
+/// PTY-exchange steps (`lane_guard::enforce_here` in `FactoryDaemon::run`).
+/// Keys typed on the client socket reach a real PTY and its echo is drained,
+/// with the lane held exactly as `run` holds it and enforced violations set
+/// to panic: no blocking call, no store access.
+#[tokio::test]
+async fn flv2_input_and_pty_exchange_run_enforced() {
+    let (_dir, cas_dir) = logged_in_project();
+    let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    daemon.listener.set_nonblocking(true).unwrap();
+    super::inject_command_tests::ready_claude_worker(&mut daemon).await;
+    assert!(daemon.app.mux.focus("worker-a"));
+    let mut client = UnixStream::connect(cas_dir.join("test.sock")).unwrap();
+    let progress = super::loop_watchdog::LoopProgress::new();
+    fn daemon_bytes(daemon: &FactoryDaemon) -> u64 {
+        daemon.app.mux.pane_bytes_received("worker-a").unwrap_or(0)
+    }
+
+    let before_lane = cas_store::lane_guard::thread_violations();
+    let before_store = wait_budget::store_access_violations();
+    let echo_before = daemon_bytes(&daemon);
+    let mut exchanged = 0usize;
+    for keys in [&b"c6-echo"[..], b"\x1b[D", b"\x1b[C"] {
+        client.write_all(keys).unwrap();
+        let started = Instant::now();
+        loop {
+            let (attachment, enforced) = super::loop_watchdog::enforced_daemon_step(
+                &progress,
+                super::loop_watchdog::LoopPhase::ClientInput,
+            );
+            assert_eq!(
+                cas_store::lane_guard::current_mode(),
+                Some(cas_store::lane_guard::GuardMode::Enforce)
+            );
+            let _forbid = wait_budget::forbid_store_access();
+            daemon.accept_clients().unwrap();
+            daemon.process_client_input().await.unwrap();
+            exchanged += daemon.exchange_terminal(&progress).await;
+            drop(enforced);
+            drop(attachment);
+            if daemon_bytes(&daemon) > echo_before || started.elapsed() > Duration::from_secs(5) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    assert!(
+        daemon_bytes(&daemon) > echo_before && exchanged > 0,
+        "the typed keys echoed through the PTY exchange"
+    );
+    assert_eq!(
+        cas_store::lane_guard::thread_violations(),
+        before_lane,
+        "{:?}",
+        cas_store::lane_guard::last_thread_violation()
+    );
+    assert_eq!(wait_budget::store_access_violations(), before_store);
+}
+
 #[test]
 fn a_task_sync_mutation_under_a_foreign_sqlite_write_lock_stays_in_budget() {
     // Only SQLite is held: the mutation takes its task-sync lease and stripe,
@@ -565,12 +624,16 @@ fn flv2_no_blocking_call_on_lanes() {
                 .downcast_ref::<String>()
                 .cloned()
                 .unwrap_or_default();
+            // The call that tripped is this kind's own, on this lane.
+            let (tripped_lane, tripped_kind, what) =
+                lane_guard::last_thread_violation().expect("the tripping call is recorded");
+            assert_eq!((tripped_lane, tripped_kind), (lane, *kind), "{message}");
             assert!(
-                message.starts_with(&format!("blocking {} call `", kind.name()))
-                    && message.contains(&format!(
-                        " on the {} lane in step `flv2 enforce probe` at ",
-                        lane.name()
-                    )),
+                message.starts_with(&format!(
+                    "blocking {} call `{what}` on the {} lane in step `flv2 enforce probe` at ",
+                    kind.name(),
+                    lane.name()
+                )),
                 "{kind:?} on {lane:?}: {message}"
             );
             assert_eq!(lane_guard::current_lane(), None, "the lane unwinds");

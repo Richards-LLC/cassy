@@ -133,15 +133,7 @@ fn managed_block_range(content: &str) -> Option<(usize, usize)> {
 
 /// Replace the managed block in `content` with `new_section`.
 fn replace_managed_block(content: &str, begin: usize, end: usize, new_section: &str) -> String {
-    let before = &content[..begin];
-    let after = &content[end..];
-    format!(
-        "{}{}{}{}",
-        before.trim_end(),
-        if before.is_empty() { "" } else { "\n" },
-        new_section,
-        after
-    )
+    format!("{}{}{}", &content[..begin], new_section, &content[end..])
 }
 
 /// Remove the managed block from `content`, joining the surrounding text

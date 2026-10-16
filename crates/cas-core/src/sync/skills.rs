@@ -271,6 +271,15 @@ impl SkillSyncer {
 
     /// Sync all enabled skills and remove stale directories
     pub fn sync_all(&self, skills: &[Skill]) -> Result<SkillSyncReport, CoreError> {
+        self.sync_all_preserving(skills, &HashSet::new())
+    }
+
+    /// Keep directories owned by another writer (builtins or project skills).
+    pub fn sync_all_preserving(
+        &self,
+        skills: &[Skill],
+        retained: &HashSet<String>,
+    ) -> Result<SkillSyncReport, CoreError> {
         let mut report = SkillSyncReport::default();
 
         // Collect names of enabled skills
@@ -301,7 +310,10 @@ impl SkillSyncer {
                         .unwrap_or_default();
 
                     // Only remove cas-* prefixed directories that we manage
-                    if name.starts_with("cas-") && !enabled_names.contains(name) {
+                    if name.starts_with("cas-")
+                        && !enabled_names.contains(name)
+                        && !retained.contains(name)
+                    {
                         fs::remove_dir_all(&path)?;
                         report.removed += 1;
                         report.removed_names.push(name.to_string());
@@ -366,7 +378,7 @@ fn sanitize_name(name: &str) -> String {
 }
 
 /// Generate a skill directory name, avoiding double "cas-" prefix
-fn skill_dir_name(name: &str) -> String {
+pub fn skill_dir_name(name: &str) -> String {
     let sanitized = sanitize_name(name);
     if sanitized.starts_with("cas-") {
         sanitized

@@ -2429,6 +2429,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     recorder.mark("host checks", &checks);
     if let Some(check) = github_origin_check(project_root) { checks.push(check); }
     recorder.mark("GitHub origin", &checks);
+    checks.push(managed_file_drift_check(project_root));
+    recorder.mark("managed file drift", &checks);
     checks.push(prompt_hook_check(&cas_root));
     recorder.mark("prompt hook", &checks);
     checks.push(session_start_budget_check());
@@ -12202,5 +12204,26 @@ mod prompt_hook_tests {
         let check = prompt_hook_check(temp.path());
         assert!(matches!(check.status, CheckStatus::Warning));
         assert_eq!(check.message, "UserPromptSubmit hook silent for 3 prompts; restart Claude");
+    }
+}
+
+fn managed_file_drift_check(root: &Path) -> Check {
+    let harnesses = crate::project_files::harnesses(root);
+    match crate::project_files::drift(root, &harnesses) {
+        Ok(0) => Check::new(
+            "managed file drift",
+            CheckStatus::Ok,
+            "managed project files are current",
+        ),
+        Ok(count) => Check::new(
+            "managed file drift",
+            CheckStatus::Warning,
+            format!("{count} managed file drift item(s); run `cas update`"),
+        ),
+        Err(error) => Check::new(
+            "managed file drift",
+            CheckStatus::Warning,
+            format!("managed file conflict: {error}; run `cas update`"),
+        ),
     }
 }

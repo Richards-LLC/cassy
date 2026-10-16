@@ -643,7 +643,24 @@ pub(crate) fn configure_claude_hooks_with_home(
 pub(crate) fn configure_claude_hooks_with_config_dirs(
     project_root: &Path,
     force: bool,
+    config_dirs: &[std::path::PathBuf],
+) -> anyhow::Result<bool> {
+    configure_claude_hooks_at(project_root, force, config_dirs, project_root)
+}
+
+/// Render an index-side settings file with the real project's permission paths.
+pub(crate) fn configure_claude_hooks_for_index(
+    target: &Path,
+    project: &Path,
+) -> anyhow::Result<bool> {
+    configure_claude_hooks_at(target, false, &[], project)
+}
+
+fn configure_claude_hooks_at(
+    project_root: &Path,
+    force: bool,
     _config_dirs: &[std::path::PathBuf],
+    permission_root: &Path,
 ) -> anyhow::Result<bool> {
     let claude_dir = project_root.join(".claude");
     let settings_path = claude_dir.join("settings.json");
@@ -674,6 +691,7 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
             anyhow::bail!("settings.json is not an object");
         }
 
+        strip_cas_hooks(&mut settings);
         let hooks = settings
             .as_object_mut()
             .unwrap()
@@ -686,7 +704,13 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
 
         let cas_hooks_obj = cas_hooks.as_object().unwrap();
         for (key, value) in cas_hooks_obj.get("hooks").unwrap().as_object().unwrap() {
-            hooks_obj.insert(key.clone(), value.clone());
+            let existing = hooks_obj
+                .entry(key.clone())
+                .or_insert_with(|| serde_json::json!([]));
+            let entries = existing
+                .as_array_mut()
+                .ok_or_else(|| anyhow::anyhow!("hook event is not an array"))?;
+            entries.extend(value.as_array().unwrap().iter().cloned());
         }
 
         // Add statusLine configuration (overwrite if exists - Cassy owns this)
@@ -719,7 +743,7 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
         }
 
         // Add worktree directory to additionalDirectories if worktrees are enabled
-        merge_worktree_permissions(project_root, settings_obj);
+        merge_worktree_permissions(permission_root, settings_obj);
 
         // Write back
         let output = canonical_json_pretty(&settings)?;
@@ -731,7 +755,7 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
 
         // Add worktree directory if worktrees are enabled
         if let Some(settings_obj) = settings.as_object_mut() {
-            merge_worktree_permissions(project_root, settings_obj);
+            merge_worktree_permissions(permission_root, settings_obj);
         }
 
         let output = canonical_json_pretty(&settings)?;

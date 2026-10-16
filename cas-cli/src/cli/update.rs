@@ -1151,7 +1151,17 @@ fn refresh_all_projects_with_user_refresh(
     user_refresh: impl FnOnce() -> ProjectPhase,
 ) -> anyhow::Result<RefreshReport> {
     let started_at = Instant::now();
-    let discovery = discover_local_projects(current_cas_root);
+    let mut discovery = discover_local_projects(current_cas_root);
+    for project in std::mem::take(&mut discovery.projects) {
+        if crate::project_files::git_root(&project) {
+            discovery.projects.push(project);
+        } else {
+            discovery.skipped_unregistered.push(SkippedProject {
+                project,
+                reason: "not a Git project root".into(),
+            });
+        }
+    }
     let mut receipts = Vec::with_capacity(discovery.projects.len());
 
     // Account registrations must converge before project proxies choose their
@@ -2124,16 +2134,7 @@ fn sync_claude_files_into(
         }
     };
 
-    // A worktree-scoped sync (cas-49c0) leaves host-level installs alone.
-    #[cfg(feature = "mcp-proxy")]
-    if project_root.is_none() {
-        crate::cli::integrate::violet_retirement::retire_installed_hub(Some(
-            &cas_root.join("proxy.toml"),
-        ))?;
-        crate::cli::integrate::violet_retirement::repair_proxy_credentials_on_update(Some(
-            &cas_root.join("proxy.toml"),
-        ));
-    }
+    let _refresh_host_integration = project_root.is_none();
     let project_root = project_root.unwrap_or_else(|| cas_root.parent().unwrap_or(&cas_root));
     let claude_dir = project_root.join(".claude");
     let codex_dir = project_root.join(".codex");
@@ -2154,17 +2155,25 @@ fn sync_claude_files_into(
     // Builtin files are generated into consumer projects and should not be
     // committed there. The authoring checkout is exempted inside the helper
     // because its rendered files are intentional tracked fixtures.
-    let mut builtin_harnesses = vec![cas_mux::SupervisorCli::Claude];
-    if codex_enabled {
-        builtin_harnesses.push(cas_mux::SupervisorCli::Codex);
+    let builtin_harnesses = crate::project_files::harnesses(project_root);
+    let reconciliation = crate::project_files::Reconcile::begin(project_root, &builtin_harnesses)?;
+    if let Some(plan) = &reconciliation {
+        if plan.blocked() {
+            report_managed_files(cli, &plan.report)?;
+            return Ok(());
+        }
     }
-    if grok_enabled {
-        builtin_harnesses.push(cas_mux::SupervisorCli::Grok);
+    // A worktree-scoped sync (cas-49c0) leaves host-level installs alone.
+    #[cfg(feature = "mcp-proxy")]
+    if _refresh_host_integration {
+        crate::cli::integrate::violet_retirement::retire_installed_hub(Some(
+            &cas_root.join("proxy.toml"),
+        ))?;
+        crate::cli::integrate::violet_retirement::repair_proxy_credentials_on_update(Some(
+            &cas_root.join("proxy.toml"),
+        ));
     }
-    if opencode_enabled {
-        builtin_harnesses.push(cas_mux::SupervisorCli::OpenCode);
-    }
-    let builtin_gitignore = ensure_builtin_gitignore(project_root, &builtin_harnesses)?;
+    let mut builtin_gitignore = ensure_builtin_gitignore(project_root, &builtin_harnesses)?;
 
     if !cli.json {
         let mut out = io::stdout();
@@ -2173,24 +2182,6 @@ fn sync_claude_files_into(
         if builtin_gitignore.updated {
             fmt.write_raw("  ")?;
             fmt.success("Updated .gitignore with Cassy-managed builtin paths")?;
-        }
-        if !builtin_gitignore.tracked_paths.is_empty() {
-            fmt.write_raw("  ")?;
-            fmt.warning(&format!(
-                "{} Cassy-managed builtin path(s) are already tracked and will not be hidden by \
-                 .gitignore:",
-                builtin_gitignore.tracked_paths.len()
-            ))?;
-            for path in &builtin_gitignore.tracked_paths {
-                fmt.write_raw(&format!("    ! {path}"))?;
-                fmt.newline()?;
-            }
-            fmt.write_raw("    ")?;
-            fmt.write_raw(
-                "To make the ignore rule effective, review and run `git rm --cached <path>` \
-                 for each path, then commit the removal.",
-            )?;
-            fmt.newline()?;
         }
     }
 
@@ -2341,7 +2332,11 @@ fn sync_claude_files_into(
     let skill_store = open_skill_store(&cas_root)?;
     let skills = skill_store.list(None)?;
     let skill_syncer = SkillSyncer::with_defaults(project_root);
-    let skill_report = skill_syncer.sync_all(&skills)?;
+    // The builtin writer, not database projection cleanup, owns these dirs.
+    // Preserve project-authored cas-* siblings too; explicit disabled database
+    // skills are still handled by sync_skill inside this operation.
+    let retained = skill_syncer.list_synced()?.into_iter().collect();
+    let skill_report = skill_syncer.sync_all_preserving(&skills, &retained)?;
 
     // Sync built-in agents, skills, and commands AFTER database sync
     // (so they don't get removed as "stale" by the skill syncer)
@@ -2461,6 +2456,20 @@ fn sync_claude_files_into(
         0
     };
 
+    let managed_files = if let Some(plan) = reconciliation {
+        let report = plan.finish(&builtin_harnesses)?;
+        builtin_gitignore.tracked_paths.clear();
+        report
+    } else {
+        crate::project_files::Report {
+            outcome: "skipped",
+            ..Default::default()
+        }
+    };
+    if !cli.json {
+        report_managed_files(cli, &managed_files)?;
+    }
+
     if cli.json {
         let config_json: Vec<String> = config_updated.iter().map(|s| format!("\"{s}\"")).collect();
         let codex_config_json: Vec<String> = codex_config_updated
@@ -2468,7 +2477,7 @@ fn sync_claude_files_into(
             .map(|s| format!("\"{s}\""))
             .collect();
         println!(
-            r#"{{"config_updated":[{}],"builtins_updated":{},"builtin_reference_conflicts":{},"codex_config_updated":[{}],"codex_builtins_updated":{},"codex_builtin_reference_conflicts":{},"grok_builtins_updated":{},"grok_builtin_reference_conflicts":{},"opencode_builtins_updated":{},"rules_synced":{},"rules_removed":{},"skills_synced":{},"skills_removed":{},"factory_tooling":"{}","builtin_gitignore_updated":{},"builtin_gitignore_tracked":{}}}"#,
+            r#"{{"config_updated":[{}],"builtins_updated":{},"builtin_reference_conflicts":{},"codex_config_updated":[{}],"codex_builtins_updated":{},"codex_builtin_reference_conflicts":{},"grok_builtins_updated":{},"grok_builtin_reference_conflicts":{},"opencode_builtins_updated":{},"rules_synced":{},"rules_removed":{},"skills_synced":{},"skills_removed":{},"factory_tooling":"{}","builtin_gitignore_updated":{},"builtin_gitignore_tracked":{},"managed_files":{}}}"#,
             config_json.join(","),
             builtin_result.total_updated(),
             builtin_result.modified_reference_files.len(),
@@ -2484,7 +2493,8 @@ fn sync_claude_files_into(
             skill_report.removed,
             factory_tooling_result,
             builtin_gitignore.updated,
-            serde_json::to_string(&builtin_gitignore.tracked_paths)?
+            serde_json::to_string(&builtin_gitignore.tracked_paths)?,
+            serde_json::to_string(&managed_files)?
         );
     } else {
         let mut out = io::stdout();
@@ -4230,3 +4240,25 @@ fn write_skill_sync_sentinel(cas_root: &std::path::Path) {
 #[cfg(test)]
 #[path = "update_tests/tests.rs"]
 mod tests;
+
+fn report_managed_files(cli: &Cli, report: &crate::project_files::Report) -> anyhow::Result<()> {
+    if cli.json {
+        println!("{}", serde_json::json!({"managed_files": report}));
+    } else {
+        let message = if !report.conflicts.is_empty() {
+            format!(
+                "Managed files: {} conflicts preserved; cas update --sync --json for paths",
+                report.conflicts.len()
+            )
+        } else if report.outcome == "staged" {
+            "Managed files: staged; commit pending (other changes are staged)".to_string()
+        } else {
+            format!(
+                "Managed files: {} ({} untracked, {} staged)",
+                report.outcome, report.untracked, report.staged
+            )
+        };
+        println!("{message}");
+    }
+    Ok(())
+}

@@ -245,3 +245,35 @@ The memory identity paths are:
 outputs, including its Alpha/Beta test vectors. Named `cas_e29c_` tests consume
 those rows through personal and team HTTP pulls, SQLite, Tantivy, editing,
 compressed HTTP pushes and replay. No client alias-fold calculator is added.
+
+
+## Managed project files
+
+`project_files::ignored_paths` is the ownership inventory shared by init/update,
+Git reconciliation and doctor. Consumer repositories use the following policy;
+the Cassy authoring checkout retains its tracked rendered fixtures.
+
+| Classification | Files | Ownership boundary |
+| --- | --- | --- |
+| Managed and ignored | Exact installed builtin catalog paths for each enabled harness; `.claude/skills/cas/SKILL.md`; generated store rules in `.claude/rules/cas/`; database skill SKILL.md projections; `.cas/` runtime state; `.env.worktree`; `.fallow/` | Source catalog/store owns the generated file. Untracking keeps its working copy. Retired managed files already pruned from disk are removed from the index. |
+| Managed and ignored when purely derived | Root `AGENTS.md` containing only the CAS block, or explicitly generated from CLAUDE.md | An AGENTS.md with project-authored text stays tracked; only its CAS block is owned. |
+| Project tracked | `.gitignore`, `CLAUDE.md`, mixed `AGENTS.md` | Only the delimited Cassy block; surrounding project bytes remain unchanged and unstaged. |
+| Project tracked | `.claude/settings.json`, `.mcp.json`, `.codex/config.toml`, `.codex/hooks.json` | Cassy hook commands, permissions, statusline and MCP entries; project hooks and configuration keys are preserved. |
+| Project tracked, project customizable | `.env.worktree.template`, `scripts/worktree-boot.sh` | Only exact generated templates are eligible for the initial automatic commit. Subsequent customization belongs to the project. |
+
+Before writing, update checks for unmerged paths, symlinks, malformed documents,
+namespace conflicts and local edits to managed content. A conflict is reported
+and leaves that project's files and index untouched. Ordinary project edits
+outside the owned portions remain in the worktree; selective index blobs are
+rendered from index-side project content so those edits never enter Cassy's
+commit. Existing staged work is preserved: update stages the repair and reports
+that a commit is pending. With no other staged work, it makes one dedicated
+`chore(cassy): reconcile managed project files` commit, using a command-scoped
+Cassy author identity. It never pushes. A second update is a no-op.
+
+The default update and `--all-projects` share the project refresh loop; `--sync`
+uses the same file repair. The sweep excludes non-Git roots as well as the
+existing temporary/worktree discovery exclusions. Doctor reports one
+**managed file drift** finding pointing to `cas update`; outside project edits
+are not managed drift. Full host convergence is verified after installing the
+release, not by modifying real repositories during worker development.

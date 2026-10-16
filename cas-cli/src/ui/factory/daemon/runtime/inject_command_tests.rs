@@ -119,7 +119,9 @@ async fn flv2_inject_is_a_command() {
         daemon.process_prompt_queue().await.unwrap();
         slowest = slowest.max(pass.elapsed());
         echoed.push_str(&drain(&mut daemon));
-        if echoed.contains("C4A-MARKER") {
+        // The payload's write receipt, and so the row's bookkeeping, may
+        // land a pass after its echo.
+        if echoed.contains("C4A-MARKER") && !daemon.app.mux.has_pending_injects() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -198,7 +200,7 @@ async fn flv2_inject_path_claims_in_two_phases_with_no_lane_violation() {
             inject_pass = Some(pass);
         }
         echoed.push_str(&drain(&mut daemon));
-        if echoed.contains("C4A-LANES") {
+        if echoed.contains("C4A-LANES") && !daemon.app.mux.has_pending_injects() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -239,7 +241,7 @@ async fn passes_until(
     while started.elapsed() < limit {
         daemon.process_prompt_queue().await.unwrap();
         echoed.push_str(&drain(daemon));
-        if done(&echoed) {
+        if done(&echoed) && !daemon.app.mux.has_pending_injects() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -252,8 +254,17 @@ async fn passes_until(
 /// counts both.
 #[tokio::test]
 async fn urgent_broadcast_members_settle_as_commands_and_count_once() {
-    let (_root, cas_dir) = project_with_workers(&[WORKER, "worker-b"]);
+    let (root, cas_dir) = project_with_workers(&[WORKER, "worker-b"]);
+    // A broadcast is delivered per member; without Agent Teams the daemon
+    // gates `all_workers` like a pane (pre-existing), so run with a team tree.
+    let claude_config = root.path().join("claude-config");
+    std::fs::create_dir_all(claude_config.join("teams").join(SESSION).join("inboxes")).unwrap();
+    let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[(
+        "CLAUDE_CONFIG_DIR",
+        claude_config.to_str(),
+    )]);
     let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    daemon.teams = Some(super::teams::TeamsManager::new(SESSION));
     ready_claude_worker(&mut daemon).await;
     ready_claude_worker_named(&mut daemon, "worker-b").await;
     let id = enqueue_urgent_to(&cas_dir, "all_workers", "everyone C4A-BCAST");

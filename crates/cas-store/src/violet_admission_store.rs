@@ -628,19 +628,14 @@ mod tests {
             let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
             let first = store.admit(&row).unwrap();
             let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+            let job = settled_job(&store, &row, "original-instance");
+            assert!(store.confirm_body_dispatch(&job, "original-instance", &body_response(&job, &row)).unwrap());
             if explicit_ack {
                 queue.ack(first.prompt_id).unwrap();
+                assert!(!queue.authorize_body_handoff(first.prompt_id, &row.recipient,
+                    Some(&row.factory_session)).unwrap(),
+                    "an explicit ack fences an already-fetched original body");
             } else {
-                let job = settled_job(&store, &row, "original-instance");
-                assert!(
-                    store
-                        .confirm_body_dispatch(
-                            &job,
-                            "original-instance",
-                            &body_response(&job, &row)
-                        )
-                        .unwrap()
-                );
                 assert_eq!(
                     queue
                         .surface_unseen_for_recipient(

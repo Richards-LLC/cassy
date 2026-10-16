@@ -2089,27 +2089,19 @@ fn withdraw_resumed_stall_nudge(
     Ok(false)
 }
 
-/// Persist a declined worker wake unless an observed open call pauses its budget.
 /// cas-d5ab (spec P2.3): the worker activity a wake-gate decline is evidence
 /// of, if any.
 ///
-/// Only a decline that shows the recipient working counts: a tool call in
-/// flight, or a pane that has not gone quiet. An operator draft, an unready
-/// pane or a taken wake slot say nothing about the worker.
+/// Only an observed tool call in flight counts. A pane that has not gone quiet
+/// is not evidence: a spinner redraws every second, so a worker hung on an
+/// API stream or a retry loop never looks silent (review H1). An operator
+/// draft, an unready pane or a taken wake slot say nothing about the worker
+/// either.
 pub(crate) fn gate_decline_activity(
     decision: WakeDecision,
     tool_call: ToolCallEvidence,
 ) -> Option<&'static str> {
-    if decision.allowed {
-        return None;
-    }
-    if tool_call == ToolCallEvidence::InFlight || decision.reason.contains("tool call in flight") {
-        return Some("tool call in flight");
-    }
-    decision
-        .reason
-        .contains("not been silent long enough")
-        .then_some("pane not silent")
+    (!decision.allowed && tool_call == ToolCallEvidence::InFlight).then_some("tool call in flight")
 }
 
 /// cas-d5ab: the least spacing of gate-decline activity events per worker.
@@ -2117,6 +2109,7 @@ pub(crate) fn gate_decline_activity(
 /// current without writing an event on every declined pass.
 const GATE_ACTIVITY_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Persist a declined worker wake unless an observed open call pauses its budget.
 fn record_worker_wake_decline(
     queue: &dyn cas_store::PromptQueueStore,
     id: i64,
@@ -6197,12 +6190,13 @@ impl FactoryDaemon {
         }
     }
 
-    /// Process prompt queue
-    /// cas-d5ab (spec P2.3): record a busy-recipient wake-gate decline as
-    /// the worker's activity, through cas-7156's per-worker recorder, so the
-    /// stall detector does not call a working worker stalled.
+    /// cas-d5ab (spec P2.3): record a wake-gate decline for a tool call in
+    /// flight as the worker's activity, through cas-7156's per-worker
+    /// recorder, so the stall detector does not call a working worker
+    /// stalled. The write is a queue-job stamp, never inline on the loop.
     fn record_gate_decline_activity(
         &mut self,
+        row: i64,
         target: &str,
         decision: WakeDecision,
         tool_call: ToolCallEvidence,
@@ -6229,25 +6223,22 @@ impl FactoryDaemon {
         else {
             return;
         };
-        match cas_factory::director::record_worker_activity(
-            self.app.cas_dir(),
-            &worker.id,
-            "wake_gate",
-            reason,
-        ) {
-            Ok(()) => {
-                self.gate_activity_recorded_at
-                    .insert(target.to_string(), Instant::now());
-            }
-            Err(error) => tracing::debug!(
-                target: "cas::coordination",
-                worker = %target,
-                %error,
-                "cas-d5ab: could not record gate-decline activity"
-            ),
-        }
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        self.queue_jobs.stamp(
+            &cas_dir,
+            row,
+            target,
+            super::prompt_queue_jobs::QueueStamp::WorkerActivity {
+                cas_dir: cas_dir.clone(),
+                agent_id: worker.id.clone(),
+                reason: reason.to_string(),
+            },
+        );
+        self.gate_activity_recorded_at
+            .insert(target.to_string(), Instant::now());
     }
 
+    /// Process prompt queue
     pub(super) async fn process_prompt_queue(&mut self) -> anyhow::Result<()> {
         let Some(selection) = self.next_queue_selection() else {
             return Ok(());
@@ -6935,12 +6926,8 @@ impl FactoryDaemon {
                 }
                 let pane = self.pane_wake_state(&queued.target);
                 if let Some(reason) = pane.veto_for_active_looking_recipient() {
-                    self.record_gate_decline_activity(
-                        &queued.target,
-                        WakeDecision::deny(reason),
-                        pane.tool_call,
-                        current_agents,
-                    );
+                    // cas-d5ab review H1: the stall nudge's own decline is never
+                    // activity, or the nudge would withdraw itself.
                     let decline = queue.record_pending_reason(queued.id,
                         cas_store::PendingReason::GatedNotReady, Some(reason))
                         .and_then(|()| record_worker_wake_decline(queue.as_ref(), queued.id,
@@ -8091,6 +8078,7 @@ impl FactoryDaemon {
                     {
                         // cas-d5ab: a busy recipient is a working one.
                         self.record_gate_decline_activity(
+                            queued.id,
                             &pane_target,
                             wake_decision,
                             pane_state.tool_call,

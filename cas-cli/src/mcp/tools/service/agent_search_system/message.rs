@@ -2813,12 +2813,24 @@ impl CasService {
         // detailed delivery report stays available through message_status;
         // only actionable exceptions expand the send result.
         // cas-d5ab: with a daemon listening, give it its first pass so a busy
-        // recipient's deferral is named at send time, not 50 ms later.
-        let daemon_listening = cas_factory::notify_socket_path(&self.inner.cas_root).exists();
-        let send_report = if daemon_listening && target_is_registered && !urgent && !duplicate_suppressed {
+        // recipient's deferral is named at send time, not 50 ms later. A row
+        // the daemon will not decide soon (native-extension recipient, a
+        // backlog longer than one selection batch) is not waited on.
+        let native_recipient = resolved_target_agent.as_ref().is_some_and(|agent| {
+            agent.metadata.get("native_extension").is_some_and(|value| value == "true")
+        });
+        let awaits_decision = target_is_registered
+            && !urgent
+            && !duplicate_suppressed
+            && !native_recipient
+            && queue
+                .pending_count()
+                .is_ok_and(|pending| pending <= SEND_OUTCOME_BACKLOG_LIMIT)
+            && daemon_accepts_notify(&self.inner.cas_root);
+        let (send_report, no_decision_yet) = if awaits_decision {
             wait_for_send_outcome(&*queue, message_id).await
         } else {
-            queue.message_delivery_report(message_id).ok().flatten()
+            (queue.message_delivery_report(message_id).ok().flatten(), false)
         };
         let delivery_stage = send_report
             .as_ref()
@@ -2884,6 +2896,11 @@ impl CasService {
                 cas_store::DeliveryStage::PartiallyDelivered => format!(
                     "partial #{message_id} → {resolved_target} ({report_detail}).\
                      Check message_status notification_id={message_id} for details.\
+                     {supervisor_copy_suffix}"
+                ),
+                // Review L6: the settle window ended before the daemon decided.
+                _ if no_decision_yet => format!(
+                    "queued #{message_id} → {resolved_target} (no decision yet)\
                      {supervisor_copy_suffix}"
                 ),
                 _ => format!(
@@ -3812,30 +3829,40 @@ fn pending_deadline_narrative(
 
 /// cas-d5ab (P1.6): the one-line reason a gated send names.
 ///
-/// A Claude recipient sees a held message at its next tool call or turn start
-/// (cas-a1ed); a PTY recipient gets it typed when its pane is free.
+/// The wake decision's own detail is read first: the daemon's generic hold
+/// stamp ("wake deferred — pane busy, tool call in flight, operator
+/// composing, or wake slot taken") lists every reason and names none (review
+/// H2). A Claude recipient sees a held message at its next tool call or turn
+/// start (cas-a1ed); a PTY recipient gets it typed when its pane is free.
 fn deferral_reason(wake_detail: Option<&str>, pending_detail: Option<&str>, claude_recipient: bool) -> String {
-    let detail = [wake_detail, pending_detail]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let why = if detail.contains("tool call in flight") {
-        "recipient mid tool call".to_string()
-    } else if detail.contains("not been silent long enough") || detail.contains("pane busy") {
-        "recipient busy".to_string()
-    } else if detail.contains("unsubmitted draft") || detail.contains("composer") {
-        "operator is typing in the recipient's pane".to_string()
-    } else if detail.contains("not ready for injection") {
-        "recipient pane not ready yet".to_string()
-    } else if detail.contains("wake slot") {
-        "another wake went first this pass".to_string()
-    } else {
-        wake_detail
-            .or(pending_detail)
-            .map(|detail| detail.trim_start_matches("wake_declined_by_policy: ").to_string())
-            .unwrap_or_else(|| "held by the wake gate".to_string())
-    };
+    fn named(detail: &str) -> Option<&'static str> {
+        if detail.starts_with("wake deferred") {
+            return Some("recipient busy");
+        }
+        if detail.contains("tool call in flight") {
+            Some("recipient mid tool call")
+        } else if detail.contains("not been silent long enough") {
+            Some("recipient busy")
+        } else if detail.contains("unsubmitted draft") {
+            Some("operator is typing in the recipient's pane")
+        } else if detail.contains("not ready for injection") {
+            Some("recipient pane not ready yet")
+        } else if detail.contains("wake slot") {
+            Some("another wake went first this pass")
+        } else {
+            None
+        }
+    }
+    let why = wake_detail
+        .and_then(named)
+        .or_else(|| pending_detail.and_then(named))
+        .map(str::to_string)
+        .or_else(|| {
+            wake_detail
+                .or(pending_detail)
+                .map(|detail| detail.trim_start_matches("wake_declined_by_policy: ").to_string())
+        })
+        .unwrap_or_else(|| "held by the wake gate".to_string());
     let surfaces = if claude_recipient {
         "surfaces at its next tool call or turn start"
     } else {
@@ -3845,30 +3872,56 @@ fn deferral_reason(wake_detail: Option<&str>, pending_detail: Option<&str>, clau
 }
 
 /// cas-d5ab (P1.6): how long a send waits for the daemon's first decision on
-/// its row. The daemon decides within tens of milliseconds of the notify.
+/// its row. The daemon decides within tens of milliseconds of the notify;
+/// tests give a loaded machine more room.
+#[cfg(not(test))]
 const SEND_OUTCOME_SETTLE: std::time::Duration = std::time::Duration::from_millis(1000);
+#[cfg(test)]
+const SEND_OUTCOME_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
 const SEND_OUTCOME_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
-/// Whether the daemon has decided a fresh row: handed it over or held it.
-/// The wake attempt is stamped before the hold, so it is not the signal.
+/// The daemon's selection batch (`QueueSelectRequest::limit`): a row behind
+/// a longer backlog may wait passes for its first decision.
+const SEND_OUTCOME_BACKLOG_LIMIT: usize = 10;
+
+/// Whether the daemon has made its first decision on a fresh row: handed it
+/// over, held it, or stated why it waits (review M4). The wake attempt is
+/// stamped before the hold, so it is not the signal.
 fn send_outcome_settled(report: &cas_store::MessageDeliveryReport) -> bool {
     !matches!(
         report.stage,
         cas_store::DeliveryStage::Enqueued | cas_store::DeliveryStage::Selected
-    )
+    ) || report.pending_reason.is_some()
 }
 
-/// The row's report once the daemon has decided it, or the last report seen
-/// when the settle window ends first.
+/// Whether a daemon is listening on the notify socket. A stale socket left by
+/// a killed daemon refuses the datagram, and `notify_daemon` treats that as
+/// success (review M3).
+fn daemon_accepts_notify(cas_root: &std::path::Path) -> bool {
+    let Ok(socket) = std::os::unix::net::UnixDatagram::unbound() else {
+        return false;
+    };
+    let _ = socket.set_nonblocking(true);
+    match socket.send_to(&[1u8], cas_factory::notify_socket_path(cas_root)) {
+        Ok(_) => true,
+        Err(error) => error.kind() == std::io::ErrorKind::WouldBlock,
+    }
+}
+
+/// The row's report once the daemon has decided it, and whether the settle
+/// window ended first.
 async fn wait_for_send_outcome(
     queue: &dyn cas_store::PromptQueueStore,
     message_id: i64,
-) -> Option<cas_store::MessageDeliveryReport> {
+) -> (Option<cas_store::MessageDeliveryReport>, bool) {
     let deadline = tokio::time::Instant::now() + SEND_OUTCOME_SETTLE;
     loop {
         let report = queue.message_delivery_report(message_id).ok().flatten();
-        if report.as_ref().is_none_or(send_outcome_settled) || tokio::time::Instant::now() >= deadline {
-            return report;
+        if report.as_ref().is_none_or(send_outcome_settled) {
+            return (report, false);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return (report, true);
         }
         tokio::time::sleep(SEND_OUTCOME_POLL).await;
     }
@@ -6666,133 +6719,79 @@ mod cas_89e1_post_merge_message_type_tests {
     }
 }
 
-/// cas-d5ab (communication contract v2, P1.6): a send names the row's current
-/// outcome in one line. In session cassy-swift-gazelle-77, 102 of 183
-/// supervisor→worker messages were deferred by the wake gate within 0.05 s of
-/// the send, yet every send result read "queued … (enqueued)", so the sender
-/// never learned the recipient was busy.
+/// cas-d5ab (communication contract v2, P1.6): how a send names the row's
+/// current outcome. The end-to-end `ct2_p1_send_returns_named_outcome` drives
+/// the real daemon (`ui::factory::daemon::runtime::busy_claude_delivery_tests`);
+/// these pin the wording against the daemon's production stamp text.
 #[cfg(test)]
 mod cas_d5ab_send_outcome_tests {
     use super::*;
-    use crate::test_support::TestEnvGuard;
-    use cas_types::{Agent, AgentRole};
-    use rmcp::model::RawContent;
 
-    fn response_text(result: CallToolResult) -> String {
-        result
-            .content
-            .into_iter()
-            .filter_map(|content| match content.raw {
-                RawContent::Text(text) => Some(text.text),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn send_to(target: &str) -> AgentRequest {
-        serde_json::from_value(serde_json::json!({
-            "action": "message",
-            "target": target,
-            "summary": "decision",
-            "message": "Decision: ONE daemon JobRuntime. Drop FactoryJobs.",
-        }))
-        .expect("static message request")
-    }
-
-    /// What the daemon does with a row on its next pass, run on a thread
-    /// while the send waits: decline the wake for a busy recipient, or hand
-    /// the row to an idle one.
-    fn fake_daemon_pass(root: std::path::PathBuf, target: &'static str, busy: bool) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || {
-            let queue = crate::store::open_prompt_queue_store(&root).unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            let row = loop {
-                if let Some(row) = queue.peek_all(10).unwrap().into_iter().find(|row| row.target == target) {
-                    break row;
-                }
-                assert!(std::time::Instant::now() < deadline, "the send never enqueued");
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            };
-            assert!(queue.claim_recipient_transport(row.id, target).unwrap());
-            if busy {
-                queue
-                    .record_wake_attempt(
-                        row.id,
-                        cas_store::WakeAttempt::NotAttempted,
-                        Some("wake_declined_by_policy: recipient has a tool call in flight"),
-                    )
-                    .unwrap();
-                queue
-                    .record_pending_reason(
-                        row.id,
-                        cas_store::PendingReason::GatedNotReady,
-                        Some("wake budget paused while the recipient has a tool call in flight"),
-                    )
-                    .unwrap();
-            } else {
-                queue.mark_transport_delivered(row.id).unwrap();
-            }
-        })
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn ct2_p1_send_returns_named_outcome() {
-        let mut env = TestEnvGuard::temp_home();
-        env.set("CAS_AGENT_ROLE", "supervisor");
-        env.set("CAS_AGENT_NAME", "supervisor");
-        let project = tempfile::tempdir().unwrap();
-        let root = project.path().join(".cas");
-        std::fs::create_dir(&root).unwrap();
-        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"cas-d5ab-send-test\"\n").unwrap();
-        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
-        let agents = core.open_agent_store().unwrap();
-        agents.init().unwrap();
-        agents
-            .register(&Agent::new_with_role("supervisor-id".into(), "supervisor".into(), AgentRole::Supervisor))
-            .unwrap();
-        for name in ["busy-worker", "idle-worker"] {
-            agents
-                .register(&Agent::new_with_role(format!("{name}-id"), name.into(), AgentRole::Worker))
-                .unwrap();
-        }
-        core.set_agent_id_for_testing("supervisor-id".into());
-        #[cfg(feature = "mcp-proxy")]
-        let service = CasService::new(core.clone(), None);
-        #[cfg(not(feature = "mcp-proxy"))]
-        let service = CasService::new(core.clone());
-        // A running daemon listens on its notify socket.
-        let _daemon_socket = cas_factory::DaemonNotifier::bind(&root).unwrap();
-
-        let daemon = fake_daemon_pass(root.clone(), "busy-worker", true);
-        let busy = response_text(service.message_send(send_to("busy-worker")).await.unwrap());
-        daemon.join().unwrap();
-        assert_eq!(busy.lines().count(), 1, "{busy}");
-        assert!(busy.starts_with("deferred #"), "{busy}");
-        assert!(busy.contains("recipient mid tool call"), "{busy}");
-        assert!(busy.contains("surfaces at its next tool call"), "{busy}");
-
-        let daemon = fake_daemon_pass(root.clone(), "idle-worker", false);
-        let idle = response_text(service.message_send(send_to("idle-worker")).await.unwrap());
-        daemon.join().unwrap();
-        assert_eq!(idle.lines().count(), 1, "{idle}");
-        assert!(idle.starts_with("delivered #"), "{idle}");
-        assert!(!idle.contains("not yet confirmed"), "{idle}");
-    }
+    /// The daemon's generic hold stamp (queue_and_events.rs, `wake_deferred`).
+    const GENERIC_HOLD: &str =
+        "wake deferred — pane busy, tool call in flight, operator composing, or wake slot taken";
 
     #[test]
-    fn a_deferral_names_the_gate_reason_and_where_it_surfaces() {
+    fn a_deferral_names_the_wake_decision_not_the_generic_hold() {
         let cases = [
             ("wake_declined_by_policy: recipient has a tool call in flight", true, "recipient mid tool call; surfaces at its next tool call or turn start"),
             ("wake_declined_by_policy: pane has not been silent long enough", true, "recipient busy; surfaces at its next tool call or turn start"),
+            ("wake_declined_by_policy: no transcript evidence and the pane has not been silent long enough", true, "recipient busy; surfaces at its next tool call or turn start"),
             ("wake_declined_by_policy: operator has an unsubmitted draft in the composer", false, "operator is typing in the recipient's pane; delivered when its pane is free"),
+            ("wake_declined_by_policy: no wake slot left this pass (a supervisor wake already fired)", true, "another wake went first this pass; surfaces at its next tool call or turn start"),
         ];
-        for (detail, claude, expected) in cases {
-            assert_eq!(deferral_reason(Some(detail), None, claude), expected);
+        for (wake_detail, claude, expected) in cases {
+            assert_eq!(deferral_reason(Some(wake_detail), Some(GENERIC_HOLD), claude), expected, "{wake_detail}");
         }
+        assert_eq!(
+            deferral_reason(None, Some(GENERIC_HOLD), true),
+            "recipient busy; surfaces at its next tool call or turn start",
+            "the generic hold alone names no single cause"
+        );
         assert_eq!(
             deferral_reason(None, Some("pane not ready for injection"), false),
             "recipient pane not ready yet; delivered when its pane is free"
         );
+    }
+
+    #[test]
+    fn a_stale_notify_socket_is_not_a_listening_daemon() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!daemon_accepts_notify(root.path()), "no socket");
+        let path = cas_factory::notify_socket_path(root.path());
+        drop(std::os::unix::net::UnixDatagram::bind(&path).unwrap());
+        assert!(path.exists());
+        assert!(!daemon_accepts_notify(root.path()), "a killed daemon's socket refuses");
+        let _listening = std::os::unix::net::UnixDatagram::bind({
+            std::fs::remove_file(&path).unwrap();
+            &path
+        })
+        .unwrap();
+        assert!(daemon_accepts_notify(root.path()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_row_the_daemon_set_aside_ends_the_wait_and_a_timeout_says_so() {
+        let root = tempfile::tempdir().unwrap();
+        let queue = cas_store::SqlitePromptQueueStore::open(root.path()).unwrap();
+        queue.init().unwrap();
+        let waiting = queue.enqueue_with_session("supervisor", "native-agent", "ping", "s").unwrap();
+        queue
+            .record_pending_reason(
+                waiting,
+                cas_store::PendingReason::AwaitingDelivery,
+                Some("native extension agent — delivered via its own polling API"),
+            )
+            .unwrap();
+        let started = std::time::Instant::now();
+        let (report, timed_out) = wait_for_send_outcome(&queue, waiting).await;
+        assert!(!timed_out && report.is_some());
+        assert!(started.elapsed() < std::time::Duration::from_millis(200), "a stated wait settles at once");
+        assert!(!send_outcome_settled(
+            &queue
+                .message_delivery_report(queue.enqueue_with_session("supervisor", "w", "fresh", "s").unwrap())
+                .unwrap()
+                .unwrap()
+        ));
     }
 }

@@ -1964,14 +1964,20 @@ impl WorkerSpawnContext {
                 let (parent_branch, base_source) =
                     resolve_spawn_base(&task_base, self.epic_branch.as_deref(), &trunk);
                 let mut notices: Vec<String> = Vec::new();
+                let mut can_refresh_parent = true;
                 if parent_branch.starts_with("epic/") {
                     let parent = recorded_epic_parent_branch_for_resolved_base(&self.cas_dir, &parent_branch)
                         .map(|(_, parent)| parent).filter(|parent| parent != &parent_branch)
                         .unwrap_or_else(|| configured_trunk.clone());
                     match spawn_git.ensure_epic_published(&parent_branch, &parent) {
-                        Ok(Some(receipt)) => notices.push(receipt),
-                        Ok(None) => {},
-                        Err(error) => notices.push(format!("EPIC BRANCH UNVERIFIED: {error}")),
+                        Ok(readiness) => {
+                            can_refresh_parent = readiness.can_refresh_parent;
+                            if let Some(receipt) = readiness.notice { notices.push(receipt); }
+                        }
+                        Err(error) => {
+                            can_refresh_parent = false;
+                            notices.push(format!("EPIC BRANCH UNVERIFIED: {error}"));
+                        }
                     }
                 }
                 if let Some(notice) = ensure_local_spawn_parent(&repo_root, &parent_branch)
@@ -1998,11 +2004,7 @@ impl WorkerSpawnContext {
                         recorded_epic_parent_branch_for_resolved_base(&self.cas_dir, &parent_branch)
                     });
                 if let Some((epic_branch, recorded_parent)) = recorded_base_parent {
-                    let remote = format!("origin/{epic_branch}");
-                    let diverged_origin = ref_exists(&repo_root, &remote)
-                        && spawn_git.commits_behind(&epic_branch, &remote).unwrap_or(0) > 0
-                        && spawn_git.commits_behind(&remote, &epic_branch).unwrap_or(0) > 0;
-                    if !diverged_origin {
+                    if can_refresh_parent {
                     let refresh = fast_forward_epic_base_from_parent(
                         &repo_root,
                         &epic_branch,

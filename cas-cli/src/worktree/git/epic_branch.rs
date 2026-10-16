@@ -5,6 +5,26 @@ use std::time::Duration;
 
 use super::GitOperations;
 
+pub(crate) struct EpicBranchReadiness {
+    pub notice: Option<String>,
+    pub can_refresh_parent: bool,
+}
+
+impl EpicBranchReadiness {
+    fn ready(notice: Option<String>) -> Self {
+        Self {
+            notice,
+            can_refresh_parent: true,
+        }
+    }
+    fn preserved(notice: String) -> Self {
+        Self {
+            notice: Some(notice),
+            can_refresh_parent: false,
+        }
+    }
+}
+
 impl GitOperations {
     /// First use, rather than creation, publishes an epic. An absent remote
     /// is verified by ls-remote, never inferred from a failed fetch/cache miss.
@@ -14,7 +34,7 @@ impl GitOperations {
         &self,
         branch: &str,
         base: &str,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<EpicBranchReadiness, String> {
         let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
         let refname = format!("refs/heads/{branch}");
         let valid = Command::new("git")
@@ -46,9 +66,9 @@ impl GitOperations {
             }
             !result.stdout.is_empty()
         } else {
-            return Ok(Some(format!(
+            return Ok(EpicBranchReadiness::ready(Some(format!(
                 "EPIC BRANCH LOCAL-ONLY: '{branch}'; origin is not configured (CAS_PUSH_EPIC_BRANCH={setting})."
-            )));
+            ))));
         };
         if remote_present {
             self.fetch_branch(branch).map_err(|e| e.to_string())?;
@@ -58,12 +78,12 @@ impl GitOperations {
             let Some(local) = self.resolve_commit(&refname) else {
                 self.create_branch_from(branch, &remote)
                     .map_err(|e| e.to_string())?;
-                return Ok(Some(format!(
+                return Ok(EpicBranchReadiness::ready(Some(format!(
                     "EPIC BRANCH MATERIALIZED: '{branch}' at published origin tip {remote}."
-                )));
+                ))));
             };
             if local == remote {
-                return Ok(None);
+                return Ok(EpicBranchReadiness::ready(None));
             }
             let ahead = self
                 .commits_behind(&remote, &local)
@@ -72,19 +92,19 @@ impl GitOperations {
                 .commits_behind(&local, &remote)
                 .map_err(|e| e.to_string())?;
             if ahead > 0 && behind > 0 {
-                return Ok(Some(format!(
+                return Ok(EpicBranchReadiness::preserved(format!(
                     "EPIC BRANCH DIVERGED: '{branch}' local {local}, origin {remote}; no refs changed or published. Reconcile before relying on this lane."
                 )));
             }
             if ahead == 0 {
                 self.advance_local_branch(branch, &local, &remote)?;
-                return Ok(Some(format!(
+                return Ok(EpicBranchReadiness::ready(Some(format!(
                     "SPAWN BASE REFRESHED: local '{branch}' ({local}) is {behind} commit(s) behind 'origin/{branch}' ({remote}); local branch FAST-FORWARDED to the published tip."
-                )));
+                ))));
             }
-            return Ok(Some(format!(
+            return Ok(EpicBranchReadiness::ready(Some(format!(
                 "EPIC BRANCH PRESERVED: '{branch}' has {ahead} unpublished unique commit(s); existing origin {remote} was not rewritten."
-            )));
+            ))));
         }
         let base = self.resolve_fresh_base(base).map_err(|e| e.to_string())?;
         if base.sha.is_empty() {
@@ -135,7 +155,7 @@ impl GitOperations {
                 )
             })?;
         if !publication.status.success() {
-            return Ok(Some(format!(
+            return Ok(EpicBranchReadiness::preserved(format!(
                 "EPIC BRANCH UNPUBLISHED: {}; expected-absent publication of '{branch}' refused: {}. No existing remote ref was rewritten (CAS_PUSH_EPIC_BRANCH={setting}).",
                 receipts.join("; "),
                 String::from_utf8_lossy(&publication.stderr).trim()
@@ -144,10 +164,10 @@ impl GitOperations {
         receipts.push(format!(
             "published '{branch}' to origin at {tip} with an expected-absent lease"
         ));
-        Ok(Some(format!(
+        Ok(EpicBranchReadiness::ready(Some(format!(
             "EPIC BRANCH READY: {} (CAS_PUSH_EPIC_BRANCH={setting}; publication deferred until first use when disabled at create).",
             receipts.join("; ")
-        )))
+        ))))
     }
 
     /// Move only an ancestor ref, protecting every checkout that holds it.

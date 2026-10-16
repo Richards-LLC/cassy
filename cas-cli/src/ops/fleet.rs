@@ -471,8 +471,10 @@ fn focus_epic_branch_receipt(cas_root: &Path, epic: &cas_types::Task) -> String 
         .or_else(|| crate::config::Config::configured_epic_base_branch(&repo))
         .unwrap_or_else(|| git.detect_default_branch());
     match git.ensure_epic_published(branch, &base) {
-        Ok(Some(receipt)) => format!("\n{receipt}"),
-        Ok(None) => format!("\nEPIC BRANCH READY: '{branch}' already published on origin."),
+        Ok(readiness) => match readiness.notice {
+            Some(receipt) => format!("\n{receipt}"),
+            None => format!("\nEPIC BRANCH READY: '{branch}' already published on origin."),
+        },
         Err(error) => format!(
             "\nEPIC BRANCH UNVERIFIED: {error}; focus recorded, branch readiness requires attention."
         ),

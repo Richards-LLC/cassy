@@ -36709,6 +36709,37 @@ mod zero_change_close_tests {
         }
     }
 
+    fn local_target_receipt_fixture_cas_5129a(with_worktree: bool) {
+        let dir = init_worker_repo();
+        let repo = dir.path();
+        let seed = head_sha(repo);
+        commit_file(repo, "delivery.rs", "cas-5129a: delivery");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "--no-ff", "-qm", "integrate locally", "factory/test-worker"]);
+        let integrated = head_sha(repo);
+        git(repo, &["update-ref", "refs/remotes/origin/main", &seed]);
+        git(repo, &["checkout", "-q", "factory/test-worker"]);
+        assert!(commit_is_merged_into_parent(repo, &integrated, "main"));
+        assert!(!git_commit_is_ancestor(repo, &integrated, "origin/main"));
+        assert!(!git_commit_is_ancestor(repo, &integrated, "HEAD"));
+        let mut task = Task::new("cas-5129a".into(), "Local integration".into());
+        task.status = TaskStatus::AwaitingMerge;
+        let evidence = run_declared_pre_close_hook(&task, &declared_main_context(repo),
+            with_worktree.then_some(repo), Some(&integrated), false)
+            .expect("receipt on local target must pass even with stale origin");
+        assert_eq!(evidence.task_tip.as_deref(), Some(integrated.as_str()));
+    }
+
+    #[test]
+    fn local_target_receipt_with_worktree_cas_5129a() {
+        local_target_receipt_fixture_cas_5129a(true);
+    }
+
+    #[test]
+    fn local_target_receipt_without_worktree_cas_5129a() {
+        local_target_receipt_fixture_cas_5129a(false);
+    }
+
     /// GH #887: local_merge uses the local target checkout as its authority.
     /// A stale remote-tracking ref must not turn a locally merged parked
     /// anchor into a pre-close reachability failure.

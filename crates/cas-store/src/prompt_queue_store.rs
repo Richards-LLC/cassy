@@ -13175,6 +13175,50 @@ mod tests {
         assert!(also > 0 && also < 59, "{also}");
     }
 
+    fn cas_1ba0_abandon_batch(store: &SqlitePromptQueueStore, count: usize) -> Vec<i64> {
+        let mut ids = Vec::new();
+        for _ in 0..count {
+            let id = store.enqueue_with_session("supervisor", "worker-1", "old work", "sess").unwrap();
+            backdate(store, id, 30 * 24 * 60 * 60);
+            ids.push(id);
+        }
+        assert_eq!(store.expire_stale_pending(900).unwrap().len(), count);
+        ids
+    }
+
+    #[test]
+    fn cas_1ba0_abandonment_overflow_counts_messages_in_each_batch() {
+        let (_temp, store) = create_test_store();
+        for index in 0..60 {
+            gh_1196_abandon_one(&store, &format!("worker-{index}"));
+        }
+        let initial = gh_1196_notices(&store)[0].1.clone();
+        let shown = initial.matches("\nAlso: ").count();
+        let mut omitted = 59 - shown;
+        for batch in [7, 11] {
+            cas_1ba0_abandon_batch(&store, batch);
+            omitted += batch;
+            let rows = gh_1196_notices(&store);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].1.lines().last().unwrap(), format!("+{omitted}{ABANDONMENT_MORE_SUFFIX}"));
+            assert!(fits_hook_surface(&rows[0].1));
+        }
+    }
+
+    #[test]
+    fn cas_1ba0_first_abandonment_batch_fits_the_hook_budget() {
+        let (_temp, store) = create_test_store();
+        let ids = cas_1ba0_abandon_batch(&store, 1200);
+        let rows = gh_1196_notices(&store);
+        assert_eq!(rows.len(), 1);
+        assert!(fits_hook_surface(&rows[0].1), "batch notice costs {} chars", hook_surface_cost(&rows[0].1));
+        assert!(rows[0].1.contains(&format!("{} messages", ids.len())));
+        assert!(rows[0].1.contains("ids omitted"));
+        assert_eq!(store.message_delivery_report(*ids.last().unwrap()).unwrap().unwrap().stage, DeliveryStage::Abandoned);
+        let surfaced = store.surface_unseen_for_recipient_without_transport_delivery("supervisor", Some("sess"), 10).unwrap();
+        assert_eq!(surfaced.iter().map(|row| row.id).collect::<Vec<_>>(), vec![rows[0].0]);
+    }
+
     /// GH #1196 review L5: episodes use fixed clock hours, not a window
     /// sliding on each notice's creation time.
     #[test]

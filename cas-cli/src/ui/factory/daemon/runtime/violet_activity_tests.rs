@@ -182,6 +182,10 @@ impl Fixture {
     }
 
     fn wake(&self, session: &str, now: DateTime<Utc>) -> VioletWake {
+        let metadata = crate::ui::factory::session::create_metadata(
+            session, std::process::id(), "supervisor", &[], None, None, None,
+        );
+        crate::ui::factory::session::SessionManager::new().save_metadata(&metadata).unwrap();
         VioletWake::new(
             PROJECT.into(),
             Vec::new(),
@@ -375,6 +379,55 @@ fn cas_639c_wake_started_before_login_claims_after_credentials_are_saved() {
             .last_ok_at
             .is_some()
     );
+}
+
+#[test]
+fn cas_639c_concurrent_session_saves_keep_both_watch_sets() {
+    let fx = Fixture::new();
+    let first = fx.wake("first", t0());
+    let second = fx.wake("second", t0());
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = [(first, "C1"), (second, "C2")].into_iter().map(|(mut wake, channel)| {
+        let root = fx._temp.path().to_path_buf();
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+            let queue = SqlitePromptQueueStore::open(&root).unwrap();
+            let relay = FakeRelay::new();
+            relay.publish(mention(channel, 0));
+            barrier.wait();
+            for tick in 0..4 {
+                let report = wake.poll_once(&relay, &queue, true, at(10 + tick));
+                assert!(report.errors.is_empty(), "{report:?}");
+            }
+        })
+    }).collect();
+    for handle in handles { handle.join().unwrap(); }
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    let owners: BTreeSet<_> = saved.active().map(|watch| watch.factory_session.as_str()).collect();
+    assert_eq!(owners, BTreeSet::from(["first", "second"]));
+    assert_eq!(fx.wakes().len(), 2);
+}
+
+#[test]
+fn cas_639c_same_channel_sweeps_route_owned_threads_without_dedupe_collision() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut first = fx.wake("first", t0());
+    relay.publish(mention("C1", 0));
+    first.poll_once(&relay, &fx.queue, true, at(10));
+    let mut second = fx.wake("second", at(20));
+    relay.publish(mention("C1", 21));
+    second.poll_once(&relay, &fx.queue, true, at(30));
+    let messages = [(100, 0, Some("U1")), (120, 21, Some("U2")), (150, 150, Some("U3"))];
+    assert_eq!(first.apply_sweep(&fx.queue, "C1", read(&messages), at(400)), SweepOutcome::Woke { messages: 2 });
+    assert_eq!(second.apply_sweep(&fx.queue, "C1", read(&messages), at(400)), SweepOutcome::Woke { messages: 2 });
+    let rows = fx.wakes();
+    assert_eq!(rows.len(), 4, "each owning session receives its own thread; unknown messages keep channel-watch behavior");
+    for (session, owned, foreign) in [("first", 100, 120), ("second", 120, 100)] {
+        let row = rows.iter().rev().find(|row| row.factory_session.as_deref() == Some(session)).unwrap();
+        assert!(row.prompt.contains(&format!("message_ts={}", ts(owned))));
+        assert!(!row.prompt.contains(&format!("message_ts={}", ts(foreign))));
+    }
 }
 
 /// AC: claim/ack is idempotent across daemon restarts. The ack is lost, the

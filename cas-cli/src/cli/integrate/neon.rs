@@ -167,6 +167,11 @@ impl Default for LiveNeonClient {
 
 #[cfg(feature = "mcp-proxy")]
 impl LiveNeonClient {
+    #[cfg(test)]
+    fn with_binary(_binary: PathBuf) -> Self {
+        Self::new()
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -190,6 +195,11 @@ impl Default for LiveNeonClient {
 
 #[cfg(not(feature = "mcp-proxy"))]
 impl LiveNeonClient {
+    #[cfg(test)]
+    fn with_binary(_binary: PathBuf) -> Self {
+        Self::new()
+    }
+
     pub fn new() -> Self {
         Self
     }
@@ -1388,43 +1398,43 @@ pub(crate) mod tests {
     use tempfile::TempDir;
 
     #[cfg(unix)]
-    fn fake_neonctl(cases: &str) -> crate::test_env_guard::TestEnvGuard {
+    fn fake_neonctl(cases: &str) -> (crate::test_env_guard::TestEnvGuard, LiveNeonClient) {
         use std::os::unix::fs::PermissionsExt;
-        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let env = crate::test_env_guard::TestEnvGuard::temp_home();
         let bin = env.home().join("neonctl");
         fs::write(&bin, format!("#!/bin/sh\ncase \"$*\" in\n{cases}\n*) echo 'unexpected neonctl arguments' >&2; exit 9;;\nesac\n")).unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
-        env.set("PATH", env.home().to_path_buf());
-        env
+        let client = LiveNeonClient::with_binary(bin);
+        (env, client)
     }
 
     #[test]
     #[cfg(unix)]
     fn neonctl_lists_organizations_without_mcp() {
-        let _env = fake_neonctl(r#"'orgs list --output json') echo '[{"id":"org-fixture","name":"Fixture"}]';;"#);
-        let orgs = LiveNeonClient::new().list_organizations().unwrap();
+        let (_env, client) = fake_neonctl(r#"'orgs list --output json') echo '[{"id":"org-fixture","name":"Fixture"}]';;"#);
+        let orgs = client.list_organizations().unwrap();
         assert_eq!(orgs, vec![NeonOrg { id: "org-fixture".into(), name: "Fixture".into() }]);
     }
 
     #[test]
     #[cfg(unix)]
     fn neonctl_lists_projects_in_selected_organization() {
-        let _env = fake_neonctl(r#"'projects list --org-id org-fixture --output json') echo '[{"id":"fixture-project","name":"Fixture"}]';;"#);
-        let projects = LiveNeonClient::new().list_projects("org-fixture").unwrap();
+        let (_env, client) = fake_neonctl(r#"'projects list --org-id org-fixture --output json') echo '[{"id":"fixture-project","name":"Fixture"}]';;"#);
+        let projects = client.list_projects("org-fixture").unwrap();
         assert_eq!(projects, vec![NeonProject { id: "fixture-project".into(), name: "Fixture".into() }]);
     }
 
     #[test]
     #[cfg(unix)]
     fn neonctl_project_detail_initializes_skills_without_mcp() {
-        let _env = fake_neonctl(r#"
+        let (_env, client) = fake_neonctl(r#"
 'projects get fixture-project --output json') echo '{"id":"fixture-project","name":"Fixture"}';;
 'branches list --project-id fixture-project --output json') echo '[{"id":"br-fixture","name":"main","default":true}]';;
 'databases list --project-id fixture-project --branch br-fixture --output json') echo '[{"name":"custom_db"}]';;
 "#);
         let repo = tempfile::tempdir().unwrap();
         write_pkg_with_neon_dep(repo.path());
-        let outcome = init(repo.path(), &LiveNeonClient::new(), InitChoices {
+        let outcome = init(repo.path(), &client, InitChoices {
             org_id: Some("org-fixture".into()), project_id: Some("fixture-project".into()), ..Default::default()
         }).unwrap();
         assert_eq!(outcome.status, IntegrationStatus::Configured);
@@ -1443,13 +1453,12 @@ pub(crate) mod tests {
     #[test]
     #[cfg(unix)]
     fn neonctl_branch_presence_distinguishes_missing_from_failed_lookup() {
-        let _env = fake_neonctl(r#"
+        let (_env, client) = fake_neonctl(r#"
 'branches list --project-id fixture-project --output json') echo '[{"id":"br-fixture","name":"main","default":true}]';;
 'branches list --project-id denied-project --output json') echo 'unauthorized' >&2; exit 1;;
 'branches list --project-id malformed-project --output json') echo '[{"name":"no-id"}]';;
 'branches list --project-id invalid-json --output json') echo 'not JSON';;
 "#);
-        let client = LiveNeonClient::new();
         assert!(client.describe_branch("org-fixture", "fixture-project", "br-fixture").unwrap());
         assert!(!client.describe_branch("org-fixture", "fixture-project", "br-missing").unwrap());
         for project in ["denied-project", "malformed-project", "invalid-json"] {

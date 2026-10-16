@@ -97,14 +97,20 @@ fn cas_8235_update_sync_repairs_unmarked_project_and_user_proxy_references() {
         panic!("serve must load the repaired HTTP upstream");
     };
     assert_eq!(auth.as_deref(), Some("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"));
-    // Repeat the actual update operation: repairs must be idempotent.
+    // pin: a shared user registration repair must disclose its host-wide scope.
+    assert!(output.contains("shared user proxy"), "{output}");
+    let first: Vec<_> = [&project_proxy, &user_proxy].iter().map(|path| std::fs::read(path).unwrap()).collect();
+    // Repeat the actual update operation: repairs must be byte-idempotent.
     execute(&args, &update_test_cli(true), Some(&root)).unwrap();
+    for (path, before) in [&project_proxy, &user_proxy].iter().zip(first) {
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
 }
 
 #[test]
 #[cfg(feature = "mcp-proxy")]
 fn cas_8235_update_preserves_custom_refs_and_a_usable_default() {
-    for mode in ["custom-ref", "custom-url", "usable-default", "unregistered"] {
+    for mode in ["custom-ref", "custom-url", "usable-default", "legacy-default", "unregistered"] {
         let mut env = cas_8235_fixture();
         let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
         env.set("CAS_ROOT", &root);
@@ -119,6 +125,10 @@ fn cas_8235_update_preserves_custom_refs_and_a_usable_default() {
             }
             "usable-default" => {
                 env.set("VIOLET_SLACK_TOKEN_CASSY_PROXY", "cas-8235-default-private")
+            }
+            "legacy-default" => {
+                let alias = cas_types::violet_compatibility::violet_compatibility().legacy_token_prefix.to_owned() + "_CASSY_PROXY";
+                env.set(alias, "cas-8235-legacy-private");
             }
             "unregistered" => {
                 std::fs::remove_file(env.home().join(".claude.json")).unwrap();
@@ -252,7 +262,7 @@ fn cas_8235_review_proxy_refusals_warn_and_continue_sync_and_doctor() {
         let row = crate::cli::integrate::violet::doctor_row_from_env(None).unwrap();
         assert_eq!(
             row.severity,
-            crate::cli::integrate::violet::DoctorSeverity::Warning,
+            crate::cli::integrate::violet::DoctorSeverity::Error,
             "{row:?}"
         );
         assert!(row.message.contains(&user.display().to_string()), "{row:?}");
@@ -406,6 +416,33 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
         );
     }
     assert!(!output.contains("cas-8235-private-fixture"));
+}
+
+#[test]
+#[cfg(all(feature = "mcp-proxy", unix))]
+fn cas_8235_doctor_keeps_working_custom_symlink_and_runs_hub_probe() {
+    use crate::cli::integrate::violet::{HubProbe, ProbeOutcome, DoctorSeverity};
+    struct Probe(std::cell::Cell<usize>);
+    impl HubProbe for Probe {
+        fn list_tools(&self, _: &cmcp_core::config::ServerConfig) -> ProbeOutcome {
+            self.0.set(self.0.get() + 1);
+            ProbeOutcome::Tools { tools: vec!["violet_read".into(), "violet_post".into()], schema_problems: vec![] }
+        }
+    }
+    let env = cas_8235_fixture();
+    let user = cmcp_core::config::Scope::User.config_path().unwrap();
+    std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+    let target = env.home().join("dotfiles-proxy.toml");
+    let original = cas_8235_proxy("env:VIOLET_SLACK_TOKEN_SOUNDWAVE");
+    std::fs::write(&target, &original).unwrap();
+    std::os::unix::fs::symlink(&target, &user).unwrap();
+    let probe = Probe(std::cell::Cell::new(0));
+    let row = crate::cli::integrate::violet::doctor_row_from_env_with_probe(None, &probe).unwrap();
+    assert_eq!(row.severity, DoctorSeverity::Ok, "{row:?}");
+    assert_eq!(probe.0.get(), 1);
+    assert!(row.message.contains("violet_read"));
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
+    assert!(std::fs::symlink_metadata(&user).unwrap().file_type().is_symlink());
 }
 
 #[test]

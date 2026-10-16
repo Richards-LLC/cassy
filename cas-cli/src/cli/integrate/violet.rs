@@ -3292,6 +3292,10 @@ pub fn execute(args: &VioletArgs, json: bool, full: bool) -> Result<IntegrationO
 /// Convenience used by `cas doctor`: resolve machine paths from the real
 /// environment and produce the row.
 pub fn doctor_row_from_env(project_proxy: Option<&Path>) -> Option<DoctorRow> {
+    doctor_row_from_env_with_probe(project_proxy, &ProxyHubProbe)
+}
+
+pub(crate) fn doctor_row_from_env_with_probe(project_proxy: Option<&Path>, probe: &dyn HubProbe) -> Option<DoctorRow> {
     let advisories = super::violet_retirement::proxy_credential_advisories(project_proxy);
     if !advisories.is_empty() {
         return Some(DoctorRow {
@@ -3305,7 +3309,7 @@ pub fn doctor_row_from_env(project_proxy: Option<&Path>) -> Option<DoctorRow> {
     }
     let env = ProcessEnv;
     let paths = MachinePaths::from_env(&env).ok()?;
-    Some(doctor_row(project_proxy, &paths, &env, &ProxyHubProbe))
+    Some(doctor_row(project_proxy, &paths, &env, probe))
 }
 
 /// A stable, order-independent view of the credential-bearing strings a

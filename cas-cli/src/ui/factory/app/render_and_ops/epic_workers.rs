@@ -996,8 +996,11 @@ fn checkout_ref_for_spawn_base_observed(
 /// epic/parent history is also refused because the worker must not inherit a
 /// base known to omit target history.
 fn refresh_epic_base_from_parent(
-    repo_root: &std::path::Path, epic_branch: &str, parent_branch: &str,
-    parent_ref: &str, publish_existing: bool,
+    repo_root: &std::path::Path,
+    epic_branch: &str,
+    parent_branch: &str,
+    parent_ref: &str,
+    publish_existing: bool,
 ) -> Result<Option<String>, String> {
     if epic_branch == parent_branch
         || !ref_exists(repo_root, epic_branch)
@@ -1130,9 +1133,14 @@ fn refresh_epic_base_from_parent(
     }
 
     let mut command = std::process::Command::new("git");
-    command.args(["push", "origin", &format!("{refname}:{refname}")])
-        .env("GIT_TERMINAL_PROMPT", "0").current_dir(repo_root);
-    let push = crate::worktree::GitOperations::run_command_bounded(command, std::time::Duration::from_secs(30));
+    command
+        .args(["push", "origin", &format!("{refname}:{refname}")])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .current_dir(repo_root);
+    let push = crate::worktree::GitOperations::run_command_bounded(
+        command,
+        std::time::Duration::from_secs(30),
+    );
     if !matches!(&push, Ok(output) if output.status.success()) {
         let push_error = match push {
             Ok(output) => String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -1882,17 +1890,24 @@ impl WorkerSpawnContext {
                 let (parent_branch, base_source) =
                     resolve_spawn_base(&task_base, self.epic_branch.as_deref(), &trunk);
                 let mut notices: Vec<String> = Vec::new();
-                let recorded_epic = cas_store::SqliteTaskStore::open(&self.cas_dir)?
-                    .epic_for_branch(&parent_branch)?;
+                let recorded_epic =
+                    cas_store::SqliteTaskStore::open(&self.cas_dir)?.epic_for_branch(&parent_branch)?;
                 let managed_epic = parent_branch.starts_with("epic/") && recorded_epic.is_some();
-                if let Some(epic) = &recorded_epic && epic.is_terminal() {
-                    anyhow::bail!("spawn refused: epic {} is {}; no lane was republished", epic.id, epic.status);
+                if let Some(epic) = &recorded_epic
+                    && epic.is_terminal()
+                {
+                    anyhow::bail!(
+                        "spawn refused: epic {} is {}; no lane was republished",
+                        epic.id,
+                        epic.status
+                    );
                 }
                 if managed_epic {
                     // Adopted self-target lanes and legacy target-less epics have
                     // no recorded parent to refresh. Trunk is only a publication
                     // base for a verified absent origin, never a divergence gate.
-                    let refresh_parent = recorded_epic.as_ref()
+                    let refresh_parent = recorded_epic
+                        .as_ref()
                         .and_then(|epic| epic.deliverables.work_target.as_ref())
                         .map(|target| target.target_branch.trim())
                         .filter(|parent| !parent.is_empty() && *parent != parent_branch);
@@ -1901,20 +1916,30 @@ impl WorkerSpawnContext {
                     let existing_remote = matches!(observation.remote, Ok(Some(true)));
                     if !ref_exists(&repo_root, &parent_branch) && !existing_remote {
                         if let Err(error) = &observation.remote {
-                            anyhow::bail!("EPIC BRANCH UNVERIFIED: '{parent_branch}' cannot be prepared because origin could not be verified: {error}; no lane was recreated");
+                            anyhow::bail!(
+                                "EPIC BRANCH UNVERIFIED: '{parent_branch}' cannot be prepared because origin could not be verified: {error}; no lane was recreated"
+                            );
                         }
-                        anyhow::bail!("spawn base '{parent_branch}' doesn't resolve; refusing to recreate a deleted epic lane from trunk");
+                        anyhow::bail!(
+                            "spawn base '{parent_branch}' doesn't resolve; refusing to recreate a deleted epic lane from trunk"
+                        );
                     }
                     // Reconcile a verified existing epic once before preparing from
                     // its parent, so a stale local copy cannot omit origin's work.
                     let preserve = if existing_remote {
-                        let readiness = spawn_git.ensure_epic_published_observed(&parent_branch, &parent, &observation)
+                        let readiness = spawn_git
+                            .ensure_epic_published_observed(&parent_branch, &parent, &observation)
                             .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
-                        if let Some(notice) = readiness.notice { notices.push(notice); }
+                        if let Some(notice) = readiness.notice {
+                            notices.push(notice);
+                        }
                         !readiness.can_refresh_parent
-                    } else { false };
+                    } else {
+                        false
+                    };
                     if let Some(parent) = refresh_parent {
-                        let parent_ref = spawn_git.shared_parent_ref(&parent)
+                        let parent_ref = spawn_git
+                            .shared_parent_ref(&parent)
                             .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
                         if preserve {
                             // Remote divergence forbids moving either side, but local
@@ -1922,22 +1947,41 @@ impl WorkerSpawnContext {
                             let ahead = spawn_git.commits_behind(&parent_ref, &parent_branch)?;
                             let behind = spawn_git.commits_behind(&parent_branch, &parent_ref)?;
                             if ahead > 0 && behind > 0 {
-                                anyhow::bail!("{}", epic_base_refresh_refusal(&format!("epic base '{parent_branch}' and recorded parent '{parent_ref}' have diverged; no refs changed")));
+                                anyhow::bail!(
+                                    "{}",
+                                    epic_base_refresh_refusal(&format!(
+                                        "epic base '{parent_branch}' and recorded parent '{parent_ref}' have diverged; no refs changed"
+                                    ))
+                                );
                             }
                         } else if let Some(notice) = refresh_epic_base_from_parent(
-                            &repo_root, &parent_branch, &parent, &parent_ref, existing_remote,
-                        ).map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))? {
+                            &repo_root,
+                            &parent_branch,
+                            &parent,
+                            &parent_ref,
+                            existing_remote,
+                        )
+                        .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?
+                        {
                             notices.push(notice);
                         }
                     }
                     if !existing_remote {
                         match spawn_git.ensure_epic_published_observed(&parent_branch, &parent, &observation) {
-                            Ok(readiness) => if let Some(notice) = readiness.notice { notices.push(notice); },
-                            Err(error) => notices.push(format!("EPIC BRANCH UNVERIFIED: '{parent_branch}' ({}); {error}", full_sha(&repo_root, &parent_branch).unwrap_or_else(|| "missing".into()))),
+                            Ok(readiness) => {
+                                if let Some(notice) = readiness.notice {
+                                    notices.push(notice);
+                                }
+                            }
+                            Err(error) => notices.push(format!(
+                                "EPIC BRANCH UNVERIFIED: '{parent_branch}' ({}); {error}",
+                                full_sha(&repo_root, &parent_branch).unwrap_or_else(|| "missing".into())
+                            )),
                         }
                     }
                 } else if let Some(notice) = ensure_local_spawn_parent(&repo_root, &parent_branch)
-                    .map_err(|error| anyhow::anyhow!("{error}"))? {
+                    .map_err(|error| anyhow::anyhow!("{error}"))?
+                {
                     notices.push(notice);
                 }
                 let (base_ref, freshness_notice, checkout_ref) =
@@ -5240,23 +5284,50 @@ mod spawn_base_tests {
         for offline in [false, true] {
             super::spawn_readiness_tests::with_fixture(|fixture| {
                 let tasks = open_task_store_cached(&fixture.root).unwrap();
-                super::spawn_readiness_tests::git(&fixture.repo, &["branch", "-m", "epic/round2", "epic/diverged-support"]);
+                super::spawn_readiness_tests::git(
+                    &fixture.repo,
+                    &["branch", "-m", "epic/round2", "epic/diverged-support"],
+                );
                 let mut epic = tasks.get("cas-round2-epic").unwrap();
                 epic.branch = Some("epic/diverged-support".into());
                 tasks.update(&epic).unwrap();
                 let mut child = tasks.get("cas-round2-child").unwrap();
                 child.execution_note = Some("no-code".into());
                 tasks.update(&child).unwrap();
-                super::spawn_readiness_tests::git(&fixture.repo, &["checkout", "epic/diverged-support"]);
+                super::spawn_readiness_tests::git(
+                    &fixture.repo,
+                    &["checkout", "epic/diverged-support"],
+                );
                 super::spawn_readiness_tests::commit(&fixture.repo, "epic-only");
-                let tip = super::spawn_readiness_tests::git(&fixture.repo, &["rev-parse", "epic/diverged-support"]);
+                let tip = super::spawn_readiness_tests::git(
+                    &fixture.repo,
+                    &["rev-parse", "epic/diverged-support"],
+                );
                 super::spawn_readiness_tests::git(&fixture.repo, &["checkout", "main"]);
                 fixture.advance_parent();
-                if offline { fixture.offline(); }
-                let error = fixture.prepare().err().expect("diverged no-code epic must refuse").to_string();
-                assert!(error.contains("EPIC BASE REFRESH REFUSED") && error.contains("have diverged"), "{error}");
-                assert!(error.contains("epic/diverged-support") && error.contains("main"), "{error}");
-                assert_eq!(super::spawn_readiness_tests::git(&fixture.repo, &["rev-parse", "epic/diverged-support"]), tip);
+                if offline {
+                    fixture.offline();
+                }
+                let error = fixture
+                    .prepare()
+                    .err()
+                    .expect("diverged no-code epic must refuse")
+                    .to_string();
+                assert!(
+                    error.contains("EPIC BASE REFRESH REFUSED") && error.contains("have diverged"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("epic/diverged-support") && error.contains("main"),
+                    "{error}"
+                );
+                assert_eq!(
+                    super::spawn_readiness_tests::git(
+                        &fixture.repo,
+                        &["rev-parse", "epic/diverged-support"]
+                    ),
+                    tip
+                );
                 assert!(!fixture.repo.join(".cas/worktrees/round2-worker").exists());
             });
         }

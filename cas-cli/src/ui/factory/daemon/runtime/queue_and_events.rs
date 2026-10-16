@@ -984,8 +984,15 @@ pub(crate) fn enqueue_spawn_warning_notice(
         .unwrap_or_else(|| "direct spawn".to_string());
     let summary = format!("Worker spawn base warning: {worker_name}");
     let message = format!("Factory spawn {request} for worker '{worker_name}': {warning}");
-    let kind = ["SPAWN BASE REFRESHED", "EPIC BRANCH UNPUBLISHED", "EPIC BRANCH PRESERVED", "EPIC BRANCH UNVERIFIED", "EPIC BRANCH LOCAL-ONLY"]
-        .into_iter().find(|kind| warning.starts_with(kind));
+    let kind = [
+        "SPAWN BASE REFRESHED",
+        "EPIC BRANCH UNPUBLISHED",
+        "EPIC BRANCH PRESERVED",
+        "EPIC BRANCH UNVERIFIED",
+        "EPIC BRANCH LOCAL-ONLY",
+    ]
+    .into_iter()
+    .find(|kind| warning.starts_with(kind));
     let identity = kind.and_then(|kind| {
         let (_, rest) = warning.split_once("'")?;
         let (branch, rest) = rest.split_once("'")?;

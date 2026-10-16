@@ -1175,7 +1175,12 @@ fn cas_bfa1_epic_for_branch_prefers_live_owner_and_bounds_lookup() {
     let (_temp, store) = create_test_store();
     for (id, status, kind, branch) in [
         ("closed", TaskStatus::Closed, TaskType::Epic, "epic/target"),
-        ("cancelled", TaskStatus::Cancelled, TaskType::Epic, "epic/target"),
+        (
+            "cancelled",
+            TaskStatus::Cancelled,
+            TaskType::Epic,
+            "epic/target",
+        ),
         ("live", TaskStatus::Open, TaskType::Epic, "epic/target"),
         ("child", TaskStatus::Open, TaskType::Task, "epic/target"),
         ("other", TaskStatus::Open, TaskType::Epic, "epic/other"),
@@ -1186,9 +1191,21 @@ fn cas_bfa1_epic_for_branch_prefers_live_owner_and_bounds_lookup() {
         task.branch = Some(branch.into());
         store.add(&task).unwrap();
     }
-    assert_eq!(store.epic_for_branch("epic/target").unwrap().unwrap().id, "live");
-    assert_eq!(store.epic_for_branch("epic/other").unwrap().unwrap().id, "other");
+    assert_eq!(
+        store.epic_for_branch("epic/target").unwrap().unwrap().id,
+        "live"
+    );
+    assert_eq!(
+        store.epic_for_branch("epic/other").unwrap().unwrap().id,
+        "other"
+    );
     assert!(store.epic_for_branch("epic/missing").unwrap().is_none());
     store.delete("live").unwrap();
-    assert!(store.epic_for_branch("epic/target").unwrap().unwrap().is_terminal());
+    assert!(
+        store
+            .epic_for_branch("epic/target")
+            .unwrap()
+            .unwrap()
+            .is_terminal()
+    );
 }

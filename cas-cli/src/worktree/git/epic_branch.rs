@@ -164,7 +164,7 @@ impl GitOperations {
             Ok(Some(present)) => *present,
             Ok(None) => {
                 return Ok(EpicBranchReadiness::ready(Some(format!(
-                    "EPIC BRANCH LOCAL-ONLY: '{branch}' ({}); origin is not configured (CAS_PUSH_EPIC_BRANCH={setting}).",
+                    "EPIC BRANCH LOCAL-ONLY: '{branch}' ({}); origin is not configured; the local tip is unpublished (CAS_PUSH_EPIC_BRANCH={setting}).",
                     self.resolve_commit(&refname)
                         .unwrap_or_else(|| "missing".into())
                 ))));

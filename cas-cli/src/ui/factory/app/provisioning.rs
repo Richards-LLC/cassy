@@ -716,10 +716,13 @@ mod tests {
         std::fs::write(&replacement, "installed build").unwrap();
         std::fs::rename(&replacement, &installed).unwrap();
 
+        // pin: the fixture bytes identify which build file the pin holds.
         assert_eq!(std::fs::read_to_string(&pin).unwrap(), "daemon build");
+        // pin: the fixture bytes identify which build file the pin holds.
         assert_eq!(std::fs::read_to_string(&installed).unwrap(), "installed build");
         // Re-pinning replaces the pin whole and leaves no staged file behind.
         pin_executable(&installed, None, &pin).unwrap();
+        // pin: the fixture bytes identify which build file the pin holds.
         assert_eq!(std::fs::read_to_string(&pin).unwrap(), "installed build");
         assert_eq!(std::fs::read_dir(pin.parent().unwrap()).unwrap().count(), 1);
     }
@@ -736,6 +739,7 @@ mod tests {
         std::fs::write(&image, "daemon build").unwrap();
         let pin = dir.path().join("pin/cas");
         pin_executable(&installed, Some(&image), &pin).unwrap();
+        // pin: the fixture bytes identify which build file the pin holds.
         assert_eq!(std::fs::read_to_string(&pin).unwrap(), "daemon build");
     }
 

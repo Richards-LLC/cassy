@@ -138,8 +138,14 @@ test("cas-2077 deployed Cloud: stopped hub replay, one offline admission, revoke
     await native("/stop"); await native("/start");
     await expect(mobile.locator('[data-state="accepted"]')).toBeVisible();
     // Give the restarted real 15s drain a tick before asserting dedupe.
-    const restartAt = Date.now();
-    await expect.poll(async () => { const value = await native("/evidence"); return { settled: Date.now() - restartAt >= 16_000, admissions: value.admissions.length, prompts: value.prompts.length }; }, { timeout: 35_000, intervals: [1000] }).toEqual({ settled: true, admissions: 1, prompts: 1 });
+    // Real time is required for the native 15s drain and Cloud PoP expiry.
+    // A fixed observation window avoids recording deliberate failed Expect
+    // attempts while waiting; this does not replace an asynchronous UI wait.
+    await page.waitForTimeout(16_000);
+    receipt.restarted = await native("/evidence");
+    expect(receipt.restarted.admissions).toHaveLength(1);
+    expect(receipt.restarted.prompts).toHaveLength(1);
+    expect(receipt.restarted.admissions[0]).toEqual(receipt.admitted.admissions[0]);
     await capture(phone, "M04", "The returning machine receives my reply once, including after a hub restart.");
 
     const refusal = page.waitForResponse(async (response) => response.url().startsWith(`${CLOUD_ORIGIN}/api/operator/`) && response.status() === 401 && (await response.json()).error === "grant_revoked", { timeout: 30_000 });

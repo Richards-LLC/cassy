@@ -44,6 +44,8 @@
 
 pub(crate) mod daemon;
 mod server;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) use server::memory::configure_allocator as configure_serve_allocator;
 pub mod socket;
 pub mod tools;
 #[cfg(feature = "mcp-proxy")]

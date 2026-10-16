@@ -2011,7 +2011,7 @@ async fn cas_cfd1_merges_pushed_parked_ref_without_touching_reused_dirty_worker(
 async fn cas_cfd1_dirty_source_refuses_unpushed_mismatched_or_destructive_merge() {
     let mut env = test_env();
     let fixture_parent = cas::test_paths::runtime_fixture_parent();
-    for case in ["unpushed", "remote_mismatch", "anchor_mismatch", "cleanup"] {
+    for case in ["unpushed", "remote_mismatch", "anchor_mismatch", "remote_deleted", "not_parked", "cleanup", "conflict"] {
         let repo = GitRepo::new();
         let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
         disable_system_a(&cas_root);
@@ -2020,12 +2020,15 @@ async fn cas_cfd1_dirty_source_refuses_unpushed_mismatched_or_destructive_merge(
         run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
         run_git(&["branch", "epic/parked"], &repo.root);
         run_git(&["push", "origin", "epic/parked"], &repo.root);
-        let target_before = git_stdout(&repo.root, &["rev-parse", "epic/parked"]);
         let (_, task_id) = create_epic_and_worker_task(&cas_root, "epic/parked", Some("alice"));
         let worker = cas_root.join("worktrees/alice");
         repo.add_worktree(&worker, "factory/alice");
         std::fs::write(worker.join("delivered.txt"), "delivery\n").unwrap();
         run_git(&["add", "delivered.txt"], &worker);
+        if case == "conflict" {
+            std::fs::write(worker.join("README.md"), "worker delivery\n").unwrap();
+            run_git(&["add", "README.md"], &worker);
+        }
         run_git(&["commit", "-m", "delivery"], &worker);
         let anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
         if case == "remote_mismatch" {
@@ -2037,9 +2040,22 @@ async fn cas_cfd1_dirty_source_refuses_unpushed_mismatched_or_destructive_merge(
             run_git(&["commit", "--allow-empty", "-m", "later task tip"], &worker);
             run_git(&["push", "origin", "factory/alice"], &worker);
         }
+        if case == "remote_deleted" {
+            run_git(&["update-ref", "-d", "refs/heads/factory/alice"], remote.path());
+            assert_eq!(git_stdout(&repo.root, &["rev-parse", "origin/factory/alice"]), anchor,
+                "stale cached origin proof must not authorize a merge");
+        }
+        if case == "conflict" {
+            std::fs::write(repo.root.join("README.md"), "competing target\n").unwrap();
+            run_git(&["add", "README.md"], &repo.root);
+            run_git(&["commit", "-m", "target conflict"], &repo.root);
+            run_git(&["update-ref", "refs/heads/epic/parked", "HEAD"], &repo.root);
+            run_git(&["push", "origin", "epic/parked"], &repo.root);
+        }
+        let target_before = git_stdout(&repo.root, &["rev-parse", "epic/parked"]);
         let tasks = open_task_store(&cas_root).unwrap();
         let mut task = tasks.get(&task_id).unwrap();
-        task.status = TaskStatus::AwaitingMerge;
+        task.status = if case == "not_parked" { TaskStatus::InProgress } else { TaskStatus::AwaitingMerge };
         task.deliverables.factory_branch_anchor = Some(anchor);
         tasks.update(&task).unwrap();
         let dirty = "uncommitted next task\n";
@@ -2053,7 +2069,11 @@ async fn cas_cfd1_dirty_source_refuses_unpushed_mismatched_or_destructive_merge(
         req.task_id = Some(task_id);
         req.cleanup = Some(case == "cleanup");
         let error = svc.coordination(Parameters(req)).await.expect_err(case);
-        assert!(error.message.contains("uncommitted changes"), "{case}: {error:?}");
+        if case == "conflict" {
+            assert!(error.message.to_lowercase().contains("conflict"), "{case}: {error:?}");
+        } else {
+            assert!(error.message.contains("uncommitted changes"), "{case}: {error:?}");
+        }
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/parked"]), target_before, "{case}");
         assert_eq!(git_stdout(&worker, &["rev-parse", "HEAD"]), head_before, "{case}");
         assert_eq!(git_stdout(&worker, &["status", "--porcelain"]), status_before, "{case}");

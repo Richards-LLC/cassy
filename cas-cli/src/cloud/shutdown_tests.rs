@@ -313,3 +313,20 @@ fn cas_4ac8_legacy_fence_allows_resumes_and_expiry() {
     write(&legacy, &intent, false).unwrap();
     assert!(!is_ended(temp.path(), &old).unwrap());
 }
+
+#[test]
+fn cas_4ac8_round3_scheduled_intent_is_superseded_before_due() {
+    let env = TestEnvGuard::temp_home();
+    let root = init_cas_dir(env.home()).unwrap();
+    enqueue(&root, "resumed", "same", "http://example.invalid").unwrap();
+    let file = path(&root, "resumed", "same");
+    let mut intent = read(&file).unwrap();
+    intent.next_retry_at = Utc::now() + chrono::Duration::minutes(10);
+    write(&file, &intent, false).unwrap();
+    let mut resumed = ended_agent("resumed", "same");
+    resumed.registered_at = Utc::now();
+    open_agent_store(&root).unwrap().register(&resumed).unwrap();
+    assert!(health(&root, Utc::now()).is_empty(), "live resume must not show pending shutdown");
+    drain(&root, &client("http://example.invalid"), Utc::now()).unwrap();
+    assert!(read(&file).unwrap().completed_at.is_some());
+}

@@ -943,3 +943,86 @@ async fn cas_4ac8_same_session_resume_can_end_again() {
         assert_eq!(requests.iter().filter(|r| r.url.path().ends_with("/shutdown")).count(), incarnation + 1);
     }
 }
+
+#[tokio::test]
+async fn cas_4ac8_round3_clear_auto_reinsert_stays_ended() {
+    use wiremock::matchers::{method, path};
+    let (fx, daemon) = fixture("cas-571d").await;
+    let daemon = Arc::new(daemon);
+    let id = "clear-auto-reinsert";
+    session_start(&daemon, id, "clearing").await;
+    Mock::given(method("POST")).and(path(format!("/api/agents/{id}/shutdown")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"released_locks": 0})))
+        .with_priority(1).expect(1).mount(&fx._server).await;
+    let root = fx.cas_root.clone();
+    tokio::task::spawn_blocking(move || crate::hooks::handlers::handle_session_end(
+        &crate::hooks::HookInput {session_id: id.into(), ..Default::default()}, Some(&root)))
+        .await.unwrap().unwrap();
+    let core = crate::mcp::server::CasCore::with_daemon(fx.cas_root.clone(), None, Some(daemon.clone()));
+    core.ensure_agent_active(id).unwrap();
+    daemon.await_cloud_presence().await;
+    let row = crate::store::open_agent_store(&fx.cas_root).unwrap().get(id).unwrap();
+    assert!(row.cc_session_id.is_none());
+    assert!(crate::cloud::shutdown::is_ended(&fx.cas_root, &row).unwrap());
+    assert_eq!(fx.cloud.state().registrations.len(), 1, "automatic reinsertion must not register with Cloud");
+}
+
+#[tokio::test]
+async fn cas_4ac8_round3_failed_unregister_real_start_is_new_incarnation() {
+    let (fx, daemon) = fixture("cas-571d").await;
+    let id = "failed-delete-resume";
+    session_start(&daemon, id, "resuming").await;
+    let agents = crate::store::open_agent_store(&fx.cas_root).unwrap();
+    let old = agents.get(id).unwrap();
+    let db = rusqlite::Connection::open(fx.cas_root.join("cas.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_agent_delete BEFORE DELETE ON agents BEGIN SELECT RAISE(FAIL, 'injected delete failure'); END;").unwrap();
+    let root = fx.cas_root.clone();
+    tokio::task::spawn_blocking(move || crate::hooks::handlers::handle_session_end(
+        &crate::hooks::HookInput {session_id: id.into(), ..Default::default()}, Some(&root)))
+        .await.unwrap().unwrap();
+    assert!(agents.get(id).is_ok(), "fixture must retain the failed-delete row");
+    let resumed = daemon_for(&fx.cas_root);
+    session_start(&resumed, id, "resuming").await;
+    let current = agents.get(id).unwrap();
+    assert!(current.registered_at > old.registered_at, "real SessionStart must refresh the retained shutdown row");
+    assert!(!crate::cloud::shutdown::is_ended(&fx.cas_root, &current).unwrap());
+}
+
+#[tokio::test]
+async fn cas_4ac8_round3_session_start_burst_keeps_pending_registrations() {
+    use wiremock::matchers::{method, path};
+    let (fx, daemon) = fixture("cas-571d").await;
+    let cloud = fx.cloud.clone();
+    Mock::given(method("POST")).and(path("/api/agents/register"))
+        .respond_with(move |request: &Request| cloud.respond(request).set_delay(std::time::Duration::from_millis(300)))
+        .up_to_n_times(1).with_priority(1).mount(&fx._server).await;
+    for id in ["burst-one", "burst-two", "burst-three"] {
+        daemon.handle_socket_event(DaemonEvent::SessionStart {
+            session_id: id.into(), agent_name: Some(id.into()), agent_role: Some("supervisor".into()),
+            cc_pid: our_cc_pid(), clone_path: None,
+        }).await;
+    }
+    daemon.await_cloud_presence().await;
+    let state = fx.cloud.state();
+    for id in ["burst-one", "burst-two", "burst-three"] {
+        assert!(state.agents.contains_key(id), "lost pending SessionStart for {id}");
+    }
+}
+
+#[tokio::test]
+async fn cas_4ac8_round3_resume_resets_failing_backoff() {
+    let (fx, daemon) = fixture("cas-571d").await;
+    let id = "resume-backoff";
+    fx.cloud.state().reject_registrations = 2;
+    session_start(&daemon, id, "failing").await;
+    heartbeat_tick(&daemon).await;
+    let record = presence::load(&fx.cas_root, id).unwrap();
+    assert!(record.next_retry_at.unwrap() > chrono::Utc::now());
+    let root = fx.cas_root.clone();
+    tokio::task::spawn_blocking(move || crate::hooks::handlers::handle_session_end(
+        &crate::hooks::HookInput {session_id: id.into(), ..Default::default()}, Some(&root)))
+        .await.unwrap().unwrap();
+    let resumed = daemon_for(&fx.cas_root);
+    session_start(&resumed, id, "resuming").await;
+    assert_eq!(presence::load(&fx.cas_root, id).unwrap().state, PresenceState::Registered);
+}

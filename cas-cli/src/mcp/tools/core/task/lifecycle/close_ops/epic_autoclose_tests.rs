@@ -364,3 +364,28 @@ async fn cas_7f60_gone_branch_with_unlanded_child_is_still_refused() {
     assert_ne!(run.task.status, TaskStatus::Closed, "{}", run.text);
     assert!(run.text.contains("cas-7f60-child"), "{}", run.text);
 }
+
+/// cas-04c6: a gone epic branch with nothing recorded to prove stays
+/// fail-closed; only anchored, terminal children make it measurable.
+#[test]
+fn cas_7f60_gone_branch_needs_anchored_terminal_children() {
+    let anchored = |id: &str| {
+        let mut task = child(id, "lane");
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        task
+    };
+    assert!(!children_prove_delivery(&[]), "no children: nothing to prove");
+    assert!(children_prove_delivery(&[anchored("cas-a")]));
+    let mut open = anchored("cas-open");
+    open.status = TaskStatus::Open;
+    assert!(!children_prove_delivery(&[anchored("cas-a"), open]), "open child");
+    let mut unanchored_code = child("cas-code", "lane");
+    unanchored_code.deliverables.files_changed = vec!["child.rs".into()];
+    assert!(
+        !children_prove_delivery(&[anchored("cas-a"), unanchored_code]),
+        "code the gate cannot measure"
+    );
+    let ops_only = child("cas-ops", "lane");
+    assert!(!children_prove_delivery(&[ops_only.clone()]), "no anchor at all");
+    assert!(children_prove_delivery(&[anchored("cas-a"), ops_only]));
+}

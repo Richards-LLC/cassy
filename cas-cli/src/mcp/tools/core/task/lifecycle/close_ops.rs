@@ -7388,9 +7388,17 @@ impl CasCore {
             // resolves neither locally nor on origin. Measure the epic and
             // the children that targeted it against the default branch
             // instead: their content must be there, or the gate refuses.
+            // Only with children whose recorded deliveries the gate can then
+            // prove there; a gone branch with nothing to prove stays
+            // fail-closed (cas-04c6).
             let gone = (req.commit_receipt.is_none())
                 .then(|| epic_autoclose::gone_epic_target(&close_project_root, &target_branch))
-                .flatten();
+                .flatten()
+                .filter(|_| {
+                    task_store
+                        .get_subtasks(&req.id)
+                        .is_ok_and(|children| epic_autoclose::children_prove_delivery(&children))
+                });
             let (target_branch, gone_epic_branch) = match gone {
                 Some(default) => (default, Some(target_branch)),
                 None => (target_branch, None),

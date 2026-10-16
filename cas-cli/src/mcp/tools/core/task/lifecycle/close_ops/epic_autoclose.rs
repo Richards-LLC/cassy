@@ -161,6 +161,24 @@ pub(crate) fn gone_epic_target(repo: &Path, epic_branch: &str) -> Option<String>
     (default != epic_branch && default_branch_ref(repo).is_some()).then_some(default)
 }
 
+/// Whether `children` give the epic-close gate something to prove on the
+/// default branch when the epic branch is gone: at least one child, every
+/// child terminal, at least one recorded delivery anchor, and no child with
+/// a code delivery the gate cannot measure (no anchor). Without that, a
+/// gone branch stays fail-closed (cas-04c6): absence is never evidence.
+pub(crate) fn children_prove_delivery(children: &[cas_types::Task]) -> bool {
+    let anchored = |child: &cas_types::Task| {
+        child.deliverables.factory_branch_anchor.is_some()
+            || !child.deliverables.historical_factory_branch_anchors.is_empty()
+    };
+    !children.is_empty()
+        && children.iter().all(cas_types::Task::is_terminal)
+        && children.iter().any(anchored)
+        && children
+            .iter()
+            .all(|child| !super::has_recorded_code_delivery(child) || anchored(child))
+}
+
 /// `children` with every work target naming the gone `epic_branch` pointed
 /// at `default_branch`, so each child's delivery is proven there.
 pub(crate) fn retarget_children(

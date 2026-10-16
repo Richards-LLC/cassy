@@ -124,6 +124,7 @@ fn cas_e1f4_apply_links_shared_items_keeps_logins_merges_and_backs_up() {
     let base = Provider::Claude.base_dir(h);
 
     // The per-account /finish command is now in the base and in every account.
+    // pin: operator-facing dry-run and receipt wording.
     assert_eq!(std::fs::read_to_string(base.join("commands/finish.md")).unwrap(), "F");
     for account in [".claude-a@x.com", ".claude-b@x.com", ".claude-c@x.com"] {
         let dir = h.join(account);
@@ -138,12 +139,15 @@ fn cas_e1f4_apply_links_shared_items_keeps_logins_merges_and_backs_up() {
             !std::fs::symlink_metadata(dir.join(".credentials.json")).unwrap().file_type().is_symlink()
         );
     }
+    // pin: operator-facing dry-run and receipt wording.
     assert_eq!(std::fs::read_to_string(base.join("settings.json")).unwrap(), "{\"main\":1}");
     assert_eq!(
         std::fs::read_to_string(base.join("settings.json.from-claude-alt")).unwrap(),
         "{\"alt\":2}"
     );
+    // pin: operator-facing dry-run and receipt wording.
     assert_eq!(std::fs::read_to_string(base.join("skills/s/SKILL.md")).unwrap(), "S");
+    // pin: operator-facing dry-run and receipt wording.
     assert_eq!(std::fs::read_to_string(base.join("projects/p/t.jsonl")).unwrap(), "typo transcript");
     assert_eq!(
         std::fs::read_to_string(h.join(".claude-a@x.com/sessions/s1.json")).unwrap(),

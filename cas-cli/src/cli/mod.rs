@@ -57,6 +57,7 @@ mod init;
 pub mod integrate;
 pub mod interactive;
 mod limits;
+pub(crate) mod accounts;
 mod list;
 pub(crate) mod mcp_cmd;
 pub mod memory;
@@ -300,6 +301,9 @@ pub enum Commands {
     /// Show local provider rate-limit and credit availability
     Limits(LimitsArgs),
 
+    /// Share one base folder across every Claude and Codex account
+    Accounts(accounts::AccountsArgs),
+
     /// Output a status line for agent integrations
     #[command(alias = "statusline")]
     StatusLine(StatusLineArgs),
@@ -468,6 +472,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Status(_)
         | Commands::Peers(_)
         | Commands::Limits(_)
+        | Commands::Accounts(_)
         | Commands::StatusLine(_)
         | Commands::Mcp(_)
         | Commands::Queue(_)
@@ -679,6 +684,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Status(_) => "status".to_string(),
         Commands::Peers(_) => "peers".to_string(),
         Commands::Limits(_) => "limits".to_string(),
+        Commands::Accounts(_) => "accounts".to_string(),
         Commands::StatusLine(_) => "statusline".to_string(),
         Commands::Hook(_) => "hook".to_string(),
         Commands::Auth(_) => "auth".to_string(),
@@ -815,6 +821,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Status(args) => status::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Peers(args) => peers::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Limits(args) => limits::execute(args, cli),
+        Commands::Accounts(args) => accounts::execute(args, cli),
         Commands::StatusLine(args) => statusline::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Hook(args) => hook::execute(args, cli),
         Commands::Auth(cmd) => auth::execute(cmd, cli),

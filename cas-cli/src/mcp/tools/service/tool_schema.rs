@@ -72,6 +72,8 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
     "remind_id",
     "remind_ttl_secs",
     "cross_session",
+    // cas-2a5a: `peers scope=all` lists the account's supervisors.
+    "scope",
 ];
 
 /// Descriptions `coordination` publishes in place of the shared
@@ -106,6 +108,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("remind_id", "remind_cancel: reminder id."),
     ("remind_ttl_secs", "TTL seconds: default 3600; external default 604800 (7 days); 0=never."),
     ("cross_session", "remind: survive session end and task close."),
+    ("scope", "peers: all = your account's supervisors in every project."),
 ];
 
 /// Messaging and reminder parameters the supervisor `factory` tool does not
@@ -128,6 +131,7 @@ pub(crate) const FACTORY_HIDDEN_FIELDS: &[&str] = &[
     "remind_id",
     "remind_ttl_secs",
     "cross_session",
+    "scope",
 ];
 
 /// Narrow the shared `CoordinationRequest` schema to the tool publishing it:

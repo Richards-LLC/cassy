@@ -872,6 +872,7 @@ pub(crate) enum Admission {
 /// The prompt queue's jobs and the control-side state that orders them.
 pub(crate) struct QueueJobs {
     pub(crate) spawn_ingress: super::queue_control_jobs::SpawnIngress,
+    pub(crate) prompt_preparation: super::queue_control_jobs::PromptPreparation,
     exec: Exec,
     next_generation: u64,
     select_in_flight: bool,
@@ -958,6 +959,7 @@ impl QueueJobs {
     fn with_exec(exec: Exec) -> Self {
         Self {
             spawn_ingress: Default::default(),
+            prompt_preparation: Default::default(),
             exec,
             next_generation: 0,
             select_in_flight: false,

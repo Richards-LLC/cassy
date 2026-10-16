@@ -183,3 +183,275 @@ fn poll_spawn_queue(request: &SpawnPollRequest) -> Result<SpawnBatch, String> {
     };
     Ok(SpawnBatch { requests, stalled })
 }
+
+pub(crate) const WAKE_GATE_READ: &str = "WakeGateRead";
+const WAKE_MAX_AGE: Duration = Duration::from_millis(250);
+
+use super::prompt_queue_jobs::QueueSelection;
+use super::queue_and_events::{RecipientWakeEvidence, ToolCallEvidence, WorkerWaitState};
+use std::collections::HashMap;
+
+#[derive(Debug)]
+pub(crate) struct RecipientInputs {
+    pub latest: crate::mcp::tools::service::harness_observation::HarnessObservations,
+    pub tool_call: ToolCallEvidence,
+    pub wait: WorkerWaitState,
+    active_until: Option<chrono::DateTime<chrono::Utc>>,
+    first_prompt_until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl RecipientInputs {
+    pub(crate) fn wake_evidence(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> RecipientWakeEvidence {
+        RecipientWakeEvidence {
+            recently_active: self.tool_call == ToolCallEvidence::InFlight
+                || self.active_until.is_some_and(|until| now <= until),
+            awaiting_first_prompt: self.first_prompt_until.is_some_and(|until| now <= until),
+        }
+    }
+    pub(crate) fn mid_turn(&self) -> Option<bool> {
+        Some(match (&self.latest.wake, &self.latest.completion) {
+            (Some(start), Some(end)) => start.at > end.at,
+            (Some(_), None) => true,
+            _ => false,
+        })
+    }
+}
+
+struct WakeInputs {
+    agents: Vec<cas_types::Agent>,
+    recipients: HashMap<String, RecipientInputs>,
+    finished_at: Instant,
+}
+
+/// Owns the raw batch until its off-loop evidence is ready. All batches pass
+/// here, including claim-only batches reconstructed from carried RowFacts.
+#[derive(Default)]
+pub(crate) struct PromptPreparation {
+    pending: Option<QueueSelection>,
+    in_flight: Option<u64>,
+    generation: u64,
+    last_submitted: Option<Instant>,
+    ready: Option<WakeInputs>,
+    current: Option<WakeInputs>,
+}
+
+impl PromptPreparation {
+    pub(crate) fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+    pub(crate) fn agents(&self) -> &[cas_types::Agent] {
+        self.current
+            .as_ref()
+            .map(|inputs| inputs.agents.as_slice())
+            .unwrap_or(&[])
+    }
+    pub(crate) fn recipient(&self, pane: &str) -> Option<&RecipientInputs> {
+        self.current.as_ref()?.recipients.get(pane)
+    }
+    pub(crate) fn advance(
+        &mut self,
+        jobs: &mut QueueJobs,
+        selection: Option<QueueSelection>,
+        cas_dir: PathBuf,
+        supervisor: String,
+        workers: Vec<String>,
+        now: Instant,
+    ) -> Option<QueueSelection> {
+        jobs.apply_completions();
+        self.collect(jobs);
+        if let Some(selection) = selection {
+            debug_assert!(self.pending.is_none());
+            if selection.rows.is_empty() {
+                return Some(selection);
+            }
+            self.pending = Some(selection);
+        }
+        if let Some(inputs) = self.ready.take() {
+            if now.saturating_duration_since(inputs.finished_at) <= WAKE_MAX_AGE {
+                let mut selection = self.pending.take()?;
+                selection.registered_agents = inputs.agents.clone();
+                self.current = Some(inputs);
+                return Some(selection);
+            }
+            // A completion held past its usable age is replaceable evidence.
+            // The raw selection and its claims remain owned while it refreshes.
+            self.last_submitted = None;
+        }
+        if self.pending.is_none()
+            || self.in_flight.is_some()
+            || self
+                .last_submitted
+                .is_some_and(|last| now.saturating_duration_since(last) < POLL_CADENCE)
+        {
+            return None;
+        }
+        let rows = &self.pending.as_ref().unwrap().rows;
+        let mut recipients = HashSet::new();
+        for row in rows {
+            if row.target == "all_workers" {
+                recipients.extend(workers.iter().cloned());
+            } else if row.target == "supervisor" {
+                recipients.insert(supervisor.clone());
+            } else {
+                recipients.insert(row.target.clone());
+            }
+        }
+        let need_worker_wait = rows.iter().any(|row| {
+            matches!(
+                row.origin,
+                Some(cas_store::QueueOrigin::RegisteredAgent { .. })
+            )
+        });
+        self.generation += 1;
+        let generation = self.generation;
+        let submitted = jobs.submit_external(
+            JobSpec {
+                kind: WAKE_GATE_READ,
+                key: "WakeGateRead:delivery".into(),
+                lane: Lane::Blocking,
+                criticality: Criticality::Refresh,
+                generation,
+                budget: Duration::from_millis(100),
+            },
+            move || {
+                let inputs = read_wake_inputs(&cas_dir, &supervisor, &recipients, need_worker_wait);
+                super::delivery::wake_daemon_after_enqueue(&cas_dir);
+                Box::new(inputs)
+            },
+        );
+        if matches!(
+            submitted,
+            Submitted::Queued
+                | Submitted::QueuedBehindKey
+                | Submitted::QueuedDroppedOldest { .. }
+                | Submitted::Coalesced { .. }
+        ) {
+            self.in_flight = Some(generation);
+        }
+        self.last_submitted = Some(now);
+        jobs.apply_completions();
+        self.collect(jobs);
+        if let Some(inputs) = self.ready.take() {
+            let mut selection = self.pending.take()?;
+            selection.registered_agents = inputs.agents.clone();
+            self.current = Some(inputs);
+            return Some(selection);
+        }
+        None
+    }
+    fn collect(&mut self, jobs: &mut QueueJobs) {
+        for result in jobs.take_external_completions_where(|kind| kind == WAKE_GATE_READ) {
+            if self.in_flight != Some(result.generation) {
+                continue;
+            }
+            self.in_flight = None;
+            match result.outcome {
+                Ok(ExternalOutcome::Done(value)) => match value
+                    .downcast::<Result<WakeInputs, String>>()
+                {
+                    Ok(value) => match *value {
+                        Ok(inputs) => self.ready = Some(inputs),
+                        Err(error) => {
+                            tracing::warn!(%error, "prompt wake inputs unavailable; retaining batch")
+                        }
+                    },
+                    Err(_) => tracing::error!("invalid prompt wake input result; retaining batch"),
+                },
+                _ => tracing::warn!("prompt wake input job did not complete; retaining batch"),
+            }
+        }
+    }
+}
+
+fn read_wake_inputs(
+    cas_dir: &std::path::Path,
+    supervisor: &str,
+    recipients: &HashSet<String>,
+    need_worker_wait: bool,
+) -> Result<WakeInputs, String> {
+    let agents = crate::store::open_agent_store(cas_dir)
+        .and_then(|store| store.list(None))
+        .map_err(|error| error.to_string())?;
+    let blocked: HashSet<String> = if need_worker_wait {
+        crate::store::open_task_store_cached(cas_dir)
+            .ok()
+            .and_then(|tasks| tasks.list(Some(cas_types::TaskStatus::Blocked)).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|task| task.assignee)
+            .map(|name| name.to_ascii_lowercase())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let mut observations = HashMap::new();
+    for name in recipients {
+        let Some(agent) = agents.iter().find(|agent| agent.name == *name) else {
+            continue;
+        };
+        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(agent);
+        let path = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
+            cas_dir, agent,
+        )
+        .filter(|path| path.exists());
+        let latest = path
+            .as_ref()
+            .map(|path| {
+                crate::mcp::tools::service::harness_observation::latest_turn_observations(path, cli)
+            })
+            .unwrap_or_default();
+        let tool_call = path
+            .as_ref()
+            .map(|path| {
+                ToolCallEvidence::from_transcript(
+                    crate::cli::factory::wedged::transcript_has_in_flight_tool_call(path, cli),
+                )
+            })
+            .unwrap_or(ToolCallEvidence::Unknown);
+        let active_until = path
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok()?.modified().ok())
+            .map(|modified| {
+                chrono::DateTime::<chrono::Utc>::from(modified)
+                    + chrono::Duration::from_std(
+                        super::queue_and_events::CLAUDE_ACTIVE_TRANSCRIPT_WINDOW,
+                    )
+                    .unwrap()
+            });
+        let first_prompt_until =
+            (path.is_none() && cli == cas_mux::SupervisorCli::Claude).then(|| {
+                agent.registered_at
+                    + chrono::Duration::from_std(super::queue_and_events::CLAUDE_FIRST_PROMPT_GRACE)
+                        .unwrap()
+            });
+        let harness_waiting_for_input = need_worker_wait
+            && name != supervisor
+            && crate::ui::factory::director::idle_worker_liveness(cas_dir, name).is_some_and(
+                |observation| {
+                    observation.state
+                        == crate::mcp::tools::service::worker_liveness::Liveness::WaitingForInput
+                },
+            );
+        observations.insert(
+            name.clone(),
+            RecipientInputs {
+                latest,
+                tool_call,
+                active_until,
+                first_prompt_until,
+                wait: WorkerWaitState {
+                    harness_waiting_for_input,
+                    task_blocked: blocked.contains(&name.to_ascii_lowercase()),
+                },
+            },
+        );
+    }
+    Ok(WakeInputs {
+        agents,
+        recipients: observations,
+        finished_at: Instant::now(),
+    })
+}

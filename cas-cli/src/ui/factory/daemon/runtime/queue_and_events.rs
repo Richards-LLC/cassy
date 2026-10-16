@@ -1629,7 +1629,7 @@ pub enum ToolCallEvidence {
 }
 
 impl ToolCallEvidence {
-    fn from_transcript(has_in_flight_call: bool) -> Self {
+    pub(super) fn from_transcript(has_in_flight_call: bool) -> Self {
         if has_in_flight_call {
             Self::InFlight
         } else {
@@ -6303,14 +6303,11 @@ impl FactoryDaemon {
     /// spoof-by-naming the stamp exists to remove.
     fn wake_sender_for(&self, origin: Option<&cas_store::QueueOrigin>) -> WakeSender {
         let resolved = match origin {
-            Some(cas_store::QueueOrigin::RegisteredAgent { agent_id }) => {
-                crate::store::open_agent_store(self.app.cas_dir())
-                    .ok()
-                    .and_then(|store| store.get(agent_id).ok())
-            }
+            Some(cas_store::QueueOrigin::RegisteredAgent { agent_id }) =>
+                self.queue_jobs.prompt_preparation.agents().iter().find(|agent| agent.id == *agent_id),
             _ => None,
         };
-        Self::wake_sender_from_origin(origin, resolved.as_ref())
+        Self::wake_sender_from_origin(origin, resolved)
     }
 
     /// Pure classification half of [`Self::wake_sender_for`] (cas-d9a8).
@@ -6647,28 +6644,7 @@ impl FactoryDaemon {
         if !name.eq_ignore_ascii_case(self.app.supervisor_name()) {
             return None;
         }
-        let cas_dir = self.app.cas_dir();
-        let harness_waiting_for_input = crate::ui::factory::director::idle_worker_liveness(
-            cas_dir, worker,
-        )
-        .is_some_and(|observation| {
-            observation.state
-                == crate::mcp::tools::service::worker_liveness::Liveness::WaitingForInput
-        });
-        let task_blocked = crate::store::open_task_store_cached(cas_dir)
-            .ok()
-            .and_then(|store| store.list(Some(cas_types::TaskStatus::Blocked)).ok())
-            .is_some_and(|tasks| {
-                tasks.iter().any(|task| {
-                    task.assignee
-                        .as_deref()
-                        .is_some_and(|assignee| assignee.eq_ignore_ascii_case(worker))
-                })
-            });
-        Some(WorkerWaitState {
-            harness_waiting_for_input,
-            task_blocked,
-        })
+        self.queue_jobs.prompt_preparation.recipient(worker).map(|inputs| inputs.wait)
     }
 
     /// Minimum settle floor between an urgent turn-break (Esc) and the
@@ -6774,6 +6750,30 @@ impl FactoryDaemon {
                 .map(|since| since.elapsed()),
             tool_call: self.recipient_tool_call_evidence(pane_target),
         }
+    }
+
+    fn prepared_pane_wake_state(&self, pane: &str) -> PaneWakeState {
+        PaneWakeState {
+            composer_dirty: self.app.mux.pane_composer_dirty(pane),
+            ready_for_injection: self.app.mux.pane_ready_for_injection(pane),
+            silent_for: self.pane_silent_since.get(pane).map(|since| since.elapsed()),
+            tool_call: self.prepared_tool_call_evidence(pane),
+        }
+    }
+    fn prepared_tool_call_evidence(&self, pane: &str) -> ToolCallEvidence {
+        self.queue_jobs.prompt_preparation.recipient(pane).map(|inputs| inputs.tool_call)
+            .unwrap_or(ToolCallEvidence::Unknown)
+    }
+    fn prepared_turn_completion_after(&self, pane: &str, after: chrono::DateTime<chrono::Utc>) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.queue_jobs.prompt_preparation.recipient(pane)?.latest.completion.as_ref()
+            .filter(|completion| completion.at > after).map(|completion| completion.at)
+    }
+    fn prepared_mid_turn(&self, pane: &str) -> Option<bool> {
+        self.queue_jobs.prompt_preparation.recipient(pane)?.mid_turn()
+    }
+    fn prepared_wake_evidence(&self, pane: &str) -> RecipientWakeEvidence {
+        self.queue_jobs.prompt_preparation.recipient(pane).map(|inputs| inputs.wake_evidence(chrono::Utc::now()))
+            .unwrap_or_default()
     }
 
     /// Whether `pane_target`'s harness transcript shows an outstanding tool
@@ -7809,6 +7809,17 @@ impl FactoryDaemon {
     /// the next one. On the daemon's lanes the selection lands on a later
     /// call (the job's ready flag wakes the loop); inline it lands at once.
     fn next_queue_selection(&mut self) -> Option<super::prompt_queue_jobs::QueueSelection> {
+        let raw = if self.queue_jobs.prompt_preparation.has_pending() { None }
+            else { self.next_unprepared_queue_selection() };
+        let mut preparation = std::mem::take(&mut self.queue_jobs.prompt_preparation);
+        let ready = preparation.advance(&mut self.queue_jobs, raw,
+            self.app.cas_dir().to_path_buf(), self.app.supervisor_name().to_string(),
+            self.app.worker_names().to_vec(), Instant::now());
+        self.queue_jobs.prompt_preparation = preparation;
+        ready
+    }
+
+    fn next_unprepared_queue_selection(&mut self) -> Option<super::prompt_queue_jobs::QueueSelection> {
         let cas_dir = self.app.cas_dir().to_path_buf();
         // A pass that returned early still owes its settling stamps.
         self.queue_jobs.settle_injects(&cas_dir);
@@ -8412,7 +8423,7 @@ impl FactoryDaemon {
                         continue;
                     }
                 }
-                let pane = self.pane_wake_state(&queued.target);
+                let pane = self.prepared_pane_wake_state(&queued.target);
                 if let Some(reason) = pane.veto_for_active_looking_recipient() {
                     // cas-d5ab review H1: the stall nudge's own decline is never
                     // activity, or the nudge would withdraw itself.
@@ -8542,7 +8553,7 @@ impl FactoryDaemon {
                 .wake_gate
                 .and_then(|(_, last_attempt)| last_attempt)
                 .and_then(|attempt| {
-                    let completed_at = self.recipient_turn_completion_after(pane_target, attempt);
+                    let completed_at = self.prepared_turn_completion_after(pane_target, attempt);
                     wake_retry_due_to_turn_end(Some(attempt), completed_at).then_some(())
                 })
                 .is_some();
@@ -8675,18 +8686,18 @@ impl FactoryDaemon {
                 // cas-5129: a busy or still-booting recipient keeps the
                 // budget; only a silent long turn or an unreachable worker
                 // spends it and reaches the supervisor.
-                let turn_aware = if self.recipient_tool_call_evidence(pane_target) == ToolCallEvidence::InFlight {
+                let turn_aware = if self.prepared_tool_call_evidence(pane_target) == ToolCallEvidence::InFlight {
                     TurnAwareRetry::Wait
                 } else {
                     claude_turn_aware_retry_with_evidence(
                     attempts,
-                    self.recipient_mid_turn(pane_target),
-                    self.pane_wake_state(pane_target)
+                    self.prepared_mid_turn(pane_target),
+                    self.prepared_pane_wake_state(pane_target)
                         .silent_for
                         .is_some_and(|silent| silent >= SILENCE_FOR_IDLE_RECIPIENT_WAKE),
                     last_attempt,
                     chrono::Utc::now(),
-                    self.recipient_wake_evidence(pane_target),
+                    self.prepared_wake_evidence(pane_target),
                     )
                 };
                 if retry_at_turn_end {
@@ -9401,7 +9412,7 @@ impl FactoryDaemon {
                     // cas-45c4: every recipient's pane is sampled now — the
                     // worker path needs the same turn evidence the supervisor
                     // wake introduced (cas-f02b).
-                    let pane_state = self.pane_wake_state(&pane_target);
+                    let pane_state = self.prepared_pane_wake_state(&pane_target);
                     // cas-f02b: at most one supervisor wake per drain pass. The
                     // supervisor is the single convergence point for every
                     // worker's lifecycle traffic, so an epic drain can park

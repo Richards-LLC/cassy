@@ -74,7 +74,7 @@ factory action=db_branch_show [task_id=<task>]
 factory action=db_branch_delete task_id=<task> [id=<branch id>]
 ```
 
-Your `cas serve` creates `cas-<task-id>-<n>` through the proxy's `neon.*` tools. The project and parent come from the repository's `neon-database` skill file: `dev` by default, else `staging`, and a production parent is always refused. It writes `DATABASE_URL` to `.env.cas-db` in the worker's worktree (mode 600, git-excluded) and records the branch in `.cas/db-branches/<task>.json` and a task note. The connection string is never shown. Closing or cancelling the task deletes the branch; a worker's own close queues the deletion, and your next coordination call performs it. A task has at most 3 branches, each with a 72-hour TTL and a small compute ceiling, and `gc_report` flags any that outlive their task, worktree or TTL.
+Your `cas serve` creates `cas-<task-id>-<n>` with `neonctl`; use `neonctl` for ad-hoc Neon work too. The project and parent come from the repository's `neon-database` skill file: `dev` by default, else `staging`, and a production parent is always refused. It writes `DATABASE_URL` to `.env.cas-db` in the worker's worktree (mode 600, git-excluded) and records the branch in `.cas/db-branches/<task>.json` and a task note. The connection string is never shown. Closing or cancelling the task deletes the branch; a worker's own close queues the deletion, and your next coordination call performs it. A task has at most 3 branches, each with a 72-hour TTL and a small compute ceiling, and `gc_report` flags any that outlive their task, worktree or TTL.
 
 **`spawn_workers` parameters:**
 

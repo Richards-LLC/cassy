@@ -53,7 +53,12 @@ proxy process environment when the child starts. An unset `${VAR}` prevents
 the child from starting and records `missing_credential_env:VAR` in proxy
 health and doctor output; it is never passed through as a literal placeholder.
 The legacy `env:VAR` credential reference remains supported for HTTP/SSE
-credentials and stdio environment values.
+credentials and stdio environment values. A stdio argument that looks like an
+API key or token refuses the launch: pass it in `env`, never in argv.
+
+An upstream whose tool catalog is cached for its exact configuration starts on
+its first call, and one unused for `idle_timeout_secs` (top level, default
+600, `0` never) stops until its next call.
 
 Stdio children whose command or args name `mcp-server-neon` or
 `server-postgres` start with `TZ=UTC`. Their Node Postgres drivers read

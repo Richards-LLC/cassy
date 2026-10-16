@@ -98,9 +98,9 @@ mcp_execute code='{"server":"violet","tool":"violet_read","args":{"channel":"<na
 ```
 
 A project `allowlist` replaces the machine allowlist entirely, so list every
-route the project needs (for example `"neon.*"`) alongside the Violet
+route the project needs (for example `"vercel.*"`) alongside the Violet
 routes. Prefix an entry with `supervisor:` (for example
-`"supervisor:neon.*"`) to admit it for supervisors and plain sessions only;
+`"supervisor:vercel.*"`) to admit it for supervisors and plain sessions only;
 factory workers are refused with a named reason. `cas serve` logs one
 `callable tools: [...]` line at startup and after each reload, and
 `mcp_search` marks such tools "supervisors only".

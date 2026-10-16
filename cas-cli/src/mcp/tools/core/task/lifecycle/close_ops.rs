@@ -2381,14 +2381,17 @@ fn epic_build_proof_basis(
         let proof = (|| -> Result<String, String> {
             let timeout = std::time::Duration::from_secs(2);
             let binary = crate::github_repo::gh_binary();
-            let github = crate::github_repo::resolve_origin(repo, &binary, timeout)?;
-            if crate::github_repo::merge_queue_enabled(
-                &github.canonical,
-                &default,
-                repo,
-                &binary,
-                timeout,
-            )? {
+            let queue =
+                crate::github_repo::resolve_origin(repo, &binary, timeout).and_then(|github| {
+                    crate::github_repo::merge_queue_enabled(
+                        &github.canonical,
+                        &default,
+                        repo,
+                        &binary,
+                        timeout,
+                    )
+                });
+            if matches!(queue, Ok(true)) {
                 return Ok(format!(
                     "its tip {short} is already contained in {target}, whose merge queue proved the landed tree"
                 ));
@@ -2417,6 +2420,10 @@ fn epic_build_proof_basis(
                     "its tip {short} is already contained in {target}; the supervisor's {line} proves exact default-branch SHA {sha}"
                 ));
             }
+            // An exact supervisor receipt is independent of GitHub access
+            // (including non-GitHub origins). Unknown queue state alone is
+            // never proof; without a receipt it must still fail closed.
+            queue?;
             let ci = crate::mcp::tools::core::workflow::epic_tip_ci_proof(&sha, repo)?;
             Ok(format!(
                 "its tip {short} is already contained in {target}; {ci}"
@@ -27395,15 +27402,21 @@ esac
     #[cfg(unix)]
     #[tokio::test]
     async fn epic_close_exact_default_assembly_receipt_cas_7e91e() {
-        let gh = r#"#!/bin/sh
+        for queue in [
+            r#"{"data":{"repository":{"mergeQueue":null}}}"#,
+            r#"{"data":null}"#,
+        ] {
+            let gh = format!(
+                r#"#!/bin/sh
 case "$1 $2" in
-'repo view') printf '%s\n' '{"nameWithOwner":"acme/epic"}' ;;
-'api graphql') printf '%s\n' '{"data":{"repository":{"mergeQueue":null}}}' ;;
+'repo view') printf '%s\n' '{{"nameWithOwner":"acme/epic"}}' ;;
+'api graphql') printf '%s\n' '{queue}' ;;
 *) exit 97 ;;
 esac
-"#;
-        for current in [false, true] {
-            let run = run_epic_close_fixture_cas_7e91e(0, "#!/bin/sh\ncat >/dev/null\n", |p| {
+"#
+            );
+            for current in [false, true] {
+                let run = run_epic_close_fixture_cas_7e91e(0, "#!/bin/sh\ncat >/dev/null\n", |p| {
                 let old = rev_parse_local(p, "main");
                 git(p, &["branch", "epic/landed", "main"]);
                 std::fs::write(p.join("delivery.js"), "export const integrated = true;\n").unwrap();
@@ -27412,14 +27425,15 @@ esac
                 git(p, &["push", "-q", "origin", "main"]);
                 let head = if current { rev_parse_local(p, "main") } else { old };
                 ("epic/landed".into(), format!("ASSEMBLY_PROOF: head={head} result=PASS command=integrated-suite log=assembly.log"))
-            }, Some((gh, false))).await;
-            assert_eq!(run.is_error, !current, "{}", run.text);
-            assert_eq!(
-                run.task.status == TaskStatus::Closed,
-                current,
-                "{}",
-                run.text
-            );
+            }, Some((&gh, false))).await;
+                assert_eq!(run.is_error, !current, "{}", run.text);
+                assert_eq!(
+                    run.task.status == TaskStatus::Closed,
+                    current,
+                    "{}",
+                    run.text
+                );
+            }
         }
     }
 

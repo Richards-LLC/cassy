@@ -2358,37 +2358,98 @@ fn epic_close_tip(task: &Task, commit_receipt: Option<&str>, repo: &std::path::P
         .or_else(|| resolve_branch_sha(repo, &format!("origin/{branch}^{{commit}}")))
 }
 
-/// cas-74cb: why an epic's own close may defer its build proof to assembly,
-/// or `None` when it must still carry the scoped proof. Either the epic's
-/// latest passing ASSEMBLY_PROOF head contains the epic tip, or the tip is
-/// already contained in the default branch, whose merge queue proved the
-/// landed tree (cas-2970; cas-459b / cas-a25c: lane deleted, content on main).
+/// One integration proof for every code epic, including non-Rust deliveries.
+/// Enforce CI only for confirmed no-queue GitHub repositories; otherwise keep
+/// the existing containment policy. Without a queue,
+/// read successful CI or an exact-SHA supervisor receipt for the landed tree.
 fn epic_build_proof_basis(
     task: &Task,
-    commit_receipt: Option<&str>,
+    tip: Option<&str>,
     repo: &std::path::Path,
-) -> Option<String> {
-    let tip = epic_close_tip(task, commit_receipt, repo)?;
+) -> Result<Option<String>, String> {
+    let Some(tip) = tip else {
+        return Ok(None);
+    };
     let short = &tip[..tip.len().min(12)];
-    if let Some(line) = matching_assembly_proof(&task.notes, repo, Some(&tip)) {
-        return Some(format!("the epic's own {line} covers its tip {short}"));
+    let landed = resolve_close_gate_default_branch(repo)
+        .ok()
+        .and_then(|default| {
+            let target = preferred_diff_target_ref(repo, &default);
+            (git_ref_exists(repo, &target) && git_commit_is_ancestor(repo, tip, &target))
+                .then_some((default, target))
+        });
+    if let Some((default, target)) = landed {
+        let proof = (|| -> Result<String, String> {
+            let timeout = std::time::Duration::from_secs(2);
+            let binary = crate::github_repo::gh_binary();
+            let queue =
+                crate::github_repo::resolve_origin(repo, &binary, timeout).and_then(|github| {
+                    crate::github_repo::merge_queue_enabled(
+                        &github.canonical,
+                        &default,
+                        repo,
+                        &binary,
+                        timeout,
+                    )
+                });
+            match queue {
+                Ok(true) => {
+                    return Ok(format!(
+                        "its tip {short} is already contained in {target}, whose merge queue proved the landed tree"
+                    ));
+                }
+                // Preserve the pre-existing containment path outside confirmed
+                // no-queue GitHub repositories: local/non-GitHub projects and
+                // unavailable queue metadata do not opt into this CI policy.
+                Err(reason) => {
+                    return Ok(format!(
+                        "its tip {short} is already contained in {target}; merge queue state is unconfirmed ({reason}), so the existing containment proof is retained"
+                    ));
+                }
+                Ok(false) => {}
+            }
+            // A cached/local main must not borrow CI while the remote main
+            // has advanced. Read one current default SHA; no test is run.
+            if crate::git_evidence::fetch_parent_branch_result(repo, &default)
+                != BoundedFetch::Succeeded
+            {
+                return Err(format!(
+                    "cannot refresh origin/{default} to read its exact SHA"
+                ));
+            }
+            let target = format!("origin/{default}");
+            let sha =
+                resolve_branch_sha(repo, &target).ok_or("default branch SHA is unresolved")?;
+            if !git_commit_is_ancestor(repo, tip, &sha) {
+                return Err(format!(
+                    "epic tip {tip} is not contained in refreshed {target} at {sha}"
+                ));
+            }
+            if let Some(line) = assembly_proof_line(&task.notes)
+                && scoped_proof_receipt_field(&line, "head=").as_deref() == Some(sha.as_str())
+            {
+                return Ok(format!(
+                    "its tip {short} is already contained in {target}; the supervisor's {line} proves exact default-branch SHA {sha}"
+                ));
+            }
+            let ci = crate::mcp::tools::core::workflow::epic_tip_ci_proof(&sha, repo)?;
+            Ok(format!(
+                "its tip {short} is already contained in {target}; {ci}"
+            ))
+        })();
+        return proof.map(Some).map_err(|reason| format!(
+            "EPIC CI REQUIRED: refusing close of {}: {reason}. A GitHub repository confirmed to have no merge queue needs successful CI on its exact SHA, or an ASSEMBLY_PROOF for that SHA recorded on the epic. Read the existing receipt; do not rerun a passing check. A registered supervisor may retry with supervisor_override=true and a non-empty reason.", task.id
+        ));
     }
-    let default = resolve_close_gate_default_branch(repo).ok()?;
-    [format!("origin/{default}"), default]
-        .into_iter()
-        .find(|target| git_ref_exists(repo, target) && git_commit_is_ancestor(repo, &tip, target))
-        .map(|target| {
-            format!(
-                "its tip {short} is already contained in {target}, whose merge queue proved the landed tree"
-            )
-        })
+    Ok(matching_assembly_proof(&task.notes, repo, Some(tip))
+        .map(|line| format!("the epic's own {line} covers its tip {short}")))
 }
 
 /// cas-74cb: appended when an epic without an assembly basis is refused by
 /// the scoped-proof gate, naming the proof an epic is expected to carry.
 fn epic_assembly_proof_instruction(epic_id: &str) -> String {
     format!(
-        "An epic's build proof is its integration proof (CONTRIBUTING): land the epic on the default branch through the merge queue, which proves the exact merged tree, then retry close. An opt-in local assembly also counts: run the full build and suite on the epic tip and record `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` as a note on {epic_id}. Epic {epic_id} has no passing ASSEMBLY_PROOF covering its tip and its tip is not contained in the default branch."
+        "An epic's build proof is its integration proof (CONTRIBUTING): land the epic on the default branch through the merge queue, which proves the exact merged tree, then retry close. An opt-in local assembly also counts: run the full build and suite on the epic tip and record `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` as a note on {epic_id}. Without a merge queue, a landed epic needs successful CI or an ASSEMBLY_PROOF on the exact default-branch SHA. Epic {epic_id} has no accepted integration proof."
     )
 }
 
@@ -2520,7 +2581,7 @@ enum BuildProofs {
 ///
 /// cas-74cb: an epic's own close defers only with an assembly basis from
 /// [`epic_build_proof_basis`]: its own ASSEMBLY_PROOF covers the epic tip, or
-/// the tip is already contained in the default branch. Otherwise it still
+/// the tip has an accepted default-branch integration proof. Otherwise it still
 /// owes the scoped proof.
 fn close_build_proofs(
     is_factory_worker: bool,
@@ -9607,6 +9668,17 @@ impl CasCore {
                 Ok(tip) => tip,
                 Err(message) => return Ok(Self::tool_error(message)),
             };
+            let epic_assembly_basis = if task.task_type == TaskType::Epic {
+                match epic_build_proof_basis(&task, delivered_tip.as_deref(), proof_repo) {
+                    Ok(basis) => basis,
+                    Err(message) if supervisor_override => {
+                        let audit = format!("decision: epic tip already contained in the default branch; supervisor overrode {message} Reason: {}", req.reason.as_deref().unwrap_or_default());
+                        append_close_decision_note(task_store.as_ref(), &mut task, &audit);
+                        Some(audit)
+                    }
+                    Err(message) => return Ok(Self::tool_error(message)),
+                }
+            } else { None };
             let has_delivery_window = task.task_type != TaskType::Epic || delivered_tip.is_some();
             let tip_is_task_delivery = (task.task_type == TaskType::Epic && delivered_tip.is_some())
                 || req.commit_receipt.is_some()
@@ -9768,9 +9840,6 @@ impl CasCore {
             // cas-74cb: an epic's own close answers with its assembly when it
             // has one; otherwise its scoped proof stays required.
             let closing_epic = task.task_type == TaskType::Epic;
-            let epic_assembly_basis = closing_epic
-                .then(|| epic_build_proof_basis(&task, req.commit_receipt.as_deref(), proof_repo))
-                .flatten();
             let build_proofs = close_build_proofs(
                 is_factory_worker,
                 assembly_proof.is_some(),
@@ -27072,6 +27141,16 @@ mod merge_state_gate_tests {
         checker: &str,
         setup: impl FnOnce(&std::path::Path) -> (String, String),
     ) -> EpicCloseRun {
+        run_epic_close_fixture_cas_7e91e(children, checker, setup, None).await
+    }
+
+    #[cfg(unix)]
+    async fn run_epic_close_fixture_cas_7e91e(
+        children: usize,
+        checker: &str,
+        setup: impl FnOnce(&std::path::Path) -> (String, String),
+        ci: Option<(&str, bool)>,
+    ) -> EpicCloseRun {
         use crate::mcp::CasService;
         use crate::store::{
             open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
@@ -27098,6 +27177,19 @@ mod merge_state_gate_tests {
         git(p, &["branch", "-D", "factory/worker"]);
         let (epic_branch, epic_notes) = setup(p);
         git(p, &["checkout", "-q", "main"]);
+        if let Some((gh_body, _)) = ci {
+            let origin = rev_parse_local(p, "origin/main");
+            let fake_gh = env.home().join("gh");
+            crate::test_paths::warm_stub(&fake_gh, gh_body);
+            env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
+            std::fs::write(p.join(".git/info/exclude"), "gh-requests.log\n").unwrap();
+            // Keep all Git operations on the local bare fixture while the
+            // provider identity remains the explicit GitHub origin.
+            let bare = _bare.path().to_str().unwrap();
+            git(p, &["config", &format!("url.{bare}.insteadOf"), "https://github.com/acme/epic"]);
+            git(p, &["config", "remote.origin.url", "https://github.com/acme/epic"]);
+            assert_eq!(origin, rev_parse_local(p, "origin/main"));
+        }
 
         let cas_dir = p.join(".cas");
         std::fs::create_dir_all(&cas_dir).unwrap();
@@ -27165,7 +27257,7 @@ mod merge_state_gate_tests {
         let request = serde_json::from_value(serde_json::json!({
             "action": "close",
             "id": epic.id,
-            "supervisor_override": true,
+            "supervisor_override": ci.is_none_or(|(_, override_requested)| override_requested),
             "reason": "inspected every terminal child delivery against main",
             "stranded_branch_override": "inspected every child lane: each factory branch and anchor is deleted locally and on origin after its delivery shipped",
         }))
@@ -27181,11 +27273,211 @@ mod merge_state_gate_tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let text = format!("{text}\nRequests: {}", std::fs::read_to_string(p.join("gh-requests.log")).unwrap_or_default());
         EpicCloseRun {
             is_error: response.is_error == Some(true),
             text,
             elapsed,
             task: store.get(&epic.id).unwrap(),
+        }
+    }
+
+
+    // Real close-handler controls: the epic tip is an ancestor of main, so
+    // CI must belong to origin/main itself, never the old epic tip.
+    #[cfg(unix)]
+    async fn landed_epic_ci_close_cas_7e91e(
+        queue: &str,
+        checks: &str,
+        override_requested: bool,
+    ) -> EpicCloseRun {
+        let gh = format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> gh-requests.log
+case "$1 $2" in
+'repo view') printf '%s\n' '{{"nameWithOwner":"acme/epic"}}' ;;
+'api graphql') printf '%s\n' '{queue}' ;;
+'api --method')
+  expected="repos/acme/epic/commits/$(git rev-parse origin/main)/check-runs"
+  [ "$4" = "$expected" ] || exit 97
+  printf '%s\n' '{checks}' ;;
+*) exit 97 ;;
+esac
+"#
+        );
+        run_epic_close_fixture_cas_7e91e(
+            0,
+            "#!/bin/sh\ncat >/dev/null\n",
+            |p| {
+                git(p, &["branch", "epic/landed", "main"]);
+                std::fs::write(p.join("delivery.js"), "export const delivered = true;\n").unwrap();
+                git(p, &["add", "delivery.js"]);
+                git(p, &["commit", "-q", "-m", "main integration"]);
+                git(p, &["push", "-q", "origin", "main"]);
+                ("epic/landed".into(), String::new())
+            },
+            Some((&gh, override_requested)),
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn epic_close_requires_exact_main_ci_without_queue_cas_7e91e() {
+        for checks in [
+            r#"{"check_runs":[]}"#,
+            r#"{"check_runs":[{"name":"Tests","status":"completed","conclusion":"cancelled"}]}"#,
+            r#"{"check_runs":[{"name":"Tests","status":"completed","conclusion":"startup_failure"}]}"#,
+            r#"{"check_runs":[{"name":"Tests","status":"completed","conclusion":"skipped"}]}"#,
+            r#"{"check_runs":[{"name":"Tests","status":"queued","conclusion":null}]}"#,
+            r#"{"check_runs":[{"name":"Tests","status":"completed","conclusion":"failure"}]}"#,
+            r#"{"check_runs":[{"name":"Tests","status":"completed","conclusion":"neutral"}]}"#,
+            r#"{"check_runs":[{"name":"Tests","status":"completed","conclusion":"skipped"},{"name":"Lint","status":"completed","conclusion":"success"}]}"#,
+            r#"{"check_runs":[{"name":"Tests","conclusion":"success"}]}"#,
+            r#"{"check_runs":[{"name":"Tests","head_sha":"wrong-sha","status":"completed","conclusion":"success"}]}"#,
+            r#"{"total_count":101,"check_runs":[{"name":"Tests","status":"completed","conclusion":"success"}]}"#,
+        ] {
+            let run = landed_epic_ci_close_cas_7e91e(
+                r#"{"data":{"repository":{"mergeQueue":null}}}"#,
+                checks,
+                false,
+            )
+            .await;
+            assert!(run.is_error, "untested main must be refused: {}", run.text);
+            assert_ne!(run.task.status, TaskStatus::Closed, "{}", run.text);
+            assert!(
+                run.text.contains("EPIC CI REQUIRED")
+                    && run.text.contains("supervisor_override=true"),
+                "{}",
+                run.text
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn epic_close_green_main_and_queue_controls_cas_7e91e() {
+        let green = landed_epic_ci_close_cas_7e91e(
+            r#"{"data":{"repository":{"mergeQueue":null}}}"#,
+            r#"{"check_runs":[{"name":"Tests","status":"completed","conclusion":"success"}]}"#,
+            false,
+        )
+        .await;
+        assert!(!green.is_error, "{}", green.text);
+        assert_eq!(green.task.status, TaskStatus::Closed, "{}", green.text);
+        assert!(
+            green.text.contains("branch=main")
+                && green.text.contains("owner=acme")
+                && green.text.contains("name=epic"),
+            "{}",
+            green.text
+        );
+        assert!(green.text.contains("/check-runs"), "{}", green.text);
+        assert!(
+            green.task.notes.contains("CI") && green.task.notes.contains("origin/main"),
+            "{}",
+            green.task.notes
+        );
+
+        let queued = landed_epic_ci_close_cas_7e91e(
+            r#"{"data":{"repository":{"mergeQueue":{"id":"queue"}}}}"#,
+            r#"{"check_runs":[]}"#,
+            false,
+        )
+        .await;
+        assert!(!queued.is_error, "{}", queued.text);
+        assert_eq!(queued.task.status, TaskStatus::Closed);
+        assert!(
+            !queued.text.contains("/check-runs"),
+            "queue proof must not add a CI run or lookup: {}",
+            queued.text
+        );
+
+        let overridden = landed_epic_ci_close_cas_7e91e(
+            r#"{"data":{"repository":{"mergeQueue":null}}}"#,
+            r#"{"check_runs":[]}"#,
+            true,
+        )
+        .await;
+        assert!(!overridden.is_error, "{}", overridden.text);
+        assert_eq!(overridden.task.status, TaskStatus::Closed);
+        assert!(
+            overridden.task.notes.contains("EPIC CI REQUIRED"),
+            "override must audit refusal: {}",
+            overridden.task.notes
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn epic_close_unknown_queue_preserves_existing_containment_cas_7e91e() {
+        for queue in [
+            "not-json",
+            r#"{"data":{"repository":null}}"#,
+            r#"{"errors":[{"message":"forbidden"}],"data":{"repository":{"mergeQueue":null}}}"#,
+            r#"{"data":{"repository":{"mergeQueue":{}}}}"#,
+        ] {
+            let run = landed_epic_ci_close_cas_7e91e(
+                queue,
+                r#"{"check_runs":[{"name":"Tests","status":"completed","conclusion":"success"}]}"#,
+                false,
+            )
+            .await;
+            assert!(
+                !run.is_error,
+                "unknown queue preserves prior behaviour: {}",
+                run.text
+            );
+            assert_eq!(run.task.status, TaskStatus::Closed);
+            assert!(
+                run.task.notes.contains("merge queue state is unconfirmed"),
+                "{}",
+                run.task.notes
+            );
+            assert!(
+                !run.text.contains("/check-runs"),
+                "unknown queue adds no CI policy: {}",
+                run.text
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn epic_close_exact_default_assembly_receipt_cas_7e91e() {
+        for queue in [
+            r#"{"data":{"repository":{"mergeQueue":null}}}"#,
+            r#"{"data":null}"#,
+        ] {
+            let gh = format!(
+                r#"#!/bin/sh
+case "$1 $2" in
+'repo view') printf '%s\n' '{{"nameWithOwner":"acme/epic"}}' ;;
+'api graphql') printf '%s\n' '{queue}' ;;
+*) exit 97 ;;
+esac
+"#
+            );
+            for current in [false, true] {
+                let run = run_epic_close_fixture_cas_7e91e(0, "#!/bin/sh\ncat >/dev/null\n", |p| {
+                let old = rev_parse_local(p, "main");
+                git(p, &["branch", "epic/landed", "main"]);
+                std::fs::write(p.join("delivery.js"), "export const integrated = true;\n").unwrap();
+                git(p, &["add", "delivery.js"]);
+                git(p, &["commit", "-q", "-m", "main integration"]);
+                git(p, &["push", "-q", "origin", "main"]);
+                let head = if current { rev_parse_local(p, "main") } else { old };
+                ("epic/landed".into(), format!("ASSEMBLY_PROOF: head={head} result=PASS command=integrated-suite log=assembly.log"))
+            }, Some((&gh, false))).await;
+                let closes = current || queue == r#"{"data":null}"#;
+                assert_eq!(run.is_error, !closes, "{}", run.text);
+                assert_eq!(
+                    run.task.status == TaskStatus::Closed,
+                    closes,
+                    "{}",
+                    run.text
+                );
+            }
         }
     }
 

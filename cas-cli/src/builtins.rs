@@ -4748,6 +4748,35 @@ This is the body content."#;
         );
     }
 
+    /// The same owner rule must survive real installation for every harness;
+    /// drift used to leave no owner for full tests in no-queue projects.
+    #[test]
+    fn full_suite_owner_rule_syncs_for_every_harness_cas_7e91e() {
+        // pin: GH #1243 requires this one identical ownership sentence across installed skill surfaces.
+        const RULE: &str = "With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only.";
+        for harness in [
+            SupervisorCli::Claude,
+            SupervisorCli::Codex,
+            SupervisorCli::Grok,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            sync_all_builtins_for_harness(harness, dir.path()).unwrap();
+            for path in [
+                "skills/cas-tdd/SKILL.md",
+                "skills/verify-before-claim/SKILL.md",
+                "skills/cas-qa-craft/references/journeys.md",
+                "skills/cas-qa-craft/references/verifier-evidence-gate.md",
+                "skills/cas-qa-craft/references/evidence-bundle.md",
+            ] {
+                let body = std::fs::read_to_string(dir.path().join(path)).unwrap();
+                assert!(
+                    body.contains(RULE),
+                    "{harness:?} {path} lost full-suite ownership"
+                );
+            }
+        }
+    }
+
     /// The launch contract lives in cas-pty. Worker skills link the on-demand
     /// discipline file, which carries the assembly proof reference.
     #[test]

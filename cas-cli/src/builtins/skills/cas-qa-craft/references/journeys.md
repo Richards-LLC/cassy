@@ -34,9 +34,11 @@ the task target, selects affected journeys itself and runs four workers.
 filter, including supplemental specs and parts. No selected IDs writes an
 explicit empty receipt without launching a browser. Independent QA first
 consumes matching worker receipts under [independent-pass.md](independent-pass.md).
-Factory workers and QA cannot use `--full` or an unfiltered Playwright run;
-the merge queue owns the full run on the final integration tree. Each
-journey leaves an evidence bundle in `<task-id>/journeys/<ID>/`, with the
+Factory workers and QA cannot use `--full` or an unfiltered Playwright run.
+
+With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
+
+Each journey leaves an evidence bundle in `<task-id>/journeys/<ID>/`, with the
 `producer` field of its `bundle.json` set to `journey`.
 
 For hub-web, the Playwright config never reuses a running server. Each
@@ -58,8 +60,7 @@ The files are:
 
 `<task-id>/journeys/JOURNEYS.md` summarises the run. Cite these paths in the
 ledger. The run also writes `journey-receipt.json` (base/head SHAs, selection
-IDs, per-ID counts); close and QA no longer require it, because the merge queue
-runs the full journey suite. Keep the original failed run when
+IDs, per-ID counts); close and QA no longer require it; full-suite ownership follows the rule above. Keep the original failed run when
 checking a single failing spec at one worker. Document-only rebinds follow
 [the affected-journeys rules](evidence-bundle.md#affected-journeys).
 

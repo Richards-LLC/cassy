@@ -14,7 +14,7 @@ Immediately before `task action=close`, treat your summary as a hypothesis, not 
 Every claim in a close reason or note carries exactly one verdict; "looks good", "should work" and "it compiled in my IDE" are not verdicts.
 
 - **VERIFIED**: the proof ran after your last change and its output is pasted.
-- **NOT VERIFIED**: not checked; say why and who checks it (for example the supervisor's `ASSEMBLY_PROOF`).
+- **NOT VERIFIED**: not checked; say why and who checks it (using the full-suite ownership rule below).
 - **INCONCLUSIVE**: checked, but the evidence does not settle it; paste what you saw. Inconclusive is not a pass.
 
 ## Proof ladder
@@ -29,7 +29,7 @@ A measurable claim (faster, smaller, fewer, fixed) needs a before and an after f
 
 ## Factory workers: Rust proof
 
-Factory workers may run capped package-scoped compile checks and targeted nextest tests described in `cas-worker/references/discipline.md`; the full Rust build and suite remain supervisor-owned. For a Rust change, the worker proof is:
+Factory workers may run capped package-scoped compile checks and targeted nextest tests described in `cas-worker/references/discipline.md`; full-suite ownership follows the rule below. For a Rust change, the worker proof is:
 
 - `git diff --stat` showing exactly the files you expected to change.
 - Wiring evidence: `rg '<symbol>'` or `git grep -n '<symbol>'` hits for every new or changed symbol outside its definition.
@@ -37,7 +37,7 @@ Factory workers may run capped package-scoped compile checks and targeted nextes
 - Targeted `test: PASS <sha> <package> <filter> <count>` evidence for the delivered clean commit, or the exact runtime denial if execution is deferred.
 - Any non-Rust suite the change touches, with its passed count.
 
-The full Rust suite and build defer to the supervisor's `ASSEMBLY_PROOF` at epic assembly. Run targeted tests in the worker; mark a deferred targeted run NOT VERIFIED with its exact denial and assembly owner. Rows marked "supervisor / non-factory" below do not apply to a factory worker.
+With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once. Run targeted tests in the worker; mark a deferred targeted run NOT VERIFIED with its exact denial and assembly owner. Rows marked "supervisor / non-factory" below do not apply to a factory worker.
 
 ## The Four-Step Protocol
 
@@ -92,8 +92,8 @@ If a proof failed or a claim is INCONCLUSIVE, do not close. Go back to the worke
 
 | Claim type | Proof shape |
 |---|---|
-| "Tests pass" (factory worker, Rust) | Tests written or updated and committed, plus the worker proof above; targeted runs have nonzero receipts, and the full suite belongs to the supervisor's `ASSEMBLY_PROOF` (see [cas-worker/references/close-gate.md](../cas-worker/references/close-gate.md)) |
-| "Tests pass" (non-Rust) | The project's suite (`pnpm test`, `npx vitest run`, `pytest`) with a nonzero passed count |
+| "Tests pass" (factory worker, Rust) | Tests written or updated and committed, plus the worker proof above; targeted runs have nonzero receipts, and the full suite follows the ownership rule above (see [cas-worker/references/close-gate.md](../cas-worker/references/close-gate.md)) |
+| "Tests pass" (non-Rust) | Affected targeted tests with a nonzero passed count; the full suite follows the ownership rule above |
 | "Tests pass" (supervisor / non-factory, Rust) | `cargo test [--lib --test --workspace]` against the relevant scope |
 | "Build is clean" (supervisor / non-factory) | `cargo build` for the touched crate(s); `cargo build --workspace` for `pub` type changes |
 | "Script runs end-to-end" | The actual script invocation, with the expected input |

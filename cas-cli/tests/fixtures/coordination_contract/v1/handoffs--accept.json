@@ -1,0 +1,236 @@
+{
+  "contract": "cassy.coordination/v1",
+  "surface": "handoffs.accept",
+  "method": "POST",
+  "path": "/api/coordination/handoffs/{id}/accept",
+  "spec": "§4 §5",
+  "cases": [
+    {
+      "name": "accepted",
+      "request": {
+        "path_params": {
+          "id": "00004a0f-1111-4111-8111-000000004a0f"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000051-2222-4222-8222-000000000051",
+          "actor": {
+            "registration_id": "reg-supervisor-beta-07"
+          },
+          "expected_generation": 1
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "acquired",
+          "guidance": "Handoff accepted. You now own this thread at generation 2.",
+          "receipt": {
+            "operation_id": "00000b51-1111-4111-8111-000000000b51",
+            "request_id": "00000051-2222-4222-8222-000000000051",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+              "registration_id": "reg-supervisor-beta-07",
+              "label": "beta (workstation)",
+              "is_caller": true
+            },
+            "generation": 2,
+            "expires_at": "2026-10-16T14:05:00.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "proceed",
+            "handoff": {
+              "id": "00004a0f-1111-4111-8111-000000004a0f",
+              "status": "accepted",
+              "from_slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "to_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+              "owner_generation": 1,
+              "expires_at": "2026-10-16T14:10:00.000Z"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "expired offer",
+      "request": {
+        "path_params": {
+          "id": "00004a0f-1111-4111-8111-000000004a0f"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000052-2222-4222-8222-000000000052",
+          "actor": {
+            "registration_id": "reg-supervisor-beta-07"
+          },
+          "expected_generation": 1
+        }
+      },
+      "response": {
+        "status": 409,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "rejected",
+          "guidance": "The offer expired. The original owner is still responsible.",
+          "reason": "offer_expired",
+          "receipt": {
+            "operation_id": "00000b52-1111-4111-8111-000000000b52",
+            "request_id": "00000052-2222-4222-8222-000000000052",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "registration_id": "reg-supervisor-alpha-01",
+              "label": "alpha (laptop)",
+              "is_caller": false
+            },
+            "generation": 1,
+            "expires_at": "2026-10-16T14:05:00.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "wait_for_owner",
+            "handoff": {
+              "id": "00004a0f-1111-4111-8111-000000004a0f",
+              "status": "expired",
+              "from_slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "to_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+              "owner_generation": 1,
+              "expires_at": "2026-10-16T14:10:00.000Z"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "claim changed since the offer",
+      "request": {
+        "path_params": {
+          "id": "00004a0f-1111-4111-8111-000000004a0f"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000053-2222-4222-8222-000000000053",
+          "actor": {
+            "registration_id": "reg-supervisor-beta-07"
+          },
+          "expected_generation": 1
+        }
+      },
+      "response": {
+        "status": 409,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "stale_generation",
+          "guidance": "The claim changed after this offer was made; it can no longer be accepted.",
+          "reason": "claim_changed",
+          "receipt": {
+            "operation_id": "00000b53-1111-4111-8111-000000000b53",
+            "request_id": "00000053-2222-4222-8222-000000000053",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "registration_id": "reg-supervisor-alpha-01",
+              "label": "alpha (laptop)",
+              "is_caller": false
+            },
+            "generation": 3,
+            "expires_at": "2026-10-16T14:05:00.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "wait_for_owner",
+            "handoff": {
+              "id": "00004a0f-1111-4111-8111-000000004a0f",
+              "status": "superseded",
+              "from_slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "to_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+              "owner_generation": 1,
+              "expires_at": "2026-10-16T14:10:00.000Z"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "offer for someone else",
+      "request": {
+        "path_params": {
+          "id": "00004a0f-1111-4111-8111-000000004a0f"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000054-2222-4222-8222-000000000054",
+          "actor": {
+            "registration_id": "reg-supervisor-gamma-02"
+          },
+          "expected_generation": 1
+        }
+      },
+      "response": {
+        "status": 409,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "rejected",
+          "guidance": "This offer names a different supervisor.",
+          "reason": "offer_not_for_caller",
+          "receipt": {
+            "operation_id": "00000b54-1111-4111-8111-000000000b54",
+            "request_id": "00000054-2222-4222-8222-000000000054",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "registration_id": "reg-supervisor-alpha-01",
+              "label": "alpha (laptop)",
+              "is_caller": false
+            },
+            "generation": 1,
+            "expires_at": "2026-10-16T14:05:00.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "none"
+          }
+        }
+      }
+    }
+  ]
+}

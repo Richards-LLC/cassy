@@ -1,0 +1,190 @@
+{
+  "contract": "cassy.coordination/v1",
+  "surface": "external_work.renew",
+  "method": "POST",
+  "path": "/api/coordination/external-work/{id}/renew",
+  "spec": "§4 §6",
+  "cases": [
+    {
+      "name": "renewed",
+      "request": {
+        "path_params": {
+          "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000011-2222-4222-8222-000000000011",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "expected_generation": 1
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Claim renewed.",
+          "receipt": {
+            "operation_id": "00000b11-1111-4111-8111-000000000b11",
+            "request_id": "00000011-2222-4222-8222-000000000011",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "registration_id": "reg-supervisor-alpha-01",
+              "label": "alpha (laptop)",
+              "is_caller": true
+            },
+            "generation": 1,
+            "expires_at": "2026-10-16T14:06:40.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "proceed"
+          }
+        }
+      }
+    },
+    {
+      "name": "stale generation",
+      "request": {
+        "path_params": {
+          "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000012-2222-4222-8222-000000000012",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "expected_generation": 1
+        }
+      },
+      "response": {
+        "status": 409,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "stale_generation",
+          "guidance": "Ownership changed since generation 1. Stop work on this thread and reacquire before acting.",
+          "reason": "generation_changed",
+          "receipt": {
+            "operation_id": "00000b12-1111-4111-8111-000000000b12",
+            "request_id": "00000012-2222-4222-8222-000000000012",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+              "registration_id": "reg-supervisor-beta-07",
+              "label": "beta (workstation)",
+              "is_caller": false
+            },
+            "generation": 2,
+            "expires_at": "2026-10-16T14:05:00.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "reacquire"
+          }
+        }
+      }
+    },
+    {
+      "name": "expired idle claim",
+      "request": {
+        "path_params": {
+          "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000013-2222-4222-8222-000000000013",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "expected_generation": 1
+        }
+      },
+      "response": {
+        "status": 409,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "rejected",
+          "guidance": "The idle lease expired and the claim is no longer active. Acquire it again.",
+          "reason": "claim_not_active",
+          "receipt": {
+            "operation_id": "00000b13-1111-4111-8111-000000000b13",
+            "request_id": "00000013-2222-4222-8222-000000000013",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "unclaimed"
+            },
+            "visible_owner": null,
+            "generation": 1,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "reacquire"
+          }
+        }
+      }
+    },
+    {
+      "name": "authority_unavailable",
+      "request": {
+        "path_params": {
+          "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000014-2222-4222-8222-000000000014",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "expected_generation": 1
+        }
+      },
+      "response": {
+        "status": 503,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "authority_unavailable",
+          "guidance": "Coordination authority is unavailable. Do not start new work or reply; keep the local journal entry and reconcile later.",
+          "receipt": {
+            "operation_id": null,
+            "request_id": "00000014-2222-4222-8222-000000000014",
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "retry_later"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "contract": "cassy.coordination/v1",
+  "surface": "deliveries.receipts",
+  "method": "POST",
+  "path": "/api/coordination/activity/deliveries/{id}/receipts",
+  "spec": "§5",
+  "cases": [
+    {
+      "name": "consumed",
+      "request": {
+        "path_params": {
+          "id": "0000de2a-1111-4111-8111-00000000de2a"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000081-2222-4222-8222-000000000081",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "delivery_generation": 1,
+          "state": "consumed",
+          "observed_at": "2026-10-16T14:00:00.000Z"
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Consumption recorded; this admission will not replay.",
+          "receipt": {
+            "operation_id": "00000b81-1111-4111-8111-000000000b81",
+            "request_id": "00000081-2222-4222-8222-000000000081",
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "none",
+            "delivery": {
+              "id": "0000de2a-1111-4111-8111-00000000de2a",
+              "occurrence_id": "00000cc2-1111-4111-8111-000000000cc2",
+              "reader_slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "registration_id": "reg-supervisor-alpha-01",
+              "route_kind": "owner",
+              "route_generation": 1,
+              "delivery_generation": 1,
+              "status": "admitted",
+              "consumption": "consumed"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "dispatch uncertain after a crash",
+      "request": {
+        "path_params": {
+          "id": "0000de2a-1111-4111-8111-00000000de2a"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000082-2222-4222-8222-000000000082",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "delivery_generation": 1,
+          "state": "dispatch_uncertain",
+          "observed_at": "2026-10-16T14:00:00.000Z"
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Recorded. Surface one recovery notice with this admission reference instead of re-injecting the ask.",
+          "receipt": {
+            "operation_id": "00000b82-1111-4111-8111-000000000b82",
+            "request_id": "00000082-2222-4222-8222-000000000082",
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "none",
+            "delivery": {
+              "id": "0000de2a-1111-4111-8111-00000000de2a",
+              "occurrence_id": "00000cc2-1111-4111-8111-000000000cc2",
+              "reader_slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "registration_id": "reg-supervisor-alpha-01",
+              "route_kind": "owner",
+              "route_generation": 1,
+              "delivery_generation": 1,
+              "status": "admitted",
+              "consumption": "dispatch_uncertain"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

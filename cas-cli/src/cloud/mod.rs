@@ -50,6 +50,10 @@ pub(crate) mod syncer;
 pub mod task_proposals;
 // cas-c117: explicit, verified project↔team registration for `cas cloud sync`.
 pub mod team_registration;
+/// cas-b512 (spec-022d part (a)): the shared `cassy.coordination/v1`
+/// contract fixtures, checked from Cassy's side.
+#[cfg(test)]
+mod coordination_contract_tests;
 
 // T6: first-run backfill — `pub` so integration tests can call the inner seam.
 pub use backfill::{BackfillOutcome, maybe_apply_team_backfill, maybe_apply_team_backfill_inner};

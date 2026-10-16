@@ -1,0 +1,133 @@
+{
+  "contract": "cassy.coordination/v1",
+  "surface": "violet_activity.claim_v2",
+  "method": "POST",
+  "path": "/api/violet/activity/claim",
+  "spec": "§5 §7 §11",
+  "cases": [
+    {
+      "name": "leases this reader's deliveries",
+      "request": {
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "max": 25,
+          "lease_secs": 60
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Admit each delivery durably before acknowledging it.",
+          "deliveries": [
+            {
+              "delivery": {
+                "id": "0000de2a-1111-4111-8111-00000000de2a",
+                "occurrence_id": "00000cc2-1111-4111-8111-000000000cc2",
+                "reader_slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+                "registration_id": "reg-supervisor-alpha-01",
+                "route_kind": "owner",
+                "route_generation": 1,
+                "delivery_generation": 1,
+                "status": "leased",
+                "consumption": "unread"
+              },
+              "lease_token": "0001ea5e-1111-4111-8111-00000001ea5e",
+              "lease_expires_at": "2026-10-16T14:01:00.000Z",
+              "target": {
+                "resource_id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+                "project_id": "github.com/richards-llc/cassy",
+                "external_ref": {
+                  "provider": "slack",
+                  "workspace_id": "T07ABCDEF",
+                  "channel_id": "C08COORD01",
+                  "root_ts": "1760616000.123456"
+                },
+                "message_ts": "1760616042.000200",
+                "permalink": "https://richards-llc.slack.com/archives/C08COORD01/p1760616042000200?thread_ts=1760616000.123456"
+              }
+            }
+          ],
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "admit"
+          }
+        }
+      }
+    },
+    {
+      "name": "nothing pending",
+      "request": {
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "actor": {
+            "registration_id": "reg-supervisor-beta-07"
+          },
+          "max": 25,
+          "lease_secs": 60
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "No deliveries pending for this supervisor.",
+          "deliveries": [],
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "none"
+          }
+        }
+      }
+    },
+    {
+      "name": "binding not activated for v2",
+      "request": {
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "max": 25,
+          "lease_secs": 60
+        }
+      },
+      "response": {
+        "status": 403,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "coordination_scope_required",
+          "guidance": "This supervisor's project has no managed binding; use v1 delivery.",
+          "reason": "binding_unmanaged",
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "link_team_project"
+          }
+        }
+      }
+    }
+  ]
+}

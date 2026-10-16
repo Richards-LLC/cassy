@@ -1,0 +1,196 @@
+{
+  "captured_at": "2026-10-16T17:05:56Z",
+  "captured_by": "cas-b512",
+  "endpoint_host": "petra-stella-cloud.vercel.app",
+  "method": "Read-only probes against production: no event, claim or lock was created or leased. The activity claim names a scratch project with no events, the ack names a random unknown event id, and every coordination route was called with a malformed request so validation answers before any effect.",
+  "probes": {
+    "activity_ack_invalid_outcome": {
+      "request": {
+        "auth": "bearer",
+        "body": {
+          "acks": [
+            {
+              "id": "3bc16ca4-efd9-4c78-b4cf-57106fb85f5c",
+              "outcome": "bogus"
+            }
+          ],
+          "consumer_id": "cas-b512-capture-3c697cc7"
+        },
+        "method": "POST",
+        "path": "/api/violet/activity/ack"
+      },
+      "response": {
+        "body": {
+          "error": "ack outcome must be admitted, no_supervisor or rejected"
+        },
+        "content_type": "application/json",
+        "status": 400
+      }
+    },
+    "activity_ack_unknown_event": {
+      "request": {
+        "auth": "bearer",
+        "body": {
+          "acks": [
+            {
+              "id": "1fb6e69f-9d1c-4c9f-9148-2899f052501f",
+              "outcome": "admitted"
+            }
+          ],
+          "consumer_id": "cas-b512-capture-3c697cc7"
+        },
+        "method": "POST",
+        "path": "/api/violet/activity/ack"
+      },
+      "response": {
+        "body": {
+          "results": [
+            {
+              "id": "1fb6e69f-9d1c-4c9f-9148-2899f052501f",
+              "status": 404
+            }
+          ]
+        },
+        "content_type": "application/json",
+        "status": 200
+      }
+    },
+    "activity_claim_missing_fields": {
+      "request": {
+        "auth": "bearer",
+        "body": {
+          "project_ids": [
+            "github.com/petrastella-live-check/qa-b512-3c697cc7"
+          ]
+        },
+        "method": "POST",
+        "path": "/api/violet/activity/claim"
+      },
+      "response": {
+        "body": {
+          "error": "consumer_id must be a non-empty string of at most 200 characters"
+        },
+        "content_type": "application/json",
+        "status": 400
+      }
+    },
+    "activity_claim_scratch_project": {
+      "request": {
+        "auth": "bearer",
+        "body": {
+          "consumer_id": "cas-b512-capture-3c697cc7",
+          "lease_secs": 30,
+          "max": 1,
+          "project_ids": [
+            "github.com/petrastella-live-check/qa-b512-3c697cc7"
+          ]
+        },
+        "method": "POST",
+        "path": "/api/violet/activity/claim"
+      },
+      "response": {
+        "body": {
+          "denied": [
+            "github.com/petrastella-live-check/qa-b512-3c697cc7"
+          ],
+          "events": []
+        },
+        "content_type": "application/json",
+        "status": 200
+      }
+    },
+    "activity_claim_unauthenticated": {
+      "request": {
+        "auth": "none",
+        "body": {
+          "consumer_id": "x",
+          "lease_secs": 30,
+          "max": 1,
+          "project_ids": [
+            "github.com/petrastella-live-check/qa-b512-3c697cc7"
+          ]
+        },
+        "method": "POST",
+        "path": "/api/violet/activity/claim"
+      },
+      "response": {
+        "body": {
+          "error": "Missing or invalid Authorization header"
+        },
+        "content_type": "application/json",
+        "status": 401
+      }
+    },
+    "coordination_activity_observe_not_deployed": {
+      "request": {
+        "auth": "bearer",
+        "body": {},
+        "method": "POST",
+        "path": "/api/coordination/activity/observe"
+      },
+      "response": {
+        "body": {
+          "error": "Invalid relay API key"
+        },
+        "content_type": "application/json",
+        "status": 401
+      }
+    },
+    "coordination_external_work_claim_not_deployed": {
+      "request": {
+        "auth": "bearer",
+        "body": {},
+        "method": "POST",
+        "path": "/api/coordination/external-work/claim"
+      },
+      "response": {
+        "body": {
+          "code": "invalid_request",
+          "guidance": "$.schema: is required",
+          "reason": "malformed_request",
+          "receipt": {
+            "expires_at": null,
+            "generation": null,
+            "next_action": "fix_request",
+            "observed_at": "2026-10-16T17:05:56.630Z",
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null
+          },
+          "schema": "cassy.coordination/v1"
+        },
+        "content_type": "application/json",
+        "status": 400
+      }
+    },
+    "coordination_operation_lookup_not_deployed": {
+      "request": {
+        "auth": "bearer",
+        "body": null,
+        "method": "GET",
+        "path": "/api/coordination/operations/7fe26455-fa16-4fa1-aec7-368d420f7d83"
+      },
+      "response": {
+        "body": {
+          "code": "invalid_request",
+          "guidance": "$.registration_id: is required",
+          "reason": "malformed_request",
+          "receipt": {
+            "expires_at": null,
+            "generation": null,
+            "next_action": "fix_request",
+            "observed_at": "2026-10-16T17:05:56.849Z",
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null
+          },
+          "schema": "cassy.coordination/v1"
+        },
+        "content_type": "application/json",
+        "status": 400
+      }
+    }
+  }
+}

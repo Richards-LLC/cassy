@@ -157,6 +157,9 @@ async fn cas_e29c_cloud_fold_vectors_round_trip_store_search_edit_push_replay() 
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.pulled_entries, wires.len());
         let index = SearchIndex::in_memory().unwrap();
+        index
+            .index_entries_batch(&f.entries.list().unwrap())
+            .unwrap();
         let editing = SyncingEntryStore::new(f.entries.clone(), f.syncer.queue.clone())
             .with_cloud_config(Arc::new(CloudConfig {
                 team_id: team.then(|| TEAM.into()),
@@ -167,7 +170,6 @@ async fn cas_e29c_cloud_fold_vectors_round_trip_store_search_edit_push_replay() 
         for wire in &wires {
             let id = wire["id"].as_str().unwrap();
             let mut entry = editing.get(id).unwrap();
-            index.index_entry(&entry).unwrap();
             let hits = index
                 .search(
                     &SearchOptions {

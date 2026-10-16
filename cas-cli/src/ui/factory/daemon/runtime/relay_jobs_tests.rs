@@ -806,3 +806,42 @@ async fn cas_26c8_a_retrying_group_does_not_hold_back_a_later_death() {
     settle_relays(&mut daemon).await;
     assert_eq!(daemon.recent_worker_exits.len(), 2, "the group is retried, not dropped");
 }
+
+/// cas-54a2: a focus change made just before shutdown (outside the refresh
+/// pass that hands writes off) is persisted by the shutdown path.
+#[test]
+fn c54a2_focus_change_just_before_shutdown_persists() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = crate::test_support::TestEnvGuard::with_vars(&[("HOME", home.path().to_str().unwrap())]);
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let (mut daemon, path) = daemon_with_session_metadata(&cas_dir, "focus-at-shutdown");
+    daemon
+        .app
+        .set_session_focus_for_test("cas-5d0e", crate::ui::factory::app::EpicFocusSource::SessionDefault);
+    daemon.app.handle_epic_events(&[crate::ui::factory::director::DirectorEvent::EpicStarted {
+        epic_id: "cas-5d0e".into(),
+        epic_title: "last moment".into(),
+    }]);
+    // No refresh pass hands the write off before shutdown.
+    assert!(daemon.finish_shutdown_writes(super::store_worker::global(), Duration::from_secs(30)));
+    assert_eq!(persisted_epic(&path).as_deref(), Some("cas-5d0e"));
+}
+
+/// cas-54a2: the shutdown drain is bounded; a wedged store write cannot
+/// hang shutdown.
+#[test]
+fn c54a2_shutdown_drain_is_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    let worker = super::store_worker::StoreWorker::start();
+    let (release, wedged) = std::sync::mpsc::channel::<()>();
+    assert!(worker.submit("wedged write", move || {
+        let _ = wedged.recv();
+    }));
+    let started = Instant::now();
+    assert!(!daemon.finish_shutdown_writes(&worker, Duration::from_millis(50)));
+    assert!(started.elapsed() < Duration::from_secs(10), "shutdown waited {:?}", started.elapsed());
+    release.send(()).unwrap();
+}

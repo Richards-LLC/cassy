@@ -478,7 +478,7 @@ fn claim_route(
                 && (lock["user_id"].as_str().unwrap_or(USER) == user
                     || (action == "claim"
                         && team.as_ref().is_some_and(|t| lock["team_id"] == *t)
-                        && lock["project_id"] == project.as_deref()))
+                        && lock["project_id"].as_str() == project.as_deref()))
         })
         .map(|(k, v)| (k.clone(), v.clone()));
     if method == "POST"

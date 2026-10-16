@@ -23,7 +23,11 @@ fn production_order() -> Vec<Exchange> {
 fn contract_parity_fake_cloud_matches_production() {
     let cloud = FakeCloud::start();
     let mut replay = Replay::new(&cloud.url, "0c7c7a11");
-    for exchange in production_order() {
+    for mut exchange in production_order() {
+        // The immutable PR #153 capture predates migration 0036 (#155).
+        // Overlay only its documented additive owner/scope fields; preserve
+        // the recorded keys and literals for the rest of the protocol.
+        amend_team_lock_shape(&mut exchange.response);
         match exchange.name.as_str() {
             // The capture waited five minutes, then listed stale agents.
             "list_project_stale" => cloud.advance_clock(310),
@@ -34,4 +38,24 @@ fn contract_parity_fake_cloud_matches_production() {
         replay.check(&exchange);
     }
     replay.assert_clean();
+}
+
+
+fn amend_team_lock_shape(value: &mut serde_json::Value) {
+    use serde_json::{Value, json};
+    match value {
+        Value::Object(object) => {
+            if object.contains_key("task_id") && object.contains_key("claim_reason") {
+                object.insert("user_id".into(), json!("<user>"));
+                object.insert("project_id".into(), json!("<project>"));
+                object.insert("team_id".into(), Value::Null);
+            }
+            if object.get("error").and_then(Value::as_str) == Some("already_claimed") {
+                object.insert("user_id".into(), json!("<user>"));
+            }
+            for value in object.values_mut() { amend_team_lock_shape(value); }
+        }
+        Value::Array(values) => for value in values { amend_team_lock_shape(value); },
+        _ => {}
+    }
 }

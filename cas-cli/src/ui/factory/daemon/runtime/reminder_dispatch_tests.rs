@@ -202,8 +202,8 @@ async fn cas_f265_cross_session_self_reminder_has_no_unread_or_stall_alarm() {
         .execute(
             "UPDATE prompt_queue SET created_at=?1, transport_delivered_at=?2 WHERE id=?3",
             rusqlite::params![
-                (chrono::Utc::now() - chrono::Duration::seconds(900)).to_rfc3339(),
-                (chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339(),
+                (chrono::Utc::now() - chrono::Duration::seconds(2100)).to_rfc3339(),
+                (chrono::Utc::now() - chrono::Duration::seconds(1800)).to_rfc3339(),
                 id
             ],
         )
@@ -231,5 +231,36 @@ async fn cas_f265_cross_session_self_reminder_has_no_unread_or_stall_alarm() {
             .unwrap()
             .confirmed_at
             .is_none()
+    );
+    let other = queue
+        .enqueue_with_session(
+            "another-agent",
+            daemon.app.supervisor_name(),
+            "A real unhandled decision",
+            &daemon.session_name,
+        )
+        .unwrap();
+    queue.mark_transport_delivered(other).unwrap();
+    rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db"))
+        .unwrap()
+        .execute(
+            "UPDATE prompt_queue SET created_at=?1, transport_delivered_at=?2 WHERE id=?3",
+            rusqlite::params![
+                (chrono::Utc::now() - chrono::Duration::seconds(2100)).to_rfc3339(),
+                (chrono::Utc::now() - chrono::Duration::seconds(1800)).to_rfc3339(),
+                other
+            ],
+        )
+        .unwrap();
+    daemon.enqueue_delivery_stalled_bounces(queue.as_ref());
+    let real_notices: Vec<_> = queue
+        .peek_all(100)
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.source == "delivery-watchdog" || row.prompt.contains("supervisor_unread"))
+        .collect();
+    assert!(
+        !real_notices.is_empty(),
+        "the same watchdog scan must still flag genuinely unread inter-agent mail"
     );
 }

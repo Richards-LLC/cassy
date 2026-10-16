@@ -10,16 +10,25 @@ their audit ownership. A superseded SessionEnd cannot tear down a rebound agent.
 Owner-addressed integration and attention notices resolve a live same-name
 successor, then a live supervisor in this project's local registry, then the
 operator. The receiving supervisor's actual name and session replace the old
-routing. Operator history retains the event's origin session, as required by its
-separate delivery lane. A heartbeat older than five minutes is not live even if
-the row still says Active. Worker commands retain their session isolation.
+routing. Operator prompts use Commander schema 2. Orphan and integration
+fallbacks remain in the project's durable notice outbox until a connected daemon
+adopts them into its own session; the ending session cannot capture its orphan
+notice. Without another daemon, ownership is cleared and the notice remains
+pending. Ordinary task lifecycle transitions stay with their owning session or
+the same supervisor's successor; they never fall back to the operator or an
+unrelated peer. A heartbeat older than five minutes is not live even if the row
+still says Active. Worker commands retain their session isolation.
 
 Focusing overlapping integration lanes tells both owners and deduplicates a
-repeated focus. A remote epic-focus claim conflict sends the other supervisor a
+repeated focus, task edits and claim renewals. Lane or owner changes create a new
+conflict identity. A remote epic-focus claim conflict sends the other supervisor a
 Cloud mailbox notice. These are separate producers: SessionEnd and daemon
 notices perform no remote discovery; only the existing focus-claim conflict
-event looks up and messages the remote holder, off the async/factory loop and
-within a time budget. Cloud failures fall back to the operator.
+event messages the supplied remote holder. Its bounded HTTP send runs in the
+background without delaying the focus response. Cassy awaits that actual result
+before choosing peer delivery or operator fallback, so a late send cannot race a
+timeout fallback. Orphan notice identity includes the epic ids and end time;
+legacy name ownership is preserved when a same-name successor has registered.
 
 Explicit cross-machine sends and replies keep the complete body in the Cloud
 mailbox, including bodies beyond the local inbox cap. Local artifact paths are
@@ -49,7 +58,9 @@ python3 scripts/live-check-peer-collab.py \
 The existing probe starts isolated scratch factories on both machines and tears
 them down. It records the binaries, Cloud ids, local notification ids, send and
 receive timestamps, delivery status and receiver-side exact body digests. Both
-the over-cap send and its over-cap reply must match. Omit `--cloud-url` only for
+the over-cap send and its over-cap reply must match. Exact probe token lines
+delimit the measured body independently of routing preamble blank lines.
+Omit `--cloud-url` only for
 a diagnostic stand-in run; its evidence is labelled `stand-in-only`.
 
 ## Release impact

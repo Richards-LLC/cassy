@@ -118,6 +118,14 @@ async fn remote_focus_conflict_uses_mailbox_and_operator_fallback() {
         "repeated claim conflict reuses Cloud identity"
     );
     assert!(bodies[0]["body"].as_str().unwrap().contains("cas-remote"));
+    assert!(
+        open_supervisor_queue_store(&root)
+            .unwrap()
+            .peek("operator", 10)
+            .unwrap()
+            .is_empty(),
+        "a slow successful peer send must not also create an operator fallback"
+    );
     assert_eq!(
         open_prompt_queue_store(&root)
             .unwrap()

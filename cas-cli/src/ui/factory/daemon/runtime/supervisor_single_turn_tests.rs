@@ -1,6 +1,6 @@
 //! GH #1231: real queue, Teams tree and PTY input, with a private harness.
 use crate::ui::factory::daemon::FactoryDaemon;
-use cas_store::{PromptQueueStore, SurfacingSource};
+use cas_store::SurfacingSource;
 use std::time::{Duration, Instant};
 
 // PTY preflight reads ambient PATH. Re-exec with a private harmless cas;

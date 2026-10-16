@@ -939,11 +939,11 @@ pub struct FactoryRequest {
 /// Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup,
 ///   session_start, session_end, loop_start, loop_cancel, loop_status, lease_history,
 ///   queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message,
-///   message_ack, message_status, claim, claim_status, release_claim,
-///   transfer_claim, accept_claim.
+///   message_ack, message_status.
 /// Factory actions: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity,
 ///   clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic,
-///   remind, remind_list, remind_cancel, restart_spawn_queue.
+///   remind, remind_list, remind_cancel, restart_spawn_queue, claim, claim_status,
+///   release_claim, transfer_claim, accept_claim.
 /// Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup,
 ///   worktree_merge, worktree_status.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -952,7 +952,7 @@ pub struct CoordinationRequest {
     /// Action to perform
     #[schemars(
         schema_with = "crate::actions::coordination_action_schema",
-        description = "Operation. `inbox` is an alias of `inbox_poll`; `interrupt` is `message` with urgent=true. External thread ownership: claim, claim_status, release_claim, transfer_claim, accept_claim. Per-action rules are on the parameters they govern."
+        description = "Operation. `inbox` is an alias of `inbox_poll`; `interrupt` is `message` with urgent=true. Per-action rules are on the parameters they govern."
     )]
     pub action: String,
 

@@ -59,6 +59,21 @@ fn context() -> OperationContext {
 }
 
 #[test]
+fn cas_c423_poll_arms_body_only_after_journaled_remote_consumption_receipt() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+    let relay = Relay {
+        response: RefCell::new(claim_fixture()), acks: RefCell::new(vec![]),
+        fail_ack: false, database: Some(root.path().join("cas.db")), ack_response: None,
+    };
+    let report = poll_once(&relay,&store,&context(),"factory-a","supervisor-a");
+    assert!(report.errors.is_empty(),"{report:?}");
+    let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+    let body = queue.poll_unseen_for_recipient("supervisor-a",Some("factory-a"),10).unwrap();
+    assert_eq!(body.len(),1,"background intake must confirm remote uncertainty before arming the original body");
+}
+
+#[test]
 fn cas_c423_successor_poll_reuses_unacknowledged_admission_with_new_lease() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();

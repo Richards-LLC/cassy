@@ -160,6 +160,7 @@ fn mention(channel: &str, secs: i64) -> serde_json::Value {
 }
 
 struct Fixture {
+    _env: crate::test_support::TestEnvGuard,
     _temp: tempfile::TempDir,
     queue: SqlitePromptQueueStore,
     watch_path: PathBuf,
@@ -167,11 +168,17 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        let env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::TempDir::new().unwrap();
         let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
         let watch_path = WatchBook::path(temp.path());
-        Self { _temp: temp, queue, watch_path }
+        Self {
+            _env: env,
+            _temp: temp,
+            queue,
+            watch_path,
+        }
     }
 
     fn wake(&self, session: &str, now: DateTime<Utc>) -> VioletWake {
@@ -261,10 +268,27 @@ fn cas_639c_peer_start_and_interleaved_ticks_preserve_both_sessions_watches() {
     second.poll_once(&relay, &fx.queue, true, at(50));
 
     let saved = WatchBook::read(&fx.watch_path).unwrap();
-    let owners: BTreeSet<_> = saved.active().map(|w| (w.factory_session.as_str(), w.channel_id.as_str())).collect();
+    let owners: BTreeSet<_> = saved
+        .active()
+        .map(|w| (w.factory_session.as_str(), w.channel_id.as_str()))
+        .collect();
     assert_eq!(owners, BTreeSet::from([("first", "C1"), ("second", "C2")]));
-    assert_eq!(first.due_sweeps(at(400)).iter().map(|s| s.channel_id.as_str()).collect::<Vec<_>>(), vec!["C1"]);
-    assert_eq!(second.due_sweeps(at(400)).iter().map(|s| s.channel_id.as_str()).collect::<Vec<_>>(), vec!["C2"]);
+    assert_eq!(
+        first
+            .due_sweeps(at(400))
+            .iter()
+            .map(|s| s.channel_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["C1"]
+    );
+    assert_eq!(
+        second
+            .due_sweeps(at(400))
+            .iter()
+            .map(|s| s.channel_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["C2"]
+    );
     first.stop_idle(&fx.queue, at(3600));
     let saved = WatchBook::read(&fx.watch_path).unwrap();
     assert!(saved.active().any(|w| w.factory_session == "second"));
@@ -284,14 +308,26 @@ fn cas_639c_claimed_reply_routes_to_existing_thread_watch_owner_before_ack() {
     assert_eq!((report.wakes, report.admitted), (1, 1));
     let rows = fx.wakes();
     assert_eq!(rows.len(), 2);
-    assert!(rows.iter().all(|row| row.factory_session.as_deref() == Some("owner")));
-    assert_eq!(relay.outcome(&format!("slack:T0123:C1:{}", ts(25))), Some(AckOutcome::Admitted));
+    assert!(
+        rows.iter()
+            .all(|row| row.factory_session.as_deref() == Some("owner"))
+    );
+    assert_eq!(
+        relay.outcome(&format!("slack:T0123:C1:{}", ts(25))),
+        Some(AckOutcome::Admitted)
+    );
     let saved = WatchBook::read(&fx.watch_path).unwrap();
-    assert_eq!(saved.watches.iter().find(|w| w.factory_session == "owner"), Some(&original));
+    assert_eq!(
+        saved.watches.iter().find(|w| w.factory_session == "owner"),
+        Some(&original)
+    );
 
     relay.publish(envelope(PROJECT, "C1", "thread_reply", 90, 80, "U3"));
     claimant.poll_once(&relay, &fx.queue, true, at(95));
-    assert_eq!(fx.wakes().last().unwrap().factory_session.as_deref(), Some("claimant"));
+    assert_eq!(
+        fx.wakes().last().unwrap().factory_session.as_deref(),
+        Some("claimant")
+    );
 }
 
 #[test]
@@ -311,15 +347,34 @@ fn cas_639c_wake_started_before_login_claims_after_credentials_are_saved() {
     };
     cloud.save_user().unwrap();
     let response = std::thread::spawn(move || {
-        let request = server.recv_timeout(Duration::from_secs(15)).unwrap().unwrap();
+        let request = server
+            .recv_timeout(Duration::from_secs(15))
+            .unwrap()
+            .unwrap();
         assert_eq!(request.url(), "/api/violet/activity/claim");
-        assert!(request.headers().iter().any(|header| header.field.equiv("Authorization") && header.value.as_str() == "Bearer cas-639c-fixture-cloud-token"));
-        request.respond(tiny_http::Response::from_string(r#"{"events":[],"denied":[]}"#)).unwrap();
+        assert!(
+            request
+                .headers()
+                .iter()
+                .any(|header| header.field.equiv("Authorization")
+                    && header.value.as_str() == "Bearer cas-639c-fixture-cloud-token")
+        );
+        request
+            .respond(tiny_http::Response::from_string(
+                r#"{"events":[],"denied":[]}"#,
+            ))
+            .unwrap();
     });
     let (report, _, _) = runtime.tick_blocking();
     response.join().unwrap();
     assert!(report.errors.is_empty(), "{report:?}");
-    assert!(WatchBook::read(&WatchBook::path(&root)).unwrap().relay.last_ok_at.is_some());
+    assert!(
+        WatchBook::read(&WatchBook::path(&root))
+            .unwrap()
+            .relay
+            .last_ok_at
+            .is_some()
+    );
 }
 
 /// AC: claim/ack is idempotent across daemon restarts. The ack is lost, the
@@ -627,13 +682,29 @@ fn incomplete_sweep_keeps_the_cursor() {
     assert_eq!(wake.book().watches[0].cursor_ts.as_deref(), Some(ts(0).as_str()));
 }
 
-/// A watch from an ended factory session is stopped on load.
+/// A positively dead daemon receipt ends its watches; another session alone
+/// is not evidence of death.
 #[test]
 fn watches_end_with_their_factory_session() {
     let fx = Fixture::new();
     let relay = FakeRelay::new();
     relay.publish(mention("C1", 0));
     fx.wake("old-session", t0()).poll_once(&relay, &fx.queue, true, at(10));
+    let metadata = crate::ui::factory::session::create_metadata(
+        "old-session",
+        i32::MAX as u32,
+        "supervisor",
+        &[],
+        None,
+        None,
+        None,
+    );
+    assert!(!crate::ui::factory::session::daemon_identity_is_live(
+        &metadata
+    ));
+    crate::ui::factory::session::SessionManager::new()
+        .save_metadata(&metadata)
+        .unwrap();
     let wake = fx.wake(SESSION, at(20));
     let watch = &wake.book().watches[0];
     assert_eq!(watch.stop_reason.as_deref(), Some("session_end"));

@@ -1,0 +1,135 @@
+{
+  "contract": "cassy.coordination/v1",
+  "surface": "deliveries.rebind",
+  "method": "POST",
+  "path": "/api/coordination/activity/deliveries/{id}/rebind",
+  "spec": "§5",
+  "cases": [
+    {
+      "name": "successor adopts the same admission",
+      "request": {
+        "path_params": {
+          "id": "0000de1b-1111-4111-8111-00000000de1b"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000071-2222-4222-8222-000000000071",
+          "actor": {
+            "registration_id": "reg-supervisor-beta-08"
+          },
+          "expected_delivery_generation": 1
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Admission rebound to your registration; resume it, do not re-admit.",
+          "receipt": {
+            "operation_id": "00000b71-1111-4111-8111-000000000b71",
+            "request_id": "00000071-2222-4222-8222-000000000071",
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "proceed",
+            "delivery": {
+              "id": "0000de1b-1111-4111-8111-00000000de1b",
+              "occurrence_id": "00000cc1-1111-4111-8111-000000000cc1",
+              "reader_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+              "registration_id": "reg-supervisor-beta-08",
+              "route_kind": "unclaimed_fanout",
+              "route_generation": 0,
+              "delivery_generation": 2,
+              "status": "admitted",
+              "consumption": "unread"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "already rebound by another successor",
+      "request": {
+        "path_params": {
+          "id": "0000de1b-1111-4111-8111-00000000de1b"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000072-2222-4222-8222-000000000072",
+          "actor": {
+            "registration_id": "reg-supervisor-beta-08"
+          },
+          "expected_delivery_generation": 1
+        }
+      },
+      "response": {
+        "status": 409,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "stale_generation",
+          "guidance": "This admission was rebound after generation 1.",
+          "reason": "generation_changed",
+          "receipt": {
+            "operation_id": "00000b72-1111-4111-8111-000000000b72",
+            "request_id": "00000072-2222-4222-8222-000000000072",
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "refresh_generation",
+            "delivery": {
+              "id": "0000de1b-1111-4111-8111-00000000de1b",
+              "occurrence_id": "00000cc1-1111-4111-8111-000000000cc1",
+              "reader_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+              "registration_id": "reg-supervisor-beta-09",
+              "route_kind": "unclaimed_fanout",
+              "route_generation": 0,
+              "delivery_generation": 3,
+              "status": "admitted",
+              "consumption": "unread"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "foreign reader",
+      "request": {
+        "path_params": {
+          "id": "0000de1b-1111-4111-8111-00000000de1b"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000073-2222-4222-8222-000000000073",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "expected_delivery_generation": 1
+        }
+      },
+      "response": {
+        "status": 404,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "not_found",
+          "guidance": "No delivery with this ID belongs to your supervisor.",
+          "reason": "unknown_delivery",
+          "receipt": {
+            "operation_id": null,
+            "request_id": "00000073-2222-4222-8222-000000000073",
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "none"
+          }
+        }
+      }
+    }
+  ]
+}

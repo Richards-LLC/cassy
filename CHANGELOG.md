@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.60.0] - 2026-10-16
+
 ### Fixed
 
 - **Typing during cleanup** — Was: poison cleanup still performed slow reads

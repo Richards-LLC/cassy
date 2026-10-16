@@ -1219,9 +1219,6 @@ fn execute_project_adopt_aliases(cli: &Cli, cas_root: &Path) -> anyhow::Result<(
         for (alias, count) in aliases {
             fmt.write_raw(&format!("  {count} row(s) rewritten from alias {alias}"))?;
             fmt.newline()?;
-            if !memory_fold_conflicts.is_empty() {
-                render_memory_fold_warning(&mut fmt, memory_fold_conflicts.len())?;
-            }
         }
     }
     Ok(())
@@ -2305,7 +2302,8 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
         .unwrap_or(0);
 
     let memory_fold_conflicts = SyncQueue::open_read_only(cas_root)
-        .and_then(|queue| queue.memory_fold_conflict_ids()).unwrap_or_default();
+        .and_then(|queue| queue.memory_fold_conflict_ids())
+        .unwrap_or_default();
 
     if config.token.is_none() {
         if cli.json {
@@ -2343,6 +2341,9 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                 "  Local rows skipped (not authored here): {unauthored_skipped}"
             ))?;
             fmt.newline()?;
+            if !memory_fold_conflicts.is_empty() {
+                render_memory_fold_warning(&mut fmt, memory_fold_conflicts.len())?;
+            }
         }
         return Ok(());
     }

@@ -126,7 +126,7 @@ pub fn user_facing_reasons(
     let rendered_paths: Vec<String> = surface_paths.iter()
         .filter(|path| first_user_facing_path(std::slice::from_ref(*path), &qa.api_paths).is_none())
         .cloned().collect();
-    if !journeys.is_empty() && (changed_paths.is_none() || !rendered_paths.is_empty()) {
+    if !journeys.is_empty() && (surface_paths.is_empty() || !rendered_paths.is_empty()) {
         reasons.push(format!("journeys:{}", journeys.join(",")));
     }
     if let Some((path, glob)) = first_user_facing_path(&rendered_paths, &qa.user_facing_paths) {
@@ -893,7 +893,9 @@ pub(crate) fn validate_round_evidence(
         let target = task.deliverables.work_target.as_ref().map(|target| target.target_branch.as_str())
             .or(parent.as_deref()).unwrap_or("main");
         if let Ok(paths) = changed_paths_for_delivery(&repo, target, &pass.bound_head)
-            && api_only_reasons(&user_facing_reasons(&task, &qa, Some(&paths), &[]).reasons)
+            && api_only_reasons(&user_facing_reasons(
+                &task, &qa, Some(&paths), &catalog_journeys_for(&repo, Some(&pass.bound_head), &paths),
+            ).reasons)
         {
             if ledger_path.file_name() != Some(std::ffi::OsStr::new("LEDGER.md")) {
                 return Err("API ledger_path must name LEDGER.md".into());

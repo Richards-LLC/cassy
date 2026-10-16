@@ -3103,7 +3103,8 @@ impl FactoryDaemon {
         }
 
         // End only this session's Violet watches before removing its liveness
-        // receipt. A running claim finishes first; later ticks cannot reopen it.
+        // receipt. Mark stopping without waiting for an in-flight HTTP claim;
+        // that tick finishes retirement, and later ticks cannot reopen it.
         if let Some(violet) = violet_wake.as_ref() {
             let violet = std::sync::Arc::clone(violet);
             match tokio::task::spawn_blocking(move || violet.stop_blocking()).await {

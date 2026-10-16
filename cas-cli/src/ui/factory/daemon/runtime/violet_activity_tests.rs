@@ -686,7 +686,11 @@ fn cas_639c_review_clean_end_stops_only_own_watches_and_blocks_later_ticks() {
     let requests = std::thread::spawn(move || {
         let request = server.recv_timeout(Duration::from_millis(200)).unwrap();
         if let Some(request) = request {
-            request.respond(tiny_http::Response::from_string(r#"{"events":[],"denied":[]}"#)).unwrap();
+            request
+                .respond(tiny_http::Response::from_string(
+                    r#"{"events":[],"denied":[]}"#,
+                ))
+                .unwrap();
             true
         } else { false }
     });
@@ -704,7 +708,11 @@ fn cas_639c_round3_truncated_peer_receipt_preserves_live_watch() {
     peer.poll_once(&relay, &fx.queue, true, at(10));
     let mut actor = fx.wake("actor", at(20));
     // save_metadata truncates before writing; this is an ambiguous live receipt.
-    std::fs::write(crate::ui::factory::session::metadata_path("peer"), b"{\"name\":").unwrap();
+    std::fs::write(
+        crate::ui::factory::session::metadata_path("peer"),
+        b"{\"name\":",
+    )
+    .unwrap();
     actor.poll_once(&relay, &fx.queue, true, at(30));
     assert!(WatchBook::read(&fx.watch_path).unwrap().watch("C1", "peer").unwrap().is_active());
 }
@@ -732,7 +740,9 @@ fn cas_639c_round3_shutdown_is_bounded_and_next_tick_finishes_stop() {
     let mut wake = fx.wake("first", t0());
     relay.publish(mention("C1", 0));
     wake.poll_once(&relay, &fx.queue, true, at(10));
-    let runtime = std::sync::Arc::new(VioletWakeRuntime::start(fx._temp.path(), "first", "supervisor").unwrap());
+    let runtime = std::sync::Arc::new(
+        VioletWakeRuntime::start(fx._temp.path(), "first", "supervisor").unwrap(),
+    );
     let guard = runtime.state.lock().unwrap();
     let (send, recv) = std::sync::mpsc::channel();
     let stop = runtime.clone();
@@ -755,7 +765,9 @@ fn cas_639c_round3_lifecycle_scope_drop_ends_own_watches() {
     {
         // The lifecycle owns this runtime through Arc. Dropping its last handle
         // must end watches even on an early return before explicit shutdown.
-        let _runtime = std::sync::Arc::new(VioletWakeRuntime::start(fx._temp.path(), "first", "supervisor").unwrap());
+        let _runtime = std::sync::Arc::new(
+            VioletWakeRuntime::start(fx._temp.path(), "first", "supervisor").unwrap(),
+        );
     }
     assert_eq!(WatchBook::read(&fx.watch_path).unwrap().watch("C1", "first").unwrap().stop_reason.as_deref(), Some("session_end"));
 }
@@ -770,7 +782,14 @@ fn cas_639c_round3_busy_foreign_thread_does_not_wake_owner_twice() {
     let mut claimant = fx.wake("claimant", at(20));
     for batch in 0..3 {
         for item in 0..20 {
-            relay.publish(envelope(PROJECT, "C1", "thread_reply", 25 + batch * 20 + item, 0, "U2"));
+            relay.publish(envelope(
+                PROJECT,
+                "C1",
+                "thread_reply",
+                25 + batch * 20 + item,
+                0,
+                "U2",
+            ));
         }
         claimant.poll_once(&relay, &fx.queue, false, at(100 + batch * 70));
     }

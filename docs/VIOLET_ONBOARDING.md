@@ -219,7 +219,9 @@ From 3.59, factory sessions on the same clone share
 `.cas/violet/watches.v2.json` (format version 2), with separate watch entries for
 each session and channel. Each mutation reloads state under a shared lock.
 Starting a second session leaves live peer watches intact. Clean shutdown stops
-its own watches. After a successful session listing, a deleted metadata receipt
+its own watches without waiting for an in-flight Cloud request; that tick
+finishes retirement. The last runtime handle also retires watches on early
+returns. After a successful session listing, a deleted metadata receipt
 also retires the old session's watches; unreadable listings or an existing but
 incomplete receipt do not prove a live daemon is gone.
 
@@ -237,7 +239,12 @@ tracking or Cloud thread claims.
 
 After enqueueing a known owner's reply, the claimant may refresh that watch's
 activity timestamp and bounded dedupe keys for that thread under the same lock.
-A busy thread cannot evict the owner's keys for other threads. Admission does
+Each thread keeps up to 200 peer-admitted keys, matching the normal dedupe
+window. A busy thread cannot evict the owner's keys for other threads. The owner
+keeps at most 200 recent thread roots per channel, discarding the oldest roots
+and their peer keys together; activity on an older root then follows the
+unknown-thread rule. Stopping a watch clears its roots and peer keys, and
+reopening starts a fresh ownership set. Admission does
 not start or stop the owner's watches, alter other watches, or advance the channel-wide
 read cursor past unread messages on other threads.
 

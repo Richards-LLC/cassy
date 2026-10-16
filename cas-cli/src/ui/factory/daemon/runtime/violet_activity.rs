@@ -65,7 +65,9 @@ const LEASE_SECS: u32 = 120;
 /// Cloud accepts at most 50 acknowledgements per request.
 const ACK_BATCH: usize = 50;
 const SEEN_KEYS_CAP: usize = 200;
-const FOREIGN_KEYS_PER_THREAD: usize = 32;
+const FOREIGN_KEYS_PER_THREAD: usize = SEEN_KEYS_CAP;
+/// Keep recent ownership bounded even when activity extends a watch forever.
+const THREAD_ROOTS_CAP: usize = 200;
 const WATCH_BOOK_VERSION: u32 = 2;
 /// Events listed individually in one wake; the rest are counted.
 const WAKE_LIST_CAP: usize = 10;
@@ -346,6 +348,36 @@ impl ChannelWatch {
         }
     }
 
+    /// Only the owner calls this while mutating its own watch. Peer admission
+    /// changes one already-known thread's bucket, never another thread's state.
+    fn bound_thread_state(&mut self) {
+        let mut roots: Vec<_> = self
+            .watched_thread_roots
+            .union(&self.violet_thread_roots)
+            .cloned()
+            .collect();
+        roots.sort_by_key(|root| slack_ts_instant(root));
+        let remove = roots.len().saturating_sub(THREAD_ROOTS_CAP);
+        for root in roots.into_iter().take(remove) {
+            self.watched_thread_roots.remove(&root);
+            self.violet_thread_roots.remove(&root);
+        }
+        self.foreign_seen_keys.retain(|root, _| {
+            self.watched_thread_roots.contains(root) || self.violet_thread_roots.contains(root)
+        });
+        for keys in self.foreign_seen_keys.values_mut() {
+            while keys.len() > FOREIGN_KEYS_PER_THREAD {
+                keys.pop_front();
+            }
+        }
+    }
+
+    fn clear_thread_state(&mut self) {
+        self.watched_thread_roots.clear();
+        self.violet_thread_roots.clear();
+        self.foreign_seen_keys.clear();
+    }
+
     fn remember(&mut self, key: String) {
         if self.has_seen(&key) {
             return;
@@ -365,6 +397,7 @@ impl ChannelWatch {
     fn stop(&mut self, reason: &str, now: DateTime<Utc>) {
         self.stopped_at = Some(now);
         self.stop_reason = Some(reason.to_string());
+        self.clear_thread_state();
     }
 
     fn message_key(&self, ts: &str) -> String {
@@ -758,6 +791,14 @@ impl VioletWake {
         let lock = WatchBook::lock(&self.watch_path)?;
         self.book = WatchBook::read_for_update(&self.watch_path)?;
         self.book.prune_dead_sessions(&self.factory_session, now);
+        for watch in self
+            .book
+            .watches
+            .iter_mut()
+            .filter(|watch| watch.factory_session == self.factory_session)
+        {
+            watch.bound_thread_state();
+        }
         Ok(lock)
     }
 
@@ -1064,6 +1105,7 @@ impl VioletWake {
                 watch.violet_thread_roots.insert(envelope.message.thread_ts.clone());
             }
         }
+        watch.bound_thread_state();
         self.book.save(&self.watch_path)?;
         Ok(created)
     }
@@ -1102,7 +1144,8 @@ impl VioletWake {
         };
         let watch = &mut self.book.watches[index];
         if !watch.is_active() || watch.factory_session != session {
-            // Reopen: a fresh hour and a fresh sweep cadence.
+            // Reopen: a fresh hour, sweep cadence and thread ownership set.
+            watch.clear_thread_state();
             watch.started_at = now;
             watch.last_human_at = envelope.occurred_at;
             watch.last_sweep_at = None;
@@ -1352,6 +1395,7 @@ impl VioletWake {
         // The durable enqueue above is the first-wake claim of any new roots.
         // The clone lock makes later sweeps/claims route to this one session.
         watch.watched_thread_roots.extend(roots);
+        watch.bound_thread_state();
         watch.last_sweep_at = Some(now);
         watch.read_failures = 0;
         for key in keys {
@@ -1999,6 +2043,16 @@ pub(crate) struct VioletWakeRuntime {
     stopping: std::sync::atomic::AtomicBool,
 }
 
+// The daemon lifecycle owns this runtime via Arc. Last-handle teardown also
+// retires watches on early returns, before the session receipt disappears.
+impl Drop for VioletWakeRuntime {
+    fn drop(&mut self) {
+        if let Err(error) = self.stop_blocking() {
+            tracing::warn!(%error, "could not stop dropped Violet session watches");
+        }
+    }
+}
+
 impl VioletWakeRuntime {
     /// `None` when push-wake is disabled or the project has no canonical id.
     /// Login is a retry state, so a later `cas login` needs no daemon restart.
@@ -2041,8 +2095,13 @@ impl VioletWakeRuntime {
 
     /// One blocking tick: claim and admit, stop idle watches, and return the
     /// sweeps now due plus the live supervisor (for the sweep caller).
-    pub(crate) fn tick_blocking(&self) -> (PollReport, Vec<SweepRequest>, Option<SupervisorPresence>) {
+    pub(crate) fn tick_blocking(
+        &self,
+    ) -> (PollReport, Vec<SweepRequest>, Option<SupervisorPresence>) {
         if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            if let Err(error) = self.stop_blocking() {
+                tracing::warn!(%error, "could not finish Violet session stop");
+            }
             return (PollReport::default(), Vec::new(), None);
         }
         let cloud = crate::cloud::CloudConfig::load_effective();
@@ -2060,9 +2119,18 @@ impl VioletWakeRuntime {
         };
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = state.end_session(now);
             return (PollReport::default(), Vec::new(), None);
         }
         let report = state.poll_once(&relay, queue.as_ref(), presence.is_some(), now);
+        // Shutdown never waits for this tick's HTTP calls. The in-flight tick
+        // owns the deferred stop and must finish it before releasing state.
+        if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            if let Err(error) = state.end_session(Utc::now()) {
+                tracing::warn!(%error, "could not finish Violet session stop");
+            }
+            return (report, Vec::new(), None);
+        }
         let stopped = state.stop_idle(queue.as_ref(), now);
         if !stopped.is_empty() {
             tracing::info!(channels = ?stopped, "Violet channel watches stopped after 1 h idle");
@@ -2075,10 +2143,13 @@ impl VioletWakeRuntime {
     pub(crate) fn stop_blocking(&self) -> Result<usize, String> {
         self.stopping
             .store(true, std::sync::atomic::Ordering::Release);
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .end_session(Utc::now())
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            // The flag makes the in-flight or next tick finish retirement.
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(0),
+        };
+        state.end_session(Utc::now())
     }
 
     /// Run the due sweeps: read through Violet, then apply the results.

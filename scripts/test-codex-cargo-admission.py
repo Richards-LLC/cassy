@@ -113,10 +113,17 @@ supports_websockets = false
             env = {"HOME": str(home), "CODEX_HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin", "SHELL": "/bin/bash", "TERM": "dumb"}
             executable = str(CODEX)
             argv = [executable]
-            if Path(executable).read_bytes()[:50].startswith(b"#!/usr/bin/env node"):
-                argv.insert(0, shutil.which("node"))
+            with Path(executable).open("rb") as binary:
+                node_script = binary.read(50).startswith(b"#!/usr/bin/env node")
+            if node_script:
+                node = shutil.which("node")
+                if node is None:
+                    raise AssertionError("the selected Codex script requires node on PATH")
+                argv.insert(0, node)
             argv += ["exec", "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--skip-git-repo-check", "--json", "-C", str(repo), "Run the prescribed fixture command."]
             result = subprocess.run(argv, env=env, text=True, capture_output=True, timeout=25, stdin=subprocess.DEVNULL)
+            if result.returncode != 0 or server.calls != 2:
+                raise AssertionError(f"fixture did not complete its scripted tool turn: {result.returncode}, {server.calls} requests, {result.stdout}{result.stderr}")
             return {"exit": result.returncode, "raw": raw.exists(), "capped": capped.exists(), "hook": hook_started.exists(), "calls": server.calls, "output": result.stdout + result.stderr}
         finally:
             server.shutdown()

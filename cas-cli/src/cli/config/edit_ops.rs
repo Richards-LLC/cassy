@@ -102,7 +102,7 @@ pub(crate) fn execute_edit_line_based(
         fmt.write_accent(&format!("## {}", meta.name))?;
         fmt.newline()?;
         fmt.write_raw("   ")?;
-        let warning_color = fmt.theme().palette.status_warning;
+        let warning_color = fmt.theme().palette.text_warning;
         fmt.write_colored(meta.key, warning_color)?;
         fmt.newline()?;
         fmt.write_raw("   ")?;

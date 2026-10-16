@@ -751,6 +751,8 @@ fn a_peer_supervisor_cannot_spawn_or_direct_the_other_machines_workers() {
             summary: Some("do this".into()),
             in_reply_to: None,
             dedupe_key: "a:direct-worker".into(),
+            scope: Default::default(),
+            recipient_project_id: None,
         })
         .unwrap();
     // A message to beta's supervisor that tries to direct its fleet.

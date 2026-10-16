@@ -326,3 +326,133 @@ fn cas_7b6b_carried_batch_gets_fresh_authority_and_wait_inputs_off_control() {
     }
     assert_eq!(wait_budget::store_access_violations(), before);
 }
+
+#[test]
+fn cas_7b6b_wake_snapshot_reuses_fresh_inputs_and_refreshes_after_cadence() {
+    use super::super::prompt_queue_jobs::{QueueJobs, QueueSelection};
+    use super::super::queue_control_jobs::PromptPreparation;
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let lead = cas_types::Agent::new_with_role(
+        "lead-id".into(),
+        "lead".into(),
+        cas_types::AgentRole::Supervisor,
+    );
+    agents.register(&lead).unwrap();
+    let tasks = crate::store::open_task_store_cached(&root).unwrap();
+    let mut task = cas_types::Task::new("cas-wait".into(), "waiting".into());
+    task.status = cas_types::TaskStatus::Blocked;
+    task.assignee = Some("worker-a".into());
+    tasks.add(&task).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+    let origin = cas_store::QueueOrigin::RegisteredAgent {
+        agent_id: lead.id.clone(),
+    };
+    let id = queue
+        .enqueue_urgent_with_outcome(
+            "lead",
+            "worker-a",
+            "decision",
+            Some("s"),
+            None,
+            None,
+            false,
+            Some(&origin),
+        )
+        .unwrap()
+        .id();
+    let row = queue.queued_prompt(id).unwrap().unwrap();
+    let batch = || {
+        Some(QueueSelection {
+            rows: vec![row.clone()],
+            ..Default::default()
+        })
+    };
+    let mut jobs = QueueJobs::inline();
+    let mut preparation = PromptPreparation::default();
+    let started = Instant::now();
+    assert!(
+        preparation
+            .advance(
+                &mut jobs,
+                batch(),
+                root.clone(),
+                "lead".into(),
+                vec![],
+                started
+            )
+            .is_some()
+    );
+    assert!(preparation.recipient("worker-a").unwrap().wait.task_blocked);
+    let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+    conn.execute("UPDATE tasks SET status='open' WHERE id='cas-wait'", [])
+        .unwrap();
+    // A second batch needs no new store read inside the bounded cadence.
+    let before = wait_budget::store_access_violations();
+    {
+        let _forbid = wait_budget::forbid_store_access();
+        assert!(
+            preparation
+                .advance(
+                    &mut jobs,
+                    batch(),
+                    root.clone(),
+                    "lead".into(),
+                    vec![],
+                    Instant::now()
+                )
+                .is_some()
+        );
+    }
+    assert_eq!(wait_budget::store_access_violations(), before);
+    assert!(preparation.recipient("worker-a").unwrap().wait.task_blocked);
+    let later = Instant::now() + Duration::from_secs(1);
+    assert!(
+        !preparation.is_fresh(later),
+        "expired evidence cannot authorize transport"
+    );
+    assert!(
+        preparation
+            .advance(&mut jobs, batch(), root, "lead".into(), vec![], later)
+            .is_some()
+    );
+    assert!(!preparation.recipient("worker-a").unwrap().wait.task_blocked);
+}
+
+#[test]
+fn cas_7b6b_wake_completion_remains_ready_after_another_owner_applies_results() {
+    use super::super::jobs::{Criticality, JobSpec, Lane};
+    use super::super::prompt_queue_jobs::QueueJobs;
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let mut jobs = QueueJobs::start(root, None);
+    jobs.submit_external(
+        JobSpec {
+            kind: super::super::queue_control_jobs::WAKE_GATE_READ,
+            key: "WakeGateRead:delivery".into(),
+            lane: Lane::Blocking,
+            criticality: Criticality::Refresh,
+            generation: 1,
+            budget: Duration::from_millis(100),
+        },
+        || Box::new(()),
+    );
+    settle_until(|| {
+        jobs.apply_completions();
+        jobs.has_ready()
+    });
+    jobs.apply_completions();
+    assert!(
+        jobs.has_ready(),
+        "spawn/director collection must not erase a pending wake completion"
+    );
+    assert_eq!(
+        jobs.take_external_completions_where(
+            |kind| kind == super::super::queue_control_jobs::WAKE_GATE_READ
+        )
+        .len(),
+        1
+    );
+    assert!(!jobs.has_ready());
+}

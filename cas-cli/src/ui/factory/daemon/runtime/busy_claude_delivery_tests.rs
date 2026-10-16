@@ -57,19 +57,26 @@ async fn busy_claude_worker_pane(daemon: &mut FactoryDaemon) {
 /// boundary, not dropped, and the worker's next tool call can surface it.
 #[tokio::test]
 async fn a_declined_wake_still_writes_the_teams_copy_and_leaves_the_row_for_the_tool_boundary() {
-    exercise_held_copy(false).await;
+    exercise_held_copy(false, false).await;
 }
 
 #[tokio::test]
 async fn cas_1ba0_failed_deferral_stamp_warns_supervisor_and_keeps_the_teams_copy() {
-    exercise_held_copy(true).await;
+    exercise_held_copy(true, false).await;
 }
 
-async fn exercise_held_copy(fail_stamp: bool) {
+#[tokio::test]
+async fn cas_1ba0_busy_worker_missing_team_folder_keeps_pty_delivery_out_of_hook_drains() {
+    exercise_held_copy(false, true).await;
+}
+
+async fn exercise_held_copy(fail_stamp: bool, missing_team_folder: bool) {
     let root = tempfile::tempdir().unwrap();
     let claude_config = root.path().join("claude-config");
     // The live team tree a running factory has (a missing one falls back to PTY).
-    std::fs::create_dir_all(claude_config.join("teams").join(SESSION).join("inboxes")).unwrap();
+    if !missing_team_folder {
+        std::fs::create_dir_all(claude_config.join("teams").join(SESSION).join("inboxes")).unwrap();
+    }
     let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[(
         "CLAUDE_CONFIG_DIR",
         claude_config.to_str(),
@@ -108,6 +115,15 @@ async fn exercise_held_copy(fail_stamp: bool) {
     daemon.process_prompt_queue().await.unwrap();
 
     let row = queue.queued_prompt(id).unwrap().unwrap();
+    if missing_team_folder {
+        assert!(queue.deferred_inbox_state(id).unwrap().is_none(),
+            "a PTY fallback must never become a held Teams copy in the same attempt");
+        assert!(row.processed_at.is_some(), "successful PTY fallback completes transport");
+        assert!(!claude_config.join("teams").join(SESSION).exists());
+        assert!(queue.surface_unseen_for_recipient_without_transport_delivery(WORKER, Some(SESSION), 10).unwrap().is_empty());
+        assert!(queue.surface_unseen_for_recipient_delivered_after(WORKER, Some(SESSION), 10, turn_started_at).unwrap().is_empty());
+        return;
+    }
     assert!(
         row.processed_at.is_none(),
         "a declined wake holds the row, never drops it"

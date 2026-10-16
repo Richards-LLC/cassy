@@ -37461,6 +37461,68 @@ mod zero_change_close_tests {
         assert_eq!(evidence.task_tip.as_deref(), Some(anchor.as_str()));
     }
 
+    /// cas-a7ed: a parked task `A` for worker `test-worker` whose delivery
+    /// lives on its per-task branch, with the shared worktree already
+    /// switched to the next task's per-task branch (as the factory flow
+    /// tells a worker to do while A awaits merge). Returns A and B's tip.
+    fn next_task_checkout_fixture_cas_a7ed(p: &Path, merge_a: bool) -> (Task, String, String) {
+        let mut task = Task::new("cas-a7ed-a".into(), "parked delivery".into());
+        task.assignee = Some("test-worker".into());
+        task.status = TaskStatus::AwaitingMerge;
+        let a_branch = crate::factory_isolation::worker_task_branch("test-worker", &task.id);
+        git(p, &["checkout", "-q", "-b", &a_branch, "main"]);
+        let anchor = commit_file(p, "a.rs", "feat(cas-a7ed-a): delivery A");
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        task.deliverables.parked_branch = Some(a_branch.clone());
+        git(p, &["checkout", "-q", "main"]);
+        let base = head_sha(p);
+        if merge_a {
+            git(p, &["merge", "--no-ff", "-q", &a_branch, "-m", "merge A"]);
+        }
+        let b_branch = crate::factory_isolation::worker_task_branch("test-worker", "cas-a7ed-b");
+        git(p, &["checkout", "-q", "-b", &b_branch, &base]);
+        let b_tip = commit_file(p, "b.rs", "feat(cas-a7ed-b): next task B");
+        (task, anchor, b_tip)
+    }
+
+    /// cas-a7ed AC1: re-closing merged task A while the worktree is on task
+    /// B's per-task branch measures A's own branch and passes, without a
+    /// branch switch.
+    #[test]
+    fn reclose_measures_the_tasks_own_branch_not_the_next_tasks_checkout_cas_a7ed() {
+        let dir = init_worker_repo();
+        let p = dir.path();
+        let (task, anchor, _b_tip) = next_task_checkout_fixture_cas_a7ed(p, true);
+        let evidence = run_declared_pre_close_hook(&task, &declared_main_context(p), Some(p), None, false)
+            .expect("a merged parked task re-closes from another task's checkout");
+        assert_eq!(evidence.task_tip.as_deref(), Some(anchor.as_str()));
+        assert_eq!(
+            evidence.worktree_branch.as_deref(),
+            Some(crate::factory_isolation::worker_task_branch("test-worker", &task.id).as_str())
+        );
+    }
+
+    /// cas-a7ed AC2/AC3: a genuine rewrite of A's own branch is still refused,
+    /// and the remediation names A's rewritten tip, never task B's tip.
+    #[test]
+    fn rewritten_own_branch_is_refused_without_naming_the_next_tasks_tip_cas_a7ed() {
+        let dir = init_worker_repo();
+        let p = dir.path();
+        let (task, anchor, b_tip) = next_task_checkout_fixture_cas_a7ed(p, false);
+        let a_branch = crate::factory_isolation::worker_task_branch("test-worker", &task.id);
+        // Rewrite A's branch: the anchor leaves every branch.
+        git(p, &["checkout", "-q", &a_branch]);
+        git(p, &["reset", "-q", "--hard", "main"]);
+        let rewritten = commit_file(p, "a2.rs", "feat(cas-a7ed-a): rewritten delivery");
+        git(p, &["checkout", "-q", crate::factory_isolation::worker_task_branch("test-worker", "cas-a7ed-b").as_str()]);
+        let error = run_declared_pre_close_hook(&task, &declared_main_context(p), Some(p), None, false)
+            .expect_err("a rewritten own branch must still be refused");
+        assert!(error.contains("history rewrite"), "{error}");
+        assert!(error.contains(&anchor), "{error}");
+        assert!(error.contains(&rewritten), "names A's own tip: {error}");
+        assert!(!error.contains(&b_tip), "never names another task's tip: {error}");
+    }
+
     /// cas-f1f4 (GH #1087): commit `name` on the current branch of `dir`.
     fn commit_file(dir: &Path, name: &str, message: &str) -> String {
         std::fs::write(dir.join(name), format!("pub fn {}() {{}}\n", name.replace('.', "_")))

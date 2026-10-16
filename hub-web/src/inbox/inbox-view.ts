@@ -196,9 +196,11 @@ export class InboxView {
     this.dialog.replaceChildren(body);
     for (const details of this.dialog.querySelectorAll<HTMLDetailsElement>(".machine-presence details")) details.open = expanded.has(details.id);
     if (focusedId) {
-      const next = this.dialog.querySelector<HTMLElement>(`[id="${CSS.escape(focusedId)}"]`);
-      next?.focus();
-      if (selection && next instanceof HTMLTextAreaElement) next.setSelectionRange(...selection);
+      const next = this.dialog.ownerDocument.getElementById(focusedId);
+      if (next && this.dialog.contains(next)) {
+        next.focus();
+        if (selection && next instanceof HTMLTextAreaElement) next.setSelectionRange(...selection);
+      }
     }
   }
 

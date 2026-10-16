@@ -1141,3 +1141,52 @@ async fn cas_4ac8_round4_unicode_session_start_and_heartbeat_complete() {
     assert!(fx.cloud.state().agents.contains_key(id));
     assert_eq!(fx.cloud.state().heartbeats.len(), 1);
 }
+
+/// A surviving MCP core is still bound to the pre-clear session. Its identity
+/// recovery must not replace the daemon's newer hook-announced heartbeat owner.
+#[tokio::test]
+async fn cas_9735_old_core_after_clear_keeps_new_session_heartbeat() {
+    for retained in [false, true] {
+        let (mut fx, daemon) = fixture("cas-9735").await;
+        fx._env.set("CAS_AGENT_ROLE", "supervisor");
+        let daemon = Arc::new(daemon);
+        let old_id = "pre-clear-session";
+        let new_id = "post-clear-session";
+        session_start(&daemon, old_id, "supervisor").await;
+        let core = crate::mcp::server::CasCore::with_daemon(
+            fx.cas_root.clone(), None, Some(Arc::clone(&daemon)),
+        );
+        core.bind_agent_identity(old_id.into(), crate::mcp::server::AgentIdentitySource::ServerInternal).unwrap();
+        let service = crate::mcp::tools::CasService::new(core,
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        daemon.handle_socket_event(DaemonEvent::SessionEnd {
+            session_id: old_id.into(), cc_pid: Some(our_cc_pid()),
+        }).await;
+        let store = crate::store::open_agent_store(&fx.cas_root).unwrap();
+        if retained {
+            store.graceful_shutdown(old_id).unwrap();
+        } else {
+            crate::hooks::handlers::cleanup_agent_leases(&fx.cas_root, old_id).unwrap();
+            assert!(store.get(old_id).is_err());
+        }
+        session_start(&daemon, new_id, "supervisor").await;
+        daemon.await_cloud_presence().await;
+        assert_eq!(daemon.agent_id.read().await.as_deref(), Some(new_id));
+        let result = service.coordination(rmcp::handler::server::wrapper::Parameters(
+            serde_json::from_value::<cas_mcp::types::CoordinationRequest>(json!({"action":"whoami"})).unwrap(),
+        )).await;
+        assert!(result.is_ok(), "retained={retained}: {result:?}");
+        // The single-thread runtime schedules the recovery task before this
+        // barrier; then settle its real HTTP presence work before observing.
+        tokio::spawn(async {}).await.unwrap();
+        daemon.await_cloud_presence().await;
+        assert_eq!(daemon.agent_id.read().await.as_deref(), Some(new_id), "old-core recovery stole heartbeat ownership (retained={retained})");
+        let before = store.get(new_id).unwrap().last_heartbeat;
+        heartbeat_tick(&daemon).await;
+        assert!(store.get(new_id).unwrap().last_heartbeat > before);
+        assert_eq!(daemon.agent_id.read().await.as_deref(), Some(new_id));
+        assert_eq!(fx.cloud.state().heartbeats.last().map(|(id, _)| id.as_str()), Some(new_id));
+    }
+}

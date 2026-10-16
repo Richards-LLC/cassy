@@ -861,7 +861,7 @@ impl ProxyEngine {
         configs: HashMap<String, ServerConfig>,
         connect_timeout: Duration,
     ) -> Result<ProxyHealthSnapshot> {
-        let engine = Self::from_configs_with_timeout(configs, connect_timeout).await?;
+        let engine = Self::from_configs_with_timeout(configs, connect_timeout, None).await?;
         let snapshot = engine.health_snapshot().await;
         engine.shutdown().await;
         Ok(snapshot)
@@ -4223,6 +4223,7 @@ for line in sys.stdin:
         let engine = ProxyEngine::from_configs_with_timeout(
             HashMap::from([("first".to_string(), first), ("second".to_string(), second)]),
             timeout,
+            None,
         )
         .await
         .unwrap();

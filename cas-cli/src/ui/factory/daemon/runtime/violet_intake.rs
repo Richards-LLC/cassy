@@ -79,6 +79,18 @@ pub(crate) fn poll_once(
             .min(CALL_REMOTE_BUDGET)
     };
     let actor = json!({"registration_id": context.registration_id});
+    // Capture the incumbent token before requesting a lease. A delayed
+    // predecessor result must never overwrite a successor's new token/route.
+    let fences = match store.pending_lease_fences(&context.project_id) {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|row| (row.delivery_id.clone(), row))
+            .collect::<std::collections::HashMap<_, _>>(),
+        Err(error) => {
+            report.errors.push(error.to_string());
+            return report;
+        }
+    };
     let result = (|| -> Result<(), String> {
         let response = relay
             .claim(
@@ -96,9 +108,16 @@ pub(crate) fn poll_once(
         )
         .map_err(|error| error.to_string())?;
         for leased in deliveries {
-            match admission_input(&leased, context, factory_session, recipient)
-                .and_then(|input| store.admit(&input).map_err(|error| error.to_string()))
-            {
+            match admission_input(&leased, context, factory_session, recipient).and_then(|input| {
+                if let Some(fence) = fences.get(&input.delivery_id) {
+                    store
+                        .adopt_lease(fence, &input)
+                        .map(|receipt| receipt.admission)
+                } else {
+                    store.admit(&input)
+                }
+                .map_err(|error| error.to_string())
+            }) {
                 Ok(receipt) => {
                     report.admitted += 1;
                     report.created += usize::from(receipt.created);

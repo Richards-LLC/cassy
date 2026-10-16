@@ -75,6 +75,7 @@ pane and every Codex worker it spawns land on that account.
 
 ```bash
 cas codex --list-profiles   # detected accounts and their real login state
+cas accounts link --dry-run  # one shared base folder for every account (docs/guides/accounts.md)
 cas codex login work        # create ~/.codex-work, seed it, run `codex login` there
 cas codex work              # factory with Codex supervising on that account
 cas codex work --workers 3  # factory flags still pass through, with or without a profile

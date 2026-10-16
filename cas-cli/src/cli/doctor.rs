@@ -244,6 +244,7 @@ impl CheckGroup {
             | "host user skills"
             | "host install parity"
             | "slack transport"
+            | "account links"
             | "hub idle sync" => Self::Host,
             "user skills" | "scratchpad policy" => Self::Config,
             "legacy search index"
@@ -1063,6 +1064,7 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
     checks.extend(registered_project_root_checks(current.unwrap_or_else(|| Path::new(""))));
     checks.push(scratchpad_policy_check());
     checks.push(slack_transport::check());
+    checks.push(account_links_check());
     let targets = user_skill_scan_targets();
     let mut skills = stray_user_skills_check(&scan_user_skill_dirs(&targets));
     skills.name = "host user skills".into();
@@ -1075,6 +1077,60 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
     }
     checks.push(install_parity_check(&gather_install_parity()));
     checks
+}
+
+/// cas-e1f4: once accounts share a base folder, every Claude and Codex
+/// account's shared items must still link to it.
+fn account_links_check() -> Check {
+    let Some(home) = dirs::home_dir() else {
+        return Check::new("account links", CheckStatus::Ok, "no home directory");
+    };
+    if !crate::accounts::Provider::ALL
+        .iter()
+        .any(|provider| provider.base_dir(&home).is_dir())
+    {
+        return Check::new(
+            "account links",
+            CheckStatus::Ok,
+            "accounts do not share a base folder yet (`cas accounts link --dry-run` previews it)",
+        );
+    }
+    let mut drift = Vec::new();
+    for provider in crate::accounts::Provider::ALL {
+        match crate::accounts::drift(provider, &home) {
+            Ok(found) => drift.extend(found),
+            Err(error) => {
+                return Check::new(
+                    "account links",
+                    CheckStatus::Warning,
+                    format!("could not read {} accounts: {error}", provider.name()),
+                );
+            }
+        }
+    }
+    if drift.is_empty() {
+        return Check::new(
+            "account links",
+            CheckStatus::Ok,
+            "every account links its shared items to the base",
+        );
+    }
+    let shown: Vec<String> = drift
+        .iter()
+        .take(5)
+        .map(|item| format!("~/{}/{}", item.account, item.item))
+        .collect();
+    Check::new(
+        "account links",
+        CheckStatus::Warning,
+        format!(
+            "{} shared item{} not linked to the base: {}{}; run `cas accounts link --dry-run`, then `cas accounts link`",
+            drift.len(),
+            if drift.len() == 1 { "" } else { "s" },
+            shown.join(", "),
+            if drift.len() > shown.len() { ", ..." } else { "" }
+        ),
+    )
 }
 
 /// The harness homes `cas update --user` writes, compared against the

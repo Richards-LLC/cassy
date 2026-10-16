@@ -198,7 +198,7 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
         ));
     }
     output.push_str(
-        "\nHit a usage limit? Switch in one step: cas claude <profile> (resume with --bare --continue).\n",
+        "\nHit a usage limit? Switch in one step: cas claude <profile> (resume: cas claude --bare <profile> --continue).\n",
     );
 
     Ok(output)

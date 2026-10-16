@@ -62,7 +62,13 @@ async fn signal(root: &Path, name: &str, deadline: tokio::time::Instant) -> anyh
 }
 
 fn create_live_root(root: &Path) -> anyhow::Result<()> {
-    fs::create_dir(root)?;
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(root)?; // atomic refusal of an existing enrollment
     crate::hub::ensure_private_dir(root)
 }
 

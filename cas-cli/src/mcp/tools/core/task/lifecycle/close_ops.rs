@@ -9,6 +9,7 @@ mod delivery_evolution;
 mod snapshot_approval;
 mod epic_verdict_cache;
 mod receipt_scope;
+mod epic_autoclose;
 // cas-269ab: the Git evidence probes and the epic-measurement deadline live
 // in `crate::git_evidence`; these re-exports keep every existing path valid.
 use crate::git_evidence::measurement as epic_measurement;
@@ -5103,6 +5104,55 @@ impl CasCore {
     /// Resolve the authority shared by every supervisor-owned non-delivery
     /// outcome. Callers map the typed failure into operation-specific text,
     /// but identity, registration, role, and liveness checks are identical.
+    /// cas-7f60 (GH #1232): a live registered supervisor adopts an epic whose
+    /// `epic_verification_owner` is a registered agent with positive evidence
+    /// that it is gone (shut down, or its harness process dead by the daemon's
+    /// liveness gate), instead of a manual owner transfer. The adoption is persisted
+    /// with a decision note naming the dead owner's evidence. Unknown owners
+    /// (perhaps a supervisor on another machine) are never adopted.
+    fn adopt_dead_owner_epic(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &mut Task,
+        owner: &str,
+    ) -> bool {
+        let Ok(caller) = self.resolve_live_supervisor_authority() else {
+            return false;
+        };
+        let Ok(agents) = self.open_agent_store().and_then(|store| {
+            store.list(None).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(error.to_string()),
+                data: None,
+            })
+        }) else {
+            return false;
+        };
+        let Some(evidence) =
+            epic_autoclose::dead_owner_adoption(
+                owner,
+                &agents,
+                chrono::Utc::now(),
+                epic_autoclose::owner_process,
+            )
+        else {
+            return false;
+        };
+        task.epic_verification_owner = Some(caller.id.clone());
+        append_close_decision_note(
+            task_store,
+            task,
+            &format!(
+                "decision: live supervisor `{name}` ({id}) adopted epic `{epic}` from dead \
+                 owner `{owner}`: {evidence}. epic_verification_owner is now {id} (cas-7f60).",
+                name = caller.name,
+                id = caller.id,
+                epic = task.id,
+            ),
+        );
+        true
+    }
+
     pub(crate) fn resolve_live_supervisor_authority(
         &self,
     ) -> Result<cas_types::Agent, SupervisorAuthorityError> {
@@ -7077,17 +7127,18 @@ impl CasCore {
         let mut deferred_epic_override_note = None;
         let mut epic_issue_warning = String::new();
         if task.task_type == TaskType::Epic {
-            if let Some(ref owner) = task.epic_verification_owner {
+            if let Some(owner) = task.epic_verification_owner.clone() {
                 let caller_id = self.get_agent_id().ok();
                 let caller_name = std::env::var("CAS_AGENT_NAME").ok();
                 let caller_session = std::env::var("CAS_SESSION_ID").ok();
                 if let Err(msg) = epic_close_owner_gate(
                     &req.id,
-                    owner,
+                    &owner,
                     caller_id.as_deref(),
                     caller_name.as_deref(),
                     caller_session.as_deref(),
-                ) {
+                ) && !self.adopt_dead_owner_epic(task_store.as_ref(), &mut task, &owner)
+                {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(msg.to_string()),
@@ -7309,6 +7360,10 @@ impl CasCore {
             Some(window)
         };
 
+        // cas-7f60: set when the epic's branch is gone and its children were
+        // proven on the default branch; that branch's tip then stands in for
+        // the hand-supplied commit_receipt the delivery-tip gate needs.
+        let mut gone_epic_branch_receipt: Option<String> = None;
         // For Epics: Check that all worker branches are merged before verification
         // This ensures epic-level verification runs on the complete merged code
         if task.task_type == TaskType::Epic {
@@ -7328,6 +7383,25 @@ impl CasCore {
                     }
                 }
                 None => "master".to_string(),
+            };
+            // cas-7f60 (GH #1232): an epic branch deleted after it merged
+            // resolves neither locally nor on origin. Measure the epic and
+            // the children that targeted it against the default branch
+            // instead: their content must be there, or the gate refuses.
+            // Only with children whose recorded deliveries the gate can then
+            // prove there; a gone branch with nothing to prove stays
+            // fail-closed (cas-04c6).
+            let gone = (req.commit_receipt.is_none())
+                .then(|| epic_autoclose::gone_epic_target(&close_project_root, &target_branch))
+                .flatten()
+                .filter(|_| {
+                    task_store
+                        .get_subtasks(&req.id)
+                        .is_ok_and(|children| epic_autoclose::children_prove_delivery(&children))
+                });
+            let (target_branch, gone_epic_branch) = match gone {
+                Some(default) => (default, Some(target_branch)),
+                None => (target_branch, None),
             };
             let unmerged =
                 check_unmerged_epic_branches(&close_project_root, &req.id, &target_branch);
@@ -7377,6 +7451,10 @@ impl CasCore {
                 )),
                 data: None,
             })?;
+            let subtasks = match gone_epic_branch.as_deref() {
+                Some(gone) => epic_autoclose::retarget_children(&subtasks, gone, &target_branch),
+                None => subtasks,
+            };
             match run_epic_close_merge_gate(
                 &task,
                 &req,
@@ -7467,6 +7545,23 @@ impl CasCore {
                         epic_id = req.id,
                     ));
                 }
+            }
+            // cas-7f60: the gate proved every child on the default branch.
+            if let Some(gone) = gone_epic_branch.as_deref() {
+                gone_epic_branch_receipt =
+                    epic_autoclose::default_branch_ref(&close_project_root).and_then(|reference| {
+                        resolve_branch_sha(&close_project_root, &format!("{reference}^{{commit}}"))
+                    });
+                append_close_decision_note(
+                    task_store.as_ref(),
+                    &mut task,
+                    &format!(
+                        "decision: epic branch `{gone}` is gone locally and on origin, so this \
+                         close measured the epic and its children against the default branch \
+                         `{target_branch}`, and used that branch's tip as the epic's delivery \
+                         (cas-7f60)."
+                    ),
+                );
             }
             // cas-dd56: name the issues the children reference that are
             // still open, so a shipped epic does not leave them behind.
@@ -9397,7 +9492,7 @@ impl CasCore {
             let delivered_tip = match close_task_delivery_tip(
                 &task,
                 proof_repo,
-                req.commit_receipt.as_deref(),
+                req.commit_receipt.as_deref().or(gone_epic_branch_receipt.as_deref()),
                 if supervisor_closing_merged_anchor {
                     task.deliverables.factory_branch_anchor.as_deref()
                 } else {
@@ -19744,14 +19839,22 @@ fn run_epic_close_merge_gate_with_budget(
         )
     } else { String::new() };
     let statuses = collection.statuses;
-    let stranded: Vec<&EpicChildBranchStatus> =
-        statuses.iter().filter(|s| s.blocks_epic_close()).collect();
+    // cas-7f60 (GH #1232): a lane the epic branch lacks is not stranded when
+    // the default branch already carries it, by ancestry or by patch.
+    let landed_on_default =
+        epic_autoclose::landed_on_default_notes(&statuses, parent_branch, repo_path);
+    let stranded: Vec<&EpicChildBranchStatus> = statuses
+        .iter()
+        .filter(|s| s.blocks_epic_close() && !landed_on_default.contains_key(&s.task_id))
+        .collect();
     if stranded.is_empty() {
         let notes = statuses
             .iter()
             .filter_map(|s| {
-                s.merge_evidence_note
-                    .as_deref()
+                landed_on_default
+                    .get(&s.task_id)
+                    .map(String::as_str)
+                    .or(s.merge_evidence_note.as_deref())
                     .or(s.content_evolution_note.as_deref())
             })
             .collect::<Vec<_>>();
@@ -35422,11 +35525,17 @@ mod epic_status_gate_tests {
             EpicCloseGateOutcome::ProceedWithNote(_)
         ));
 
+        // Without its own target the child is measured against the follow-up
+        // branch, which lacks it. cas-7f60 (GH #1232): the default branch
+        // already carries its patch, so it is not stranded; the decision
+        // note records that measurement instead of a hard block.
         landed.deliverables.work_target = None;
-        assert!(matches!(
-            run_epic_close_merge_gate(&task, &req, "epic/follow-up", p, &[landed]),
-            EpicCloseGateOutcome::Reject(_)
-        ));
+        match run_epic_close_merge_gate(&task, &req, "epic/follow-up", p, &[landed]) {
+            EpicCloseGateOutcome::ProceedWithNote(note) => {
+                assert!(note.contains("cas-7f60") && note.contains("main"), "{note}");
+            }
+            other => panic!("content already on main must not hard-block: {other:?}"),
+        }
     }
 
     #[test]

@@ -183,4 +183,3 @@ pub(crate) fn is_factory_kind(kind: &str) -> bool {
         DIRECTOR_SNAPSHOT | REVALIDATE_FRESH | WORKER_HEALTH_PROBE | REMINDER_SCAN | CI_STATUS
     )
 }
-

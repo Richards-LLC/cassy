@@ -2395,4 +2395,3 @@ pub(crate) fn job_thread_spawn_queue(
         Ok(crate::store::open_spawn_queue_store(root)?)
     })
 }
-

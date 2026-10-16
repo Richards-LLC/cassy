@@ -1,3 +1,5 @@
+mod shell_effects;
+
 use crate::hooks::handlers::*;
 
 // PreToolUse Hook Handler
@@ -4069,23 +4071,29 @@ fn factory_write_decision(
         .iter()
         .filter_map(|dir| canonicalize_for_containment(dir))
         .collect();
+    let shell_effects = if tool == "Bash" {
+        match shell_effects::collect(tool_input.get("command").and_then(|value| value.as_str()).unwrap_or(""), &cwd) {
+            Ok(effects) => effects,
+            Err(rule) => return link_violation(input.cwd.clone(), cwd.clone(), rule),
+        }
+    } else {
+        shell_effects::ShellEffects::default()
+    };
     let mut aliases: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     let mut link_targets: Vec<(String, Option<WriteMode>)> = Vec::new();
-    if tool == "Bash"
-        && let Some(command) = tool_input.get("command").and_then(|value| value.as_str())
-    {
-        for link in bash_link_creations(command, &cwd) {
+    if tool == "Bash" {
+        for (link, link_cwd) in &shell_effects.links {
             let evaluated = format!("{} -> {}", link.link, link.destination);
             if unresolved_word(&link.link) || unresolved_word(&link.destination) {
                 return link_violation(evaluated, std::path::PathBuf::from(&link.link), "link with an unresolved shell variable");
             }
-            let Some(link_path) = absolute(&link.link, &cwd).and_then(|path| resolve_through_links(&path, &aliases)) else {
+            let Some(link_path) = absolute(&link.link, link_cwd).and_then(|path| resolve_through_links(&path, &aliases)) else {
                 return link_violation(evaluated, std::path::PathBuf::from(&link.link), "link through a symlink that cannot be resolved");
             };
             let base = if link.destination_from_cwd {
-                cwd.clone()
+                link_cwd.clone()
             } else {
-                link_path.parent().map(std::path::Path::to_path_buf).unwrap_or_else(|| cwd.clone())
+                link_path.parent().map(std::path::Path::to_path_buf).unwrap_or_else(|| link_cwd.clone())
             };
             let Some(destination) = absolute(&link.destination, &base).and_then(|path| resolve_through_links(&path, &aliases)) else {
                 return link_violation(evaluated, link_path, "link through a symlink that cannot be resolved");
@@ -4138,10 +4146,8 @@ fn factory_write_decision(
         })
     };
     // cas-cf4f: Bash deletions are judged as deletions, before creation.
-    if tool == "Bash"
-        && let Some(command) = tool_input.get("command").and_then(|value| value.as_str())
-    {
-        for (raw_path, _recursive) in bash_delete_targets(command) {
+    if tool == "Bash" {
+        for (raw_path, _recursive) in &shell_effects.deletes {
             let raw_path = match physical(&raw_path) {
                 Ok(path) => path,
                 Err(violation) => return FactoryWriteDecision::Denied(violation),
@@ -4190,17 +4196,14 @@ fn factory_write_decision(
             .map(|path| vec![(path.to_string(), None)])
             .unwrap_or_default(),
         "Bash" => {
-            let Some(command) = tool_input.get("command").and_then(|value| value.as_str()) else {
-                return FactoryWriteDecision::Allowed;
-            };
             // cas-3147 (GH #1169 item 4): once the operator has configured
             // roots, in-place edits and rename sources are judged like any
             // other write. Without them the default contract stays as it
             // was, except that the protected policy files are never edited
             // in place or renamed (GH #1182).
             let mut in_place = Vec::new();
-            for raw_path in bash_in_place_edit_targets(command) {
-                match physical(&raw_path) {
+            for raw_path in &shell_effects.edits {
+                match physical(raw_path) {
                     Ok(path) => in_place.push(path),
                     Err(violation) => return FactoryWriteDecision::Denied(violation),
                 }
@@ -4213,7 +4216,7 @@ fn factory_write_decision(
             if !policy.configured {
                 in_place.clear();
             }
-            bash_write_targets(command)
+            shell_effects.writes
                 .into_iter()
                 .map(|path| (path, None))
                 .chain(in_place.into_iter().map(|path| (path, Some(WriteMode::Edit))))
@@ -5816,6 +5819,18 @@ fn factory_workspace_contract_denial(
     let worktree = worktree_root
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    if matches!(violation.matched_rule,
+        "a write with an unresolved effective working directory"
+        | "a link with an unresolved effective working directory"
+        | "an unresolved shell payload"
+        | "a shell command without a resolvable payload"
+        | "a shell payload beyond the resolution limit"
+        | "an unmatched shell scope") {
+        return format!(
+            "🚫 FACTORY WORKSPACE CONTRACT: cannot resolve shell filesystem effects ({}). Use literal directory operands and a literal, bounded shell payload so every write can be checked against its effective directory. Assigned worktree: `{}`.",
+            violation.matched_rule, worktree.display(),
+        );
+    }
     if violation.matched_rule == "unresolved shell variable" {
         let suffix = violation.evaluated_path.split_once('$').map(|(_, rest)| rest).unwrap_or("");
         let variable = if suffix.starts_with('$') {
@@ -7604,6 +7619,21 @@ mod workspace_contract_tests {
             ("cd \"$UNKNOWN_CWD\" && printf x > file.txt", true),
             ("sh -c \"$UNKNOWN_SCRIPT\"", true),
             ("cd src && printf x > new.rs", false),
+            ("cd src && printf x > ../../../operator/write-policy.toml", true),
+            ("cd src; cd ../../..; printf x > config.toml", true),
+            ("cd ../.. || printf x > config.toml", true),
+            ("if true; then cd ../..; fi; printf x > config.toml", true),
+            ("(cd ../..); printf x > config.toml", false),
+            ("sh -c 'cd ../..'; printf x > config.toml", false),
+            ("cd src && sh -c 'printf x > ../../../config.toml'", true),
+            ("sh -c 'bash -c \"printf x > ../../config.toml\"'", true),
+            ("sh -c 'rm ../../config.toml'", true),
+            ("cd ../.. && sed -i 's/a/b/' config.toml", true),
+            ("cd src && ln -s ../../../operator op", true),
+            ("cd src && ln -s . local && printf x > local/new.rs", false),
+            ("cd src && python3 - <<'PY'\nopen('../../../config.toml','w').write('x')\nPY", true),
+            ("cd src && python3 - <<'PY'\nopen('new.rs','w').write('x')\nPY", false),
+            ("cd \"$UNKNOWN_CWD\" && cat file.txt", false),
             ("sh -c 'printf x > src/new.rs'", false),
             ("(cd src && printf x > new.rs); printf x > local.rs", false),
             ("cd ../.. && cat config.toml", false),

@@ -3062,6 +3062,10 @@ impl FactoryApp {
 }
 
 #[cfg(test)]
+#[path = "epic_spawn_readiness_tests.rs"]
+mod spawn_readiness_tests;
+
+#[cfg(test)]
 mod spawn_base_tests {
     use super::*;
     use crate::test_support::TestEnvGuard;

@@ -309,6 +309,7 @@ mod rate_limit_tests {
         let mut agent = crate::types::Agent::new("supervisor".into(), "supervisor".into());
         agent.role = AgentRole::Supervisor;
         agent.pid = Some(std::process::id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, std::process::id());
         agent.factory_session = Some("factory-retry".into());
         crate::store::open_agent_store(&root)
             .unwrap()

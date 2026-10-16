@@ -137,7 +137,7 @@ async fn cas_031e_poison_idle_probe_runs_under_enforced_daemon_step() {
             .peek_all(20)
             .unwrap()
             .iter()
-            .any(|r| r.prompt.contains("Unread message on an idle worker"))
+            .any(|r| r.id != row && r.target == daemon.app.supervisor_name())
         {
             break;
         }
@@ -197,7 +197,8 @@ async fn cas_031e_superseded_message_discards_its_held_probe_result() {
     );
     // Supersede even under the same row and pane: a new delivery phase and body.
     let replacement = daemon.normal_delivery_probes.get_mut(&row).unwrap();
-    replacement.prompt = "replacement message".into();
+    let replacement_body = String::from("replacement message");
+    replacement.prompt = replacement_body.clone();
     replacement.delivered_at = Instant::now();
     replacement.delivered_at_utc = chrono::Utc::now() + chrono::Duration::minutes(1);
     release_tx.send(()).unwrap();
@@ -217,7 +218,7 @@ async fn cas_031e_superseded_message_discards_its_held_probe_result() {
         .normal_delivery_probes
         .get(&row)
         .expect("old turn must not retire the replacement");
-    assert_eq!(current.prompt, "replacement message");
+    assert_eq!(current.prompt, replacement_body);
     assert!(current.nudge_sent_at.is_none());
     assert!(
         daemon

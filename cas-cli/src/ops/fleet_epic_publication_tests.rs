@@ -36,6 +36,7 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
     git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
     git(&repo, &["push", "origin", "main"]);
     let root = crate::store::init_cas_dir(&repo).unwrap();
+    std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"publication-test\"\n").unwrap();
     let mut epic = cas_types::Task::new("cas-unpublished".into(), "Unpublished epic".into());
     epic.task_type = cas_types::TaskType::Epic;
     epic.branch = Some("epic/unpublished".into());

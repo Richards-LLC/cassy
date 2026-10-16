@@ -9801,6 +9801,80 @@ mod purge_foreign_safety_tests {
     }
 
     #[test]
+    fn cas_7e38_fresh_active_team_pull_ignores_frozen_personal_watermark() {
+        for team_only in [false, true] {
+            let (_env, root, conn) = purge_queue_fixture();
+            let mut cloud = CloudConfig::default();
+            cloud.set_team("team-1", "fixture");
+            cloud.team_only = team_only;
+            cloud.save_to_cas_dir(&root).unwrap();
+            conn.execute("UPDATE sync_metadata SET value = '2020-01-01T00:00:00Z'", []).unwrap();
+            conn.execute("INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-1_test-project', ?1)",
+                [chrono::Utc::now().to_rfc3339()]).unwrap();
+            let inspection = inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
+            assert!(inspection.refusals.is_empty(), "fresh team scope must be safe (team_only={team_only}): {:?}", inspection.refusals);
+        }
+    }
+
+    #[test]
+    fn cas_7e38_fresh_personal_or_other_scope_cannot_mask_bad_team_freshness() {
+        for (active_value, expected) in [
+            (None, "never_pulled"),
+            (Some("2020-01-01T00:00:00Z"), "stale_pull"),
+            (Some("not-a-timestamp"), "unreadable_pull_timestamp"),
+        ] {
+            let (_env, root, conn) = purge_queue_fixture();
+            let mut cloud = CloudConfig::default();
+            cloud.set_team("team-1", "fixture");
+            cloud.save_to_cas_dir(&root).unwrap();
+            for key in ["last_team_pull_at_team-2_test-project", "last_team_pull_at_team-1_other-project"] {
+                conn.execute("INSERT INTO sync_metadata VALUES (?1, ?2)",
+                    [key, &chrono::Utc::now().to_rfc3339()]).unwrap();
+            }
+            if let Some(value) = active_value {
+                conn.execute("INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-1_test-project', ?1)", [value]).unwrap();
+            }
+            let inspection = inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
+            assert_eq!(inspection.refusals.len(), 1, "active={active_value:?}: {:?}", inspection.refusals);
+            assert_eq!(inspection.refusals[0].code(), expected);
+        }
+    }
+
+    #[test]
+    fn cas_7e38_personal_and_team_opt_out_keep_personal_freshness() {
+        for opted_out in [false, true] {
+            let (_env, root, conn) = purge_queue_fixture();
+            let mut cloud = CloudConfig::default();
+            if opted_out {
+                cloud.set_team("team-1", "fixture");
+                cloud.team_auto_promote = Some(false);
+            }
+            cloud.save_to_cas_dir(&root).unwrap();
+            conn.execute("UPDATE sync_metadata SET value = '2020-01-01T00:00:00Z'", []).unwrap();
+            conn.execute("INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-1_test-project', ?1)",
+                [chrono::Utc::now().to_rfc3339()]).unwrap();
+            let inspection = inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
+            assert_eq!(inspection.refusals[0].code(), "stale_pull");
+        }
+    }
+
+    #[test]
+    fn cas_7e38_opted_in_user_default_team_is_the_active_scope() {
+        let (env, root, conn) = purge_queue_fixture();
+        let mut user = CloudConfig::default();
+        user.default_team_id = Some("team-default".into());
+        user.save_to_cas_dir(&env.home().join(".cas")).unwrap();
+        let mut cloud = CloudConfig::default();
+        cloud.team_auto_promote = Some(true);
+        cloud.save_to_cas_dir(&root).unwrap();
+        conn.execute("UPDATE sync_metadata SET value = '2020-01-01T00:00:00Z'", []).unwrap();
+        conn.execute("INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-default_test-project', ?1)",
+            [chrono::Utc::now().to_rfc3339()]).unwrap();
+        let inspection = inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
+        assert!(inspection.refusals.is_empty(), "{:?}", inspection.refusals);
+    }
+
+    #[test]
     fn purge_queue_non_overlapping_changes_proceed_and_survive_delete() {
         let (_env, cas_root, mut conn) = purge_queue_fixture();
         // The incident shape: 362 unrelated task pushes plus two other kinds,

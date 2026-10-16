@@ -1,10 +1,9 @@
 //! Supervisor-provisioned disposable database branches per task (cas-0033,
 //! GH #1005 item 3).
 //!
-//! A worker that needs a database to reproduce a bug could not get one: the
-//! proxy denies it `neon.create_branch`, so the supervisor relayed branch
-//! creation and connection strings by hand. Here the supervisor's `cas serve`,
-//! which holds the Neon credential, creates `cas-<task-id>-<n>` from a
+//! A worker that needs a database to reproduce a bug could not get one, so the
+//! supervisor relayed branch creation and connection strings by hand. Here the
+//! supervisor's `cas serve`, which holds the Neon credential, creates `cas-<task-id>-<n>` from a
 //! non-production parent, writes the connection string into the worker's
 //! worktree as `.env.cas-db` (mode 600, git-excluded), and records the branch in
 //! a per-task ledger. Closing or cancelling the task deletes it.
@@ -16,8 +15,8 @@
 //! string).
 //!
 //! This module holds the provider-independent logic, generic over
-//! [`NeonBranchApi`] so tests drive it with a stub. The MCP surface and the
-//! live proxy-backed client are in `mcp::tools::service::db_branch_ops`.
+//! [`NeonBranchApi`] so tests drive it with a stub; [`NeonCli`] is the live
+//! client. The MCP surface is in `mcp::tools::service::db_branch_ops`.
 
 use std::path::{Path, PathBuf};
 
@@ -292,9 +291,47 @@ pub struct NeonCli {
 }
 
 impl NeonCli {
+    /// `neonctl` on PATH, else under an nvm Node install.
+    pub fn locate() -> Option<PathBuf> {
+        let on_path = std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .map(|dir| dir.join("neonctl"));
+        let nvm = std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join(".nvm/versions/node"))
+            .and_then(|dir| std::fs::read_dir(dir).ok())
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|node| node.path().join("bin/neonctl"));
+        on_path.chain(nvm).find(|candidate| candidate.is_file())
+    }
+
     async fn run(&self, args: &[&str]) -> Result<String, String> {
-        let _ = args;
-        Err("neonctl backend not implemented".into())
+        let mut command = tokio::process::Command::new(&self.program);
+        command
+            .args(args)
+            .args(["--output", "json", "--no-color", "--no-analytics"])
+            .env_remove("NEON_API_KEY")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        if let Some(key) = &self.api_key {
+            command.env("NEON_API_KEY", key);
+        }
+        let label = args.iter().take(2).copied().collect::<Vec<_>>().join(" ");
+        let output = tokio::time::timeout(std::time::Duration::from_secs(60), command.output())
+            .await
+            .map_err(|_| format!("neonctl {label} timed out after 60s"))?
+            .map_err(|error| format!("could not run neonctl: {error}"))?;
+        if !output.status.success() {
+            let detail: String =
+                redact_connection_strings(String::from_utf8_lossy(&output.stderr).trim())
+                    .chars()
+                    .take(400)
+                    .collect();
+            return Err(format!("neonctl {label} failed: {detail}"));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 }
 
@@ -309,18 +346,37 @@ impl NeonBranchApi for NeonCli {
         name: &str,
         parent_id: &str,
     ) -> Result<NeonBranchInfo, String> {
-        let _ = (project_id, name, parent_id);
-        Err("neonctl backend not implemented".into())
+        // Cost cap: a small autoscaling ceiling that suspends when idle.
+        let cu = format!("0.25-{MAX_CU}");
+        let text = self
+            .run(&[
+                "branches", "create", "--project-id", project_id, "--name", name, "--parent",
+                parent_id, "--cu", &cu, "--suspend-timeout", "300",
+            ])
+            .await?;
+        let created = parse_branches(&text);
+        created
+            .iter()
+            .find(|branch| branch.name == name)
+            .or_else(|| created.first())
+            .cloned()
+            .ok_or_else(|| {
+                format!("neonctl branches create returned no branch id for {name}; check the Neon console for a stray branch")
+            })
     }
 
     async fn connection_string(&self, project_id: &str, branch_id: &str) -> Result<String, String> {
-        let _ = (project_id, branch_id);
-        Err("neonctl backend not implemented".into())
+        let text = self
+            .run(&["connection-string", branch_id, "--project-id", project_id])
+            .await?;
+        extract_connection_string(&text)
+            .ok_or_else(|| format!("neonctl connection-string returned no postgres:// URL for {branch_id}"))
     }
 
     async fn delete_branch(&self, project_id: &str, branch_id: &str) -> Result<(), String> {
-        let _ = (project_id, branch_id);
-        Err("neonctl backend not implemented".into())
+        self.run(&["branches", "delete", branch_id, "--project-id", project_id])
+            .await
+            .map(|_| ())
     }
 }
 

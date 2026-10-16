@@ -16,7 +16,7 @@ struct Fixture {
     remote: tempfile::TempDir,
     app: FactoryApp,
     event: DirectorEvent,
-    env: crate::test_support::TestEnvGuard,
+    _env: crate::test_support::TestEnvGuard,
 }
 
 impl Fixture {
@@ -36,6 +36,9 @@ impl Fixture {
         git(repo.path(), &["add", "."]);
         git(repo.path(), &["commit", "-qm", "cas-9efb-test delivery"]);
         git(repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+        // Git fetches the local bare server, while GitHub identity remains explicit.
+        git(repo.path(), &["config", &format!("url.{}.insteadOf", remote.path().display()), "https://github.com/acme/cas.git"]);
+        git(repo.path(), &["remote", "set-url", "origin", "https://github.com/acme/cas.git"]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
         env.set("CAS_ROOT", &cas_dir);
         let mut task = Task::new("cas-9efb-test".into(), "parked delivery".into());
@@ -45,6 +48,9 @@ impl Fixture {
             repo_selector: "project:fixture".into(), target_branch: "epic/test".into(),
         });
         crate::store::open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
+        crate::store::open_agent_store(&cas_dir).unwrap().register(
+            &cas_types::Agent::new("merge-w".into(), "merge-w".into())
+        ).unwrap();
         let mut data = DirectorData::load_with_stores_for_project(&cas_dir, None, false, None, None).unwrap();
         data.agent_id_to_name.insert("merge-w".into(), "merge-w".into());
         let mut app = FactoryApp::for_test_at(cas_dir.clone());
@@ -58,7 +64,7 @@ impl Fixture {
         let gh = cas_dir.join("gh-fixture");
         crate::test_paths::warm_stub(&gh, "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{\"nameWithOwner\":\"acme/cas\"}'; else printf '%s\\n' \"$*\" >> .cas/gh-requests; cat .cas/ci.json; fi\n");
         env.set(crate::github_issue_attach::GH_BIN_ENV, gh);
-        let fixture = Self { repo, remote, app, event, env };
+        let fixture = Self { repo, remote, app, event, _env: env };
         fixture.ci(Some("success"));
         fixture
     }

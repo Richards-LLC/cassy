@@ -119,6 +119,13 @@ pub fn execute(args: &AccountsArgs, cli: &Cli) -> Result<()> {
             }
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&found)?);
+            } else if !provider
+                .providers()
+                .iter()
+                .any(|provider| provider.base_dir(&home).is_dir())
+            {
+                println!("[OK] accounts do not share a base folder yet");
+                println!("Preview one: cas accounts link --dry-run");
             } else if found.is_empty() {
                 println!("[OK] every account links its shared items to the base");
             } else {

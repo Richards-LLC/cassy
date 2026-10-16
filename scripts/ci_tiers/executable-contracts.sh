@@ -335,11 +335,12 @@ rm -f "$tag_push_output"
 first_branch_output="$(mktemp)"
 if BASE_SHA="0000000000000000000000000000000000000000" \
     ZERO_BASE_REF="HEAD" \
+    GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/factory/fixture \
     GITHUB_OUTPUT="$first_branch_output" \
     bash < <(python3 "$policy_parser" action-run .github/actions/classify-required-diff/action.yml); then
-    require_text "$(<"$first_branch_output")" 'class=empty' 'first branch push uses its protected-base fallback'
-    require_text "$(<"$first_branch_output")" 'fast-pass=true' 'empty first branch push fast-passes without Rust'
-    require_text "$(<"$first_branch_output")" 'rust-unaffected=true' 'empty first branch push skips Cargo'
+    require_text "$(<"$first_branch_output")" 'class=rust-touched' 'first branch push refuses untrusted HEAD fallback'
+    require_text "$(<"$first_branch_output")" 'fast-pass=false' 'untrusted first branch push does not fast-pass'
+    require_text "$(<"$first_branch_output")" 'rust-unaffected=false' 'untrusted first branch push keeps Rust coverage'
 else
     printf 'FAIL first branch push runs the shared classifier action\n'
     fail=$((fail + 1))

@@ -107,8 +107,9 @@ For hub-web deliveries, run vitest, tsc and the source-impact-selected journeys
 while iterating, with `scripts/journey-eval.sh <task-artifact-dir>` (default
 affected, four workers) or `--affected <base>`. Close and QA do not require a
 journey receipt: the merge queue runs the full journey suite once.
-Workers and independent QA use affected journeys; the hook denies factory
-worker and QA full or unfiltered runs. A failure control may rerun the failing
+Workers produce affected-journey evidence; independent QA consumes matching
+receipts before running missing checks (see [independent-pass.md](independent-pass.md)).
+The hook denies factory worker and QA full or unfiltered runs. A failure control may rerun the failing
 spec at one worker, keeping the original failure.
 
 Documentation or ledger edits do not require a browser rerun of the QA bundle:

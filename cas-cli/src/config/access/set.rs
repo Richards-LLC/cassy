@@ -207,6 +207,25 @@ impl Config {
                     ))
                 })?;
             }
+            "factory.build_guard.max_load_ratio"
+            | "factory.build_guard.max_cpu_pressure_percent"
+            | "factory.build_guard.max_memory_pressure_percent" => {
+                let number: f64 = value.parse().map_err(|_| MemError::Parse(format!("Invalid number for {key}: {value}")))?;
+                let load_ratio = key.ends_with("max_load_ratio");
+                if !number.is_finite() || if load_ratio { number <= 0.0 } else { !(0.0..=100.0).contains(&number) } {
+                    return Err(MemError::Parse(format!("Invalid value for {key}: expected {}", if load_ratio { "a positive finite ratio" } else { "a percentage from 0 to 100" })));
+                }
+                let limits = &mut self.factory.get_or_insert_with(FactoryConfig::default).build_guard;
+                match key {
+                    "factory.build_guard.max_load_ratio" => limits.max_load_ratio = number,
+                    "factory.build_guard.max_cpu_pressure_percent" => limits.max_cpu_pressure_percent = number,
+                    _ => limits.max_memory_pressure_percent = number,
+                }
+            }
+            "factory.build_guard.min_available_memory_gib" => {
+                let gib: u32 = value.parse().map_err(|_| MemError::Parse(format!("Invalid GiB value for {key}: {value}")))?;
+                self.factory.get_or_insert_with(FactoryConfig::default).build_guard.min_available_memory_gib = gib;
+            }
             "factory.worker_memory_high_gib" => {
                 self.factory.get_or_insert_with(FactoryConfig::default).worker_memory_high_gib =
                     value.parse().map_err(|_| MemError::Parse(format!(

@@ -194,6 +194,10 @@ fn lock_file(path: &Path) -> Result<File> {
     Ok(options.open(path)?)
 }
 
+fn waiting_for_admission(reason: &str) -> String {
+    format!("Waiting for build admission: {reason}.\nRetry the same capped Cargo command when host pressure or a builder slot clears.")
+}
+
 fn acquire_slot(root: &Path, cap: usize) -> Result<File> {
     std::fs::create_dir_all(root)?;
     for index in 0..cap {
@@ -204,7 +208,7 @@ fn acquire_slot(root: &Path, cap: usize) -> Result<File> {
             Err(error) => return Err(error.into()),
         }
     }
-    bail!("Worker check refused: max_concurrent_builders={cap} slots are occupied; retry later")
+    bail!("{}", waiting_for_admission(&format!("max_concurrent_builders={cap} slots are occupied")))
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -728,11 +732,11 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
     let violations = snapshot.admission_violations(load_admitted);
     if !violations.is_empty() {
-        bail!("Worker check refused: {}; retry later", violations.join("; "));
+        bail!("{}", waiting_for_admission(&violations.join("; ")));
     }
     if load_admitted && !snapshot.violations().is_empty() {
         println!(
-            "Worker check: continuing the proof that just passed at {head}; its load admission carries over (load_1m={:?}, cpu_count={})",
+            "Worker check: continuing the proof that just passed at {head}; its CPU admission carries over (load_1m={:?}, cpu_count={})",
             snapshot.load_1m, snapshot.cpu_count
         );
     }
@@ -1475,6 +1479,8 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
             expected_build: "yes",
             max_concurrent_builders: 2,
             disabled: false,
+            pressure: Default::default(),
+            limits: Default::default(),
         };
         assert_eq!(snapshot.admission_violations(false).len(), 1, "independent checks stay load-gated");
         assert!(snapshot.violations()[0].contains("exceeds 32 CPUs"));
@@ -2206,7 +2212,9 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
             let dir = tempfile::tempdir().unwrap();
             let first = acquire_slot(dir.path(), 2).unwrap();
             let second = acquire_slot(dir.path(), 2).unwrap();
-            assert!(acquire_slot(dir.path(), 2).is_err());
+            let refusal = acquire_slot(dir.path(), 2).unwrap_err().to_string();
+            assert!(refusal.contains("Waiting for build admission"), "{refusal}");
+            assert!(refusal.contains("max_concurrent_builders=2"), "{refusal}");
             drop(first);
             assert!(acquire_slot(dir.path(), 2).is_ok());
             drop(second);

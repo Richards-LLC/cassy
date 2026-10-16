@@ -877,6 +877,30 @@ copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
 
+Build admission reads Linux `/proc/pressure/cpu` and `/proc/pressure/memory`
+`some avg10` stall percentages, plus `MemAvailable` from `/proc/meminfo`.
+Valid CPU PSI replaces the raw load check, so unrelated I/O-heavy work does not
+block an otherwise healthy host. Missing or malformed CPU PSI falls back to
+one-minute load divided by CPU count. Missing memory probes remain unknown.
+Memory pressure and the memory floor are rechecked even when a proof continuation
+carries its earlier CPU admission. Swap usage alone is not a refusal signal;
+PSI measures time lost to contention. Non-Linux hosts retain unavailable probes.
+
+| Config key | Default | Meaning |
+| --- | --- | --- |
+| `factory.build_guard.max_load_ratio` | `1.0` | Positive finite fallback load/CPU ceiling |
+| `factory.build_guard.max_cpu_pressure_percent` | `90.0` | Maximum CPU `some avg10`, 0–100% |
+| `factory.build_guard.max_memory_pressure_percent` | `10.0` | Maximum memory `some avg10`, 0–100% |
+| `factory.build_guard.min_available_memory_gib` | `2` | Minimum available GiB; 0 disables this floor |
+
+For example, `cas config set factory.build_guard.max_load_ratio 1.5` changes the
+fallback threshold. PSI limits and `factory.max_concurrent_builders` still apply.
+Invalid hand-edited thresholds use defaults. A denied worker command prints
+`Waiting for build admission` with its measured reason and asks for the same
+capped command to be retried; it does not hold a builder slot while waiting.
+`force=true` only overrides the existing spawn-time soft check, never capped
+worker slot locks.
+
 On Linux, the capped runner launches each build in a dedicated
 `systemd-run --user --scope` with `MemoryHigh`, keeping compiler reclaim separate
 from the supervisor and daemon. `factory.worker_memory_high_gib` sets the limit

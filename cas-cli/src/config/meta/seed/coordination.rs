@@ -230,7 +230,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         key: "factory.max_concurrent_builders",
         section: "factory",
         name: "Maximum Concurrent Builders",
-        description: "Builder cap for worker compile checks and targeted tests, enforced with OS slot locks. spawn_workers also refuses when a request would exceed this cap or one-minute load exceeds CPU count; force=true overrides only the spawn-time soft guard.",
+        description: "Builder cap for worker compile checks and targeted tests, enforced with OS slot locks. spawn_workers also checks configured PSI/memory pressure, or the load ratio when PSI is unavailable; force=true overrides only the spawn-time soft guard.",
         value_type: ConfigType::Int,
         default: "4",
         constraint: Constraint::Range(1, 256),
@@ -241,6 +241,62 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             "Keep a shared 32-core host at four concurrent builders",
             "Raise the cap only when the host has spare CPU capacity",
         ],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.build_guard.max_load_ratio",
+        section: "factory",
+        name: "Fallback Maximum Load Ratio",
+        description: "Positive finite load/CPU ceiling when CPU PSI is unavailable. PSI and memory thresholds take precedence on supported hosts.",
+        value_type: ConfigType::Float,
+        default: "1.0",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "cargo", "build", "admission", "pressure", "load", "memory"],
+        use_cases: &["Tune build admission on a shared host without changing builder slots"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.build_guard.max_cpu_pressure_percent",
+        section: "factory",
+        name: "Maximum CPU Pressure (%)",
+        description: "Maximum CPU PSI some avg10 stall percentage (0..100). Replaces the raw-load test when available.",
+        value_type: ConfigType::Float,
+        default: "90.0",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "cargo", "build", "admission", "pressure", "load", "memory"],
+        use_cases: &["Tune build admission on a shared host without changing builder slots"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.build_guard.max_memory_pressure_percent",
+        section: "factory",
+        name: "Maximum Memory Pressure (%)",
+        description: "Maximum memory PSI some avg10 stall percentage (0..100). Rechecked even for an admitted proof continuation.",
+        value_type: ConfigType::Float,
+        default: "10.0",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "cargo", "build", "admission", "pressure", "load", "memory"],
+        use_cases: &["Tune build admission on a shared host without changing builder slots"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.build_guard.min_available_memory_gib",
+        section: "factory",
+        name: "Minimum Available Memory (GiB)",
+        description: "Minimum MemAvailable before build admission. Zero disables this floor; PSI and the hard builder cap still apply.",
+        value_type: ConfigType::Int,
+        default: "2",
+        constraint: Constraint::Range(0, 65536),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "cargo", "build", "admission", "pressure", "load", "memory"],
+        use_cases: &["Tune build admission on a shared host without changing builder slots"],
     });
 
     registry.register(ConfigMeta {

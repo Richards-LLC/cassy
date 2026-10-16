@@ -1,4 +1,4 @@
-//! Spawn-time protection against a factory build storm.
+//! Shared host-pressure admission for factory spawns and capped worker builds.
 //!
 //! Worker panes are cheap to queue but their Cargo processes are not. Keep the
 //! guard here, beside the MCP spawn handler, so the decision is made before a
@@ -9,7 +9,65 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::config::FactoryConfig;
+use crate::config::{BuildGuardConfig, FactoryConfig};
+
+/// Linux PSI stall percentages and reclaimable memory; missing probes stay unknown.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct HostPressure {
+    cpu_some_avg10: Option<f64>,
+    memory_some_avg10: Option<f64>,
+    available_memory_bytes: Option<u64>,
+}
+
+impl HostPressure {
+    fn read(proc_root: &Path) -> Self {
+        let psi = |resource: &str| -> Option<f64> {
+            let text = std::fs::read_to_string(proc_root.join("pressure").join(resource)).ok()?;
+            let some = text
+                .lines()
+                .find(|line| line.split_whitespace().next() == Some("some"))?;
+            some.split_whitespace().find_map(|field| {
+                field
+                    .strip_prefix("avg10=")?
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+            })
+        };
+        let available_memory_bytes = std::fs::read_to_string(proc_root.join("meminfo"))
+            .ok()
+            .and_then(|text| {
+                text.lines().find_map(|line| {
+                    let mut fields = line.split_whitespace();
+                    if fields.next()? != "MemAvailable:" {
+                        return None;
+                    }
+                    let kib = fields.next()?.parse::<u64>().ok()?;
+                    if fields.next()? != "kB" {
+                        return None;
+                    }
+                    kib.checked_mul(1024)
+                })
+            });
+        Self {
+            cpu_some_avg10: psi("cpu"),
+            memory_some_avg10: psi("memory"),
+            available_memory_bytes,
+        }
+    }
+
+    fn notice(&self) -> String {
+        let memory = self.available_memory_bytes.map_or_else(
+            || "unknown".into(),
+            |bytes| format!("{:.2}GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0)),
+        );
+        format!(
+            "cpu_psi_some_avg10={}%; memory_psi_some_avg10={}%; available_memory={memory}",
+            format_load(self.cpu_some_avg10),
+            format_load(self.memory_some_avg10)
+        )
+    }
+}
 
 /// Snapshot used in the spawn receipt and refusal diagnostic.
 #[derive(Debug, Clone, PartialEq)]
@@ -22,37 +80,68 @@ pub(crate) struct BuildGuardSnapshot {
     pub expected_build: &'static str,
     pub max_concurrent_builders: usize,
     pub disabled: bool,
+    pub pressure: HostPressure,
+    pub limits: BuildGuardConfig,
 }
 
 impl BuildGuardSnapshot {
-    /// A spawn is refused when it would leave more builders than configured,
-    /// or when the host's one-minute load is already above CPU capacity.
-    fn with_host(mut self, proc_root: &Path, _config: &FactoryConfig) -> Self {
-        self.load_1m = std::fs::read_to_string(proc_root.join("loadavg")).ok()
-            .and_then(|text| text.split_whitespace().next()?.parse().ok());
+    fn with_host(mut self, proc_root: &Path, config: &FactoryConfig) -> Self {
+        self.load_1m = std::fs::read_to_string(proc_root.join("loadavg"))
+            .ok()
+            .and_then(|text| text.split_whitespace().next()?.parse::<f64>().ok())
+            .filter(|load| load.is_finite() && *load >= 0.0);
+        self.pressure = HostPressure::read(proc_root);
+        self.limits = config.build_guard.effective();
         self
     }
 
+    /// Refuse host contention or a projected builder count above the cap.
     pub(crate) fn violations(&self) -> Vec<String> {
         self.admission_violations(false)
     }
 
-    /// [`Self::violations`], optionally without the host-load reading
+    /// [`Self::violations`], optionally carrying the earlier CPU admission
     /// (cas-f616). A lane proof's second capped step carries its first
     /// step's admission: the load that step raised must not refuse its own
-    /// continuation. The builder cap is never waived.
+    /// continuation. Memory pressure and the builder cap are never waived.
     pub(crate) fn admission_violations(&self, load_admitted: bool) -> Vec<String> {
         if self.disabled {
             return Vec::new();
         }
         let mut violations = Vec::new();
-        if !load_admitted
-            && let Some(load) = self.load_1m
-            && load > self.cpu_count as f64
+        if !load_admitted {
+            if let Some(cpu) = self.pressure.cpu_some_avg10 {
+                if cpu > self.limits.max_cpu_pressure_percent {
+                    violations.push(format!(
+                        "CPU PSI some avg10 {cpu:.2}% exceeds {:.2}%",
+                        self.limits.max_cpu_pressure_percent
+                    ));
+                }
+            } else if let Some(load) = self.load_1m
+                && load > self.cpu_count as f64 * self.limits.max_load_ratio
+            {
+                violations.push(format!(
+                    "1-minute load {load:.2} exceeds {} CPUs x max_load_ratio={:.2}",
+                    self.cpu_count, self.limits.max_load_ratio
+                ));
+            }
+        }
+        // Continuing a recently admitted proof never waives fresh memory safety.
+        if let Some(memory) = self.pressure.memory_some_avg10
+            && memory > self.limits.max_memory_pressure_percent
         {
             violations.push(format!(
-                "1-minute load {:.2} exceeds {} CPUs",
-                load, self.cpu_count
+                "memory PSI some avg10 {memory:.2}% exceeds {:.2}%",
+                self.limits.max_memory_pressure_percent
+            ));
+        }
+        if let Some(bytes) = self.pressure.available_memory_bytes
+            && bytes < u64::from(self.limits.min_available_memory_gib) * 1024 * 1024 * 1024
+        {
+            violations.push(format!(
+                "available memory {:.2}GiB is below {}GiB",
+                bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                self.limits.min_available_memory_gib
             ));
         }
         if self.requested_builders > 0 {
@@ -80,7 +169,7 @@ impl BuildGuardSnapshot {
             " Pass force=true to override this soft guard."
         };
         format!(
-            "Build concurrency guard: refusing spawn of {} worker(s): {}. Current state: load_1m={}, cpu_count={}, live_cargo_workers={}, requested_builders={}, expected_build={}, max_concurrent_builders={}.{}",
+            "Build concurrency guard: waiting for admission; refusing spawn of {} worker(s): {}. Current state: load_1m={}, cpu_count={}, live_cargo_workers={}, requested_builders={}, expected_build={}, max_concurrent_builders={}.{}",
             self.requested_workers,
             violations.join("; "),
             format_load(self.load_1m),
@@ -104,6 +193,7 @@ impl BuildGuardSnapshot {
         } else {
             violations.join("; ")
         };
+        let state = format!("{state}; {}", self.pressure.notice());
         format!(
             "\nBuild guard: {state}; load_1m={} / cpu_count={}; live_cargo_workers={}; requested_workers={}; requested_builders={}; expected_build={}; max_concurrent_builders={}",
             format_load(self.load_1m),
@@ -183,6 +273,8 @@ fn evaluate_with_builders(
         expected_build,
         max_concurrent_builders,
         disabled: false,
+        pressure: HostPressure::default(),
+        limits: BuildGuardConfig::default(),
     }
 }
 
@@ -243,7 +335,8 @@ pub(crate) fn inspect_for_task(
         requested_workers,
         config.max_concurrent_builders,
         task,
-    ).with_host(Path::new("/proc"), config)
+    )
+    .with_host(Path::new("/proc"), config)
 }
 
 fn build_guard_disabled_override() -> bool {
@@ -343,42 +436,136 @@ mod tests {
         std::fs::write(root.path().join("loadavg"), format!("{load} 0 0 1/1 1\n")).unwrap();
         std::fs::write(root.path().join("pressure/cpu"), cpu).unwrap();
         std::fs::write(root.path().join("pressure/memory"), memory).unwrap();
-        std::fs::write(root.path().join("meminfo"), format!("MemAvailable: {available_kib} kB\n")).unwrap();
+        std::fs::write(
+            root.path().join("meminfo"),
+            format!("MemAvailable: {available_kib} kB\n"),
+        )
+        .unwrap();
         root
     }
 
     #[test]
     fn cas_2d63_admission_uses_proc_pressure_and_preserves_builder_cap() {
         for (label, load, cpu, memory, available, allowed) in [
-            ("quiet PSI, noisy load", 64.0, "some avg10=2.5 avg60=1 total=42", "some avg10=0.1", 8*1024*1024, true),
-            ("CPU contention", 2.0, "some avg10=95.0", "some avg10=0.1", 8*1024*1024, false),
-            ("memory stalls", 2.0, "some avg10=2.5", "some avg10=12.0", 8*1024*1024, false),
-            ("low available memory", 2.0, "some avg10=2.5", "some avg10=0.1", 1024*1024, false),
-            ("PSI unavailable", 64.0, "", "", 8*1024*1024, false),
-            ("invalid PSI", 64.0, "some avg10=NaN", "some avg10=0.1", 8*1024*1024, false),
+            (
+                "quiet PSI, noisy load",
+                64.0,
+                "some avg10=2.5 avg60=1 total=42",
+                "some avg10=0.1",
+                8 * 1024 * 1024,
+                true,
+            ),
+            (
+                "CPU contention",
+                2.0,
+                "some avg10=95.0",
+                "some avg10=0.1",
+                8 * 1024 * 1024,
+                false,
+            ),
+            (
+                "memory stalls",
+                2.0,
+                "some avg10=2.5",
+                "some avg10=12.0",
+                8 * 1024 * 1024,
+                false,
+            ),
+            (
+                "low available memory",
+                2.0,
+                "some avg10=2.5",
+                "some avg10=0.1",
+                1024 * 1024,
+                false,
+            ),
+            ("PSI unavailable", 64.0, "", "", 8 * 1024 * 1024, false),
+            (
+                "invalid PSI",
+                64.0,
+                "some avg10=NaN",
+                "some avg10=0.1",
+                8 * 1024 * 1024,
+                false,
+            ),
         ] {
             let proc = fake_proc(load, cpu, memory, available);
-            let snapshot = evaluate(32, None, 0, 1, 4).with_host(proc.path(), &FactoryConfig::default());
-            assert_eq!(snapshot.violations().is_empty(), allowed, "{label}: {:?}", snapshot.violations());
+            let snapshot =
+                evaluate(32, None, 0, 1, 4).with_host(proc.path(), &FactoryConfig::default());
+            assert_eq!(
+                snapshot.violations().is_empty(),
+                allowed,
+                "{label}: {:?}",
+                snapshot.violations()
+            );
             if allowed {
-                let crowded = BuildGuardSnapshot { live_cargo_workers: 4, ..snapshot };
-                assert!(crowded.admission_violations(true).iter().any(|v| v.contains("max_concurrent_builders")));
+                let crowded = BuildGuardSnapshot {
+                    live_cargo_workers: 4,
+                    ..snapshot
+                };
+                assert!(
+                    crowded
+                        .admission_violations(true)
+                        .iter()
+                        .any(|v| v.contains("max_concurrent_builders"))
+                );
             } else if matches!(label, "memory stalls" | "low available memory") {
-                assert!(!snapshot.admission_violations(true).is_empty(), "continuation must recheck memory: {label}");
+                assert!(
+                    !snapshot.admission_violations(true).is_empty(),
+                    "continuation must recheck memory: {label}"
+                );
             }
         }
     }
 
     #[test]
     fn cas_2d63_load_fallback_honors_registered_configuration() {
-        let proc = fake_proc(48.0, "", "", 8*1024*1024);
+        let proc = fake_proc(48.0, "", "", 8 * 1024 * 1024);
         let mut config = crate::config::Config::default();
-        config.set("factory.build_guard.max_load_ratio", "2").unwrap();
+        config
+            .set("factory.build_guard.max_load_ratio", "2")
+            .unwrap();
         let relaxed = evaluate(32, None, 0, 1, 4).with_host(proc.path(), &config.factory());
-        assert!(relaxed.violations().is_empty(), "{:?}", relaxed.violations());
-        config.set("factory.build_guard.max_load_ratio", "1").unwrap();
+        assert!(
+            relaxed.violations().is_empty(),
+            "{:?}",
+            relaxed.violations()
+        );
+        config
+            .set("factory.build_guard.max_load_ratio", "1")
+            .unwrap();
         let normal = evaluate(32, None, 0, 1, 4).with_host(proc.path(), &config.factory());
         assert!(!normal.violations().is_empty());
+        let pressed = fake_proc(64.0, "some avg10=95", "some avg10=12", 1024 * 1024);
+        for (key, value) in [
+            ("factory.build_guard.max_cpu_pressure_percent", "100"),
+            ("factory.build_guard.max_memory_pressure_percent", "20"),
+            ("factory.build_guard.min_available_memory_gib", "0"),
+        ] {
+            config.set(key, value).unwrap();
+        }
+        assert!(
+            evaluate(32, None, 0, 1, 4)
+                .with_host(pressed.path(), &config.factory())
+                .violations()
+                .is_empty()
+        );
+        let invalid: crate::config::Config = toml::from_str("[factory.build_guard]\nmax_load_ratio = nan\nmax_cpu_pressure_percent = inf\nmax_memory_pressure_percent = nan\nmin_available_memory_gib = 70000\n").unwrap();
+        assert!(
+            !evaluate(32, None, 0, 1, 4)
+                .with_host(proc.path(), &invalid.factory())
+                .violations()
+                .is_empty(),
+            "hand-edited NaN cannot disable load fallback"
+        );
+        assert_eq!(
+            evaluate(32, None, 0, 1, 4)
+                .with_host(pressed.path(), &invalid.factory())
+                .violations()
+                .len(),
+            3,
+            "invalid hand-edited thresholds use safe defaults"
+        );
     }
 
     #[test]

@@ -200,6 +200,10 @@ impl Config {
                 "factory.max_concurrent_builders".to_string(),
                 factory.max_concurrent_builders.to_string(),
             ),
+            ("factory.build_guard.max_load_ratio".to_string(), format!("{:?}", factory.build_guard.max_load_ratio)),
+            ("factory.build_guard.max_cpu_pressure_percent".to_string(), format!("{:?}", factory.build_guard.max_cpu_pressure_percent)),
+            ("factory.build_guard.max_memory_pressure_percent".to_string(), format!("{:?}", factory.build_guard.max_memory_pressure_percent)),
+            ("factory.build_guard.min_available_memory_gib".to_string(), factory.build_guard.min_available_memory_gib.to_string()),
             (
                 "factory.worker_memory_high_gib".to_string(),
                 factory.worker_memory_high_gib.to_string(),

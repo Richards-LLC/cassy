@@ -90,6 +90,13 @@ impl AttentionInputs {
                 decisions.insert(row.id, MessageAttention::Satisfied);
                 continue;
             }
+            // cas-0cdaa: explicit work after the handoff retires the alarm
+            // even when a Codex transcript cannot be bound. Keep this separate
+            // from per-message read/ack evidence; transport alone is insufficient.
+            if queue.recipient_action_satisfies_alarm(row.id).unwrap_or(false) {
+                decisions.insert(row.id, MessageAttention::Satisfied);
+                continue;
+            }
             let recipient = agents
                 .iter()
                 .filter(|agent| {

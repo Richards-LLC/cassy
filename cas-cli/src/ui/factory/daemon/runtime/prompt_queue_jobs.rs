@@ -871,6 +871,8 @@ pub(crate) enum Admission {
 
 /// The prompt queue's jobs and the control-side state that orders them.
 pub(crate) struct QueueJobs {
+    pub(crate) spawn_ingress: super::queue_control_jobs::SpawnIngress,
+    pub(crate) prompt_preparation: super::queue_control_jobs::PromptPreparation,
     exec: Exec,
     next_generation: u64,
     select_in_flight: bool,
@@ -898,8 +900,6 @@ pub(crate) struct QueueJobs {
     mirror_state: Option<Box<super::MirrorScanState>>,
     config: ConfigCache,
     store: Option<Arc<dyn cas_store::PromptQueueStore>>,
-    /// Wake-gate "tool call in flight" probes, per pane.
-    pub(crate) tool_call_probes: TranscriptProbeCache<bool>,
     /// Rows with a settling stamp not yet landed, by row: the count of such
     /// stamps outstanding, and a hold deadline once one was deferred.
     settling_rows: HashMap<i64, (usize, Option<Instant>)>,
@@ -968,6 +968,8 @@ impl QueueJobs {
 
     fn with_exec(exec: Exec) -> Self {
         Self {
+            spawn_ingress: Default::default(),
+            prompt_preparation: Default::default(),
             exec,
             next_generation: 0,
             select_in_flight: false,
@@ -984,7 +986,6 @@ impl QueueJobs {
             mirror_state: Some(Box::default()),
             config: ConfigCache::default(),
             store: None,
-            tool_call_probes: TranscriptProbeCache::default(),
             prunes_done: 0,
             settling_rows: HashMap::new(),
             last_stamp_progress: Instant::now(),
@@ -1007,6 +1008,11 @@ impl QueueJobs {
     /// A finished job is waiting to be applied.
     pub(crate) fn has_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
+            || self.selection.is_some()
+            || self
+                .external
+                .iter()
+                .any(|result| result.kind == super::queue_control_jobs::WAKE_GATE_READ)
     }
 
     pub(crate) fn config(&mut self, cas_dir: &Path) -> Arc<crate::config::Config> {
@@ -1743,6 +1749,9 @@ impl QueueJobs {
     /// (stamps) to finish. Call before the StoreWorker drains (jobs.rs).
     pub(crate) fn drain_for_shutdown(&mut self, cas_dir: &Path, timeout: Duration) -> bool {
         self.settle_injects(cas_dir);
+        let mut ingress = std::mem::take(&mut self.spawn_ingress);
+        ingress.cancel(self, "Factory shutdown", true);
+        self.spawn_ingress = ingress;
         match std::mem::replace(&mut self.exec, Exec::Inline(VecDeque::new())) {
             Exec::Lanes(runtime) => match Arc::try_unwrap(runtime) {
                 Ok(runtime) => runtime.drain(timeout),
@@ -2389,4 +2398,12 @@ fn log_prune(report: &PruneReport) {
 
 #[cfg(test)]
 #[path = "prompt_queue_jobs_tests.rs"]
-mod tests;
+pub(super) mod tests;
+
+pub(crate) fn job_thread_spawn_queue(
+    cas_dir: &Path,
+) -> anyhow::Result<Arc<dyn cas_store::SpawnQueueStore>> {
+    job_thread_store("spawn", cas_dir, |root| {
+        Ok(crate::store::open_spawn_queue_store(root)?)
+    })
+}

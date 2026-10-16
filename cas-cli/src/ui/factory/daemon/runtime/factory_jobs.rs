@@ -175,3 +175,11 @@ pub(crate) enum FactoryJobOutput {
     ReminderScan,
     CiStatus(GitEvidenceMap),
 }
+
+/// Only the director's own result kinds; other owners drain theirs separately.
+pub(crate) fn is_factory_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        DIRECTOR_SNAPSHOT | REVALIDATE_FRESH | WORKER_HEALTH_PROBE | REMINDER_SCAN | CI_STATUS
+    )
+}

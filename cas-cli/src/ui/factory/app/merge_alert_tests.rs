@@ -231,6 +231,54 @@ fn cas_9efb_red_ci_relays_one_decision() {
 }
 
 #[test]
+fn cas_9efb_missing_ci_has_one_bounded_unknown_decision() {
+    let mut f = Fixture::new();
+    let now = Utc::now();
+    std::fs::write(f.app.cas_dir.join("ci.json"), "{\"check_runs\":[]}").unwrap();
+    f.app.merge_alert_retries.now = Some(now);
+    assert!(f.relay().is_empty());
+    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(9));
+    assert!(f.relay().is_empty());
+    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
+    let prompts = f.relay();
+    assert_eq!(prompts.len(), 1, "missing CI must not silence the request forever");
+    assert!(prompts[0].text.contains("CI unknown"), "{}", prompts[0].text);
+    assert!(f.relay().is_empty());
+    f.ci(Some("success"));
+    assert_eq!(f.relay().len(), 1, "later settled CI is a new decision");
+}
+
+#[test]
+fn cas_9efb_missing_ci_retries_without_a_new_worker_idle_event() {
+    let mut f = Fixture::new();
+    let now = Utc::now();
+    f.ci(None);
+    f.app.merge_alert_retries.now = Some(now);
+    assert!(f.relay().is_empty());
+    assert!(f.app.merge_alert_retry_events_at(now + chrono::Duration::seconds(59)).is_empty());
+    let retries = f.app.merge_alert_retry_events_at(now + chrono::Duration::minutes(1));
+    assert_eq!(retries.len(), 1, "the consumed WorkerIdle event must be retried each minute");
+    assert!(f.app.merge_alert_retry_events_at(now + chrono::Duration::minutes(1)).is_empty());
+    f.ci(Some("success"));
+    let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
+    assert_eq!(prompts.len(), 1);
+}
+
+#[test]
+fn cas_9efb_docs_only_and_cancelled_ci_have_terminal_decisions() {
+    let mut f = Fixture::new();
+    std::fs::write(f.app.cas_dir.join("ci.json"), serde_json::json!({"check_runs": [{
+        "name": "Docs Lint", "status": "completed", "conclusion": "success",
+    }]}).to_string()).unwrap();
+    assert_eq!(f.relay().len(), 1, "Docs Lint is sufficient for a docs-only delivery");
+    f.ci(Some("cancelled"));
+    let cancelled = f.relay();
+    assert_eq!(cancelled.len(), 1);
+    assert!(cancelled[0].text.contains("CI failed"));
+    assert!(f.relay().is_empty());
+}
+
+#[test]
 fn cas_9efb_unknown_or_partly_pending_ci_defers_without_consuming_decision() {
     let mut f = Fixture::new();
     let ci_file = f.app.cas_dir.join("ci.json");

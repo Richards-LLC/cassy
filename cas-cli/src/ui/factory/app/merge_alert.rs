@@ -4,6 +4,25 @@ use crate::ui::factory::director::{
     MergeAlertEvidence, MergeAlertFreshness, check_merge_alert_freshness,
 };
 use std::path::Path;
+use chrono::{DateTime, Utc};
+
+#[derive(Default)]
+pub(super) struct Retries {
+    #[cfg(test)]
+    pub now: Option<DateTime<Utc>>,
+}
+
+impl Retries {
+    pub fn due(&mut self, _now: DateTime<Utc>, _data: &DirectorData) -> Vec<DirectorEvent> {
+        Vec::new()
+    }
+}
+
+impl super::FactoryApp {
+    pub(crate) fn merge_alert_retry_events_at(&mut self, now: DateTime<Utc>) -> Vec<DirectorEvent> {
+        self.merge_alert_retries.due(now, &self.unfiltered_director_data)
+    }
+}
 
 pub(super) struct Ready {
     pub evidence: MergeAlertEvidence,

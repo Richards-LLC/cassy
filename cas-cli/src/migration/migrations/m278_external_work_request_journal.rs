@@ -33,12 +33,16 @@ mod tests {
             let applied: i64 = conn
                 .query_row("SELECT COUNT(*) FROM cas_migrations", [], |row| row.get(0))
                 .unwrap();
-            let latest: i64 = conn
-                .query_row("SELECT MAX(id) FROM cas_migrations", [], |row| row.get(0))
+            let recorded: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM cas_migrations WHERE id=?1)",
+                    [MIGRATION.id as i64],
+                    |row| row.get(0),
+                )
                 .unwrap();
 
             assert_eq!(applied, crate::migration::MIGRATIONS.len() as i64);
-            assert_eq!(latest, MIGRATION.id as i64);
+            assert!(recorded, "request-journal migration must be recorded");
             assert!(crate::migration::migration_is_detected(&conn, &MIGRATION));
         });
     }

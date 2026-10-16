@@ -1856,10 +1856,14 @@ fn cas_fd42_repair_preserves_existing_endpoint_routes_and_retry_metadata() {
         assert_eq!(after.last_outcome, before.last_outcome);
         assert_eq!(after.last_reason, before.last_reason);
         assert_eq!(after.failed_client_version, before.failed_client_version);
-        assert!(
+        assert_eq!(
             queue
-                .dependency_endpoint_queued("child", "parent", "fd42-team")
+                .dependency_endpoint_state("child", "parent", "fd42-team", 5)
                 .unwrap(),
+            crate::cloud::DependencyEndpointState::Parked {
+                endpoint: "child".into(),
+                reason: "scope_mismatch".into(),
+            },
             "failed endpoint still withholds the edge"
         );
     }

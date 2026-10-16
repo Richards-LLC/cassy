@@ -4045,12 +4045,17 @@ async fn cas_fd42_failed_task_push_withholds_dependent_edge() {
         .into_iter()
         .find(|row| row.entity_type == crate::cloud::EntityType::TaskDependency)
         .unwrap();
-    assert_eq!(edge.retry_count, 0);
-    assert!(
-        edge.last_error
-            .unwrap()
-            .contains("waiting for endpoint task")
+    // cas-9b5d: a terminally parked endpoint withholds the edge by parking
+    // it with a named reason, not by leaving it pending forever where it
+    // could fill a push batch. Retrying scope_mismatch releases both.
+    assert_eq!(edge.retry_count, 5);
+    assert_eq!(
+        edge.last_reason.as_deref(),
+        Some("dependency_endpoint_unavailable")
     );
+    let error = edge.last_error.unwrap();
+    assert!(error.contains("fd42-child"), "{error}");
+    assert!(error.contains("scope_mismatch"), "{error}");
 }
 
 #[tokio::test]

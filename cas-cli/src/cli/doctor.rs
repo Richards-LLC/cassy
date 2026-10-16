@@ -3026,6 +3026,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
         checks.push(cloud_queue_check(&cas_root));
         checks.push(cloud_team_only_check(&cas_root));
+        checks.extend(cloud_pull_freshness_check(&cas_root));
         checks.extend(sync_warning_checks(&sync_warnings));
         checks.extend(pull_id_collision_check(&cas_root));
         checks.extend(unauthored_pull_check(&cas_root));
@@ -4505,6 +4506,102 @@ fn cloud_team_only_check(cas_root: &Path) -> Check {
             format!("could not read cloud config: {error}"),
         ),
     }
+}
+
+/// How old the newest pull watermark may get before doctor flags the store
+/// (cas-9b5d). A live `cas serve` pulls every minute, so a day means no
+/// session has synced this project in that time.
+const CLOUD_PULL_STALE_AFTER: chrono::Duration = chrono::Duration::hours(24);
+
+/// Flag a logged-in store whose cloud pull has gone stale (cas-9b5d).
+///
+/// Cloud sync runs only inside a live `cas serve`, which exists only while
+/// an agent session is open in the project. A project nobody opens stops
+/// syncing silently: prowl's petra-stella-cloud last pulled when its last
+/// session ended, 13 days earlier. Freshness takes the newer of the personal
+/// watermark and the active team's scoped one, so a team-linked store that
+/// pulled in team scope is not reported stale.
+fn cloud_pull_freshness_check(cas_root: &Path) -> Option<Check> {
+    cloud_pull_freshness_check_at(cas_root, chrono::Utc::now(), cloud_serve_is_live(cas_root))
+}
+
+/// Whether a `cas serve` daemon is accepting connections for this store.
+fn cloud_serve_is_live(cas_root: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(crate::mcp::socket::socket_path(cas_root)).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cas_root;
+        false
+    }
+}
+
+fn cloud_pull_freshness_check_at(
+    cas_root: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+    serve_live: bool,
+) -> Option<Check> {
+    const NAME: &str = "cloud pull freshness";
+    // The daemon also syncs with the machine-wide login; inherit it in memory
+    // only, since doctor must not write the project's cloud.json.
+    let mut config = crate::cloud::CloudConfig::load_from_cas_dir(cas_root).ok()?;
+    if !config.is_logged_in()
+        && let Ok(user) = crate::cloud::CloudConfig::load_user()
+    {
+        config.inherit_credentials_from(&user);
+    }
+    if !config.is_logged_in() || crate::cloud::presence::opted_out(cas_root) {
+        return None;
+    }
+    let queue = crate::cloud::SyncQueue::open_read_only(cas_root).ok()?;
+    let mut watermarks = vec![queue.get_metadata("last_pull_at").ok().flatten()];
+    if let Some(team_id) = config.active_team_id()
+        && let Ok(project_id) = crate::cloud::resolve_canonical_id_for_sync(cas_root)
+    {
+        watermarks.push(
+            queue
+                .get_metadata(&format!("last_team_pull_at_{team_id}_{project_id}"))
+                .ok()
+                .flatten(),
+        );
+    }
+    let newest = watermarks
+        .into_iter()
+        .flatten()
+        .filter_map(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
+        .map(|at| at.with_timezone(&chrono::Utc))
+        .max();
+    let cause = if serve_live {
+        "a `cas serve` is live for this store, so its sync is failing: inspect `cas cloud status` and `cas cloud queue --verbose`"
+    } else {
+        "no live `cas serve` for this store; cloud sync runs only while an agent session is open in the project. Run `cas cloud sync` here, or open a session, to catch up"
+    };
+    let Some(newest) = newest else {
+        return Some(Check::new(
+            NAME,
+            CheckStatus::Warning,
+            format!("logged in but this store has never pulled; {cause}"),
+        ));
+    };
+    let age = now.signed_duration_since(newest);
+    if age <= CLOUD_PULL_STALE_AFTER {
+        return Some(Check::new(
+            NAME,
+            CheckStatus::Ok,
+            format!("last pull {}", newest.to_rfc3339()),
+        ));
+    }
+    Some(Check::new(
+        NAME,
+        CheckStatus::Warning,
+        format!(
+            "last pull {} ({} day(s) ago); {cause}",
+            newest.to_rfc3339(),
+            age.num_days()
+        ),
+    ))
 }
 
 /// Report cloud watermarks and registration markers that belong to another
@@ -6013,6 +6110,49 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// cas-9b5d: prowl's petra-stella-cloud had no open session for 13 days,
+    /// so nothing pulled. Doctor names the stale pull and its cause, and a
+    /// team-scoped pull counts as fresh (the cas-7e38 watermark trap).
+    #[test]
+    fn cas_9b5d_pull_freshness_flags_a_store_without_a_live_serve() {
+        use crate::cloud::SyncQueue;
+        let temp = TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("config.toml"),
+            "[project]\ncanonical_id = \"p\"\n",
+        )
+        .unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-16T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        fs::write(
+            temp.path().join("cloud.json"),
+            r#"{"endpoint":"https://cloud.invalid","token":"t","team_id":"team-1","team_slug":"team"}"#,
+        )
+        .unwrap();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        queue
+            .set_metadata("last_pull_at", "2026-10-02T14:27:08.386Z")
+            .unwrap();
+
+        let idle = cloud_pull_freshness_check_at(temp.path(), now, false).unwrap();
+        assert!(matches!(idle.status, CheckStatus::Warning), "{}", idle.message);
+        assert!(idle.message.contains("13 day(s) ago"), "{}", idle.message);
+        assert!(idle.message.contains("no live `cas serve`"), "{}", idle.message);
+        assert!(idle.message.contains("cas cloud sync"), "{}", idle.message);
+
+        let live = cloud_pull_freshness_check_at(temp.path(), now, true).unwrap();
+        assert!(matches!(live.status, CheckStatus::Warning), "{}", live.message);
+        assert!(live.message.contains("sync is failing"), "{}", live.message);
+
+        queue
+            .set_metadata("last_team_pull_at_team-1_p", "2026-10-16T11:30:00Z")
+            .unwrap();
+        let fresh = cloud_pull_freshness_check_at(temp.path(), now, false).unwrap();
+        assert!(matches!(fresh.status, CheckStatus::Ok), "{}", fresh.message);
+    }
 
     /// cas-25c1: a checkout with `cloud.team_only` off whose personal rows
     /// the cloud rejected as `team_owned_project` is the prowl mismatch. Doctor

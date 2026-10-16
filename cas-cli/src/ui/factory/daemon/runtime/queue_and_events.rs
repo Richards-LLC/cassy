@@ -10184,6 +10184,17 @@ impl FactoryDaemon {
                             "Recycle request {request_id} for {name} has no valid worker recipe"
                         )
                     })?;
+                    // cas-033a: validate the replacement before the stop, so a
+                    // refused recipe leaves the running worker in place.
+                    cas_factory::validate_explicit(
+                        &spec,
+                        &cas_factory::CapabilitySnapshot::default(),
+                    )
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "recipe refused before stopping {name}; the worker keeps running: {error}"
+                        )
+                    })?;
                     self.app.shutdown_worker_for_recycle(&name).await?;
                     // cas-981e: the relaunch queues the worker's intro and
                     // tracks its process group; give it the same bounded

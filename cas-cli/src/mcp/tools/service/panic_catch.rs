@@ -159,6 +159,28 @@ mod tests {
     use rmcp::model::Content;
 
     #[tokio::test]
+    async fn cas_6eec_mcp_dispatch_records_its_authenticated_workers_activity() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        let worker = cas_types::Agent::new_with_role("worker-session".into(), "worker".into(), cas_types::AgentRole::Worker);
+        core.open_agent_store().unwrap().register(&worker).unwrap();
+        core.bind_agent_identity(worker.id.clone(), crate::mcp::server::AgentIdentitySource::ServerInternal).unwrap();
+        let events = crate::store::open_event_store(&root).unwrap();
+        let worker_id = worker.id.clone();
+        dispatch_with_guidance("task", core, async move {
+            // A call in flight must already be visible, even before its result.
+            let activity = events.latest_worker_activity(&worker_id, "worker").unwrap()
+                .expect("authenticated MCP calls are worker activity");
+            assert_eq!(activity.session_id.as_deref(), Some(worker_id.as_str()));
+            assert_eq!(activity.event_type, cas_types::EventType::WorkerActivity);
+            assert!((chrono::Utc::now() - activity.created_at).num_seconds() < 5);
+            Ok(CallToolResult::success(vec![]))
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn recovery_guidance_dispatch_retains_panic_isolation() {
         let _env = crate::test_env_guard::TestEnvGuard::new();
         let dir = tempfile::TempDir::new().unwrap();

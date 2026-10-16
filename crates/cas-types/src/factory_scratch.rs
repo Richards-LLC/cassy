@@ -24,6 +24,12 @@ use std::path::{Path, PathBuf};
 pub const TARGETS_DIR: &str = "targets";
 /// Directory under a project's scratch namespace holding target baselines.
 pub const BUILD_CACHE_DIR: &str = "build-cache";
+/// Directory under a project's scratch namespace holding release scratch:
+/// its `base` is the release scratch base, and release-gate archives and every
+/// assembly clone with its target are created beside that base (cas-baa8).
+/// It shares the build-cache's filesystem, so clone seeding can hard-link the
+/// baseline.
+pub const RELEASE_GATE_DIR: &str = "release-gate";
 
 /// `<label>-<sha256>` namespace for one Cassy store. The label is the store's
 /// project directory name (at most 48 characters, restricted to
@@ -64,6 +70,15 @@ pub fn build_cache_dir(scratch_root: Option<&Path>, cas_dir: &Path) -> PathBuf {
         Some(root) => project_scratch_dir(root, cas_dir).join(BUILD_CACHE_DIR),
         None => cas_dir.join(BUILD_CACHE_DIR),
     }
+}
+
+/// The release scratch base under a configured scratch root (cas-baa8).
+/// Unset has no answer here: the release resolver keeps deriving a base on
+/// the checkout's filesystem.
+pub fn release_gate_base(scratch_root: &Path, cas_dir: &Path) -> PathBuf {
+    project_scratch_dir(scratch_root, cas_dir)
+        .join(RELEASE_GATE_DIR)
+        .join("base")
 }
 
 /// A managed worker checkout is a direct child of `<cas_dir>/worktrees`.
@@ -137,6 +152,18 @@ mod tests {
         assert_eq!(
             build_cache_dir(Some(root), cas),
             root.join(&key).join("build-cache")
+        );
+    }
+
+    #[test]
+    fn scratch_root_release_gate_base_shares_the_project_namespace() {
+        let root = Path::new("/mnt/rewind/cas");
+        let cas = Path::new("/srv/repo/.cas");
+        let project = root.join(project_key(cas));
+        assert_eq!(release_gate_base(root, cas), project.join("release-gate/base"));
+        assert_eq!(
+            release_gate_base(root, cas).parent().and_then(Path::parent),
+            build_cache_dir(Some(root), cas).parent()
         );
     }
 

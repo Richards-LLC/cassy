@@ -46,6 +46,106 @@ pub(crate) fn build_cache_dir(cas_dir: &Path) -> PathBuf {
     cas_types::factory_scratch::build_cache_dir(configured_scratch_root(cas_dir).as_deref(), cas_dir)
 }
 
+/// The release scratch base under the configured root (cas-baa8): release-gate
+/// archives and assembly clones with their targets. `None` when unset, so the
+/// release resolver keeps its checkout-filesystem base.
+pub(crate) fn release_gate_base(cas_dir: &Path) -> Option<PathBuf> {
+    configured_scratch_root(cas_dir)
+        .map(|root| cas_types::factory_scratch::release_gate_base(&root, cas_dir))
+}
+
+/// One regenerable cache that `factory.scratch_root` relocated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RelocatedCache {
+    /// `build-cache`, `target <worker>` or `release-gate`.
+    pub label: String,
+    pub path: PathBuf,
+    pub bytes: u64,
+}
+
+/// Every relocated cache under this project's scratch directory; empty when
+/// the root is unset (cas-baa8).
+pub(crate) fn relocated_caches(cas_dir: &Path) -> Vec<RelocatedCache> {
+    use cas_types::factory_scratch::{BUILD_CACHE_DIR, RELEASE_GATE_DIR, TARGETS_DIR};
+    let Some(root) = configured_scratch_root(cas_dir) else {
+        return Vec::new();
+    };
+    let project = cas_types::factory_scratch::project_scratch_dir(&root, cas_dir);
+    let cache = |label: String, path: PathBuf| RelocatedCache {
+        bytes: tree_bytes(&path),
+        label,
+        path,
+    };
+    let mut caches = Vec::new();
+    let build_cache = project.join(BUILD_CACHE_DIR);
+    if build_cache.is_dir() {
+        caches.push(cache(BUILD_CACHE_DIR.to_string(), build_cache));
+    }
+    let mut targets: Vec<PathBuf> = std::fs::read_dir(project.join(TARGETS_DIR))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    targets.sort();
+    for target in targets {
+        let name = target.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        caches.push(cache(format!("target {name}"), target));
+    }
+    let release_gate = project.join(RELEASE_GATE_DIR);
+    if release_gate.is_dir() {
+        caches.push(cache(RELEASE_GATE_DIR.to_string(), release_gate));
+    }
+    caches
+}
+
+/// Apparent bytes of every regular file under `path`; symlinks are not
+/// followed, so a link out of the scratch root is never counted.
+fn tree_bytes(path: &Path) -> u64 {
+    walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|meta| meta.len())
+        .sum()
+}
+
+/// The `gc_report` section naming the relocated caches. Read-only.
+pub(crate) fn render_relocated(cas_dir: &Path) -> String {
+    let caches = relocated_caches(cas_dir);
+    let Some(root) = configured_scratch_root(cas_dir) else {
+        return String::new();
+    };
+    let total: u64 = caches.iter().map(|cache| cache.bytes).sum();
+    let mut out = format!(
+        "\nScratch root caches (factory.scratch_root {}): {} total\n",
+        root.display(),
+        bytes_label(total)
+    );
+    if caches.is_empty() {
+        out.push_str("  none yet\n");
+    }
+    for cache in &caches {
+        out.push_str(&format!(
+            "  {}: {} ({})\n",
+            cache.label,
+            cache.path.display(),
+            bytes_label(cache.bytes)
+        ));
+    }
+    out.push_str("  gc_cleanup reclaims in-tree worker targets only; retirement and park-time pruning cover relocated ones.\n");
+    out
+}
+
+fn bytes_label(bytes: u64) -> String {
+    format!("{bytes} bytes")
+}
+
 /// True when `target` is not the checkout's in-tree `target/`.
 pub(crate) fn is_relocated(worktree: &Path, target: &Path) -> bool {
     target != worktree.join("target")
@@ -155,6 +255,52 @@ mod tests {
         // The main checkout and other unmanaged checkouts keep target/.
         let main = dir.path().to_path_buf();
         assert_eq!(worker_target_dir(&main), main.join("target"));
+    }
+
+    #[test]
+    fn scratch_root_unset_has_no_release_gate_base_or_relocated_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cas, _) = managed(dir.path(), None);
+        assert_eq!(release_gate_base(&cas), None);
+        assert!(relocated_caches(&cas).is_empty());
+        assert_eq!(render_relocated(&cas), "");
+    }
+
+    #[test]
+    fn scratch_root_gc_report_lists_relocated_caches_with_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let scratch = dir.path().join("rewind");
+        let (cas, _) = managed(
+            dir.path(),
+            Some(&format!("[factory]\nscratch_root = {:?}\n", scratch.display().to_string())),
+        );
+        let project = scratch.join(cas_types::factory_scratch::project_key(&cas));
+        let write = |rel: &str, bytes: usize| {
+            let path = project.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, vec![b'x'; bytes]).unwrap();
+        };
+        write("build-cache/snapshots/a/lib.rlib", 10);
+        write("targets/worker-1/debug/lib.rlib", 20);
+        write("targets/worker-2/debug/lib.rlib", 30);
+        write("release-gate/assembly-clone-x/repo/target/f", 5);
+        assert_eq!(release_gate_base(&cas), Some(project.join("release-gate/base")));
+        let caches = relocated_caches(&cas);
+        let summary: Vec<(&str, u64)> =
+            caches.iter().map(|cache| (cache.label.as_str(), cache.bytes)).collect();
+        assert_eq!(
+            summary,
+            [
+                ("build-cache", 10),
+                ("target worker-1", 20),
+                ("target worker-2", 30),
+                ("release-gate", 5),
+            ]
+        );
+        let report = render_relocated(&cas);
+        assert!(report.contains("Scratch root caches"), "{report}");
+        assert!(report.contains(&project.join("targets/worker-2").display().to_string()), "{report}");
+        assert!(report.contains("65 bytes"), "{report}");
     }
 
     #[test]

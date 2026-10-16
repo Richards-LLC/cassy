@@ -1,5 +1,19 @@
 use crate::mcp::tools::core::imports::*;
 
+/// The `dep_type` both `dep_add` and `dep_remove` read (cas-96ab): one
+/// parser, so the edge `dep_add` writes is the one a matching `dep_remove`
+/// finds. Case and `_`/`-` are ignored; anything unrecognised means Blocks.
+fn parse_dep_type(raw: &str) -> DependencyType {
+    match raw.to_lowercase().replace('_', "-").as_str() {
+        "related" => DependencyType::Related,
+        "parent" | "parentchild" | "parent-child" => DependencyType::ParentChild,
+        "discovered" | "discoveredfrom" | "discovered-from" => DependencyType::DiscoveredFrom,
+        "extracted" | "extractedfrom" | "extracted-from" => DependencyType::ExtractedFrom,
+        "requires-start" | "requiresstart" => DependencyType::RequiresStart,
+        _ => DependencyType::Blocks,
+    }
+}
+
 impl CasCore {
     pub async fn cas_task_dep_add(
         &self,
@@ -19,13 +33,7 @@ impl CasCore {
             data: None,
         })?;
 
-        let dep_type = match req.dep_type.to_lowercase().replace('_', "-").as_str() {
-            "related" => DependencyType::Related,
-            "parent" | "parentchild" => DependencyType::ParentChild,
-            "discovered" | "discoveredfrom" => DependencyType::DiscoveredFrom,
-            "requires-start" | "requiresstart" => DependencyType::RequiresStart,
-            _ => DependencyType::Blocks,
-        };
+        let dep_type = parse_dep_type(&req.dep_type);
 
         let dep = Dependency {
             from_id: req.from_id.clone(),
@@ -141,14 +149,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
-        let dep_type = match req.dep_type.to_lowercase().replace('_', "-").as_str() {
-            "related" => DependencyType::Related,
-            "parent" | "parentchild" | "parent-child" => DependencyType::ParentChild,
-            "discovered" | "discoveredfrom" | "discovered-from" => DependencyType::DiscoveredFrom,
-            "extracted" | "extractedfrom" | "extracted-from" => DependencyType::ExtractedFrom,
-            "requires-start" | "requiresstart" => DependencyType::RequiresStart,
-            _ => DependencyType::Blocks,
-        };
+        let dep_type = parse_dep_type(&req.dep_type);
 
         let found = task_store
             .remove_dependency_of_type(&req.from_id, &req.to_id, dep_type)

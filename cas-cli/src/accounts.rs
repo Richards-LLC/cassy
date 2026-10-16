@@ -1,0 +1,933 @@
+//! One shared base folder per provider for every Claude and Codex account
+//! (cas-e1f4).
+//!
+//! Each named account directory (`~/.claude-<email>`, `~/.codex-<email>`)
+//! keeps only its login and runtime state; the shared configuration surface
+//! (commands, skills, agents, settings, project memory, ...) is a symlink into
+//! one base folder, `~/.cas/claude-base` or `~/.cas/codex-base`. The default
+//! directories (`~/.claude`, `~/.claude-alt`, `~/.codex`) stop being accounts:
+//! a login that duplicates a named account is retired into the backup, a
+//! unique one is renamed to its named directory.
+//!
+//! The work is a [`Plan`] (read-only, what `cas accounts link --dry-run`
+//! prints) and [`apply`]. Apply never discards: every item it replaces is
+//! moved into `~/.cas/accounts-backup/<ts>/` first, files that differ from the
+//! base are kept side by side as `<name>.from-<account>`, and a `restore.sh`
+//! undoes the move. A second plan after an apply is empty.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use serde::Serialize;
+
+/// The providers whose account directories share a base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Claude,
+    Codex,
+}
+
+impl Provider {
+    pub const ALL: [Provider; 2] = [Provider::Claude, Provider::Codex];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    /// `~/.cas/claude-base` or `~/.cas/codex-base`.
+    pub fn base_dir(self, home: &Path) -> PathBuf {
+        home.join(".cas").join(format!("{}-base", self.name()))
+    }
+
+    /// Named account directories are `<prefix><name>`.
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Self::Claude => ".claude-",
+            Self::Codex => ".codex-",
+        }
+    }
+
+    /// The default directories that stop being accounts.
+    pub fn retiring(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &[".claude", ".claude-alt"],
+            Self::Codex => &[".codex"],
+        }
+    }
+
+    /// Items every account shares through the base.
+    pub fn shared(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &CLAUDE_SHARED,
+            Self::Codex => &CODEX_SHARED,
+        }
+    }
+
+    /// The login item: an account directory without it has no login.
+    pub fn credentials(self) -> &'static str {
+        match self {
+            Self::Claude => ".credentials.json",
+            Self::Codex => "auth.json",
+        }
+    }
+
+    /// The login email of the account at `dir`, if it can be read.
+    ///
+    /// Claude: `oauthAccount.emailAddress` in `<dir>/.claude.json`; for the
+    /// default `~/.claude`, Claude Code keeps that file at `~/.claude.json`,
+    /// which wins. Codex: the `email` claim of the `auth.json` id token.
+    pub fn login_email(self, home: &Path, dir: &Path) -> Option<String> {
+        match self {
+            Self::Claude => {
+                let default = dir == home.join(".claude");
+                let candidates = if default {
+                    vec![home.join(".claude.json"), dir.join(".claude.json")]
+                } else {
+                    vec![dir.join(".claude.json")]
+                };
+                candidates.iter().find_map(|path| claude_email(path))
+            }
+            Self::Codex => codex_email(&dir.join("auth.json")),
+        }
+    }
+}
+
+/// Claude: the operator's list (cas-e1f4) plus the surfaces earlier
+/// profiles already shared (hooks, output-styles).
+pub const CLAUDE_SHARED: [&str; 11] = [
+    "agents",
+    "commands",
+    "skills",
+    "plugins",
+    "hooks",
+    "workflows",
+    "output-styles",
+    "settings.json",
+    "settings.local.json",
+    "CLAUDE.md",
+    "projects",
+];
+
+/// Codex: instructions, agents, hooks, config, plugins, skills and memories.
+/// `config.toml` is shared: the CAS MCP server is injected per spawn, so it
+/// carries no per-account key.
+pub const CODEX_SHARED: [&str; 7] = [
+    "AGENTS.md",
+    "agents",
+    "hooks.json",
+    "config.toml",
+    "plugins",
+    "skills",
+    "memories",
+];
+
+fn claude_email(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value["oauthAccount"]["emailAddress"]
+        .as_str()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+fn codex_email(path: &Path) -> Option<String> {
+    use base64::Engine as _;
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let token = value["tokens"]["id_token"].as_str()?;
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    claims["email"]
+        .as_str()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+/// One account directory found under the home directory.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountDir {
+    /// Directory name, e.g. `.claude-pippenz@gmail.com`.
+    pub label: String,
+    pub path: PathBuf,
+    /// A default directory being retired.
+    pub retiring: bool,
+    pub email: Option<String>,
+    pub has_login: bool,
+}
+
+/// What happens to a directory as a whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DirChange {
+    /// A default directory whose login duplicates a named account, or a stray
+    /// named directory: moved whole into the backup.
+    Retire { label: String, reason: String },
+    /// A default directory with a unique login, renamed to its named form.
+    Rename { label: String, to: String },
+}
+
+/// One file copied into the base.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Merge {
+    /// Account directory the file comes from.
+    pub account: String,
+    /// Path relative to that account directory (and to the base).
+    pub rel: String,
+    /// Where it lands relative to the base: `rel`, or a side-by-side name for
+    /// a conflict.
+    pub to: String,
+    pub conflict: bool,
+}
+
+/// One shared item replaced by a link to the base.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Link {
+    /// Account directory label after any rename.
+    pub account: String,
+    pub item: String,
+    /// What is there now, for the dry run: `missing`, `file`, `dir` or
+    /// `link -> <target>`.
+    pub was: String,
+}
+
+/// The read-only plan for one provider.
+#[derive(Debug, Clone, Serialize)]
+pub struct Plan {
+    pub provider: Provider,
+    pub base: PathBuf,
+    pub create_base: bool,
+    pub accounts: Vec<AccountDir>,
+    pub dir_changes: Vec<DirChange>,
+    pub merges: Vec<Merge>,
+    pub links: Vec<Link>,
+    /// Reported only, never acted on (e.g. a directory named for one email
+    /// holding another email's login).
+    pub notes: Vec<String>,
+}
+
+impl Plan {
+    pub fn is_empty(&self) -> bool {
+        !self.create_base
+            && self.dir_changes.is_empty()
+            && self.merges.is_empty()
+            && self.links.is_empty()
+    }
+
+    pub fn conflicts(&self) -> impl Iterator<Item = &Merge> {
+        self.merges.iter().filter(|merge| merge.conflict)
+    }
+}
+
+/// Whether `name` (after the prefix) looks like a login email.
+fn email_shaped(name: &str) -> bool {
+    name.split_once('@')
+        .is_some_and(|(user, domain)| !user.is_empty() && domain.contains('.'))
+}
+
+/// Find the provider's account directories under `home`: the retiring
+/// defaults first, then the named ones in name order. Symlinked directories
+/// and non-account siblings (`.lock`, `.bak`, ...) are skipped.
+pub fn discover(provider: Provider, home: &Path) -> io::Result<Vec<AccountDir>> {
+    let real_dir = |path: &Path| {
+        std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
+    };
+    let account = |label: String, path: PathBuf, retiring: bool| AccountDir {
+        email: provider.login_email(home, &path),
+        has_login: path.join(provider.credentials()).exists(),
+        label,
+        path,
+        retiring,
+    };
+    let mut found = Vec::new();
+    for label in provider.retiring() {
+        let path = home.join(label);
+        if real_dir(&path) {
+            found.push(account((*label).to_string(), path, true));
+        }
+    }
+    let mut named = Vec::new();
+    for entry in std::fs::read_dir(home)? {
+        let entry = entry?;
+        let Some(label) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(name) = label.strip_prefix(provider.prefix()) else {
+            continue;
+        };
+        if provider.retiring().contains(&label.as_str())
+            || !crate::cli::account_picker::is_account_profile_name(name)
+            || !real_dir(&entry.path())
+        {
+            continue;
+        }
+        named.push(label);
+    }
+    named.sort();
+    for label in named {
+        let path = home.join(&label);
+        found.push(account(label, path, false));
+    }
+    Ok(found)
+}
+
+/// Build the plan for `provider` under `home`. Reads only.
+pub fn plan(provider: Provider, home: &Path) -> Result<Plan> {
+    let base = provider.base_dir(home);
+    let accounts = discover(provider, home).context("could not list account directories")?;
+    let named: BTreeSet<String> = accounts
+        .iter()
+        .filter(|account| !account.retiring)
+        .map(|account| account.label.clone())
+        .collect();
+    let named_for = |email: &str| format!("{}{email}", provider.prefix());
+
+    let mut dir_changes = Vec::new();
+    let mut notes = Vec::new();
+    // Final label of every account directory that keeps living.
+    let mut keep: Vec<(String, &AccountDir)> = Vec::new();
+    for account in &accounts {
+        let name = account.label.strip_prefix(provider.prefix()).unwrap_or("");
+        if account.retiring {
+            match account.email.as_deref() {
+                Some(email) if named.contains(&named_for(email)) => {
+                    dir_changes.push(DirChange::Retire {
+                        label: account.label.clone(),
+                        reason: format!("login {email} duplicates {}", named_for(email)),
+                    })
+                }
+                Some(email) => {
+                    let to = named_for(email);
+                    dir_changes.push(DirChange::Rename {
+                        label: account.label.clone(),
+                        to: to.clone(),
+                    });
+                    keep.push((to, account));
+                }
+                None if !account.has_login => dir_changes.push(DirChange::Retire {
+                    label: account.label.clone(),
+                    reason: "no login".into(),
+                }),
+                None => {
+                    notes.push(format!(
+                        "{} has a login whose email cannot be read; left in place and linked",
+                        account.label
+                    ));
+                    keep.push((account.label.clone(), account));
+                }
+            }
+            continue;
+        }
+        if email_shaped(name) && !account.has_login {
+            dir_changes.push(DirChange::Retire {
+                label: account.label.clone(),
+                reason: "no login (stray directory)".into(),
+            });
+            continue;
+        }
+        match account.email.as_deref() {
+            Some(email) if email != name.to_ascii_lowercase() => {
+                if email_shaped(name) && named.contains(&named_for(email)) {
+                    dir_changes.push(DirChange::Retire {
+                        label: account.label.clone(),
+                        reason: format!("login {email} duplicates {}", named_for(email)),
+                    });
+                    continue;
+                }
+                notes.push(format!(
+                    "{} is signed in as {email}; left as is",
+                    account.label
+                ));
+            }
+            _ => {}
+        }
+        keep.push((account.label.clone(), account));
+    }
+
+    // Merge every account's shared items into the base, defaults first.
+    let mut planned: HashMap<String, [u8; 32]> = HashMap::new();
+    let mut seen_sources: BTreeSet<PathBuf> = BTreeSet::new();
+    let base_canonical = base.canonicalize().ok();
+    let mut merges = Vec::new();
+    for account in &accounts {
+        for item in provider.shared() {
+            let source = account.path.join(item);
+            let Ok(canonical) = source.canonicalize() else {
+                continue;
+            };
+            if base_canonical
+                .as_ref()
+                .is_some_and(|base| canonical.starts_with(base))
+                || !seen_sources.insert(canonical.clone())
+            {
+                continue;
+            }
+            for (rel, file) in files_under(&canonical, item)? {
+                let digest = digest(&file)?;
+                let existing = match planned.get(&rel) {
+                    Some(planned) => Some(*planned),
+                    None => {
+                        let on_disk = base.join(&rel);
+                        if on_disk.is_file() {
+                            Some(digest_file(&on_disk)?)
+                        } else {
+                            None
+                        }
+                    }
+                };
+                match existing {
+                    None => {
+                        planned.insert(rel.clone(), digest);
+                        merges.push(Merge {
+                            account: account.label.clone(),
+                            to: rel.clone(),
+                            rel,
+                            conflict: false,
+                        });
+                    }
+                    Some(existing) if existing == digest => {}
+                    Some(_) => {
+                        let to = side_by_side(&rel, &account.label);
+                        if planned.contains_key(&to) || base.join(&to).exists() {
+                            continue;
+                        }
+                        planned.insert(to.clone(), digest);
+                        merges.push(Merge {
+                            account: account.label.clone(),
+                            rel,
+                            to,
+                            conflict: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Link every shared item the base has (or will have) in every kept
+    // account directory.
+    let base_has = |item: &str| {
+        base.join(item).exists()
+            || planned
+                .keys()
+                .any(|rel| rel == item || rel.starts_with(&format!("{item}/")))
+    };
+    let mut links = Vec::new();
+    for (label, account) in &keep {
+        for item in provider.shared() {
+            if !base_has(item) {
+                continue;
+            }
+            let path = account.path.join(item);
+            let target = base.join(item);
+            let was = match std::fs::symlink_metadata(&path) {
+                Err(_) => "missing".to_string(),
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    let pointed = std::fs::read_link(&path).unwrap_or_default();
+                    if pointed == target {
+                        continue;
+                    }
+                    format!("link -> {}", pointed.display())
+                }
+                Ok(meta) if meta.is_dir() => "dir".to_string(),
+                Ok(_) => "file".to_string(),
+            };
+            links.push(Link {
+                account: label.clone(),
+                item: (*item).to_string(),
+                was,
+            });
+        }
+    }
+
+    Ok(Plan {
+        provider,
+        create_base: !base.is_dir(),
+        base,
+        accounts,
+        dir_changes,
+        merges,
+        links,
+        notes,
+    })
+}
+
+/// `commands/finish.md` from `.claude-daniel@x` → `commands/finish.md.from-claude-daniel@x`.
+fn side_by_side(rel: &str, account: &str) -> String {
+    format!("{rel}.from-{}", account.trim_start_matches('.'))
+}
+
+/// Every regular file under `root` (or `root` itself), as paths relative to
+/// the account directory: `<item>/<...>`. Symlinks inside an item are
+/// followed only when they point at a regular file.
+fn files_under(root: &Path, item: &str) -> Result<Vec<(String, PathBuf)>> {
+    if root.is_file() {
+        return Ok(vec![(item.to_string(), root.to_path_buf())]);
+    }
+    let mut files = Vec::new();
+    for entry in walkdir::WalkDir::new(root).follow_links(false).sort_by_file_name() {
+        let entry = entry.with_context(|| format!("could not read {}", root.display()))?;
+        let path = entry.path();
+        let is_file = entry.file_type().is_file()
+            || (entry.file_type().is_symlink() && path.is_file());
+        if !is_file {
+            continue;
+        }
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        files.push((
+            format!("{item}/{}", relative.to_string_lossy()),
+            path.to_path_buf(),
+        ));
+    }
+    Ok(files)
+}
+
+fn digest(path: &Path) -> Result<[u8; 32]> {
+    digest_file(path)
+}
+
+fn digest_file(path: &Path) -> Result<[u8; 32]> {
+    use sha2::{Digest as _, Sha256};
+    use std::io::Read as _;
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("could not read {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+/// What an apply did, and how to undo it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Applied {
+    pub backup: PathBuf,
+    pub restore: PathBuf,
+    pub merged: usize,
+    pub conflicts: usize,
+    pub linked: usize,
+    pub dir_changes: usize,
+}
+
+/// Apply `plan` under `home`, backing everything up under
+/// `~/.cas/accounts-backup/<stamp>/` first.
+///
+/// Order: (1) every shared item about to be replaced, and every directory
+/// being retired, is moved into the backup; (2) the files of the plan are
+/// copied into the base from their backed-up location; (3) renames run;
+/// (4) links are created. `restore.sh` reverses (1), (3) and (4); the base is
+/// left in place.
+pub fn apply(plan: &Plan, home: &Path, stamp: &str) -> Result<Applied> {
+    let backup = home
+        .join(".cas")
+        .join("accounts-backup")
+        .join(format!("{stamp}-{}", plan.provider.name()));
+    std::fs::create_dir_all(&backup)
+        .with_context(|| format!("could not create {}", backup.display()))?;
+    restrict(&backup)?;
+    let mut restore = vec![
+        "#!/usr/bin/env bash".to_string(),
+        format!(
+            "# Undo `cas accounts link` for {} (backup {}).",
+            plan.provider.name(),
+            backup.display()
+        ),
+        "# Run with no Claude or Codex session open on these accounts.".to_string(),
+        "set -euo pipefail".to_string(),
+    ];
+    let mut undo: Vec<String> = Vec::new();
+    // Original path of a moved file or directory → its backup location.
+    let mut moved: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+
+    // (1) Move directories being retired, and items being replaced.
+    let account_path = |label: &str| home.join(label);
+    for change in &plan.dir_changes {
+        if let DirChange::Retire { label, .. } = change {
+            let from = account_path(label);
+            let to = backup.join("dirs").join(label);
+            move_path(&from, &to)?;
+            undo.push(format!("mv {} {}", quote(&to), quote(&from)));
+            moved.insert(from, to);
+        }
+    }
+    let renamed: HashMap<&str, &str> = plan
+        .dir_changes
+        .iter()
+        .filter_map(|change| match change {
+            DirChange::Rename { label, to } => Some((to.as_str(), label.as_str())),
+            DirChange::Retire { .. } => None,
+        })
+        .collect();
+    for link in &plan.links {
+        let original_label = renamed.get(link.account.as_str()).copied().unwrap_or(&link.account);
+        let from = account_path(original_label).join(&link.item);
+        if std::fs::symlink_metadata(&from).is_err() {
+            continue;
+        }
+        let to = backup.join("items").join(original_label).join(&link.item);
+        move_path(&from, &to)?;
+        // Undo runs after any rename is reversed, so it names the original
+        // directory.
+        undo.push(format!(
+            "rm -f {link_path} && mv {} {link_path}",
+            quote(&to),
+            link_path = quote(&from)
+        ));
+        moved.insert(from, to);
+    }
+
+    // (2) Fill the base.
+    std::fs::create_dir_all(&plan.base)
+        .with_context(|| format!("could not create {}", plan.base.display()))?;
+    let mut merged = 0;
+    let mut conflicts = 0;
+    for merge in &plan.merges {
+        let original = account_path(&merge.account).join(&merge.rel);
+        let source = locate(&original, &moved, home)
+            .with_context(|| format!("could not find {} to merge", original.display()))?;
+        let target = plan.base.join(&merge.to);
+        if target.exists() {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&source, &target).with_context(|| {
+            format!("could not copy {} into the base", source.display())
+        })?;
+        merged += 1;
+        conflicts += usize::from(merge.conflict);
+    }
+    for item in plan.provider.shared() {
+        // An empty shared directory still becomes a linkable base entry.
+        let original = plan
+            .accounts
+            .iter()
+            .map(|account| account.path.join(item))
+            .find_map(|path| locate(&path, &moved, home));
+        if let Some(source) = original
+            && source.is_dir()
+            && !plan.base.join(item).exists()
+        {
+            std::fs::create_dir_all(plan.base.join(item))?;
+        }
+    }
+
+    // (3) Renames.
+    for change in &plan.dir_changes {
+        if let DirChange::Rename { label, to } = change {
+            let from = account_path(label);
+            let target = account_path(to);
+            anyhow::ensure!(
+                !target.exists(),
+                "{} already exists; not renaming {}",
+                target.display(),
+                from.display()
+            );
+            std::fs::rename(&from, &target).with_context(|| {
+                format!("could not rename {} to {}", from.display(), target.display())
+            })?;
+            // The default Claude login lives beside the directory.
+            if plan.provider == Provider::Claude && label == ".claude" {
+                let login = home.join(".claude.json");
+                if login.is_file() {
+                    let inside = target.join(".claude.json");
+                    if inside.exists() {
+                        std::fs::rename(&inside, target.join(".claude.json.pre-link"))?;
+                    }
+                    std::fs::copy(&login, &inside)?;
+                }
+            }
+            undo.push(format!("mv {} {}", quote(&target), quote(&from)));
+        }
+    }
+
+    // (4) Links.
+    let mut linked = 0;
+    for link in &plan.links {
+        let path = account_path(&link.account).join(&link.item);
+        let target = plan.base.join(&link.item);
+        if !target.exists() {
+            continue;
+        }
+        if std::fs::symlink_metadata(&path).is_ok() {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        symlink(&target, &path)
+            .with_context(|| format!("could not link {}", path.display()))?;
+        let original_label = renamed.get(link.account.as_str()).copied().unwrap_or(&link.account);
+        if !moved.contains_key(&account_path(original_label).join(&link.item)) {
+            // Nothing was there before: undo removes the link.
+            undo.push(format!("rm -f {}", quote(&path)));
+        }
+        linked += 1;
+    }
+
+    // Undo runs last-first: links and moved items, then renames, then dirs.
+    undo.reverse();
+    restore.extend(undo);
+    restore.push(format!(
+        "echo 'Restored. The base {} was left in place.'",
+        plan.base.display()
+    ));
+    let restore_path = backup.join("restore.sh");
+    std::fs::write(&restore_path, restore.join("\n") + "\n")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&restore_path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    std::fs::write(
+        backup.join("plan.json"),
+        serde_json::to_string_pretty(plan)?,
+    )?;
+    Ok(Applied {
+        backup,
+        restore: restore_path,
+        merged,
+        conflicts,
+        linked,
+        dir_changes: plan.dir_changes.len(),
+    })
+}
+
+/// Where `original` lives now: in place, or under the backup a parent of it
+/// (or its symlink target) was moved to.
+fn locate(original: &Path, moved: &BTreeMap<PathBuf, PathBuf>, home: &Path) -> Option<PathBuf> {
+    for (from, to) in moved.iter().rev() {
+        if let Ok(rest) = original.strip_prefix(from) {
+            let candidate = if rest.as_os_str().is_empty() {
+                to.clone()
+            } else {
+                to.join(rest)
+            };
+            return resolve_moved(&candidate, moved, home);
+        }
+    }
+    resolve_moved(original, moved, home)
+}
+
+/// Follow a symlink in a moved tree to its own (possibly moved) target.
+fn resolve_moved(
+    path: &Path,
+    moved: &BTreeMap<PathBuf, PathBuf>,
+    home: &Path,
+) -> Option<PathBuf> {
+    if path.exists() {
+        return Some(path.to_path_buf());
+    }
+    // A dangling path: walk up to the first symlink ancestor and re-target.
+    let mut ancestor = path.to_path_buf();
+    let mut rest = PathBuf::new();
+    loop {
+        if std::fs::symlink_metadata(&ancestor).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            let target = std::fs::read_link(&ancestor).ok()?;
+            let target = if target.is_absolute() {
+                target
+            } else {
+                ancestor.parent()?.join(target)
+            };
+            let joined = if rest.as_os_str().is_empty() {
+                target
+            } else {
+                target.join(&rest)
+            };
+            if joined.starts_with(home) && joined != path {
+                return locate(&joined, moved, home);
+            }
+            return None;
+        }
+        let name = ancestor.file_name()?.to_os_string();
+        rest = if rest.as_os_str().is_empty() {
+            PathBuf::from(name)
+        } else {
+            PathBuf::from(name).join(&rest)
+        };
+        if !ancestor.pop() {
+            return None;
+        }
+    }
+}
+
+fn move_path(from: &Path, to: &Path) -> Result<()> {
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(from, to)
+        .with_context(|| format!("could not move {} to {}", from.display(), to.display()))
+}
+
+fn restrict(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let _ = path;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn symlink(target: &Path, path: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, path)
+}
+
+#[cfg(not(unix))]
+fn symlink(target: &Path, path: &Path) -> io::Result<()> {
+    if target.is_dir() {
+        std::os::windows::fs::symlink_dir(target, path)
+    } else {
+        std::os::windows::fs::symlink_file(target, path)
+    }
+}
+
+fn quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+/// A shared item in an account directory that is not linked to the base.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Drift {
+    pub provider: Provider,
+    pub account: String,
+    pub item: String,
+}
+
+/// Drift for `provider`: only once its base exists, so an operator who never
+/// linked sees nothing.
+pub fn drift(provider: Provider, home: &Path) -> Result<Vec<Drift>> {
+    let base = provider.base_dir(home);
+    if !base.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut found = Vec::new();
+    for account in discover(provider, home)? {
+        for item in provider.shared() {
+            if !base.join(item).exists() {
+                continue;
+            }
+            let path = account.path.join(item);
+            let linked = std::fs::read_link(&path).is_ok_and(|target| target == base.join(item));
+            if !linked || account.retiring {
+                found.push(Drift {
+                    provider,
+                    account: account.label.clone(),
+                    item: (*item).to_string(),
+                });
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Link a new account directory to the base (account creation). Returns the
+/// items linked; existing entries are left alone.
+pub fn link_new_account(provider: Provider, home: &Path, account: &Path) -> Result<Vec<String>> {
+    let base = provider.base_dir(home);
+    if !base.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut linked = Vec::new();
+    for item in provider.shared() {
+        let target = base.join(item);
+        let path = account.join(item);
+        if target.exists() && std::fs::symlink_metadata(&path).is_err() {
+            symlink(&target, &path)
+                .with_context(|| format!("could not link {}", path.display()))?;
+            linked.push((*item).to_string());
+        }
+    }
+    Ok(linked)
+}
+
+/// The dry run, for people: what moves, merges, conflicts and links.
+pub fn render_plan(plan: &Plan, home: &Path) -> String {
+    let short = |path: &Path| match path.strip_prefix(home) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
+    };
+    let conflicts = plan.conflicts().count();
+    let mut out = format!(
+        "{} {}: {} account dir{}, {} file{} into {}, {} conflict{}, {} link{}, {} dir change{}\n",
+        if plan.is_empty() { "[OK]" } else { "[PLAN]" },
+        plan.provider.name(),
+        plan.accounts.len(),
+        if plan.accounts.len() == 1 { "" } else { "s" },
+        plan.merges.len() - conflicts,
+        if plan.merges.len() - conflicts == 1 { "" } else { "s" },
+        short(&plan.base),
+        conflicts,
+        if conflicts == 1 { "" } else { "s" },
+        plan.links.len(),
+        if plan.links.len() == 1 { "" } else { "s" },
+        plan.dir_changes.len(),
+        if plan.dir_changes.len() == 1 { "" } else { "s" },
+    );
+    if plan.is_empty() {
+        out.push_str("  Every account already links its shared items to the base.\n");
+    }
+    if plan.create_base {
+        out.push_str(&format!("Create {}\n", short(&plan.base)));
+    }
+    for change in &plan.dir_changes {
+        match change {
+            DirChange::Retire { label, reason } => {
+                out.push_str(&format!("Retire ~/{label} into the backup ({reason})\n"))
+            }
+            DirChange::Rename { label, to } => {
+                out.push_str(&format!("Rename ~/{label} to ~/{to} (unique login)\n"))
+            }
+        }
+    }
+    // Merges grouped per account and top-level item, so a projects/ tree
+    // reads as one line.
+    let mut groups: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for merge in plan.merges.iter().filter(|merge| !merge.conflict) {
+        let item = merge.rel.split('/').next().unwrap_or(&merge.rel).to_string();
+        *groups.entry((merge.account.clone(), item)).or_default() += 1;
+    }
+    for ((account, item), count) in groups {
+        out.push_str(&format!(
+            "Merge {item} from ~/{account}: {count} file{}\n",
+            if count == 1 { "" } else { "s" }
+        ));
+    }
+    for merge in plan.conflicts() {
+        out.push_str(&format!(
+            "Conflict {} from ~/{}: kept as {}\n",
+            merge.rel, merge.account, merge.to
+        ));
+    }
+    for link in &plan.links {
+        out.push_str(&format!(
+            "Link ~/{}/{} -> base (was {})\n",
+            link.account, link.item, link.was
+        ));
+    }
+    for note in &plan.notes {
+        out.push_str(&format!("Note: {note}\n"));
+    }
+    out
+}
+
+#[cfg(test)]
+#[path = "accounts_tests.rs"]
+mod tests;

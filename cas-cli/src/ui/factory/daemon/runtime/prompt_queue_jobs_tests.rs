@@ -1106,8 +1106,8 @@ fn an_untaken_claim_is_released_after_its_ttl() {
     let writer = TestWriter::start(false);
     let mut jobs = jobs_on(&writer);
     jobs.claim_for_inject(&cas_dir, "s", row, "worker-a", "worker-a");
-    settle(&mut jobs, |_| claim_source(&cas_dir, row, "worker-a").is_some());
-    jobs.apply_completions();
+    // The claim job's result is back (not just its write).
+    settle(&mut jobs, |jobs| jobs.claim_resolved(&cas_dir, "s", row, "worker-a", "worker-a"));
     jobs.expire_claims(&cas_dir, Instant::now());
     assert!(claim_source(&cas_dir, row, "worker-a").is_some(), "held within the TTL");
     jobs.expire_claims(&cas_dir, Instant::now() + CLAIM_READY_TTL + Duration::from_millis(10));

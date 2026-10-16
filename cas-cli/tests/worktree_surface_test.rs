@@ -1946,6 +1946,68 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
 }
 
 #[tokio::test]
+async fn cas_cfd1_merges_pushed_parked_ref_without_touching_reused_dirty_worker() {
+    let repo = GitRepo::new();
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
+    disable_system_a(&cas_root);
+    let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["branch", "epic/parked"], &repo.root);
+    run_git(&["push", "origin", "epic/parked"], &repo.root);
+    let (_, task_id) = create_epic_and_worker_task(&cas_root, "epic/parked", Some("alice"));
+    let worker = cas_root.join("worktrees/alice");
+    repo.add_worktree(&worker, "factory/alice");
+    let delivery = "parked delivery\n";
+    std::fs::write(worker.join("delivered.txt"), delivery).unwrap();
+    run_git(&["add", "delivered.txt"], &worker);
+    run_git(&["commit", "-m", "parked delivery"], &worker);
+    let anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    run_git(&["push", "origin", "factory/alice"], &worker);
+    let tasks = open_task_store(&cas_root).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some(anchor.clone());
+    task.deliverables.parked_branch = Some("factory/alice".into());
+    tasks.update(&task).unwrap();
+
+    run_git(&["switch", "-c", "factory/alice-next"], &worker);
+    std::fs::write(worker.join("next-task.txt"), "next task commit\n").unwrap();
+    run_git(&["add", "next-task.txt"], &worker);
+    run_git(&["commit", "-m", "next task"], &worker);
+    std::fs::write(worker.join("README.md"), "next task staged\n").unwrap();
+    run_git(&["add", "README.md"], &worker);
+    let dirty = "next task unstaged\n";
+    std::fs::write(worker.join("README.md"), dirty).unwrap();
+    let untracked = "next task untracked\n";
+    std::fs::write(worker.join("draft.txt"), untracked).unwrap();
+    let head_before = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    let status_before = git_stdout(&worker, &["status", "--porcelain"]);
+    let index_path = git_stdout(&worker, &["rev-parse", "--git-path", "index"]);
+    let index_before = std::fs::read(&index_path).unwrap();
+    env.set_current_dir(&repo.root);
+    let svc = make_service(cas_root);
+    let mut req = coord_req("worktree_merge");
+    req.id = Some("factory/alice".into());
+    req.task_id = Some(task_id);
+    req.cleanup = Some(false);
+    let result = svc.coordination(Parameters(req)).await.expect("merge parked pushed delivery");
+    let text = get_text(&result);
+    assert!(text.contains("Merged worktree"), "{text}");
+    // pin: operator receipt identifies immutable origin authority and preservation, per cas-cfd1 AC3.
+    assert!(text.contains("pushed ref") && text.contains("untouched"), "{text}");
+    assert_eq!(git_stdout(&repo.root, &["show", "epic/parked:delivered.txt"]) + "\n", delivery);
+    assert!(!git_stdout(&repo.root, &["ls-tree", "-r", "--name-only", "epic/parked"]).contains("next-task.txt"));
+    assert_eq!(git_stdout(&worker, &["rev-parse", "HEAD"]), head_before);
+    assert_eq!(git_stdout(&worker, &["status", "--porcelain"]), status_before);
+    assert_eq!(std::fs::read(&index_path).unwrap(), index_before);
+    assert_eq!(std::fs::read_to_string(worker.join("README.md")).unwrap(), dirty);
+    assert_eq!(std::fs::read_to_string(worker.join("draft.txt")).unwrap(), untracked);
+    run_git(&["merge-base", "--is-ancestor", &anchor, "origin/epic/parked"], &repo.root);
+}
+
+#[tokio::test]
 async fn test_worktree_merge_refuses_explicit_task_whose_parent_epic_is_closed() {
     let repo = GitRepo::new();
     let mut env = test_env();

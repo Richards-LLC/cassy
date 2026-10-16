@@ -11880,3 +11880,150 @@ async fn worker_status_shows_peers_but_the_summary_does_not_cas_e477() {
     );
     assert!(!summary.contains("Peers"), "{summary}");
 }
+
+/// cas-009c: the id of the newest queued row to `target` whose body contains
+/// `needle`.
+fn queued_row_id(env: &FactoryTestEnv, target: &str, needle: &str) -> i64 {
+    env.prompt_queue()
+        .peek_all(100)
+        .expect("peek queue")
+        .into_iter()
+        .filter(|row| row.target == target && row.prompt.contains(needle))
+        .map(|row| row.id)
+        .max()
+        .unwrap_or_else(|| panic!("no row to {target} containing {needle:?}"))
+}
+
+fn reply(target: &str, message: &str, in_reply_to: i64) -> CoordinationRequest {
+    let mut request = coord_msg("message", target, message, None);
+    request.in_reply_to = Some(in_reply_to);
+    request
+}
+
+/// cas-009c AC1 (supervisor lead 7): a supervisor following up in a thread it
+/// started was refused with "in_reply_to notification 4185839 is supervisor ->
+/// bold-spider-9, not a direct message from bold-spider-9". A follow-up to the
+/// sender's own row threads as a reference; only a direct reply acknowledges.
+#[tokio::test]
+async fn cas009c_supervisor_follow_up_threads_on_its_own_message() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::with_agent_id_and_env("cosmic-bear-id", None);
+    let mut supervisor = Agent::new("cosmic-bear-id".to_string(), "cosmic-bear-43".to_string());
+    supervisor.role = AgentRole::Supervisor;
+    env.agent_store().register(&supervisor).expect("register supervisor");
+    env.register_worker_with_id("spider-id", "bold-spider-9", None);
+
+    env.service
+        .coordination(Parameters(coord_msg("message", "bold-spider-9", "Rebase onto v43.", None)))
+        .await
+        .expect("supervisor starts the thread");
+    let started = queued_row_id(&env, "bold-spider-9", "Rebase onto v43.");
+
+    env.service
+        .coordination(Parameters(reply("bold-spider-9", "And re-run ct2_p1 after.", started)))
+        .await
+        .expect("a follow-up in the supervisor's own thread is accepted");
+    let follow_up = env
+        .prompt_queue()
+        .queued_prompt(queued_row_id(&env, "bold-spider-9", "And re-run ct2_p1 after."))
+        .expect("read follow-up")
+        .expect("follow-up queued");
+    // pin: the thread marker the recipient reads, distinct from the ack marker.
+    assert!(
+        follow_up.prompt.contains(&format!("[CAS reply: in thread with notification_id={started}]")),
+        "{}",
+        follow_up.prompt
+    );
+    let report = env
+        .prompt_queue()
+        .message_delivery_report(started)
+        .expect("report")
+        .expect("row");
+    assert_ne!(
+        report.confirmation_source,
+        cas_store::ConfirmationSource::ExplicitAck,
+        "the sender's own message is not acknowledged by its own follow-up"
+    );
+}
+
+/// cas-009c AC2: a worker that addresses its supervisor by name replies to a
+/// supervisor→worker row, whose source is the logical `supervisor`. It is a
+/// direct reply and acknowledges the row.
+#[tokio::test]
+async fn cas009c_worker_reply_to_supervisor_by_name_threads_and_acknowledges() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "bold-spider-9"),
+    ]);
+    let env = FactoryTestEnv::with_agent_id_and_env("spider-id", None);
+    env.register_worker_with_id("spider-id", "bold-spider-9", None);
+    let mut supervisor = Agent::new("cosmic-bear-id".to_string(), "cosmic-bear-43".to_string());
+    supervisor.role = AgentRole::Supervisor;
+    env.agent_store().register(&supervisor).expect("register supervisor");
+    let decision = env
+        .prompt_queue()
+        .enqueue_urgent("supervisor", "bold-spider-9", "Take option B.", None, None, None, false)
+        .expect("supervisor decision");
+
+    env.service
+        .coordination(Parameters(reply("cosmic-bear-43", "Done: took option B.", decision)))
+        .await
+        .expect("a reply addressed to the supervisor by name threads");
+    let report = env
+        .prompt_queue()
+        .message_delivery_report(decision)
+        .expect("report")
+        .expect("row");
+    assert_eq!(report.confirmation_source, cas_store::ConfirmationSource::ExplicitAck);
+}
+
+/// cas-009c AC3: a lifecycle row, a broadcast and the director's rows are
+/// thread references the reply may cite; a row between two other agents is
+/// still refused.
+#[tokio::test]
+async fn cas009c_lifecycle_and_broadcast_rows_are_thread_references() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::with_agent_id_and_env("cosmic-bear-id", None);
+    let mut supervisor = Agent::new("cosmic-bear-id".to_string(), "cosmic-bear-43".to_string());
+    supervisor.role = AgentRole::Supervisor;
+    env.agent_store().register(&supervisor).expect("register supervisor");
+    env.register_worker_with_id("spider-id", "bold-spider-9", None);
+    env.register_worker_with_id("koala-id", "watchful-koala-20", None);
+    let queue = env.prompt_queue();
+    let lifecycle = queue
+        .enqueue_urgent("lifecycle-wake:16790", "supervisor", "<task-lifecycle task=\"cas-x\" transition=\"awaiting_merge\"/>", None, None, None, false)
+        .expect("lifecycle row");
+    let broadcast = queue
+        .enqueue_urgent("supervisor", "all_workers", "Epic tip moved.", None, None, None, false)
+        .expect("broadcast");
+    let director = queue
+        .enqueue_urgent("director", "cosmic-bear-43", "bold-spider-9 has gone quiet.", None, None, None, false)
+        .expect("director row");
+    let unrelated = queue
+        .enqueue_urgent("watchful-koala-20", "bold-spider-9", "peer note", None, None, None, false)
+        .expect("peer row");
+
+    for (row, text) in [(lifecycle, "Merging now."), (broadcast, "Rebase please."), (director, "Are you stuck?")] {
+        env.service
+            .coordination(Parameters(reply("bold-spider-9", text, row)))
+            .await
+            .unwrap_or_else(|error| panic!("row {row} is a thread reference: {error:?}"));
+        let report = queue.message_delivery_report(row).expect("report").expect("row");
+        assert_ne!(
+            report.confirmation_source,
+            cas_store::ConfirmationSource::ExplicitAck,
+            "only a direct reply acknowledges (row {row})"
+        );
+    }
+    let refused = env
+        .service
+        .coordination(Parameters(reply("bold-spider-9", "Not my thread.", unrelated)))
+        .await;
+    assert!(refused.is_err(), "a row between two other agents is not this sender's thread");
+}

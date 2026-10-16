@@ -200,13 +200,21 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
             .as_deref()
             .map(|usage| format!(" · {usage}"))
             .unwrap_or_default();
+        // cas-e1f4: two short lines per account, so the list fits 80 columns.
+        let directory = profile
+            .directory
+            .strip_prefix(home)
+            .map(|rest| format!("~/{}", rest.display()))
+            .unwrap_or_else(|_| profile.directory.display().to_string());
         output.push_str(&format!(
-            "  {} — {} ({login}){active}{usage}\n",
+            "  {} ({login}){active}{usage}\n    {directory}\n",
             profile.name,
-            profile.directory.display(),
         ));
     }
-    output.push_str("\nHit a usage limit? Switch in one step: cas codex <profile>.\n");
+    output.push('\n');
+    output.push_str(&crate::cloud::presence::wrap_line(
+        "Hit a usage limit? Switch in one step: cas codex <profile>.",
+    ));
 
     Ok(output)
 }

@@ -74,18 +74,10 @@ fn list_profiles_shows_detected_accounts_and_login_state() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Usage: cas claude <profile>"))
-        .stdout(predicate::str::contains(format!(
-            "  alt — {} (logged in) (active)\n",
-            alt.display()
-        )))
-        .stdout(predicate::str::contains(format!(
-            "  main — {} (not logged in)\n",
-            home.path().join(".claude").display()
-        )))
-        .stdout(predicate::str::contains(format!(
-            "  work — {} (not logged in)\n",
-            home.path().join(".claude-work").display()
-        )));
+        // pin: cas-e1f4 two-line rows that fit 80 columns.
+        .stdout(predicate::str::contains("  alt (logged in) (active)\n    ~/.claude-alt\n"))
+        .stdout(predicate::str::contains("  main (not logged in)\n    ~/.claude\n"))
+        .stdout(predicate::str::contains("  work (not logged in)\n    ~/.claude-work\n"));
 }
 
 /// The headline behavior: `cas claude alt` selects the alt account and then

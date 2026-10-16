@@ -57,12 +57,27 @@ pub(super) fn check_for(report: &crate::backlog_hygiene::BacklogReport) -> Check
         report.idle.iter().map(hygiene::idle_line).collect(),
         &mut lines,
     );
+    section(
+        "citing removed code (review; never closed automatically)",
+        report.stale_citations.iter().map(hygiene::stale_citation_line).collect(),
+        &mut lines,
+    );
+    if report.citations_unchecked > 0 {
+        lines.push(format!(
+            "{} open task{} not checked for removed code (scan budget)",
+            report.citations_unchecked,
+            if report.citations_unchecked == 1 { "" } else { "s" },
+        ));
+    }
     if let Some(reason) = report.delivery_unknown.as_deref() {
         lines.push(format!("delivered-on-default-branch check unknown: {reason}"));
     }
     let status = if !report.delivered.is_empty() || !report.finished_epics.is_empty() {
         CheckStatus::Warning
-    } else if !report.idle.is_empty() || report.delivery_unknown.is_some() {
+    } else if !report.idle.is_empty()
+        || !report.stale_citations.is_empty()
+        || report.delivery_unknown.is_some()
+    {
         CheckStatus::Info
     } else {
         CheckStatus::Ok

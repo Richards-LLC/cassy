@@ -22,6 +22,9 @@ fn cas_5c2c_round2_sessionless_owner_receives_lifecycle() {
         AgentRole::Supervisor,
     );
     agents.register(&owner).unwrap();
+    let mut worker = Agent::new_with_role("worker".into(), "worker".into(), AgentRole::Worker);
+    worker.factory_session = Some("unstamped-owner-session".into());
+    agents.register(&worker).unwrap();
     let prepared = prepare_task_lifecycle_outbox(
         agents.as_ref(),
         "cas-sessionless",

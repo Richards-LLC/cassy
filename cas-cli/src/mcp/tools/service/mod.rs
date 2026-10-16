@@ -1920,7 +1920,6 @@ mod tests {
             neon::{self, InitChoices, LiveNeonClient, RefreshOpts},
             types::{IntegrationAction, IntegrationStatus},
         };
-        use crate::store::TaskStore;
         use crate::types::Task;
         use cmcp_core::config::{Config as ProxyConfig, ExternalToolConfig, ServerConfig};
         use std::{collections::HashMap, sync::Arc};

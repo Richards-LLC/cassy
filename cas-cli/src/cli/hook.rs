@@ -364,7 +364,9 @@ fn cleanup_single_file(path: &Path, dry_run: bool) -> anyhow::Result<CleanupActi
 
     // Also strip Cassy statusLine if present (global provides it)
     if let Some(obj) = settings.as_object_mut() {
-        obj.remove("statusLine");
+        if obj.get("statusLine").and_then(|v| v.get("command")).and_then(|v| v.as_str()).is_some_and(|c| c.starts_with("cas ")) {
+            obj.remove("statusLine");
+        }
     }
 
     // Check if the file is now empty or only has empty objects

@@ -336,7 +336,7 @@ impl Reconcile {
             }
             if path == ".codex/config.toml" {
                 if let Some(bytes) = &working {
-                    match text(bytes)?.parse::<toml::Value>() {
+                    match toml::from_str::<toml::Value>(text(bytes)?) {
                         Ok(v) if v.is_table() => {
                             for key in ["cs", "cas"] {
                                 if v.get("mcp_servers")
@@ -603,7 +603,7 @@ fn owned_fragment(path: &str, bytes: &[u8]) -> Result<String> {
         let value: toml::Value = if s.is_empty() {
             toml::Value::Table(Default::default())
         } else {
-            s.parse()?
+            toml::from_str(s)?
         };
         return Ok(format!(
             "{:?}",

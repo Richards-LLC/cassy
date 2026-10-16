@@ -13738,6 +13738,20 @@ pub(crate) fn resolve_close_delivery_branch(
     else {
         return Ok(own);
     };
+    // cas-cfa5: a worker whose only commit merges `main` into its target
+    // delivers that merge on its own branch, though every commit it brings
+    // claims another task. Park and merge the real branch, never an absent
+    // per-task ref the push guard forbids.
+    if let Some(target) = task
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|target| target.target_branch.trim())
+        .filter(|target| !target.is_empty())
+        && merge_only_delivery(repo_path, &own_ref, target)
+    {
+        return Ok(own);
+    }
     let prefix = format!("factory/{assignee}-");
     let listed = std::process::Command::new("git")
         .args([
@@ -13799,10 +13813,42 @@ pub(crate) fn resolve_close_delivery_branch(
     ))
 }
 
-/// cas-cfa5: whether `lane`'s tip is a merge-only delivery onto `target`.
+/// cas-cfa5: whether `lane`'s tip is a merge-only delivery onto `target`:
+/// a merge commit whose first parent is already on the target (locally or on
+/// origin), so it fast-forwards the target, and whose tree differs from that
+/// first parent, so it delivers something. A worker that merges `main` into
+/// the epic delivers exactly that commit; every non-merge commit it brings
+/// claims another task, which is why ordinary attribution cannot see it.
+/// Unknown targets, non-merge tips and empty merges are never merge-only.
 pub(crate) fn merge_only_delivery(repo: &std::path::Path, lane: &str, target: &str) -> bool {
-    let _ = (repo, lane, target);
-    false
+    if !is_safe_git_refname(lane) || !is_safe_git_refname(target) {
+        return false;
+    }
+    let targets: Vec<String> = [target.to_string(), format!("origin/{target}")]
+        .into_iter()
+        .filter(|reference| git_ref_exists(repo, reference))
+        .collect();
+    if targets.is_empty() {
+        return false;
+    }
+    let Ok(parents) = git_stdout_lines(repo, &["rev-list", "--parents", "-n", "1", lane]) else {
+        return false;
+    };
+    let commits: Vec<&str> = parents
+        .first()
+        .map(|line| line.split_whitespace().collect())
+        .unwrap_or_default();
+    let [tip, first_parent, _merged, ..] = commits.as_slice() else {
+        return false;
+    };
+    if !targets
+        .iter()
+        .any(|reference| git_commit_is_ancestor(repo, first_parent, reference))
+    {
+        return false;
+    }
+    let tree = |commit: &str| resolve_branch_sha(repo, &format!("{commit}^{{tree}}"));
+    matches!((tree(tip), tree(first_parent)), (Some(tip), Some(first)) if tip != first)
 }
 
 /// GH #1133, #1147, #1151: whether a `no-code` task has no commit of its own.

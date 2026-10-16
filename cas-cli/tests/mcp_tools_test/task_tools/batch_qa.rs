@@ -11,7 +11,10 @@ use std::process::Command;
 
 #[test]
 fn override_debt_documentation_cas_5129a() {
-    let guide = include_str!("../../../../../../docs/qa/batch-qa.md");
+    let guide = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../docs/qa/batch-qa.md"
+    ));
     assert!(guide.contains("supervisor_override=true does not clear batch QA debt"));
     assert!(!guide.contains(
         "Normal supervisor override and explicit QA-request authority remain available."

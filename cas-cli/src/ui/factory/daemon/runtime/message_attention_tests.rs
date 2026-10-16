@@ -334,8 +334,8 @@ fn cas_07ee_same_recipient_unrelated_codex_turn_still_alarms() {
     f.codex_turn("A separate task that never carried this queued body");
     let created = f.queue.queued_prompt(id).unwrap().unwrap().created_at;
     assert!(
-        f.daemon
-            .recipient_turn_completion_after("worker", created)
+        super::super::delivery_probe_jobs::recipient_turn_completion_after_io(
+            f.daemon.app.cas_dir(), "worker", created)
             .is_some(),
         "fixture must resolve the real Codex turn"
     );

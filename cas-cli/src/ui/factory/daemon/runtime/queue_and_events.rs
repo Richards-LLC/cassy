@@ -4562,7 +4562,7 @@ impl FactoryDaemon {
     /// then surface the residual failure to the supervisor.  The retry uses
     /// `Mux::inject`, never `interrupt_and_inject`: this watchdog is evidence
     /// and visibility, not permission to auto-escalate a normal message.
-    async fn resolve_normal_delivery_probes(&mut self, queue: &dyn cas_store::PromptQueueStore) {
+    async fn resolve_normal_delivery_probes(&mut self, _queue: &dyn cas_store::PromptQueueStore) {
         use super::relay_jobs::{Relay, RelayOutput};
         let now = Instant::now();
         self.queue_jobs
@@ -4651,6 +4651,7 @@ impl FactoryDaemon {
             match action {
                 NormalDeliveryProbeAction::Observed => {
                     self.normal_delivery_probes.remove(&row_id);
+                    self.queue_jobs.normal_probe_jobs.forget_row(row_id);
                 }
                 NormalDeliveryProbeAction::WaitForTurnBoundary => {
                     if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
@@ -4701,6 +4702,7 @@ impl FactoryDaemon {
                         self.app.supervisor_name(),
                     ) {
                         self.normal_delivery_probes.remove(&row_id);
+                        self.queue_jobs.normal_probe_jobs.forget_row(row_id);
                         continue;
                     }
                     let cas_dir = self.app.cas_dir().to_path_buf();
@@ -4723,6 +4725,7 @@ impl FactoryDaemon {
                 }
             }
         }
+        self.drain_relay_jobs();
     }
 
     /// cas-ac7e (GH #130): settle every outstanding urgent wake probe against

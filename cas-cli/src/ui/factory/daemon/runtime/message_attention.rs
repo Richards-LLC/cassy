@@ -1,9 +1,10 @@
 //! Read-only alarm eligibility, shared by the sender and supervisor alarm lanes.
 //! Acting on work retires its alarm without inventing a per-message read receipt.
 use super::*;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MessageAttention {
+pub(crate) enum MessageAttention {
     Needed,
     Satisfied,
 }

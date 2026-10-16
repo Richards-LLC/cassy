@@ -209,8 +209,17 @@ async fn cas_031e_superseded_message_discards_its_held_probe_result() {
     replacement.delivered_at_utc = chrono::Utc::now() + chrono::Duration::minutes(1);
     release_tx.send(()).unwrap();
     let progress = loop_watchdog::LoopProgress::new();
-    let deadline = Instant::now() + Duration::from_millis(300);
-    while Instant::now() < deadline {
+    assert!(
+        daemon
+            .relay_jobs
+            .reading(super::super::relay_jobs::Relay::NormalProbes)
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while daemon
+        .relay_jobs
+        .reading(super::super::relay_jobs::Relay::NormalProbes)
+        && Instant::now() < deadline
+    {
         {
             let (_attachment, _enforce) = loop_watchdog::enforced_daemon_step(
                 &progress,
@@ -220,6 +229,12 @@ async fn cas_031e_superseded_message_discards_its_held_probe_result() {
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    assert!(
+        !daemon
+            .relay_jobs
+            .reading(super::super::relay_jobs::Relay::NormalProbes),
+        "the held result must actually report before asserting it was discarded"
+    );
     let current = daemon
         .normal_delivery_probes
         .get(&row)

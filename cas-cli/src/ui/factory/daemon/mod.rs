@@ -280,7 +280,9 @@ pub struct FactoryDaemon {
     reported_permission_requests: std::collections::HashSet<String>,
     /// Bounded supervisor transcript scan for Commander mirroring.
     last_commander_mirror_scan: Option<Instant>,
-    commander_mirror_state: runtime::MirrorScanState,
+    /// Factory loop v2 C3 (cas-d2a2): the prompt queue's selection, stamps,
+    /// in-flight rows, inbox retraction and Commander mirror scan as jobs.
+    queue_jobs: runtime::prompt_queue_jobs::QueueJobs,
     /// cas-8a55: workers whose harness refused a turn for an account reason
     /// (revoked Codex token, expired Claude session). Agent id -> evidence
     /// occurrence, so the supervisor is told once per failure rather than once

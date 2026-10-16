@@ -266,7 +266,7 @@ impl CheckGroup {
             | "sync target"
             | "models"
             | "sessionstart budget" => Self::Config,
-            "issue repositories" => Self::Config,
+            "issue repositories" | "shipped issues" => Self::Config,
             "integrations" | "violet" | "violet wake" | "github origin" => Self::Integrations,
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,
@@ -1619,6 +1619,51 @@ fn lesson_recurrence_check(runs: &[crate::cli::release_report::LessonRecurrence]
     Some(Check::new("lesson recurrence", CheckStatus::Warning, message))
 }
 
+/// cas-dd56: open GitHub issues whose every referencing task is closed with
+/// its delivery in a release tag. A failed `gh` is a stated skip, not an
+/// empty list.
+fn shipped_issues_check(
+    tasks: &[crate::types::Task],
+    default_repo: Option<&str>,
+    states: &dyn crate::issue_reconcile::IssueStates,
+    tag_containing: &dyn Fn(&str) -> Option<String>,
+) -> Check {
+    const NAME: &str = "shipped issues";
+    let Some(repo) = default_repo else {
+        return Check::new(NAME, CheckStatus::Info, "skipped: no GitHub repository resolved for this project");
+    };
+    match crate::issue_reconcile::shipped_open_issues(tasks, Some(repo), states, tag_containing) {
+        Err(error) => Check::new(NAME, CheckStatus::Info, format!("skipped: could not list open issues ({error})")),
+        Ok(shipped) if shipped.is_empty() => Check::new(
+            NAME,
+            CheckStatus::Ok,
+            format!("no open {repo} issue has all of its referencing tasks shipped"),
+        ),
+        Ok(shipped) => Check::new(
+            NAME,
+            CheckStatus::Warning,
+            format!(
+                "{} open issue(s) whose referencing tasks have all shipped; close them with the \
+                 release version: {}",
+                shipped.len(),
+                shipped
+                    .iter()
+                    .map(|item| format!(
+                        "{} ({})",
+                        item.issue,
+                        item.tasks
+                            .iter()
+                            .map(|(task, tag)| format!("{task} in {tag}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        ),
+    }
+}
+
 /// Report the effective destinations and distinguish an inferred project
 /// repository from an explicit setting. This check never writes config.
 fn issue_repositories_check(config: &Config, cas_root: &Path) -> Check {
@@ -2754,6 +2799,14 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 open_count,
                 blocked_count,
                 &health,
+            ));
+            // cas-dd56: issues still open although their fixes shipped.
+            let repo_root = cas_root.parent().unwrap_or(cas_root.as_path()).to_path_buf();
+            checks.push(shipped_issues_check(
+                &tasks,
+                crate::github_issue_attach::default_repo_for(&cas_root).as_deref(),
+                &crate::issue_reconcile::GhIssueStates::new(crate::issue_reconcile::GH_BUDGET),
+                &|commit: &str| crate::issue_reconcile::release_tag_containing(&repo_root, commit),
             ));
         }
     }
@@ -6348,6 +6401,46 @@ mod tests {
             check.message
         );
         assert!(!check.message.contains("cas-other"), "{}", check.message);
+    }
+
+    /// cas-dd56 item 4: the doctor row names open issues whose fixes have
+    /// shipped, and reports an offline `gh` as a skip rather than "none".
+    #[test]
+    fn shipped_issues_doctor_row_lists_open_issues_whose_fixes_shipped_cas_dd56() {
+        struct States(Result<std::collections::HashSet<u64>, String>);
+        impl crate::issue_reconcile::IssueStates for States {
+            fn open_issues(&self, _repo: &str) -> Result<std::collections::HashSet<u64>, String> {
+                self.0.clone()
+            }
+        }
+        let mut shipped = crate::types::Task::new("cas-ship".into(), "GH #1158: fix".into());
+        shipped.status = crate::types::TaskStatus::Closed;
+        shipped.deliverables.factory_branch_anchor = Some("aaa111".into());
+        let mut unshipped = crate::types::Task::new("cas-open".into(), "GH #1170: fix".into());
+        unshipped.status = crate::types::TaskStatus::Closed;
+        unshipped.deliverables.factory_branch_anchor = Some("ccc333".into());
+        let tasks = vec![shipped, unshipped];
+        let tags = |sha: &str| (sha == "aaa111").then(|| "v3.50.0".to_string());
+        let repo = Some("Richards-LLC/cassy");
+
+        let check = shipped_issues_check(&tasks, repo, &States(Ok([1158, 1170].into())), &tags);
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            check.message.contains("Richards-LLC/cassy#1158 (cas-ship in v3.50.0)"),
+            "{}",
+            check.message
+        );
+        assert!(!check.message.contains("#1170"), "{}", check.message);
+
+        let check = shipped_issues_check(&tasks, repo, &States(Ok([1170].into())), &tags);
+        assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+
+        let check = shipped_issues_check(&tasks, repo, &States(Err("gh: offline".into())), &tags);
+        assert!(matches!(check.status, CheckStatus::Info), "{}", check.message);
+        assert!(check.message.contains("skipped: could not list open issues (gh: offline)"));
+
+        let check = shipped_issues_check(&tasks, None, &States(Ok([1158].into())), &tags);
+        assert!(check.message.starts_with("skipped: no GitHub repository"), "{}", check.message);
     }
 
     #[test]

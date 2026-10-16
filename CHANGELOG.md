@@ -9,9 +9,56 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — upgrades keep Violet working across Claude profiles (cas-678d)
 
-- `cas update` migrates older Violet credentials in every Claude and Codex
-  profile and verifies each profile before reporting success. Empty
-  credentials are refused instead of being sent as an empty bearer token.
+- `cas update` migrates the Violet registration in every Claude and Codex
+  profile, and Cassy launches load each profile's private credentials. Empty
+  tokens are never sent.
+
+### Fixed — terminal QA checks only apply to terminal output (#1212, cas-2de9)
+
+- A terminal-QA receipt is required only for terminal-drawing CLI paths and
+  `cas-mux` `render.rs`, `pane/style.rs` and `pane/snapshot.rs`.
+- Tasks without a CLI/TUI surface, and mux input, PTY and resize changes, use
+  the real-build interaction ledger and no longer block park, receipt or QA.
+
+### Fixed — supervisors wake for peer replies and requests (#1215 b, cas-1f25)
+
+- Idle supervisors wake for peer replies and ask/blocker messages, while FYIs
+  do not wake them.
+
+### Fixed — projects resolve issue tracking from their GitHub origin (#1221, cas-f398)
+
+- When `issues.repo` is unset, the local GitHub origin supplies the repository;
+  doctor reports that the value came from the origin without writing config.
+
+### Fixed — factory workers cannot use operator-authenticated tools (#1219, cas-d757)
+
+- Factory workers are refused Vercel and other operator-authenticated CLIs,
+  along with the matching MCP tools.
+
+### Fixed — Claude Teams messages arrive once with their full bodies (cas-1f0c)
+
+- Messages use one wake pointer and one body, with budgeted surfacing and
+  fallback delivery preserving bodies that do not fit the hook.
+
+### Fixed — released epics verify every child in one check (cas-0a27)
+
+- The release fast path verifies every closed child's anchor on the default
+  branch in one bounded check.
+
+### Fixed — false unread and stall alarms require row-bound evidence (#1217, cas-07ee)
+
+- Only evidence bound to the relevant message or activity row suppresses its
+  unread or stall alarm.
+
+### Fixed — optional upstreams with missing credentials log quietly (#1220, cas-a1ef)
+
+- An unconfigured optional MCP upstream logs its missing key at info; failures
+  from configured upstreams remain errors.
+
+### Changed — shipped issue links are easier to reconcile (cas-dd56)
+
+- Task creation suggests an `external_ref` for cited GitHub issues; epic close
+  warns about open linked issues, and doctor lists shipped issues still open.
 
 ### Fixed — deliveries stay tied to their actual target (#1179, cas-1cc7, cas-4a65)
 
@@ -24,6 +71,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Each worker build runs in its own configurable memory-limited scope, so a
   simultaneous build cannot consume the host's remaining memory.
+
+### Fixed — systemd worker builds preserve embedded test scripts (cas-192b)
+
+- On systemd 254+, worker builds disable `systemd-run` environment expansion
+  with `--expand-environment=no`, so `$VAR` reaches Bash and Python unchanged.
 
 ### Added — factory loop v2 job framework and watchdog (#1211, cas-5c24, cas-1240, cas-6931)
 

@@ -1,6 +1,14 @@
 use crate::ui::factory::daemon::SpawnVerification;
 use crate::ui::factory::daemon::imports::*;
 
+#[path = "message_attention.rs"]
+mod message_attention;
+use message_attention::MessageAttention;
+
+#[cfg(test)]
+#[path = "message_attention_tests.rs"]
+mod message_attention_tests;
+
 /// What a delivery probe learned about recipient-authored activity (GH #1163).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecipientActivity {
@@ -2115,6 +2123,129 @@ fn worker_recipient_shut_down(
     dead.contains(target) && !live.iter().any(|name| name == target)
 }
 
+/// Factory loop v2 `QueueSelect` (cas-d2a2, spec §4.3 and §4.5 rule 1). Runs
+/// on the store writer, never on the loop: re-target QA rejections, read the
+/// roster, withdraw rows for recipients that shut down, collapse duplicate
+/// worker deaths, then select the batch, stamp it `Selected` and take its
+/// transport claims in one transaction.
+pub(super) fn run_queue_select(
+    request: &super::prompt_queue_jobs::QueueSelectRequest,
+    generation: u64,
+) -> anyhow::Result<super::prompt_queue_jobs::QueueSelection> {
+    let session = request.session_name.as_str();
+    // Review round 1, M4: this job thread opens each store once.
+    let queue = super::prompt_queue_jobs::job_thread_prompt_queue(&request.cas_dir)?;
+    // Revalidate before roster selection: an old assignee may already have
+    // left the roster, but its task's notice is still live.
+    let retargeted_rows = queue.refresh_qa_rejection_targets(session, None)?;
+    let registered_agents = super::prompt_queue_jobs::job_thread_store(
+        "agent",
+        &request.cas_dir,
+        |dir| Ok(open_agent_store(dir)?),
+    )?
+    .list(None)?;
+    let mut retired_candidates = registered_prompt_sweep_agents(&registered_agents, session);
+    retired_candidates.extend(request.dead_workers.iter().cloned());
+    retired_candidates.sort();
+    retired_candidates.dedup();
+    let mut shut_down_recipients = Vec::new();
+    for name in retired_candidates {
+        if worker_recipient_shut_down(&name, &request.dead_workers, &request.worker_names, &registered_agents) {
+            queue.cancel_unread_for_shutdown(&name, Some(session),
+                "wake withdrawn: recipient has shut down")?;
+            shut_down_recipients.push(name);
+        }
+    }
+
+    // Native-extension agents consume their own queue rows. Excluding them
+    // from the daemon's target universe prevents this PTY/inbox processor
+    // from repeatedly selecting rows it deliberately cannot consume.
+    let native_agents: std::collections::HashSet<String> = registered_agents
+        .iter()
+        .filter(|agent| {
+            agent
+                .metadata
+                .get("native_extension")
+                .is_some_and(|value| value == "true")
+        })
+        .map(|agent| agent.name.clone())
+        .collect();
+    let registered_session_agents = registered_prompt_sweep_agents(&registered_agents, session);
+    // cas-73c8: `director` is a valid target (see prompt_poison_sweep_targets).
+    let valid_target_names = prompt_poison_sweep_targets(
+        &request.supervisor_name,
+        &request.worker_names,
+        &registered_session_agents,
+    );
+    let mut targets: Vec<&str> = valid_target_names
+        .iter()
+        .map(String::as_str)
+        .filter(|target| !native_agents.contains(*target))
+        .collect();
+    targets.sort_unstable();
+
+    let mut selection = super::prompt_queue_jobs::QueueSelection {
+        generation,
+        retargeted_rows,
+        shut_down_recipients,
+        ..Default::default()
+    };
+    // An all-native session has no rows for the PTY/inbox delivery path. The
+    // store rejects an empty target universe so accidental session-wide peeks
+    // fail loudly.
+    if !targets.is_empty() {
+        // cas-20ac: stale cleanup can expose many registration UUIDs for one
+        // logical worker. Collapse task-free death rows BEFORE the delivery
+        // batch is selected, otherwise each UUID steals a supervisor turn
+        // even though none carries work.
+        let death_candidates = queue.peek_for_targets(
+            &targets,
+            Some(session),
+            crate::mcp::tools::service::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT,
+        )?;
+        let supervisor_queue = super::prompt_queue_jobs::job_thread_store(
+            "supervisor_queue",
+            &request.cas_dir,
+            |dir| Ok(crate::store::open_supervisor_queue_store(dir)?),
+        )
+        .ok();
+        match crate::mcp::tools::service::orphan_recovery::coalesce_pending_worker_deaths(
+            queue.as_ref(),
+            supervisor_queue.as_deref(),
+            &death_candidates,
+        ) {
+            Ok(report) if report.duplicates > 0 => tracing::info!(
+                target: "cas::coordination",
+                stage = "worker_death_coalesced",
+                families = report.families,
+                duplicates = report.duplicates,
+                "cas-20ac: collapsed duplicate no-task worker deaths before supervisor delivery"
+            ),
+            Err(error) => tracing::warn!(
+                target: "cas::coordination",
+                stage = "worker_death_coalesce_failed",
+                %error,
+                "cas-20ac: duplicate worker-death coalescing failed; rows remain pending"
+            ),
+            _ => {}
+        }
+
+        // Filter by targets AND session to prevent cross-session message
+        // theft. A row is only acked after its delivery (at-least-once). No
+        // claim is taken here: the loop claims each row just before its
+        // transport handoff (review round 1, H1/H2).
+        selection.rows = queue.select_for_targets(&targets, Some(session), request.limit)?;
+    }
+    selection.native_agents = native_agents;
+    selection.registered_agents = registered_agents;
+    // Wake the loop so the batch is delivered now, not after its idle sleep
+    // (up to 500 ms headless). One wake per selection: no spin.
+    if !selection.rows.is_empty() {
+        let _ = cas_factory::notify_daemon(&request.cas_dir);
+    }
+    Ok(selection)
+}
+
 /// Whether a completed harness turn is newer than the wake attempt that
 /// declined to interrupt it. Kept pure so timestamp ordering stays explicit
 /// and testable at the queue boundary.
@@ -3219,7 +3350,9 @@ impl FactoryDaemon {
     /// owns the read/ack race and one-shot marker; this daemon layer adds the
     /// live recipient harness and the authoritative delivery-state context.
     fn enqueue_delivery_stalled_bounces(&mut self, queue: &dyn cas_store::PromptQueueStore) {
-        let config = crate::config::Config::load(self.app.cas_dir()).unwrap_or_default();
+        // cas-d2a2: cached, reloaded only when the config file changes.
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        let config = self.queue_jobs.config(&cas_dir);
         let factory = config.factory();
         let candidates = match queue.delivery_stalled_candidates(
             &self.session_name,
@@ -3233,6 +3366,10 @@ impl FactoryDaemon {
                 return;
             }
         };
+        let decisions = self.message_attention_decisions(queue, &candidates);
+        let candidates: Vec<_> = candidates.into_iter()
+            .filter(|row| decisions.get(&row.id) == Some(&MessageAttention::Needed))
+            .collect();
 
         // cas-d9a8: the same scan already knows which supervisor-addressed
         // messages have gone unread past their threshold. Bouncing to the
@@ -3367,7 +3504,11 @@ impl FactoryDaemon {
             };
         let supervisor_name = self.app.supervisor_name().to_string();
         let now = chrono::Utc::now();
+        let decisions = self.message_attention_decisions(queue, &candidates);
         for queued in candidates {
+            if decisions.get(&queued.id) != Some(&MessageAttention::Needed) {
+                continue;
+            }
             let target = queued.target.as_str();
             if target == "supervisor" || target.eq_ignore_ascii_case(&supervisor_name) {
                 continue;
@@ -5803,16 +5944,21 @@ impl FactoryDaemon {
     /// busy, forever".
     fn recipient_tool_call_evidence(&self, pane_target: &str) -> ToolCallEvidence {
         let cas_root = self.app.cas_dir();
-        let Ok(resolved) = crate::cli::factory::wedged::resolve_worker(cas_root, pane_target)
-        else {
-            return ToolCallEvidence::Unknown;
-        };
-        let Some(path) = resolved.transcript_path.as_deref() else {
-            return ToolCallEvidence::Unknown;
-        };
-        ToolCallEvidence::from_transcript(
-            crate::cli::factory::wedged::transcript_has_in_flight_tool_call(path, resolved.cli),
-        )
+        // cas-d2a2: cached per pane; the transcript is re-read only when it
+        // changed, and its path is re-resolved at most every 2 s.
+        self.queue_jobs
+            .tool_call_probes
+            .probe(
+                pane_target,
+                Instant::now(),
+                || {
+                    crate::cli::factory::wedged::resolve_worker(cas_root, pane_target)
+                        .ok()
+                        .and_then(|resolved| Some((resolved.transcript_path?, resolved.cli)))
+                },
+                crate::cli::factory::wedged::transcript_has_in_flight_tool_call,
+            )
+            .map_or(ToolCallEvidence::Unknown, ToolCallEvidence::from_transcript)
     }
 
     /// Forward pending supervisor replies to the authenticated Commander hub
@@ -6021,29 +6167,81 @@ impl FactoryDaemon {
 
     /// Process prompt queue
     pub(super) async fn process_prompt_queue(&mut self) -> anyhow::Result<()> {
+        let Some(selection) = self.next_queue_selection() else {
+            return Ok(());
+        };
+        let result = self.deliver_queue_selection(selection).await;
+        // cas-d2a2 (spec §4.5): queue the settling stamp of every inject this
+        // pass made; it lands after that row's other stamps.
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        self.queue_jobs.settle_injects(&cas_dir);
+        self.queue_jobs.apply_completions();
+        result
+    }
+
+    /// Factory loop v2 C3 (cas-d2a2): the finished `QueueSelect`, or submit
+    /// the next one. On the daemon's lanes the selection lands on a later
+    /// call (the job's ready flag wakes the loop); inline it lands at once.
+    fn next_queue_selection(&mut self) -> Option<super::prompt_queue_jobs::QueueSelection> {
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        // A pass that returned early still owes its settling stamps.
+        self.queue_jobs.settle_injects(&cas_dir);
+        self.queue_jobs.apply_completions();
+        self.queue_jobs.expire_injects(&cas_dir, Instant::now());
+        if let Some(selection) = self.queue_jobs.take_selection() {
+            return Some(selection);
+        }
+        if self.queue_jobs.select_in_flight() {
+            return None;
+        }
+        let request = super::prompt_queue_jobs::QueueSelectRequest {
+            cas_dir,
+            session_name: self.session_name.clone(),
+            supervisor_name: self.app.supervisor_name().to_string(),
+            worker_names: self.app.worker_names().to_vec(),
+            dead_workers: self.dead_workers.clone(),
+            limit: 10,
+        };
+        self.queue_jobs.submit_select(request, |request, generation| {
+            let selection = run_queue_select(request, generation);
+            if selection.is_err() {
+                // A broken handle is reopened on the next selection.
+                super::prompt_queue_jobs::forget_job_thread_stores(&request.cas_dir);
+            }
+            selection
+        });
+        self.queue_jobs.apply_completions();
+        self.queue_jobs.take_selection()
+    }
+
+    /// Deliver one selected batch. Store reads that used to run here on
+    /// every pass (roster, retargeting, selection, claims) arrive with the
+    /// selection; wake and gate decisions stay on control.
+    async fn deliver_queue_selection(
+        &mut self,
+        selection: super::prompt_queue_jobs::QueueSelection,
+    ) -> anyhow::Result<()> {
         use cas_store::{EventStore, SqliteEventStore};
         use cas_types::{Event, EventEntityType, EventType};
 
         super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: roster"));
-        let queue = open_prompt_queue_store(self.app.cas_dir())?;
-
-        // Revalidate before watchdogs and roster selection: an old assignee
-        // may already have left the roster, but its task's notice is still live.
-        for id in queue.refresh_qa_rejection_targets(&self.session_name, None)? {
+        let queue = self.queue_jobs.store(self.app.cas_dir())?;
+        let super::prompt_queue_jobs::QueueSelection {
+            generation,
+            submitted_at: selection_submitted_at,
+            registered_agents,
+            retargeted_rows,
+            shut_down_recipients,
+            native_agents,
+            rows: prompts,
+        } = selection;
+        tracing::trace!(target: "cas::coordination", generation, rows = prompts.len(), "delivering a QueueSelect batch");
+        for id in retargeted_rows {
             self.forget_row_delivery_state(id);
         }
-        let registered_agents = open_agent_store(self.app.cas_dir())?.list(None)?;
-        let mut retired_candidates = registered_prompt_sweep_agents(&registered_agents, &self.session_name);
-        retired_candidates.extend(self.dead_workers.iter().cloned());
-        retired_candidates.sort();
-        retired_candidates.dedup();
-        for name in retired_candidates {
-            if worker_recipient_shut_down(&name, &self.dead_workers, self.app.worker_names(), &registered_agents) {
-                queue.cancel_unread_for_shutdown(&name, Some(&self.session_name),
-                    "wake withdrawn: recipient has shut down")?;
-                self.normal_delivery_probes.retain(|_, probe| probe.pane != name && probe.target != name);
-                self.urgent_wake_probes.retain(|_, probe| probe.pane != name && probe.target != name);
-            }
+        for name in &shut_down_recipients {
+            self.normal_delivery_probes.retain(|_, probe| probe.pane != *name && probe.target != *name);
+            self.urgent_wake_probes.retain(|_, probe| probe.pane != *name && probe.target != *name);
         }
 
         // cas-45c4 (GH #102): advance every pane's quiet streak once per poll,
@@ -6059,31 +6257,28 @@ impl FactoryDaemon {
         super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: commander mirror"));
         if self.last_commander_mirror_scan.is_none_or(|last| last.elapsed() >= Duration::from_secs(5)) {
             self.last_commander_mirror_scan = Some(std::time::Instant::now());
-            super::commander_mirror::scan_supervisor_replies(
-                self.app.cas_dir(),
-                self.app.project_path(),
-                &self.session_name,
-                queue.as_ref(),
-                &registered_agents,
-                &mut self.commander_mirror_state,
-            );
+            // cas-d2a2: transcript reads and mirror writes run as a job.
+            let cas_dir = self.app.cas_dir().to_path_buf();
+            let project_path = self.app.project_path().to_path_buf();
+            let session_name = self.session_name.clone();
+            let agents = registered_agents.clone();
+            self.queue_jobs.submit_mirror_scan(move |state| {
+                match super::prompt_queue_jobs::job_thread_prompt_queue(&cas_dir) {
+                    Ok(queue) => super::commander_mirror::scan_supervisor_replies(
+                        &cas_dir,
+                        &project_path,
+                        &session_name,
+                        queue.as_ref(),
+                        &agents,
+                        state,
+                    ),
+                    Err(error) => tracing::debug!(%error, "commander mirror scan skipped: queue store unavailable"),
+                }
+            });
         }
         super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: operator replies"));
         self.process_operator_replies(queue.as_ref())?;
 
-        // Native-extension agents consume their own queue rows. Excluding them
-        // from the daemon's target universe prevents this PTY/inbox processor
-        // from repeatedly selecting rows it deliberately cannot consume.
-        let native_agents: std::collections::HashSet<String> = registered_agents
-            .iter()
-            .filter(|agent| {
-                agent
-                    .metadata
-                    .get("native_extension")
-                    .is_some_and(|value| value == "true")
-            })
-            .map(|agent| agent.name.clone())
-            .collect();
         let registered_session_agents =
             registered_prompt_sweep_agents(&registered_agents, &self.session_name);
 
@@ -6092,11 +6287,6 @@ impl FactoryDaemon {
         // session running in the same project directory.
         let supervisor_name = self.app.supervisor_name().to_string();
         let worker_names = self.app.worker_names().to_vec();
-        // cas-73c8: include `director` so outbound replies to the permanent
-        // team director member are delivered (write_to_inbox / PTY), matching
-        // inbound director → agent delivery. Without this, messages queued
-        // to target=director sat forever while registration reported them
-        // as "not yet registered".
         let valid_target_names = prompt_poison_sweep_targets(
             &supervisor_name,
             &worker_names,
@@ -6164,56 +6354,6 @@ impl FactoryDaemon {
             }
         }
 
-        let targets: Vec<&str> = valid_targets
-            .iter()
-            .copied()
-            .filter(|target| !native_agents.contains(*target))
-            .collect();
-
-        // An all-native session has no rows for the PTY/inbox delivery path.
-        // Keep that intentional no-op at the caller boundary: the store rejects
-        // an empty target universe so accidental session-wide peeks fail loudly.
-        if targets.is_empty() {
-            return Ok(());
-        }
-
-        // cas-20ac: stale cleanup can expose many registration UUIDs for one
-        // logical worker. Collapse task-free death rows BEFORE the ordinary
-        // ten-row delivery batch is selected, otherwise each UUID steals a
-        // supervisor turn even though none carries work. The bounded scan is
-        // session/target isolated by the same store predicate as delivery.
-        super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: select"));
-        let death_candidates = queue.peek_for_targets(
-            &targets,
-            Some(&self.session_name),
-            crate::mcp::tools::service::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT,
-        )?;
-        let supervisor_queue = crate::store::open_supervisor_queue_store(self.app.cas_dir()).ok();
-        match crate::mcp::tools::service::orphan_recovery::coalesce_pending_worker_deaths(
-            queue.as_ref(),
-            supervisor_queue.as_deref(),
-            &death_candidates,
-        ) {
-            Ok(report) if report.duplicates > 0 => tracing::info!(
-                target: "cas::coordination",
-                stage = "worker_death_coalesced",
-                families = report.families,
-                duplicates = report.duplicates,
-                "cas-20ac: collapsed duplicate no-task worker deaths before supervisor delivery"
-            ),
-            Err(error) => tracing::warn!(
-                target: "cas::coordination",
-                stage = "worker_death_coalesce_failed",
-                %error,
-                "cas-20ac: duplicate worker-death coalescing failed; rows remain pending"
-            ),
-            _ => {}
-        }
-
-        // Peek first, only ack after successful injection to provide at-least-once delivery.
-        // Filter by targets AND session to prevent cross-session message theft.
-        let prompts = queue.peek_for_targets(&targets, Some(&self.session_name), 10)?;
-
         if !prompts.is_empty() {
             tracing::info!("Processing {} prompts from queue", prompts.len());
 
@@ -6221,12 +6361,10 @@ impl FactoryDaemon {
             // queue before the daemon picked it up. The gap between `now`
             // and `queued.created_at` is the queue→deliver latency, which
             // is what the P99 SLO targets. Logged at debug; enable via
-            // `RUST_LOG=cas::coordination=debug`.
-            // cas-2c5f: stamp selected_at so message_status can report the
-            // Selected stage (authoritative daemon observation).
+            // `RUST_LOG=cas::coordination=debug`. QueueSelect already stamped
+            // selected_at (cas-2c5f) in the selecting transaction.
             let now = chrono::Utc::now();
             for queued in &prompts {
-                let _ = queue.record_selected(queued.id);
                 let wait_ms = (now - queued.created_at).num_milliseconds();
                 tracing::debug!(
                     target: "cas::coordination",
@@ -6256,12 +6394,31 @@ impl FactoryDaemon {
         self.stall_nudge_gate_checks.retain(|_, (next, _, _)| next.elapsed().as_secs() < 300);
         for selected in prompts {
             super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: row"));
-            // The assignee may have changed while earlier rows were delivered.
+            // Review round 1, H2: the fresh per-row check stays (C3b moves it
+            // off the loop). The assignee may have changed while earlier
+            // rows were delivered, and a hook or poll may have taken the row
+            // since QueueSelect read it.
             for id in queue.refresh_qa_rejection_targets(&self.session_name, Some(selected.id))? {
                 self.forget_row_delivery_state(id);
             }
             let Some(queued) = queue.queued_prompt(selected.id)? else { continue };
             if queued.processed_at.is_some() { continue; }
+            // Spec §4.5 rule 2: a row whose earlier inject has not settled is
+            // not delivered again, even if a selection picked it again.
+            // cas-4272: a row whose terminal or delivered stamp has not landed
+            // is settled already, even if the re-read still shows it pending.
+            if self.queue_jobs.in_flight().holds_row(queued.id)
+                || self.queue_jobs.row_settling(queued.id, Instant::now())
+                || selection_submitted_at
+                    .is_some_and(|since| self.queue_jobs.stamped_since(queued.id, since))
+            {
+                tracing::debug!(
+                    target: "cas::coordination",
+                    message_id = queued.id,
+                    "row still in flight from an earlier inject; skipped this pass"
+                );
+                continue;
+            }
             let refreshed_agents;
             let current_agents = if queued.kind.as_deref() == Some("worker_stall_nudge") {
                 &registered_agents
@@ -6312,17 +6469,23 @@ impl FactoryDaemon {
                         );
                     }
                     super::delivery::ContextResetDelivery::NotReady => {
-                        let _ = queue.record_pending_reason(
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
                             queued.id,
-                            cas_store::PendingReason::GatedNotReady,
-                            Some("pane not ready for injection — context reset retries next tick"),
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::PendingReason { reason: cas_store::PendingReason::GatedNotReady, detail: (Some("pane not ready for injection — context reset retries next tick")).map(|detail| detail.to_string()) },
                         );
                     }
                     super::delivery::ContextResetDelivery::Unsupported { detail } => {
                         // Terminal: retrying cannot make an unsupported harness
                         // resettable, and leaving the row pending would wedge
                         // the queue behind an impossible command.
-                        let _ = queue.mark_dropped(queued.id, Some(&detail));
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
+                            queued.id,
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::Dropped { detail: (Some(&detail)).map(|detail| detail.to_string()) },
+                        );
                         tracing::warn!(
                             target: "cas::coordination",
                             stage = "context_reset_unsupported",
@@ -6333,10 +6496,11 @@ impl FactoryDaemon {
                         );
                     }
                     super::delivery::ContextResetDelivery::Failed { detail } => {
-                        let _ = queue.record_retry(
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
                             queued.id,
-                            cas_store::PendingReason::AdapterRetryable,
-                            Some(&detail),
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::Retry { reason: cas_store::PendingReason::AdapterRetryable, detail: (Some(&detail)).map(|detail| detail.to_string()) },
                         );
                     }
                 }
@@ -6493,7 +6657,12 @@ impl FactoryDaemon {
                             // name that says so. The worker has already been
                             // told (the guidance enqueue above succeeded), so
                             // the premise-expiry is recorded, not silent.
-                            let _ = queue.mark_superseded(queued.id, &detail);
+                            self.queue_jobs.stamp(
+                                self.app.cas_dir(),
+                                queued.id,
+                                &queued.target,
+                                super::prompt_queue_jobs::QueueStamp::Superseded { detail: (&detail).to_string() },
+                            );
                             continue;
                         }
                         Err(error) => {
@@ -6568,13 +6737,15 @@ impl FactoryDaemon {
                         // chatter. The name is now the honest one, and the
                         // detail says which task moved on — a terminal row has
                         // to be answerable for itself.
-                        let _ = queue.mark_superseded(
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
                             queued.id,
-                            &format!(
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::Superseded { detail: (&format!(
                                 "withdrawn before transport: {} left the status this \
                                  notification announces",
                                 envelope.task_id
-                            ),
+                            )).to_string() },
                         );
                         tracing::debug!(
                             prompt_id = queued.id,
@@ -6631,7 +6802,12 @@ impl FactoryDaemon {
                     "withdrawn before transport: assignment for {task_id} is stale because the task is {}",
                     status
                 );
-                let _ = queue.mark_superseded(queued.id, &detail);
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(),
+                    queued.id,
+                    &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::Superseded { detail: (&detail).to_string() },
+                );
                 self.forget_row_delivery_state(queued.id);
                 tracing::info!(
                     target: "cas::coordination",
@@ -6857,13 +7033,20 @@ impl FactoryDaemon {
                     // cas-ef14: the harness filed our copy but the pane has not
                     // spoken yet and the window is still open. Writing again
                     // would duplicate; consuming would repeat the silent stall.
-                    let _ = queue.record_pending_reason(
-                        queued.id,
-                        cas_store::PendingReason::GatedNotReady,
+                    // cas-d2a2: a QueueStamp on the writer; the pass moves on.
+                    let pending_detail: Option<&str> =
                         Some(
                             "inbox copy drained by the harness; awaiting evidence the recipient \
                              surfaced it as a turn",
-                        ),
+                        );
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
+                        queued.id,
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::PendingReason {
+                            reason: cas_store::PendingReason::GatedNotReady,
+                            detail: pending_detail.map(str::to_string),
+                        },
                     );
                     tracing::debug!(
                         target: "cas::coordination",
@@ -6966,19 +7149,28 @@ impl FactoryDaemon {
                 match decision {
                     ClaudeRedelivery::Deliver => {}
                     ClaudeRedelivery::Cooldown => {
-                        let _ = queue.record_pending_reason(
-                            queued.id,
-                            cas_store::PendingReason::GatedNotReady,
+                        // cas-d2a2: a QueueStamp on the writer; the pass moves on.
+                        let pending_detail: Option<&str> =
                             Some(
                                 "Claude inbox redelivery cooldown — exponential spacing protects the worker context",
-                            ),
+                            );
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
+                            queued.id,
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::PendingReason {
+                                reason: cas_store::PendingReason::GatedNotReady,
+                                detail: pending_detail.map(str::to_string),
+                            },
                         );
                         continue;
                     }
                     ClaudeRedelivery::StopAcknowledged => {
-                        let _ = queue.mark_suppressed(
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
                             queued.id,
-                            Some("Claude inbox notification already acknowledged by the recipient"),
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::Suppressed { detail: (Some("Claude inbox notification already acknowledged by the recipient")).map(|detail| detail.to_string()) },
                         );
                         self.forget_row_delivery_state(queued.id);
                         continue;
@@ -7075,9 +7267,8 @@ impl FactoryDaemon {
                     LifecycleRedelivery::Cooldown => {
                         // GatedNotReady: withheld by policy, not a failed
                         // attempt — it must not burn the row's retry budget.
-                        let _ = queue.record_pending_reason(
-                            queued.id,
-                            cas_store::PendingReason::GatedNotReady,
+                        // cas-d2a2: a QueueStamp on the writer; the pass moves on.
+                        let pending_detail: Option<&str> =
                             // cas-9e81: cas-ceae widened this cadence from
                             // supervisor lifecycle rows to ANY row already
                             // written to an inbox, but the operator-facing
@@ -7087,7 +7278,15 @@ impl FactoryDaemon {
                             // to do with. Same rule, honest label.
                             Some(
                                 "re-nudge cooldown — this row was already delivered this interval",
-                            ),
+                            );
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
+                            queued.id,
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::PendingReason {
+                                reason: cas_store::PendingReason::GatedNotReady,
+                                detail: pending_detail.map(str::to_string),
+                            },
                         );
                         tracing::debug!(
                             target: "cas::coordination",
@@ -7099,9 +7298,11 @@ impl FactoryDaemon {
                         continue;
                     }
                     LifecycleRedelivery::StopAcknowledged => {
-                        let _ = queue.mark_suppressed(
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
                             queued.id,
-                            Some("lifecycle notification already acknowledged by the recipient"),
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::Suppressed { detail: (Some("lifecycle notification already acknowledged by the recipient")).map(|detail| detail.to_string()) },
                         );
                         self.forget_row_delivery_state(queued.id);
                         tracing::info!(
@@ -7191,7 +7392,12 @@ impl FactoryDaemon {
                     "Dropping message from dead worker"
                 );
                 // cas-2c5f: not transport delivery — structured stage=dropped.
-                let _ = queue.mark_dropped(queued.id, Some("source worker is dead/shut down"));
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(),
+                    queued.id,
+                    &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::Dropped { detail: (Some("source worker is dead/shut down")).map(|detail| detail.to_string()) },
+                );
                 continue;
             }
 
@@ -7215,9 +7421,11 @@ impl FactoryDaemon {
                         "Suppressing duplicate idle message (rate-limited to 5min)"
                     );
                     // cas-2c5f: not transport delivery — structured stage=suppressed.
-                    let _ = queue.mark_suppressed(
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
                         queued.id,
-                        Some("duplicate idle message rate-limited (5min)"),
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::Suppressed { detail: (Some("duplicate idle message rate-limited (5min)")).map(|detail| detail.to_string()) },
                     );
                     continue;
                 }
@@ -7236,10 +7444,17 @@ impl FactoryDaemon {
             // non-blocking) reason so the distinction is visible without
             // changing the retry/ownership semantics at all.
             if target != "all_workers" && native_agents.contains(target.as_str()) {
-                let _ = queue.record_pending_reason(
+                // cas-d2a2: a QueueStamp on the writer; the pass moves on.
+                let pending_detail: Option<&str> =
+                    Some("native extension agent — delivered via its own polling API, not daemon PTY/inbox");
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(),
                     queued.id,
-                    cas_store::PendingReason::AwaitingDelivery,
-                    Some("native extension agent — delivered via its own polling API, not daemon PTY/inbox"),
+                    &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::PendingReason {
+                        reason: cas_store::PendingReason::AwaitingDelivery,
+                        detail: pending_detail.map(str::to_string),
+                    },
                 );
                 continue;
             }
@@ -7278,10 +7493,17 @@ impl FactoryDaemon {
                     // attempt: the daemon has not touched the transport yet.
                     // Keep the forensic reason without consuming the bounded
                     // retry budget or starting its age clock.
-                    let _ = queue.record_pending_reason(
+                    // cas-d2a2: a QueueStamp on the writer; the pass moves on.
+                    let pending_detail: Option<&str> =
+                        Some("pane not ready for injection");
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
                         queued.id,
-                        cas_store::PendingReason::GatedNotReady,
-                        Some("pane not ready for injection"),
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::PendingReason {
+                            reason: cas_store::PendingReason::GatedNotReady,
+                            detail: pending_detail.map(str::to_string),
+                        },
                     );
                     continue;
                 }
@@ -7373,17 +7595,17 @@ impl FactoryDaemon {
                 tracing::info!("all_workers target, workers: {:?}", workers);
                 let attempted = workers.len() as u32;
                 if attempted == 0 {
-                    let _ = queue.mark_broadcast_outcome(
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
                         queued.id,
-                        0,
-                        0,
-                        0,
-                        Some("no non-native workers for all_workers broadcast"),
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::BroadcastOutcome { attempted: 0, succeeded: 0, failed: 0, detail: (Some("no non-native workers for all_workers broadcast")).map(|detail| detail.to_string()) },
                     );
-                    let _ = queue.record_retry(
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
                         queued.id,
-                        cas_store::PendingReason::TargetUnavailable,
-                        Some("all_workers broadcast has no non-native recipients"),
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::Retry { reason: cas_store::PendingReason::TargetUnavailable, detail: (Some("all_workers broadcast has no non-native recipients")).map(|detail| detail.to_string()) },
                     );
                     continue;
                 }
@@ -7398,10 +7620,13 @@ impl FactoryDaemon {
                         fail_notes.push(format!("{name}: pane not ready"));
                         continue;
                     }
-                    if !queue.claim_recipient_transport(queued.id, name)? {
+                    // The claim is taken just before the handoff, as before C3;
+                    // its token lets the release drop only this claim.
+                    let Some(claim_token) = queue.claim_recipient_transport_token(queued.id, name)?
+                    else {
                         succeeded += 1;
                         continue;
-                    }
+                    };
                     super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: transport"));
                     let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent {
                         // cas-ab80: urgent Codex recipients still need the shared
@@ -7438,7 +7663,12 @@ impl FactoryDaemon {
                         .await
                     };
                     if !matches!(&inject_result, Ok(cas_mux::InjectOutcome::Delivered)) {
-                        queue.release_recipient_transport(queued.id, name)?;
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
+                            queued.id,
+                            name,
+                            super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token },
+                        );
                     }
                     match inject_result {
                         Ok(cas_mux::InjectOutcome::Delivered) => {
@@ -7547,12 +7777,13 @@ impl FactoryDaemon {
                     }
                 }
                 if succeeded == 0 {
-                    let _ = queue.record_retry(
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
                         queued.id,
-                        cas_store::PendingReason::AdapterRetryable,
-                        detail
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::Retry { reason: cas_store::PendingReason::AdapterRetryable, detail: (detail
                             .as_deref()
-                            .or(Some("all_workers broadcast reached zero recipients")),
+                            .or(Some("all_workers broadcast reached zero recipients"))).map(|detail| detail.to_string()) },
                     );
                 }
                 // Do not fall through to mark_transport_delivered — outcome already stamped.
@@ -7571,10 +7802,22 @@ impl FactoryDaemon {
                 } else {
                     target.clone()
                 };
-                if !queue.claim_recipient_transport(queued.id, &queued.target)? {
-                    // A hook/poll may have won after this pass peeked the row.
-                    continue;
-                }
+                // cas-d2a2 (spec §4.5 rule 2; review round 1, H2): the claim is
+                // taken here, just before the handoff, as before C3. It is the
+                // fresh check: not claimed means a hook/poll, or an earlier
+                // handoff that keeps its claim, holds the row. From here the
+                // row is in flight, holding the claim's token, until its
+                // stamps land.
+                let inject_generation = match self.queue_jobs.admit(
+                    queued.id,
+                    &queued.target,
+                    Instant::now(),
+                    || Ok(queue.claim_recipient_transport_token(queued.id, &queued.target)?),
+                )? {
+                    super::prompt_queue_jobs::Admission::Inject { generation } => generation,
+                    super::prompt_queue_jobs::Admission::InFlight
+                    | super::prompt_queue_jobs::Admission::NotClaimed => continue,
+                };
                 let inject_result: anyhow::Result<super::delivery::NudgeReport> = if queued.urgent {
                     // Urgent: interrupt-and-redirect by name via the PTY,
                     // bypassing the inbox even in teams mode. An attached
@@ -7776,7 +8019,18 @@ impl FactoryDaemon {
                                     declines,
                                     claude_inbox_target,
                                 );
-                                queue.release_recipient_transport(queued.id, &queued.target)?;
+                                self.queue_jobs.release_inject_claim(
+                                    self.app.cas_dir(),
+                                    queued.id,
+                                    &queued.target,
+                                );
+                                // Nothing was sent: the inject's outcome is
+                                // that it never happened.
+                                self.queue_jobs.record_outcome(
+                                    queued.id,
+                                    &queued.target,
+                                    inject_generation,
+                                );
                                 continue;
                             }
                             Ok(_) => {}
@@ -7831,19 +8085,18 @@ impl FactoryDaemon {
                 // arm below — including the failure arms, which are exactly the
                 // ones an operator debugging a silent worker needs to read.
                 // Best-effort: a delivery is never failed over observability.
+                self.queue_jobs
+                    .record_outcome(queued.id, &queued.target, inject_generation);
                 if let Ok(ref report) = inject_result {
-                    if let Err(error) = queue.record_wake_attempt(
+                    self.queue_jobs.stamp(
+                        self.app.cas_dir(),
                         queued.id,
-                        report.wake,
-                        report.wake_detail.as_deref(),
-                    ) {
-                        tracing::debug!(
-                            target: "cas::coordination",
-                            message_id = queued.id,
-                            %error,
-                            "cas-7a01: could not persist wake attempt"
-                        );
-                    }
+                        &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::WakeAttempt {
+                            attempt: report.wake,
+                            detail: report.wake_detail.clone(),
+                        },
+                    );
                 }
                 let pass_wake = inject_result
                     .as_ref()
@@ -7851,7 +8104,11 @@ impl FactoryDaemon {
                     .unwrap_or_default();
                 let inject_result = inject_result.map(|report| report.outcome);
                 if !matches!(&inject_result, Ok(cas_mux::InjectOutcome::Delivered)) {
-                    queue.release_recipient_transport(queued.id, &queued.target)?;
+                    self.queue_jobs.release_inject_claim(
+                        self.app.cas_dir(),
+                        queued.id,
+                        &queued.target,
+                    );
                 }
                 match inject_result {
                     Ok(cas_mux::InjectOutcome::Delivered) => {
@@ -7922,10 +8179,11 @@ impl FactoryDaemon {
                             target_agent = %pane_target,
                             "prompt_queue message remains durable pending a clean composer"
                         );
-                        let _ = queue.record_retry(
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(),
                             queued.id,
-                            cas_store::PendingReason::GatedNotReady,
-                            Some("operator composer is dirty"),
+                            &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::Retry { reason: cas_store::PendingReason::GatedNotReady, detail: (Some("operator composer is dirty")).map(|detail| detail.to_string()) },
                         );
                         if let Some(ref store) = event_store {
                             record_injection(
@@ -7973,10 +8231,11 @@ impl FactoryDaemon {
                                     // next tick.
                                     tracing::error!("Failed to inject to '{}': {}", pane_target, e);
                                     // cas-2c5f: adapter failure leaves row pending for retry.
-                                    let _ = queue.record_retry(
+                                    self.queue_jobs.stamp(
+                                        self.app.cas_dir(),
                                         queued.id,
-                                        cas_store::PendingReason::AdapterRetryable,
-                                        Some(&e.to_string()),
+                                        &queued.target,
+                                        super::prompt_queue_jobs::QueueStamp::Retry { reason: cas_store::PendingReason::AdapterRetryable, detail: (Some(&e.to_string())).map(|detail| detail.to_string()) },
                                     );
                                     if let Some(ref store) = event_store {
                                         record_injection(
@@ -7993,10 +8252,11 @@ impl FactoryDaemon {
                                     // Pane missing but the target is still a current
                                     // session member (mid-spawn) — bare retry.
                                     // cas-2c5f: known target still spawning — retryable unavail.
-                                    let _ = queue.record_retry(
+                                    self.queue_jobs.stamp(
+                                        self.app.cas_dir(),
                                         queued.id,
-                                        cas_store::PendingReason::TargetUnavailable,
-                                        Some("pane missing; target is current session member"),
+                                        &queued.target,
+                                        super::prompt_queue_jobs::QueueStamp::Retry { reason: cas_store::PendingReason::TargetUnavailable, detail: (Some("pane missing; target is current session member")).map(|detail| detail.to_string()) },
                                     );
                                 }
                             }
@@ -8014,11 +8274,13 @@ impl FactoryDaemon {
                                      message will not be delivered"
                                 );
                                 // cas-2c5f: not transport delivery — structured stage=abandoned.
-                                let _ = queue.mark_abandoned(
+                                self.queue_jobs.stamp(
+                                    self.app.cas_dir(),
                                     queued.id,
-                                    Some(&format!(
+                                    &queued.target,
+                                    super::prompt_queue_jobs::QueueStamp::Abandoned { detail: (Some(&format!(
                                         "target '{pane_target}' not found in current session"
-                                    )),
+                                    ))).map(|detail| detail.to_string()) },
                                 );
                                 // cas-ceae: terminal row — drop its clocks.
                                 // cas-ac7e (GH #130): go through the helper
@@ -8085,13 +8347,14 @@ impl FactoryDaemon {
                 // through the interrupt. Hold the row pending; the probe
                 // resolves it on a later poll, and the re-nudge cadence gate
                 // bounds any re-interrupt to one per interval.
-                let _ = queue.record_pending_reason(
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(),
                     queued.id,
-                    cas_store::PendingReason::GatedNotReady,
-                    Some(
+                    &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::PendingReason { reason: cas_store::PendingReason::GatedNotReady, detail: (Some(
                         "urgent redirect typed into the pane; awaiting evidence the \
                          interrupt granted a turn",
-                    ),
+                    )).map(|detail| detail.to_string()) },
                 );
                 self.lifecycle_redelivery_attempts
                     .entry(queued.id)
@@ -8112,13 +8375,14 @@ impl FactoryDaemon {
                 // later tick, with a clean composer / quiescent pane / free
                 // wake slot, can actually deliver the turn. The repeat inbox
                 // write is content-deduped, so this cannot double-post.
-                let _ = queue.record_pending_reason(
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(),
                     queued.id,
-                    cas_store::PendingReason::GatedNotReady,
-                    Some(
+                    &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::PendingReason { reason: cas_store::PendingReason::GatedNotReady, detail: (Some(
                         "wake deferred — pane busy, tool call in flight, operator composing, \
                          or wake slot taken",
-                    ),
+                    )).map(|detail| detail.to_string()) },
                 );
                 tracing::info!(
                     target: "cas::coordination",
@@ -8229,18 +8493,22 @@ impl FactoryDaemon {
                 // plus the re-nudge cadence still cover the deferred path. The
                 // recipient's unread view was never the right place to hide a
                 // delivery failure.
-                self.record_transport_receipt_durable(&*queue, queued.id, &queued.target);
-                // cas-2c5f: authoritative transport handoff only.
-                // GH #1165: the bytes are already in the pane, so a busy store
-                // defers this stamp to the store worker instead of losing it.
-                if super::store_worker::mark_transport_delivered(self.app.cas_dir(), queued.id)
-                    == super::store_worker::Persisted::Dropped
-                {
-                    tracing::error!(
-                        "Failed to mark prompt {} as transport-delivered",
-                        queued.id
-                    );
-                }
+                // cas-d2a2: both stamps are QueueStamp jobs on the writer, in
+                // order on this row's key. cas-2c5f: authoritative transport
+                // handoff only. GH #1165: the bytes are already in the pane,
+                // so the writer retries a busy store instead of losing it.
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(),
+                    queued.id,
+                    &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::TransportReceipt,
+                );
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(),
+                    queued.id,
+                    &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::TransportDelivered,
+                );
             }
         }
 

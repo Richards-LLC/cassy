@@ -6980,6 +6980,7 @@ impl CasCore {
         // caller needs before its MCP deadline, and the full narrative is
         // appended from a detached task after that row commits.
         let mut deferred_epic_override_note = None;
+        let mut epic_issue_warning = String::new();
         if task.task_type == TaskType::Epic {
             if let Some(ref owner) = task.epic_verification_owner {
                 let caller_id = self.get_agent_id().ok();
@@ -7372,6 +7373,15 @@ impl CasCore {
                     ));
                 }
             }
+            // cas-dd56: name the issues the children reference that are
+            // still open, so a shipped epic does not leave them behind.
+            // Bounded and offline-tolerant; it never blocks the close.
+            epic_issue_warning = crate::issue_reconcile::epic_open_issue_warning(
+                &subtasks,
+                crate::github_issue_attach::default_repo_for(&self.cas_root).as_deref(),
+                &crate::issue_reconcile::GhIssueStates::new(crate::issue_reconcile::GH_BUDGET),
+            )
+            .unwrap_or_default();
         }
 
         // cas-95ce / cas-4b3f / cas-cf64: per-task close-time merge-state
@@ -10388,6 +10398,7 @@ impl CasCore {
                 "\n\nReceipt: epic close committed. The full stranded-branch override narrative is queued as a durable decision note.",
             );
         }
+        receipt.push_str(&epic_issue_warning);
         if used_deprecated_override_alias {
             receipt.push_str("\n\n");
             receipt.push_str(DEPRECATED_BYPASS_WARNING);

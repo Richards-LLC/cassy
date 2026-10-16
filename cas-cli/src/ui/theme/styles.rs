@@ -159,7 +159,7 @@ impl Styles {
             text_secondary: Style::default().fg(p.text_secondary),
             text_muted: Style::default().fg(p.text_muted),
             text_disabled: Style::default().fg(p.text_disabled),
-            text_accent: Style::default().fg(p.accent),
+            text_accent: Style::default().fg(p.text_accent),
             text_bold: Style::default()
                 .fg(p.text_primary)
                 .add_modifier(Modifier::BOLD),
@@ -168,10 +168,10 @@ impl Styles {
                 .add_modifier(Modifier::BOLD),
 
             // Status text
-            text_success: Style::default().fg(p.status_success),
-            text_warning: Style::default().fg(p.status_warning),
-            text_error: Style::default().fg(p.status_error),
-            text_info: Style::default().fg(p.status_info),
+            text_success: Style::default().fg(p.text_success),
+            text_warning: Style::default().fg(p.text_warning),
+            text_error: Style::default().fg(p.text_error),
+            text_info: Style::default().fg(p.text_info),
 
             // Backgrounds
             bg_primary: Style::default().bg(p.bg_primary),
@@ -202,11 +202,15 @@ impl Styles {
                 .fg(p.text_primary)
                 .add_modifier(Modifier::BOLD),
             header_subtitle: Style::default().fg(p.text_secondary),
-            section_title: Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+            section_title: Style::default()
+                .fg(p.text_accent)
+                .add_modifier(Modifier::BOLD),
 
             // Tabs
             tab_inactive: Style::default().fg(p.text_muted),
-            tab_active: Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+            tab_active: Style::default()
+                .fg(p.text_accent)
+                .add_modifier(Modifier::BOLD),
 
             // Status bar
             status_bar: Style::default().fg(p.text_muted),
@@ -216,7 +220,7 @@ impl Styles {
 
             // Input
             input_normal: Style::default().fg(p.text_primary),
-            input_focused: Style::default().fg(p.accent),
+            input_focused: Style::default().fg(p.text_accent),
             input_placeholder: Style::default().fg(p.text_muted),
 
             // Scores

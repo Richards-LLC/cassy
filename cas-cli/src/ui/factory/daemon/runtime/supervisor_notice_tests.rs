@@ -9,9 +9,9 @@ fn cas_5c2c_round2_sessionless_owner_receives_lifecycle() {
         prepare_task_lifecycle_outbox,
     };
     let home = tempfile::TempDir::new().unwrap();
-    let _env = crate::test_support::TestEnvGuard::with_vars(&[
-        ("HOME", home.path().to_str().unwrap()),
-        ("CAS_FACTORY_SESSION", "unstamped-owner-session"),
+    let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[
+        ("HOME", Some(home.path().to_str().unwrap())),
+        ("CAS_FACTORY_SESSION", None),
     ]);
     let temp = tempfile::TempDir::new().unwrap();
     let root = crate::store::init_cas_dir(temp.path()).unwrap();
@@ -22,6 +22,7 @@ fn cas_5c2c_round2_sessionless_owner_receives_lifecycle() {
         AgentRole::Supervisor,
     );
     agents.register(&owner).unwrap();
+    assert!(agents.get(&owner.id).unwrap().factory_session.is_none());
     let mut worker = Agent::new_with_role("worker".into(), "worker".into(), AgentRole::Worker);
     worker.factory_session = Some("unstamped-owner-session".into());
     agents.register(&worker).unwrap();

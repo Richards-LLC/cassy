@@ -67,6 +67,15 @@ pub(crate) fn reconcile_service_due(
         .map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn cas_c423_empty_reconciliation_needs_no_registration_or_cloud_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(super::reconcile_due(root.path()).unwrap(), 0);
+    }
+}
+
 #[cfg(feature = "mcp-proxy")]
 struct DaemonVioletResolver {
     runtime: std::sync::Mutex<tokio::runtime::Runtime>,

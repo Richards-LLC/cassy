@@ -397,6 +397,8 @@ fn peer(name: &str, machine: &str, live: bool) -> Peer {
         heartbeat_age_secs: if live { 5 } else { PEER_LIVE_SECS + 1 },
         live,
         user_id: None,
+        owner: None,
+        own: None,
     }
 }
 

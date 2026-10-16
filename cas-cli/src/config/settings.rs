@@ -10,6 +10,33 @@ pub enum SlackTransport {
     Any,
 }
 
+/// cas-d58d: which same-repo peer supervisors a project lists and messages.
+/// `team` (the default) keeps teammates' supervisors on a shared team project,
+/// each labelled with its owner; `own` admits only the caller's own account.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SameRepoScope {
+    #[default]
+    Team,
+    Own,
+}
+
+impl SameRepoScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Team => "team",
+            Self::Own => "own",
+        }
+    }
+}
+
+/// `[peers]` — same-repo peer supervisor policy (cas-d58d).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PeersConfig {
+    #[serde(default)]
+    pub same_repo_scope: SameRepoScope,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SlackConfig {
     #[serde(default)]

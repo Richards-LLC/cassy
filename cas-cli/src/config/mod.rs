@@ -152,6 +152,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slack: Option<SlackConfig>,
 
+    /// `[peers]` — same-repo peer supervisor scope (cas-d58d).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peers: Option<PeersConfig>,
+
     /// `[release]` — operator policy for release-note routing (cas-37f6).
     /// Currently the account allowlist consulted before the one-shot
     /// `claude -p` route documented by the `cli-routing` skill. Absent by

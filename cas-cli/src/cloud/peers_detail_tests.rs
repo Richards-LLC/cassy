@@ -164,6 +164,7 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
         .metadata
         .insert("focus".into(), format!("\u{1b}[31m\n{}", "界".repeat(100)));
     let report = PeerReport {
+        hidden_peers: 0,
         limitations: Vec::new(),
         observed_at: Utc::now(),
         cloud_presence: None,
@@ -249,6 +250,7 @@ fn cas_559c_missing_account_identity_never_means_zero_claims() {
     let agents = vec![agent("sup", "supervisor", "factory-b", "beta", REPO, 1)];
     let peers = peers::repo_peers(&agents, REPO, &[], None, Utc::now());
     let report = PeerReport {
+        hidden_peers: 0,
         limitations: Vec::new(),
         observed_at: Utc::now(),
         cloud_presence: None,
@@ -350,6 +352,7 @@ fn cas_a81c_claim_copy_uses_scoped_plain_ids_owner_names_and_missing_title_reaso
         lease(&foreign_key, owner_id, LeaseStatus::Active, 600),
     ];
     let report = PeerReport {
+        hidden_peers: 0,
         limitations: Vec::new(),
         observed_at: Utc::now(),
         cloud_presence: None,

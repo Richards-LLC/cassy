@@ -33,6 +33,9 @@ pub const META_FOCUS: &str = "focus";
 pub const META_FACTORY_SESSION: &str = "factory_session";
 /// Metadata key carrying the machine's hostname, for display.
 pub const META_HOSTNAME: &str = "hostname";
+/// Metadata key carrying the email of the Cassy Cloud user that registered
+/// the agent (cas-d58d), so a peer can be labelled with its owner.
+pub const META_OWNER: &str = "owner";
 /// Metadata key carrying the branch checked out where the agent works
 /// (cas-f707). Optional; empty when unknown or detached.
 pub const META_BRANCH: &str = "branch";
@@ -63,6 +66,14 @@ pub struct Peer {
     /// whose user is the caller's own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
+    /// Email of the registering user, when the registration carried it
+    /// (cas-d58d).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Whether the caller's own account registered this supervisor:
+    /// `None` when either account is unknown (cas-d58d).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub own: Option<bool>,
 }
 
 impl Peer {
@@ -198,7 +209,90 @@ fn supervisor_peer(agent: &AgentInfo, now: DateTime<Utc>) -> Option<Peer> {
             .map(str::trim)
             .filter(|user| !user.is_empty())
             .map(str::to_string),
+        owner: agent_meta(agent, META_OWNER),
+        own: None,
     })
+}
+
+/// Mark each peer as the viewer's own or another user's (cas-d58d). A peer
+/// stays unmarked when either account is unknown.
+pub fn mark_own(peers: &mut [Peer], viewer_user_id: Option<&str>) {
+    for peer in peers {
+        peer.own = viewer_user_id
+            .zip(peer.user_id.as_deref())
+            .map(|(viewer, owner)| viewer == owner);
+    }
+}
+
+/// Split marked peers by the project's same-repo scope (cas-d58d): `team`
+/// keeps all of them; `own` keeps only the viewer's own and returns the rest
+/// (another user's, or an account that cannot be told) as hidden.
+pub fn apply_same_repo_scope(
+    peers: Vec<Peer>,
+    scope: crate::config::SameRepoScope,
+) -> (Vec<Peer>, Vec<Peer>) {
+    match scope {
+        crate::config::SameRepoScope::Team => (peers, Vec::new()),
+        crate::config::SameRepoScope::Own => {
+            peers.into_iter().partition(|peer| peer.own == Some(true))
+        }
+    }
+}
+
+/// The project's `peers.same_repo_scope` (default `team`).
+pub fn same_repo_scope(cas_root: &Path) -> crate::config::SameRepoScope {
+    crate::config::Config::load(cas_root)
+        .ok()
+        .and_then(|config| config.peers)
+        .map(|peers| peers.same_repo_scope)
+        .unwrap_or_default()
+}
+
+/// Who owns `peer`, for display (cas-d58d): `you`, the owner's email, a
+/// short user id, or `unknown account`.
+pub fn owner_label(peer: &Peer) -> String {
+    if peer.own == Some(true) {
+        return "you".to_string();
+    }
+    let who = peer
+        .owner
+        .clone()
+        .or_else(|| {
+            peer.user_id
+                .as_deref()
+                .map(|id| format!("user {}", id.chars().take(8).collect::<String>()))
+        })
+        .unwrap_or_else(|| "unknown account".to_string());
+    if peer.own == Some(false) {
+        format!("teammate {who}")
+    } else {
+        who
+    }
+}
+
+/// The account viewing peers (cas-d58d): the user of the caller's own
+/// registered row, else the single user of `own_agents` (an agent list asked
+/// for without a project, which the cloud answers with the token's own
+/// agents only). Never inferred from a project-visible row of another agent.
+pub fn viewer_user_id(
+    agents: &[AgentInfo],
+    self_id: Option<&str>,
+    own_agents: impl FnOnce() -> Option<Vec<AgentInfo>>,
+) -> Option<String> {
+    let user = |agent: &AgentInfo| {
+        agent
+            .user_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|user| !user.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(own) = self_id.and_then(|id| agents.iter().find(|agent| agent.id == id)) {
+        return user(own);
+    }
+    let own_agents = own_agents()?;
+    let users: std::collections::BTreeSet<_> = own_agents.iter().filter_map(user).collect();
+    (users.len() == 1).then(|| users.into_iter().next()).flatten()
 }
 
 fn sort_peers(peers: &mut [Peer]) {
@@ -284,16 +378,72 @@ pub fn render_peers(canonical_id: &str, peers: &[Peer]) -> String {
     }
     for peer in peers {
         let state = if peer.live { "live" } else { "stale" };
+        // cas-d58d: every peer names its owning account, on its own line so
+        // a long email never pushes the session line past 80 columns.
         out.push_str(&format!(
-            "  {} [{state}] on {}, heartbeat {} ago\n    session {} | focus {}\n",
+            "  {} [{state}] on {}, heartbeat {} ago\n    owner {}\n    session {} | focus {}\n",
             peer.name,
             peer.machine,
             age(peer.heartbeat_age_secs),
+            owner_label(peer),
             peer.session.as_deref().unwrap_or("-"),
             peer.focus.as_deref().unwrap_or("-"),
         ));
     }
     out
+}
+
+/// Where a plain same-repo message target goes (cas-d58d).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SameRepoTarget<'a> {
+    /// A listed peer of this repo: deliver to it.
+    Peer(&'a Peer),
+    /// Another account's supervisor that `peers.same_repo_scope = own` hid:
+    /// refuse with this message.
+    Refused(String),
+    /// No same-repo peer of that name: try other routes.
+    NotFound,
+}
+
+/// Resolve `target` among the listed peers, then among the ones the `own`
+/// scope hid, so a hidden teammate is refused by name.
+pub fn resolve_same_repo_target<'a>(
+    peers: &'a [Peer],
+    hidden: &[Peer],
+    target: &str,
+) -> Result<SameRepoTarget<'a>, String> {
+    if let Some(peer) = crate::cloud::peer_mailbox::resolve_peer_target(peers, target)? {
+        return Ok(SameRepoTarget::Peer(peer));
+    }
+    Ok(match crate::cloud::peer_mailbox::resolve_peer_target(hidden, target) {
+        Ok(Some(other)) => SameRepoTarget::Refused(format!(
+            "'{target}' is {}@{}, a supervisor of {} (another Cassy Cloud account). This \
+             project's peers.same_repo_scope is own, so only your own supervisors are \
+             messaged. Nothing was sent.",
+            other.name,
+            other.machine,
+            owner_label(other)
+        )),
+        // Ambiguous among hidden supervisors is still another account's.
+        Err(_) => SameRepoTarget::Refused(format!(
+            "'{target}' names supervisors of other Cassy Cloud accounts. This project's \
+             peers.same_repo_scope is own, so only your own supervisors are messaged. \
+             Nothing was sent."
+        )),
+        Ok(None) => SameRepoTarget::NotFound,
+    })
+}
+
+/// The note under a same-repo list whose `own` scope hid other accounts'
+/// supervisors (cas-d58d). Empty when nothing was hidden.
+pub fn render_hidden_note(hidden: usize) -> String {
+    if hidden == 0 {
+        return String::new();
+    }
+    crate::cloud::presence::wrap_line(&format!(
+        "  {hidden} supervisor{} of other accounts hidden: peers.same_repo_scope is own",
+        if hidden == 1 { "" } else { "s" }
+    ))
 }
 
 /// Per-request cap for a peer lookup; status views must not hang on the cloud.
@@ -302,10 +452,14 @@ pub const DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// Result of a peer lookup for one project.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerDiscovery {
-    /// Peers of `canonical_id` (possibly none).
+    /// Peers of `canonical_id` (possibly none), each marked as the
+    /// caller's own or another user's.
     Found {
         canonical_id: String,
         peers: Vec<Peer>,
+        /// Supervisors the `own` scope excluded (cas-d58d), so a send to one
+        /// can be refused by name rather than falling through.
+        hidden: Vec<Peer>,
     },
     /// Not logged in to Cassy Cloud: cross-machine peers are unknowable.
     NotLoggedIn,
@@ -350,15 +504,34 @@ pub fn discover_peers(
         .into_iter()
         .chain(std::iter::once(canonical_id.clone()))
         .collect::<Vec<_>>();
-    let mut peers = crate::cloud::CloudCoordinator::new(config)?
+    // cas-f707: ask the cloud for this project (petra-stella-cloud#151).
+    let agents = crate::cloud::CloudCoordinator::new(config.clone())?
         .with_timeout(DISCOVERY_TIMEOUT)
-        // cas-f707: ask the cloud for this project (petra-stella-cloud#151).
         .with_canonical_id(Some(canonical_id.clone()))
-        .list_repo_peers(&canonical_id, &alias_class, self_id, Utc::now())?;
+        .list_agent_infos()?;
+    let mut peers = repo_peers(&agents, &canonical_id, &alias_class, self_id, Utc::now());
     exclude_project_agents(cas_root, &mut peers)?;
+    // cas-d58d: label each peer with its account; the project's scope may
+    // keep only the caller's own.
+    // The token's own agent list is asked for only when it can decide
+    // something: a peer that carries an account.
+    let any_account = peers.iter().any(|peer| peer.user_id.is_some());
+    let viewer = viewer_user_id(&agents, self_id, || {
+        if !any_account {
+            return None;
+        }
+        crate::cloud::CloudCoordinator::new(config)
+            .ok()?
+            .with_timeout(DISCOVERY_TIMEOUT)
+            .list_agent_infos()
+            .ok()
+    });
+    mark_own(&mut peers, viewer.as_deref());
+    let (peers, hidden) = apply_same_repo_scope(peers, same_repo_scope(cas_root));
     Ok(PeerDiscovery::Found {
         canonical_id,
         peers,
+        hidden,
     })
 }
 
@@ -594,7 +767,12 @@ fn peers_discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
         Ok(PeerDiscovery::Found {
             canonical_id,
             peers,
-        }) => render_peers(&canonical_id, &peers),
+            hidden,
+        }) => format!(
+            "{}{}",
+            render_peers(&canonical_id, &peers),
+            render_hidden_note(hidden.len())
+        ),
         Ok(PeerDiscovery::NotLoggedIn) => crate::cloud::presence::wrap_line(
             "Peers: not logged in to Cassy Cloud, so supervisors on other machines are \
              unknown (`cas login`).",
@@ -744,3 +922,7 @@ fn ancestor_pids(depth: usize) -> Vec<u32> {
 #[cfg(test)]
 #[path = "peers_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "peers_scope_tests.rs"]
+mod scope_tests;

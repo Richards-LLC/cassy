@@ -27,6 +27,10 @@ impl Config {
                 self.get("slack.transport").unwrap(),
             ),
             (
+                "peers.same_repo_scope".to_string(),
+                self.get("peers.same_repo_scope").unwrap(),
+            ),
+            (
                 "slack.wake_enabled".to_string(),
                 self.get("slack.wake_enabled").unwrap(),
             ),

@@ -41,6 +41,26 @@ and record it with an epic split, which both databases enforce.
 [petra-stella-cloud#155](https://github.com/Richards-LLC/petra-stella-cloud/issues/155)
 tracks claims across team accounts.
 
+**Whose supervisors you see.** Every peer names its owning account: `owner
+you` for your own supervisors, `owner teammate <email>` for another member's
+(`cas peers` shows the same as `Account …`). A shared team project lists
+teammates' supervisors by default. To keep this project to your own account,
+the operator runs:
+
+```bash
+cas config set peers.same_repo_scope own
+```
+
+With `own`, the peer list, `cas peers` and plain-name messages reach only your
+own supervisors. Other accounts' supervisors are counted (`1 supervisor of
+other accounts hidden: peers.same_repo_scope is own`), and a message or reply
+to one is refused by name with `Nothing was sent.` The default is `team`.
+Changing the key is operator-only. Messages to supervisors of your other
+projects are always limited to your own account, whatever this key says.
+Cassy enforces `own` on this client; the cloud still lets a teammate on the
+team project message you
+([petra-stella-cloud#168](https://github.com/Richards-LLC/petra-stella-cloud/issues/168)).
+
 **Opting out.** A project that sets `cloud.auto_sync = false` does not register
 its agents, so their names, hostnames and branches stay on the machine. Its
 peers section then opens with
@@ -69,6 +89,7 @@ Cloud presence: registered (focus -, branch main, registered 3s ago)
 Peers (github.com/petrastella-live-check/qa-b9d2-29dfcb, via Cassy
   Cloud):
   qa-6f85-b-29dfcb [live] on soundwave, heartbeat 3s ago
+    owner you
     session qa6f85-b-29dfcb | focus -
 Peer mailbox: receiving.
 ```
@@ -85,6 +106,7 @@ For a peer's claims, workers and branches, run `cas peers --detail`, or
 [OK] 1 peer supervisor | 1 live
 Repo github.com/petrastella-live-check/qa-7e32-b251eb
 qa7e32-b-b251eb [live]
+  Account you
   Machine soundwave
   Session q7e32b-b251eb
   Focus   cas-3775

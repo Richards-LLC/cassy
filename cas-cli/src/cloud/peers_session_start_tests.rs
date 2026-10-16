@@ -145,7 +145,7 @@ async fn cas_97ff_one_live_two_stale_names_the_live_peer_and_counts_stale() {
         .unwrap_or_else(|| panic!("live peer row: {full}"));
     // The heartbeat is read at lookup time: 12s old, plus request latency.
     assert!(row.contains("heartbeat 1") && row.contains("s ago"), "{row}");
-    for expected in ["on beta", "focus cas-epic", "3 claimed tasks"] {
+    for expected in ["on beta", ", owner ", "focus cas-epic", "3 claimed tasks"] {
         assert!(row.contains(expected), "{expected:?} missing from {row:?}");
     }
     assert!(full.contains("2 stale"), "{full}");

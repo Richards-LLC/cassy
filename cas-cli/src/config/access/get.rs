@@ -33,6 +33,14 @@ impl Config {
                 }
                 .to_string(),
             ),
+            "peers.same_repo_scope" => Some(
+                self.peers
+                    .as_ref()
+                    .map(|peers| peers.same_repo_scope)
+                    .unwrap_or_default()
+                    .as_str()
+                    .to_string(),
+            ),
             "slack.wake_enabled" => Some(
                 self.slack
                     .as_ref()

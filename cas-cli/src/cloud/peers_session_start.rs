@@ -112,10 +112,12 @@ pub fn render_session_start_peers(report: &PeerReport, tool_prefix: &str) -> Opt
     let mut out = String::from(HEADING);
     for detail in report.peers.iter().filter(|p| p.supervisor.live).take(SESSION_START_PEER_ROWS) {
         let peer = &detail.supervisor;
+        // cas-d58d: name the account each peer runs as.
         out.push_str(&format!(
-            "\n- {} on {}: heartbeat {}s ago, focus {}, {}",
+            "\n- {} on {}, owner {}: heartbeat {}s ago, focus {}, {}",
             clean(&peer.name, FIELD_MAX_CHARS),
             clean(&peer.machine, FIELD_MAX_CHARS),
+            clean(&super::peers::owner_label(peer), FIELD_MAX_CHARS),
             peer.heartbeat_age_secs,
             clean(peer.focus.as_deref().unwrap_or("none"), FIELD_MAX_CHARS),
             claims(detail),

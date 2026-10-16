@@ -26,6 +26,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Peer mail stands out** — Was: replies from other supervisors were buried
   among system notices. → Now: peer and operator messages lead the inbox, and
   notices about workers that have already ended fold into one digest row.
+- **Teammates' claims** — Was: work claimed by a teammate on another account
+  showed only "claims not visible". → Now: peer details show those claims with
+  their owner, and starting, claiming or spawning on a teammate's task is
+  refused with their name. This uses Cassy Cloud's team claims.
 - **Backlog hygiene checks** — Was: open tasks that were already delivered,
   finished epics left open, long-idle work and tasks citing deleted code went
   unnoticed. → Now: `cas doctor` and supervisor session start flag all four,
@@ -79,6 +83,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   suite, browser journeys ran twice, and fonts were installed on every journey
   shard. → Now: a lane runs only what its change touches, journeys run once,
   and the redundant font install is gone.
+- **Build admission on shared machines** — Was: capped builds were refused
+  whenever 1-minute load exceeded the CPU count, so builds waited for long
+  stretches while other projects kept the machine busy. → Now: admission
+  reads CPU and memory pressure and free memory against configurable limits
+  (`factory.build_guard.*`), with a load ratio as the fallback.
 - **Finished epics close themselves** — Was: closing a finished epic often
   needed manual owner transfers, receipts and override notes. → Now: an epic
   whose owner is gone is adopted, and work already on the default branch counts
@@ -86,6 +95,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- **Lighter `cas serve`** — Was: each long-lived `cas serve` grew to 500–900
+  MB, and every one launched its own Neon MCP server. → Now: allocator arenas
+  are bounded and freed memory is returned while idle (an idle serve measured
+  81% smaller), proxied MCP servers start on first use and stop when idle,
+  Cassy's own database branches use `neonctl`, and API keys stay out of
+  command lines.
+- **Workers after an upgrade** — Was: after upgrading Cassy under a running
+  factory, spawning workers failed until the factory restarted. → Now: the
+  factory provisions workers from a pinned copy of its own build.
+- **Safe evidence cleanup** — Was: `gc_cleanup force=true` deleted closed-task
+  evidence, even from the same day, and left dev-server child processes
+  running. → Now: deleting evidence needs an explicit `artifacts=true`,
+  evidence from the last 7 days or still referenced is kept, and orphaned
+  child processes are stopped with their wrapper.
+- **Commander sends once** — Was: a queued command could be sent twice and
+  then show "Not sent" although Cassy Cloud had accepted it. → Now: sending is
+  serialized, and stale command snapshots are read again.
+- **Commander in forced colors** — Was: the machine alert buttons showed no
+  outline in forced-colors mode. → Now: they draw a visible boundary.
 - **Exact-commit CI without a merge queue** — Was: on a repository with no
   merge queue, an epic could close because its tip was on the default branch,
   even if CI never ran there. → Now: it needs green CI on that exact commit.
@@ -143,8 +171,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Flake fixes** — Was: several tests failed under load or inside a factory
   session: a shutdown drain, a torn inbox read, memory ordering with random
-  ids, and update tests that wrote into the real worktree. → Now: inbox writes
-  are atomic under a lock, and those tests are deterministic and isolated.
+  ids, update tests that wrote into the real worktree, epic-close tests that
+  reached the real GitHub, and fixture repositories left busy by background
+  git maintenance. → Now: inbox writes are atomic under a lock, and those
+  tests are deterministic and isolated.
 - **Deployed-cloud inbox journey** — Was: Commander's cloud inbox was proven
   only against a stand-in. → Now: a two-profile journey runs against the
   deployed cloud, including revoke and key rotation.

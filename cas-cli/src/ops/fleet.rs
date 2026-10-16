@@ -464,12 +464,9 @@ fn focus_epic_branch_receipt(cas_root: &Path, epic: &cas_types::Task) -> String 
         .deliverables
         .work_target
         .as_ref()
-        .map(|target| target.target_branch.as_str())
-        .filter(|base| *base != branch)
-        .map(str::to_string)
-        .or_else(|| crate::config::Config::configured_epic_base_branch(&repo))
-        .unwrap_or_else(|| git.detect_default_branch());
-    match git.ensure_epic_published(branch, &base) {
+        .map(|target| target.target_branch.trim())
+        .filter(|base| !base.is_empty() && *base != branch);
+    match git.ensure_epic_published(branch, base) {
         Ok(readiness) => match readiness.notice {
             Some(receipt) => format!("\n{receipt}"),
             None => format!("\nEPIC BRANCH READY: '{branch}' already published on origin."),

@@ -744,6 +744,31 @@ pub trait TaskStore: Send + Sync {
     /// List tasks with optional status filter
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>>;
 
+    /// Find a lane owner through the store's visibility policy, preferring a
+    /// live epic over historical terminal records.
+    fn epic_for_branch(&self, branch: &str) -> Result<Option<Task>> {
+        self.epic_for_branch_excluding(branch, &[])
+    }
+
+    /// Narrow lane query with visibility exclusions supplied by wrappers.
+    /// Database stores override this; the fallback supports in-memory stores.
+    fn epic_for_branch_excluding(&self, branch: &str, excluded: &[String]) -> Result<Option<Task>> {
+        Ok(self
+            .list(None)?
+            .into_iter()
+            .filter(|task| {
+                task.task_type == cas_types::TaskType::Epic
+                    && task.branch.as_deref() == Some(branch)
+                    && !excluded.contains(&task.id)
+            })
+            .min_by(|a, b| {
+                a.is_terminal()
+                    .cmp(&b.is_terminal())
+                    .then_with(|| b.updated_at.cmp(&a.updated_at))
+                    .then_with(|| a.id.cmp(&b.id))
+            }))
+    }
+
     /// List the board and rows suppressed by a local visibility policy.
     /// Audit callers use the second collection to explain exclusions; ordinary
     /// board callers must continue using `list`. Both collections are disjoint.

@@ -3588,11 +3588,22 @@ impl CasService {
                 // "in flight" from "already doomed" — two supervisors waited on
                 // exactly this. State the deadline while it is still pending,
                 // and say the reason out loud once it is terminal.
+                let held_inbox = if r.stage == cas_store::DeliveryStage::Gated
+                    && r.pending_reason == Some(cas_store::PendingReason::GatedNotReady)
+                {
+                    queue.deferred_inbox_state(notification_id)
+                        .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                            format!("Failed to query deferred inbox status: {error}")))?
+                        .is_some()
+                } else {
+                    false
+                };
                 let pending_deadline_line = pending_deadline_narrative(
                     r.stage,
                     r.pending_reason,
                     r.pending_detail.as_deref(),
                     undelivered_after_secs,
+                    held_inbox,
                 );
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
@@ -3739,6 +3750,7 @@ fn pending_deadline_narrative(
     pending_reason: Option<cas_store::PendingReason>,
     pending_detail: Option<&str>,
     undelivered_after_secs: Option<i64>,
+    held_inbox: bool,
 ) -> String {
     use cas_store::DeliveryStage;
     // cas-d1659: a row parked for a busy recipient is neither doomed nor on
@@ -3752,21 +3764,24 @@ fn pending_deadline_narrative(
             pending_detail.unwrap_or("no detail was recorded")
         );
     }
-    // cas-a1ed: a row the daemon selected and then held behind a declined
-    // wake is not on the never-selected deadline; no sweep abandons it while
-    // its recipient stays in the session. The same reason also marks a
-    // delivery the daemon is retrying (an operator draft in the composer),
-    // and that retry budget can still abandon the row, so say both.
+    // GatedNotReady also covers composer retries. Only the durable Teams
+    // handoff marker promises tool-boundary surfacing without a retry deadline.
     if stage == DeliveryStage::Gated
         && pending_reason == Some(cas_store::PendingReason::GatedNotReady)
     {
-        return format!(
-            "held: still pending — a wake held for a busy recipient surfaces at its next tool \
-             call or turn start and does not expire while it stays in the session; a delivery \
-             being retried (for example behind an operator draft) is abandoned once its \
-             {PROMPT_ABANDON_DEADLINE_SECS}s retry budget runs out — {}\n",
-            pending_detail.unwrap_or("no detail was recorded")
-        );
+        let detail = pending_detail.unwrap_or("no detail was recorded");
+        return if held_inbox {
+            format!(
+                "held inbox: still pending — surfaces at its next tool call or turn start; \
+                 does not expire while the recipient stays in the session — {detail}\n"
+            )
+        } else {
+            format!(
+                "delivery retry: still pending — no held inbox handoff is recorded; \
+                 transport retries (for example behind an operator draft) are abandoned \
+                 once the {PROMPT_ABANDON_DEADLINE_SECS}s retry budget runs out — {detail}\n"
+            )
+        };
     }
     match stage {
         DeliveryStage::Abandoned => format!(
@@ -3873,7 +3888,7 @@ mod pending_deadline_tests {
     /// now say how much of the budget is left.
     #[test]
     fn a_pending_row_states_how_long_before_it_is_abandoned() {
-        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(60));
+        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(60), false);
         assert!(
             line.contains("abandoned as undeliverable in 840s"),
             "{line}"
@@ -3895,20 +3910,19 @@ mod pending_deadline_tests {
                 Some(cas_store::PendingReason::GatedNotReady),
                 Some("wake deferred — pane busy, tool call in flight, operator composing, or wake slot taken"),
                 Some(waited),
+                true,
             );
             assert!(line.contains("still pending"), "{line}");
             assert!(line.contains("next tool"), "{line}");
             assert!(!line.contains("abandoned as undeliverable"), "{line}");
             assert!(!line.contains("PAST"), "{line}");
-            // Review M2: the composer-draft retry shares the reason and can
-            // still be abandoned; the line must not promise otherwise.
-            assert!(line.contains("retry budget"), "{line}");
+            assert!(!line.contains("retry budget"), "{line}");
         }
     }
 
     #[test]
     fn a_row_past_the_deadline_says_it_is_not_in_flight() {
-        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(1200));
+        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(1200), false);
         assert!(line.contains("PAST"), "{line}");
         assert!(line.contains("not still in flight"), "{line}");
     }
@@ -3920,6 +3934,7 @@ mod pending_deadline_tests {
             None,
             Some("target no longer belongs to factory session"),
             Some(1800),
+            false,
         );
         assert!(line.contains("undeliverable"), "{line}");
         assert!(
@@ -3931,7 +3946,7 @@ mod pending_deadline_tests {
 
     #[test]
     fn an_abandoned_row_without_a_recorded_reason_says_so() {
-        let line = pending_deadline_narrative(DeliveryStage::Abandoned, None, None, None);
+        let line = pending_deadline_narrative(DeliveryStage::Abandoned, None, None, None, false);
         assert!(line.contains("no reason was recorded"), "{line}");
     }
 
@@ -3944,6 +3959,7 @@ mod pending_deadline_tests {
             Some(cas_store::PendingReason::AwaitingBusyRecipient),
             Some("recipient busy: wake budget spent after 3 attempts"),
             Some(1200),
+            false,
         );
         assert!(line.contains("busy recipient: still pending"), "{line}");
         assert!(line.contains("next turn start or tool call"), "{line}");
@@ -3954,7 +3970,7 @@ mod pending_deadline_tests {
     #[test]
     fn a_delivered_row_adds_no_deadline_noise() {
         assert!(
-            pending_deadline_narrative(DeliveryStage::Delivered, None, None, Some(30)).is_empty()
+            pending_deadline_narrative(DeliveryStage::Delivered, None, None, Some(30), false).is_empty()
         );
     }
 }

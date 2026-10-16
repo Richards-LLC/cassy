@@ -8431,6 +8431,33 @@ impl FactoryDaemon {
                         %error,
                         "failed to persist deferred Claude inbox handoff"
                     );
+                    // The Teams copy survives, but without this marker a tool
+                    // boundary cannot take the claim. Report the degraded path
+                    // durably, once per row, rather than leaving it only in logs.
+                    let notice = format!(
+                        "Warning: deferred inbox handoff not recorded: notification_id={}; \
+                         target={}. tool-boundary surfacing unavailable; the Teams copy \
+                         waits until the recipient's turn boundary. Inspect with \
+                         coordination action=message_status notification_id={}",
+                        queued.id, queued.target, queued.id,
+                    );
+                    match queue.enqueue_idempotent(
+                        "daemon",
+                        self.app.supervisor_name(),
+                        &notice,
+                        Some(self.session_name.as_str()),
+                        Some("Deferred inbox handoff not recorded"),
+                        None,
+                        &format!("deferred-inbox-stamp-failed:{}", queued.id),
+                        Some(&cas_store::QueueOrigin::Daemon),
+                    ) {
+                        Ok(_) => super::delivery::wake_daemon_after_enqueue(self.app.cas_dir()),
+                        Err(notice_error) => tracing::error!(
+                            prompt_id = queued.id,
+                            %notice_error,
+                            "failed to persist supervisor warning about deferred inbox handoff"
+                        ),
+                    }
                 }
                 self.lifecycle_redelivery_attempts
                     .entry(queued.id)

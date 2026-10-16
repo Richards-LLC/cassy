@@ -35,6 +35,7 @@ pub mod cloud;
 pub mod capability;
 pub mod config;
 pub mod consolidation;
+pub mod coordination;
 pub mod daemon;
 pub mod duplicate_check;
 pub mod error;

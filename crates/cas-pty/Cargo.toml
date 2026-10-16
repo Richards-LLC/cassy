@@ -9,6 +9,8 @@ license = "MIT"
 workspace = true
 
 [dependencies]
+cas-types = { path = "../cas-types" }
+
 # PTY management
 portable-pty = "0.9"
 

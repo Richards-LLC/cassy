@@ -1723,7 +1723,7 @@ function conversationLabel(machineId: string, session: string): string {
 function bannerStatesConnection(machineId: string, session: string | undefined): boolean {
   if (!session) return false;
   const grid = document.querySelector<HTMLElement>("#conversation-stage");
-  if (grid?.dataset.sessionKey !== sessionKey(machineId, session) || !grid.querySelector(".pane")) return false;
+  if (grid?.dataset.sessionKey !== sessionKey(machineId, session) || !grid.querySelector(":scope > .conversation-thread-slot")) return false;
   const snapshot = attachStates.get(sessionKey(machineId, session)) ?? connectionStates.get(machineId);
   return snapshot !== undefined && shouldRetainDisconnectedFrame(snapshot);
 }
@@ -1735,7 +1735,9 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
   // A fatal machine verdict wins over a session's last retry snapshot.
   const machineState = connectionStates.get(machineId);
   if (machineState?.fatal === true) snapshot = machineState;
-  const hasLastFrame = grid.querySelector(".pane") !== null;
+  // The session's thread is up (cas-f285: it is the stage's last frame now
+  // that no pane card stands behind it): keep it, under a banner.
+  const hasLastFrame = grid.querySelector(":scope > .conversation-thread-slot") !== null;
   if (hasLastFrame && shouldRetainDisconnectedFrame(snapshot)) {
     const view = disconnectedView(snapshot, now);
     let banner = grid.querySelector<HTMLElement>(".terminal-disconnected-banner");

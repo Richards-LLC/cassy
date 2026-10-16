@@ -103,6 +103,12 @@ pub const COORDINATION_ACTIONS: &[&str] = &[
     "my_context",
     // cas-e477: live supervisors of this repo on any machine.
     "peers",
+    // cas-72d3: Slack-thread external-work ownership.
+    "claim",
+    "claim_status",
+    "release_claim",
+    "transfer_claim",
+    "accept_claim",
 ];
 
 /// Actions of the supervisor `factory` tool (D2 split, cas-8563b): fleet,

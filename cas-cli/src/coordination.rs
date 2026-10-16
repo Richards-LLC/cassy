@@ -1,5 +1,7 @@
 //! Durable, fail-closed authority operations for external Slack threads.
 
+pub mod external_work;
+
 #[cfg(test)]
 mod tests {
     #[test]

@@ -47,6 +47,13 @@ const SCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "$defs
 pub(crate) const COORDINATION_FIELDS: &[&str] = &[
     "action",
     "id",
+    "external_ref",
+    "request_id",
+    "resource_id",
+    "handoff_id",
+    "expected_generation",
+    "to_slot_id",
+    "offer_ttl_secs",
     "target",
     "message",
     "summary",
@@ -82,6 +89,13 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
 /// actions.
 pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("id", "Agent id (default caller); message_status: peer message id."),
+    ("external_ref", "claim: Slack permalink only; Violet verifies thread identity."),
+    ("request_id", "External-work mutation UUID; claim_status looks up that original request."),
+    ("resource_id", "release_claim/transfer_claim: external-work resource id."),
+    ("handoff_id", "accept_claim: handoff offer id."),
+    ("expected_generation", "release_claim/transfer_claim/accept_claim: required expected owner generation."),
+    ("to_slot_id", "transfer_claim: eligible destination supervisor slot id."),
+    ("offer_ttl_secs", "transfer_claim: offer lifetime in seconds (default 600)."),
     ("target", "Recipient: agent, supervisor, all_workers, operator or commander:<label>; remind default self."),
     ("message", "Body chars (configurable defaults): 1200; blocker/merge 2500; task notes 1500. Over-cap operator/Commander refused; supervisor to agent spills to artifact."),
     ("urgent", "Interrupt recipient and inject next; discards in-flight work."),
@@ -109,6 +123,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("remind_ttl_secs", "TTL seconds: default 3600; external default 604800 (7 days); 0=never."),
     ("cross_session", "remind: survive session end and task close."),
     ("scope", "peers: all=account-wide."),
+    // Keep new ownership actions visible only on this coordination tool.
 ];
 
 /// Messaging and reminder parameters the supervisor `factory` tool does not

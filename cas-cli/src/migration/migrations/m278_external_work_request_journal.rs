@@ -1,0 +1,46 @@
+//! cas-72d3: durable request identity and reconciliation state for Slack claims.
+
+use crate::migration::{Migration, Subsystem};
+
+pub const MIGRATION: Migration = Migration {
+    id: 278,
+    name: "external_work_request_journal",
+    subsystem: Subsystem::Agents,
+    description: "Persist immutable external-work authority requests and retry state (cas-72d3)",
+    up: &[crate::coordination::external_work::EXTERNAL_WORK_SCHEMA],
+    detect: Some("SELECT CASE WHEN
+        EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='external_work_operations')
+        AND EXISTS (SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_external_work_due')
+        AND EXISTS (SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='external_work_request_immutable')
+        AND EXISTS (SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='external_work_wire_immutable')
+        THEN 1 ELSE 0 END"),
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn journal_migration_recreates_the_schema_and_preserves_immutable_requests() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(!crate::migration::migration_is_detected(&conn, &MIGRATION));
+        for statement in MIGRATION.up {
+            conn.execute_batch(statement).unwrap();
+        }
+        assert!(crate::migration::migration_is_detected(&conn, &MIGRATION));
+        assert!(conn.execute(
+            "INSERT INTO external_work_operations(request_id,kind,input_digest,input_json,stage,created_at,updated_at)
+             VALUES ('id','claim','digest','{}','prepared','now','now')", []
+        ).is_ok());
+        assert!(conn.execute(
+            "UPDATE external_work_operations SET input_json='{} changed' WHERE request_id='id'", []
+        ).is_err());
+        assert!(conn.execute(
+            "UPDATE external_work_operations SET wire_json='{}' WHERE request_id='id'", []
+        ).is_ok());
+        assert!(conn.execute(
+            r#"UPDATE external_work_operations SET wire_json='{"request_id":"changed"}' WHERE request_id='id'"#, []
+        ).is_err());
+    }
+}

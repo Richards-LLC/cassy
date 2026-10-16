@@ -983,6 +983,41 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub id: Option<String>,
 
+    /// Slack permalink for coordination action=claim.
+    #[schemars(description = "claim only: Slack thread permalink; Violet resolves and verifies the canonical thread")]
+    #[serde(default)]
+    pub external_ref: Option<String>,
+
+    /// Immutable idempotency key for external-work mutations; claim_status lookup key.
+    #[schemars(description = "External-work mutation: optional lowercase UUID request_id. claim_status: required original request_id")]
+    #[serde(default)]
+    pub request_id: Option<String>,
+
+    /// External-work claim resource; accept_claim instead uses handoff_id.
+    #[schemars(description = "release_claim/transfer_claim only: external-work resource id")]
+    #[serde(default)]
+    pub resource_id: Option<String>,
+
+    /// Handoff offer id for accept_claim.
+    #[schemars(description = "accept_claim only: handoff offer id")]
+    #[serde(default)]
+    pub handoff_id: Option<String>,
+
+    /// Current claim generation required for release, transfer, and accept.
+    #[schemars(description = "release_claim/transfer_claim/accept_claim: required current generation")]
+    #[serde(default, deserialize_with = "deser::option_u64")]
+    pub expected_generation: Option<u64>,
+
+    /// Logical supervisor slot to receive a transfer offer.
+    #[schemars(description = "transfer_claim only: eligible destination supervisor slot id")]
+    #[serde(default)]
+    pub to_slot_id: Option<String>,
+
+    /// Transfer offer lifetime.
+    #[schemars(description = "transfer_claim only: offer lifetime in seconds (default 600)")]
+    #[serde(default, deserialize_with = "deser::option_u32")]
+    pub offer_ttl_secs: Option<u32>,
+
     /// Task ID (for loop_start, worktree_create, spawn_workers, server_start,
     /// server_list, remind, or a
     /// merge_request message).

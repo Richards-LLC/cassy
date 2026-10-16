@@ -1503,7 +1503,7 @@ impl CasCore {
                                 })
                                 .unwrap_or(false);
                             let push_state = if !push_enabled {
-                                "Push state: local-only (CAS_PUSH_EPIC_BRANCH is disabled)."
+                                "Push state: local-only (CAS_PUSH_EPIC_BRANCH is disabled); it will be published on first focus or spawn."
                                     .to_string()
                             } else if created {
                                 match git_ops.push_branch(&branch_name) {
@@ -1516,7 +1516,7 @@ impl CasCore {
                                 }
                             } else {
                                 format!(
-                                    "Push state: local branch {branch_name} already existed; no publish was needed."
+                                    "Push state: local branch {branch_name} already existed; publication will be checked on first focus or spawn."
                                 )
                             };
 

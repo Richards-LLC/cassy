@@ -970,7 +970,7 @@ fn append_spawn_audit_line(paths: impl IntoIterator<Item = std::path::PathBuf>, 
 /// inbox. Separate from [`enqueue_spawn_outcome_notice`] because the spawn did
 /// NOT fail — the worker exists, it just started on old history, and calling
 /// that a failure would train supervisors to ignore it.
-fn enqueue_spawn_warning_notice(
+pub(crate) fn enqueue_spawn_warning_notice(
     cas_dir: &std::path::Path,
     supervisor_name: &str,
     factory_session: &str,
@@ -984,13 +984,35 @@ fn enqueue_spawn_warning_notice(
         .unwrap_or_else(|| "direct spawn".to_string());
     let summary = format!("Worker spawn base warning: {worker_name}");
     let message = format!("Factory spawn {request} for worker '{worker_name}': {warning}");
-    let id = queue.enqueue_with_summary(
-        "director",
-        supervisor_name,
-        &message,
-        Some(factory_session),
-        Some(&summary),
-    )?;
+    let kind = [
+        "SPAWN BASE REFRESHED",
+        "EPIC BRANCH UNPUBLISHED",
+        "EPIC BRANCH PRESERVED",
+        "EPIC BRANCH UNVERIFIED",
+        "EPIC BRANCH LOCAL-ONLY",
+    ]
+    .into_iter()
+    .find(|kind| warning.starts_with(kind));
+    let identity = kind.and_then(|kind| {
+        let (_, rest) = warning.split_once("'")?;
+        let (branch, rest) = rest.split_once("'")?;
+        let (_, rest) = rest.split_once('(')?;
+        let (tip, _) = rest.split_once(')')?;
+        Some(format!("spawn-base-notice:{factory_session}:{kind}:{branch}:{tip}"))
+    });
+    let id = if let Some(identity) = identity {
+        // Identity contains the branch and original stale tip, never a worker,
+        // request or changing remote tip. All provisioners share this ledger.
+        match queue.enqueue_idempotent(
+            "director", supervisor_name, &message, Some(factory_session), Some(&summary),
+            None, &identity, Some(&cas_store::QueueOrigin::Daemon),
+        )? {
+            cas_store::EnqueueIdempotentResult::Created(id) => id,
+            cas_store::EnqueueIdempotentResult::AlreadyExists(id) => return Ok(id),
+        }
+    } else {
+        queue.enqueue_with_summary("director", supervisor_name, &message, Some(factory_session), Some(&summary))?
+    };
     super::delivery::wake_daemon_after_enqueue(cas_dir);
     Ok(id)
 }

@@ -143,6 +143,13 @@ impl TaskStore for QuarantineFilteringTaskStore {
             .map(|(visible, _)| visible)
     }
 
+    fn epic_for_branch_excluding(&self, branch: &str, excluded: &[String]) -> Result<Option<Task>> {
+        let mut hidden = self.quarantined();
+        hidden.extend(excluded.iter().cloned());
+        self.inner
+            .epic_for_branch_excluding(branch, &hidden.into_iter().collect::<Vec<_>>())
+    }
+
     fn list_with_suppressed(&self, status: Option<TaskStatus>) -> Result<(Vec<Task>, Vec<Task>)> {
         let hidden = self.quarantined();
         let (tasks, mut suppressed) = self.inner.list_with_suppressed(status)?;
@@ -370,5 +377,49 @@ mod tests {
             "releasing nothing must not claim to have released something"
         );
         assert_eq!(queue.quarantined_count(QUARANTINE_TASK).unwrap(), 0);
+    }
+
+    #[test]
+    fn cas_bfa1_round4_lane_lookup_filters_before_limit_and_releases() {
+        let (_temp, queue, store) = store();
+        for id in ["cas-live", "cas-hidden", "cas-closed"] {
+            let mut task = Task::new(id.into(), id.into());
+            task.task_type = cas_types::TaskType::Epic;
+            task.branch = Some("epic/lane".into());
+            if id == "cas-closed" {
+                task.status = TaskStatus::Closed;
+            }
+            store.add(&task).unwrap();
+        }
+        queue
+            .quarantine_row(QUARANTINE_TASK, "cas-hidden", "fixture")
+            .unwrap();
+        assert_eq!(
+            store.epic_for_branch("epic/lane").unwrap().unwrap().id,
+            "cas-live"
+        );
+        assert_eq!(
+            store
+                .epic_for_branch_excluding("epic/lane", &["cas-live".into()])
+                .unwrap()
+                .unwrap()
+                .id,
+            "cas-closed"
+        );
+        queue
+            .quarantine_row(QUARANTINE_TASK, "cas-live", "fixture")
+            .unwrap();
+        assert_eq!(
+            store.epic_for_branch("epic/lane").unwrap().unwrap().id,
+            "cas-closed"
+        );
+        queue
+            .release_quarantined_row(QUARANTINE_TASK, "cas-hidden")
+            .unwrap();
+        assert_eq!(
+            store.epic_for_branch("epic/lane").unwrap().unwrap().id,
+            "cas-hidden"
+        );
+        assert!(store.epic_for_branch("epic/absent").unwrap().is_none());
     }
 }

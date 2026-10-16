@@ -82,7 +82,7 @@ pub(crate) fn ensure_adopted_lane(repo_root: &Path, lane: &str) -> String {
         let published = if resolved.used_remote || resolved.branch_ref.starts_with("origin/") {
             "published on origin"
         } else {
-            "local-only; push it so deliveries survive this machine"
+            "local-only; it will be published on first focus or spawn"
         };
         return format!(
             "{header}\n   Tip: '{}' @ {sha} ({published}).{state}",
@@ -110,7 +110,7 @@ pub(crate) fn ensure_adopted_lane(repo_root: &Path, lane: &str) -> String {
     let sha = &base.sha[..base.sha.len().min(8)];
     let push_state = if !push_enabled() {
         format!(
-            "local-only (CAS_PUSH_EPIC_BRANCH is disabled); push it with `git push -u origin {lane}`"
+            "local-only (CAS_PUSH_EPIC_BRANCH is disabled); it will be published on first focus or spawn"
         )
     } else {
         match git.push_branch(lane) {

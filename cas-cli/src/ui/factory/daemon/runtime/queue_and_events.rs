@@ -372,6 +372,15 @@ fn relay_held_worker_deaths_io(cas_dir: &std::path::Path, group: &[ObservedWorke
     }
 }
 
+/// cas-58a3: how many times a crashed worker's cleanup is submitted before
+/// it is given up and its name released.
+pub(super) const CRASH_CLEANUP_MAX_ATTEMPTS: u32 = 5;
+
+/// cas-58a3: the job key of one crashed worker's reap and worktree check.
+pub(crate) fn worker_crash_cleanup_key(worker: &str, at: chrono::DateTime<chrono::Utc>) -> String {
+    format!("worker-crash:{worker}:{}", at.timestamp_nanos_opt().unwrap_or_default())
+}
+
 /// cas-ff42 C6: the write-lane key of one exit's death record.
 pub(crate) fn worker_death_record_key(worker: &str, at: chrono::DateTime<chrono::Utc>) -> String {
     format!("worker-death:{worker}:{}", at.timestamp_nanos_opt().unwrap_or_default())
@@ -3827,11 +3836,16 @@ impl FactoryDaemon {
                         deaths,
                         given_up,
                     } => self.decide_recorded_worker_deaths(basis, folded, deaths, given_up),
-                    RelayOutput::WorkerDeathRecorded { worker, at, death } => {
-                        if let Some(at) = at {
-                            self.settle_worker_death_record(&worker, at, death);
-                        }
+                    RelayOutput::WorkerDeathRecorded {
+                        worker,
+                        at,
+                        death,
+                        record_key,
+                    } => self.death_record_settled(&worker, at, death, &record_key),
+                    RelayOutput::WorkerCrashCleaned { cleanup_key, outcome } => {
+                        self.crash_cleaned(cleanup_key, outcome)
                     }
+                    RelayOutput::Written => {}
                     RelayOutput::DeathSweepWritten => {}
                     RelayOutput::EscalationRead {
                         notice_ids,
@@ -5375,7 +5389,7 @@ impl FactoryDaemon {
     }
 
     /// Handle worker crash
-    async fn handle_worker_crash(
+    pub(super) async fn handle_worker_crash(
         &mut self,
         worker_name: &str,
         exit_code: Option<i32>,
@@ -5421,6 +5435,10 @@ impl FactoryDaemon {
                 recording: true,
             });
         }
+        // cas-58a3: the roster, detector and layout change here; the reap and
+        // worktree check run after the death record, off the loop, in order:
+        // recorded, then crashed, then relayed or folded.
+        let cleanup = self.app.mark_worker_crashed_in_memory(worker_name);
         self.mark_registered_worker_stale(
             worker_name,
             &exit_cause.status(),
@@ -5431,8 +5449,8 @@ impl FactoryDaemon {
                 crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred
             },
             (!requested_stop).then_some(at),
+            Some(cleanup),
         );
-        self.app.mark_worker_crashed(worker_name).await;
         self.queue_jobs.prompt_preparation.forget_pane(worker_name);
         self.dead_workers.insert(worker_name.to_string());
 
@@ -5451,29 +5469,51 @@ impl FactoryDaemon {
             } else {
                 format!("Worker process {exit_info} before Cassy agent registration.")
             };
-            append_spawn_audit(
-                self.app.cas_dir(),
-                &self.session_name,
-                verification.request_id,
-                Some(worker_name),
-                "register",
-                "failed",
-                &detail,
+            // cas-58a3: the audit row and the supervisor notice are store
+            // writes; they run on the store worker, not in the PTY exchange.
+            let cas_dir = self.app.cas_dir().to_path_buf();
+            let session = self.session_name.clone();
+            let supervisor = self.app.supervisor_name().to_string();
+            let worker = worker_name.to_string();
+            let request_id = verification.request_id;
+            let key = format!(
+                "spawn-boot-exit:{worker_name}:{}",
+                at.timestamp_nanos_opt().unwrap_or_default()
             );
-            if let Err(error) = enqueue_spawn_outcome_notice(
-                self.app.cas_dir(),
-                self.app.supervisor_name(),
-                &self.session_name,
-                verification.request_id,
-                worker_name,
-                "register",
-                false,
-                &detail,
-            ) {
+            let submitted = self.relay_jobs.submit_write(&mut self.queue_jobs, &key, None, move || {
+                append_spawn_audit(
+                    &cas_dir,
+                    &session,
+                    request_id,
+                    Some(&worker),
+                    "register",
+                    "failed",
+                    &detail,
+                );
+                if let Err(error) = enqueue_spawn_outcome_notice(
+                    &cas_dir,
+                    &supervisor,
+                    &session,
+                    request_id,
+                    &worker,
+                    "register",
+                    false,
+                    &detail,
+                ) {
+                    tracing::warn!(
+                        worker = %worker,
+                        error = %error,
+                        "failed to enqueue supervisor-visible pre-registration exit"
+                    );
+                }
+                super::relay_jobs::RelayOutput::Written
+            });
+            // cas-58a3 review L2: a refused write is not silent.
+            if !submitted {
                 tracing::warn!(
                     worker = %worker_name,
-                    error = %error,
-                    "failed to enqueue supervisor-visible pre-registration exit"
+                    request_id = ?request_id,
+                    "cas-58a3: the boot-exit spawn notice could not be submitted; the spawn row keeps its last state"
                 );
             }
         }
@@ -5496,6 +5536,7 @@ impl FactoryDaemon {
         exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
         relay: crate::mcp::tools::service::orphan_recovery::DeathRelay,
         exit_at: Option<chrono::DateTime<chrono::Utc>>,
+        cleanup: Option<crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanup>,
     ) {
         let cached_id = self
             .app
@@ -5509,11 +5550,27 @@ impl FactoryDaemon {
         let worker = worker_name.to_string();
         let reason = reason.to_string();
         let exit = exit.cloned();
-        let key = worker_death_record_key(worker_name, exit_at.unwrap_or_else(chrono::Utc::now));
+        let stamp = exit_at.unwrap_or_else(chrono::Utc::now);
+        let key = worker_death_record_key(worker_name, stamp);
+        // cas-58a3 review M1: the crash cleanup is held here, not inside the
+        // record job, so a refused or panicked record can never lose the reap.
+        if let Some(cleanup) = cleanup {
+            self.relay_jobs.crash_cleanups.insert(
+                worker_crash_cleanup_key(worker_name, stamp),
+                super::relay_jobs::PendingCrashCleanup {
+                    worker: worker_name.to_string(),
+                    at: exit_at,
+                    record_key: Some(key.clone()),
+                    cleanup,
+                    attempts: 0,
+                },
+            );
+        }
         #[cfg(test)]
         let record = self.relay_jobs.death_record_override.unwrap_or(record_worker_death_io);
         #[cfg(not(test))]
         let record = record_worker_death_io;
+        let record_key = key.clone();
         let submitted = self.relay_jobs.submit_write(&mut self.queue_jobs, &key, None, move || {
             let death = record(
                 &cas_dir,
@@ -5525,17 +5582,183 @@ impl FactoryDaemon {
                 relay,
                 exit_at,
             );
-            super::relay_jobs::RelayOutput::WorkerDeathRecorded { worker, at: exit_at, death }
+            super::relay_jobs::RelayOutput::WorkerDeathRecorded {
+                worker,
+                at: exit_at,
+                death,
+                record_key,
+            }
         });
         if !submitted {
             tracing::warn!(
                 worker = %worker_name,
                 "cas-ff42: could not submit the worker death record; the heartbeat gate will mark it stale"
             );
-            if let Some(at) = exit_at {
-                self.settle_worker_death_record(worker_name, at, None);
+            self.death_record_settled(worker_name, exit_at, None, &key);
+            // cas-58a3 review M1: the reap does not wait for a record that
+            // will never run.
+            self.advance_crash_cleanups();
+        }
+    }
+
+    /// cas-58a3: a death record reported (or will never report). Hold its
+    /// death on its exit, and release the crash cleanup waiting on it; the
+    /// exit is relayed only once that cleanup reports (recorded, then
+    /// crashed, then relayed or folded).
+    fn death_record_settled(
+        &mut self,
+        worker: &str,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+        death: Option<DeferredWorkerDeath>,
+        record_key: &str,
+    ) {
+        for pending in self.relay_jobs.crash_cleanups.values_mut() {
+            if pending.record_key.as_deref() == Some(record_key) {
+                pending.record_key = None;
             }
         }
+        // Waiting on a cleanup is a property of the exit, not of this record:
+        // an earlier result in the same batch may already have released it.
+        let waits_for_cleanup = self
+            .relay_jobs
+            .crash_cleanups
+            .values()
+            .any(|pending| pending.worker == worker && pending.at.is_some() && pending.at == at);
+        if let Some(at) = at {
+            if waits_for_cleanup {
+                if let Some(exit) = self
+                    .recent_worker_exits
+                    .iter_mut()
+                    .find(|exit| exit.worker == worker && exit.at == at)
+                {
+                    exit.death = death;
+                }
+            } else {
+                self.settle_worker_death_record(worker, at, death);
+            }
+        }
+        // The cleanup itself is submitted only outside a drain batch (the
+        // batch has already dropped its in-flight keys, so a cleanup whose
+        // result is still in it would look idle and run twice).
+    }
+
+    /// cas-58a3 review M1: submit every crash cleanup whose death record has
+    /// reported or vanished and which is not already running. A refused
+    /// submit or a panicked job is retried here; after
+    /// [`CRASH_CLEANUP_MAX_ATTEMPTS`] the cleanup is given up loudly and its
+    /// name released.
+    fn advance_crash_cleanups(&mut self) {
+        let due = self
+            .relay_jobs
+            .crash_cleanups
+            .iter()
+            .filter(|(key, pending)| {
+                pending
+                    .record_key
+                    .as_deref()
+                    .is_none_or(|record| !self.relay_jobs.writing(record))
+                    && !self.relay_jobs.writing(key)
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in due {
+            let Some(pending) = self.relay_jobs.crash_cleanups.get_mut(&key) else {
+                continue;
+            };
+            pending.record_key = None;
+            if pending.attempts >= CRASH_CLEANUP_MAX_ATTEMPTS {
+                let pending = self.relay_jobs.crash_cleanups.remove(&key).expect("present");
+                tracing::error!(
+                    target: "cas::coordination",
+                    worker = %pending.worker,
+                    attempts = pending.attempts,
+                    "cas-58a3: a crashed worker's reap and worktree check never completed; giving up and releasing its name"
+                );
+                self.app.abandon_crash_cleanup(&pending.worker);
+                self.release_exit(&pending.worker, pending.at);
+                continue;
+            }
+            pending.attempts += 1;
+            let cleanup = pending.cleanup.clone();
+            #[cfg(test)]
+            let clean = self
+                .relay_jobs
+                .crash_cleanup_override
+                .unwrap_or(crate::ui::factory::app::render_and_ops::epic_workers::crash_cleanup_io);
+            #[cfg(not(test))]
+            let clean = crate::ui::factory::app::render_and_ops::epic_workers::crash_cleanup_io;
+            let cleanup_key = key.clone();
+            if !self.relay_jobs.submit_blocking_write(&mut self.queue_jobs, &key, move || {
+                let outcome = clean(&cleanup);
+                super::relay_jobs::RelayOutput::WorkerCrashCleaned {
+                    cleanup_key,
+                    outcome,
+                }
+            }) {
+                tracing::warn!(key = %key, "cas-58a3: could not submit a crashed worker's cleanup; retrying next pass");
+            }
+        }
+    }
+
+    /// cas-58a3: the crashed worker's cleanup reported; apply it (which
+    /// releases the name), and let its exit be relayed.
+    fn crash_cleaned(
+        &mut self,
+        cleanup_key: String,
+        outcome: crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanupOutcome,
+    ) {
+        let Some(pending) = self.relay_jobs.crash_cleanups.remove(&cleanup_key) else {
+            return;
+        };
+        self.app.apply_crash_cleanup(&pending.worker, outcome);
+        self.release_exit(&pending.worker, pending.at);
+    }
+
+    /// An exit no longer waits for its record or cleanup.
+    fn release_exit(&mut self, worker: &str, at: Option<chrono::DateTime<chrono::Utc>>) {
+        if let Some(at) = at
+            && let Some(exit) = self
+                .recent_worker_exits
+                .iter_mut()
+                .find(|exit| exit.worker == worker && exit.at == at)
+        {
+            exit.recording = false;
+        }
+    }
+
+    /// cas-ff42 review M / cas-58a3 N1: a record job that panicked (or was
+    /// dropped) reports nothing and frees its key. Its exit must not stay
+    /// recording, which would hold its group and the sweep's name hold
+    /// forever. A pending crash cleanup is then run by
+    /// [`Self::advance_crash_cleanups`]. Run only after a drain has applied
+    /// every taken result, so a result still in the batch is never mistaken
+    /// for a vanished job.
+    fn settle_vanished_death_records(&mut self) {
+        let vanished = self
+            .recent_worker_exits
+            .iter()
+            .filter(|exit| {
+                exit.recording
+                    && !self
+                        .relay_jobs
+                        .writing(&worker_death_record_key(&exit.worker, exit.at))
+                    && !self
+                        .relay_jobs
+                        .crash_cleanups
+                        .values()
+                        .any(|pending| pending.worker == exit.worker && pending.at == Some(exit.at))
+            })
+            .map(|exit| (exit.worker.clone(), exit.at))
+            .collect::<Vec<_>>();
+        for (worker, at) in vanished {
+            tracing::warn!(
+                target: "cas::coordination",
+                worker = %worker,
+                "cas-ff42: a worker's death record job ended without reporting; its exit is relayed without waiting for it"
+            );
+            self.release_exit(&worker, Some(at));
+        }
+        self.advance_crash_cleanups();
     }
 
     /// cas-ff42 C6: a death record reported; its exit may now be relayed.
@@ -5565,6 +5788,8 @@ impl FactoryDaemon {
     pub(super) fn relay_correlated_worker_deaths(&mut self) {
         // cas-4491f: the relays are written on the store worker.
         self.drain_relay_jobs();
+        // cas-58a3 N1: only after the drain, never inside a batch.
+        self.settle_vanished_death_records();
         self.advance_correlated_worker_deaths();
         self.sweep_recorded_worker_deaths();
         self.drain_relay_jobs();
@@ -5573,28 +5798,6 @@ impl FactoryDaemon {
     /// cas-26c8 L1: submit every closed group that has no write in flight,
     /// each under its own key, lone deaths included.
     fn advance_correlated_worker_deaths(&mut self) {
-        // cas-ff42 review M: a record job that panicked (or was dropped)
-        // reports nothing and frees its key. Its exit must not stay recording,
-        // which would hold its group and the sweep's name hold forever.
-        let vanished = self
-            .recent_worker_exits
-            .iter()
-            .filter(|exit| {
-                exit.recording
-                    && !self
-                        .relay_jobs
-                        .writing(&worker_death_record_key(&exit.worker, exit.at))
-            })
-            .map(|exit| (exit.worker.clone(), exit.at))
-            .collect::<Vec<_>>();
-        for (worker, at) in vanished {
-            tracing::warn!(
-                target: "cas::coordination",
-                worker = %worker,
-                "cas-ff42: a worker's death record job ended without reporting; its exit is relayed without a held death"
-            );
-            self.settle_worker_death_record(&worker, at, None);
-        }
         let now = chrono::Utc::now();
         for group in
             closed_death_groups(&self.recent_worker_exits, now, WORKER_DEATH_CORRELATION_WINDOW)
@@ -5941,14 +6144,15 @@ impl FactoryDaemon {
                 if let Err(error) = self.app.mux.kill_worker(&worker, true).await {
                     tracing::warn!(worker = %worker, error = %error, "failed to reap boot-failed worker PTY");
                 }
+                let cleanup = self.app.mark_worker_crashed_in_memory(&worker);
                 self.mark_registered_worker_stale(
                     &worker,
                     "worker harness failed during boot",
                     None,
                     crate::mcp::tools::service::orphan_recovery::DeathRelay::Alarm,
                     None,
+                    Some(cleanup),
                 );
-                self.app.mark_worker_crashed(&worker).await;
                 self.dead_workers.insert(worker.clone());
                 self.pane_buffers.remove(&worker);
                 self.queue_jobs.prompt_preparation.forget_pane(&worker);
@@ -10536,6 +10740,27 @@ impl FactoryDaemon {
                 Some(a) => a,
                 None => return,
             };
+
+        // cas-58a3 review H1: a name whose crash cleanup is still pending is
+        // busy: its late reap and worktree check would act on the new worker.
+        // Requeue the spawn behind the rest of the queue.
+        let reuses = match &action {
+            PendingSpawn::Named { name, .. } | PendingSpawn::Recycle { name, .. } => Some(name),
+            PendingSpawn::Respawn(name) => Some(name),
+            _ => None,
+        };
+        if let Some(name) = reuses
+            && self.app.crash_cleanup_pending(name)
+        {
+            // cas-58a3 review L-c: this repeats every tick until the cleanup
+            // applies, so it is debug, not info.
+            tracing::debug!(
+                worker = %name,
+                "cas-58a3: spawn requeued until the crashed worker's cleanup is applied"
+            );
+            self.pending_spawns.push_back(action);
+            return;
+        }
 
         match action {
             PendingSpawn::Anonymous {

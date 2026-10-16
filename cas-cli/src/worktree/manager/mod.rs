@@ -121,7 +121,10 @@ pub struct WorktreeManager {
 mod epic_ops;
 pub mod worker_ops;
 
-pub use worker_ops::{CleanupReport, DirtyWorktreeWarning, ExternalSymlinkWarning, RemoveOutcome};
+pub use worker_ops::{
+    CleanupReport, DirtyWorktreeWarning, ExternalSymlinkWarning, RemoveOutcome, WorkerRemovalPlan,
+    remove_worker_worktree_io,
+};
 
 /// Where a merge into a target branch is executed (cas-4702 / GH #68).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

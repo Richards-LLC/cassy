@@ -39,6 +39,8 @@ pub(crate) fn is_relay_kind(kind: &str) -> bool {
 /// store-worker write.
 const RELAY_READ_BUDGET: Duration = Duration::from_millis(100);
 const RELAY_WRITE_BUDGET: Duration = Duration::from_millis(100);
+/// cas-58a3: a crashed worker's reap (up to 0.5 s) and worktree check (git).
+const CRASH_CLEANUP_BUDGET: Duration = Duration::from_secs(2);
 
 /// One relay's read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -132,7 +134,16 @@ pub(crate) enum RelayOutput {
         worker: String,
         at: Option<chrono::DateTime<chrono::Utc>>,
         death: Option<super::queue_and_events::DeferredWorkerDeath>,
+        /// The record's job key, for the crash cleanup waiting on it.
+        record_key: String,
     },
+    /// cas-58a3: a crashed worker's reap and worktree check finished.
+    WorkerCrashCleaned {
+        cleanup_key: String,
+        outcome: crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanupOutcome,
+    },
+    /// cas-58a3: a store write with nothing for the loop to apply.
+    Written,
     /// cas-26c8: one swept relay was (re)injected, or found already handled.
     DeathSweepWritten,
     /// The open operator notices the read asked about, their states
@@ -170,6 +181,11 @@ pub(crate) struct RelayJobs {
     /// Test hook: give up in-flight reads after this.
     #[cfg(test)]
     pub(crate) timeout_override: Option<Duration>,
+    /// cas-58a3 review M1: crashed workers' reaps and worktree checks not yet
+    /// applied, by cleanup key. Each runs after its death record reports, or
+    /// at once if that record was refused or vanished, and is resubmitted
+    /// until it reports, so a reap is never lost.
+    pub(crate) crash_cleanups: HashMap<String, PendingCrashCleanup>,
     /// cas-ff42 L3: recorded-death rows the sweep already reported giving
     /// up on, so each is warned about once.
     pub(crate) death_sweep_given_up: std::collections::HashSet<i64>,
@@ -182,6 +198,27 @@ pub(crate) struct RelayJobs {
     /// `record_worker_death_io`, e.g. to make the record job panic.
     #[cfg(test)]
     pub(crate) death_record_override: Option<DeathRecordFn>,
+    /// Test hook (cas-58a3): run a crashed worker's cleanup with this instead
+    /// of `crash_cleanup_io`, e.g. to make it slow.
+    #[cfg(test)]
+    pub(crate) crash_cleanup_override: Option<
+        fn(
+            &crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanup,
+        ) -> crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanupOutcome,
+    >,
+}
+
+/// cas-58a3: one crashed worker's cleanup and what it waits for.
+#[derive(Debug)]
+pub(crate) struct PendingCrashCleanup {
+    pub(crate) worker: String,
+    /// Its exit in the correlation window, if it waits there.
+    pub(crate) at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The death record still awaited, by job key; `None` once it reported.
+    pub(crate) record_key: Option<String>,
+    pub(crate) cleanup: crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanup,
+    /// Submissions so far; after the cap the cleanup is given up, loudly.
+    pub(crate) attempts: u32,
 }
 
 /// The shape of `record_worker_death_io`, for the cas-ff42 test hook.
@@ -240,6 +277,34 @@ impl RelayJobs {
             budget: RELAY_READ_BUDGET,
         };
         self.submit(jobs, spec, read)
+    }
+
+    /// cas-58a3: run `work`, a write that is file, process and git I/O rather
+    /// than store writes (a crashed worker's reap and worktree check), on the
+    /// External lane, so slow git never holds up the store worker. Like a
+    /// write it is never given up and its key is `RelayWrite:<key>`. Returns
+    /// whether it was submitted.
+    pub(crate) fn submit_blocking_write(
+        &mut self,
+        jobs: &mut QueueJobs,
+        key: &str,
+        work: impl FnOnce() -> RelayOutput + Send + 'static,
+    ) -> bool {
+        let key = write_key(key);
+        if self.in_flight.contains_key(&key) {
+            return false;
+        }
+        let spec = JobSpec {
+            kind: RELAY_WRITE,
+            key,
+            // cas-58a3 review L1: git status and worktree removal are slow
+            // external calls, so they run on the External lane.
+            lane: Lane::External,
+            criticality: Criticality::Critical,
+            generation: self.next_generation(),
+            budget: CRASH_CLEANUP_BUDGET,
+        };
+        self.submit(jobs, spec, work)
     }
 
     /// Run `write` on the write lane (the store worker), unless the write

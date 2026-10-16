@@ -324,10 +324,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         WorkerUpdatePlan::Unrestricted => {}
         WorkerUpdatePlan::Refuse(message) => anyhow::bail!(message),
         WorkerUpdatePlan::SyncWorktree(worktree) => {
-            let mut steps = UpdateStepTracker::new(1, !cli.json);
-            return steps.run("Syncing .claude/.codex files in this worktree", || {
-                sync_claude_files_into(cli, cas_root, Some(&worktree))
-            });
+            return sync_claude_files_into(cli, cas_root, Some(&worktree)).map(|_| ());
         }
     }
 
@@ -369,10 +366,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     // Handle sync-only mode (just sync .claude/.codex files)
     if args.sync {
-        let mut steps = UpdateStepTracker::new(1, !cli.json);
-        return steps.run("Syncing .claude/.codex files", || {
-            sync_claude_files(cli, cas_root)
-        });
+        return sync_claude_files(cli, cas_root).map(|_| ());
     }
 
     // Handle schema-only mode
@@ -1215,9 +1209,7 @@ fn refresh_all_projects_with_user_refresh(
             details.push_str(&output);
             phase_details.push((search_index.is_ok(), output));
             let (skills, output) = capture_phase(!cli.json, || {
-                run_project_phase("skills", args.dry_run, || {
-                    sync_claude_files(cli, Some(&cas_root))
-                })
+                refresh_project_files(cli, &cas_root, args.dry_run)
             });
             details.push_str(&output);
             phase_details.push((skills.is_ok(), output));
@@ -1516,6 +1508,25 @@ fn run_project_phase(
     match operation() {
         Ok(()) => ProjectPhase::Ok(name.to_string()),
         Err(error) => ProjectPhase::Failed(format!("{name}: {error:#}")),
+    }
+}
+
+// Preserve the managed-file verdict through the compact sweep. In particular,
+// a skipped writer must never become an OK skills phase with its warning hidden.
+fn refresh_project_files(cli: &Cli, cas_root: &Path, dry_run: bool) -> ProjectPhase {
+    if dry_run {
+        return ProjectPhase::Planned("skills".into());
+    }
+    match sync_claude_files(cli, Some(cas_root)) {
+        Err(error) => ProjectPhase::Failed(format!("skills: {error:#}")),
+        Ok(report) if !report.conflicts.is_empty() => ProjectPhase::Warning(format!(
+            "{} managed file conflict(s); run `cas update --sync --json`",
+            report.conflicts.len()
+        )),
+        Ok(report) if report.outcome == "staged" => {
+            ProjectPhase::Warning("managed changes staged; commit pending".into())
+        }
+        Ok(report) => ProjectPhase::Ok(format!("skills; managed files {}", report.outcome)),
     }
 }
 
@@ -2121,7 +2132,10 @@ fn scan_for_projects(root: &Path, depth: usize, projects: &mut BTreeSet<PathBuf>
 }
 
 /// Sync rules, skills, and configuration to .claude/.codex directories
-fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result<()> {
+fn sync_claude_files(
+    cli: &Cli,
+    cas_root_param: Option<&Path>,
+) -> anyhow::Result<crate::cli::project_files::Report> {
     sync_claude_files_into(cli, cas_root_param, None)
 }
 
@@ -2131,13 +2145,13 @@ fn sync_claude_files_into(
     cli: &Cli,
     cas_root_param: Option<&Path>,
     project_root: Option<&Path>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<crate::cli::project_files::Report> {
     // cas_root is optional - if not provided and Cassy is not initialized, nothing to sync
     let cas_root = match cas_root_param {
         Some(path) => path.to_path_buf(),
         None => {
             // Not initialized, nothing to sync
-            return Ok(());
+            return Ok(crate::cli::project_files::Report { outcome: "skipped", ..Default::default() });
         }
     };
 
@@ -2163,13 +2177,13 @@ fn sync_claude_files_into(
     // committed there. The authoring checkout is exempted inside the helper
     // because its rendered files are intentional tracked fixtures.
     let builtin_harnesses = crate::cli::project_files::harnesses(project_root);
-    let reconciliation = crate::cli::project_files::Reconcile::begin(project_root, &builtin_harnesses)?;
-    if let Some(plan) = &reconciliation {
-        if plan.blocked() {
+    let reconciliation = match crate::cli::project_files::Reconcile::begin(project_root, &builtin_harnesses)? {
+        Some(plan) if plan.blocked() => {
             report_managed_files(cli, &plan.report)?;
-            return Ok(());
+            return Ok(plan.report);
         }
-    }
+        plan => plan,
+    };
     // A worktree-scoped sync (cas-49c0) leaves host-level installs alone.
     #[cfg(feature = "mcp-proxy")]
     if _refresh_host_integration {
@@ -2535,7 +2549,7 @@ fn sync_claude_files_into(
         }
     }
 
-    Ok(())
+    Ok(managed_files)
 }
 
 /// Distribute embedded built-in skills/agents/commands to user-level dirs

@@ -74,18 +74,10 @@ fn list_profiles_shows_detected_accounts_and_login_state() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Usage: cas claude <profile>"))
-        .stdout(predicate::str::contains(format!(
-            "  alt — {} (logged in) (active)\n",
-            alt.display()
-        )))
-        .stdout(predicate::str::contains(format!(
-            "  main — {} (not logged in)\n",
-            home.path().join(".claude").display()
-        )))
-        .stdout(predicate::str::contains(format!(
-            "  work — {} (not logged in)\n",
-            home.path().join(".claude-work").display()
-        )));
+        // pin: cas-e1f4 two-line rows that fit 80 columns.
+        .stdout(predicate::str::contains("  alt (logged in) (active)\n    ~/.claude-alt\n"))
+        .stdout(predicate::str::contains("  main (not logged in)\n    ~/.claude\n"))
+        .stdout(predicate::str::contains("  work (not logged in)\n    ~/.claude-work\n"));
 }
 
 /// The headline behavior: `cas claude alt` selects the alt account and then
@@ -211,6 +203,37 @@ fn login_subcommand_binds_auth_flow_to_named_profile() {
             "{key} must be unset in the login child"
         );
     }
+}
+
+/// cas-e1f4 QA F07: once accounts share a base folder, `cas claude login
+/// <new>` links the new account dir to it, as the picker does; its login
+/// stays its own.
+#[test]
+fn login_subcommand_links_a_new_account_to_the_shared_base() {
+    let home = home_with_profiles();
+    let base = home.path().join(".cas/claude-base");
+    std::fs::create_dir_all(base.join("commands")).unwrap();
+    std::fs::write(base.join("commands/finish.md"), "F").unwrap();
+    std::fs::write(base.join("settings.json"), "{}").unwrap();
+
+    cas_cmd(home.path())
+        .args(["claude", "login", "newbie@x.com"])
+        .assert()
+        .success();
+    let account = home.path().join(".claude-newbie@x.com");
+    assert_eq!(
+        std::fs::read_link(account.join("commands")).unwrap(),
+        base.join("commands")
+    );
+    assert_eq!(
+        std::fs::read_to_string(account.join("commands/finish.md")).unwrap(),
+        "F"
+    );
+    assert_eq!(
+        std::fs::read_link(account.join("settings.json")).unwrap(),
+        base.join("settings.json")
+    );
+    assert!(!account.join(".credentials.json").exists(), "no login is shared");
 }
 
 #[test]

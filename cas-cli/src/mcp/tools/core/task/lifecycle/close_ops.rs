@@ -10317,6 +10317,7 @@ impl CasCore {
         // Auto-unblock tasks that were blocked solely by this task.
         // This keeps dependency state and task status synchronized.
         let mut auto_unblocked_tasks: Vec<String> = Vec::new();
+        let mut held_blocked_tasks: Vec<String> = Vec::new();
         if let Ok(dependents) = task_store.get_dependents(&req.id) {
             for dep in dependents
                 .iter()
@@ -10340,6 +10341,40 @@ impl CasCore {
                             .map(|blockers| blockers.is_empty())
                             .unwrap_or(false);
                     if !(local_blockers_cleared && external_blockers_cleared) {
+                        continue;
+                    }
+                    let hold = match super::super::block_hold::read(
+                        task_store.as_ref(),
+                        &dependent_task.id,
+                    ) {
+                        Ok(hold) => hold,
+                        Err(error) => {
+                            tracing::warn!(
+                                task_id = %dependent_task.id,
+                                error = %error,
+                                "dependency blockers closed but structured hold state could not be read"
+                            );
+                            held_blocked_tasks.push(format!(
+                                "{} — structured hold state could not be read",
+                                dependent_task.id
+                            ));
+                            continue;
+                        }
+                    };
+                    if let Some(hold) = hold {
+                        let task_id = dependent_task.id.clone();
+                        super::super::block_hold::record_auto_unblock_skipped(
+                            &mut dependent_task,
+                            &hold.reason,
+                        );
+                        if let Err(error) = task_store.update(&dependent_task) {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                error = %error,
+                                "dependency blockers closed but the auto-unblock audit note could not be persisted"
+                            );
+                        }
+                        held_blocked_tasks.push(format!("{task_id} — {}", hold.reason));
                         continue;
                     }
                     dependent_task.status = TaskStatus::Open;
@@ -10562,7 +10597,7 @@ impl CasCore {
                 ""
             };
 
-        let auto_unblock_msg = if auto_unblocked_tasks.is_empty() {
+        let mut auto_unblock_msg = if auto_unblocked_tasks.is_empty() {
             String::new()
         } else {
             format!(
@@ -10570,6 +10605,12 @@ impl CasCore {
                 auto_unblocked_tasks.join(", ")
             )
         };
+        if !held_blocked_tasks.is_empty() {
+            auto_unblock_msg.push_str(&format!(
+                "\n\n⏸ Kept blocked after dependency closure: {}",
+                held_blocked_tasks.join("; ")
+            ));
+        }
 
         // cas-490f: surface the actual committed delta for the task so
         // supervisors see real changes at close time. cas-203e: this must use
@@ -11117,6 +11158,7 @@ impl CasCore {
                     "task reopen rejected: a non-empty reason is required to preserve the terminal-state audit trail",
                 )
             })?;
+        let clear_blocked_hold = old_status == TaskStatus::Blocked;
         task.status = TaskStatus::Open;
         if matches!(old_status, TaskStatus::Closed | TaskStatus::Cancelled) {
             // cas-cd24: closed-specific resets stay gated to the closed
@@ -11254,6 +11296,18 @@ impl CasCore {
                 data: None,
             })?;
             occurrence = super::supervisor_push::occurrence_from_updated_at(task.updated_at);
+        }
+
+        if clear_blocked_hold {
+            task_store
+                .patch_execution_state(&req.id, &serde_json::json!({"blocked_hold": null}))
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Task was reopened, but its structured blocked hold could not be cleared: {error}"
+                    )),
+                    data: None,
+                })?;
         }
 
         // cas-062d / cas-17e4: ready/reopened outbox after successful reopen.
@@ -13738,6 +13792,20 @@ pub(crate) fn resolve_close_delivery_branch(
     else {
         return Ok(own);
     };
+    // cas-cfa5: a worker whose only commit merges `main` into its target
+    // delivers that merge on its own branch, though every commit it brings
+    // claims another task. Park and merge the real branch, never an absent
+    // per-task ref the push guard forbids.
+    if let Some(target) = task
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|target| target.target_branch.trim())
+        .filter(|target| !target.is_empty())
+        && merge_only_delivery(repo_path, &own_ref, target)
+    {
+        return Ok(own);
+    }
     let prefix = format!("factory/{assignee}-");
     let listed = std::process::Command::new("git")
         .args([
@@ -13797,6 +13865,44 @@ pub(crate) fn resolve_close_delivery_branch(
          retry; or close with commit_receipt=<this task's delivery SHA>.",
         id = task.id,
     ))
+}
+
+/// cas-cfa5: whether `lane`'s tip is a merge-only delivery onto `target`:
+/// a merge commit whose first parent is already on the target (locally or on
+/// origin), so it fast-forwards the target, and whose tree differs from that
+/// first parent, so it delivers something. A worker that merges `main` into
+/// the epic delivers exactly that commit; every non-merge commit it brings
+/// claims another task, which is why ordinary attribution cannot see it.
+/// Unknown targets, non-merge tips and empty merges are never merge-only.
+pub(crate) fn merge_only_delivery(repo: &std::path::Path, lane: &str, target: &str) -> bool {
+    if !is_safe_git_refname(lane) || !is_safe_git_refname(target) {
+        return false;
+    }
+    let targets: Vec<String> = [target.to_string(), format!("origin/{target}")]
+        .into_iter()
+        .filter(|reference| git_ref_exists(repo, reference))
+        .collect();
+    if targets.is_empty() {
+        return false;
+    }
+    let Ok(parents) = git_stdout_lines(repo, &["rev-list", "--parents", "-n", "1", lane]) else {
+        return false;
+    };
+    let commits: Vec<&str> = parents
+        .first()
+        .map(|line| line.split_whitespace().collect())
+        .unwrap_or_default();
+    let [tip, first_parent, _merged, ..] = commits.as_slice() else {
+        return false;
+    };
+    if !targets
+        .iter()
+        .any(|reference| git_commit_is_ancestor(repo, first_parent, reference))
+    {
+        return false;
+    }
+    let tree = |commit: &str| resolve_branch_sha(repo, &format!("{commit}^{{tree}}"));
+    matches!((tree(tip), tree(first_parent)), (Some(tip), Some(first)) if tip != first)
 }
 
 /// GH #1133, #1147, #1151: whether a `no-code` task has no commit of its own.
@@ -39943,3 +40049,7 @@ mod no_code_close_tests;
 #[cfg(test)]
 #[path = "close_ops/blast_radius_park_tests.rs"]
 mod blast_radius_park_tests;
+
+#[cfg(test)]
+#[path = "close_ops/merge_only_delivery_tests.rs"]
+mod merge_only_delivery_tests;

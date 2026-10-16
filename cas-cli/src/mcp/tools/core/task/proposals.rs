@@ -417,6 +417,7 @@ impl CasCore {
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         }
         let mut reopened = Vec::new();
+        let mut kept_blocked = Vec::new();
         let mut rejected = Vec::new();
         for task_id in touched {
             let blockers = projection_store
@@ -448,12 +449,29 @@ impl CasCore {
             {
                 if let Ok(mut task) = task_store.get(&task_id) {
                     if task.status == TaskStatus::Blocked {
-                        task.status = TaskStatus::Open;
-                        task.updated_at = chrono::Utc::now();
-                        task_store.update(&task).map_err(|error| {
-                            Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
-                        })?;
-                        reopened.push(task_id);
+                        let hold = super::block_hold::read(task_store.as_ref(), &task_id)
+                            .map_err(|error| {
+                                Self::error(
+                                    ErrorCode::INTERNAL_ERROR,
+                                    format!("Could not read structured blocked hold: {error}"),
+                                )
+                            })?;
+                        if let Some(hold) = hold {
+                            super::block_hold::record_auto_unblock_skipped(
+                                &mut task,
+                                &hold.reason,
+                            );
+                            task_store.update(&task).map_err(|error| {
+                                Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
+                            })?;
+                            kept_blocked.push(format!("{task_id} — {}", hold.reason));
+                        } else {
+                            task.status = TaskStatus::Open;
+                            task_store.update(&task).map_err(|error| {
+                                Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
+                            })?;
+                            reopened.push(task_id);
+                        }
                     }
                 }
             }
@@ -467,8 +485,13 @@ impl CasCore {
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         rejected.sort();
         rejected.dedup();
+        let kept_blocked = if kept_blocked.is_empty() {
+            "none".to_string()
+        } else {
+            kept_blocked.join("; ")
+        };
         Ok(Self::success(format!(
-            "Reconciled {} external dependency signal(s) for explicit project `{}`. Reopened: {}. Rejected handoffs still blocking: {}.",
+            "Reconciled {} external dependency signal(s) for explicit project `{}`. Reopened: {}. Kept blocked: {}. Rejected handoffs still blocking: {}.",
             feed.dependencies.len(),
             origin_project,
             if reopened.is_empty() {
@@ -476,6 +499,7 @@ impl CasCore {
             } else {
                 reopened.join(", ")
             },
+            kept_blocked,
             if rejected.is_empty() {
                 "none".into()
             } else {

@@ -1261,7 +1261,13 @@ pub(crate) fn collect_pr_lane_failures(
     Ok(failures)
 }
 
-/// Keep only the latest completed failure for each watched branch.
+fn is_branch_ci_verdict(run: &CiRun) -> bool {
+    run.name == "CI"
+        && matches!(run.event.as_str(), "push" | "merge_group")
+        && run.status == "completed"
+}
+
+/// Keep only the latest completed CI push/merge-group failure per watched branch.
 ///
 /// GitHub Action run IDs increase monotonically.  Selecting the highest run ID
 /// per branch makes the current completed conclusion authoritative: a newer
@@ -1276,7 +1282,7 @@ pub(crate) fn collect_failures(
     let mut latest_by_branch = BTreeMap::<String, &CiRun>::new();
 
     for run in &runs {
-        if run.status != "completed" || !watched_branches.contains(&run.head_branch) {
+        if !is_branch_ci_verdict(run) || !watched_branches.contains(&run.head_branch) {
             continue;
         }
         let replace = latest_by_branch
@@ -1312,7 +1318,7 @@ pub(crate) fn collect_failures(
             .filter(|older| {
                 older.head_branch == run.head_branch
                     && older.id < run.id
-                    && older.status == "completed"
+                    && is_branch_ci_verdict(older)
                     && older.conclusion.as_deref() == Some("failure")
             })
             .map(|older| SuppressedCiRun {
@@ -1588,7 +1594,7 @@ mod tests {
     fn run_with(branch: &str, head_sha: &str, id: u64, conclusion: Option<&str>) -> CiRun {
         CiRun {
             id,
-            name: String::new(),
+            name: "CI".to_string(),
             head_branch: branch.to_string(),
             head_sha: head_sha.to_string(),
             html_url: format!("https://github.test/org/repo/actions/runs/{id}"),
@@ -1825,6 +1831,63 @@ mod tests {
             _: &str,
         ) -> Result<Vec<DeliveryPullRequest>, CiWatchError> {
             Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn cas_233e_watchdog_failure_is_not_main_ci_and_enqueues_no_relay() {
+        let mut watchdog = run("main", Some("failure"));
+        watchdog.name = "Stale queued-run watchdog".to_string();
+        watchdog.event = "schedule".to_string();
+        let transport = TipTransport {
+            runs: vec![watchdog], tip: Some("deadbeef"),
+            failed_job: Some("Cancel stale non-merge-group queued runs"), job_lookups: Cell::new(0),
+        };
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()])).unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        for failure in &failures { emit_failure(&queue, "factory-session", failure).unwrap(); }
+        assert!(queue.peek_all(10).unwrap().is_empty(), "housekeeping must never claim CI failed on main");
+        assert_eq!(transport.job_lookups.get(), 0);
+    }
+
+    #[test]
+    fn cas_233e_housekeeping_cannot_hide_ci_failure_or_pollute_suppressed_history() {
+        let mut old_watchdog = run_with("main", "deadbeef", 40, Some("failure"));
+        old_watchdog.name = "Stale queued-run watchdog".to_string();
+        old_watchdog.event = "schedule".to_string();
+        let mut green_watchdog = old_watchdog.clone();
+        green_watchdog.id = 42;
+        green_watchdog.conclusion = Some("success".to_string());
+        let transport = TipTransport {
+            runs: vec![old_watchdog, run_with("main", "deadbeef", 41, Some("failure")), green_watchdog],
+            tip: Some("deadbeef"), failed_job: Some("Fast Validation"), job_lookups: Cell::new(0),
+        };
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()])).unwrap();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].run_id, 41);
+        assert!(failures[0].suppressed_red_runs.is_empty());
+        assert_eq!(transport.job_lookups.get(), 1);
+    }
+
+    #[test]
+    fn cas_233e_only_ci_push_and_merge_group_define_branch_verdict() {
+        for (name, event, eligible) in [
+            ("CI", "push", true), ("CI", "merge_group", true),
+            ("CI", "schedule", false), ("CI", "workflow_dispatch", false),
+            ("CI", "pull_request", false), ("Stale queued-run watchdog", "push", false),
+            ("Other workflow", "merge_group", false),
+        ] {
+            let mut ci = run("main", Some("failure"));
+            ci.name = name.to_string();
+            ci.event = event.to_string();
+            let transport = TipTransport {
+                runs: vec![ci], tip: Some("deadbeef"),
+                failed_job: Some("Fast Validation"), job_lookups: Cell::new(0),
+            };
+            let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()])).unwrap();
+            assert_eq!(!failures.is_empty(), eligible, "{name}/{event}");
         }
     }
 

@@ -4353,15 +4353,14 @@ impl FactoryDaemon {
     }
 
     fn teams_pointer_recipients(&self) -> Vec<String> {
-        let supervisor = self.app.supervisor_name();
-        let mut recipients: Vec<_> = self.app.worker_names().iter()
+        // GH #1231: supervisor events now carry their body in the sole PTY
+        // wake (or wait for a hook). Oversized bodies already travel whole.
+        // The timed Teams-pointer fallback belongs only to worker pointers;
+        // treating an inline handoff as a pointer would append a second body.
+        self.app.worker_names().iter()
             .filter(|name| !self.dead_workers.contains(*name))
             .filter(|name| self.app.harness_for(name) == cas_mux::SupervisorCli::Claude)
-            .cloned().collect();
-        if self.app.harness_for(supervisor) == cas_mux::SupervisorCli::Claude {
-            recipients.extend(["supervisor".to_string(), supervisor.to_string()]);
-        }
-        recipients
+            .cloned().collect()
     }
 
     fn decide_pointer_read(&mut self, generation: u64, rows: Vec<(cas_store::QueuedPrompt, String)>) {
@@ -8206,6 +8205,12 @@ impl FactoryDaemon {
             facts: row_facts,
             operator_replies,
         } = selection;
+        // Reuse the hook's message-class seam for inline operator/peer labels.
+        // The roster arrived from QueueSelect; there is no loop-thread read.
+        let supervisor_senders: HashMap<String, String> = registered_agents.iter()
+            .filter(|agent| agent.role == cas_types::AgentRole::Supervisor)
+            .map(|agent| (agent.id.clone(), agent.name.clone())).collect();
+        let supervisor_aliases = vec!["supervisor".to_string(), self.app.supervisor_name().to_string()];
         tracing::trace!(target: "cas::coordination", generation, rows = prompts.len(), "delivering a QueueSelect batch");
         for id in retargeted_rows
             .into_iter()
@@ -8780,10 +8785,15 @@ impl FactoryDaemon {
             // was queued at spawn but reaches the worker after a supervisor
             // reply must read as old spawn boilerplate, not a fresh reassignment.
             prompt_with_instructions = format!(
-                "{}\n{}\n{}",
+                "{}\n{}{}\n{}",
                 crate::mcp::tools::service::agent_search_system::message::first_message_provenance(
                     &queued
                 ),
+                if target == "supervisor" || target == self.app.supervisor_name() {
+                    crate::hooks::handlers::handlers_middle::factory_inbox::inbox_lane(
+                        &queued, &supervisor_senders, &supervisor_aliases,
+                    ).label()
+                } else { "" },
                 crate::mcp::tools::service::agent_search_system::message::commander_reply_command(
                     &queued,
                 )
@@ -8822,6 +8832,13 @@ impl FactoryDaemon {
                     self.app.harness_for(pane_target),
                     true,
                 ) == super::delivery::DeliveryChannel::TeamsInbox;
+            // GH #1231: bounded supervisor events have one delivery path.
+            // Preserve already-held legacy copies until their recovery settles.
+            let inline_supervisor_body = claude_inbox_target
+                && (target == "supervisor" || target == self.app.supervisor_name())
+                && cas_store::fits_hook_surface(&prompt_with_instructions)
+                && facts.deferred_inbox.is_none()
+                && !self.inbox_deferred_writes.contains_key(&queued.id);
             // cas-786a6 (H3): the durable marker, read by QueueSelect.
             let durable_deferred_inbox = claude_inbox_target && facts.deferred_inbox.is_some();
             let deferred_inbox_recorded =
@@ -9307,6 +9324,24 @@ impl FactoryDaemon {
                     .insert(queued.source.clone(), now);
             }
 
+            if inline_supervisor_body && !queued.urgent
+                && !Self::row_is_supervisor_wake(
+                    &wake_sender, self.app.supervisor_name(), &queued.source, &queued.prompt,
+                )
+            {
+                // FYI (including task_started) is read on the recipient's
+                // next tool/turn boundary. Park it out of daemon selection so
+                // a full batch of quiet rows cannot starve later action rows.
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(), queued.id, &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                        detail: "quiet supervisor event; awaiting the recipient's next hook or inbox_poll".into(),
+                        recheck_at: chrono::Utc::now() + chrono::Duration::minutes(1),
+                    },
+                );
+                continue;
+            }
+
             // Skip PTY injection for native extension agents that use plain PTY mode —
             // they poll the queue and deliver messages via their own extension API.
             //
@@ -9740,6 +9775,23 @@ impl FactoryDaemon {
                         )
                     };
                     let worker_is_idle = wake_decision.allowed;
+                    if inline_supervisor_body && !worker_is_idle {
+                        // A veto holds the row for the hook/poll or next wake.
+                        // No inbox handoff occurred, so release the reservation
+                        // instead of recording a held Teams copy.
+                        self.queue_jobs.release_inject_claim(
+                            self.app.cas_dir(), queued.id, &queued.target,
+                        );
+                        self.queue_jobs.record_outcome(queued.id, &queued.target, inject_generation);
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(), queued.id, &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::PendingReason {
+                                reason: cas_store::PendingReason::GatedNotReady,
+                                detail: Some(wake_decision.status_detail()),
+                            },
+                        );
+                        continue;
+                    }
                     if !worker_is_idle {
                         tracing::debug!(
                             target: "cas::coordination",
@@ -9854,7 +9906,11 @@ impl FactoryDaemon {
                     // so it withdraws itself once the merge lands instead of
                     // being read later as an outstanding ask.
                     super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: transport"));
-                    if nudge_only {
+                    if inline_supervisor_body {
+                        self.deliver_supervisor_event_inline(
+                            &inbox_source, &prompt_with_instructions, queued.id,
+                        ).await
+                    } else if nudge_only {
                         // cas-ef14 (GH #139): the recipient's harness already
                         // holds this payload — re-writing the inbox is the
                         // GH #124 storm. Only the pane nudge is left to try.
@@ -9875,7 +9931,13 @@ impl FactoryDaemon {
                             wake_decision,
                             merge_request_task.as_deref(),
                             Some(queued.id),
-                            Some(&queued.prompt),
+                            // A new oversized supervisor event must carry its
+                            // whole text, even if only the framing pushed it
+                            // over the inline cap. Held legacy copies keep
+                            // their pointer so their dedup probe still matches.
+                            if is_supervisor_target && !deferred_inbox_recorded {
+                                None
+                            } else { Some(&queued.prompt) },
                         )
                         .await
                     }

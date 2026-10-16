@@ -69,6 +69,44 @@ fn test_init_yes_flag() {
 }
 
 #[test]
+fn cas_de46_startup_preserves_retired_embedding_artifacts() {
+    let temp = TempDir::new().unwrap();
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    // Old local embedding data is no longer produced or consumed by search.
+    // Ordinary startup must leave any remaining files for the owner to manage.
+    let cas_root = temp.path().join(".cas");
+    let fixtures = [
+        ("vectors.hnsw", "legacy vector bytes"),
+        ("vectors.meta.json", "legacy metadata bytes"),
+        ("models/nested/model.bin", "legacy model bytes"),
+    ];
+    for (relative, content) in fixtures {
+        let path = cas_root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .arg("status")
+        .assert()
+        .success();
+
+    for (relative, content) in fixtures {
+        assert_eq!(
+            std::fs::read_to_string(cas_root.join(relative)).unwrap(),
+            content,
+            "startup must preserve {relative}"
+        );
+    }
+}
+
+#[test]
 fn test_init_json() {
     let temp = TempDir::new().unwrap();
 

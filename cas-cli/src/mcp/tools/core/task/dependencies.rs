@@ -1,5 +1,19 @@
 use crate::mcp::tools::core::imports::*;
 
+/// The `dep_type` both `dep_add` and `dep_remove` read (cas-96ab): one
+/// parser, so the edge `dep_add` writes is the one a matching `dep_remove`
+/// finds. Case and `_`/`-` are ignored; anything unrecognised means Blocks.
+fn parse_dep_type(raw: &str) -> DependencyType {
+    match raw.to_lowercase().replace('_', "-").as_str() {
+        "related" => DependencyType::Related,
+        "parent" | "parentchild" | "parent-child" => DependencyType::ParentChild,
+        "discovered" | "discoveredfrom" | "discovered-from" => DependencyType::DiscoveredFrom,
+        "extracted" | "extractedfrom" | "extracted-from" => DependencyType::ExtractedFrom,
+        "requires-start" | "requiresstart" => DependencyType::RequiresStart,
+        _ => DependencyType::Blocks,
+    }
+}
+
 impl CasCore {
     pub async fn cas_task_dep_add(
         &self,
@@ -19,13 +33,7 @@ impl CasCore {
             data: None,
         })?;
 
-        let dep_type = match req.dep_type.to_lowercase().replace('_', "-").as_str() {
-            "related" => DependencyType::Related,
-            "parent" | "parentchild" => DependencyType::ParentChild,
-            "discovered" | "discoveredfrom" => DependencyType::DiscoveredFrom,
-            "requires-start" | "requiresstart" => DependencyType::RequiresStart,
-            _ => DependencyType::Blocks,
-        };
+        let dep_type = parse_dep_type(&req.dep_type);
 
         let dep = Dependency {
             from_id: req.from_id.clone(),
@@ -141,14 +149,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
-        let dep_type = match req.dep_type.to_lowercase().replace('_', "-").as_str() {
-            "related" => DependencyType::Related,
-            "parent" | "parentchild" | "parent-child" => DependencyType::ParentChild,
-            "discovered" | "discoveredfrom" | "discovered-from" => DependencyType::DiscoveredFrom,
-            "extracted" | "extractedfrom" | "extracted-from" => DependencyType::ExtractedFrom,
-            "requires-start" | "requiresstart" => DependencyType::RequiresStart,
-            _ => DependencyType::Blocks,
-        };
+        let dep_type = parse_dep_type(&req.dep_type);
 
         let found = task_store
             .remove_dependency_of_type(&req.from_id, &req.to_id, dep_type)
@@ -181,8 +182,29 @@ impl CasCore {
                             .unwrap_or_default()
                             .is_empty()
                     {
+                        let hold = super::block_hold::read(task_store.as_ref(), &req.from_id)
+                            .map_err(|error| {
+                                Self::error(
+                                    ErrorCode::INTERNAL_ERROR,
+                                    format!(
+                                        "Could not read structured blocked hold; task remains blocked: {error}"
+                                    ),
+                                )
+                            })?;
+                        if let Some(hold) = hold {
+                            super::block_hold::record_auto_unblock_skipped(
+                                &mut task,
+                                &hold.reason,
+                            );
+                            task_store.update(&task).map_err(|error| {
+                                Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
+                            })?;
+                            return Ok(Self::success(format!(
+                                "Removed external dependency: {} was blocked_by {}. Task remains blocked: {}.",
+                                req.from_id, req.to_id, hold.reason
+                            )));
+                        }
                         task.status = TaskStatus::Open;
-                        task.updated_at = chrono::Utc::now();
                         task_store.update(&task).map_err(|error| {
                             Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
                         })?;
@@ -386,5 +408,60 @@ mod describe_dependency_tests {
             "release/operator-selected",
             "an explicit non-default target remains task authority"
         );
+    }
+
+    /// cas-96ab: `dep_add` and `dep_remove` read `dep_type` the same way.
+    /// `dep_add` used to coerce `extracted` (and the hyphenated spellings
+    /// `dep_remove` accepts) to Blocks, so the edge it wrote was not the one
+    /// a matching `dep_remove` looked for.
+    #[tokio::test]
+    async fn dep_add_and_dep_remove_accept_the_same_dep_type_spellings_cas_96ab() {
+        use tempfile::TempDir;
+
+        let root = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(root.path().to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        for (spelling, expected) in [
+            ("extracted", DependencyType::ExtractedFrom),
+            ("extractedfrom", DependencyType::ExtractedFrom),
+            ("extracted-from", DependencyType::ExtractedFrom),
+            ("extracted_from", DependencyType::ExtractedFrom),
+            ("parent-child", DependencyType::ParentChild),
+            ("discovered-from", DependencyType::DiscoveredFrom),
+            ("requires_start", DependencyType::RequiresStart),
+            ("related", DependencyType::Related),
+            ("blocks", DependencyType::Blocks),
+        ] {
+            let from = format!("cas-96ab-from-{spelling}");
+            let to = format!("cas-96ab-to-{spelling}");
+            store.add(&Task::new(from.clone(), "from".into())).unwrap();
+            store.add(&Task::new(to.clone(), "to".into())).unwrap();
+            core.cas_task_dep_add(Parameters(DependencyRequest {
+                from_id: from.clone(),
+                to_id: to.clone(),
+                dep_type: spelling.into(),
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("dep_add {spelling}: {error:?}"));
+            let stored: Vec<DependencyType> = store
+                .get_dependencies(&from)
+                .unwrap()
+                .into_iter()
+                .map(|dep| dep.dep_type)
+                .collect();
+            assert_eq!(stored, vec![expected], "dep_add dep_type={spelling}");
+            core.cas_task_dep_remove(Parameters(DependencyRequest {
+                from_id: from.clone(),
+                to_id: to.clone(),
+                dep_type: spelling.into(),
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("dep_remove {spelling}: {error:?}"));
+            assert!(
+                store.get_dependencies(&from).unwrap().is_empty(),
+                "dep_remove dep_type={spelling} removes the edge dep_add wrote"
+            );
+        }
     }
 }

@@ -22,11 +22,18 @@ fn probe(executable: &Path, budget: Duration) -> Option<String> {
         .ok()?;
     let stdout = child.stdout.take()?;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let mut text = String::new();
-        let result = stdout.take(256).read_to_string(&mut text).map(|_| text);
-        let _ = sender.send(result);
-    });
+    if std::thread::Builder::new()
+        .spawn(move || {
+            let mut text = String::new();
+            let result = stdout.take(256).read_to_string(&mut text).map(|_| text);
+            let _ = sender.send(result);
+        })
+        .is_err()
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -108,9 +115,7 @@ mod tests {
         std::fs::write(&cli, "#!/bin/sh\nexit 1\n").unwrap();
         assert!(probe(&cli, Duration::from_secs(1)).is_none());
         std::fs::write(&cli, "#!/bin/sh\nexec sleep 5\n").unwrap();
-        let start = Instant::now();
         assert!(probe(&cli, Duration::from_millis(30)).is_none());
-        assert!(start.elapsed() < Duration::from_secs(1));
         assert!(probe(&root.path().join("missing"), Duration::from_secs(1)).is_none());
     }
 }

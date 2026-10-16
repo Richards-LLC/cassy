@@ -4351,66 +4351,123 @@ fn read_only_statement(words: &[String]) -> bool {
             args.get(at + 1)
                 .is_some_and(|sub| matches!(sub.as_str(), "get" | "describe" | "list" | "search" | "docs"))
         }),
-        // cas-b7b2: searches that cas-1768 QA found refused.
-        "awk" | "gawk" | "mawk" | "nawk" => read_only_awk(args),
-        "find" => read_only_find(args),
-        "gh" => read_only_gh(args),
-        "jq" => true,
+        // cas-b7b2: searches that cas-1768 QA found refused, judged by
+        // POSITIVE allowlists that fail closed. No environment assignment or
+        // env/sudo-style prefix may precede them: awk and find read
+        // environment that can load programs. gh is never admitted here: a
+        // configured pager, browser or alias can run a command from what
+        // looks like `gh <noun> view`, and that cannot be proved from the
+        // statement text.
+        "awk" | "gawk" | "mawk" | "nawk" => {
+            plain_command_prefix(&words[..index]) && read_only_awk(args)
+        }
+        "find" => plain_command_prefix(&words[..index]) && read_only_find(args),
+        "jq" => plain_command_prefix(&words[..index]),
         _ => false,
     }
 }
 
-/// cas-b7b2: an awk run that only reads and prints. Refused: an in-place
-/// edit (`-i inplace`, `--inplace`), a program read from a file (`-f`,
-/// `--file`, `-E`, `--exec`, whose text is not visible here), and any
-/// program text that can run a command or write a file (`system`, a `|`
-/// pipe in or out, `getline`, an output redirection `>`).
-fn read_only_awk(args: &[String]) -> bool {
-    let options_ok = args.iter().all(|arg| {
-        let arg = arg.as_str();
-        !(arg == "-i"
-            || arg.starts_with("-i")
-            || arg.starts_with("--include")
-            || arg.starts_with("--inplace")
-            || arg == "-f"
-            || arg.starts_with("-f")
-            || arg.starts_with("--file")
-            || arg == "-E"
-            || arg.starts_with("--exec"))
-    });
-    options_ok
-        && !args.iter().any(|arg| {
-            arg.contains("system")
-                || arg.contains('|')
-                || arg.contains("getline")
-                || arg.contains('>')
+/// cas-b7b2: the words before an allowlisted command carry no environment
+/// assignment and no wrapper that sets or clears environment or changes
+/// user. Only the plain `xargs` that pipelines use is accepted; anything
+/// else fails closed.
+fn plain_command_prefix(prefix: &[String]) -> bool {
+    let Some((first, rest)) = prefix.split_first() else {
+        return true;
+    };
+    shell_word_basename(first) == "xargs"
+        && rest.iter().all(|word| {
+            !word.contains('=')
+                && !matches!(shell_word_basename(word), "env" | "sudo" | "doas" | "su" | "runuser")
         })
 }
 
-/// cas-b7b2: a find that only lists. Refused: every action that runs a
-/// command, deletes or writes a file.
-fn read_only_find(args: &[String]) -> bool {
-    !args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "-exec" | "-execdir" | "-ok" | "-okdir" | "-delete" | "-fprint" | "-fprint0"
-                | "-fprintf" | "-fls"
-        )
-    })
+/// cas-b7b2: an awk run that only reads and prints, by a POSITIVE
+/// allowlist. Options: only `-F SEP` and `-v NAME=VALUE` (or their attached
+/// forms) before the program; any other option, long option or dialect flag
+/// (program files, includes, `-W`, `-e`, in-place) fails closed. Exactly one
+/// program, given inline, with no construct that can run a command, read or
+/// write outside the input, or load code: `system`, `|`, `<`, `>`,
+/// `getline`, `@` directives. Operands after it are input files; a dash
+/// operand other than `-` (stdin) fails closed.
+fn read_only_awk(args: &[String]) -> bool {
+    let mut index = 0;
+    let program = loop {
+        let Some(word) = args.get(index) else {
+            return false;
+        };
+        match word.as_str() {
+            "-F" | "-v" => index += 2,
+            "--" => {
+                index += 1;
+                break args.get(index);
+            }
+            option if (option.starts_with("-F") || option.starts_with("-v")) && option.len() > 2 => {
+                index += 1
+            }
+            option if option.starts_with('-') => return false,
+            _ => break Some(word),
+        }
+    };
+    let Some(program) = program else {
+        return false;
+    };
+    const IO_CONSTRUCTS: &[&str] = &["system", "|", "<", ">", "getline", "@"];
+    !IO_CONSTRUCTS.iter().any(|construct| program.contains(construct))
+        && args[index + 1..]
+            .iter()
+            .all(|operand| operand == "-" || !operand.starts_with('-'))
 }
 
-/// cas-b7b2: a gh subcommand that only reads: `gh <noun> view|list|status|
-/// diff|checks` and `gh search …`. `gh api` (any method), edits, comments,
-/// merges and every other verb stay refused.
-fn read_only_gh(args: &[String]) -> bool {
-    let mut positionals = args.iter().filter(|arg| !arg.starts_with('-'));
-    match positionals.next().map(String::as_str) {
-        Some("search") => true,
-        Some("api") | None => false,
-        Some(_) => positionals.next().is_some_and(|verb| {
-            matches!(verb.as_str(), "view" | "list" | "status" | "diff" | "checks")
-        }),
+/// cas-b7b2: a find that only lists, by a POSITIVE allowlist of options,
+/// tests and output actions. Start paths come first; every later word must
+/// be a recognised expression token or the value of one. Anything else
+/// (actions that run, delete or write files, debug or file-list options)
+/// fails closed.
+fn read_only_find(args: &[String]) -> bool {
+    const LEADING_OPTIONS: &[&str] = &["-L", "-H", "-P"];
+    const BARE: &[&str] = &[
+        "!", "(", ")", ",", "-not", "-o", "-or", "-a", "-and", "-print", "-print0", "-prune",
+        "-depth", "-xdev", "-mount", "-empty", "-readable", "-writable", "-executable",
+        "-nouser", "-nogroup", "-true", "-false", "-quit", "-ls", "-follow", "-daystart",
+        "-noleaf", "-ignore_readdir_race", "-noignore_readdir_race",
+    ];
+    const WITH_VALUE: &[&str] = &[
+        "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-lname",
+        "-ilname", "-regex", "-iregex", "-regextype", "-type", "-xtype", "-maxdepth",
+        "-mindepth", "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin",
+        "-newer", "-anewer", "-cnewer", "-user", "-group", "-uid", "-gid", "-perm",
+        "-links", "-inum", "-samefile", "-used", "-printf", "-fstype",
+    ];
+    let mut words = args.iter().peekable();
+    while let Some(word) = words.peek() {
+        if LEADING_OPTIONS.contains(&word.as_str()) {
+            words.next();
+        } else {
+            break;
+        }
     }
+    // Start paths: plain words before the first expression token.
+    while words
+        .peek()
+        .is_some_and(|word| !word.starts_with('-') && !BARE.contains(&word.as_str()))
+    {
+        words.next();
+    }
+    while let Some(word) = words.next() {
+        let word = word.as_str();
+        if BARE.contains(&word) {
+            continue;
+        }
+        if WITH_VALUE.contains(&word) {
+            if words.next().is_none() {
+                return false;
+            }
+            continue;
+        }
+        return false;
+    }
+    true
 }
 
 /// cas-1b94: refusal for an agent's Bash `cas mcp add|remove|import` that

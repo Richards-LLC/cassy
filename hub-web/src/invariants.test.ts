@@ -1163,11 +1163,11 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(socket.sent.map((value) => JSON.parse(value))).toEqual(expect.arrayContaining([
       { proto: 2 },
       { channel: "events", subscribe: true },
-      // Supervisors only by default (cas-6261): the subscribe names workers off.
-      { channel: "pty:factory-a", subscribe: true, workers: false },
-      { channel: "pty:factory-b", subscribe: true, workers: false },
+      // Supervisors only (cas-6261): the hub never streams workers, so the subscribe names none.
+      { channel: "pty:factory-a", subscribe: true },
+      { channel: "pty:factory-b", subscribe: true },
     ]));
-    expect(socket.sent.filter((value) => value === JSON.stringify({ channel: "pty:factory-a", subscribe: true, workers: false }))).toHaveLength(1);
+    expect(socket.sent.filter((value) => value === JSON.stringify({ channel: "pty:factory-a", subscribe: true }))).toHaveLength(1);
 
     socket.receive(JSON.stringify({
       channel: "pty:factory-a",

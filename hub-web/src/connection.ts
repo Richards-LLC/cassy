@@ -1429,8 +1429,8 @@ export class HubConnectionSupervisor {
     if (this.machineSubscriptions.has(session)) return;
     this.machineSubscriptions.add(session);
     this.transitionAttach(session, "attaching", "attaching");
-    // Supervisors only (cas-6261): worker panes are never streamed to Commander.
-    socket.send(JSON.stringify({ channel: `pty:${session}`, subscribe: true, workers: false }));
+    // Supervisors only (cas-6261): the hub never streams worker panes to Commander.
+    socket.send(JSON.stringify({ channel: `pty:${session}`, subscribe: true }));
     const timeouts = this.attachTimeouts.get(session) ?? {};
     if (timeouts.ready !== undefined) window.clearTimeout(timeouts.ready);
     timeouts.ready = window.setTimeout(() => {

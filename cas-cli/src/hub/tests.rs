@@ -2429,7 +2429,8 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
     };
 
     assert_eq!(required_scope(&input), Some(Scope::PaneInput));
-    assert_eq!(required_scope(&resize), Some(Scope::PaneRead));
+    // cas-f285: Commander never sizes a pane, so the hub exposes no resize.
+    assert_eq!(required_scope(&resize), None);
     assert_eq!(required_scope(&keyframe), Some(Scope::PaneRead));
     assert_eq!(required_scope(&scrollback), Some(Scope::PaneRead));
     assert_eq!(required_scope(&history), Some(Scope::PaneRead));
@@ -2438,7 +2439,7 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
     assert!(super::server::is_pane_read_message(&history));
     assert!(
         !super::server::is_pane_read_message(&resize),
-        "ResizePane retains may_resize_panes lease policy"
+        "ResizePane is not a pane read; no viewer may set pane geometry"
     );
     assert!(
         !super::server::is_pane_read_message(&input),
@@ -2688,11 +2689,7 @@ fn h4_lease_04_two_devices_observe_one_controller_expiry_release_and_admin_takeo
     let phone = pair("phone");
     let laptop = pair("laptop");
 
-    assert!(auth.may_resize_panes(&phone, "factory-a", now).unwrap());
-    assert!(auth.may_resize_panes(&laptop, "factory-a", now).unwrap());
     auth.acquire_lease(&phone, "factory-a", now).unwrap();
-    assert!(auth.may_resize_panes(&phone, "factory-a", now).unwrap());
-    assert!(!auth.may_resize_panes(&laptop, "factory-a", now).unwrap());
     assert!(
         auth.lease_status(&phone, "factory-a", now)
             .unwrap()
@@ -2713,7 +2710,6 @@ fn h4_lease_04_two_devices_observe_one_controller_expiry_release_and_admin_takeo
         Some("laptop")
     );
     auth.release_lease(&laptop, "factory-a", now).unwrap();
-    assert!(auth.may_resize_panes(&phone, "factory-a", now).unwrap());
     assert!(
         auth.lease_status(&phone, "factory-a", now)
             .unwrap()
@@ -3334,54 +3330,9 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
     );
 }
 
-// cas-37f8: a phone-sized viewer must never shrink the operator's dashboard.
-// The daemon answers a refused ResizePane with the authoritative geometry; the
-// hub turns that reply into an audit record for the device that asked.
-
-#[test]
-fn a_local_dashboard_authority_reply_is_recognised_as_a_refused_resize() {
-    let frame = serde_json::to_vec(&DaemonMessage::PaneSize {
-        pane_id: "worker-1".into(),
-        cols: 203,
-        rows: 44,
-        authority: crate::ui::factory::PaneSizeAuthority::LocalDashboard,
-    })
-    .expect("PaneSize frame");
-
-    assert_eq!(
-        super::server::refused_pane_resize(&frame),
-        Some(("worker-1".to_owned(), 203, 44))
-    );
-}
-
-#[test]
-fn a_viewer_authority_reply_is_not_a_refusal() {
-    let frame = serde_json::to_vec(&DaemonMessage::PaneSize {
-        pane_id: "worker-1".into(),
-        cols: 46,
-        rows: 33,
-        authority: crate::ui::factory::PaneSizeAuthority::Viewer,
-    })
-    .expect("PaneSize frame");
-
-    assert_eq!(super::server::refused_pane_resize(&frame), None);
-}
-
-#[test]
-fn ordinary_relay_traffic_is_never_parsed_as_a_resize_refusal() {
-    let output = serde_json::to_vec(&DaemonMessage::Output {
-        pane_id: "worker-1".into(),
-        data: b"\x1b[2J{\"PaneSize\"".to_vec(),
-    })
-    .expect("Output frame");
-
-    assert_eq!(super::server::refused_pane_resize(&output), None);
-    assert_eq!(super::server::refused_pane_resize(b""), None);
-    assert_eq!(super::server::refused_pane_resize(b"not json"), None);
-}
-
 /// cas-7103: the catalog lists every live supervisor-led session, even before
-/// it has spawned workers; worker-only rows still require an explicit switch.
+/// it has spawned workers; a worker-only row is never listed (cas-f285 retired
+/// the `workers=1` switch, which is now ignored).
 #[tokio::test]
 async fn sessions_catalog_lists_live_supervisors_with_empty_rosters() {
     let mut empty_supervisor = fixture_session("empty-supervisor");
@@ -3457,7 +3408,7 @@ async fn sessions_catalog_lists_live_supervisors_with_empty_rosters() {
     );
     assert_eq!(
         names(fetch("/v1/sessions?workers=1").await),
-        vec!["factory-a", "empty-supervisor", "bare-shell"]
+        vec!["factory-a", "empty-supervisor"]
     );
     assert_eq!(
         names(fetch("/v1/sessions?dormant=1").await),
@@ -3465,13 +3416,7 @@ async fn sessions_catalog_lists_live_supervisors_with_empty_rosters() {
     );
     assert_eq!(
         names(fetch("/v1/sessions?workers=1&dormant=1").await),
-        vec![
-            "factory-a",
-            "empty-supervisor",
-            "bare-shell",
-            "hung-empty",
-            "orphaned-supervisor"
-        ]
+        vec!["factory-a", "empty-supervisor", "orphaned-supervisor"]
     );
 }
 
@@ -3482,7 +3427,7 @@ fn dormant_supervisor_metadata_is_not_a_live_catalog_row() {
     let mut dormant = fixture_session("orphaned-supervisor");
     dormant.dormant = true;
     assert!(
-        super::server::supervisor_sessions(vec![dormant], false, false).is_empty(),
+        super::server::supervisor_sessions(vec![dormant], false).is_empty(),
         "a non-empty supervisor name is not proof of a live supervisor"
     );
 }

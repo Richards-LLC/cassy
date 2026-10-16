@@ -3422,3 +3422,101 @@ fn pty_less_pane_reports_no_winsize() {
     let pane = Pane::director("d", 24, 80).unwrap();
     assert_eq!(pane.pty_winsize(), None);
 }
+
+fn spawn_test_pty(name: &str, script: &str) -> crate::pty::Pty {
+    crate::pty::Pty::spawn(
+        name,
+        crate::pty::PtyConfig {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), script.to_string()],
+            cwd: Some(PathBuf::from("/tmp")),
+            env: vec![],
+            env_remove: vec![],
+            rows: 24,
+            cols: 80,
+        },
+    )
+    .expect("spawn test pty")
+}
+
+/// Factory loop v2 §7 (cas-786a6): a pane whose child stopped reading fills
+/// its PTY buffer and then its input buffer, and stops taking input. No
+/// write waits on it, and another pane's echo is unaffected.
+#[test]
+fn flv2_pty_write_never_blocks_lane() {
+    // Raw mode without echo: the line discipline neither echoes nor discards,
+    // so unread input fills the kernel buffer and a blocking write waits.
+    let mut stalled = spawn_test_pty("stalled", "stty raw -echo; printf ready; exec sleep 60");
+    let mut echo = spawn_test_pty("echo", "printf ready; exec cat");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for pty in [&mut stalled, &mut echo] {
+        runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while let Some(event) = pty.recv().await {
+                    if matches!(&event, crate::pty::PtyEvent::Output(bytes) if String::from_utf8_lossy(bytes).contains("ready")) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("pane printed ready");
+        });
+    }
+
+    // The writes run on their own thread so a write that blocks fails the
+    // test instead of hanging it.
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let chunk = vec![b'x'; 4096];
+        let mut slowest = std::time::Duration::ZERO;
+        let mut refused = None;
+        for _ in 0..512 {
+            let started = std::time::Instant::now();
+            let result = runtime.block_on(stalled.write(&chunk));
+            slowest = slowest.max(started.elapsed());
+            if let Err(error) = result {
+                refused = Some(error.to_string());
+                break;
+            }
+        }
+        let _ = done_tx.send((slowest, refused));
+        stalled
+    });
+    let (slowest, refused) = done_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("2 MiB of writes to a pane that does not read returned within 5 s");
+    let _stalled = writer.join().unwrap();
+    assert!(
+        slowest < std::time::Duration::from_millis(50),
+        "a PTY write waited {slowest:?} on a pane that does not read"
+    );
+    let refused = refused.expect("the full pane stops taking input");
+    assert!(refused.contains("buffer full"), "refusal names the full buffer: {refused}");
+
+    // The other pane still echoes promptly.
+    let started = std::time::Instant::now();
+    runtime.block_on(async {
+        echo.write(b"ping\r").await.expect("the echo pane takes input");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut seen = String::new();
+            while let Some(event) = echo.recv().await {
+                if let crate::pty::PtyEvent::Output(bytes) = event {
+                    seen.push_str(&String::from_utf8_lossy(&bytes));
+                    if seen.contains("ping") {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the echo pane echoed while the other pane was full");
+    });
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}

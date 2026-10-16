@@ -79,7 +79,11 @@ pub use entry::{BeliefType, Entry, EntryType, MemoryTier, ObservationType};
 pub use event::{Event, EventEntityType, EventType};
 pub use file_change::{ChangeType, FileChange};
 pub use lease::{ClaimResult, LeaseStatus, TaskLease, WorktreeClaimResult, WorktreeLease};
-pub use lifecycle::{LifecycleEnvelope, parse_lifecycle_envelope};
+pub use lifecycle::{
+    CiRedRunEnvelope, LifecycleEnvelope, VerificationDispatchEnvelope, WorkerAttentionEnvelope,
+    parse_ci_red_run_envelope, parse_lifecycle_envelope, parse_verification_dispatch_envelope,
+    parse_worker_attention_envelope,
+};
 pub use loop_state::{Loop, LoopStatus};
 pub use prompt::{AgentInfo, Message, MessageRole, Prompt};
 pub use provenance::merge_source_ids;

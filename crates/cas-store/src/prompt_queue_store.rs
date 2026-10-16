@@ -1396,39 +1396,114 @@ const RELAY_SESSION_ENDED_SQL: &str = "NULLIF(factory_session, '') IS NOT NULL
        )";
 
 impl SqlitePromptQueueStore {
-    /// Revalidate terminal-task relays at the final recipient boundary, under
-    /// the same transaction that would otherwise receipt their body. Daemon
-    /// ticks cannot protect a hook/poll that drains first (cas-1485).
-    fn expire_terminal_task_relays_in_tx(
+    /// A local terminal task is positive evidence that its action alert expired.
+    fn terminal_relay_task_status(
+        tx: &ImmediateTx<'_>,
+        has_tasks: bool,
+        task_id: &str,
+    ) -> Result<Option<String>> {
+        if !has_tasks { return Ok(None); }
+        Ok(tx.query_row(
+            "SELECT status FROM tasks WHERE id = ?1 AND status IN ('closed', 'cancelled')",
+            params![task_id], |row| row.get(0),
+        ).optional()?)
+    }
+
+    /// CI envelopes normally name only a branch. A reused/shared branch is
+    /// ambiguous: never suppress a fresh alert because one old task closed.
+    fn terminal_ci_branch_task(
+        tx: &ImmediateTx<'_>,
+        has_tasks: bool,
+        branch: &str,
+    ) -> Result<Option<(String, String)>> {
+        if !has_tasks { return Ok(None); }
+        let mut stmt = tx.prepare_cached(
+            "SELECT id, status FROM tasks WHERE branch = ?1
+                OR CASE WHEN json_valid(deliverables)
+                    THEN json_extract(deliverables, '$.parked_branch') END = ?1
+             LIMIT 2",
+        )?;
+        let matches = stmt.query_map(params![branch], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(if matches.len() == 1 && matches!(matches[0].1.as_str(), "closed" | "cancelled") {
+            matches.into_iter().next()
+        } else { None })
+    }
+
+    fn supervisor_relay_expiry_reason(
+        tx: &ImmediateTx<'_>,
+        has_tasks: bool,
+        prompt: &QueuedPrompt,
+        now: DateTime<Utc>,
+    ) -> Result<Option<String>> {
+        let terminal_detail = |task_id: &str, status: &str| {
+            format!("relay for {task_id} superseded by terminal task state {status} at recipient drain")
+        };
+        if prompt.source.starts_with("verification-dispatch:") {
+            if let Some(envelope) = cas_types::parse_verification_dispatch_envelope(&prompt.prompt) {
+                if let Some(status) = Self::terminal_relay_task_status(tx, has_tasks, &envelope.task_id)? {
+                    return Ok(Some(terminal_detail(&envelope.task_id, &status)));
+                }
+                if DateTime::parse_from_rfc3339(&envelope.deadline).is_ok_and(|deadline| deadline <= now) {
+                    return Ok(Some(format!("verification dispatch {} deadline {} passed at recipient drain", envelope.dispatch_id, envelope.deadline)));
+                }
+            }
+            return Ok(None);
+        }
+        if !prompt.source.starts_with("lifecycle-wake:") { return Ok(None); }
+        if let Some(envelope) = cas_types::parse_lifecycle_envelope(&prompt.prompt) {
+            return Ok(Self::terminal_relay_task_status(tx, has_tasks, &envelope.task_id)?
+                .filter(|status| status != &envelope.new_status.to_string())
+                .map(|status| terminal_detail(&envelope.task_id, &status)));
+        }
+        let point_in_time = if prompt.source.starts_with("lifecycle-wake:ci-red-run:") {
+            if let Some(envelope) = cas_types::parse_ci_red_run_envelope(&prompt.prompt) {
+                let terminal = if let Some(task_id) = &envelope.task_id {
+                    Self::terminal_relay_task_status(tx, has_tasks, task_id)?.map(|status| (task_id.clone(), status))
+                } else {
+                    Self::terminal_ci_branch_task(tx, has_tasks, &envelope.branch)?
+                };
+                if let Some((task_id, status)) = terminal {
+                    return Ok(Some(terminal_detail(&task_id, &status)));
+                }
+                Some("CI red-run")
+            } else { None }
+        } else if prompt.source.starts_with("lifecycle-wake:worker-attention:") {
+            if let Some(envelope) = cas_types::parse_worker_attention_envelope(&prompt.prompt) {
+                if let Some(task_id) = &envelope.task_id
+                    && let Some(status) = Self::terminal_relay_task_status(tx, has_tasks, task_id)? {
+                    return Ok(Some(terminal_detail(task_id, &status)));
+                }
+                Some("worker-attention")
+            } else { None }
+        } else { None };
+        // These are snapshots, not durable instructions. No Git or network
+        // lookup belongs on a recipient drain; bound stale head/worker alerts
+        // even when no task can be resolved (cas-7af8).
+        Ok(point_in_time.filter(|_| prompt.created_at <= now - chrono::Duration::hours(1))
+            .map(|kind| format!("{kind} snapshot older than 1 hour at recipient drain (queued {})", prompt.created_at)))
+    }
+
+    /// Revalidate supervisor relays under the transaction that would receipt
+    /// their body, before render budget/seen writes (cas-1485, cas-7af8).
+    fn expire_supervisor_relays_in_tx(
         tx: &ImmediateTx<'_>,
         prompts: Vec<QueuedPrompt>,
     ) -> Result<Vec<QueuedPrompt>> {
-        if !prompts.iter().any(|prompt| prompt.source.starts_with("lifecycle-wake:")) {
+        if !prompts.iter().any(|prompt| prompt.source.starts_with("lifecycle-wake:") || prompt.source.starts_with("verification-dispatch:")) {
             return Ok(prompts);
         }
         let has_tasks: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
             [], |row| row.get(0),
         )?;
-        if !has_tasks { return Ok(prompts); }
+        let now = Utc::now();
         let mut current = Vec::with_capacity(prompts.len());
         for prompt in prompts {
-            let terminal = if prompt.source.starts_with("lifecycle-wake:") {
-                if let Some(envelope) = cas_types::parse_lifecycle_envelope(&prompt.prompt) {
-                    tx.query_row(
-                        "SELECT status FROM tasks WHERE id = ?1 AND status IN ('closed', 'cancelled')",
-                        params![envelope.task_id], |row| row.get::<_, String>(0),
-                    ).optional()?
-                        .filter(|status| status != &envelope.new_status.to_string())
-                        .map(|status| (envelope.task_id, status))
-                } else { None }
-            } else { None };
-            if let Some((task_id, status)) = terminal {
-                let detail = format!("lifecycle relay for {task_id} superseded by terminal task state {status} at recipient drain");
-                // A transported/polled row already reached a sibling terminal
-                // rank. Retain that forensic stage; only an early-stage row
-                // can advance to Suppressed. The acknowledgement below retires
-                // replay eligibility without inventing a delivery transition.
+            if let Some(detail) = Self::supervisor_relay_expiry_reason(tx, has_tasks, &prompt, now)? {
+                // Preserve forensic transport history on a previously polled
+                // row. Early stages can advance to Suppressed; acknowledgement
+                // retires replay without fabricating a recipient-seen receipt.
                 let stage = Self::read_highest_stage(tx, prompt.id)?;
                 let stage = if stage.rank() >= DeliveryStage::Suppressed.rank() {
                     stage
@@ -1438,10 +1513,13 @@ impl SqlitePromptQueueStore {
                         reason: Some(PendingReason::SupersededStale), detail: Some(&detail), set_processed: true,
                         broadcast_attempted: None, broadcast_succeeded: None, broadcast_failed: None,
                     })?;
+                let acked_via = if cas_types::parse_lifecycle_envelope(&prompt.prompt).is_some() {
+                    "terminal_task_reconciled"
+                } else { "relay_expired" };
                 tx.execute(
-                    "UPDATE prompt_queue SET acked_via = CASE WHEN acked_at IS NULL THEN 'terminal_task_reconciled' ELSE acked_via END,
-                        acked_at = COALESCE(acked_at, ?1) WHERE id = ?2",
-                    params![Utc::now().to_rfc3339(), prompt.id],
+                    "UPDATE prompt_queue SET acked_via = CASE WHEN acked_at IS NULL THEN ?1 ELSE acked_via END,
+                        acked_at = COALESCE(acked_at, ?2) WHERE id = ?3",
+                    params![acked_via, now.to_rfc3339(), prompt.id],
                 )?;
             } else {
                 current.push(prompt);
@@ -8803,7 +8881,7 @@ impl SqlitePromptQueueStore {
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()?
             };
-            let prompts = Self::expire_terminal_task_relays_in_tx(&tx, prompts)?;
+            let prompts = Self::expire_supervisor_relays_in_tx(&tx, prompts)?;
             // cas-1f0c: keep only what the caller can render whole; a row
             // that does not fit gets no receipt and stays unread.
             let mut over_budget: Vec<(i64, usize)> = Vec::new();
@@ -8973,7 +9051,7 @@ mod tests {
 
     fn cas_7af8_assert_relay_expiry(kind: &str) {
         // Fresh controls run first, so every red proves that live work still surfaces.
-        for case in ["fresh", "aged", "closed", "cancelled", "deadline"] {
+        for case in ["fresh", "within_age", "aged", "closed", "cancelled", "deadline"] {
             if case == "deadline" && kind != "verification" { continue; }
             if case == "aged" && kind == "verification" { continue; }
             for repeat in [false, true] {
@@ -8982,7 +9060,11 @@ mod tests {
                 tasks.init().unwrap();
                 let mut task = Task::new("cas-7af8-target".into(), "current lane".into());
                 task.status = TaskStatus::InProgress;
-                task.deliverables.parked_branch = Some("factory/test-delivery".into());
+                if case == "cancelled" {
+                    task.branch = Some("factory/test-delivery".into());
+                } else {
+                    task.deliverables.parked_branch = Some("factory/test-delivery".into());
+                }
                 tasks.add(&task).unwrap();
                 let deadline = Utc::now() + chrono::Duration::hours(if case == "deadline" { -1 } else { 1 });
                 let (source, body) = match kind {
@@ -8994,10 +9076,10 @@ mod tests {
                 if repeat && case != "deadline" {
                     assert_eq!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().len(), 1);
                 }
-                if case == "aged" {
+                if matches!(case, "aged" | "within_age") {
                     crate::shared_db::lock_connection(&store.conn).unwrap().execute(
                         "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
-                        params![(Utc::now() - chrono::Duration::hours(8)).to_rfc3339(), id],
+                        params![(Utc::now() - chrono::Duration::minutes(if case == "aged" { 65 } else { 55 })).to_rfc3339(), id],
                     ).unwrap();
                 } else if matches!(case, "closed" | "cancelled") {
                     task.status = if case == "closed" { TaskStatus::Closed } else { TaskStatus::Cancelled };
@@ -9008,7 +9090,7 @@ mod tests {
                 } else {
                     store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap()
                 };
-                if case == "fresh" {
+                if matches!(case, "fresh" | "within_age") {
                     assert_eq!(
                         rows.iter().map(|row| row.prompt.as_str()).collect::<Vec<_>>(),
                         vec![body.as_str()],
@@ -9041,6 +9123,40 @@ mod tests {
     #[test]
     fn cas_7af8_worker_attention_expires_by_age_or_terminal_task() {
         cas_7af8_assert_relay_expiry("attention");
+    }
+
+    #[test]
+    fn cas_7af8_uncertain_and_unrelated_messages_remain_eligible() {
+        let (temp, store) = create_test_store();
+        let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+        tasks.init().unwrap();
+        for (id, status) in [("cas-old", TaskStatus::Closed), ("cas-live", TaskStatus::InProgress)] {
+            let mut task = Task::new(id.into(), "shared branch".into());
+            task.branch = Some("factory/shared".into());
+            task.status = status;
+            tasks.add(&task).unwrap();
+        }
+        let future_deadline = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        for (source, body, old) in [
+            ("lifecycle-wake:ci-red-run:test", "<ci-red-run branch=\"factory/shared\" head_sha=\"abc\" run_id=\"42\">ambiguous branch</ci-red-run>".to_string(), false),
+            ("lifecycle-wake:ci-red-run:test", "<ci-red-run branch=\"unknown\" head_sha=\"abc\" run_id=\"42\">unknown fresh branch</ci-red-run>".to_string(), false),
+            ("lifecycle-wake:ci-red-run:test", "<ci-red-run branch=\"factory/shared\" head_sha=\"abc\" run_id=\"bad\">malformed CI</ci-red-run>".to_string(), true),
+            ("lifecycle-wake:worker-attention:42", "<worker-attention kind=\"unknown\" worker=\"test\" notification_id=\"42\">unknown attention</worker-attention>".to_string(), true),
+            ("human", "<worker-attention kind=\"worker_stalled\" worker=\"test\" notification_id=\"42\">human quote</worker-attention>".to_string(), true),
+            ("lifecycle-wake:ci-red-run:test", "Quoted: <ci-red-run branch=\"factory/shared\" head_sha=\"abc\" run_id=\"42\">quoted CI</ci-red-run>".to_string(), true),
+            ("verification-dispatch:vd-test", "<cas-verification-dispatch dispatch_id=\"vd-test\" task_id=\"cas-live\" owner=\"supervisor\" deadline=\"unknown\">uncertain deadline</cas-verification-dispatch>".to_string(), true),
+            ("verification-dispatch:vd-test", format!("<cas-verification-dispatch dispatch_id=\"vd-test\" task_id=\"cas-live\" owner=\"supervisor\" deadline=\"{future_deadline}\">old but still valid dispatch</cas-verification-dispatch>"), true),
+        ] {
+            let id = store.enqueue_with_session(source, "supervisor", &body, "session").unwrap();
+            if old {
+                crate::shared_db::lock_connection(&store.conn).unwrap().execute(
+                    "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
+                    params![(Utc::now() - chrono::Duration::hours(8)).to_rfc3339(), id],
+                ).unwrap();
+            }
+            let rows = store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap();
+            assert_eq!(rows.iter().map(|row| row.prompt.as_str()).collect::<Vec<_>>(), vec![body.as_str()]);
+        }
     }
 
     #[test]

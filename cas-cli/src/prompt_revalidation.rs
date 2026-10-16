@@ -2,7 +2,10 @@ use cas_types::{Task, TaskStatus};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-pub(crate) use cas_types::{LifecycleEnvelope, parse_lifecycle_envelope};
+pub(crate) use cas_types::{
+    LifecycleEnvelope, parse_lifecycle_envelope,
+    parse_verification_dispatch_envelope,
+};
 
 const MERGE_ENVELOPE_OPEN: &str = "<cas-merge-request>";
 const MERGE_ENVELOPE_CLOSE: &str = "</cas-merge-request>";
@@ -777,42 +780,7 @@ pub(crate) fn is_supervisor_wake_envelope(prompt: &str) -> bool {
 
 /// Worker idle/stall relay emitted by the factory daemon (cas-d4ae).
 pub(crate) fn parse_worker_attention_envelope(prompt: &str) -> bool {
-    let Some(tag_end) = prompt.find('>') else {
-        return false;
-    };
-    let tag = &prompt[..tag_end];
-    tag.starts_with("<worker-attention ")
-        && matches!(
-            xml_attribute(tag, "kind"),
-            Some(
-                "worker_idle"
-                    | "worker_stalled"
-                    | "worker_delivery_stalled"
-                    | "worker_unavailable"
-                    // cas-4143: a teammate permission parked for a lead
-                    // nobody plays, past the wake threshold.
-                    | "worker_approval_pending"
-                    // cas-2ffe: simultaneous harness exits flagged as one.
-                    | "workers_died_together"
-                    | "supervisor_stalled"
-                    | "merged_close_blocked"
-                    | "pr_lane_failed"
-                    | "delivery_pr_merge_timeout"
-                    // cas-d9a8: CAS's own unread-backlog summary for the
-                    // supervisor. Same envelope, same producer (the daemon
-                    // relay), so it inherits the wake terms rather than
-                    // inventing new ones.
-                    | "supervisor_unread"
-                    | "sweep_failed"
-                    // GH #1006: the one report a deferred rolling
-                    // integration sends when it finally runs green.
-                    | "sweep_passed"
-                    | "sweep_not_configured"
-            )
-        )
-        && xml_attribute(tag, "worker").is_some_and(|value| !value.is_empty())
-        && xml_attribute(tag, "notification_id").is_some_and(|value| value.parse::<i64>().is_ok())
-        && prompt.ends_with("</worker-attention>")
+    cas_types::parse_worker_attention_envelope(prompt).is_some()
 }
 
 /// Spawn pre-assignment failures leave a registered worker idle and need the
@@ -833,15 +801,7 @@ pub(crate) fn parse_spawn_preassign_failed_envelope(prompt: &str) -> bool {
 /// preserves the supervisor PTY wake boundary: a caller-settable source alone
 /// can never type arbitrary content into the supervisor pane.
 pub(crate) fn parse_ci_red_run_envelope(prompt: &str) -> bool {
-    let Some(tag_end) = prompt.find('>') else {
-        return false;
-    };
-    let tag = &prompt[..tag_end];
-    tag.starts_with("<ci-red-run ")
-        && xml_attribute(tag, "branch").is_some_and(|value| !value.is_empty())
-        && xml_attribute(tag, "head_sha").is_some_and(|value| !value.is_empty())
-        && xml_attribute(tag, "run_id").is_some_and(|value| value.parse::<u64>().is_ok())
-        && prompt.ends_with("</ci-red-run>")
+    cas_types::parse_ci_red_run_envelope(prompt).is_some()
 }
 
 pub(crate) fn select_unambiguous_merge_task<'a>(
@@ -1212,23 +1172,6 @@ pub(crate) struct WorkerActionEnvelope {
     pub worker: String,
 }
 
-/// CAS's own handoff for a close that just entered verification (cas-8725).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct VerificationDispatchEnvelope {
-    pub dispatch_id: String,
-    pub task_id: String,
-    /// Agent id bound to record the verdict.
-    pub owner: String,
-    /// RFC3339 instant after which the dispatch times out.
-    pub deadline: String,
-    /// Git HEAD captured when this dispatch was created, when it is a
-    /// repository-bound task cycle.
-    pub bound_head: Option<String>,
-    /// Verdict id from the immediately preceding cycle, when a close retry
-    /// replaced a proof that had already been reviewed.
-    pub approved_verdict_id: Option<String>,
-}
-
 /// Attribute values are written by CAS from registry/store values, but a task
 /// id or worker name is still data. Dropping the quote and angle characters
 /// keeps a hostile value from closing the tag early and inventing attributes —
@@ -1372,36 +1315,6 @@ pub(crate) fn verification_dispatch_envelope(
             .map(|reason| format!("Proposed close reason: {reason}\n"))
             .unwrap_or_default(),
     )
-}
-
-/// Parse a verification-dispatch handoff, if this prompt is one.
-///
-/// Whole-prompt shaped, like `<task-lifecycle …>`: CAS composes the entire
-/// row, so the envelope opens the prompt and closes it. A worker cannot
-/// prepend it to its own free text and still parse.
-pub(crate) fn parse_verification_dispatch_envelope(
-    prompt: &str,
-) -> Option<VerificationDispatchEnvelope> {
-    if !prompt.starts_with(VERIFICATION_DISPATCH_ENVELOPE_OPEN)
-        || !prompt.trim_end().ends_with(VERIFICATION_DISPATCH_ENVELOPE_CLOSE)
-    {
-        return None;
-    }
-    let tag_end = prompt.find('>')?;
-    let tag = &prompt[..tag_end];
-    let required = |name: &str| xml_attribute(tag, name).filter(|value| !value.is_empty());
-    Some(VerificationDispatchEnvelope {
-        dispatch_id: required("dispatch_id")?.to_string(),
-        task_id: required("task_id")?.to_string(),
-        owner: required("owner")?.to_string(),
-        deadline: required("deadline")?.to_string(),
-        bound_head: xml_attribute(tag, "bound_head")
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
-        approved_verdict_id: xml_attribute(tag, "approved_verdict_id")
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
-    })
 }
 
 const QA_DISPATCH_ENVELOPE_OPEN: &str = "<cas-qa-dispatch ";

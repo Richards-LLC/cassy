@@ -8749,20 +8749,21 @@ mod tests {
     #[test]
     fn cas_4e19_writable_queue_open_removes_empty_diagnostic_decoy() {
         let (temp, store) = create_test_store();
-        let id = store.enqueue("sender", "worker", "real queued message").unwrap();
+        let prompt = "real queued message";
+        let id = store.enqueue("sender", "worker", prompt).unwrap();
         let decoy = temp.path().join("prompt_queue.db");
         std::fs::write(&decoy, []).unwrap();
 
         let reader = SqlitePromptQueueStore::open_read_only(temp.path()).unwrap();
         assert!(decoy.exists(), "read-only diagnosis must not mutate files");
         let rows = reader.peek_all(10).unwrap();
-        assert_eq!((rows[0].id, rows[0].prompt.as_str()), (id, "real queued message"));
+        assert_eq!((rows[0].id, rows[0].prompt.as_str()), (id, prompt));
 
         let reopened = SqlitePromptQueueStore::open(temp.path()).unwrap();
         reopened.init().unwrap();
         assert!(!decoy.exists(), "writable open must remove the misleading empty database");
         let rows = reopened.peek_all(10).unwrap();
-        assert_eq!((rows[0].id, rows[0].prompt.as_str()), (id, "real queued message"));
+        assert_eq!((rows[0].id, rows[0].prompt.as_str()), (id, prompt));
         assert!(temp.path().join("cas.db").metadata().unwrap().len() > 0);
         SqlitePromptQueueStore::open(temp.path()).unwrap();
         assert!(!decoy.exists(), "opening the queue must never recreate the decoy");

@@ -5,6 +5,9 @@ import viteConfig from "./vite.config";
 // never change the hub build digest that vite.config.ts feeds (__HUB_BUILD__).
 export default mergeConfig(viteConfig, defineConfig({
   test: {
+    // The opt-in live journey uses Playwright; its offline preflight uses
+    // node:test in npm test. Neither is a Vitest suite.
+    exclude: ["scripts/operator-inbox-live*.test.mjs", "scripts/operator-inbox-live.spec.mjs"],
     // cas-ad70: jsdom test files see jsdom's Web Storage on every Node.
     setupFiles: ["test/webstorage-setup.ts"],
   },

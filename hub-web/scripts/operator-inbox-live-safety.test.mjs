@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { mkdtemp, writeFile, chmod, symlink, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -16,6 +18,17 @@ CAS_TEST_B_EMAIL=cas-test-b@sandbox.petrastella.io
 CAS_TEST_A_TOKEN=psc_k1_fixture_A
 CAS_TEST_B_TOKEN=psc_k1_fixture_B
 `;
+
+test("live entrypoints refuse before credentials, HTTP, browser or scratch without opt-in", () => {
+  for (const file of ["operator-inbox-live-native.mjs", "operator-inbox-live.mjs"]) {
+    const child = spawnSync(process.execPath, [fileURLToPath(new URL(file, import.meta.url))], {
+      env: { PATH: process.env.PATH, HOME: "/missing-cas-2077-home" }, encoding: "utf8", timeout: 5000,
+    });
+    assert.equal(child.status, 1, file);
+    assert.match(child.stderr, /CAS_2077_LIVE=1 is required/, file);
+    assert.doesNotMatch(child.stderr, /ENOENT|ERR_MODULE_NOT_FOUND|psc_k1_/, file);
+  }
+});
 
 test("default selection loads only the approved B account; A is explicit", () => {
   const b = parseSandboxProfile(fixture());

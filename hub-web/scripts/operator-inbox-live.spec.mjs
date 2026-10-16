@@ -169,6 +169,7 @@ test("cas-2077 deployed Cloud: stopped hub replay, one offline admission, revoke
     await phone.reload(); await phone.getByRole("button", { name: "Operator inbox", exact: true }).click(); await openThread(mobile);
     for (const message of [...messages, reply, rotated]) await expect(mobile.getByText(message, { exact: true })).toHaveCount(1);
     await expect(mobile.locator('[data-state="accepted"]')).toBeVisible();
+    // pin: reviewed accessible inbox heading and sign-out controls after replay.
     await expect(mobile).toMatchAriaSnapshot(`
       - dialog "Operator inbox":
         - heading "Operator inbox" [level=2]

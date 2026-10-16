@@ -70,6 +70,5 @@ and the scrubbed test-runner trace. Preserve failed runs separately.
 Offline preflight coverage needs no credentials, browser or Cloud connection:
 
 ```bash
-node --test hub-web/scripts/operator-inbox-live-safety.test.mjs \
-  hub-web/scripts/operator-inbox-live-entrypoints.test.mjs
+node --test hub-web/scripts/operator-inbox-live-safety.test.mjs
 ```

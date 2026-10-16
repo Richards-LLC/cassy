@@ -384,6 +384,98 @@ fn context_reset_rebind_preserves_worker_name_and_lease_for_claude_and_codex() {
     }
 }
 
+/// cas-e9fc: live 2026-10-16 (smooth-robin-87). `/clear` makes Claude emit
+/// SessionEnd(reason=clear) for the old conversation and SessionStart for the
+/// new one at once, before clear_context has recorded the new session id on
+/// the worker row (the factory log shows the old SessionEnd's shutdown intent
+/// at 16:28:33.028, the new SessionStart at .050). The old SessionEnd then
+/// tore the worker down: its lease was released and the row deleted, while the
+/// claude process kept running, unregistered. Through the real hook path, a
+/// /clear SessionEnd must leave the worker registered under its name with its
+/// lease, and the new SessionStart must rebind that same row.
+#[test]
+fn cas_e9fc_clear_session_end_before_rebind_keeps_the_worker_registered() {
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", Some("worker")),
+        ("CAS_AGENT_NAME", Some("smooth-robin-87")),
+        ("CAS_FACTORY_SESSION", Some("factory-e9fc")),
+        ("CAS_FACTORY_WORKER_CLI", Some("claude")),
+    ]);
+    let temp = TempDir::new().expect("temp project");
+    let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
+    let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
+    let task_store = crate::store::open_task_store(&cas_root).expect("open task store");
+    task_store
+        .add(&Task::new("cas-e9fc-lease".to_string(), "scratch root".to_string()))
+        .expect("seed task");
+    let old_session = "cd08c932-378b-4b5c-a69a-c5ade0b8aa62";
+    let new_session = "34398e29-2e78-46c0-b17f-127c407f02e4";
+    let cc_pid = std::process::id();
+
+    // The worker as spawned: registered by its first SessionStart.
+    let (original, _) = register_session_start_agent(
+        &cas_root,
+        agent_store.as_ref(),
+        old_session,
+        Some("smooth-robin-87"),
+        Some("worker"),
+        cc_pid,
+        Some("/tmp/smooth-robin-87"),
+    )
+    .expect("register worker");
+    agent_store
+        .try_claim("cas-e9fc-lease", &original.id, 600, Some("in progress"))
+        .expect("claim task before reset");
+
+    // /clear: the old conversation's SessionEnd lands while the row still
+    // names the old session (clear_context has not recorded the new one).
+    crate::hooks::handlers::handle_session_end(
+        &crate::hooks::HookInput {
+            session_id: old_session.into(),
+            hook_event_name: "SessionEnd".into(),
+            reason: Some("clear".into()),
+            ..Default::default()
+        },
+        Some(&cas_root),
+    )
+    .expect("SessionEnd");
+    let kept = agent_store
+        .get(&original.id)
+        .expect("a /clear SessionEnd keeps the worker registered");
+    assert_eq!(kept.name, "smooth-robin-87");
+    assert_eq!(
+        agent_store
+            .get_lease("cas-e9fc-lease")
+            .unwrap()
+            .filter(|lease| lease.status == cas_types::LeaseStatus::Active)
+            .expect("the task lease survives a /clear")
+            .agent_id,
+        original.id
+    );
+
+    // The new conversation's SessionStart rebinds the same row.
+    let (resolved, reused) = register_session_start_agent(
+        &cas_root,
+        agent_store.as_ref(),
+        new_session,
+        Some("smooth-robin-87"),
+        Some("worker"),
+        cc_pid,
+        Some("/tmp/smooth-robin-87"),
+    )
+    .expect("rebind after /clear");
+    assert!(reused, "the post-clear SessionStart reuses the worker row");
+    assert_eq!(resolved.id, original.id);
+    assert_eq!(resolved.cc_session_id.as_deref(), Some(new_session));
+    let workers = agent_store
+        .list(None)
+        .unwrap()
+        .into_iter()
+        .filter(|agent| agent.name == "smooth-robin-87")
+        .count();
+    assert_eq!(workers, 1, "one row, reachable by name");
+}
+
 /// Duplicate rows are a recovery case for databases written by the buggy
 /// build. Both harnesses must make the daemon choose the newest identity row
 /// before stale cleanup or heartbeat ownership is evaluated.

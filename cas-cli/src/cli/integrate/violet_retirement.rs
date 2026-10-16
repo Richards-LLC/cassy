@@ -692,7 +692,7 @@ pub fn migrate_installed_hub_on_update() -> Result<()> {
     migrate_installed_hub_on_update_with_probe(&probe)
 }
 
-pub(super) fn migrate_installed_hub_on_update_with_probe(probe: &dyn HubProbe) -> Result<()> {
+pub(crate) fn migrate_installed_hub_on_update_with_probe(probe: &dyn HubProbe) -> Result<()> {
     let report = migrate_installed_hub_with_probe(probe)?;
     anyhow::ensure!(
         report.warnings.is_empty(),

@@ -79,26 +79,29 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cas_c423_store_admitted_body_waits_for_confirmed_remote_uncertainty() {
-        let root = tempfile::tempdir().unwrap();
-        let row = input();
-        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
-        let admitted = store.admit(&row).unwrap();
-        let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
-        assert!(queue.poll_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10)
-            .unwrap().is_empty(), "admission ack alone must not authorize a body");
-        assert!(queue.surface_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10)
-            .unwrap().is_empty(), "hooks must share the managed body barrier");
-        assert!(queue.queued_prompt(admitted.prompt_id).unwrap().is_some(),
-            "blocked body remains durable for the background receipt job");
-    }
-
-    fn settled_job(store: &SqliteVioletAdmissionStore, row: &VioletAdmissionInput, instance: &str) -> VioletConsumptionJob {
-        let ack = store.pending_acknowledgements(&row.registration_id,&row.project_id).unwrap().remove(0);
-        assert!(store.settle_acknowledgement(&ack,&row.registration_id,&row.project_id).unwrap());
-        store.prepare_body_dispatch(&row.delivery_id,&row.registration_id,&row.project_id,instance,
-            "00000082-2222-4222-8222-000000000082").unwrap()
+    fn settled_job(
+        store: &SqliteVioletAdmissionStore,
+        row: &VioletAdmissionInput,
+        instance: &str,
+    ) -> VioletConsumptionJob {
+        let ack = store
+            .pending_acknowledgements(&row.registration_id, &row.project_id)
+            .unwrap()
+            .remove(0);
+        assert!(
+            store
+                .settle_acknowledgement(&ack, &row.registration_id, &row.project_id)
+                .unwrap()
+        );
+        store
+            .prepare_body_dispatch(
+                &row.delivery_id,
+                &row.registration_id,
+                &row.project_id,
+                instance,
+                "00000082-2222-4222-8222-000000000082",
+            )
+            .unwrap()
     }
 
     fn body_response(job: &VioletConsumptionJob, row: &VioletAdmissionInput) -> String {
@@ -110,110 +113,175 @@ mod tests {
     }
 
     #[test]
-    fn cas_c423_store_body_permit_is_one_use_and_pointer_claim_is_separate() {
+    fn cas_c423_store_admitted_body_waits_for_confirmed_remote_uncertainty() {
         let root = tempfile::tempdir().unwrap();
         let row = input();
         let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
         let admitted = store.admit(&row).unwrap();
-        let job = settled_job(&store,&row,"daemon-instance-a");
         let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
-        let pointer = queue.claim_recipient_transport_token(admitted.prompt_id,&row.recipient).unwrap().unwrap();
-        assert!(!queue.authorize_body_handoff(admitted.prompt_id,&row.recipient,Some(&row.factory_session)).unwrap());
-        let same = store.prepare_body_dispatch(&row.delivery_id,&row.registration_id,&row.project_id,
-            "daemon-instance-a","new-id-must-be-ignored").unwrap();
-        assert_eq!(same.input_json,job.input_json,"retry uses frozen request bytes");
-        let mut bad: serde_json::Value = serde_json::from_str(&body_response(&job,&row)).unwrap();
+        assert!(
+            queue
+                .poll_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10)
+                .unwrap()
+                .is_empty(),
+            "admission ack alone must not authorize a body"
+        );
+        assert!(
+            queue
+                .surface_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10)
+                .unwrap()
+                .is_empty(),
+            "hooks must share the managed body barrier"
+        );
+        let job = settled_job(&store, &row, "daemon-instance-a");
+        let pointer = queue
+            .claim_recipient_transport_token(admitted.prompt_id, &row.recipient)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !queue
+                .authorize_body_handoff(
+                    admitted.prompt_id,
+                    &row.recipient,
+                    Some(&row.factory_session)
+                )
+                .unwrap()
+        );
+        let same = store
+            .prepare_body_dispatch(
+                &row.delivery_id,
+                &row.registration_id,
+                &row.project_id,
+                "daemon-instance-a",
+                "new-id-must-be-ignored",
+            )
+            .unwrap();
+        assert_eq!(
+            same.input_json, job.input_json,
+            "retry uses frozen request bytes"
+        );
+        let mut bad: serde_json::Value = serde_json::from_str(&body_response(&job, &row)).unwrap();
         bad["receipt"]["delivery"]["reader_slot_id"] = serde_json::json!("foreign-reader");
-        assert!(store.confirm_body_dispatch(&job,"daemon-instance-a",&bad.to_string()).is_err());
-        assert!(store.confirm_body_dispatch(&job,"daemon-instance-a",&body_response(&job,&row)).unwrap());
-        assert!(!queue.authorize_body_handoff(admitted.prompt_id,"foreign-reader",Some(&row.factory_session)).unwrap());
-        assert!(!queue.authorize_body_handoff(admitted.prompt_id,&row.recipient,Some("foreign-session")).unwrap());
+        assert!(
+            store
+                .confirm_body_dispatch(&job, "daemon-instance-a", &bad.to_string())
+                .is_err()
+        );
+        assert!(
+            store
+                .confirm_body_dispatch(&job, "daemon-instance-a", &body_response(&job, &row))
+                .unwrap()
+        );
+        assert!(
+            !queue
+                .authorize_body_handoff(
+                    admitted.prompt_id,
+                    "foreign-reader",
+                    Some(&row.factory_session)
+                )
+                .unwrap()
+        );
+        assert!(
+            !queue
+                .authorize_body_handoff(admitted.prompt_id, &row.recipient, Some("foreign-session"))
+                .unwrap()
+        );
         // The pointer claim is taken over by the hook, which spends the body
         // permit and its surfacing receipt in the same writer transaction.
-        let surfaced = queue.surface_unseen_for_recipient(&row.recipient,Some(&row.factory_session),10).unwrap();
-        assert_eq!(surfaced.len(),1);
-        assert_eq!(surfaced[0].id,admitted.prompt_id);
-        assert!(!queue.release_recipient_transport_claim(admitted.prompt_id,&row.recipient,pointer).unwrap());
-        assert!(!queue.authorize_body_handoff(admitted.prompt_id,&row.recipient,Some(&row.factory_session)).unwrap());
-        assert!(!store.confirm_body_dispatch(&job,"daemon-instance-a",&body_response(&job,&row)).unwrap(),
-            "lost local result cannot replenish a spent permit");
-        assert!(queue.poll_unseen_for_recipient(&row.recipient,Some(&row.factory_session),10).unwrap().is_empty());
-        assert_eq!(store.prepare_consumed_receipts(&row.registration_id,&row.project_id,"daemon-instance-a",
-            ||"00000081-2222-4222-8222-000000000081".into()).unwrap(),1);
-        let pending = store.due_consumption_jobs(&row.registration_id,&row.project_id,i64::MAX).unwrap();
-        assert_eq!(pending.len(),1);
-        assert_eq!(pending[0].state,"consumed");
-        assert_eq!(store.prepare_consumed_receipts(&row.registration_id,&row.project_id,"daemon-instance-a",
-            || panic!("consumed already journaled")).unwrap(),0);
+        let surfaced = queue
+            .surface_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10)
+            .unwrap();
+        assert_eq!(surfaced.len(), 1);
+        assert_eq!(surfaced[0].id, admitted.prompt_id);
+        assert!(
+            !queue
+                .release_recipient_transport_claim(admitted.prompt_id, &row.recipient, pointer)
+                .unwrap()
+        );
+        assert!(
+            !queue
+                .authorize_body_handoff(
+                    admitted.prompt_id,
+                    &row.recipient,
+                    Some(&row.factory_session)
+                )
+                .unwrap()
+        );
+        assert!(
+            !store
+                .confirm_body_dispatch(&job, "daemon-instance-a", &body_response(&job, &row))
+                .unwrap(),
+            "lost local result cannot replenish a spent permit"
+        );
+        assert!(
+            queue
+                .poll_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn cas_c423_store_crash_or_successor_never_rearms_original_body() {
-        for confirm_first in [false,true] {
+        for confirm_first in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let row = input();
             let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
             let admitted = store.admit(&row).unwrap();
-            let job = settled_job(&store,&row,"predecessor-instance");
-            let response = body_response(&job,&row);
-            if confirm_first { assert!(store.confirm_body_dispatch(&job,"predecessor-instance",&response).unwrap()); }
+            let job = settled_job(&store, &row, "predecessor-instance");
+            let response = body_response(&job, &row);
+            if confirm_first {
+                assert!(
+                    store
+                        .confirm_body_dispatch(&job, "predecessor-instance", &response)
+                        .unwrap()
+                );
+            }
             let restarted = SqliteVioletAdmissionStore::open(root.path()).unwrap();
-            assert_eq!(restarted.revoke_predecessor_body_attempts(&row.registration_id,"successor-instance").unwrap(),1);
-            assert!(!restarted.confirm_body_dispatch(&job,"predecessor-instance",&response).unwrap());
-            assert!(restarted.prepare_body_dispatch(&row.delivery_id,&row.registration_id,&row.project_id,
-                "successor-instance","different-request").is_err());
-            let recovered = restarted.recover_known(&successor(&row),VioletConsumption::Queued).unwrap();
-            assert_eq!(recovered.consumption,VioletConsumption::DispatchUncertain);
+            assert_eq!(
+                restarted
+                    .revoke_predecessor_body_attempts(&row.registration_id, "successor-instance")
+                    .unwrap(),
+                1
+            );
+            assert!(
+                !restarted
+                    .confirm_body_dispatch(&job, "predecessor-instance", &response)
+                    .unwrap()
+            );
+            assert!(
+                restarted
+                    .prepare_body_dispatch(
+                        &row.delivery_id,
+                        &row.registration_id,
+                        &row.project_id,
+                        "successor-instance",
+                        "different-request"
+                    )
+                    .is_err()
+            );
+            let recovered = restarted
+                .recover_known(&successor(&row), VioletConsumption::Queued)
+                .unwrap();
+            assert_eq!(recovered.consumption, VioletConsumption::DispatchUncertain);
             assert!(recovered.recovery_prompt_id.is_some());
             let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
-            assert!(!queue.authorize_body_handoff(admitted.prompt_id,&row.recipient,Some(&row.factory_session)).unwrap());
-            let notices = queue.poll_unseen_for_recipient("supervisor-successor",Some("factory-successor"),10).unwrap();
-            assert_eq!(notices.len(),1);
-            assert_ne!(notices[0].id,admitted.prompt_id);
+            assert!(
+                !queue
+                    .authorize_body_handoff(
+                        admitted.prompt_id,
+                        &row.recipient,
+                        Some(&row.factory_session)
+                    )
+                    .unwrap()
+            );
+            let notices = queue
+                .poll_unseen_for_recipient("supervisor-successor", Some("factory-successor"), 10)
+                .unwrap();
+            assert_eq!(notices.len(), 1);
+            assert_ne!(notices[0].id, admitted.prompt_id);
             assert!(!notices[0].prompt.contains(&row.prompt));
         }
-    }
-
-    #[test]
-    fn cas_c423_store_admission_is_stable_across_lost_ack_restart_and_reader_fanout() {
-        let root = tempfile::tempdir().unwrap();
-        let row = input();
-        let first = SqliteVioletAdmissionStore::open(root.path())
-            .unwrap()
-            .admit(&row)
-            .unwrap();
-        assert!(first.created);
-        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
-        let duplicate = store.admit(&row).unwrap();
-        assert!(!duplicate.created);
-        assert_eq!(duplicate.prompt_id, first.prompt_id);
-        let mut peer = row.clone();
-        peer.delivery_id = "delivery-b".into();
-        peer.reader_slot_id = "reader-b".into();
-        peer.registration_id = "registration-b".into();
-        peer.factory_session = "factory-b".into();
-        peer.recipient = "supervisor-b".into();
-        assert!(store.admit(&peer).unwrap().created);
-        let db = Connection::open(root.path().join("cas.db")).unwrap();
-        let counts: (i64,i64,i64) = db.query_row("SELECT (SELECT COUNT(*) FROM prompt_queue),
-            (SELECT COUNT(*) FROM violet_admissions), (SELECT COUNT(*) FROM violet_admission_cursors)",
-            [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
-        assert_eq!(counts, (2, 2, 2));
-        let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
-        assert_eq!(
-            queue
-                .queued_prompt(first.prompt_id)
-                .unwrap()
-                .unwrap()
-                .origin,
-            Some(QueueOrigin::Daemon)
-        );
-        let mut conflict = row.clone();
-        conflict.registration_id = "replacement".into();
-        assert!(
-            store.admit(&conflict).is_err(),
-            "new registration requires an authorized rebind"
-        );
     }
 
     #[test]
@@ -538,37 +606,59 @@ mod tests {
 
     #[test]
     fn cas_c423_store_consumed_recipient_receipt_wins_over_remote_unread() {
-        let root = tempfile::tempdir().unwrap();
-        let row = input();
-        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
-        let first = store.admit(&row).unwrap();
-        let job = settled_job(&store,&row,"original-instance");
-        assert!(store.confirm_body_dispatch(&job,"original-instance",&body_response(&job,&row)).unwrap());
-        let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
-        assert_eq!(
-            queue
-                .surface_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10)
-                .unwrap()
-                .len(),
-            1
-        );
-        let binding = successor(&row);
-        let recovered = store
-            .recover_known(&binding, VioletConsumption::Queued)
-            .unwrap();
-        assert_eq!(recovered.admission.prompt_id, first.prompt_id);
-        assert_eq!(recovered.consumption, VioletConsumption::Consumed);
-        assert_eq!(recovered.recovery_prompt_id, None);
-        assert!(
-            queue
-                .peek_unseen_for_recipient(&binding.recipient, Some(&binding.factory_session), 10)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            store.adopt_unread(&binding).is_err(),
-            "consumed cannot regress to queued"
-        );
+        for explicit_ack in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let row = input();
+            let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+            let first = store.admit(&row).unwrap();
+            let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+            if explicit_ack {
+                queue.ack(first.prompt_id).unwrap();
+            } else {
+                let job = settled_job(&store, &row, "original-instance");
+                assert!(
+                    store
+                        .confirm_body_dispatch(
+                            &job,
+                            "original-instance",
+                            &body_response(&job, &row)
+                        )
+                        .unwrap()
+                );
+                assert_eq!(
+                    queue
+                        .surface_unseen_for_recipient(
+                            &row.recipient,
+                            Some(&row.factory_session),
+                            10
+                        )
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+            let binding = successor(&row);
+            let recovered = store
+                .recover_known(&binding, VioletConsumption::Queued)
+                .unwrap();
+            assert_eq!(recovered.admission.prompt_id, first.prompt_id);
+            assert_eq!(recovered.consumption, VioletConsumption::Consumed);
+            assert_eq!(recovered.recovery_prompt_id, None);
+            assert!(
+                queue
+                    .peek_unseen_for_recipient(
+                        &binding.recipient,
+                        Some(&binding.factory_session),
+                        10
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                store.adopt_unread(&binding).is_err(),
+                "consumed cannot regress to queued"
+            );
+        }
     }
 
     #[test]
@@ -577,45 +667,48 @@ mod tests {
         let row = input();
         let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
         let admitted = store.admit(&row).unwrap();
-        let job = settled_job(&store,&row,"original-instance");
-        assert!(store.confirm_body_dispatch(&job,"original-instance",&body_response(&job,&row)).unwrap());
+        let job = settled_job(&store, &row, "original-instance");
+        assert!(
+            store
+                .confirm_body_dispatch(&job, "original-instance", &body_response(&job, &row))
+                .unwrap()
+        );
         let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
-        let small = queue.surface_for_recipient_within_budget(&row.recipient,Some(&row.factory_session),
-            HookDrain::Unseen,10,1).unwrap();
+        let small = queue
+            .surface_for_recipient_within_budget(
+                &row.recipient,
+                Some(&row.factory_session),
+                HookDrain::Unseen,
+                10,
+                1,
+            )
+            .unwrap();
         assert!(small.rows.is_empty());
-        assert_eq!(small.over_budget.len(),1);
+        assert_eq!(small.over_budget.len(), 1);
         let db = Connection::open(root.path().join("cas.db")).unwrap();
-        db.execute_batch("CREATE TRIGGER fail_body_receipt BEFORE INSERT ON prompt_queue_recipient_seen
-            BEGIN SELECT RAISE(ABORT, 'body receipt write failed'); END;").unwrap();
-        let error = queue.poll_unseen_for_recipient(&row.recipient,Some(&row.factory_session),10).unwrap_err();
+        db.execute_batch(
+            "CREATE TRIGGER fail_body_receipt BEFORE INSERT ON prompt_queue_recipient_seen
+            BEGIN SELECT RAISE(ABORT, 'body receipt write failed'); END;",
+        )
+        .unwrap();
+        let error = queue
+            .poll_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10)
+            .unwrap_err();
         assert!(error.to_string().contains("body receipt write failed"));
         db.execute_batch("DROP TRIGGER fail_body_receipt").unwrap();
-        let body = queue.poll_unseen_for_recipient(&row.recipient,Some(&row.factory_session),10).unwrap();
-        assert_eq!(body.len(),1);
-        assert_eq!(body[0].id,admitted.prompt_id);
-        assert!(!queue.authorize_body_handoff(admitted.prompt_id,&row.recipient,Some(&row.factory_session)).unwrap());
-    }
-
-    #[test]
-    fn cas_c423_store_explicit_ack_is_consumed_on_successor_recovery() {
-        let root = tempfile::tempdir().unwrap();
-        let row = input();
-        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
-        let first = store.admit(&row).unwrap();
-        let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
-        queue.ack(first.prompt_id).unwrap();
-        let binding = successor(&row);
-        let recovered = store
-            .recover_known(&binding, VioletConsumption::Queued)
+        let body = queue
+            .poll_unseen_for_recipient(&row.recipient, Some(&row.factory_session), 10)
             .unwrap();
-        assert_eq!(recovered.admission.prompt_id, first.prompt_id);
-        assert_eq!(recovered.consumption, VioletConsumption::Consumed);
-        assert_eq!(recovered.recovery_prompt_id, None);
+        assert_eq!(body.len(), 1);
+        assert_eq!(body[0].id, admitted.prompt_id);
         assert!(
-            queue
-                .peek_unseen_for_recipient(&binding.recipient, Some(&binding.factory_session), 10)
+            !queue
+                .authorize_body_handoff(
+                    admitted.prompt_id,
+                    &row.recipient,
+                    Some(&row.factory_session)
+                )
                 .unwrap()
-                .is_empty()
         );
     }
 
@@ -1094,10 +1187,17 @@ impl SqliteVioletAdmissionStore {
                         binding.recipient
                     ],
                 )?;
-                tx.execute("UPDATE violet_body_permits SET registration_id=?2,delivery_generation=?3,
+                tx.execute(
+                    "UPDATE violet_body_permits SET registration_id=?2,delivery_generation=?3,
                     factory_session=?4,recipient=?5,state='blocked' WHERE prompt_id=?1",
-                    params![prompt_id,binding.registration_id,binding.delivery_generation,
-                        binding.factory_session,binding.recipient])?;
+                    params![
+                        prompt_id,
+                        binding.registration_id,
+                        binding.delivery_generation,
+                        binding.factory_session,
+                        binding.recipient
+                    ],
+                )?;
                 Ok((receipt, true))
             },
         )?;
@@ -1413,10 +1513,17 @@ fn recover_known_in_tx(
     } else {
         VioletConsumption::Queued
     };
-    let permit_touched: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM violet_body_permits
+    let permit_touched: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM violet_body_permits
         WHERE prompt_id=?1 AND (request_id IS NOT NULL OR state IN ('spent','revoked')))",
-        [prompt_id], |r|r.get(0))?;
-    let evidence = if permit_touched { evidence.max(VioletConsumption::DispatchUncertain) } else { evidence };
+        [prompt_id],
+        |r| r.get(0),
+    )?;
+    let evidence = if permit_touched {
+        evidence.max(VioletConsumption::DispatchUncertain)
+    } else {
+        evidence
+    };
     let consumption = remote.max(VioletConsumption::parse(&stored)?).max(evidence);
     // Recovery never renews a dispatch attempt, including a late local apply.
     tx.execute("UPDATE violet_body_permits SET state=CASE WHEN ?2='queued' THEN 'blocked' ELSE 'revoked' END,

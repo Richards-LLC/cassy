@@ -14,6 +14,12 @@ use crate::coordination::external_work::{
 pub(crate) trait ActivityDeliveryPort {
     fn claim(&self, request: &Value, timeout: Duration) -> Result<Value, RemoteError>;
     fn acknowledge(&self, request: &Value, timeout: Duration) -> Result<Value, RemoteError>;
+    fn record_consumption(
+        &self,
+        delivery: &str,
+        request: &Value,
+        timeout: Duration,
+    ) -> Result<Value, RemoteError>;
 }
 
 // Violet performs managed sweep observation after an ordinary read. There is
@@ -70,12 +76,14 @@ pub(crate) fn poll_once(
     context: &OperationContext,
     factory_session: &str,
     recipient: &str,
+    instance_id: &str,
+    evidence: &activation::BindingEvidence,
+    deadline: Instant,
 ) -> IntakeReport {
     let mut report = IntakeReport::default();
-    let started = Instant::now();
     let budget = || {
-        TOTAL_REMOTE_BUDGET
-            .saturating_sub(started.elapsed())
+        deadline
+            .saturating_duration_since(Instant::now())
             .min(CALL_REMOTE_BUDGET)
     };
     let actor = json!({"registration_id": context.registration_id});
@@ -92,6 +100,9 @@ pub(crate) fn poll_once(
         }
     };
     let result = (|| -> Result<(), String> {
+        if budget().is_zero() {
+            return Err("remote budget exhausted before managed claim".into());
+        }
         let response = relay
             .claim(
                 &json!({"schema": CONTRACT_SCHEMA, "actor": actor,
@@ -108,16 +119,22 @@ pub(crate) fn poll_once(
         )
         .map_err(|error| error.to_string())?;
         for leased in deliveries {
-            match admission_input(&leased, context, factory_session, recipient).and_then(|input| {
-                if let Some(fence) = fences.get(&input.delivery_id) {
-                    store
-                        .adopt_lease(fence, &input)
-                        .map(|receipt| receipt.admission)
-                } else {
-                    store.admit(&input)
-                }
-                .map_err(|error| error.to_string())
-            }) {
+            match evidence
+                .require_managed(
+                    &leased.target.external_ref.workspace_id,
+                    &leased.target.external_ref.channel_id,
+                )
+                .and_then(|()| admission_input(&leased, context, factory_session, recipient))
+                .and_then(|input| {
+                    if let Some(fence) = fences.get(&input.delivery_id) {
+                        store
+                            .adopt_lease(fence, &input)
+                            .map(|receipt| receipt.admission)
+                    } else {
+                        store.admit(&input)
+                    }
+                    .map_err(|error| error.to_string())
+                }) {
                 Ok(receipt) => {
                     report.admitted += 1;
                     report.created += usize::from(receipt.created);
@@ -190,7 +207,76 @@ pub(crate) fn poll_once(
     if let Err(error) = settled {
         report.errors.push(error);
     }
+    if let Err(error) = advance_consumption(relay, store, context, instance_id, deadline) {
+        report.errors.push(error);
+    }
     report
+}
+
+/// Off-loop only. Intent and model-side evidence survive a lost HTTP response;
+/// no network result may arm another daemon instance's original body.
+fn advance_consumption(
+    relay: &dyn ActivityDeliveryPort,
+    store: &SqliteVioletAdmissionStore,
+    context: &OperationContext,
+    instance_id: &str,
+    deadline: Instant,
+) -> Result<(), String> {
+    for delivery in store
+        .body_dispatch_candidates(&context.registration_id, &context.project_id, instance_id)
+        .map_err(|e| e.to_string())?
+    {
+        store
+            .prepare_body_dispatch(
+                &delivery,
+                &context.registration_id,
+                &context.project_id,
+                instance_id,
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    store
+        .prepare_consumed_receipts(
+            &context.registration_id,
+            &context.project_id,
+            instance_id,
+            || uuid::Uuid::new_v4().to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+    let jobs = store
+        .due_consumption_jobs(
+            &context.registration_id,
+            &context.project_id,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .map_err(|e| e.to_string())?;
+    for job in jobs {
+        let timeout = deadline
+            .saturating_duration_since(Instant::now())
+            .min(CALL_REMOTE_BUDGET);
+        if timeout.is_zero() {
+            return Err("remote budget exhausted; durable consumption awaits confirmation".into());
+        }
+        uuid::Uuid::parse_str(&job.delivery_id).map_err(|_| "invalid consumption delivery UUID")?;
+        uuid::Uuid::parse_str(&job.request_id).map_err(|_| "invalid consumption request UUID")?;
+        let input: Value = serde_json::from_str(&job.input_json).map_err(|e| e.to_string())?;
+        let result = relay
+            .record_consumption(&job.delivery_id, &input, timeout)
+            .map_err(|e| e.message)
+            .and_then(|response| {
+                store
+                    .confirm_body_dispatch(&job, instance_id, &response.to_string())
+                    .map_err(|e| e.to_string())
+            });
+        if let Err(error) = result {
+            store
+                .defer_consumption_job(&job, chrono::Utc::now().timestamp_millis() + 1000)
+                .map_err(|e| e.to_string())?;
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 fn require_completed(value: &Value) -> Result<(), String> {

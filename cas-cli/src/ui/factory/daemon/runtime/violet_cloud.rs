@@ -29,6 +29,20 @@ impl ActivityDeliveryPort for HttpCloudCoordinationPort {
     fn acknowledge(&self, request: &Value, timeout: Duration) -> Result<Value, RemoteError> {
         self.post("/api/violet/activity/ack", request, timeout)
     }
+    fn record_consumption(
+        &self,
+        delivery: &str,
+        request: &Value,
+        timeout: Duration,
+    ) -> Result<Value, RemoteError> {
+        uuid::Uuid::parse_str(delivery)
+            .map_err(|_| RemoteError::unavailable("invalid delivery UUID"))?;
+        self.post(
+            &format!("/api/coordination/activity/deliveries/{delivery}/receipts"),
+            request,
+            timeout,
+        )
+    }
 }
 
 impl ActivityRecoveryPort for HttpCloudCoordinationPort {

@@ -1,6 +1,6 @@
 use super::*;
 use cas_store::{PromptQueueStore, SqlitePromptQueueStore};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 pub(super) fn claim_fixture() -> Value {
     let fixture: Value = serde_json::from_str(include_str!(
@@ -16,6 +16,21 @@ struct Relay {
     fail_ack: bool,
     database: Option<std::path::PathBuf>,
     ack_response: Option<Value>,
+    consumption_receipts: RefCell<Vec<Value>>,
+    lose_consumption_response: Cell<bool>,
+}
+impl Relay {
+    fn new(root: &std::path::Path) -> Self {
+        Self {
+            response: RefCell::new(claim_fixture()),
+            acks: RefCell::new(vec![]),
+            fail_ack: false,
+            database: Some(root.join("cas.db")),
+            ack_response: None,
+            consumption_receipts: RefCell::new(vec![]),
+            lose_consumption_response: Cell::new(false),
+        }
+    }
 }
 impl ActivityDeliveryPort for Relay {
     fn claim(&self, request: &Value, timeout: Duration) -> Result<Value, RemoteError> {
@@ -50,6 +65,33 @@ impl ActivityDeliveryPort for Relay {
             ).collect::<Vec<_>>()
         })))
     }
+    fn record_consumption(
+        &self,
+        delivery: &str,
+        request: &Value,
+        _: Duration,
+    ) -> Result<Value, RemoteError> {
+        let db = rusqlite::Connection::open(self.database.as_ref().unwrap()).unwrap();
+        let (frozen,occurrence,reader): (String,String,String) = db.query_row(
+            "SELECT o.input_json,a.occurrence_id,a.reader_slot_id FROM violet_consumption_outbox o
+             JOIN violet_admissions a ON a.delivery_id=o.delivery_id WHERE o.request_id=?1",
+            [request["request_id"].as_str().unwrap()], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(
+            frozen,
+            request.to_string(),
+            "remote mutation must follow frozen local intent"
+        );
+        self.consumption_receipts.borrow_mut().push(request.clone());
+        if self.lose_consumption_response.replace(false) {
+            return Err(RemoteError::timeout("lost consumption response"));
+        }
+        Ok(
+            json!({"schema":CONTRACT_SCHEMA,"code":"completed","receipt":{
+            "request_id":request["request_id"],"delivery":{"id":delivery,"occurrence_id":occurrence,
+                "reader_slot_id":reader,"registration_id":request["actor"]["registration_id"],
+                "delivery_generation":request["delivery_generation"],"status":"admitted","consumption":request["state"]}}}),
+        )
+    }
 }
 fn context() -> OperationContext {
     OperationContext {
@@ -58,19 +100,86 @@ fn context() -> OperationContext {
     }
 }
 
+fn poll_once(
+    relay: &dyn ActivityDeliveryPort,
+    store: &SqliteVioletAdmissionStore,
+    context: &OperationContext,
+    session: &str,
+    recipient: &str,
+) -> IntakeReport {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/coordination_contract/v1/bindings--activation.json"
+    ))
+    .unwrap();
+    let evidence =
+        activation::validate_activation(&fixture["cases"][0]["response"]["payload"], context)
+            .unwrap();
+    super::poll_once(
+        relay,
+        store,
+        context,
+        session,
+        recipient,
+        "test-instance",
+        &evidence,
+        Instant::now() + TOTAL_REMOTE_BUDGET,
+    )
+}
+
 #[test]
 fn cas_c423_poll_arms_body_only_after_journaled_remote_consumption_receipt() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
-    let relay = Relay {
-        response: RefCell::new(claim_fixture()), acks: RefCell::new(vec![]),
-        fail_ack: false, database: Some(root.path().join("cas.db")), ack_response: None,
-    };
-    let report = poll_once(&relay,&store,&context(),"factory-a","supervisor-a");
-    assert!(report.errors.is_empty(),"{report:?}");
+    let relay = Relay::new(root.path());
+    relay.lose_consumption_response.set(true);
+    let report = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("lost consumption response")),
+        "{report:?}"
+    );
     let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
-    let body = queue.poll_unseen_for_recipient("supervisor-a",Some("factory-a"),10).unwrap();
-    assert_eq!(body.len(),1,"background intake must confirm remote uncertainty before arming the original body");
+    assert!(
+        queue
+            .poll_unseen_for_recipient("supervisor-a", Some("factory-a"), 10)
+            .unwrap()
+            .is_empty()
+    );
+    relay.response.borrow_mut()["deliveries"] = json!([]);
+    let db = rusqlite::Connection::open(root.path().join("cas.db")).unwrap();
+    db.execute("UPDATE violet_consumption_outbox SET retry_at=0", [])
+        .unwrap();
+    let report = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
+    assert!(report.errors.is_empty(), "{report:?}");
+    let receipts = relay.consumption_receipts.borrow();
+    assert_eq!(receipts.len(), 2);
+    assert_eq!(
+        receipts[0], receipts[1],
+        "lost response retries the same UUID and bytes"
+    );
+    drop(receipts);
+    let body = queue
+        .poll_unseen_for_recipient("supervisor-a", Some("factory-a"), 10)
+        .unwrap();
+    assert_eq!(
+        body.len(),
+        1,
+        "background intake must confirm remote uncertainty before arming the original body"
+    );
+    let report = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert_eq!(
+        relay.consumption_receipts.borrow().last().unwrap()["state"],
+        "consumed"
+    );
+    assert!(
+        queue
+            .poll_unseen_for_recipient("supervisor-a", Some("factory-a"), 10)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -91,10 +200,7 @@ fn cas_c423_successor_poll_reuses_unacknowledged_admission_with_new_lease() {
     response["deliveries"][0]["lease_token"] = json!("successor-lease");
     let relay = Relay {
         response: RefCell::new(response),
-        acks: RefCell::new(vec![]),
-        fail_ack: false,
-        database: Some(root.path().join("cas.db")),
-        ack_response: None,
+        ..Relay::new(root.path())
     };
     let report = poll_once(&relay, &store, &successor, "new-session", "new-reader");
     assert!(report.errors.is_empty(), "{report:?}");
@@ -141,6 +247,14 @@ fn cas_c423_poll_snapshots_lease_fence_before_remote_claim() {
         fn acknowledge(&self, _: &Value, _: Duration) -> Result<Value, RemoteError> {
             panic!("the old actor must not acknowledge the successor's admission")
         }
+        fn record_consumption(
+            &self,
+            _: &str,
+            _: &Value,
+            _: Duration,
+        ) -> Result<Value, RemoteError> {
+            panic!("old actor must not arm the successor's body")
+        }
     }
     let root = tempfile::tempdir().unwrap();
     let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
@@ -184,11 +298,8 @@ fn cas_c423_duplicate_poll_lost_ack_and_two_readers_keep_one_admission_each() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
     let relay = Relay {
-        response: RefCell::new(claim_fixture()),
-        acks: RefCell::new(vec![]),
         fail_ack: true,
-        database: Some(root.path().join("cas.db")),
-        ack_response: None,
+        ..Relay::new(root.path())
     };
     let first = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
     assert_eq!(first.admitted, 1, "{first:?}");
@@ -238,13 +349,7 @@ fn cas_c423_failed_sqlite_cursor_commit_never_acks_or_leaks_an_admission() {
         BEGIN SELECT RAISE(ABORT, 'disk-full simulation'); END;",
     )
     .unwrap();
-    let relay = Relay {
-        response: RefCell::new(claim_fixture()),
-        acks: RefCell::new(vec![]),
-        fail_ack: false,
-        database: Some(root.path().join("cas.db")),
-        ack_response: None,
-    };
+    let relay = Relay::new(root.path());
     let result = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
     assert_eq!(result.admitted, 0);
     assert!(
@@ -277,11 +382,8 @@ fn cas_c423_failed_sqlite_cursor_commit_never_acks_or_leaks_an_admission() {
 fn cas_c423_ack_retries_durable_admission_when_cloud_no_longer_leases_it() {
     let root = tempfile::tempdir().unwrap();
     let relay = Relay {
-        response: RefCell::new(claim_fixture()),
-        acks: RefCell::new(vec![]),
         fail_ack: true,
-        database: Some(root.path().join("cas.db")),
-        ack_response: None,
+        ..Relay::new(root.path())
     };
     let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
     let first = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
@@ -293,10 +395,7 @@ fn cas_c423_ack_retries_durable_admission_when_cloud_no_longer_leases_it() {
     empty["deliveries"] = json!([]);
     let relay = Relay {
         response: RefCell::new(empty),
-        acks: RefCell::new(vec![]),
-        fail_ack: false,
-        database: Some(root.path().join("cas.db")),
-        ack_response: None,
+        ..Relay::new(root.path())
     };
     let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
     let resumed = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");
@@ -333,10 +432,8 @@ fn cas_c423_ack_checks_each_delivery_result_and_retains_failures() {
     .unwrap();
     let relay = Relay {
         response: RefCell::new(claim),
-        acks: RefCell::new(vec![]),
-        fail_ack: false,
-        database: Some(root.path().join("cas.db")),
         ack_response: Some(fixture["cases"][0]["response"]["payload"].clone()),
+        ..Relay::new(root.path())
     };
     let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
     let report = poll_once(&relay, &store, &context(), "factory-a", "supervisor-a");

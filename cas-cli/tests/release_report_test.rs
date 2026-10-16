@@ -179,10 +179,15 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     }
     assert!(source.starts_with("---\nversion: 3.19.0\n"));
     assert!(source.contains("## Change map\n"));
+    // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("| Area | Changes | What changed |"));
+    // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("| Sessions | 1 | Worker report improvements |"));
+    // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("| Releases and CI | 1 | Simpler install |"));
+    // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("| GitHub issues closed | 2 |"));
+    // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("[#705](https://github.com/example/project/issues/705)"));
     assert!(source.contains("sha256:abc123"));
     assert!(html.contains("<html lang=\"en\">"));
@@ -291,13 +296,18 @@ esac
     assert_eq!(result["issue_count"], 2, "{result}");
     assert_eq!(result["change_count"], 3);
     let source = fs::read_to_string(project.path().join("docs/release-reports/v3.19.0.md")).unwrap();
+    // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("| GitHub issues closed | 2 |"), "{source}");
+    // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("[#801](https://github.com/example/project/issues/801)"));
+    // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("[#802](https://github.com/example/project/issues/802)"));
     assert!(
+        // pin: the ledger names out-of-window closures instead of counting them
         source.contains("closed outside this release's counting window, so not counted: [#700]"),
         "{source}"
     );
+    // pin: page one ends where the renderer's fixed "What you can do now" section starts
     let page_one = &source[..source.find("## What you can do now").unwrap()];
     for zero in ["| 0 |", "no listed issues", "issue-bearing", "verified closure"] {
         assert!(!page_one.contains(zero), "page one shows {zero:?}:\n{page_one}");
@@ -413,8 +423,11 @@ fn cli_release_report_resolves_main_config_from_a_git_worktree() {
     let (user_section, developer_and_rest) = source.split_once("## Under the hood").unwrap();
     assert!(source.contains("Published 9 September 2026 · 16:51 UTC"));
     assert!(source.contains("The release is ready to inspect."));
+    // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("areas: [\"Tasks and merges\"]"));
+    // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("| Tasks and merges | 1 |"));
+    // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("[#767](https://github.com/example/project/issues/767)"));
     assert!(user_section.contains("### Release reports"));
     assert!(user_section.contains("### Already live on hosts that updated from main"));

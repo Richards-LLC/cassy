@@ -214,9 +214,6 @@ fn worker_exit_cause(
     }
 }
 
-/// Red-first stub (cas-26c8).
-const CAS_26C8_RED_STUB: bool = true;
-
 /// Deaths closer together than this are one incident (cas-2ffe, GH #915):
 /// three Codex workers exited with code 0 within 1.2 s of each other.
 pub(super) const WORKER_DEATH_CORRELATION_WINDOW: std::time::Duration =

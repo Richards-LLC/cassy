@@ -6711,7 +6711,7 @@ impl FactoryDaemon {
             .recipient(pane)?
             .mid_turn()
     }
-    fn prepared_wake_evidence(&mut self, pane: &str) -> RecipientWakeEvidence {
+    fn prepared_wake_evidence(&self, pane: &str) -> RecipientWakeEvidence {
         self.queue_jobs.prompt_preparation.wake_evidence(pane)
     }
 

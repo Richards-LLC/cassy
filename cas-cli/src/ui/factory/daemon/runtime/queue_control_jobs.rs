@@ -420,7 +420,7 @@ pub(crate) struct PromptPreparation {
     unusable_reads: u8,
     fallback: Option<WakeInputs>,
     // Retained across reads and batches: unavailable registration is not a new boot.
-    unknown_first_seen: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    unknown_first_seen: std::cell::RefCell<HashMap<String, chrono::DateTime<chrono::Utc>>>,
     #[cfg(test)]
     pub(crate) read_delay: Duration,
     #[cfg(test)]
@@ -435,29 +435,29 @@ impl PromptPreparation {
         }
         chrono::Utc::now()
     }
-    fn remember_unknowns(&mut self, inputs: &WakeInputs) {
+    fn remember_unknowns(&self, inputs: &WakeInputs) {
+        let mut first_seen = self.unknown_first_seen.borrow_mut();
         for (pane, input) in &inputs.recipients {
             if let Some(observed) = input.unknown_observed_at {
-                self.unknown_first_seen
-                    .entry(pane.clone())
-                    .or_insert(observed);
+                first_seen.entry(pane.clone()).or_insert(observed);
             }
         }
     }
-    pub(crate) fn wake_evidence(&mut self, pane: &str) -> RecipientWakeEvidence {
+    pub(crate) fn wake_evidence(&self, pane: &str) -> RecipientWakeEvidence {
         let now = self.wake_now();
         let (mut evidence, unknown_observed_at) = self
             .recipient(pane)
             .map(|input| (input.wake_evidence(now), input.unknown_observed_at))
             .unwrap_or((RecipientWakeEvidence::default(), Some(now)));
         if let Some(observed) = unknown_observed_at {
-            let first_seen = self
-                .unknown_first_seen
-                .entry(pane.into())
-                .or_insert(observed);
-            evidence.awaiting_first_prompt = now >= *first_seen
+            let mut sightings = self.unknown_first_seen.borrow_mut();
+            let first_seen = sightings.get(pane).copied().unwrap_or_else(|| {
+                sightings.insert(pane.into(), observed);
+                observed
+            });
+            evidence.awaiting_first_prompt = now >= first_seen
                 && now
-                    <= *first_seen
+                    <= first_seen
                         + chrono::Duration::from_std(
                             super::queue_and_events::CLAUDE_FIRST_PROMPT_GRACE,
                         )

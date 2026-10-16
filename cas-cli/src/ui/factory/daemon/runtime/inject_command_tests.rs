@@ -3,7 +3,6 @@
 //! pass waits for it.
 use std::time::{Duration, Instant};
 
-
 use crate::store::{open_agent_store, open_prompt_queue_store};
 use crate::ui::factory::daemon::FactoryDaemon;
 

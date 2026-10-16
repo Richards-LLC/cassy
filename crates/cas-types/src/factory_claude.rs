@@ -4,6 +4,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FactoryClaudeConfig {
+    /// Native worker MCP scope. Inheritance cannot override resource denials.
+    pub worker_mcp: WorkerMcp,
     /// Opt in to interactive Remote Control for the supervisor only.
     pub remote_control: bool,
     /// Explicit overload fallback; no model availability is inferred by Cassy.
@@ -33,4 +35,33 @@ fn deserialize_fallback<'de, D: Deserializer<'de>>(
         .transpose()
         .map(Option::flatten)
         .map_err(serde::de::Error::custom)
+}
+
+/// Project-selected native Claude worker MCP discovery.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerMcp {
+    #[default]
+    CasOnly,
+    Inherit,
+}
+
+impl WorkerMcp {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CasOnly => "cas_only",
+            Self::Inherit => "inherit",
+        }
+    }
+}
+
+impl std::str::FromStr for WorkerMcp {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "cas_only" => Ok(Self::CasOnly),
+            "inherit" => Ok(Self::Inherit),
+            _ => Err("factory.claude.worker_mcp must be cas_only or inherit".into()),
+        }
+    }
 }

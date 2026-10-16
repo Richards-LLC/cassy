@@ -197,6 +197,22 @@ pub(super) fn finish_worker_config(
         config.env.push((cas_pty::WORKER_CREDENTIAL_WARNING_ENV.into(), warning));
     }
     let claude = config.effective_command() == "claude";
+    if claude {
+        let options = match crate::worker_resources::load_claude_config(cas_root.map(PathBuf::as_path)) {
+            Ok(options) => options,
+            Err(error) => {
+                config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), error.to_string()));
+                return;
+            }
+        };
+        if options.worker_mcp == cas_types::factory_claude::WorkerMcp::Inherit {
+            if !policy.is_empty() {
+                config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(),
+                    "Claude worker_mcp=inherit conflicts with the denial policy; use cas_only, or clear the denial policy".into()));
+            }
+            return;
+        }
+    }
     if claude && (!cas_pty::claude_supports_flag("--mcp-config") || !cas_pty::claude_supports_flag("--strict-mcp-config")) {
         config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), "Claude worker isolation requires --mcp-config and --strict-mcp-config; upgrade the installed Claude CLI before spawning".into()));
         return;

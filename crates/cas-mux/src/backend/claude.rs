@@ -116,28 +116,9 @@ fn apply_launch_options(
     supervisor: bool,
 ) {
     let result = (|| -> std::result::Result<(), String> {
-        let contents = match root.map(|root| std::fs::read_to_string(root.join("config.toml"))) {
-            None => return Ok(()),
-            Some(Ok(contents)) => contents,
-            Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Some(Err(error)) => {
-                return Err(format!(
-                    "cannot read factory Claude launch configuration: {error}"
-                ));
-            }
-        };
-        #[derive(serde::Deserialize, Default)]
-        #[serde(default)]
-        struct Factory {
-            claude: cas_types::factory_claude::FactoryClaudeConfig,
-        }
-        #[derive(serde::Deserialize)]
-        struct Document {
-            #[serde(default)]
-            factory: Factory,
-        }
-        let options = toml::from_str::<Document>(&contents)
-            .map_err(|_| "invalid [factory.claude] launch configuration; check remote_control and fallback_model".to_string())?.factory.claude;
+        let options =
+            crate::worker_resources::load_claude_config(root.map(std::path::PathBuf::as_path))
+                .map_err(|error| error.to_string())?;
         let mut flags = Vec::new();
         if supervisor && options.remote_control {
             flags.push(("--remote-control", name.to_owned()));

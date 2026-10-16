@@ -1848,3 +1848,7 @@ impl PeerMailbox for HttpPeerMailbox {
 #[cfg(test)]
 #[path = "peer_mailbox_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "peer_mailbox_user_scope_tests.rs"]
+mod user_scope_tests;

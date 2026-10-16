@@ -9,11 +9,16 @@ runs every time and nothing is persisted.
 Zig: $ZIG; the checkout's .context/zig/zig; the main checkout's (symlinked in
 with --link-zig); `zig` on PATH. Otherwise the fix is ./scripts/bootstrap-zig.sh.
 
-Scratch base: an exported CAS_RELEASE_GATE_HOME_DIR; <staging.scratch_root>/
+Scratch base: an exported CAS_RELEASE_GATE_HOME_DIR;
+<factory.scratch_root>/<project-key>/release-gate; <staging.scratch_root>/
 cas-release-gate; <mount>/cas/scratch/cas-release-gate;
 <mount>/cas-release-gate/base; the platform default; cas-release-gate beside the
 checkout. A candidate counts only when its parent is an existing writable
-directory on the checkout's filesystem with no .cas ancestor. Durable mode
+directory on the checkout's filesystem with no .cas ancestor. The one
+exception is a base inside the configured factory.scratch_root (cas-baa8): it
+may sit on another device, but it must share the scratch root's filesystem,
+because assembly clones there hard-link the baseline from
+<factory.scratch_root>/<project-key>/build-cache. Durable mode
 (assembly-proof and the release train) also refuses system temporary roots,
 because assembly-proof's plain clone must not look like a throwaway project.
 
@@ -26,6 +31,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -191,7 +197,67 @@ def staging_scratch_root(checkout: Path, env) -> str:
     return lines[0] if lines and lines[0].startswith("/") else ""
 
 
-def scratch_problem(base: Path, checkout_device, env, durable: bool, host: Host) -> str:
+# --- factory.scratch_root (cas-baa8) ---------------------------------------------
+
+FACTORY_SCRATCH_VAR = "CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT"
+RELEASE_GATE_DIR = "release-gate"
+
+
+def project_key(cas_dir: Path) -> str:
+    """`<label>-<sha256>` of a Cassy store, as cas_types::factory_scratch::project_key
+    and refresh-worker-build-cache.sh derive it (pinned to one golden vector)."""
+    cas_dir = Path(cas_dir)
+    store = Path(os.path.realpath(cas_dir)) if cas_dir.exists() else cas_dir
+    name = store.parent.name if store.parent != store else ""
+    label = "".join(ch if ch.isascii() and (ch.isalnum() or ch in "-_") else "-"
+                    for ch in (name or "project")[:48])
+    return f"{label}-{hashlib.sha256(os.fsencode(store)).hexdigest()}"
+
+
+def cas_dir_for(checkout: Path) -> Path:
+    """The store of the main checkout every worktree of this repository shares."""
+    return (main_checkout(checkout) or Path(checkout).absolute()) / ".cas"
+
+
+def factory_scratch_root(checkout: Path, env) -> Path | None:
+    """`cas config get factory.scratch_root`; CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT
+    overrides it. Only an absolute value relocates anything."""
+    if FACTORY_SCRATCH_VAR in env:
+        value = env[FACTORY_SCRATCH_VAR]
+    else:
+        cas = shutil.which("cas", path=env.get("PATH", ""))
+        value = ""
+        if cas:
+            try:
+                result = subprocess.run([cas, "config", "get", "factory.scratch_root"], cwd=checkout,
+                                        capture_output=True, text=True, timeout=5, env=dict(env))
+                lines = result.stdout.strip().splitlines() if result.returncode == 0 else []
+                value = lines[0] if lines else ""
+            except (OSError, subprocess.SubprocessError):
+                value = ""
+    value = value.strip()
+    return Path(value) if value.startswith("/") else None
+
+
+def project_scratch_dir(checkout: Path, env) -> Path | None:
+    root = factory_scratch_root(checkout, env)
+    return root / project_key(cas_dir_for(checkout)) if root else None
+
+
+def build_cache_root(checkout: Path, env=os.environ) -> Path:
+    """Where worker baselines are published: <project scratch>/build-cache, else <store>/build-cache."""
+    project = project_scratch_dir(checkout, env)
+    return project / "build-cache" if project else cas_dir_for(checkout) / "build-cache"
+
+
+def nearest_existing(path: Path) -> Path:
+    while not os.path.lexists(path) and path.parent != path:
+        path = path.parent
+    return path
+
+
+def scratch_problem(base: Path, checkout_device, env, durable: bool, host: Host,
+                    project: Path | None = None) -> str:
     if not base.is_absolute():
         return "not an absolute path"
     parent = base.parent
@@ -200,7 +266,15 @@ def scratch_problem(base: Path, checkout_device, env, durable: bool, host: Host)
     if base.exists() and not (base.is_dir() and os.access(base, os.W_OK | os.X_OK)):
         return "exists but is not a writable directory"
     device = host.device(parent)
-    if checkout_device is None or device != checkout_device:
+    inside = project is not None and (base.absolute() == project or project in base.absolute().parents)
+    if inside:
+        # cas-baa8: the configured scratch root may be on another device, but the
+        # base must share its filesystem: clones hard-link the build-cache there.
+        root_device = host.device(nearest_existing(project.parent))
+        if device != root_device:
+            return (f"scratch root boundary (factory.scratch_root device {root_device}, "
+                    f"scratch parent device {device})")
+    elif checkout_device is None or device != checkout_device:
         return f"filesystem boundary (checkout device {checkout_device}, scratch parent device {device})"
     ancestor = cas_ancestor(parent)
     if ancestor is not None:
@@ -217,15 +291,23 @@ def resolve_scratch(checkout: Path, env=os.environ, *, durable: bool = False, cr
     mount = host.mount(checkout)
     checkout_device = host.device(checkout)
     result = ScratchResolution("", "", str(mount))
+    project = project_scratch_dir(checkout, env)
     explicit = env.get(GATE_VAR, "")
     if explicit:
         # Operator intent wins; callers still check it and name the problem.
         result.base, result.source = explicit, f"{GATE_VAR} (environment)"
-        result.problem = scratch_problem(Path(explicit), checkout_device, env, durable, host)
+        if project is not None and Path(explicit).absolute().is_relative_to(project):
+            result.source += ", inside factory.scratch_root"
+        result.problem = scratch_problem(Path(explicit), checkout_device, env, durable, host, project)
         if result.problem:
             result.fix = f"unset {GATE_VAR} so the resolver derives a base on the checkout's filesystem"
     else:
         candidates = []
+        if project is not None:
+            # The project directory is created beside its targets and build-cache.
+            if project.parent.is_dir() and os.access(project.parent, os.W_OK | os.X_OK):
+                project.mkdir(exist_ok=True)
+            candidates.append((project / RELEASE_GATE_DIR, "factory.scratch_root"))
         scratch_root = staging_scratch_root(checkout, env)
         if scratch_root:
             candidates.append((Path(scratch_root) / "cas-release-gate", "staging.scratch_root"))
@@ -235,7 +317,7 @@ def resolve_scratch(checkout: Path, env=os.environ, *, durable: bool = False, cr
                              else "/var/tmp/cas-release-gate"), "platform default"),
                        (checkout.parent / "cas-release-gate", "beside the checkout")]
         for base, source in candidates:
-            problem = scratch_problem(base, checkout_device, env, durable, host)
+            problem = scratch_problem(base, checkout_device, env, durable, host, project)
             if not problem:
                 result.base, result.source = str(base), source
                 break

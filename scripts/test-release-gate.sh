@@ -32,6 +32,7 @@ export CAS_RELEASE_GATE_HOME_DIR
 # `cas config` staging.scratch_root, so Zig and scratch resolve from fixtures.
 export CAS_RELEASE_ENV_FILE="$tmp/no-release.env"
 export CAS_RELEASE_ENV_SCRATCH_ROOT=""
+export CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT=""
 mkdir -p "$CAS_RELEASE_GATE_HOME_DIR"
 
 # Fail loudly rather than silently reintroducing the same class: if the chosen

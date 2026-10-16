@@ -7,6 +7,7 @@ Immutable worker snapshots seed dependencies only; workspace units are rebuilt.
 """
 import argparse
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -77,7 +78,21 @@ def invalidate_workspace(target, packages):
 
 def cache_root(root):
     common = Path(git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir')).resolve()
-    return common.parent / '.cas/build-cache'
+    store = common.parent / '.cas'
+    # cas-baa8: [factory] scratch_root publishes the baseline beside the
+    # relocated targets; release_env.py owns that lookup and the project key.
+    resolver = Path(__file__).with_name('release_env.py')
+    if resolver.is_file():
+        release_env = sys.modules.get('release_env')
+        if release_env is None:
+            spec = importlib.util.spec_from_file_location('release_env', resolver)
+            release_env = importlib.util.module_from_spec(spec)
+            sys.modules['release_env'] = release_env  # dataclasses resolve their module
+            spec.loader.exec_module(release_env)
+        scratch_root = release_env.factory_scratch_root(Path(root), os.environ)
+        if scratch_root is not None:
+            return scratch_root / release_env.project_key(store) / 'build-cache'
+    return store / 'build-cache'
 
 
 def seed_dependencies(root, target, packages, cache):

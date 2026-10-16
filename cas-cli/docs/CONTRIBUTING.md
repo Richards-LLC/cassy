@@ -1485,8 +1485,25 @@ When the root is unset, every path stays as it was: `<worktree>/target` and
 `.cas/build-cache`. Running workers keep their current target. They move only
 when they respawn, and live targets are never moved. Run the refresh script
 after you change the root, so new workers have a baseline to seed from.
-`gc_report`/`gc_cleanup` still inventory only in-tree targets. Retirement and
-park-time pruning cover relocated worker targets.
+Retirement and park-time pruning cover relocated worker targets.
+
+The release scratch base follows the same root (cas-baa8).
+`scripts/release_env.py` resolves it first, as
+`<scratch_root>/<project-key>/release-gate`. Every release-gate archive and
+assembly clone lives there, including each clone's `repo/target`. This base may
+sit on a different device from the checkout, but it must share the scratch
+root's filesystem: assembly clones hard-link the baseline from
+`<project-key>/build-cache`, which `scripts/proof_target.py` now reads from the
+same root. A mount below the root is refused. Any other base on another
+device, including a `staging.scratch_root` base, is still refused. The gate's
+`scratch-base` row asks `release_env.py` about a device mismatch, so the
+boundary rule lives in one resolver. The legacy in-tree
+`.cas/merge-sweeps/assembly-target` inventory stays where the old caches were.
+
+`gc_report` lists the relocated caches with their sizes under "Scratch root
+caches": the build-cache, each worker target and the release scratch base. Its
+release-scratch section scans the relocated base. `gc_cleanup` still reclaims
+only in-tree worker targets.
 
 Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
 checkout paths remain in its cache keys (measured 0/45 hits even with

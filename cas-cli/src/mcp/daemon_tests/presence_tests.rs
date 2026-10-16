@@ -1026,3 +1026,17 @@ async fn cas_4ac8_round3_resume_resets_failing_backoff() {
     session_start(&resumed, id, "resuming").await;
     assert_eq!(presence::load(&fx.cas_root, id).unwrap().state, PresenceState::Registered);
 }
+
+#[tokio::test]
+async fn cas_4ac8_round3_heartbeat_kicks_once_with_and_without_owned_agent() {
+    let (fx, daemon) = fixture("cas-571d").await;
+    let before = daemon.presence_kick_count.load(Ordering::Relaxed);
+    heartbeat_tick(&daemon).await;
+    assert_eq!(daemon.presence_kick_count.load(Ordering::Relaxed) - before, 1);
+    session_start(&daemon, "one-kick", "supervisor").await;
+    let before = daemon.presence_kick_count.load(Ordering::Relaxed);
+    let requests = fx.cloud.state().heartbeats.len();
+    heartbeat_tick(&daemon).await;
+    assert_eq!(daemon.presence_kick_count.load(Ordering::Relaxed) - before, 1);
+    assert_eq!(fx.cloud.state().heartbeats.len() - requests, 1);
+}

@@ -364,6 +364,8 @@ pub struct EmbeddedDaemon {
     /// The in-flight cloud presence upkeep (cas-f707). One at a time: a tick
     /// that finds the previous one still running skips its turn.
     presence_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    #[cfg(test)]
+    presence_kick_count: std::sync::atomic::AtomicUsize,
 }
 
 impl EmbeddedDaemon {
@@ -415,6 +417,8 @@ impl EmbeddedDaemon {
             agent_id: RwLock::new(None),
             pid_sessions: RwLock::new(std::collections::HashMap::new()),
             presence_task: tokio::sync::Mutex::new(None),
+            #[cfg(test)]
+            presence_kick_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -502,6 +506,8 @@ impl EmbeddedDaemon {
     /// the cloud answers 404/401. Skipped when the previous tick still runs
     /// or the project has no cloud coordinator.
     async fn kick_cloud_presence(&self, agent_id: String) {
+        #[cfg(test)]
+        self.presence_kick_count.fetch_add(1, Ordering::Relaxed);
         let Some(coordinator) = self.fresh_cloud_coordinator().await else {
             return;
         };
@@ -1895,6 +1901,8 @@ impl EmbeddedDaemon {
     /// failures under SQLite lock contention can cause workers to be
     /// incorrectly marked stale in multi-agent factory sessions.
     async fn send_agent_heartbeat(&self) {
+        // Temporary L5 negative control: reinstate the reviewed duplicate kick.
+        self.kick_cloud_presence(String::new()).await;
         if let Ok(store) = open_agent_store(&self.config.cas_root) {
             // If we don't have an agent_id yet, try to adopt one by PID.
             // This handles the factory case where another daemon owns the

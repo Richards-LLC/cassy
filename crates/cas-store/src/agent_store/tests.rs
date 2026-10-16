@@ -1505,3 +1505,23 @@ fn cas_8063_unregister_retains_minimal_peer_identity_once() {
     assert!(metadata["retired_agent"].get("metadata").is_none());
     assert!(!metadata.to_string().contains("private-value"));
 }
+
+#[test]
+fn cas_4ac8_round3_registration_time_changes_only_for_real_start_after_shutdown() {
+    let (_temp, store) = create_test_store();
+    let mut original = Agent::new("retained-row".into(), "worker".into());
+    original.cc_session_id = Some("same-session".into());
+    store.register(&original).unwrap();
+    let mut fresh = original.clone();
+    fresh.registered_at += Duration::seconds(1);
+    store.register(&fresh).unwrap();
+    assert_eq!(store.get(&original.id).unwrap().registered_at, original.registered_at);
+    store.graceful_shutdown(&original.id).unwrap();
+    let mut automatic = fresh.clone();
+    automatic.cc_session_id = None;
+    store.register(&automatic).unwrap();
+    assert_eq!(store.get(&original.id).unwrap().registered_at, original.registered_at);
+    store.graceful_shutdown(&original.id).unwrap();
+    store.register(&fresh).unwrap();
+    assert_eq!(store.get(&original.id).unwrap().registered_at, fresh.registered_at);
+}

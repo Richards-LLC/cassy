@@ -570,14 +570,16 @@ fn prepared_cargo_route_preserves_original_and_rewritten_cli_denials_cas_2c8e() 
     ]);
     // Both commands still pass through the existing operator-owned CLI deny
     // policy; constructing the route before IO must not approve either one.
-    for denied in ["cargo", "cas"] {
+    let executable = std::env::current_exe().unwrap();
+    let runner_cli = executable.file_name().unwrap().to_str().unwrap();
+    for denied in ["cargo", runner_cli] {
         let mut config = crate::config::Config::default();
         config.factory.get_or_insert_with(Default::default).worker_denied_clis = vec![denied.into()];
         config.save(&root).unwrap();
         let mut call = input("cargo check -p cas --tests", "worker");
         call.cwd = project.path().to_string_lossy().into_owned();
         let output = handle_pre_tool_use(&call, Some(&root)).unwrap();
-        let reason = deny_reason(&output).expect("original and rewritten commands are denied");
+        let reason = deny_reason(&output).unwrap_or_else(|| panic!("{denied} must be denied: {output:?}"));
         assert!(reason.contains(denied), "{reason}");
         assert!(serde_json::to_value(output).unwrap()["hookSpecificOutput"]["updatedInput"].is_null());
     }

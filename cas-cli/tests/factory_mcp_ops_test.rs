@@ -11931,8 +11931,8 @@ async fn cas009c_supervisor_follow_up_threads_on_its_own_message() {
         .queued_prompt(queued_row_id(&env, "bold-spider-9", "And re-run ct2_p1 after."))
         .expect("read follow-up")
         .expect("follow-up queued");
-    // pin: the thread marker the recipient reads, distinct from the ack marker.
     assert!(
+        // pin: the thread marker the recipient reads, distinct from the ack marker.
         follow_up.prompt.contains(&format!("[CAS reply: in thread with notification_id={started}]")),
         "{}",
         follow_up.prompt

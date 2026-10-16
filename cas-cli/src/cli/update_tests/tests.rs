@@ -275,17 +275,25 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
         }
     }
     let mut env = cas_8235_fixture();
-    let projects = env.home().join("projects");
+    // Host discovery deliberately excludes /tmp and artifact roots. Keep a
+    // temporary HOME under the test runtime's sanctioned project-fixture root.
+    let host = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    let home = host.path();
+    env.set("HOME", home);
+    env.set("XDG_CONFIG_HOME", home.join(".config"));
+    env.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
+    let projects = home.join("projects");
     let roots: Vec<_> = ["first", "second"].iter().map(|name| {
-        let root = crate::store::init_cas_dir(&projects.join(name)).unwrap();
-        crate::store::open_store(&root).unwrap();
-        root
+        let project = projects.join(name);
+        std::fs::create_dir_all(&project).unwrap();
+        assert!(std::process::Command::new("git").args(["init", "--quiet"]).arg(&project).status().unwrap().success());
+        crate::store::init_cas_dir(&project).unwrap()
     }).collect();
     env.set("CAS_PROJECT_ROOTS", &projects);
     env.set("CAS_ROOT", &roots[0]);
     let old = cas_types::violet_compatibility::violet_compatibility().legacy_token_prefix.to_owned() + "_CASSY_PROXY";
     // pin: the legacy Authorization wire shape is the upgrade fixture input.
-    std::fs::write(env.home().join(".claude.json"), serde_json::json!({"mcpServers":{"violet":{
+    std::fs::write(home.join(".claude.json"), serde_json::json!({"mcpServers":{"violet":{
         "url":cas_types::violet_compatibility::violet_hub_url(),
         "headers":{"Authorization":format!("Bearer ${{{old}}}")}}}}).to_string()).unwrap();
     let original = cas_8235_proxy("env:VIOLET_SLACK_TOKEN_CASSY_PROXY");

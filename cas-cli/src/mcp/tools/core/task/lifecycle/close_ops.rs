@@ -24349,6 +24349,26 @@ mod merge_state_gate_tests {
         ));
     }
 
+    /// The serving 3.56 shape used this legacy counter as merge evidence.
+    /// A missing local epic is Unknown, never an integrated delivery.
+    #[test]
+    #[should_panic(expected = "legacy missing-ref count allowed an unmerged delivery")]
+    fn cas_4d67_old_merge_count_shape_failure_control() {
+        let dir = init_factory_repo("worker");
+        let repo = dir.path();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(repo, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        git(repo, &["push", "-q", "origin", "main:epic/remote-only"]);
+        std::fs::write(repo.join("delivery.rs"), "pub fn delivery() {}\n").unwrap();
+        git(repo, &["add", "delivery.rs"]);
+        git(repo, &["commit", "-q", "-m", "fix(cas-test1): delivery"]);
+        assert!(matches!(known_unmerged_factory_commits(repo, "factory/worker", "origin/epic/remote-only"),
+            KnownUnmergedCount::KnownPositive(1)));
+        let legacy_count = count_unmerged_factory_commits(repo, "factory/worker", "epic/remote-only");
+        assert!(legacy_count > 0, "legacy missing-ref count allowed an unmerged delivery");
+    }
+
     fn close_relay_fixture_cas_3a82(
         root: &std::path::Path,
     ) -> (CasCore, cas_store::SqliteTaskStore, cas_store::SqliteSupervisorQueueStore, Task) {

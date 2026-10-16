@@ -989,6 +989,7 @@ pub struct SqliteVioletAdmissionStore {
 impl SqliteVioletAdmissionStore {
     /// Restore Cloud's existing admission on a successor machine. No lease
     /// token or new admission acknowledgement is invented by this path.
+    /// `live_instance` identifies this daemon lifetime, never a recovered one.
     pub fn restore_admitted(
         &self,
         input: &VioletAdmissionInput,
@@ -1523,6 +1524,37 @@ fn recover_known_in_tx(
         params![prompt_id, recipient],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
+    // Periodic discovery also sees our own pre-dispatch uncertainty receipt.
+    // Only this still-live, unspent attempt may keep its original body. A
+    // successor (including a daemon restart with the same registration) has
+    // a different instance and must take the conservative recovery path.
+    if let RecoveryAuthority::Rebind(Some(instance)) = authority {
+        let live_unspent: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM violet_body_permits b
+            JOIN prompt_queue q ON q.id=b.prompt_id
+            WHERE b.prompt_id=?1 AND b.instance_id=?2 AND b.request_id IS NOT NULL
+              AND b.state IN ('blocked','armed') AND q.processed_at IS NULL
+              AND b.registration_id=?3 AND b.delivery_generation=?4
+              AND b.factory_session=?5 AND b.recipient=?6)",
+            params![prompt_id,instance,binding.registration_id,binding.delivery_generation,
+                binding.factory_session,binding.recipient],
+            |r| r.get(0),
+        )?;
+        if same_route && live_unspent && !surfaced
+            && remote != VioletConsumption::Consumed
+            && VioletConsumption::parse(&stored)? == VioletConsumption::Queued
+        {
+            tx.execute("UPDATE violet_admissions SET ack_pending=0 WHERE delivery_id=?1",
+                [&binding.delivery_id])?;
+            return Ok(VioletRecoveryReceipt {
+                admission: VioletAdmissionReceipt {
+                    delivery_id: binding.delivery_id.clone(), prompt_id, created: false,
+                },
+                consumption: VioletConsumption::Queued,
+                recovery_prompt_id,
+            });
+        }
+    }
     let evidence = if surfaced {
         VioletConsumption::Consumed
     } else if touched {

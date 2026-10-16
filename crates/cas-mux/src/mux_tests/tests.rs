@@ -1282,6 +1282,7 @@ fn worker_gets_the_read_only_github_token_and_never_the_operators() {
 #[tokio::test]
 async fn machine_global_protected_proxy_credentials_do_not_reach_worker_descendants() {
     let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
     let home = tempfile::tempdir().expect("temporary home");
     let config_home = tempfile::tempdir().expect("temporary config home");
     let global_config = config_home.path().join("code-mode-mcp/config.toml");
@@ -3922,4 +3923,36 @@ fn cas_569f_defaults_and_native_cas_preserve_environment_denials() {
             assert_eq!(env_value(&pane, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"), Some("1"));
         }
     }
+}
+
+#[test]
+fn cas_569f_dynamic_claude_launch_keeps_account_team_and_factory_identity() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--name,--fallback-model,--mcp-config,--strict-mcp-config");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"), "[factory.claude]\nfallback_model='haiku'\n").unwrap();
+    let account = env.home().join("selected-account");
+    std::fs::create_dir_all(&account).unwrap();
+    let teams = crate::pty::TeamsSpawnConfig {
+        team_name: "fixture-team".into(), agent_id: "dynamic@fixture-team".into(),
+        agent_name: "dynamic".into(), agent_color: "blue".into(),
+        agent_type: "general-purpose".into(), parent_session_id: Some("lead-session".into()),
+        lead_session_id: None, settings_path: Some("fixture-settings.json".into()),
+    };
+    let config = MuxConfig { factory_session: Some("factory-569f".into()), ..Default::default() };
+    let mux = Mux::factory_state_for_test(&config);
+    let spec = WorkerSpec { config_dir: Some(account.display().to_string()), ..WorkerSpec::builtin_default() };
+    let pane = mux.build_add_worker_config("dynamic", project.path().into(), Some(&root), "supervisor", Some(&teams), Some(spec));
+    assert!(env_value(&pane, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+    for (flag, value) in [("--name", "dynamic"), ("--fallback-model", "haiku"),
+        ("--team-name", "fixture-team"), ("--settings", "fixture-settings.json"),
+        ("--disallowedTools", "AskUserQuestion"), ("--permission-mode", "bypassPermissions")] {
+        assert!(pane.args.windows(2).any(|pair| pair == [flag, value]), "missing {flag} {value}");
+    }
+    assert!(pane.args.contains(&"--strict-mcp-config".into()));
+    assert_eq!(env_value(&pane, "CLAUDE_CONFIG_DIR"), account.to_str());
+    assert_eq!(env_value(&pane, "CAS_FACTORY_SESSION"), Some("factory-569f"));
+    assert_eq!(env_value(&pane, "CAS_SUPERVISOR_NAME"), Some("supervisor"));
 }

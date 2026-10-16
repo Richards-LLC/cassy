@@ -787,6 +787,20 @@ fn gh_1196_cancelled_task_no_longer_needs_attention() {
 // A handed-off Codex row can lack a usable transcript binding. The watchdog
 // must distinguish later authored action from transport alone (cas-0cdaa).
 fn handed_off_row(f: &Fixture, source: &str, target: &str) -> i64 {
+    let agents = open_agent_store(&f.cas_dir).unwrap();
+    let mut worker = agents.get("worker-id").unwrap();
+    worker.cc_session_id = Some("codex-worker-synthetic-session".into());
+    worker.metadata.insert("worker_cli".into(), "codex".into());
+    let account = f.root.path().join("unbound-codex");
+    std::fs::create_dir_all(&account).unwrap();
+    worker.metadata.insert(
+        "worker_account_dir".into(),
+        account.to_string_lossy().into(),
+    );
+    worker
+        .metadata
+        .insert("clone_path".into(), f.root.path().to_string_lossy().into());
+    agents.register(&worker).unwrap();
     let id = f.aged(
         source,
         target,
@@ -998,4 +1012,47 @@ fn cas_0cdaa_action_after_scan_cancels_durable_sender_bounce() {
         "atomic bounce write must revalidate recipient action after the scan"
     );
     assert!(f.scan().is_empty());
+}
+
+#[test]
+fn cas_0cdaa_forged_outbound_source_is_not_recipient_action() {
+    let _env = env();
+    let mut f = Fixture::new();
+    handed_off_row(&f, "supervisor", "worker");
+    authored_outbound(
+        &f,
+        &cas_store::QueueOrigin::RegisteredAgent {
+            agent_id: "different-worker-id".into(),
+        },
+    );
+    assert!(
+        !f.scan().is_empty(),
+        "worker source text cannot replace authenticated actor identity"
+    );
+}
+
+#[test]
+fn cas_0cdaa_real_task_claim_and_release_retire_watchdog_alarms() {
+    let _env = env();
+    for release in [false, true] {
+        let mut f = Fixture::new();
+        let agents = open_agent_store(&f.cas_dir).unwrap();
+        if release {
+            agents
+                .try_claim("cas-0cdaa", "worker-id", 1800, None)
+                .unwrap();
+        }
+        handed_off_row(&f, "supervisor", "worker");
+        if release {
+            agents.release_lease("cas-0cdaa", "worker-id").unwrap();
+        } else {
+            agents
+                .try_claim("cas-0cdaa", "worker-id", 1800, None)
+                .unwrap();
+        }
+        assert!(
+            f.scan().is_empty(),
+            "real recipient task transition satisfies the alarm; release={release}"
+        );
+    }
 }

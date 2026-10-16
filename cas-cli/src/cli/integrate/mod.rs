@@ -37,15 +37,14 @@
 //!
 //! ## Live MCP transport
 //!
-//! Platform handlers backed by an upstream MCP server (vercel, neon,
-//! and any future github-with-API client) wrap [`proxy::ProxyClient`]
+//! Platform handlers backed by an upstream MCP server (Vercel) wrap [`proxy::ProxyClient`]
 //! rather than reimplementing the runtime + engine lifecycle. The shared
 //! module owns config loading, lazy engine init, call dispatch, envelope
 //! unwrap, and Drop-time shutdown (cas-36fd0). New live clients should
-//! follow the `vercel::mcp_proxy_client::ProxyVercelClient` /
-//! `neon::LiveNeonClient` shape: a thin wrapper over
+//! follow the `vercel::mcp_proxy_client::ProxyVercelClient` shape: a thin wrapper over
 //! `ProxyClient::new("<server>")` that maps trait calls onto
-//! `ProxyClient::call(tool, args)` and a per-platform parser.
+//! `ProxyClient::call(tool, args)` and a per-platform parser. Neon uses the
+//! authenticated `neonctl` CLI with JSON output instead.
 
 pub mod doctor;
 pub mod fs;
@@ -117,7 +116,7 @@ pub enum PlatformAction {
     Init,
     /// Re-run detection; update outer content, preserve user-owned keep blocks.
     Refresh,
-    /// Read recorded IDs, ping the platform's MCP, return a staleness report.
+    /// Read recorded IDs, query the platform, return a staleness report.
     Verify,
 }
 

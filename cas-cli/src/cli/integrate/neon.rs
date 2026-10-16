@@ -11,12 +11,12 @@
 //!   cleanly without error so `cas init` orchestration can move on to the
 //!   next platform.
 //! - **`Err(...)`** for unrecoverable conditions: malformed `package.json`,
-//!   filesystem errors, MCP/Neon client failures, or required prompts the
+//!   filesystem errors, Neon CLI failures, or required prompts the
 //!   caller cannot answer.
 //!
 //! ## Keep-block convention
 //!
-//! All MCP-fetched IDs live inside a single named keep block,
+//! All Neon-fetched IDs live inside a single named keep block,
 //! `<!-- keep neon-ids -->` … `<!-- /keep neon-ids -->`. Named (not unnamed)
 //! per cas-e6b6 design note: a future template revision that adds another
 //! preserved block should not silently misroute user content into the wrong
@@ -28,20 +28,16 @@
 //!
 //! ## Multi-org wrinkle
 //!
-//! The user has multiple Neon orgs (memory `reference_neon_cas_cloud.md`),
-//! so `mcp__neon__list_projects` *requires* `org_id`. Org selection is
+//! Project listing explicitly selects an organization with `--org-id`. Selection is
 //! interactive when more than one org is returned; otherwise auto-picked.
 //!
 //! ## Testability
 //!
-//! All MCP/Neon access goes through the [`NeonClient`] trait. Tests use
-//! [`FakeNeonClient`] — `cargo test` never depends on a live Neon endpoint.
-//! The production [`LiveNeonClient`] is wired to `cmcp_core::ProxyEngine`
-//! (cas-1549) when the binary is built with `--features mcp-proxy`; off
-//! that feature it bails with a clear rebuild hint. Parser-level fixture
-//! tests live in `super::neon_parsers_test`; live MCP transport is
-//! intentionally not exercised by `cargo test` (verified manually, same
-//! scope cap as cas-7417's vercel wiring).
+//! Neon access goes through the [`NeonClient`] trait. The production
+//! [`LiveNeonClient`] runs authenticated `neonctl` commands with JSON output;
+//! no MCP configuration or `mcp-proxy` feature is required. Tests inject a
+//! fake CLI executable or [`tests::FakeNeonClient`], never a live project.
+//! Legacy MCP-envelope parser fixtures remain supported for existing callers.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -138,136 +134,132 @@ pub trait NeonClient {
     fn describe_branch(&self, org_id: &str, project_id: &str, branch_id: &str) -> Result<bool>;
 }
 
-/// Production [`NeonClient`] backed by the shared
-/// [`super::proxy::ProxyClient`] (cas-36fd0). The proxy lifecycle (lazy
-/// init, engine reuse, Drop with shutdown, poison recovery) lives once
-/// in `proxy.rs`; this struct is just the Neon-specific wrapper that
-/// translates trait calls into `ProxyClient::call(tool, args)` plus the
-/// neon-specific parsers below.
-///
-/// **Live MCP is not exercised by `cargo test`** — the parsers in
-/// [`parse_list_organizations`] / [`parse_list_projects`] /
-/// [`parse_describe_project`] / [`parse_describe_branch`] are
-/// fixture-tested against canonical Neon MCP response shapes. End-to-end
-/// transport is verified by the shared fixture in
-/// `cas-cli/tests/integrate_lifecycle_test.rs` (cas-2dc9).
-#[cfg(feature = "mcp-proxy")]
+/// Production Neon reads through the authenticated Neon CLI. This works in
+/// builds without `mcp-proxy` and needs no MCP server registration.
 pub struct LiveNeonClient {
-    inner: super::proxy::ProxyClient,
+    binary: PathBuf,
 }
 
-#[cfg(feature = "mcp-proxy")]
 impl Default for LiveNeonClient {
     fn default() -> Self {
         Self {
-            inner: super::proxy::ProxyClient::new("neon"),
+            binary: PathBuf::from("neonctl"),
         }
     }
 }
 
-#[cfg(feature = "mcp-proxy")]
 impl LiveNeonClient {
-    #[cfg(test)]
-    fn with_binary(_binary: PathBuf) -> Self {
-        Self::new()
-    }
-
     pub fn new() -> Self {
         Self::default()
     }
 
-    fn arg_str(k: &str, v: &str) -> serde_json::Map<String, serde_json::Value> {
-        let mut m = serde_json::Map::new();
-        m.insert(k.to_string(), serde_json::Value::String(v.to_string()));
-        m
-    }
-}
-
-#[cfg(not(feature = "mcp-proxy"))]
-pub struct LiveNeonClient;
-
-#[cfg(not(feature = "mcp-proxy"))]
-impl Default for LiveNeonClient {
-    fn default() -> Self {
-        Self
-    }
-}
-
-#[cfg(not(feature = "mcp-proxy"))]
-impl LiveNeonClient {
     #[cfg(test)]
-    fn with_binary(_binary: PathBuf) -> Self {
-        Self::new()
+    fn with_binary(binary: PathBuf) -> Self {
+        Self { binary }
     }
 
-    pub fn new() -> Self {
-        Self
+    fn json(&self, args: &[&str]) -> Result<serde_json::Value> {
+        use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
+        use std::process::Command;
+        use std::time::Duration;
+
+        let action = args.join(" ");
+        let timeout = Duration::from_secs(10);
+        let mut command = Command::new(&self.binary);
+        command.args(args).args(["--output", "json"]).env("CI", "1");
+        let output =
+            run_command(&mut command, Deadline::after(timeout), timeout).map_err(|error| {
+                match error {
+                    BoundedCommandError::TimedOut => {
+                        anyhow!("neonctl {action} timed out after 10s")
+                    }
+                    BoundedCommandError::Io => anyhow!(
+                        "could not execute neonctl {action}; install with `npm install -g neonctl` \
+                     and authenticate with `neonctl auth`"
+                    ),
+                }
+            })?;
+        // Do not expose CLI output in errors: it may contain account credentials.
+        if !output.status.success() {
+            anyhow::bail!(
+                "neonctl {action} failed ({}); check Neon CLI authentication and permissions",
+                output.status
+            );
+        }
+        serde_json::from_slice(&output.stdout)
+            .with_context(|| format!("invalid JSON from neonctl {action}"))
+    }
+
+    fn branches(&self, project_id: &str) -> Result<Vec<NeonBranch>> {
+        let value = self.json(&["branches", "list", "--project-id", project_id])?;
+        let branches = value
+            .as_array()
+            .ok_or_else(|| anyhow!("neonctl branches list: expected array"))?;
+        branches
+            .iter()
+            .map(|branch| {
+                neon_branch_from_value(branch)
+                    .ok_or_else(|| anyhow!("neonctl branches list: missing branch id or name"))
+            })
+            .collect()
     }
 }
 
-#[cfg(not(feature = "mcp-proxy"))]
-const NO_MCP_PROXY: &str =
-    "this build of cas does not include the mcp-proxy feature; rebuild with \
-     `cargo install cas --features mcp-proxy` to enable `cas integrate neon`";
-
-#[cfg(not(feature = "mcp-proxy"))]
 impl NeonClient for LiveNeonClient {
     fn list_organizations(&self) -> Result<Vec<NeonOrg>> {
-        Err(anyhow!(NO_MCP_PROXY))
-    }
-    fn list_projects(&self, _org_id: &str) -> Result<Vec<NeonProject>> {
-        Err(anyhow!(NO_MCP_PROXY))
-    }
-    fn describe_project(&self, _org_id: &str, _project_id: &str) -> Result<NeonProjectDetail> {
-        Err(anyhow!(NO_MCP_PROXY))
-    }
-    fn describe_branch(&self, _o: &str, _p: &str, _b: &str) -> Result<bool> {
-        Err(anyhow!(NO_MCP_PROXY))
-    }
-}
-
-#[cfg(feature = "mcp-proxy")]
-impl NeonClient for LiveNeonClient {
-    fn list_organizations(&self) -> Result<Vec<NeonOrg>> {
-        // Neon requires `params.arguments` to be an object even when this
-        // tool has no inputs. `None` omits the JSON-RPC field and triggers
-        // -32602 on strict MCP servers.
-        let value = self
-            .inner
-            .call("list_organizations", Some(serde_json::Map::new()))?;
-        parse_list_organizations(&value)
+        parse_list_organizations(&self.json(&["orgs", "list"])?)
     }
 
     fn list_projects(&self, org_id: &str) -> Result<Vec<NeonProject>> {
-        let args = Self::arg_str("org_id", org_id);
-        let value = self.inner.call("list_projects", Some(args))?;
-        parse_list_projects(&value)
+        parse_list_projects(&self.json(&["projects", "list", "--org-id", org_id])?)
     }
 
     fn describe_project(&self, org_id: &str, project_id: &str) -> Result<NeonProjectDetail> {
-        let mut args = serde_json::Map::new();
-        args.insert("org_id".to_string(), serde_json::Value::String(org_id.to_string()));
-        args.insert(
-            "project_id".to_string(),
-            serde_json::Value::String(project_id.to_string()),
-        );
-        let value = self.inner.call("describe_project", Some(args))?;
-        parse_describe_project(&value)
+        // `projects get` emits a flat project, without branches or databases.
+        let value = self.json(&["projects", "get", project_id])?;
+        let project = neon_project_from_value(&value)
+            .ok_or_else(|| anyhow!("neonctl projects get: missing project id or name"))?;
+        if value
+            .get("org_id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| id != org_id)
+        {
+            anyhow::bail!("Neon project {project_id} does not belong to organization {org_id}");
+        }
+        let branches = self.branches(project_id)?;
+        let default = branches
+            .iter()
+            .find(|branch| branch.is_default)
+            .ok_or_else(|| anyhow!("Neon project {project_id} has no default branch"))?;
+        let databases = self.json(&[
+            "databases",
+            "list",
+            "--project-id",
+            project_id,
+            "--branch",
+            &default.id,
+        ])?;
+        let default_database = databases
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(|database| database.get("name"))
+            .and_then(|name| name.as_str())
+            .ok_or_else(|| anyhow!("neonctl databases list: no database name on default branch"))?
+            .to_owned();
+        Ok(NeonProjectDetail {
+            project,
+            default_database,
+            branches,
+        })
     }
 
-    fn describe_branch(&self, org_id: &str, project_id: &str, branch_id: &str) -> Result<bool> {
-        let mut args = serde_json::Map::new();
-        args.insert("org_id".to_string(), serde_json::Value::String(org_id.to_string()));
-        args.insert(
-            "project_id".to_string(),
-            serde_json::Value::String(project_id.to_string()),
-        );
-        args.insert(
-            "branch_id".to_string(),
-            serde_json::Value::String(branch_id.to_string()),
-        );
-        let value = self.inner.call("describe_branch", Some(args))?;
-        parse_describe_branch(&value)
+    fn describe_branch(&self, _org_id: &str, project_id: &str, branch_id: &str) -> Result<bool> {
+        // Successful enumeration proves absence; failed authentication, network,
+        // or malformed output must remain transport errors, never stale IDs.
+        Ok(self
+            .branches(project_id)?
+            .iter()
+            .any(|branch| branch.id == branch_id))
     }
 }
 
@@ -1411,41 +1403,71 @@ pub(crate) mod tests {
     #[test]
     #[cfg(unix)]
     fn neonctl_lists_organizations_without_mcp() {
-        let (_env, client) = fake_neonctl(r#"'orgs list --output json') echo '[{"id":"org-fixture","name":"Fixture"}]';;"#);
+        let (_env, client) = fake_neonctl(
+            r#"'orgs list --output json') echo '[{"id":"org-fixture","name":"Fixture"}]';;"#,
+        );
         let orgs = client.list_organizations().unwrap();
-        assert_eq!(orgs, vec![NeonOrg { id: "org-fixture".into(), name: "Fixture".into() }]);
+        assert_eq!(
+            orgs,
+            vec![NeonOrg {
+                id: "org-fixture".into(),
+                name: "Fixture".into()
+            }]
+        );
     }
 
     #[test]
     #[cfg(unix)]
     fn neonctl_lists_projects_in_selected_organization() {
-        let (_env, client) = fake_neonctl(r#"'projects list --org-id org-fixture --output json') echo '[{"id":"fixture-project","name":"Fixture"}]';;"#);
+        let (_env, client) = fake_neonctl(
+            r#"'projects list --org-id org-fixture --output json') echo '[{"id":"fixture-project","name":"Fixture"}]';;"#,
+        );
         let projects = client.list_projects("org-fixture").unwrap();
-        assert_eq!(projects, vec![NeonProject { id: "fixture-project".into(), name: "Fixture".into() }]);
+        assert_eq!(
+            projects,
+            vec![NeonProject {
+                id: "fixture-project".into(),
+                name: "Fixture".into()
+            }]
+        );
     }
 
     #[test]
     #[cfg(unix)]
     fn neonctl_project_detail_initializes_skills_without_mcp() {
-        let (_env, client) = fake_neonctl(r#"
+        let (_env, client) = fake_neonctl(
+            r#"
 'projects get fixture-project --output json') echo '{"id":"fixture-project","name":"Fixture"}';;
 'branches list --project-id fixture-project --output json') echo '[{"id":"br-fixture","name":"main","default":true}]';;
 'databases list --project-id fixture-project --branch br-fixture --output json') echo '[{"name":"custom_db"}]';;
-"#);
+"#,
+        );
         let repo = tempfile::tempdir().unwrap();
         write_pkg_with_neon_dep(repo.path());
-        let outcome = init(repo.path(), &client, InitChoices {
-            org_id: Some("org-fixture".into()), project_id: Some("fixture-project".into()), ..Default::default()
-        }).unwrap();
+        let outcome = init(
+            repo.path(),
+            &client,
+            InitChoices {
+                org_id: Some("org-fixture".into()),
+                project_id: Some("fixture-project".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(outcome.status, IntegrationStatus::Configured);
         for path in [CLAUDE_SKILL, CURSOR_SKILL, CLAUDE_QUERIES] {
             let skill = fs::read_to_string(repo.path().join(path)).unwrap();
             // pin: generated instructions must route agents through the installed CLI.
             assert!(skill.contains("neonctl"), "{path}: {skill}");
             // pin: generated instructions cannot reference the removed Neon MCP.
-            assert!(!skill.contains("mcp__neon") && !skill.contains("mcp-neon"), "{path}: {skill}");
+            assert!(
+                !skill.contains("mcp__neon") && !skill.contains("mcp-neon"),
+                "{path}: {skill}"
+            );
         }
-        let payload = parse_keep_payload(&fs::read_to_string(repo.path().join(CLAUDE_SKILL)).unwrap()).unwrap();
+        let payload =
+            parse_keep_payload(&fs::read_to_string(repo.path().join(CLAUDE_SKILL)).unwrap())
+                .unwrap();
         assert_eq!(payload.database_name, "custom_db");
         assert!(payload.branches.iter().any(|(_, id)| id == "br-fixture"));
     }
@@ -1453,16 +1475,31 @@ pub(crate) mod tests {
     #[test]
     #[cfg(unix)]
     fn neonctl_branch_presence_distinguishes_missing_from_failed_lookup() {
-        let (_env, client) = fake_neonctl(r#"
+        let (_env, client) = fake_neonctl(
+            r#"
 'branches list --project-id fixture-project --output json') echo '[{"id":"br-fixture","name":"main","default":true}]';;
 'branches list --project-id denied-project --output json') echo 'unauthorized' >&2; exit 1;;
 'branches list --project-id malformed-project --output json') echo '[{"name":"no-id"}]';;
 'branches list --project-id invalid-json --output json') echo 'not JSON';;
-"#);
-        assert!(client.describe_branch("org-fixture", "fixture-project", "br-fixture").unwrap());
-        assert!(!client.describe_branch("org-fixture", "fixture-project", "br-missing").unwrap());
+"#,
+        );
+        assert!(
+            client
+                .describe_branch("org-fixture", "fixture-project", "br-fixture")
+                .unwrap()
+        );
+        assert!(
+            !client
+                .describe_branch("org-fixture", "fixture-project", "br-missing")
+                .unwrap()
+        );
         for project in ["denied-project", "malformed-project", "invalid-json"] {
-            assert!(client.describe_branch("org-fixture", project, "br-fixture").is_err(), "{project}");
+            assert!(
+                client
+                    .describe_branch("org-fixture", project, "br-fixture")
+                    .is_err(),
+                "{project}"
+            );
         }
     }
 
@@ -1840,7 +1877,6 @@ pub(crate) mod tests {
 
         let cursor = fs::read_to_string(repo.path().join(CURSOR_SKILL)).unwrap();
         assert!(cursor.contains("br-main"));
-        assert!(cursor.contains("server: user-neon"));
 
         let queries = fs::read_to_string(repo.path().join(CLAUDE_QUERIES)).unwrap();
         assert!(queries.contains("3-step flow"));

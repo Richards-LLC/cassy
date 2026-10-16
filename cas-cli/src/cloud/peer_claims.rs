@@ -1274,7 +1274,7 @@ mod tests {
                 .and(path("/api/agents/locks"))
                 .and(query_param("project", project))
                 .respond_with(
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"locks":[lock]})),
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"success", "locks":[lock]})),
                 )
                 .mount(&server)
                 .await;

@@ -55,7 +55,9 @@
 //! - Detach with Ctrl+D keeps daemon running
 
 mod app;
-pub(crate) use app::provisioning::installed_provisioner_build_hash;
+pub(crate) use app::provisioning::{
+    installed_provisioner_build_hash, pin_daemon_provisioner, pinned_provisioner_build_hash,
+};
 pub use app::provisioning::run_internal_provisioner;
 mod boot;
 mod buffer_backend;
@@ -141,8 +143,8 @@ pub use protocol::{
 pub use renderer::{FactoryViewMode, MissionControlFocus};
 pub use session::{
     SessionInfo, SessionManager, create_metadata, daemon_log_path, daemon_trace_log_path,
-    generate_session_name, metadata_path, panic_log_path, session_log_dir, socket_path,
-    tui_log_path,
+    generate_session_name, metadata_path, panic_log_path, provisioner_pin_path, session_log_dir,
+    socket_path, tui_log_path,
 };
 pub(crate) use session::daemon_identity_is_live;
 use std::io;

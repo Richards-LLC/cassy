@@ -2208,6 +2208,19 @@ fn factory_provision_build_compatibility(
     let Some(daemon_build) = known_factory_build_id(metadata.daemon_build_hash.as_deref()) else {
         return FactoryProvisionBuildCheck::Skipped("daemon build ID unavailable");
     };
+    // cas-cef2 (GH #1242): a daemon that pinned its executable provisions from
+    // that pin, never from the installed binary `cas update` may have replaced.
+    // Judge the file that will actually run; an unreadable pin falls back to
+    // the installed probe below.
+    if let Some(Ok(pinned)) = crate::ui::factory::pinned_provisioner_build_hash(session) {
+        return if known_factory_build_id(Some(&pinned)) == Some(daemon_build) {
+            FactoryProvisionBuildCheck::Compatible
+        } else {
+            FactoryProvisionBuildCheck::Mismatch(format!(
+                "provision_build_mismatch: factory session {session} daemon build {daemon_build} differs from its pinned provisioner build {pinned}. Restart this factory session before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
+            ))
+        };
+    }
     let Some(provisioner_build) = known_factory_build_id(provisioner_build) else {
         return FactoryProvisionBuildCheck::Skipped("provisioner build ID unavailable");
     };

@@ -484,6 +484,14 @@ impl DaemonInitPhase {
             }
         };
 
+        // cas-cef2 (GH #1242): pin this daemon's own executable before the
+        // metadata names its build, so a later `cas update` cannot change the
+        // build workers are provisioned with. Without a pin, spawn falls back
+        // to the installed binary and its build check.
+        if let Err(error) = crate::ui::factory::pin_daemon_provisioner(&self.session_name) {
+            tracing::warn!(error = %format!("{error:#}"), "factory provisioner pin unavailable");
+        }
+
         // Save session metadata (after teams init so team_name is included)
         let session_manager = SessionManager::new();
         let project_dir = self.factory_config.cwd.to_string_lossy().to_string();

@@ -45,6 +45,22 @@ fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
         .unwrap_or(path)
 }
 
+/// cas-cef2: this daemon's pinned copy of its own executable, set once at start.
+static PINNED_PROVISIONER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The image this process is running, readable even after an atomic update
+/// replaced its path (Linux only).
+fn running_image() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let image = PathBuf::from("/proc/self/exe");
+        if image.exists() {
+            return Some(image);
+        }
+    }
+    None
+}
+
 fn provisioner_executable() -> anyhow::Result<PathBuf> {
     #[cfg(test)]
     {
@@ -52,13 +68,89 @@ fn provisioner_executable() -> anyhow::Result<PathBuf> {
     }
     #[cfg(not(test))]
     {
-        // Linux keeps the old executable inode here after an atomic update.
-        #[cfg(target_os = "linux")]
-        if Path::new("/proc/self/exe").exists() {
-            return Ok(PathBuf::from("/proc/self/exe"));
-        }
-        Ok(strip_deleted_suffix(std::env::current_exe()?))
+        choose_provisioner_executable(
+            running_image(),
+            PINNED_PROVISIONER.get().map(PathBuf::as_path),
+            || Ok(strip_deleted_suffix(std::env::current_exe()?)),
+        )
     }
+}
+
+/// Linux keeps the old executable inode at `/proc/self/exe` after an atomic
+/// update. Elsewhere (macOS) the path now names the replacement, so the
+/// daemon's pin is the only file still holding its own build (cas-cef2).
+fn choose_provisioner_executable(
+    running_image: Option<PathBuf>,
+    pinned: Option<&Path>,
+    current_exe: impl FnOnce() -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<PathBuf> {
+    if let Some(image) = running_image {
+        return Ok(image);
+    }
+    if let Some(pin) = pinned.filter(|pin| pin.is_file()) {
+        return Ok(pin.to_path_buf());
+    }
+    current_exe()
+}
+
+/// cas-cef2: places a hard link to `source` at `pin` (a copy when a link is
+/// impossible), staged beside it and renamed into place, so a concurrent
+/// probe never runs a partial file. `cas update` swaps the installed binary
+/// by rename, which leaves a linked inode untouched. On Linux the link is
+/// checked against the running image and replaced by a copy of that image
+/// when the installed path already names another build.
+pub(crate) fn pin_executable(
+    source: &Path,
+    running_image: Option<&Path>,
+    pin: &Path,
+) -> std::io::Result<()> {
+    let dir = pin
+        .parent()
+        .ok_or_else(|| std::io::Error::other("provisioner pin has no parent directory"))?;
+    std::fs::create_dir_all(dir)?;
+    let staged = dir.join(format!(".pin-{}.staged", std::process::id()));
+    let _ = std::fs::remove_file(&staged);
+    let linked = std::fs::hard_link(source, &staged).is_ok()
+        && running_image.is_none_or(|image| same_file(&staged, image));
+    if !linked {
+        let _ = std::fs::remove_file(&staged);
+        std::fs::copy(running_image.unwrap_or(source), &staged)?;
+    }
+    std::fs::rename(&staged, pin)
+}
+
+#[cfg(unix)]
+fn same_file(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(left), std::fs::metadata(right)) {
+        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_file(_left: &Path, _right: &Path) -> bool {
+    true
+}
+
+/// cas-cef2: pins the executable this daemon started from for `session_name`
+/// and provisions every worker from it. Called once at daemon start, before
+/// the session metadata names the daemon build.
+pub(crate) fn pin_daemon_provisioner(session_name: &str) -> anyhow::Result<PathBuf> {
+    let source = strip_deleted_suffix(std::env::current_exe()?);
+    let pin = crate::ui::factory::session::provisioner_pin_path(session_name);
+    pin_executable(&source, running_image().as_deref(), &pin)
+        .with_context(|| format!("failed to pin the factory provisioner at {}", pin.display()))?;
+    let _ = PINNED_PROVISIONER.set(pin.clone());
+    Ok(pin)
+}
+
+/// cas-cef2: the build of `session_name`'s pinned provisioner, or `None` when
+/// the session has no pin (a daemon started before pinning).
+pub(crate) fn pinned_provisioner_build_hash(session_name: &str) -> Option<anyhow::Result<String>> {
+    let pin = crate::ui::factory::session::provisioner_pin_path(session_name);
+    pin.is_file()
+        .then(|| probe_build_hash_from_executable(&pin))
 }
 
 /// Read the build identity from the executable that a worker provision would
@@ -606,6 +698,63 @@ mod tests {
         assert_eq!(
             probe_build_hash_from_executable(&executable).unwrap(),
             "newer-provisioner-build"
+        );
+    }
+
+    /// cas-cef2 (GH #1242): `cas update` swaps the installed binary by
+    /// rename. The daemon's pin must still hold the build it started from.
+    #[test]
+    fn pinned_provisioner_survives_an_atomic_binary_update_cas_cef2() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("bin/cas");
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, "daemon build").unwrap();
+        let pin = dir.path().join("sessions/s.provisioner/cas");
+        pin_executable(&installed, None, &pin).unwrap();
+
+        let replacement = dir.path().join("bin/cas.new");
+        std::fs::write(&replacement, "installed build").unwrap();
+        std::fs::rename(&replacement, &installed).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&pin).unwrap(), "daemon build");
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "installed build");
+        // Re-pinning replaces the pin whole and leaves no staged file behind.
+        pin_executable(&installed, None, &pin).unwrap();
+        assert_eq!(std::fs::read_to_string(&pin).unwrap(), "installed build");
+        assert_eq!(std::fs::read_dir(pin.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    /// cas-cef2: when the installed path already names another build, the pin
+    /// copies the running image instead of linking the wrong file.
+    #[cfg(unix)]
+    #[test]
+    fn pin_copies_the_running_image_when_the_installed_path_moved_on_cas_cef2() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("cas");
+        let image = dir.path().join("running-image");
+        std::fs::write(&installed, "installed build").unwrap();
+        std::fs::write(&image, "daemon build").unwrap();
+        let pin = dir.path().join("pin/cas");
+        pin_executable(&installed, Some(&image), &pin).unwrap();
+        assert_eq!(std::fs::read_to_string(&pin).unwrap(), "daemon build");
+    }
+
+    #[test]
+    fn provisioner_prefers_running_image_then_pin_then_installed_path_cas_cef2() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = dir.path().join("pin");
+        std::fs::write(&pin, "pinned").unwrap();
+        let installed = || Ok(PathBuf::from("/installed/cas"));
+        let image = PathBuf::from("/proc/self/exe");
+        assert_eq!(
+            choose_provisioner_executable(Some(image.clone()), Some(&pin), installed).unwrap(),
+            image
+        );
+        assert_eq!(choose_provisioner_executable(None, Some(&pin), installed).unwrap(), pin);
+        let missing = dir.path().join("missing-pin");
+        assert_eq!(
+            choose_provisioner_executable(None, Some(&missing), installed).unwrap(),
+            PathBuf::from("/installed/cas")
         );
     }
 

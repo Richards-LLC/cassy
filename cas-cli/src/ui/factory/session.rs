@@ -113,6 +113,18 @@ pub fn metadata_path(session_name: &str) -> PathBuf {
     sessions_dir().join(format!("{session_name}.json"))
 }
 
+/// cas-cef2 (GH #1242): the session daemon's pinned provisioner, a link to
+/// (or copy of) the executable the daemon started from. Worker provisioning
+/// runs this file, so `cas update` replacing the installed binary cannot
+/// change the build a running session provisions with.
+pub fn provisioner_pin_path(session_name: &str) -> PathBuf {
+    provisioner_pin_dir(&sessions_dir(), session_name).join("cas")
+}
+
+fn provisioner_pin_dir(sessions_dir: &Path, session_name: &str) -> PathBuf {
+    sessions_dir.join(format!("{session_name}.provisioner"))
+}
+
 /// Generate a unique session name using project + friendly adjective-noun format
 ///
 /// Produces names like "cas-internal-swift-falcon-42" when given a project dir,
@@ -300,6 +312,11 @@ impl SessionManager {
         let path = self.sessions_dir.join(format!("{session_name}.json"));
         if path.exists() {
             fs::remove_file(path)?;
+        }
+        // cas-cef2: the pinned provisioner lives exactly as long as its session.
+        match fs::remove_dir_all(provisioner_pin_dir(&self.sessions_dir, session_name)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+            _ => {}
         }
         Ok(())
     }
@@ -1072,5 +1089,23 @@ mod tests {
         );
 
         drop(env);
+    }
+
+    /// cas-cef2: a session's pinned provisioner is removed with its metadata.
+    #[test]
+    fn removing_session_metadata_removes_its_pinned_provisioner_cas_cef2() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let manager = SessionManager::new();
+        manager.ensure_dir().unwrap();
+        let session = "pinned-session-cef2";
+        let pin = provisioner_pin_path(session);
+        std::fs::create_dir_all(pin.parent().unwrap()).unwrap();
+        std::fs::write(&pin, "daemon build").unwrap();
+        std::fs::write(metadata_path(session), "{}").unwrap();
+        manager.remove_metadata(session).unwrap();
+        assert!(!pin.parent().unwrap().exists());
+        assert!(!metadata_path(session).exists());
+        // A session that never pinned is removed without error.
+        manager.remove_metadata("unpinned-session-cef2").unwrap();
     }
 }

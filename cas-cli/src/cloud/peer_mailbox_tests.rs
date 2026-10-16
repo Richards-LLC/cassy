@@ -538,7 +538,8 @@ fn cas_8063_retired_routes_require_same_identity_and_no_live_competitor() {
         );
         assert!(machine.rows().is_empty(), "{case}: {report:?}");
         if case == "ambiguous" {
-            assert!(!report.errors.is_empty());
+            assert!(report.errors.is_empty());
+            assert!(!report.warnings.is_empty());
         }
     }
 }
@@ -559,7 +560,7 @@ fn cas_8063_repair_different_factory_lineage_stays_ambiguous() {
 fn cas_8063_repair_retirement_claims_are_recent_and_bounded() {
     let machine = Machine::new();
     let agents = open_agent_store(&machine.cas).unwrap();
-    for index in 0..120 {
+    for index in 0..=120 {
         let mut old = Agent::new(format!("old-{index:03}"), "same".into());
         old.role = AgentRole::Supervisor;
         old.status = AgentStatus::Shutdown;
@@ -583,12 +584,10 @@ fn cas_8063_repair_retirement_claims_are_recent_and_bounded() {
     );
     assert!(!report.warnings.is_empty());
     let claims = mailbox.claims.lock().unwrap();
-    assert!(
-        claims[0].len() <= 101,
-        "bounded retired IDs plus current: {}",
-        claims[0].len()
-    );
+    assert_eq!(claims[0].len(), 101, "100 retirements plus current");
     assert!(claims[0].iter().any(|id| id == "current"));
+    assert!(claims[0].iter().any(|id| id == "old-001"), "newest eligible retirement is included");
+    assert!(!claims[0].iter().any(|id| id == "old-120"), "120th eligible retirement is excluded");
     assert!(!claims[0].iter().any(|id| id == "old-000"), "expired retirement must not be claimed");
 }
 
@@ -652,4 +651,99 @@ fn cas_8063_repair_same_name_factories_cannot_swap_mail() {
     let claims = mailbox.claims.lock().unwrap();
     assert!(claims[0].iter().any(|id| id == "old-factory-a"));
     assert!(!claims[0].iter().any(|id| id == "old-factory-b"));
+}
+
+fn history_delivery(machine: &Machine, mailbox: &FakeMailbox, history: &RecipientHistory, session: &str) -> DeliveryReport {
+    deliver_claimed_with_history(
+        mailbox, open_prompt_queue_store(&machine.cas).unwrap().as_ref(),
+        open_agent_store(&machine.cas).unwrap().as_ref(), REPO, &[], session,
+        "consumer", history, &|_,_| Ok(()),
+    )
+}
+
+#[test]
+fn cas_4fe2_legacy_feedback_requires_one_live_factory() {
+    let machine = Machine::new();
+    let agents = open_agent_store(&machine.cas).unwrap();
+    let mut supervisors = Vec::new();
+    for (id, session) in [("a", "factory-a"), ("b", "factory-b")] {
+        let mut agent = Agent::new(id.into(), "same".into());
+        agent.role = AgentRole::Supervisor;
+        agent.factory_session = Some(session.into());
+        agents.register(&agent).unwrap();
+        supervisors.push(agent);
+    }
+    for agent in &supervisors { agents.update(agent).unwrap(); }
+    crate::store::open_event_store(&machine.cas).unwrap().record(&crate::types::Event::new(
+        crate::types::EventType::AgentShutdown, crate::types::EventEntityType::Agent,
+        "legacy", "Agent unregistered: same",
+    )).unwrap();
+    for session in ["factory-a", "factory-b"] {
+        let history = retired_recipients(&machine.cas, session).unwrap();
+        let mailbox = FakeMailbox::default();
+        let report = history_delivery(&machine, &mailbox, &history, session);
+        assert!(mailbox.claims.lock().unwrap().iter().flatten().all(|id| id != "legacy"), "{session}: {report:?}");
+        assert!(report.errors.is_empty(), "legacy ambiguity is a warning: {report:?}");
+        assert!(!report.warnings.is_empty(), "skipped legacy address must be visible");
+    }
+    supervisors[1].status = AgentStatus::Shutdown;
+    agents.update(&supervisors[1]).unwrap();
+    let history = retired_recipients(&machine.cas, "factory-a").unwrap();
+    let mailbox = FakeMailbox::default();
+    history_delivery(&machine, &mailbox, &history, "factory-a");
+    assert!(mailbox.claims.lock().unwrap().iter().flatten().any(|id| id == "legacy"), "an ended competing factory must not block safe feedback");
+}
+
+#[test]
+fn cas_4fe2_ambiguous_retirement_keeps_current_delivery_healthy() {
+    let machine = Machine::new();
+    let agents = open_agent_store(&machine.cas).unwrap();
+    let mut old = Agent::new("old".into(), "same".into());
+    old.role = AgentRole::Supervisor;
+    old.factory_session = Some("factory-a".into());
+    old.machine_id = Some("box".into());
+    old.status = AgentStatus::Shutdown;
+    agents.register(&old).unwrap();
+    let mut current = old.clone();
+    current.id = "current".into();
+    current.status = AgentStatus::Active;
+    current.registered_at = chrono::Utc::now();
+    let mut twin = current.clone();
+    twin.id = "twin".into();
+    for agent in [&current, &twin] { agents.register(agent).unwrap(); }
+    for agent in [&current, &twin] { agents.update(agent).unwrap(); }
+    let mailbox = FakeMailbox::default();
+    mailbox.inbox.lock().unwrap().push(message("current-mail", "current", REPO, "valid mail"));
+    let report = machine.deliver(&mailbox);
+    assert_eq!(report.delivered, 1, "current mail still flows: {report:?}");
+    assert!(report.errors.is_empty(), "an ambiguous historical route must not disable the mailbox: {report:?}");
+    assert_eq!(report.warnings.len(), 1);
+    assert!(report.warnings[0].contains("current") && report.warnings[0].contains("twin"));
+    assert!(mailbox.claims.lock().unwrap()[0].iter().all(|id| id != "old"));
+}
+
+#[test]
+fn cas_4fe2_retirement_cap_warns_once_across_both_pools() {
+    let machine = Machine::new();
+    let agents = open_agent_store(&machine.cas).unwrap();
+    for i in 0..101 {
+        let mut old = Agent::new(format!("old-{i}"), "same".into());
+        old.role = AgentRole::Supervisor;
+        old.factory_session = Some("factory-a".into());
+        old.machine_id = Some("box".into());
+        old.status = AgentStatus::Shutdown;
+        agents.register(&old).unwrap();
+    }
+    let mut current = Agent::new("current".into(), "same".into());
+    current.role = AgentRole::Supervisor;
+    current.factory_session = Some("factory-a".into());
+    current.machine_id = Some("box".into());
+    agents.register(&current).unwrap();
+    let history = RecipientHistory {
+        unverified: vec![UnverifiedRetirement { id: "legacy".into(), name: "same".into(), retired_at: chrono::Utc::now() }],
+        ..Default::default()
+    };
+    let report = history_delivery(&machine, &FakeMailbox::default(), &history, "factory-a");
+    assert_eq!(report.warnings.len(), 1, "one cap warning per tick: {report:?}");
+    assert!(report.errors.is_empty());
 }

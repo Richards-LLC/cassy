@@ -199,7 +199,10 @@ impl SqliteEventStore {
     /// Recent retirement evidence for one named factory. Typed worker rows and
     /// other factories cannot consume the caller's bounded history window.
     /// Legacy rows match a current supervisor name only for resend feedback;
-    /// that match does not establish their former role or machine.
+    /// that match does not establish their former role, machine or factory.
+    /// Before claiming legacy candidates, callers must require exactly one
+    /// live same-name factory in the project; competing factories leave them
+    /// unclaimed and warn instead. Typed identities retain their exact lineage.
     pub fn list_retired_supervisors_since(
         &self,
         since: DateTime<Utc>,

@@ -5963,6 +5963,61 @@ mod workspace_contract_tests {
         }
     }
 
+    /// cas-b7b2: read-only searches that merely mention grant-write are
+    /// allowed (cas-1768 QA round 2, Normal F01), while every way of RUNNING a
+    /// policy command through the same tools stays refused: awk `system()` or
+    /// pipes, find `-exec`/`-delete`, an xargs child that is not read-only, a
+    /// gh subcommand that writes, a pipe into a shell, and command or process
+    /// substitution.
+    #[test]
+    fn cas_b7b2_read_only_searches_pass_and_disguised_invocations_do_not() {
+        for allowed in [
+            // The three QA forms.
+            "awk '/grant-write/' docs/operator-policy.md",
+            "find docs cas-cli/src -name '*.md' | xargs grep -n grant-write",
+            "gh issue view 1182 --repo Richards-LLC/cassy | grep grant-write",
+            // Their neighbours.
+            "awk '/revoke-write/ {print FILENAME\": \"$0}' CHANGELOG.md docs/*.md",
+            "find . -name '*grant-write*' -print",
+            "find . -type f | xargs -0 grep -l revoke-write",
+            "gh pr list --search grant-write --state all",
+            "gh search issues grant-write --repo Richards-LLC/cassy",
+            "gh pr view 1214 --json body | jq -r .body | grep -n grant-write",
+            "jq '.grant_write_events' artifacts/report.json | grep grant-write",
+        ] {
+            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+        }
+        for command in [
+            "awk 'BEGIN{system(\"cas config grant-write --task t --path /x\")}'",
+            "awk '/grant-write/ {print | \"sh\"}' docs/x.md",
+            "awk 'BEGIN{\"cas config grant-write --task t\" | getline x}'",
+            "awk '/grant-write/ {print > \"/tmp/run.sh\"}' docs/x.md",
+            "awk -f grant-write.awk docs/x.md",
+            "gawk -i inplace '/grant-write/' docs/x.md",
+            "awk '/grant-write/' docs/x.md | sh",
+            "find . -name x -exec cas config grant-write --task t --path /x \\;",
+            "find . -name grant-write -execdir sh -c 'cas config revoke-write --task t' \\;",
+            "find . -name grant-write -delete",
+            "find . -name grant-write -ok rm {} \\;",
+            "find . -name grant-write -fprint /tmp/out",
+            "find . -name grant-write | xargs cas config grant-write --task t --path",
+            "find . -print0 | xargs -0 sh -c 'cas config grant-write --task t --path \"$1\"' _",
+            "gh issue edit 1182 --body 'cas config grant-write'",
+            "gh api -X POST repos/x/y/issues -f body=grant-write",
+            "gh issue view 1182 | grep grant-write | bash",
+            "jq -r '.[\"grant-write\"]' f.json | sh",
+            "grep \"$(cas config grant-write --task t --path /x)\" notes.md",
+            "grep `cas config revoke-write --task t` notes.md",
+            "cat <(cas config grant-write --task t --path /x)",
+            "sed -i 's/x/y/' grant-write.md",
+            "xargs -a list.txt awk 'BEGIN{system(\"cas config grant-write\")}'",
+        ] {
+            let denial = operator_policy_command_denial(command)
+                .unwrap_or_else(|| panic!("{command} must be refused"));
+            assert!(denial.contains("OPERATOR-ONLY"), "{denial}");
+        }
+    }
+
     /// cas-3c26: an agent cannot change the role environment its own commands
     /// run with, so `CAS_AGENT_ROLE` / `CAS_FACTORY_MODE` gates see the truth.
     #[test]

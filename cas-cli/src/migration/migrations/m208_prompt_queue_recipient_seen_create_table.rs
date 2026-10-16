@@ -117,6 +117,11 @@ mod tests {
                     .up
                     .iter(),
             )
+            .chain(
+                super::super::m273_prompt_queue_recipient_seen_poll_settled::MIGRATION
+                    .up
+                    .iter(),
+            )
         {
             migrated.execute(sql, []).unwrap();
         }

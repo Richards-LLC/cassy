@@ -202,14 +202,16 @@ enum TransportEligibility {
 /// binds the turn start. An `inbox_poll` claims rows before its response is
 /// read, so a row polled mid-turn and not acted on was lost. A direct row now
 /// comes back once, in a later turn, unless the recipient acknowledged it
-/// (`message_ack`, a reply with `in_reply_to`, or the poll settling a row it
-/// withheld) or a later message from it implied a reply (`assumed_seen_at`).
+/// (`message_ack` or a reply with `in_reply_to`), a later message from it
+/// implied a reply (`assumed_seen_at`), or the poll settled the row
+/// (`poll_settled`: withheld, not replayed, or shown as a redelivery).
 /// Broadcasts are announcements with one shared ack; they are not repeated.
 const POLLED_UNACKED_RECEIPT_SQL: &str = "AND seen.source = 'inbox_poll'
           AND julianday(seen.seen_at) < julianday(?)
           AND q.target <> 'all_workers'
           AND q.acked_at IS NULL
-          AND q.assumed_seen_at IS NULL";
+          AND q.assumed_seen_at IS NULL
+          AND seen.poll_settled IS NULL";
 
 /// cas-6ccb (GH #1215): eligibility for [`TransportEligibility::NamedRead`].
 /// An `inbox_poll notification_id=<id>` is an explicit request for that row:
@@ -1554,9 +1556,6 @@ pub enum ConfirmationSource {
     /// recipient — unlike [`ConfirmationSource::InferredFromReply`], which is
     /// only evidence that some turn happened.
     HookSurfaced,
-    /// cas-6ccb: an `inbox_poll` claimed the row and withheld its body as
-    /// already done, or named it as an older delivery it did not replay.
-    PollSettled,
     /// Ack recorded before provenance was tracked, or by an unknown path.
     Unknown,
 }
@@ -1568,7 +1567,6 @@ impl ConfirmationSource {
             (Some("explicit_ack"), true) => Self::ExplicitAck,
             (Some("inferred_from_reply"), true) => Self::InferredFromReply,
             (Some("hook_surfaced"), true) => Self::HookSurfaced,
-            (Some("poll_settled"), true) => Self::PollSettled,
             (_, true) => Self::Unknown,
         }
     }
@@ -1591,7 +1589,6 @@ impl std::fmt::Display for ConfirmationSource {
             Self::ExplicitAck => write!(f, "explicit_ack"),
             Self::InferredFromReply => write!(f, "inferred_from_reply"),
             Self::HookSurfaced => write!(f, "hook_surfaced"),
-            Self::PollSettled => write!(f, "poll_settled"),
             Self::Unknown => write!(f, "unknown"),
         }
     }
@@ -1668,6 +1665,11 @@ pub struct MessageDeliveryReport {
     /// harness may still be holding back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recipient_receipt: Option<SurfacingSource>,
+    /// cas-6ccb (GH #1215): why an `inbox_poll` settled the target's receipt
+    /// without the recipient confirming it (withheld, not replayed, or shown
+    /// as a redelivery). Not an acknowledgement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_poll_settled: Option<String>,
     /// cas-7a01 (GH #155): what CAS's own wake nudge did for this row.
     ///
     /// Independent of [`MessageDeliveryReport::wake`], and answers a different
@@ -1798,6 +1800,14 @@ ALTER TABLE prompt_queue ADD COLUMN deferred_inbox_bytes INTEGER;
 /// daemon restarts. Store-local `ensure_column` migration.
 const PROMPT_QUEUE_RECIPIENT_SEEN_TEAMS_BODY_FALLBACK_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue_recipient_seen ADD COLUMN teams_body_fallback_at TEXT;
+"#;
+
+/// cas-6ccb (GH #1215): why an `inbox_poll` settled this recipient's receipt
+/// (withheld as already done, not replayed, or shown as a redelivery), so the
+/// next turn's one-time repeat of unacknowledged polled rows skips it.
+/// Store-local `ensure_column` plus ledger migration m273.
+const PROMPT_QUEUE_RECIPIENT_SEEN_POLL_SETTLED_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue_recipient_seen ADD COLUMN poll_settled TEXT;
 "#;
 
 /// cas-6853 (communication contract v2, P2.4/P3.7): broadcast audience
@@ -2525,11 +2535,14 @@ pub trait PromptQueueStore: Send + Sync {
     /// Acknowledge receipt of a prompt (target agent confirms delivery)
     fn ack(&self, prompt_id: i64) -> Result<()>;
 
-    /// cas-6ccb (GH #1215): confirm direct rows an `inbox_poll` claimed but
-    /// deliberately did not show in full (withheld as already done, or named
-    /// as an older delivery not replayed), so the next turn does not repeat
-    /// them. Recorded as `acked_via = 'poll_settled'`; broadcasts untouched.
-    fn settle_polled_rows(&self, prompt_ids: &[i64]) -> Result<()>;
+    /// cas-6ccb (GH #1215): settle rows an `inbox_poll` claimed for
+    /// `recipients` but deliberately handled otherwise than as a first
+    /// delivery (withheld as already done, named as an older delivery not
+    /// replayed, or shown again as a redelivery), so the next turn does not
+    /// repeat them. Each `(id, reason)` is recorded on the recipients'
+    /// `inbox_poll` receipts (`poll_settled`). No ack and no stage change:
+    /// the recipient never confirmed reading these rows.
+    fn settle_polled_rows(&self, recipients: &[String], settled: &[(i64, String)]) -> Result<()>;
 
     /// Acknowledge the prompt outbox row identified by `dedupe_key`.
     ///
@@ -4276,6 +4289,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 "prompt_queue_recipient_seen",
                 "teams_body_fallback_at",
                 PROMPT_QUEUE_RECIPIENT_SEEN_TEAMS_BODY_FALLBACK_MIGRATION,
+            )?;
+            crate::shared_db::ensure_column(
+                &conn,
+                "prompt_queue_recipient_seen",
+                "poll_settled",
+                PROMPT_QUEUE_RECIPIENT_SEEN_POLL_SETTLED_MIGRATION,
             )?;
             crate::shared_db::ensure_column(
                 &conn,
@@ -6140,26 +6159,19 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         }) // with_write_retry
     }
 
-    fn settle_polled_rows(&self, prompt_ids: &[i64]) -> Result<()> {
-        if prompt_ids.is_empty() {
+    fn settle_polled_rows(&self, recipients: &[String], settled: &[(i64, String)]) -> Result<()> {
+        if recipients.is_empty() || settled.is_empty() {
             return Ok(());
         }
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let now = Utc::now().to_rfc3339();
-            for prompt_id in prompt_ids {
-                let changed = conn.execute(
-                    "UPDATE prompt_queue SET acked_at = ?, acked_via = 'poll_settled' \
-                     WHERE id = ? AND acked_at IS NULL AND target <> 'all_workers'",
-                    params![now, prompt_id],
-                )?;
-                if changed == 1 {
-                    let _ = Self::atomic_stage_stamp(
-                        &conn,
-                        *prompt_id,
-                        DeliveryStage::Confirmed,
-                        AtomicStampOpts::clear_reason(),
-                    );
+            let mut stmt = conn.prepare_cached(
+                "UPDATE prompt_queue_recipient_seen SET poll_settled = ?1
+                  WHERE prompt_id = ?2 AND recipient = ?3 AND source = 'inbox_poll'",
+            )?;
+            for (prompt_id, reason) in settled {
+                for recipient in recipients {
+                    stmt.execute(params![reason, prompt_id, recipient])?;
                 }
             }
             Ok(())
@@ -6499,17 +6511,16 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             .as_deref()
             .and_then(Self::parse_datetime);
 
-        let recipient_receipt: Option<SurfacingSource> = conn
-            .query_row(
-                "SELECT source FROM prompt_queue_recipient_seen
+        let (recipient_receipt, recipient_poll_settled): (Option<SurfacingSource>, Option<String>) =
+            conn.query_row(
+                "SELECT source, poll_settled FROM prompt_queue_recipient_seen
                   WHERE prompt_id = ? AND recipient = ?",
                 params![id, &target],
-                |row| row.get::<_, Option<String>>(0),
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .optional()?
-            .flatten()
-            .as_deref()
-            .and_then(SurfacingSource::parse);
+            .map(|(source, settled)| (source.as_deref().and_then(SurfacingSource::parse), settled))
+            .unwrap_or((None, None));
 
         let wake_evidence = hook_surfaced_at.map(|_| {
             format!(
@@ -6650,6 +6661,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ObservationStatus::Unobserved
             },
             recipient_receipt,
+            recipient_poll_settled,
             wake_attempt: WakeAttempt::from_column(wake_attempt_s.as_deref()),
             wake_gate_declines: wake_gate_declines.try_into().unwrap_or(u32::MAX),
             wake_attempt_at: Self::optional_datetime(
@@ -17095,5 +17107,41 @@ mod cas_1f0c_teams_body_fallback_tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod cas_6ccb_poll_settled_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// cas-6ccb review: a row the poll settled is skipped by the one-time
+    /// repeat, keeps no ack and no Confirmed stage, and its report names why;
+    /// an unsettled polled row is still repeated.
+    #[test]
+    fn a_settled_poll_receipt_ends_the_repeat_without_an_ack() {
+        let temp = TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let settled = store.enqueue_with_session("supervisor", "w1", "stale ask", "s").unwrap();
+        let kept = store.enqueue_with_session("supervisor", "w1", "fresh ask", "s").unwrap();
+        assert_eq!(store.poll_unseen_for_recipient("w1", Some("s"), 10).unwrap().len(), 2);
+        store
+            .settle_polled_rows(&["w1".to_string()], &[(settled, "withheld by inbox_poll: done".to_string())])
+            .unwrap();
+
+        let later = Utc::now() + chrono::Duration::seconds(1);
+        let repeated: Vec<i64> = store
+            .surface_for_recipient_within_budget("w1", Some("s"), HookDrain::PolledBefore(later), 10, 5_000)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(repeated, vec![kept]);
+        let report = store.message_delivery_report(settled).unwrap().unwrap();
+        assert!(report.confirmed_at.is_none());
+        assert_ne!(report.stage, DeliveryStage::Confirmed);
+        assert_eq!(report.recipient_poll_settled.as_deref(), Some("withheld by inbox_poll: done"));
     }
 }

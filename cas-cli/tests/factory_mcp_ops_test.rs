@@ -6412,6 +6412,16 @@ async fn inbox_poll_settles_withheld_rows_and_reads_a_named_row_again_cas_6ccb()
         .map(|row| row.id)
         .collect();
     assert_eq!(repeated, vec![kept], "the withheld row {stale} is settled, not repeated");
+    // Settled is not acknowledged: no ack, and status says why (review M-new).
+    let report = queue.message_delivery_report(stale).unwrap().unwrap();
+    assert!(report.confirmed_at.is_none(), "{report:?}");
+    assert!(
+        report
+            .recipient_poll_settled
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("withheld by inbox_poll: assignment for")),
+        "{report:?}"
+    );
 
     let mut named = coord_req("inbox_poll");
     named.notification_id = Some(kept);

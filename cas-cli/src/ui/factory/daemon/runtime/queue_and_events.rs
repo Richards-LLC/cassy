@@ -7053,6 +7053,8 @@ impl FactoryDaemon {
         self.queue_jobs.settle_injects(&cas_dir);
         self.queue_jobs.apply_completions();
         self.queue_jobs.expire_injects(&cas_dir, Instant::now());
+        // cas-786a6: a claim whose row was not delivered in time is released.
+        self.queue_jobs.expire_claims(&cas_dir, Instant::now());
         if let Some(selection) = self.queue_jobs.take_selection() {
             return Some(selection);
         }

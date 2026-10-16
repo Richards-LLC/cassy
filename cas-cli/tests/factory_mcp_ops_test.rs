@@ -5922,6 +5922,53 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
 
 }
 
+#[tokio::test]
+async fn test_gc_artifact_opt_in_retains_young_and_referenced_evidence_gh_1248() {
+    let env = FactoryTestEnv::new();
+    let base = env.cas_root.join("durable-artifacts");
+    let root = cas::config::project_factory_artifacts_root(&env.cas_root, &base);
+    std::fs::write(env.cas_root.join("config.toml"), format!(
+        "[factory]\nartifacts_root = {:?}\n", base.display().to_string()
+    )).unwrap();
+    let now = chrono::Utc::now();
+    let old = now - chrono::Duration::days(8);
+    let store = env.task_store();
+    for id in ["cas-a001", "cas-a002", "cas-a003", "cas-a004", "cas-a006"] {
+        let mut task = Task::new(id.into(), "closed evidence owner".into());
+        task.status = TaskStatus::Closed;
+        task.closed_at = Some(if id == "cas-a002" { now } else { old });
+        task.updated_at = task.closed_at.unwrap();
+        if id == "cas-a006" {
+            task.updated_at = now;
+            task.notes = "Recent review uses cas-a004/proof.txt".into();
+        }
+        store.add(&task).unwrap();
+        std::fs::create_dir_all(root.join(id)).unwrap();
+        std::fs::write(root.join(id).join("proof.txt"), "durable evidence").unwrap();
+    }
+    let mut open = Task::new("cas-a005".into(), "open review".into());
+    open.notes = "Review artifact://art-7a82".into();
+    store.add(&open).unwrap();
+    cas_store::SqliteArtifactStore::open(&env.cas_root).unwrap().record_local(
+        &cas_store::NewArtifact {
+            id: "art-7a82".into(), task_id: "cas-a003".into(), name: "proof.txt".into(),
+            mime: "text/plain".into(), size_bytes: 16, sha256: "a".repeat(64),
+        }
+    ).unwrap();
+
+    let mut request = factory_req("gc_cleanup");
+    request.force = Some(true);
+    request.dry_run = Some(false);
+    request.artifacts = Some(true);
+    let result = env.service.factory_request(Parameters(request)).await.unwrap();
+    let output = get_text(&result);
+    for (id, guard) in [("cas-a002", "7-day floor"), ("cas-a003", "open artifact reference"),
+                         ("cas-a004", "recent note reference")] {
+        assert!(root.join(id).join("proof.txt").is_file(), "{guard} lost evidence: {output}");
+    }
+    assert!(!root.join("cas-a001").exists(), "expired unreferenced evidence must be reclaimed: {output}");
+}
+
 // Linux reclamation requires readable process evidence; unavailable evidence
 // must remain visible through the public JSON and preserve every fixture byte.
 #[cfg(target_os = "linux")]

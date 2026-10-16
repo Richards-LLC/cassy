@@ -6191,6 +6191,70 @@ mod workspace_contract_tests {
         }
     }
 
+    /// cas-a673: through the real PreToolUse, words after an argument
+    /// substitution's `)` are still that command's arguments, so filename data
+    /// is not a config write. A real write stays refused, whether it follows an
+    /// operator, sits inside the substitution, or follows a substitution in
+    /// command position (`$(true) touch x` runs `touch`).
+    #[cfg(unix)]
+    #[test]
+    fn cas_a673_argument_substitution_data_is_not_a_config_write() {
+        let mut env = TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let project = home.join("projects/a673");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let worktree = cas_root.join("worktrees/lively-puma-3");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::write(worktree.join("src/new.rs"), "pub fn new() {}\n").unwrap();
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD", "CAS_ROOT"] {
+            env.remove(key);
+        }
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "cas-a673");
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_AGENT_NAME", "lively-puma-3");
+        env.set("CAS_CLONE_PATH", &worktree);
+        let decide = |command: &str| -> (String, String) {
+            let input = HookInput {
+                hook_event_name: "PreToolUse".to_string(),
+                agent_role: Some("worker".to_string()),
+                ..bash_input(command, &worktree)
+            };
+            let output = handle_pre_tool_use(&input, Some(&cas_root)).expect("handler ok");
+            let value = serde_json::to_value(output).unwrap();
+            (
+                value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("").to_string(),
+                value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").to_string(),
+            )
+        };
+        for command in [
+            "echo $(cat src/new.rs) touch ../../config.toml",
+            "echo $(cat src/new.rs) rm ../../config.toml",
+            "printf '%s\\n' $(cat src/new.rs) mv src/new.rs ../../config.toml",
+            "echo $(cat $(ls src)) tee ../../config.toml",
+        ] {
+            let (decision, reason) = decide(command);
+            assert!(
+                decision != "deny" && !reason.contains("CASSY CONFIG"),
+                "read-only `{command}` must be allowed: {decision} {reason}"
+            );
+        }
+        for command in [
+            "touch ../../config.toml",
+            "echo $(touch ../../config.toml)",
+            "echo $(cat src/new.rs) $(rm ../../config.toml)",
+            "$(true) touch ../../config.toml",
+            "echo $(cat src/new.rs); touch ../../config.toml",
+            "echo $(cat src/new.rs) && mv src/new.rs ../../config.toml",
+            "(cd src) ; rm ../../config.toml",
+            "case x in x) touch ../../config.toml ;; esac",
+        ] {
+            let (decision, reason) = decide(command);
+            assert_eq!(decision, "deny", "`{command}` writes the config and stays refused: {reason}");
+            assert!(reason.contains("CASSY CONFIG"), "`{command}`: {reason}");
+        }
+    }
+
     #[test]
     fn apply_patch_targets_every_added_updated_deleted_and_moved_file_cas_49c0() {
         let patch = "*** Begin Patch\n\

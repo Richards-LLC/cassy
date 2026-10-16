@@ -9825,11 +9825,23 @@ mod purge_foreign_safety_tests {
             cloud.set_team("team-1", "fixture");
             cloud.team_only = team_only;
             cloud.save_to_cas_dir(&root).unwrap();
-            conn.execute("UPDATE sync_metadata SET value = '2020-01-01T00:00:00Z'", []).unwrap();
-            conn.execute("INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-1_test-project', ?1)",
-                [chrono::Utc::now().to_rfc3339()]).unwrap();
-            let inspection = inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
-            assert!(inspection.refusals.is_empty(), "fresh team scope must be safe (team_only={team_only}): {:?}", inspection.refusals);
+            conn.execute(
+                "UPDATE sync_metadata SET value = '2020-01-01T00:00:00Z'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-1_test-project', ?1)",
+                [chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            let inspection =
+                inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
+            assert!(
+                inspection.refusals.is_empty(),
+                "fresh team scope must be safe (team_only={team_only}): {:?}",
+                inspection.refusals
+            );
         }
     }
 
@@ -9844,15 +9856,27 @@ mod purge_foreign_safety_tests {
             let mut cloud = CloudConfig::default();
             cloud.set_team("team-1", "fixture");
             cloud.save_to_cas_dir(&root).unwrap();
-            for key in ["last_team_pull_at_team-2_test-project", "last_team_pull_at_team-1_other-project"] {
-                conn.execute("INSERT INTO sync_metadata VALUES (?1, ?2)",
-                    [key, &chrono::Utc::now().to_rfc3339()]).unwrap();
+            for key in [
+                "last_team_pull_at_team-2_test-project",
+                "last_team_pull_at_team-1_other-project",
+            ] {
+                conn.execute(
+                    "INSERT INTO sync_metadata VALUES (?1, ?2)",
+                    [key, &chrono::Utc::now().to_rfc3339()],
+                )
+                .unwrap();
             }
             if let Some(value) = active_value {
                 conn.execute("INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-1_test-project', ?1)", [value]).unwrap();
             }
-            let inspection = inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
-            assert_eq!(inspection.refusals.len(), 1, "active={active_value:?}: {:?}", inspection.refusals);
+            let inspection =
+                inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
+            assert_eq!(
+                inspection.refusals.len(),
+                1,
+                "active={active_value:?}: {:?}",
+                inspection.refusals
+            );
             assert_eq!(inspection.refusals[0].code(), expected);
         }
     }
@@ -9867,10 +9891,18 @@ mod purge_foreign_safety_tests {
                 cloud.team_auto_promote = Some(false);
             }
             cloud.save_to_cas_dir(&root).unwrap();
-            conn.execute("UPDATE sync_metadata SET value = '2020-01-01T00:00:00Z'", []).unwrap();
-            conn.execute("INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-1_test-project', ?1)",
-                [chrono::Utc::now().to_rfc3339()]).unwrap();
-            let inspection = inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
+            conn.execute(
+                "UPDATE sync_metadata SET value = '2020-01-01T00:00:00Z'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-1_test-project', ?1)",
+                [chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            let inspection =
+                inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
             assert_eq!(inspection.refusals[0].code(), "stale_pull");
         }
     }
@@ -9884,11 +9916,45 @@ mod purge_foreign_safety_tests {
         let mut cloud = CloudConfig::default();
         cloud.team_auto_promote = Some(true);
         cloud.save_to_cas_dir(&root).unwrap();
-        conn.execute("UPDATE sync_metadata SET value = '2020-01-01T00:00:00Z'", []).unwrap();
-        conn.execute("INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-default_test-project', ?1)",
-            [chrono::Utc::now().to_rfc3339()]).unwrap();
+        conn.execute(
+            "UPDATE sync_metadata SET value = '2020-01-01T00:00:00Z'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_metadata VALUES ('last_team_pull_at_team-default_test-project', ?1)",
+            [chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
         let inspection = inspect_purge_state(&root, "test-project", 3, 7, false, false).unwrap();
         assert!(inspection.refusals.is_empty(), "{:?}", inspection.refusals);
+    }
+
+    #[test]
+    fn cas_7e38_invalid_scope_and_metadata_reads_abort_before_purge() {
+        for sql in [
+            "DROP TABLE sync_metadata",
+            "UPDATE sync_metadata SET value = X'FF'",
+        ] {
+            let (_env, root, conn) = purge_queue_fixture();
+            conn.execute_batch(sql).unwrap();
+            assert!(inspect_purge_state(&root, "test-project", 3, 7, false, false).is_err());
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM tasks", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                3
+            );
+        }
+        let (_env, root, _conn) = purge_queue_fixture();
+        let mut cloud = CloudConfig::default();
+        cloud.team_only = true;
+        cloud.save_to_cas_dir(&root).unwrap();
+        let error = inspect_purge_state(&root, "test-project", 3, 7, false, false)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("no active team"), "{error}");
+        std::fs::write(root.join("cloud.json"), "not-json").unwrap();
+        assert!(inspect_purge_state(&root, "test-project", 3, 7, false, false).is_err());
     }
 
     #[test]

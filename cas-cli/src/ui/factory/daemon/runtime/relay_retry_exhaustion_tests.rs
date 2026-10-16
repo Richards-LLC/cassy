@@ -158,6 +158,24 @@ async fn cas_af23_exhausted_status_about_open_task_remains_readable() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn cas_af23_exhausted_status_uses_envelope_task_without_summary_id() {
+    if !child("cas_af23_exhausted_status_uses_envelope_task_without_summary_id") {
+        return;
+    }
+    exhausted_message(
+        attach_worker_action_envelope(
+            "Supervisor recovery required.",
+            WorkerActionKind::Status,
+            "worker",
+            Some("cas-af23"),
+        ),
+        "verification timed out",
+        &["cas-af23"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cas_af23_exhausted_blocker_about_open_task_remains_readable() {
     if !child("cas_af23_exhausted_blocker_about_open_task_remains_readable") {
         return;
@@ -261,7 +279,7 @@ async fn daemon_relay(
             "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-af23\" \
              old=\"in_progress\" new=\"awaiting_merge\" actor=\"worker\" \
              notification_id=\"3386\" occurrence=\"{}\">parked</task-lifecycle>",
-            chrono::Utc::now().to_rfc3339(),
+            task.updated_at.to_rfc3339(),
         )
     };
     let queue = open_prompt_queue_store(&cas).unwrap();

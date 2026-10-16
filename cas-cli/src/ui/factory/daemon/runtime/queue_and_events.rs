@@ -4643,6 +4643,9 @@ impl FactoryDaemon {
                 evidence => evidence,
             };
             let action = normal_delivery_probe_action(evidence, probe.nudge_sent_at);
+            tracing::debug!(target: "cas::coordination", stage = "normal_delivery_watchdog_evidence",
+                message_id = row_id, target_agent = %probe.pane, ?evidence, ?action,
+                "cas-ac97: normal delivery watchdog read harness turn evidence");
             actions.push((row_id, probe, evidence, action, prepared.live));
         }
         for (row_id, probe, evidence, action, live) in actions {
@@ -5070,6 +5073,7 @@ impl FactoryDaemon {
         // same exhausted budget instead of starting a fresh one.
         self.urgent_wake_probes.remove(&queued.id);
         self.normal_delivery_probes.remove(&queued.id);
+        self.queue_jobs.normal_probe_jobs.forget_row(queued.id);
         if silent {
             self.notify_wake_starved_supervisor(queued, pane_target, attempts);
         }
@@ -7891,6 +7895,7 @@ impl FactoryDaemon {
         }
         for name in &shut_down_recipients {
             self.normal_delivery_probes.retain(|_, probe| probe.pane != *name && probe.target != *name);
+            self.queue_jobs.normal_probe_jobs.forget_pane(name);
             self.urgent_wake_probes.retain(|_, probe| probe.pane != *name && probe.target != *name);
         }
 

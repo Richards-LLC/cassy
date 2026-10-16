@@ -142,7 +142,7 @@ pub(crate) fn write_normal_flag(
     {
         tracing::warn!(row_id, %error, "failed to record delivery watchdog flag");
     }
-    matches!(
+    let persisted = matches!(
         super::lifecycle::enqueue_worker_delivery_stalled_relay(
             cas_dir,
             &probe.pane,
@@ -150,7 +150,13 @@ pub(crate) fn write_normal_flag(
             Utc::now()
         ),
         super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
-    )
+    );
+    if persisted {
+        tracing::warn!(target: "cas::coordination", stage = "normal_delivery_watchdog_flagged",
+            message_id = row_id, target_agent = %probe.pane, ?evidence,
+            "normal delivery started no harness turn after retry; supervisor notified without urgent escalation");
+    }
+    persisted
 }
 pub(crate) struct IdleCandidate {
     pub(crate) row: cas_store::QueuedPrompt,
@@ -236,8 +242,11 @@ pub(crate) fn write_idle_unread(
         &format!("idle-unacked:{}", row.id),
         None,
     ) {
-        Ok(cas_store::EnqueueIdempotentResult::Created(_)) => {
-            super::delivery::wake_daemon_after_enqueue(&context.cas_dir)
+        Ok(cas_store::EnqueueIdempotentResult::Created(relay_id)) => {
+            super::delivery::wake_daemon_after_enqueue(&context.cas_dir);
+            tracing::warn!(target: "cas::coordination", stage = "idle_unacked_relayed",
+                message_id = row.id, relay_id, target_agent = %row.target,
+                "cas-913c: relayed an unread message on an idle worker to the supervisor");
         }
         Ok(cas_store::EnqueueIdempotentResult::AlreadyExists(_)) => {}
         Err(error) => {

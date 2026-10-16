@@ -1146,6 +1146,47 @@ pub fn lease_duration_secs(cas_root: &Path) -> u32 {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn cas_8ea7_team_conflict_names_account_and_never_recovers_foreign_lock() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for status in [None, Some("shutdown")] {
+            let server = MockServer::start().await;
+            let project = "github.com/acme/widgets";
+            let key = claim_key(project, "cas-team");
+            let holder = ClaimHolder::new(ClaimKind::Task, "teammate", project).on("team-host");
+            let mut lease = TaskLease::new(key.clone(), "remote".into(), 600);
+            lease.renewed_at = Utc::now() - chrono::Duration::seconds(400);
+            let mut lock = serde_json::to_value(&lease).unwrap();
+            lock["id"] = serde_json::json!("cloud-lock");
+            lock["user_id"] = serde_json::json!("other-account");
+            lock["claim_reason"] = serde_json::json!(holder.reason());
+            Mock::given(method("POST")).and(path(format!("/api/agents/tasks/{key}/claim")))
+                .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                    "error":"already_claimed", "owner_agent_id":"remote", "user_id":"other-account", "expires_at":lease.expires_at,
+                }))).mount(&server).await;
+            Mock::given(method("GET")).and(path(format!("/api/agents/tasks/{key}/lock")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"lock":null}))).mount(&server).await;
+            Mock::given(method("GET")).and(path("/api/agents/locks")).and(query_param("project",project))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"locks":[lock]}))).mount(&server).await;
+            let agents = status.map(|status| serde_json::json!([{
+                "id":"remote", "name":"teammate", "agent_type":"primary", "status":status,
+                "last_heartbeat":Utc::now(), "active_tasks":0, "machine_id":"team-host",
+                "metadata":{"canonical_id":project,"hostname":"team-host"},
+            }])).unwrap_or_else(|| serde_json::json!([]));
+            Mock::given(method("GET")).and(path("/api/agents"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents":agents}))).mount(&server).await;
+            let claims = PeerClaims {
+                config: CloudConfig { endpoint:server.uri(), token:Some("sandbox-token".into()), ..Default::default() },
+                project:project.into(), label:"local-host".into(), retired_local:HashMap::new(), budget:None,
+            };
+            let answer = tokio::task::spawn_blocking(move || claims.acquire("cas-team",ClaimKind::Task,"local","local",600,&|_|false)).await.unwrap();
+            let Acquire::PeerHolds(hold) = answer else { panic!("foreign locks stay owner-only: {answer:?}"); };
+            assert!(hold.describe().contains("teammate on team-host") && hold.describe().contains("other-account"), "{}",hold.describe());
+            assert!(!server.received_requests().await.unwrap().iter().any(|r| r.url.path().ends_with("/release")), "never release another account's lock");
+        }
+    }
+
     /// cas-0078 (f): cloud work runs on the blocking pool, and one budget
     /// bounds every call of a request: past the deadline the caller gets an
     /// answer at once instead of waiting on the network.

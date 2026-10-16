@@ -513,7 +513,13 @@ pub fn discover_peers(
     exclude_project_agents(cas_root, &mut peers)?;
     // cas-d58d: label each peer with its account; the project's scope may
     // keep only the caller's own.
+    // The token's own agent list is asked for only when it can decide
+    // something: a peer that carries an account.
+    let any_account = peers.iter().any(|peer| peer.user_id.is_some());
     let viewer = viewer_user_id(&agents, self_id, || {
+        if !any_account {
+            return None;
+        }
         crate::cloud::CloudCoordinator::new(config)
             .ok()?
             .with_timeout(DISCOVERY_TIMEOUT)

@@ -5178,7 +5178,8 @@ impl FactoryDaemon {
     ) -> bool {
         let self_reminder = self_addressed_reminder(queued);
         let silent = !self_reminder
-            && escalate && wake_starved_needs_supervisor(self.prepared_wake_evidence(pane_target));
+            && escalate
+            && wake_starved_needs_supervisor(self.prepared_wake_evidence(pane_target));
         let detail = if self_reminder {
             "self reminder waiting for the next turn or wake recheck; no inter-agent alarm".to_string()
         } else if silent {
@@ -5212,8 +5213,8 @@ impl FactoryDaemon {
             self.lifecycle_redelivery_attempts.remove(&queued.id);
         }
         // Live probes would keep acting on a row Cassy decided to stop
-        // waking. The redelivery counters stay, so the recheck lands on the
-        // same exhausted budget instead of starting a fresh one.
+        // waking. Ordinary relay counters stay, so their recheck lands on
+        // the same exhausted budget instead of starting a fresh one.
         self.urgent_wake_probes.remove(&queued.id);
         self.normal_delivery_probes.remove(&queued.id);
         self.queue_jobs.normal_probe_jobs.forget_row(queued.id);
@@ -12013,7 +12014,15 @@ pub(super) fn fire_reminder(
             // its own origin; an unstamped row can never wake a pane. The
             // source names the owner by agent name, as other mail does, and
             // the dedupe key keeps a stale snapshot from writing it twice.
-            let owner = reminder_owner_name(reminder, agent_id_to_name, cas_dir);
+            // A self reminder stays self-addressed if a replacement supervisor
+            // takes over its Shutdown owner's wake. The reminder record keeps
+            // the original owner and target IDs; delegated reminders retain
+            // their actual sender for inter-agent delivery accounting.
+            let owner = if reminder.owner_id == reminder.target_id {
+                target.clone()
+            } else {
+                reminder_owner_name(reminder, agent_id_to_name, cas_dir)
+            };
             queue
                 .enqueue_idempotent(
                     &owner,

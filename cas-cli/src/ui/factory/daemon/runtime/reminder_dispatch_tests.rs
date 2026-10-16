@@ -74,7 +74,16 @@ fn dispatch(daemon: &mut FactoryDaemon, ci: bool, takeover: bool) -> (i64, Strin
     );
     assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
     assert_eq!(rows[0].target, daemon.app.supervisor_name());
-    assert_eq!(reminders.list_recently_fired(60).unwrap().len(), 1);
+    assert_eq!(
+        rows[0].source, rows[0].target,
+        "self identity survives takeover"
+    );
+    let fired = reminders.list_recently_fired(60).unwrap();
+    assert_eq!(fired.len(), 1);
+    assert_eq!(
+        fired[0].owner_id, owner,
+        "retain original durable provenance"
+    );
     (rows[0].id, rows[0].prompt.clone())
 }
 
@@ -223,6 +232,61 @@ async fn busy_self_reminder(takeover: bool) {
     );
     assert_eq!(typed.matches('\r').count(), 1);
     assert!(teams_messages(&daemon).is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_f265_delegated_reminder_retains_sender_and_failure_accounting() {
+    if !child("cas_f265_delegated_reminder_retains_sender_and_failure_accounting") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_root, mut daemon) = fixture().await;
+    let mut owner = cas_types::Agent::new("other-id".into(), "another-agent".into());
+    owner.factory_session = Some(daemon.session_name.clone());
+    open_agent_store(daemon.app.cas_dir())
+        .unwrap()
+        .register(&owner)
+        .unwrap();
+    daemon.app.refresh_data().unwrap();
+    crate::store::open_reminder_store(daemon.app.cas_dir())
+        .unwrap()
+        .create_with_scope(
+            &owner.id,
+            Some("single-sup"),
+            "Review a delegated decision",
+            cas_store::ReminderTriggerType::Time,
+            Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+            None,
+            None,
+            0,
+            Some(&daemon.session_name),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+    daemon.process_reminders(&[]);
+    let queue = open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    let rows = queue.peek_all(20).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].source, "another-agent");
+    assert_ne!(rows[0].source, rows[0].target);
+    daemon
+        .pane_silent_since
+        .insert(daemon.app.supervisor_name().to_string(), Instant::now());
+    daemon
+        .lifecycle_redelivery_counts
+        .insert(rows[0].id, LIFECYCLE_MAX_RENUDGE_ATTEMPTS);
+    daemon.process_prompt_queue().await.unwrap();
+    assert_eq!(
+        queue
+            .message_delivery_report(rows[0].id)
+            .unwrap()
+            .unwrap()
+            .stage,
+        cas_store::DeliveryStage::Abandoned,
+        "delegated reminders retain the existing relay failure policy"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -3338,6 +3338,27 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
             .expect("hold timestamp string"),
     )
     .expect("hold timestamp should be RFC3339");
+    let caller_hold_patch = service
+        .cas_task_update_with_target(
+            serde_json::from_value(serde_json::json!({"id": dependent_id.clone()}))
+                .expect("caller hold patch update request"),
+            None,
+            None,
+            false,
+            None,
+            Some(serde_json::json!({
+                "blocked_hold": {
+                    "reason": "caller supplied hold",
+                    "who": session_id.clone(),
+                    "when": "2026-10-16T15:00:00Z"
+                }
+            })),
+        )
+        .await;
+    assert!(
+        caller_hold_patch.is_err(),
+        "caller-supplied non-null blocked_hold should be rejected"
+    );
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
             blocked_by: Some(blocker_id.clone()),
@@ -3420,6 +3441,48 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
         .await
         .expect("legacy-note control should be dependency blocked only");
 
+    let dependency_status_control = service
+        .cas_task_create(Parameters(make_task_create_req(
+            "Status set while dependency is open",
+        )))
+        .await
+        .expect("dependency-status control create should succeed");
+    let dependency_status_control_id =
+        extract_task_id(&extract_text(dependency_status_control))
+            .expect("dependency-status control id")
+            .to_string();
+    let add_dependency_status_control: TaskUpdateRequest =
+        serde_json::from_value(serde_json::json!({
+            "id": dependency_status_control_id.clone(),
+            "blocked_by": blocker_id.clone(),
+        }))
+        .expect("dependency-status control dependency request");
+    service
+        .cas_task_update(Parameters(add_dependency_status_control))
+        .await
+        .expect("dependency-status control should be blocked");
+    let explicit_dependency_status: TaskUpdateRequest =
+        serde_json::from_value(serde_json::json!({
+            "id": dependency_status_control_id.clone(),
+            "status": "blocked",
+            "notes": "Leave blocked until the API dependency closes.",
+        }))
+        .expect("explicit dependency-blocked status request");
+    service
+        .cas_task_update(Parameters(explicit_dependency_status))
+        .await
+        .expect("explicit status update should preserve dependency-only blocking");
+    let dependency_status_state = task_store
+        .get_execution_state(&dependency_status_control_id)
+        .expect("read dependency-status execution state");
+    assert!(
+        dependency_status_state
+            .as_ref()
+            .and_then(|state| state.get("blocked_hold"))
+            .is_none(),
+        "status=blocked with an unmet dependency must not create a non-dependency hold"
+    );
+
     let dispatch = cas_store::create_verification_dispatch(
         &cas_dir,
         &blocker_id,
@@ -3483,6 +3546,10 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
         !close_text.contains(&legacy_note_control_id),
         "old blocker prose alone must not be surfaced as an active hold: {close_text}"
     );
+    assert!(
+        !close_text.contains(&dependency_status_control_id),
+        "status=blocked while a dependency is unmet must not create a hold: {close_text}"
+    );
     let explicit_show = service
         .cas_task_show(Parameters(TaskShowRequest {
             id: explicit_hold_id.clone(),
@@ -3504,6 +3571,17 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
     assert!(
         extract_text(legacy_show).contains("Status: Open"),
         "an old worker blocker note must not prevent dependency auto-unblock"
+    );
+    let dependency_status_show = service
+        .cas_task_show(Parameters(TaskShowRequest {
+            id: dependency_status_control_id,
+            with_deps: false,
+        }))
+        .await
+        .expect("dependency-status control task_show should succeed");
+    assert!(
+        extract_text(dependency_status_show).contains("Status: Open"),
+        "status=blocked with an unmet dependency must still auto-unblock when it closes"
     );
 
     let clear_hold: TaskUpdateRequest = serde_json::from_value(serde_json::json!({

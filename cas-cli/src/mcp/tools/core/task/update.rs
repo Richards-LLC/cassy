@@ -393,6 +393,18 @@ fn parked_assignment_note(
     ))
 }
 
+fn set_execution_state_patch_field(
+    patch: &mut Option<serde_json::Value>,
+    field: &str,
+    value: serde_json::Value,
+) {
+    patch
+        .get_or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .expect("execution state patches are validated as objects")
+        .insert(field.to_string(), value);
+}
+
 impl CasCore {
     pub async fn cas_task_update(
         &self,
@@ -449,12 +461,17 @@ impl CasCore {
             .status
             .as_deref()
             .is_some_and(|status| status.eq_ignore_ascii_case("blocked"));
+        let explicit_open_status = req
+            .status
+            .as_deref()
+            .is_some_and(|status| status.eq_ignore_ascii_case("open"));
         let explicit_block_reason = req
             .notes
             .as_deref()
             .map(str::trim)
             .filter(|reason| !reason.is_empty())
             .map(ToOwned::to_owned);
+        let mut execution_state_patch = state_patch.clone();
         if merged_into.is_some() && (target_repo.is_some() || target_branch.is_some() || req.epic.is_some() || req.status.is_some()) {
             return Err(McpError { code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from("INTEGRATION BATCH REJECTED: record merged_into separately from work-target, epic or status changes"), data: None });
@@ -536,6 +553,19 @@ impl CasCore {
         // this validation while holding its write lock, so a malformed patch
         // cannot corrupt an existing state even if another writer races us.
         if let Some(patch) = state_patch.as_ref() {
+            if patch
+                .as_object()
+                .and_then(|object| object.get("blocked_hold"))
+                .is_some_and(|hold| !hold.is_null())
+            {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "TASK EXECUTION STATE REJECTED: blocked_hold is managed by status transitions; supply null only to clear it.",
+                    ),
+                    data: None,
+                });
+            }
             let current = task_store
                 .get_execution_state(&req.id)
                 .map_err(|error| McpError {
@@ -839,9 +869,10 @@ impl CasCore {
             task.deliverables.review_envelope = None;
             task.deliverables.pre_close_hook = None;
             if task.status == TaskStatus::Blocked {
-                crate::mcp::tools::core::task::block_reason::record_hold_clear(
-                    &mut task,
-                    "supervisor corrected the blocked task's proof scope",
+                set_execution_state_patch_field(
+                    &mut execution_state_patch,
+                    "blocked_hold",
+                    serde_json::Value::Null,
                 );
             }
             task.status = TaskStatus::Open;
@@ -1775,31 +1806,6 @@ impl CasCore {
                     return Ok(Self::tool_error(message.to_string()));
                 }
             }
-            if new_status == TaskStatus::Blocked && explicit_block_status {
-                // A direct status request is an operator hold, even if a
-                // dependency had already projected the task to Blocked. Store
-                // that intent in the task's append-only notes so a later
-                // dependency close cannot erase it.
-                if crate::mcp::tools::core::task::block_reason::non_dependency_hold_reason(
-                    &task.notes,
-                )
-                .is_none()
-                    || explicit_block_reason.is_some()
-                {
-                    crate::mcp::tools::core::task::block_reason::record_explicit_status_hold(
-                        &mut task,
-                        explicit_block_reason.as_deref(),
-                    );
-                    changes.push("notes");
-                }
-            }
-            if new_status == TaskStatus::Open && task.status == TaskStatus::Blocked {
-                crate::mcp::tools::core::task::block_reason::record_hold_clear(
-                    &mut task,
-                    "task status explicitly set to open",
-                );
-                changes.push("notes");
-            }
             if new_status != task.status {
                 task.status = new_status;
                 changes.push("status");
@@ -2110,8 +2116,79 @@ impl CasCore {
             }
         }
 
-        if state_patch.is_some() {
-            changes.push("execution_state");
+        // Holds are active structured state, never inferred from notes. Only
+        // an explicit status=blocked request with no unmet dependency creates
+        // one; dependency changes from this same request are already visible.
+        if explicit_open_status {
+            set_execution_state_patch_field(
+                &mut execution_state_patch,
+                "blocked_hold",
+                serde_json::Value::Null,
+            );
+        }
+        if explicit_block_status && task.status == TaskStatus::Blocked {
+            let local_blockers = task_store.get_blockers(&req.id).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Could not evaluate blockers before recording task hold: {error}"
+                )),
+                data: None,
+            })?;
+            let external_blockers = cas_store::ExternalTaskDependencyStore::open(&self.cas_root)
+                .and_then(|store| store.list_blocking_for_task(&req.id))
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Could not evaluate external blockers before recording task hold: {error}"
+                    )),
+                    data: None,
+                })?;
+            if local_blockers.is_empty() && external_blockers.is_empty() {
+                let who = self
+                    .get_agent_id()
+                    .unwrap_or_else(|_| "unknown".to_string());
+                let hold = crate::mcp::tools::core::task::block_hold::explicit(
+                    explicit_block_reason.as_deref(),
+                    &who,
+                );
+                let value = serde_json::to_value(hold).map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Could not encode structured blocked hold: {error}"
+                    )),
+                    data: None,
+                })?;
+                set_execution_state_patch_field(
+                    &mut execution_state_patch,
+                    "blocked_hold",
+                    value,
+                );
+            }
+        }
+
+        if let Some(patch) = execution_state_patch.as_ref() {
+            let current = task_store
+                .get_execution_state(&req.id)
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Failed to read structured execution state before update: {error}"
+                    )),
+                    data: None,
+                })?
+                .unwrap_or_else(|| serde_json::json!({}));
+            cas_types::merge_task_execution_state_patch(&current, patch).map_err(|error| {
+                McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "TASK EXECUTION STATE REJECTED: {error}. No state was changed."
+                    )),
+                    data: None,
+                }
+            })?;
+            if !changes.contains(&"execution_state") {
+                changes.push("execution_state");
+            }
         }
 
         if let Some(batch) = staged_batch {
@@ -2205,7 +2282,7 @@ impl CasCore {
             }
         }
 
-        if let Some(patch) = state_patch.as_ref() {
+        if let Some(patch) = execution_state_patch.as_ref() {
             task_store
                 .patch_execution_state(&req.id, patch)
                 .map_err(|error| McpError {

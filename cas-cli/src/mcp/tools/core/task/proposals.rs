@@ -449,14 +449,22 @@ impl CasCore {
             {
                 if let Ok(mut task) = task_store.get(&task_id) {
                     if task.status == TaskStatus::Blocked {
-                        if let Some(reason) =
-                            super::block_reason::non_dependency_hold_reason(&task.notes)
-                        {
-                            super::block_reason::record_auto_unblock_skipped(&mut task, &reason);
+                        let hold = super::block_hold::read(task_store.as_ref(), &task_id)
+                            .map_err(|error| {
+                                Self::error(
+                                    ErrorCode::INTERNAL_ERROR,
+                                    format!("Could not read structured blocked hold: {error}"),
+                                )
+                            })?;
+                        if let Some(hold) = hold {
+                            super::block_hold::record_auto_unblock_skipped(
+                                &mut task,
+                                &hold.reason,
+                            );
                             task_store.update(&task).map_err(|error| {
                                 Self::error(ErrorCode::INTERNAL_ERROR, error.to_string())
                             })?;
-                            kept_blocked.push(format!("{task_id} — {reason}"));
+                            kept_blocked.push(format!("{task_id} — {}", hold.reason));
                         } else {
                             task.status = TaskStatus::Open;
                             task_store.update(&task).map_err(|error| {

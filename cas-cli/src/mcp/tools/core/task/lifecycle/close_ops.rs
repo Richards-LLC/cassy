@@ -10343,22 +10343,38 @@ impl CasCore {
                     if !(local_blockers_cleared && external_blockers_cleared) {
                         continue;
                     }
-                    if let Some(reason) =
-                        super::super::block_reason::non_dependency_hold_reason(&dependent_task.notes)
-                    {
+                    let hold = match super::super::block_hold::read(
+                        task_store.as_ref(),
+                        &dependent_task.id,
+                    ) {
+                        Ok(hold) => hold,
+                        Err(error) => {
+                            tracing::warn!(
+                                task_id = %dependent_task.id,
+                                error = %error,
+                                "dependency blockers closed but structured hold state could not be read"
+                            );
+                            held_blocked_tasks.push(format!(
+                                "{} — structured hold state could not be read",
+                                dependent_task.id
+                            ));
+                            continue;
+                        }
+                    };
+                    if let Some(hold) = hold {
                         let task_id = dependent_task.id.clone();
-                        super::super::block_reason::record_auto_unblock_skipped(
+                        super::super::block_hold::record_auto_unblock_skipped(
                             &mut dependent_task,
-                            &reason,
+                            &hold.reason,
                         );
                         if let Err(error) = task_store.update(&dependent_task) {
                             tracing::warn!(
                                 task_id = %task_id,
                                 error = %error,
-                                "dependency blockers closed but the non-dependency hold note could not be persisted"
+                                "dependency blockers closed but the auto-unblock audit note could not be persisted"
                             );
                         }
-                        held_blocked_tasks.push(format!("{task_id} — {reason}"));
+                        held_blocked_tasks.push(format!("{task_id} — {}", hold.reason));
                         continue;
                     }
                     dependent_task.status = TaskStatus::Open;
@@ -11142,12 +11158,7 @@ impl CasCore {
                     "task reopen rejected: a non-empty reason is required to preserve the terminal-state audit trail",
                 )
             })?;
-        if old_status == TaskStatus::Blocked {
-            super::super::block_reason::record_hold_clear(
-                &mut task,
-                "task explicitly reopened",
-            );
-        }
+        let clear_blocked_hold = old_status == TaskStatus::Blocked;
         task.status = TaskStatus::Open;
         if matches!(old_status, TaskStatus::Closed | TaskStatus::Cancelled) {
             // cas-cd24: closed-specific resets stay gated to the closed
@@ -11285,6 +11296,18 @@ impl CasCore {
                 data: None,
             })?;
             occurrence = super::supervisor_push::occurrence_from_updated_at(task.updated_at);
+        }
+
+        if clear_blocked_hold {
+            task_store
+                .patch_execution_state(&req.id, &serde_json::json!({"blocked_hold": null}))
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Task was reopened, but its structured blocked hold could not be cleared: {error}"
+                    )),
+                    data: None,
+                })?;
         }
 
         // cas-062d / cas-17e4: ready/reopened outbox after successful reopen.

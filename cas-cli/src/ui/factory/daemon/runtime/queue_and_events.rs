@@ -1568,6 +1568,11 @@ impl WakeDecision {
         format!("{}: {}", self.kind.as_str(), self.reason)
     }
 
+    #[cfg(test)]
+    pub(crate) fn deny_for_test(reason: &'static str) -> Self {
+        Self::deny(reason)
+    }
+
     /// An eligible row was refused. Diagnosable.
     fn deny(reason: &'static str) -> Self {
         Self {
@@ -2085,6 +2090,16 @@ fn withdraw_resumed_stall_nudge(
 }
 
 /// Persist a declined worker wake unless an observed open call pauses its budget.
+/// cas-d5ab (spec P2.3): the worker activity a wake-gate decline is evidence
+/// of, if any.
+pub(crate) fn gate_decline_activity(
+    decision: WakeDecision,
+    tool_call: ToolCallEvidence,
+) -> Option<&'static str> {
+    let _ = (decision, tool_call);
+    None
+}
+
 fn record_worker_wake_decline(
     queue: &dyn cas_store::PromptQueueStore,
     id: i64,

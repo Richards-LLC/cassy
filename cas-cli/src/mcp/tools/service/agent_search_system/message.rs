@@ -3742,6 +3742,12 @@ fn pending_deadline_narrative(
     }
 }
 
+/// cas-d5ab (P1.6): the one-line reason a gated send names.
+fn deferral_reason(wake_detail: Option<&str>, pending_detail: Option<&str>, claude_recipient: bool) -> String {
+    let _ = (wake_detail, pending_detail, claude_recipient);
+    String::new()
+}
+
 /// Which `factory_session` a queued row must carry (cas-15f2).
 ///
 /// The row is stamped with the **recipient's** session, never the sender's.
@@ -6365,5 +6371,136 @@ mod cas_89e1_post_merge_message_type_tests {
             .await
             .expect_err("worker operator turn must be rejected");
         assert!(error.message.contains("Only a registered supervisor"), "{error:?}");
+    }
+}
+
+/// cas-d5ab (communication contract v2, P1.6): a send names the row's current
+/// outcome in one line. In session cassy-swift-gazelle-77, 102 of 183
+/// supervisor→worker messages were deferred by the wake gate within 0.05 s of
+/// the send, yet every send result read "queued … (enqueued)", so the sender
+/// never learned the recipient was busy.
+#[cfg(test)]
+mod cas_d5ab_send_outcome_tests {
+    use super::*;
+    use crate::test_support::TestEnvGuard;
+    use cas_types::{Agent, AgentRole};
+    use rmcp::model::RawContent;
+
+    fn response_text(result: CallToolResult) -> String {
+        result
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn send_to(target: &str) -> AgentRequest {
+        serde_json::from_value(serde_json::json!({
+            "action": "message",
+            "target": target,
+            "summary": "decision",
+            "message": "Decision: ONE daemon JobRuntime. Drop FactoryJobs.",
+        }))
+        .expect("static message request")
+    }
+
+    /// What the daemon does with a row on its next pass, run on a thread
+    /// while the send waits: decline the wake for a busy recipient, or hand
+    /// the row to an idle one.
+    fn fake_daemon_pass(root: std::path::PathBuf, target: &'static str, busy: bool) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let row = loop {
+                if let Some(row) = queue.peek_all(10).unwrap().into_iter().find(|row| row.target == target) {
+                    break row;
+                }
+                assert!(std::time::Instant::now() < deadline, "the send never enqueued");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            };
+            assert!(queue.claim_recipient_transport(row.id, target).unwrap());
+            if busy {
+                queue
+                    .record_wake_attempt(
+                        row.id,
+                        cas_store::WakeAttempt::NotAttempted,
+                        Some("wake_declined_by_policy: recipient has a tool call in flight"),
+                    )
+                    .unwrap();
+                queue
+                    .record_pending_reason(
+                        row.id,
+                        cas_store::PendingReason::GatedNotReady,
+                        Some("wake budget paused while the recipient has a tool call in flight"),
+                    )
+                    .unwrap();
+            } else {
+                queue.mark_transport_delivered(row.id).unwrap();
+            }
+        })
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ct2_p1_send_returns_named_outcome() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_AGENT_NAME", "supervisor");
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"cas-d5ab-send-test\"\n").unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&Agent::new_with_role("supervisor-id".into(), "supervisor".into(), AgentRole::Supervisor))
+            .unwrap();
+        for name in ["busy-worker", "idle-worker"] {
+            agents
+                .register(&Agent::new_with_role(format!("{name}-id"), name.into(), AgentRole::Worker))
+                .unwrap();
+        }
+        core.set_agent_id_for_testing("supervisor-id".into());
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core.clone(), None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core.clone());
+        // A running daemon listens on its notify socket.
+        let _daemon_socket = cas_factory::DaemonNotifier::bind(&root).unwrap();
+
+        let daemon = fake_daemon_pass(root.clone(), "busy-worker", true);
+        let busy = response_text(service.message_send(send_to("busy-worker")).await.unwrap());
+        daemon.join().unwrap();
+        assert_eq!(busy.lines().count(), 1, "{busy}");
+        assert!(busy.starts_with("deferred #"), "{busy}");
+        assert!(busy.contains("recipient mid tool call"), "{busy}");
+        assert!(busy.contains("surfaces at its next tool call"), "{busy}");
+
+        let daemon = fake_daemon_pass(root.clone(), "idle-worker", false);
+        let idle = response_text(service.message_send(send_to("idle-worker")).await.unwrap());
+        daemon.join().unwrap();
+        assert_eq!(idle.lines().count(), 1, "{idle}");
+        assert!(idle.starts_with("delivered #"), "{idle}");
+        assert!(!idle.contains("not yet confirmed"), "{idle}");
+    }
+
+    #[test]
+    fn a_deferral_names_the_gate_reason_and_where_it_surfaces() {
+        let cases = [
+            ("wake_declined_by_policy: recipient has a tool call in flight", true, "recipient mid tool call; surfaces at its next tool call or turn start"),
+            ("wake_declined_by_policy: pane has not been silent long enough", true, "recipient busy; surfaces at its next tool call or turn start"),
+            ("wake_declined_by_policy: operator has an unsubmitted draft in the composer", false, "operator is typing in the recipient's pane; delivered when its pane is free"),
+        ];
+        for (detail, claude, expected) in cases {
+            assert_eq!(deferral_reason(Some(detail), None, claude), expected);
+        }
+        assert_eq!(
+            deferral_reason(None, Some("pane not ready for injection"), false),
+            "recipient pane not ready yet; delivered when its pane is free"
+        );
     }
 }

@@ -190,6 +190,10 @@ async fn ct2_p2_gate_decline_counts_as_activity() {
     let mut daemon = super::provisioning_tests::daemon(&cas_dir);
     busy_claude_worker_pane(&mut daemon).await;
     daemon.teams = Some(super::teams::TeamsManager::new(SESSION));
+    // The daemon's director view knows the registered, working worker.
+    daemon.app.set_director_data_for_test(
+        crate::ui::factory::director::DirectorData::load_with_git(&cas_dir, None, false).unwrap(),
+    );
     let queue = open_prompt_queue_store(&cas_dir).unwrap();
     let id = queue
         .enqueue_with_session("supervisor", WORKER, "status check", SESSION)

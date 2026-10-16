@@ -81,7 +81,7 @@ async function cleanup() {
   assert.equal(receipt.remaining_active.length, 0, "run principals still active");
   // Secret-bearing HOME/logs/DB are never artifacts. Keep only scrubbed receipts.
   // The test runner still owns its private trace directory until it exits.
-  for (const name of ["home", "project", "bin", "daemon.log", "hub.log"]) await rm(join(options.root, name), { recursive: true, force: true });
+  for (const name of ["native", "daemon.log", "hub.log"]) await rm(join(options.root, name), { recursive: true, force: true });
   cleaned = true;
   return { cleaned: true, receipt };
 }
@@ -89,9 +89,11 @@ async function prepare() {
   assert(!state, "one disposable run per registry entry");
   profile = await loadSandboxProfile(process.env.CAS_2077_CREDENTIAL_FILE ?? join(process.env.HOME, ".config/cas/cloud-test-profiles.env"), options.profile);
   assertSandboxIdentity(await authority("/api/me"), options.profile);
-  await mkdir(options.root, { mode: 0o700 }); // Refuse existing or symlink roots.
+  await mkdir(options.root, { recursive: true, mode: 0o700 });
+  const nativeRoot = join(options.root, "native");
+  await mkdir(nativeRoot, { mode: 0o700 }); // Refuse existing native runs.
   await mkdir(options.artifacts, { recursive: true });
-  const env = isolatedCasEnv(options.root, process.env), project = join(options.root, "project"), bin = join(options.root, "bin");
+  const env = isolatedCasEnv(nativeRoot, process.env), project = join(nativeRoot, "project"), bin = join(nativeRoot, "bin");
   state = { env, project, label: `cassy-2077-${Date.now()}`, session: "inbox-live-2077" };
   await mkdir(project); await mkdir(bin); await mkdir(join(env.HOME, ".cas"), { recursive: true });
   env.PATH = `${bin}:${env.PATH}`;
@@ -147,6 +149,7 @@ const server = createServer(async (req, res) => {
     const data = JSON.parse(body || "{}");
     const job = chain.then(async () => {
       if (req.url === "/prepare") return prepare();
+      if (req.url === "/cleanup") return cleanup();
       assert(state, "prepare required");
       switch (req.url) {
         case "/approve":
@@ -161,7 +164,6 @@ const server = createServer(async (req, res) => {
           const { devices } = await inventory(); assert(devices.some((x) => x.device_id === data.id), "only run-created device can be revoked");
           return jsonCas(["hub", "operator", "revoke-device", data.id]);
         }
-        case "/cleanup": return cleanup();
         default: throw Error("unknown control");
       }
     });

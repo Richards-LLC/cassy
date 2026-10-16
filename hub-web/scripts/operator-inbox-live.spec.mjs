@@ -186,6 +186,9 @@ test("cas-2077 deployed Cloud: stopped hub replay, one offline admission, revoke
     const css = (await Promise.all(files.filter((x) => x.endsWith(".css")).map((x) => readFile(join(dist, x), "utf8")))).join("\n");
     await writeFile(join(qa, "inbox.html"), `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Live inbox</title><style>${css}</style></head><body>${await mobile.evaluate((node) => node.outerHTML)}</body></html>`);
     receipt.status = "PASS";
+  } catch (error) {
+    receipt.failure = String(error).split("\n")[0];
+    throw error;
   } finally {
     await writeFile(join(options.root, "trace-secrets.json"), JSON.stringify(secrets), { mode: 0o600 }).catch(() => {});
     if (other) await other.close();

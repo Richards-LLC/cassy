@@ -1690,7 +1690,9 @@ async fn cas_4fe2_partial_claim_survivors_are_admitted_and_acked_once() {
         let machine = TestMachine::new("machine-beta");
         seed_project(&machine, &endpoint, "github.com/acme/widgets");
         let agents = open_agent_store(&machine.cas_dir).unwrap();
-        for i in 1..=100 {
+        // Two current IDs plus99 retirements keeps this independent of the
+        // cap-size negative control while still crossing three HTTP chunks.
+        for i in 2..=100 {
             let mut old = Agent::new(format!("r{i:03}"), "sup-b".into());
             old.role = AgentRole::Supervisor;
             old.status = cas::types::AgentStatus::Shutdown;
@@ -1703,6 +1705,10 @@ async fn cas_4fe2_partial_claim_survivors_are_admitted_and_acked_once() {
         current.factory_session = Some("factory-b".into());
         current.machine_id = Some("machine-beta".into());
         agents.register(&current).unwrap();
+        let mut direct = current.clone();
+        direct.id = "r001".into();
+        direct.name = "direct-first".into();
+        agents.register(&direct).unwrap();
         for id in ["r001", "r050", "r100"] {
             cloud_mail.lock().unwrap().push(json!({
                 "id":format!("mail-{id}"), "project_id":"github.com/acme/widgets",
@@ -1718,8 +1724,8 @@ async fn cas_4fe2_partial_claim_survivors_are_admitted_and_acked_once() {
         let rows = inbox(&machine.cas_dir);
         let ids: Vec<_> = rows.iter().map(|r| parse_envelope(&r.prompt).unwrap().id).collect();
         assert_eq!(ids, ["mail-r001", "mail-r100"]);
+        assert_eq!(rows.iter().map(|row| row.target.as_str()).collect::<Vec<_>>(), ["direct-first", "sup-b"]);
         for row in &rows {
-            assert_eq!(row.target, "sup-b");
             assert_eq!(row.factory_session.as_deref(), Some("factory-b"));
         }
         let mut mail = cloud_mail.lock().unwrap();

@@ -43,7 +43,7 @@ pub const LEASE_SECS: u32 = 120;
 /// recover a message sent during that restart window.
 const RETIREMENT_LOOKBACK_DAYS: i64 = 7;
 /// Keep current recipients independent of bounded historical recovery work.
-const RETIRED_RECIPIENT_MAX: usize = 100;
+const RETIRED_RECIPIENT_MAX: usize = 99; // cas-4fe2 temporary mutation control; restore before delivery.
 
 /// One outbound peer message (`POST /api/peer-messages`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1232,7 +1232,7 @@ impl PeerMailbox for HttpPeerMailbox {
                         combined.messages.extend(batch.messages);
                         combined.denied.extend(batch.denied);
                     }
-                    Err(error) => combined.errors.push(error),
+                    Err(error) => return Err(error), // cas-4fe2 temporary mutation control.
                 }
             }
         }

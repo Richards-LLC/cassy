@@ -471,6 +471,57 @@ fn cas_639c_same_channel_sweeps_route_owned_threads_without_dedupe_collision() {
     }
 }
 
+#[test]
+fn cas_639c_foreign_reply_near_idle_boundary_keeps_owners_watch_active() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut owner = fx.wake("owner", t0());
+    relay.publish(mention("C1", 0));
+    owner.poll_once(&relay, &fx.queue, true, at(10));
+    let mut claimant = fx.wake("claimant", at(3500));
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 3595, 0, "U2"));
+    claimant.poll_once(&relay, &fx.queue, false, at(3596));
+    assert!(owner.stop_idle(&fx.queue, at(3601)).is_empty());
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    let watch = saved.watch("C1", "owner").unwrap();
+    assert!(watch.is_active());
+    assert_eq!(watch.last_human_at, at(3595));
+}
+
+#[test]
+fn cas_639c_foreign_admission_updates_only_known_thread_activity() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut owner = fx.wake("owner", t0());
+    relay.publish(mention("C1", 0));
+    relay.publish(mention("C2", 1));
+    owner.poll_once(&relay, &fx.queue, true, at(10));
+    let mut other = fx.wake("other", at(20));
+    relay.publish(mention("C1", 21));
+    other.poll_once(&relay, &fx.queue, true, at(30));
+    let before = WatchBook::read(&fx.watch_path).unwrap();
+    let mut claimant = fx.wake("claimant", at(3500));
+    relay.publish(envelope(PROJECT, "C1", "thread_reply", 3595, 0, "U2"));
+    claimant.poll_once(&relay, &fx.queue, false, at(3596));
+    let after = WatchBook::read(&fx.watch_path).unwrap();
+    assert_eq!(after.watches.len(), before.watches.len());
+    for original in &before.watches {
+        let updated = after.watch(&original.channel_id, &original.factory_session).unwrap();
+        if original.factory_session == "owner" && original.channel_id == "C1" {
+            assert_eq!(updated.last_human_at, at(3595));
+            assert_eq!(updated.cursor_ts, Some(ts(3595)));
+            assert!(updated.has_seen(&format!("slack:T0123:C1:{}", ts(3595))));
+            assert_eq!(updated.started_at, original.started_at);
+            assert_eq!(updated.stopped_at, original.stopped_at);
+            assert_eq!(updated.stop_reason, original.stop_reason);
+            assert_eq!(updated.watched_thread_roots, original.watched_thread_roots);
+            assert_eq!(updated.violet_thread_roots, original.violet_thread_roots);
+        } else {
+            assert_eq!(updated, original);
+        }
+    }
+}
+
 /// AC: claim/ack is idempotent across daemon restarts. The ack is lost, the
 /// daemon restarts, the lease expires and Cloud redelivers: the event is
 /// acknowledged again with no second wake.
@@ -823,6 +874,8 @@ fn sweep_learns_the_violet_bot_from_its_thread_root() {
     assert_eq!(outcome, SweepOutcome::Quiet, "root and reply are Violet's");
     assert!(wake.book().learned_bot_user_ids.contains("U0VIOLET"));
     // Configured ids work before anything is learned.
+    drop(wake);
+    drop(fx);
     let fx2 = Fixture::new();
     let mut configured = VioletWake::new(
         PROJECT.into(),

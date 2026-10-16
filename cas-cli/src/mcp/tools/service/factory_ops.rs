@@ -2208,6 +2208,22 @@ fn factory_provision_build_compatibility(
     let Some(daemon_build) = known_factory_build_id(metadata.daemon_build_hash.as_deref()) else {
         return FactoryProvisionBuildCheck::Skipped("daemon build ID unavailable");
     };
+    // cas-cef2 (GH #1242): a daemon that pinned its executable provisions from
+    // that pin, never from the installed binary `cas update` may have replaced.
+    // Judge the file that will actually run; an unreadable pin falls back to
+    // the installed probe below. On Linux the pin links the daemon's process
+    // image, so it is only probed while that exact daemon is alive.
+    if crate::ui::factory::daemon_identity_is_live(&metadata)
+        && let Some(Ok(pinned)) = crate::ui::factory::pinned_provisioner_build_hash(session)
+    {
+        return if known_factory_build_id(Some(&pinned)) == Some(daemon_build) {
+            FactoryProvisionBuildCheck::Compatible
+        } else {
+            FactoryProvisionBuildCheck::Mismatch(format!(
+                "provision_build_mismatch: factory session {session} daemon build {daemon_build} differs from its pinned provisioner build {pinned}. Restart this factory session before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
+            ))
+        };
+    }
     let Some(provisioner_build) = known_factory_build_id(provisioner_build) else {
         return FactoryProvisionBuildCheck::Skipped("provisioner build ID unavailable");
     };
@@ -12112,7 +12128,8 @@ mod tests {
         session: &str,
         daemon_build_hash: Option<&str>,
         provisioner_build: Option<&str>,
-    ) -> (String, Vec<cas_store::SpawnRequest>) {
+        pinned_build: Option<&str>,
+    ) -> (Result<String, String>, Vec<cas_store::SpawnRequest>) {
         use cas_store::SpawnQueueStore;
         use cas_types::TaskType;
 
@@ -12144,6 +12161,15 @@ mod tests {
             )
             .expect("write session metadata");
         }
+        // cas-cef2: the daemon's pinned provisioner, reporting `pinned_build`.
+        #[cfg(unix)]
+        if let Some(pinned_build) = pinned_build {
+            use std::os::unix::fs::PermissionsExt;
+            let pin = crate::ui::factory::provisioner_pin_path(session);
+            std::fs::create_dir_all(pin.parent().unwrap()).unwrap();
+            std::fs::write(&pin, format!("#!/bin/sh\necho {pinned_build}\n")).unwrap();
+            std::fs::set_permissions(&pin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
         #[cfg(feature = "mcp-proxy")]
@@ -12162,17 +12188,20 @@ mod tests {
                 req,
                 provisioner_build,
             )
-            .await
-            .expect("spawn is queued when build identity is inconclusive");
+            .await;
         let receipt = response
-            .content
-            .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
-                _ => None,
+            .map(|response| {
+                response
+                    .content
+                    .into_iter()
+                    .filter_map(|content| match content.raw {
+                        rmcp::model::RawContent::Text(text) => Some(text.text),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .map_err(|error| error.to_string());
         let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
         (receipt, queue.peek(10).expect("read spawn queue"))
     }
@@ -12180,8 +12209,9 @@ mod tests {
     #[tokio::test]
     async fn missing_factory_session_metadata_skips_build_check_and_queues_spawn() {
         let (receipt, queue) =
-            spawn_build_check_case("missing-metadata-1174", None, Some("known-provisioner"))
+            spawn_build_check_case("missing-metadata-1174", None, Some("known-provisioner"), None)
                 .await;
+        let receipt = receipt.expect("spawn is queued when build identity is inconclusive");
 
         assert!(
             receipt.contains(
@@ -12195,7 +12225,8 @@ mod tests {
     #[tokio::test]
     async fn unprobeable_provisioner_identity_skips_build_check_and_queues_spawn() {
         let (receipt, queue) =
-            spawn_build_check_case("unprobeable-1174", Some("known-daemon"), None).await;
+            spawn_build_check_case("unprobeable-1174", Some("known-daemon"), None, None).await;
+        let receipt = receipt.expect("spawn is queued when build identity is inconclusive");
 
         assert!(
             receipt.contains(
@@ -12204,6 +12235,37 @@ mod tests {
             "receipt should explain why the early check was skipped: {receipt}"
         );
         assert_eq!(queue.len(), 1, "an unprobeable provisioner must not refuse spawn");
+    }
+
+    /// cas-cef2 (GH #1242): `cas update` replaced the binary under a running
+    /// daemon and spawn refused for the rest of the session. The daemon
+    /// provisions from its pin, so the check judges the pin: an upgraded
+    /// installed binary still spawns, and a pin of another build is still
+    /// refused (#1174).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_judges_the_daemons_pinned_build_not_the_installed_binary_cas_cef2() {
+        let (receipt, queue) = spawn_build_check_case(
+            "pinned-cef2",
+            Some("ee41e82"),
+            Some("f15ccb5"),
+            Some("ee41e82"),
+        )
+        .await;
+        assert!(receipt.is_ok(), "{receipt:?}");
+        assert_eq!(queue.len(), 1);
+
+        let (refusal, queue) = spawn_build_check_case(
+            "foreign-pin-cef2",
+            Some("ee41e82"),
+            Some("ee41e82"),
+            Some("other-build"),
+        )
+        .await;
+        let refusal = refusal.expect_err("a pin of another build must not provision");
+        assert!(refusal.contains("provision_build_mismatch"), "{refusal}");
+        assert!(refusal.contains("other-build"), "{refusal}");
+        assert!(queue.is_empty());
     }
 
     #[tokio::test]

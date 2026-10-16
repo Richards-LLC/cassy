@@ -1946,3 +1946,18 @@ fn dry_run_planned_phases_keep_their_details_block_cas_937a() {
         "a dry run says so in the compact view:\n{compact}"
     );
 }
+
+/// cas-cef2 (GH #1242): the update says what happens to running factories.
+#[test]
+fn update_names_what_happens_to_running_factories_cas_cef2() {
+    assert_eq!(running_factory_update_notice(&[], "9.99.1"), None);
+    let notice = running_factory_update_notice(
+        &[("pinned-session".into(), true), ("older-session".into(), false)],
+        "9.99.1",
+    )
+    .expect("running sessions get a notice");
+    assert!(notice.contains("2 running factory session(s) keep their current build"), "{notice}");
+    assert!(notice.contains("pinned-session keep spawning workers"), "{notice}");
+    assert!(notice.contains("older-session started before build pinning and cannot spawn"), "{notice}");
+    assert!(notice.contains("9.99.1") && notice.contains("cas factory kill <session>"), "{notice}");
+}

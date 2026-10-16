@@ -2101,7 +2101,12 @@ impl CloudSyncer {
                 store, remote_entry, remote_updated_at, current_project_id, None, row_origin.as_deref(),
             )?;
             let remote_entry_id = remote_entry.id.clone();
-            match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
+            match self.upsert_entry_lww(
+                store,
+                remote_entry,
+                remote_updated_at,
+                &mut result.memory_fold_conflicts,
+            ) {
                 Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_entries += 1;
                     self.note_pulled_authorship(
@@ -2700,6 +2705,7 @@ impl CloudSyncer {
         store: &dyn Store,
         entry: Entry,
         remote_updated_at: DateTime<Utc>,
+        fold_conflicts: &mut Vec<String>,
     ) -> Result<UpsertResult, CasError> {
         let local = match store.get(&entry.id) {
             Ok(local) => Some(local),
@@ -2728,13 +2734,13 @@ impl CloudSyncer {
                         }
                         Err(error) => return Err(error.into()),
                     };
-                    self.merge_entry_lww(store, local, entry, remote_updated_at)
+                    self.merge_entry_lww(store, local, entry, remote_updated_at, fold_conflicts)
                 }
                 Err(error) => Err(error.into()),
             };
         };
 
-        self.merge_entry_lww(store, local, entry, remote_updated_at)
+        self.merge_entry_lww(store, local, entry, remote_updated_at, fold_conflicts)
     }
 
     fn merge_entry_lww(
@@ -2743,7 +2749,11 @@ impl CloudSyncer {
         local: Entry,
         remote: Entry,
         remote_updated_at: DateTime<Utc>,
+        fold_conflicts: &mut Vec<String>,
     ) -> Result<UpsertResult, CasError> {
+        if self.preserve_fold_conflict(&local, &remote, remote_updated_at, fold_conflicts)? {
+            return Ok(UpsertResult::Skipped);
+        }
         // Re-check after the get→add race too: a recovery key must never
         // overwrite a concurrent insert belonging to another creation.
         super::entry_identity::verify_recovery_birth(&local, &remote)?;
@@ -3112,6 +3122,7 @@ impl CloudSyncer {
             conflicts_resolved_local: pull_result.conflicts_resolved_local,
             conflicts_resolved_remote: pull_result.conflicts_resolved_remote,
             conflicts: pull_result.conflicts,
+            memory_fold_conflicts: pull_result.memory_fold_conflicts,
             errors: [
                 push_result.errors,
                 team_push_result.errors,
@@ -3262,7 +3273,12 @@ impl CloudSyncer {
                 store, remote_entry, remote_updated_at, current_project_id, Some(team_id), row_origin.as_deref(),
             )?;
             let remote_entry_id = remote_entry.id.clone();
-            match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
+            match self.upsert_entry_lww(
+                store,
+                remote_entry,
+                remote_updated_at,
+                &mut result.memory_fold_conflicts,
+            ) {
                 Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_entries += 1;
                     self.note_pulled_authorship(

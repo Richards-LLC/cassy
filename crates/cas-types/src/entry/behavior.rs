@@ -7,6 +7,11 @@ use crate::entry::{
 use crate::scope::Scope;
 
 impl Entry {
+    /// Missing legacy births cannot prove that two copies are one memory.
+    pub fn has_known_creation(&self) -> bool {
+        !super::is_unknown_created(&self.created)
+    }
+
     /// Mint a memory identity independent of the checkout and its counters.
     /// Existing IDs remain opaque strings; no legacy rows are rewritten.
     pub fn generate_id() -> String {

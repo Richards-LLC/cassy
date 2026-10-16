@@ -3098,6 +3098,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         checks.extend(cloud_pull_freshness_check(&cas_root));
         checks.extend(sync_warning_checks(&sync_warnings));
         checks.extend(pull_id_collision_check(&cas_root));
+        checks.extend(memory_fold_conflict_check(&cas_root));
         checks.extend(unauthored_pull_check(&cas_root));
         // Quarantine is local state, so an unreadable ledger reports zero
         // rather than failing the whole check: the check's job is to describe
@@ -5694,6 +5695,24 @@ fn unauthored_pull_check_for(counts: &BTreeMap<String, usize>) -> Option<Check> 
     ))
 }
 
+/// Surface retained Cloud fold conflicts even after the watermark advances.
+fn memory_fold_conflict_check(cas_root: &Path) -> Option<Check> {
+    let ids = crate::cloud::SyncQueue::open_read_only(cas_root)
+        .and_then(|queue| queue.memory_fold_conflict_ids())
+        .ok()?;
+    if ids.is_empty() {
+        return None;
+    }
+    Some(Check::new(
+        "folded memory conflicts",
+        CheckStatus::Warning,
+        format!(
+            "{} folded memory id(s) had distinct copies; both retained.\nInspect: cas cloud conflicts --json",
+            ids.len()
+        ),
+    ))
+}
+
 /// Report pulled task rows that were parked because they shared an id with a
 /// different local task (cas-7a63, GH #1000). Silent when there are none, so a
 /// clean project's report is unchanged.
@@ -6560,6 +6579,42 @@ mod tests {
             "{}",
             check.message
         );
+    }
+
+    #[test]
+    fn cas_e29c_doctor_reports_retained_fold_conflicts_once_per_id() {
+        let temp = TempDir::new().unwrap();
+        let queue = crate::cloud::SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        assert!(memory_fold_conflict_check(temp.path()).is_none());
+        for id in ["opaque-fold0123456789ab", "opaque-fold0123456789ab"] {
+            queue
+                .record_conflict(
+                    "entry",
+                    id,
+                    "{}",
+                    "local",
+                    crate::cloud::sync_queue::MEMORY_FOLD_CONFLICT,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        queue
+            .record_conflict(
+                "task",
+                "unrelated",
+                "{}",
+                "local",
+                crate::cloud::sync_queue::MEMORY_FOLD_CONFLICT,
+                None,
+                None,
+            )
+            .unwrap();
+        let check = memory_fold_conflict_check(temp.path()).unwrap();
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.starts_with("1 folded memory id(s)"));
+        assert!(check.message.contains("cas cloud conflicts --json"));
     }
 
     /// cas-7a63: a parked id collision is reported once per id, and a clean

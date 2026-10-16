@@ -449,3 +449,92 @@ async fn cas_25eb1_matching_birth_edits_and_identical_memories_still_dedupe() {
         }
     }
 }
+
+#[tokio::test]
+async fn cas_e29c_fold_same_memory_keeps_lww_and_custom_suffixes_stay_opaque() {
+    let _env = TestEnvGuard::temp_home();
+    for team in [false, true] {
+        for id in [
+            "custom-source-fold0123456789ab",
+            "custom-foldnot-a-v1-digest",
+        ] {
+            for same_birth in [false, true] {
+                let (mut a, mut b) = legacy_pair();
+                a.id = id.into();
+                b.id = id.into();
+                if same_birth {
+                    b.created = a.created;
+                } else {
+                    b.title = a.title.clone();
+                    b.content = a.content.clone();
+                }
+                let f = Fixture::new(team, &a, &b).await;
+                assert!(f.pull().unwrap().errors.is_empty());
+                assert_eq!(f.entries.list().unwrap().len(), 1);
+                assert_eq!(f.entries.get(id).unwrap().created, b.created);
+                assert_eq!(f.entries.get(id).unwrap().content, b.content);
+                assert!(
+                    f.syncer
+                        .queue
+                        .memory_fold_conflict_ids()
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn cas_e29c_archived_fold_incumbent_stays_archived_with_incoming_journaled() {
+    let _env = TestEnvGuard::temp_home();
+    for team in [false, true] {
+        let wire = cloud_vectors(team)[0].clone();
+        let (mut local, remote) = legacy_pair();
+        local.id = wire["id"].as_str().unwrap().into();
+        let f = Fixture::new(team, &local, &remote).await;
+        f.entries.archive(&local.id).unwrap();
+        f.respond_wires(vec![wire.clone()], "2026-10-16T12:00:00Z")
+            .await;
+        let result = f.pull().unwrap();
+        assert!(result.errors.is_empty());
+        assert_eq!(result.memory_fold_conflicts, vec![local.id.clone()]);
+        assert_eq!(
+            f.entries.get_archived(&local.id).unwrap().content,
+            local.content
+        );
+        assert!(f.entries.list().unwrap().is_empty());
+        let conflicts = f.syncer.queue.list_conflicts(20).unwrap();
+        let before: serde_json::Value =
+            serde_json::from_str(&conflicts[0].discarded_row_json).unwrap();
+        assert_eq!(before["incoming"]["content"], wire["content"]);
+        assert_eq!(before["local"]["archived"], true);
+    }
+}
+
+#[tokio::test]
+async fn cas_e29c_missing_birth_legacy_collisions_use_distinct_stable_local_recovery() {
+    let _env = TestEnvGuard::temp_home();
+    for team in [false, true] {
+        let (a, b) = legacy_pair();
+        let mut local = serde_json::to_value(&a).unwrap();
+        local.as_object_mut().unwrap().remove("created");
+        let local: Entry = serde_json::from_value(local).unwrap();
+        let f = Fixture::new(team, &local, &b).await;
+        let mut wire = serde_json::to_value(&b).unwrap();
+        wire.as_object_mut().unwrap().remove("created");
+        wire["project_id"] = serde_json::json!(PROJECT);
+        wire["updated_at"] = serde_json::json!("2099-10-16T12:00:00Z");
+        f.respond_wires(vec![wire], "2026-10-16T12:00:00Z").await;
+        for _ in 0..2 {
+            assert!(f.pull().unwrap().errors.is_empty());
+            let rows = f.entries.list().unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(f.entries.get(&a.id).unwrap().content, a.content);
+            let recovered = rows.iter().find(|e| e.content == b.content).unwrap();
+            assert!(recovered.id.starts_with(&format!("{}-recovered-", a.id)));
+            assert!(!recovered.has_known_creation());
+        }
+        assert!(f.entries.list_archived().unwrap().is_empty());
+    }
+}

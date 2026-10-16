@@ -256,13 +256,12 @@ pub(crate) const INBOX_POLL_ORDER_SQL: &str = "ORDER BY (q.processed_at IS NOT N
 /// cas-a1ed: the transport claim a tool boundary may take over. The daemon
 /// stamps `deferred_inbox_at` only after it wrote the Teams copy and left the
 /// row pending because the wake was declined; that handoff will not finish
-/// until the recipient's turn ends. A PTY inject (a Codex or OpenCode
-/// recipient, the Teams ENOENT fallback, any urgent interrupt) never stamps
-/// it, so its claim stays with the transport even while its Delivered stamp
-/// lands late (cas-9568: a tool boundary never replays an injected turn).
-/// Every fresh transport reservation atomically clears a previous deferral:
-/// a same-name recipient may now use PTY, including the Teams ENOENT fallback.
-/// Only a new successful Teams write can make that reservation held again.
+/// until the recipient's turn ends. Every fresh transport reservation
+/// atomically clears a previous deferral. Only an actual TeamsInbox handoff
+/// may stamp it again: the daemon uses the reported primary channel, including
+/// the Teams ENOENT fallback to PTY, rather than the configured channel.
+/// PTY and urgent claims stay with their transport while Delivered lands late
+/// (cas-9568: a tool boundary never replays an injected turn).
 macro_rules! held_teams_claim_sql {
     () => {
         "seen.source = 'transport_claimed'

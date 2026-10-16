@@ -7878,12 +7878,14 @@ impl FactoryDaemon {
                     outcome.map(|outcome| match outcome {
                         cas_mux::InjectOutcome::Delivered => super::delivery::NudgeReport {
                             outcome,
+                            channel: super::delivery::DeliveryChannel::Pty,
                             wake: cas_store::WakeAttempt::Fired,
                             wake_detail: Some("urgent interrupt-and-inject".to_string()),
                         },
                         cas_mux::InjectOutcome::DeferredComposerDirty => {
                             super::delivery::NudgeReport::not_attempted(
                                 outcome,
+                                super::delivery::DeliveryChannel::Pty,
                                 "urgent delivery retained until the operator composer is clean",
                             )
                         }
@@ -8088,6 +8090,10 @@ impl FactoryDaemon {
                 self.queue_jobs
                     .record_outcome(queued.id, &queued.target, inject_generation);
                 if let Ok(ref report) = inject_result {
+                    // A configured Teams inbox may have fallen back to PTY
+                    // on ENOENT. Only an actual Teams copy can be held for a
+                    // tool boundary; never re-stamp a PTY delivery as deferred.
+                    wake_deferred &= report.channel == super::delivery::DeliveryChannel::TeamsInbox;
                     self.queue_jobs.stamp(
                         self.app.cas_dir(),
                         queued.id,

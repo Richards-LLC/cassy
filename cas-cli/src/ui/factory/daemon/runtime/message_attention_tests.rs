@@ -1036,10 +1036,25 @@ fn cas_0cdaa_real_task_claim_and_release_retire_watchdog_alarms() {
     let _env = env();
     for release in [false, true] {
         let mut f = Fixture::new();
+        crate::store::open_task_store_local(&f.cas_dir)
+            .unwrap()
+            .add(&Task::new("cas-0cdaa".into(), "Message decision work".into()))
+            .unwrap();
         let agents = open_agent_store(&f.cas_dir).unwrap();
         if release {
             agents
                 .try_claim("cas-0cdaa", "worker-id", 1800, None)
+                .unwrap();
+        }
+        if release {
+            // The existing lease predates the message; only its later release
+            // may satisfy this case, not the setup claim.
+            rusqlite::Connection::open(f.cas_dir.join("cas.db"))
+                .unwrap()
+                .execute(
+                    "UPDATE task_lease_history SET timestamp=? WHERE task_id='cas-0cdaa' AND event_type='claimed'",
+                    [(chrono::Utc::now() - chrono::Duration::seconds(1200)).to_rfc3339()],
+                )
                 .unwrap();
         }
         handed_off_row(&f, "supervisor", "worker");

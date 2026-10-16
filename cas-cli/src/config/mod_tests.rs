@@ -1509,3 +1509,19 @@ fn factory_scratch_root_is_absolute_or_unset_cas_3f93() {
     config.set("factory.scratch_root", "").unwrap();
     assert_eq!(config.factory().scratch_root, None);
 }
+
+#[test]
+fn cas_940c_worker_mcp_config_roundtrip_and_invalid_rejection() {
+    let mut config = Config::default();
+    assert_eq!(config.get("factory.claude.worker_mcp").as_deref(), Some("cas_only"));
+    for mode in ["inherit", "cas_only"] {
+        config.set("factory.claude.worker_mcp", mode).unwrap();
+        assert_eq!(config.get("factory.claude.worker_mcp").as_deref(), Some(mode));
+        assert!(config.list().contains(&("factory.claude.worker_mcp".into(), mode.into())));
+        config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(config.get("factory.claude.worker_mcp").as_deref(), Some(mode));
+        assert!(config.set("factory.claude.worker_mcp", "all").is_err());
+        assert_eq!(config.get("factory.claude.worker_mcp").as_deref(), Some(mode));
+    }
+    assert!(toml::from_str::<Config>("[factory.claude]\nworker_mcp='all'").is_err());
+}

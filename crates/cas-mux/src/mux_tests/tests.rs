@@ -3956,3 +3956,45 @@ fn cas_569f_dynamic_claude_launch_keeps_account_team_and_factory_identity() {
     assert_eq!(env_value(&pane, "CAS_FACTORY_SESSION"), Some("factory-569f"));
     assert_eq!(env_value(&pane, "CAS_SUPERVISOR_NAME"), Some("supervisor"));
 }
+
+#[test]
+fn cas_940c_worker_mcp_modes_preserve_supervisor_and_codex_launches() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
+    for mode in [None, Some("cas_only"), Some("inherit")] {
+        for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+            let project = tempfile::tempdir().unwrap();
+            let root = project.path().join(".cas");
+            std::fs::create_dir_all(&root).unwrap();
+            if let Some(mode) = mode {
+                std::fs::write(root.join("config.toml"), format!("[factory.claude]\nworker_mcp='{mode}'\n")).unwrap();
+            }
+            let original = serde_json::json!({"mcpServers": {
+                "cas": {"command": "cas-fixture"},
+                "additional": {"command": "additional-fixture"}
+            }}).to_string();
+            std::fs::write(project.path().join(".mcp.json"), &original).unwrap();
+            let configs = Mux::factory_pane_configs(&MuxConfig {
+                cwd: project.path().into(), cas_root: Some(root.clone()), workers: 1,
+                worker_cli: cli, supervisor_cli: SupervisorCli::Claude,
+                include_director: false, ..Default::default()
+            });
+            for (_, pane) in configs {
+                assert!(env_value(&pane, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none(), "{mode:?} {cli:?}");
+                let strict = cli == SupervisorCli::Claude && mode != Some("inherit") && env_value(&pane, "CAS_AGENT_ROLE") == Some("worker");
+                for flag in ["--strict-mcp-config", "--mcp-config"] {
+                    assert_eq!(pane.args.contains(&flag.to_string()), strict, "mode={mode:?} cli={cli:?} flag={flag}");
+                }
+                if env_value(&pane, "CAS_AGENT_ROLE") == Some("worker") {
+                    let path = root.join("worker-mcp/worker-1.json");
+                    assert_eq!(path.exists(), strict, "mode={mode:?} cli={cli:?}");
+                    if strict {
+                        let document: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                        assert_eq!(document["mcpServers"].as_object().unwrap().keys().collect::<Vec<_>>(), vec!["cas"]);
+                    }
+                }
+            }
+            assert_eq!(std::fs::read_to_string(project.path().join(".mcp.json")).unwrap(), original);
+        }
+    }
+}

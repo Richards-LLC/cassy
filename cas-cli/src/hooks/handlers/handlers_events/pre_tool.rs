@@ -6280,7 +6280,7 @@ mod workspace_contract_tests {
 
         // The PreToolUse hook applies it to an agent's Bash call.
         let input = bash_input("cas mcp remove vercel", root.path());
-        let output = handle_pre_tool_use_inner(&input, Some(root.path())).expect("hook");
+        let output = handle_pre_tool_use_inner(&input, Some(root.path()), None).expect("hook");
         let rendered = serde_json::to_string(&output).expect("serialize");
         assert!(
             rendered.contains("deny") && rendered.contains("supervisor-only"),

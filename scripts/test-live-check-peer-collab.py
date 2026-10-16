@@ -99,6 +99,54 @@ class OvercapProbeTest(unittest.TestCase):
             self.run_probe(corrupt=True)
 
 
+class TeamClaimsProbeTest(unittest.TestCase):
+    def run_probe(self, visibility="team_project", missing=False, queued=False):
+        from types import SimpleNamespace
+        run = object.__new__(live_check.Run)
+        run.args = SimpleNamespace(cloud_url="https://sandbox.example")
+        run.standin = None
+        run.ctx = {"task_id": "cas-held"}
+        run.names = {"a": "alpha", "b": "beta", "bw": "beta-worker"}
+        class Machine:
+            def __init__(self):
+                self.run_dir = "/sandbox-fixture"
+                self.counts = iter([0, int(queued)])
+            def call(self, *args, **kwargs):
+                return {"spawn_queue_rows": next(self.counts)}
+            def tool(self, agent, name, **args):
+                if name == "coordination":
+                    return {"text": json.dumps({"peers": [{
+                        "user_id": "account-a", "claims_visibility": visibility,
+                        "supervisor": {"machine": "alpha-host"},
+                        "claims": [] if missing else [{"task_id": "cas-held", "agent_name": "alpha"}],
+                    }]})}
+                if args["action"] == "update":
+                    return {"text": "updated", "is_error": False}
+                return {"text": "HELD BY A PEER alpha on alpha-host (account account-a)", "is_error": True}
+        run.a = Machine()
+        run.b = Machine()
+        evidence = {}
+        run.step_team_claims(evidence, [])
+        return evidence
+
+    def test_team_claim_probe_requires_owner_claim_and_all_refusals(self):
+        evidence = self.run_probe()
+        self.assertEqual(evidence["receipt_scope"], "live-cloud-two-account")
+        self.assertEqual(evidence["owner_user_id"], "account-a")
+        self.assertIn("start", evidence)
+        self.assertIn("claim", evidence)
+        self.assertIn("spawn", evidence)
+
+    def test_team_claim_probe_rejects_missing_claim_or_queued_spawn(self):
+        for options in ({"missing": True}, {"queued": True}):
+            with self.subTest(options=options), self.assertRaises(live_check.StepFailed):
+                self.run_probe(**options)
+
+    def test_same_account_run_never_counts_as_two_account_proof(self):
+        with self.assertRaises(live_check.StepSkipped):
+            self.run_probe(visibility="same_account")
+
+
 class StandinCloudTest(unittest.TestCase):
     def setUp(self):
         self.state = standin_cloud.State()

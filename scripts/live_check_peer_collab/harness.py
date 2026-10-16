@@ -519,6 +519,7 @@ def cmd_task_import(args):
 # client code) is in the executable, so a step can never be labelled active
 # for a build that lacks its code, or pending for one that has it.
 FEATURE_MARKERS = {
+    "cas-8ea7": [b"Claims visible (team project)"],
     "cas-559c": [b"Claims not visible (different account)"],
     "cas-0078": [b"cloud claim renewal failed; claiming again"],
     "cas-a19b": [b"through Cassy Cloud: no token", b"is not visible to this account (or does not exist)"],

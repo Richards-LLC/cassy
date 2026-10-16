@@ -2211,8 +2211,11 @@ fn factory_provision_build_compatibility(
     // cas-cef2 (GH #1242): a daemon that pinned its executable provisions from
     // that pin, never from the installed binary `cas update` may have replaced.
     // Judge the file that will actually run; an unreadable pin falls back to
-    // the installed probe below.
-    if let Some(Ok(pinned)) = crate::ui::factory::pinned_provisioner_build_hash(session) {
+    // the installed probe below. On Linux the pin links the daemon's process
+    // image, so it is only probed while that exact daemon is alive.
+    if crate::ui::factory::daemon_identity_is_live(&metadata)
+        && let Some(Ok(pinned)) = crate::ui::factory::pinned_provisioner_build_hash(session)
+    {
         return if known_factory_build_id(Some(&pinned)) == Some(daemon_build) {
             FactoryProvisionBuildCheck::Compatible
         } else {

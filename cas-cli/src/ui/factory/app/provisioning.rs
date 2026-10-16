@@ -50,6 +50,7 @@ static PINNED_PROVISIONER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::n
 
 /// The image this process is running, readable even after an atomic update
 /// replaced its path (Linux only).
+#[cfg_attr(test, allow(dead_code))]
 fn running_image() -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
@@ -96,50 +97,55 @@ fn choose_provisioner_executable(
 /// cas-cef2: places a hard link to `source` at `pin` (a copy when a link is
 /// impossible), staged beside it and renamed into place, so a concurrent
 /// probe never runs a partial file. `cas update` swaps the installed binary
-/// by rename, which leaves a linked inode untouched. On Linux the link is
-/// checked against the running image and replaced by a copy of that image
-/// when the installed path already names another build.
-pub(crate) fn pin_executable(
-    source: &Path,
-    running_image: Option<&Path>,
-    pin: &Path,
-) -> std::io::Result<()> {
+/// by rename, which leaves a linked inode untouched.
+pub(crate) fn pin_executable(source: &Path, pin: &Path) -> std::io::Result<()> {
+    let staged = staged_pin(pin)?;
+    if std::fs::hard_link(source, &staged).is_err() {
+        std::fs::copy(source, &staged)?;
+    }
+    std::fs::rename(&staged, pin)
+}
+
+/// cas-cef2 (Linux): pins by symlink to `/proc/<daemon pid>/exe`, which the
+/// kernel resolves to the daemon's own image even after an update replaced
+/// its path. Nothing is copied; the pin dangles once the daemon exits.
+#[cfg(unix)]
+pub(crate) fn pin_running_image(image: &Path, pin: &Path) -> std::io::Result<()> {
+    let staged = staged_pin(pin)?;
+    std::os::unix::fs::symlink(image, &staged)?;
+    std::fs::rename(&staged, pin)
+}
+
+fn staged_pin(pin: &Path) -> std::io::Result<PathBuf> {
     let dir = pin
         .parent()
         .ok_or_else(|| std::io::Error::other("provisioner pin has no parent directory"))?;
     std::fs::create_dir_all(dir)?;
     let staged = dir.join(format!(".pin-{}.staged", std::process::id()));
-    let _ = std::fs::remove_file(&staged);
-    let linked = std::fs::hard_link(source, &staged).is_ok()
-        && running_image.is_none_or(|image| same_file(&staged, image));
-    if !linked {
-        let _ = std::fs::remove_file(&staged);
-        std::fs::copy(running_image.unwrap_or(source), &staged)?;
+    match std::fs::remove_file(&staged) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(staged),
     }
-    std::fs::rename(&staged, pin)
-}
-
-#[cfg(unix)]
-fn same_file(left: &Path, right: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (std::fs::metadata(left), std::fs::metadata(right)) {
-        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
-        _ => false,
-    }
-}
-
-#[cfg(not(unix))]
-fn same_file(_left: &Path, _right: &Path) -> bool {
-    true
 }
 
 /// cas-cef2: pins the executable this daemon started from for `session_name`
 /// and provisions every worker from it. Called once at daemon start, before
 /// the session metadata names the daemon build.
 pub(crate) fn pin_daemon_provisioner(session_name: &str) -> anyhow::Result<PathBuf> {
-    let source = strip_deleted_suffix(std::env::current_exe()?);
     let pin = crate::ui::factory::session::provisioner_pin_path(session_name);
-    pin_executable(&source, running_image().as_deref(), &pin)
+    #[cfg(target_os = "linux")]
+    {
+        let image = PathBuf::from(format!("/proc/{}/exe", std::process::id()));
+        if image.exists() {
+            pin_running_image(&image, &pin).with_context(|| {
+                format!("failed to pin the factory provisioner at {}", pin.display())
+            })?;
+            let _ = PINNED_PROVISIONER.set(pin.clone());
+            return Ok(pin);
+        }
+    }
+    let source = strip_deleted_suffix(std::env::current_exe()?);
+    pin_executable(&source, &pin)
         .with_context(|| format!("failed to pin the factory provisioner at {}", pin.display()))?;
     let _ = PINNED_PROVISIONER.set(pin.clone());
     Ok(pin)
@@ -710,7 +716,7 @@ mod tests {
         std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
         std::fs::write(&installed, "daemon build").unwrap();
         let pin = dir.path().join("sessions/s.provisioner/cas");
-        pin_executable(&installed, None, &pin).unwrap();
+        pin_executable(&installed, &pin).unwrap();
 
         let replacement = dir.path().join("bin/cas.new");
         std::fs::write(&replacement, "installed build").unwrap();
@@ -721,26 +727,27 @@ mod tests {
         // pin: the fixture bytes identify which build file the pin holds.
         assert_eq!(std::fs::read_to_string(&installed).unwrap(), "installed build");
         // Re-pinning replaces the pin whole and leaves no staged file behind.
-        pin_executable(&installed, None, &pin).unwrap();
+        pin_executable(&installed, &pin).unwrap();
         // pin: the fixture bytes identify which build file the pin holds.
         assert_eq!(std::fs::read_to_string(&pin).unwrap(), "installed build");
         assert_eq!(std::fs::read_dir(pin.parent().unwrap()).unwrap().count(), 1);
     }
 
-    /// cas-cef2: when the installed path already names another build, the pin
-    /// copies the running image instead of linking the wrong file.
-    #[cfg(unix)]
+    /// cas-cef2 (Linux): the pin is a link to this process's own image, not
+    /// a copy of it, so a daemon start never copies the binary.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn pin_copies_the_running_image_when_the_installed_path_moved_on_cas_cef2() {
+    fn linux_pin_links_the_running_image_without_copying_cas_cef2() {
+        use std::os::unix::fs::MetadataExt;
         let dir = tempfile::tempdir().unwrap();
-        let installed = dir.path().join("cas");
-        let image = dir.path().join("running-image");
-        std::fs::write(&installed, "installed build").unwrap();
-        std::fs::write(&image, "daemon build").unwrap();
         let pin = dir.path().join("pin/cas");
-        pin_executable(&installed, Some(&image), &pin).unwrap();
-        // pin: the fixture bytes identify which build file the pin holds.
-        assert_eq!(std::fs::read_to_string(&pin).unwrap(), "daemon build");
+        let image = PathBuf::from(format!("/proc/{}/exe", std::process::id()));
+        pin_running_image(&image, &pin).unwrap();
+        assert!(std::fs::symlink_metadata(&pin).unwrap().file_type().is_symlink());
+        let pinned = std::fs::metadata(&pin).unwrap();
+        let running = std::fs::metadata("/proc/self/exe").unwrap();
+        assert_eq!((pinned.dev(), pinned.ino()), (running.dev(), running.ino()));
+        assert_eq!(std::fs::read_dir(pin.parent().unwrap()).unwrap().count(), 1);
     }
 
     #[test]

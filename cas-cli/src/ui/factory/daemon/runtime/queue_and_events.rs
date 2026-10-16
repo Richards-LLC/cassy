@@ -20035,3 +20035,7 @@ mod queue_control_tests;
 #[cfg(test)]
 #[path = "delivery_probe_tests.rs"]
 mod delivery_probe_tests;
+
+#[cfg(test)]
+#[path = "reminder_dispatch_tests.rs"]
+mod reminder_dispatch_tests;

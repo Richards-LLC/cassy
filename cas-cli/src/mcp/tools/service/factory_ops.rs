@@ -7846,24 +7846,46 @@ async fn collect_worker_worktree_status_with_timeout(
     gh_program: &std::path::Path,
 ) -> WorkerWorktreeStatus {
     let fallback = worker_worktree_status_timeout_fallback(cas_root, agent);
-    tokio::time::timeout(timeout, async {
-        collect_worker_worktree_status_with_gh(cas_root, agent, task, gh_program)
-    })
-    .await
-    .unwrap_or(fallback)
+    let failure_fallback =
+        worker_worktree_status_fallback(cas_root, agent, "status lookup failed");
+    let cas_root = cas_root.to_path_buf();
+    let agent = agent.clone();
+    let task = task.cloned();
+    let gh_program = gh_program.to_path_buf();
+    let worktree_status = tokio::task::spawn_blocking(move || {
+        collect_worker_worktree_status_with_gh(
+            &cas_root,
+            &agent,
+            task.as_ref(),
+            &gh_program,
+        )
+    });
+
+    match tokio::time::timeout(timeout, worktree_status).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(_)) => failure_fallback,
+        Err(_) => fallback,
+    }
 }
 
 fn worker_worktree_status_timeout_fallback(
     cas_root: &std::path::Path,
     agent: &cas_types::Agent,
 ) -> WorkerWorktreeStatus {
+    worker_worktree_status_fallback(cas_root, agent, "status lookup timed out")
+}
+
+fn worker_worktree_status_fallback(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+    reason: &'static str,
+) -> WorkerWorktreeStatus {
     match resolve_worker_clone_path(cas_root, agent) {
         WorkerClonePathResolve::Ready(path) => {
             let clone_path = path.display().to_string();
             WorkerWorktreeStatus {
                 clone_info: format!("\n    Clone: {clone_path}"),
-                git_info: "\n    git: status lookup timed out\n    PR: unknown (status lookup timed out)"
-                    .to_string(),
+                git_info: format!("\n    git: {reason}\n    PR: unknown ({reason})"),
                 clone_path: Some(clone_path),
             }
         }
@@ -7886,7 +7908,13 @@ fn apply_task_delivery_git_status(
     worker: &str,
     status: &mut WorkerGitStatus,
 ) {
-    apply_task_delivery_git_status_with_gh(repo, task, worker, status, std::path::Path::new("gh"));
+    apply_task_delivery_git_status_with_gh(
+        repo,
+        task,
+        worker,
+        status,
+        std::path::Path::new("gh"),
+    );
 }
 
 fn apply_task_delivery_git_status_with_gh(
@@ -10950,10 +10978,9 @@ impl std::fmt::Display for WorkerPrUrl {
 /// duplicating the collector.
 ///
 /// NOTE: This is a synchronous, blocking function that shells out to `git`
-/// and, optionally, `gh`.  It is intended to be called from within
-/// `factory_worker_status` (which is `async` but performs several other
-/// blocking operations already).  Callers in a strict async context should
-/// wrap in `tokio::task::spawn_blocking` if needed.
+/// and, optionally, `gh`. `factory_worker_status` calls it through
+/// `tokio::task::spawn_blocking` and bounds the wait; other strict async callers
+/// should do the same.
 pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> WorkerGitStatus {
     collect_worker_git_status_with_gh(worktree_path, std::path::Path::new("gh"))
 }

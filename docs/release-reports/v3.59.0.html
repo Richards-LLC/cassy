@@ -4,7 +4,7 @@
      section data-section markers are stable; preserve their order. -->
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light dark"><title>Cassy v3.59.0 · Release report · Published 16 October 2026 · 09:33 UTC</title>
+<meta name="color-scheme" content="light dark"><title>Cassy v3.59.0 · Release report · Published 16 October 2026 · 5:33 AM ET</title>
 <style>
 :root{ --bg:#F7F4EE;--surface:#FFFFFF;--surface-hero:#F1E7DD;--line:#DAD3C7;--line-strong:#8F8371;--ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--verdict-soft:#DDE1F7;--evidence:#5A5F6E;--action:#2E3A9F;--good:#226845;--warning:#7F5504;--danger:#B3261E;--good-tint:rgba(34,104,69,0.10);--warning-tint:rgba(127,85,4,0.10);--danger-tint:rgba(179,38,30,0.10);--focus:#2E3A9F; --font-display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;--font-body:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--font-mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color-scheme:light dark}
 @media(prefers-color-scheme:dark){:root{ --bg:#12141A;--surface:#191C24;--surface-hero:#241E1E;--line:#2B3040;--line-strong:#6B7390;--ink:#E9E6E0;--ink-muted:#A3A7B4;--verdict:#A9B3FF;--verdict-soft:rgba(169,179,255,0.16);--evidence:#A3A7B4;--action:#A9B3FF;--good:#5FC492;--warning:#E2B14D;--danger:#EF7B72;--good-tint:rgba(95,196,146,0.14);--warning-tint:rgba(226,177,77,0.14);--danger-tint:rgba(239,123,114,0.14);--focus:#A9B3FF }}
@@ -63,7 +63,7 @@ pre{background:var(--surface);color:var(--ink);padding:4mm;white-space:pre-wrap}
 </style></head><body>
 <a class="skip" href="#content">Skip to release details</a>
 <!-- section: hero -->
-<header class="hero" data-section="hero"><div class="folio eyebrow"><span>Cassy v3.59.0 / Release notes</span><span>Published 16 October 2026 · 09:33 UTC</span></div>
+<header class="hero" data-section="hero"><div class="folio eyebrow"><span>Cassy v3.59.0 / Release notes</span><span>Published 16 October 2026 · 5:33 AM ET</span></div>
 <div class="hero-grid"><h1>Keys echo at once even when every session is busy, tool calls stay under two seconds under load, and Commander looks the same on every machine.</h1><figure>
 <!-- Change-map contract v2: each g[data-area] has data-count (integer >= 1),
      data-changes (JSON string array of plain-language change titles) and
@@ -136,15 +136,15 @@ pre{background:var(--surface);color:var(--ink);padding:4mm;white-space:pre-wrap}
 <td class="num">16</td>
 <td>4 areas</td>
 </tr>
-</tbody></table></div><p>Source: CHANGELOG <code>CHANGELOG.md</code>, release-notes draft <code>docs/release-notes/2026-10-16-v3.59.0-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.59.0; retrieved 2026-10-16T14:02:54Z.</p></details>
+</tbody></table></div><p>Source: CHANGELOG <code>CHANGELOG.md</code>, release-notes draft <code>docs/release-notes/2026-10-16-v3.59.0-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.59.0; retrieved 16 October 2026 · 11:10 AM ET.</p></details>
 <div class="stats"><div class="stat"><span class="stat-value">16</span><span class="stat-label">Changes shipped</span><p>1 added, 14 fixed, 1 changed; tests and docs not counted</p></div>
 <div class="stat"><span class="stat-value">1</span><span class="stat-label">GitHub issues closed</span><p>Closed from PR #1227 opening to 15 min after merge</p></div>
 <div class="stat"><span class="stat-value">77.7 → 12.8 ms</span><span class="stat-label">Key to echo, p99</span><p>A keystroke&#x27;s echo under write pressure with 16 agents</p></div>
 <div class="stat"><span class="stat-value">50 → 1 ms</span><span class="stat-label">Control pass, p99</span><p>One daemon loop pass in its worst 5 s window, same load</p></div>
 <div class="stat"><span class="stat-value">2.23 → 1.88 s</span><span class="stat-label">Tool call, p99</span><p>Task and coordination tool calls under the same 16-agent pressure</p></div>
 <div class="stat"><span class="stat-value">54 → 14 ms</span><span class="stat-label">Message, p50</span><p>One unloaded <code>coordination.message</code> call on a single serve</p></div>
-<div class="stat"><span class="stat-value">36 m 48 s</span><span class="stat-label">Cut → published</span><p>Release PR #1227 opened at 08:56:17Z to publication at 09:33:05Z</p></div>
-<div class="stat"><span class="stat-value">3 m 7 s</span><span class="stat-label">Merged → published</span><p>Main landing at 09:29:58Z to release publication at 09:33:05Z</p></div></div><div class="method"><p>Changes and GitHub issues are counted separately. A change is one titled entry in the v3.59.0 CHANGELOG section; tests and documentation entries are listed under the hood but not counted. A GitHub issue counts when release PR #1227 or the CHANGELOG section references it and it closed between the PR opening (08:56:17Z) and 15 minutes after its merge (09:44:58Z). Issues are closed by hand shortly after the merge, so a report run inside that window waits for referenced issues that are still open. The latency rows compare a build without the change against a build with it, from the factory&#x27;s load receipts rather than production telemetry: 16 agents, synthetic writers at 38, 63 and 236 writes/s, and 300 s per phase. Key to echo and control pass compare build 0b85372 with ddce962; tool call compares ddce962 with 3ad81fd, rerun on a quiet host; message compares the 54 ms baseline with 004ea9a, with no background writers. The cut and merge rows use GitHub&#x27;s PR <code>createdAt</code> and <code>mergedAt</code> and the release <code>publishedAt</code>. Not measured for this release: green to published, request to published, blockers, lesson recurrence, manual interventions.</p></div></section>
+<div class="stat"><span class="stat-value">36 m 48 s</span><span class="stat-label">Cut → published</span><p>Release PR #1227 opened at 4:56 AM ET to publication at 5:33 AM ET</p></div>
+<div class="stat"><span class="stat-value">3 m 7 s</span><span class="stat-label">Merged → published</span><p>Main landing at 5:29 AM ET to release publication at 5:33 AM ET</p></div></div><div class="method"><p>Changes and GitHub issues are counted separately. A change is one titled entry in the v3.59.0 CHANGELOG section; tests and documentation entries are listed under the hood but not counted. A GitHub issue counts when release PR #1227 or the CHANGELOG section references it and it closed between the PR opening (4:56 AM ET) and 15 minutes after its merge (5:44 AM ET). Issues are closed by hand shortly after the merge, so a report run inside that window waits for referenced issues that are still open. The latency rows compare a build without the change against a build with it, from the factory&#x27;s load receipts rather than production telemetry: 16 agents, synthetic writers at 38, 63 and 236 writes/s, and 300 s per phase. Key to echo and control pass compare build 0b85372 with ddce962; tool call compares ddce962 with 3ad81fd, rerun on a quiet host; message compares the 54 ms baseline with 004ea9a, with no background writers. The cut and merge rows use GitHub&#x27;s PR <code>createdAt</code> and <code>mergedAt</code> and the release <code>publishedAt</code>. Not measured for this release: green to published, request to published, blockers, lesson recurrence, manual interventions.</p></div></section>
 <!-- section: users -->
 <section class="report-section users" data-section="users"><div class="section-top"><h2>What you can do now</h2><span class="section-no">02 / 06</span></div><section class="theme theme-1"><div class="theme-label"><span class="eyebrow">01</span><h3>Smoother sessions</h3></div><div class="changes">
 <article class="change"><h4>Instant typing</h4><div class="pair"><p class="was"><span class="state">Was</span>with many sessions busy, a keystroke could take about 80 ms to appear.</p><p class="now"><span class="state">Now</span>it appears in about 13 ms.</p></div></article>
@@ -216,7 +216,7 @@ pre{background:var(--surface);color:var(--ink);padding:4mm;white-space:pre-wrap}
 <tr>
 <th scope="row"><a href="https://github.com/Richards-LLC/cassy/issues/1203">#1203</a></th>
 <td>QA: support a batch QA receipt and a project &#x27;batch&#x27; QA mode (one staging walk per batch instead of per-task bundles)</td>
-<td>2026-10-16T09:35:48Z</td>
+<td>16 October 2026 · 5:35 AM ET</td>
 <td>Tasks</td>
 </tr>
 </tbody></table></div>
@@ -242,10 +242,10 @@ pre{background:var(--surface);color:var(--ink);padding:4mm;white-space:pre-wrap}
 </tr>
 </tbody></table></div></section>
 <!-- section: provenance -->
-<section class="report-section provenance" data-section="provenance"><div class="section-top"><h2>Evidence and scope</h2><span class="section-no">06 / 06</span></div><p>Retrieved: 2026-10-16T14:02:54Z.</p>
-<p>Source: CHANGELOG <code>CHANGELOG.md</code>, release-notes draft <code>docs/release-notes/2026-10-16-v3.59.0-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.59.0; retrieved 2026-10-16T14:02:54Z.</p>
+<section class="report-section provenance" data-section="provenance"><div class="section-top"><h2>Evidence and scope</h2><span class="section-no">06 / 06</span></div><p>Retrieved: 16 October 2026 · 11:10 AM ET.</p>
+<p>Source: CHANGELOG <code>CHANGELOG.md</code>, release-notes draft <code>docs/release-notes/2026-10-16-v3.59.0-slack.md</code>, GitHub <code>Richards-LLC/cassy</code> release v3.59.0; retrieved 16 October 2026 · 11:10 AM ET.</p>
 <p>Each change is placed in a product area by the words in its title, then its text; a change that matches no area is listed under Other. Correct an area in the Change map table before rendering.</p>
-<p>Release PR: &lt;https://github.com/Richards-LLC/cassy/pull/1227&gt; (merged 2026-10-16T09:29:58Z).</p>
+<p>Release PR: &lt;https://github.com/Richards-LLC/cassy/pull/1227&gt; (merged 16 October 2026 · 5:29 AM ET).</p>
 <p>Release-notes draft: <code>docs/release-notes/2026-10-16-v3.59.0-slack.md</code>.</p>
 <p>CHANGELOG source: <code>CHANGELOG.md</code>.</p>
 <p>GitHub release: &lt;https://github.com/Richards-LLC/cassy/releases/tag/v3.59.0&gt; (published or unknown).</p>

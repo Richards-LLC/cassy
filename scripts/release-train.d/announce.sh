@@ -32,9 +32,27 @@ release_train_announce_receipt_field() {
     sed -n "s/^${key}=//p" "$run_dir/announce.receipt" | head -n1
 }
 
+# The operator reads Eastern 12-hour times; announce.receipt keeps UTC ISO-8601.
+release_train_announce_eastern_time() {
+    python3 - "$1" <<'PY'
+import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+value = sys.argv[1]
+try:
+    instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    local = instant.astimezone(ZoneInfo("America/New_York"))
+except (ValueError, KeyError, OSError):
+    print(value)
+else:
+    print(f"{local.day} {local:%B %Y} · {local.hour % 12 or 12}:{local:%M %p} ET")
+PY
+}
+
 release_train_announce_posted_block() {
     local posted_at channel channel_id channel_display tick
-    posted_at="$(release_train_announce_receipt_field POSTED_AT)"
+    posted_at="$(release_train_announce_eastern_time "$(release_train_announce_receipt_field POSTED_AT)")"
     channel="$(release_train_announce_receipt_field CHANNEL)"
     channel_id="$(release_train_announce_receipt_field CHANNEL_ID)"
     channel_display="#${channel}"
@@ -43,7 +61,7 @@ release_train_announce_posted_block() {
     cat <<EOF
 ## POSTED
 
-- **Posted at (UTC):** ${tick}${posted_at}${tick}
+- **Posted at:** ${tick}${posted_at}${tick}
 - **Channel:** ${tick}${channel_display}${tick}
 - **User top-level:** ${tick}message_id=$(release_train_announce_receipt_field USER_TOP_LEVEL_ID)${tick} · <$(release_train_announce_receipt_field USER_TOP_LEVEL_PERMALINK)>
 - **User reply:** ${tick}message_id=$(release_train_announce_receipt_field USER_REPLY_ID)${tick} · <$(release_train_announce_receipt_field USER_REPLY_PERMALINK)>

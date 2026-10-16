@@ -2375,8 +2375,8 @@
           "unicode_case": true
         },
         {
-          "text": "utc timestamp",
-          "reason": "Retain the load-bearing policy term from builtin skills contains release notes rubric.",
+          "text": "eastern 12-hour",
+          "reason": "Retain the load-bearing policy term from builtin skills contains release notes rubric (POSTED times are Eastern 12-hour; cas-5389).",
           "case_sensitive": false,
           "unicode_case": true
         },

@@ -481,18 +481,22 @@ pub(super) fn inventory(
             waiting.push("merge_queue");
         }
         for kind in waiting {
+            let pr_observation = matches!(kind, "merge_queue" | "open_epic_pr");
             work.waiting_merges.push(WaitingMerge {
                 kind: kind.into(),
                 owner: row.owner.clone(),
                 task_id: Some(row.task_id.clone()),
                 branch: row.branch.clone(),
-                head_sha: row
-                    .pr
-                    .as_ref()
-                    .map(|p| p.head_sha.clone())
-                    .or_else(|| row.head_sha.clone()),
+                // Local delivery anchors and remote PR heads have independent
+                // evidence times. Never attach an old PR head to a newer
+                // task timestamp and make that observation appear fresh.
+                head_sha: if pr_observation {
+                    row.pr.as_ref().map(|p| p.head_sha.clone())
+                } else {
+                    row.head_sha.clone()
+                },
                 pr_url: row.pr.as_ref().and_then(|p| p.url.clone()),
-                observed_at: if matches!(kind, "merge_queue" | "open_epic_pr") {
+                observed_at: if pr_observation {
                     work.prs_status.observed_at
                 } else {
                     row.observed_at

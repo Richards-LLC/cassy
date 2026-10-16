@@ -98,7 +98,7 @@ fn collect_script(
     let mut alternatives = Vec::new();
     let mut heredocs = shell_heredoc_bodies(script).into_iter();
     let mut scopes = Vec::new();
-    let mut start = 0;
+    let mut start: usize = 0;
     for end in 0..=tokens.len() {
         let separator = match tokens.get(end) {
             Some(ShellToken::Operator(ch @ (';' | '&' | '|' | '(' | ')'))) => Some(*ch),

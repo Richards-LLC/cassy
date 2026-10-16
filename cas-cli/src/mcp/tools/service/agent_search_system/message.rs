@@ -3701,6 +3701,22 @@ fn pending_deadline_narrative(
             pending_detail.unwrap_or("no detail was recorded")
         );
     }
+    // cas-a1ed: a row the daemon selected and then held behind a declined
+    // wake is not on the never-selected deadline; no sweep abandons it while
+    // its recipient stays in the session. The same reason also marks a
+    // delivery the daemon is retrying (an operator draft in the composer),
+    // and that retry budget can still abandon the row, so say both.
+    if stage == DeliveryStage::Gated
+        && pending_reason == Some(cas_store::PendingReason::GatedNotReady)
+    {
+        return format!(
+            "held: still pending — a wake held for a busy recipient surfaces at its next tool \
+             call or turn start and does not expire while it stays in the session; a delivery \
+             being retried (for example behind an operator draft) is abandoned once its \
+             {PROMPT_ABANDON_DEADLINE_SECS}s retry budget runs out — {}\n",
+            pending_detail.unwrap_or("no detail was recorded")
+        );
+    }
     match stage {
         DeliveryStage::Abandoned => format!(
             "undeliverable: this row was abandoned and will never be delivered — {}\n",
@@ -3816,6 +3832,29 @@ mod pending_deadline_tests {
 
     /// Past the deadline the row is doomed, not in flight. Saying "still
     /// pending" there is the claimed-green shape this task exists to remove.
+    /// cas-a1ed: messages 4189870, 4189912 and 4189924 were held because
+    /// their busy recipients' panes were never silent. Status said "PAST — the
+    /// sweep will mark this undeliverable" although no sweep abandons a row
+    /// held for a live recipient, so a supervisor read a delivery as lost.
+    #[test]
+    fn a_row_held_for_a_busy_recipient_is_not_on_the_abandonment_deadline_cas_a1ed() {
+        for waited in [60, 1200] {
+            let line = pending_deadline_narrative(
+                DeliveryStage::Gated,
+                Some(cas_store::PendingReason::GatedNotReady),
+                Some("wake deferred — pane busy, tool call in flight, operator composing, or wake slot taken"),
+                Some(waited),
+            );
+            assert!(line.contains("still pending"), "{line}");
+            assert!(line.contains("next tool"), "{line}");
+            assert!(!line.contains("abandoned as undeliverable"), "{line}");
+            assert!(!line.contains("PAST"), "{line}");
+            // Review M2: the composer-draft retry shares the reason and can
+            // still be abandoned; the line must not promise otherwise.
+            assert!(line.contains("retry budget"), "{line}");
+        }
+    }
+
     #[test]
     fn a_row_past_the_deadline_says_it_is_not_in_flight() {
         let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(1200));

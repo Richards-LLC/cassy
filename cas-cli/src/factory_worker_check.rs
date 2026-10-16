@@ -25,6 +25,16 @@ struct TestReceipt {
     filter: String,
     harness: Option<String>,
     count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_path_opt_out: Option<String>,
+}
+
+impl TestReceipt {
+    fn path_note(&self) -> String {
+        self.host_path_opt_out.as_ref()
+            .map(|reason| format!(" [host PATH opt-out: {reason}]"))
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug)]
@@ -230,6 +240,100 @@ fn executable(path: &Path) -> bool {
     }
 }
 
+const HOST_PATH_OPT_OUT: &str = "CAS_WORKER_TEST_ALLOW_HOST_PATH";
+
+fn host_path_opt_out() -> Result<Option<String>> {
+    let Some(reason) = std::env::var_os(HOST_PATH_OPT_OUT) else {
+        return Ok(None);
+    };
+    let reason = reason
+        .to_str()
+        .context("host PATH opt-out reason must be Unicode")?
+        .trim();
+    if reason.is_empty() || reason.chars().any(char::is_control) {
+        bail!("{HOST_PATH_OPT_OUT} requires a nonempty, single-line reason");
+    }
+    Ok(Some(reason.to_string()))
+}
+
+#[cfg(unix)]
+fn isolated_test_path(
+    cargo: &Path,
+    cwd: &Path,
+    slots: &Path,
+) -> Result<(tempfile::TempDir, std::ffi::OsString)> {
+    let started = std::time::Instant::now();
+    let bin = tempfile::tempdir_in(slots)?;
+    let search = std::env::var_os("PATH").unwrap_or_default();
+    let resolve = |name: &Path| {
+        let candidates = if name.is_absolute() || name.components().count() > 1 {
+            vec![name.to_path_buf()]
+        } else {
+            std::env::split_paths(&search)
+                .map(|dir| dir.join(name))
+                .collect()
+        };
+        candidates
+            .into_iter()
+            .map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    cwd.join(path)
+                }
+            })
+            .find(|path| executable(path))
+    };
+    let resolved_cargo =
+        resolve(cargo).context("cannot resolve Cargo before isolating test PATH")?;
+    let rustup = resolve(Path::new("rustup")).or_else(|| {
+        resolved_cargo.canonicalize().ok().filter(|path| path.file_name().is_some_and(|name| name == "rustup"))
+    });
+    let concrete = |name: &str, tool: PathBuf| -> Result<PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+        let tool = tool.canonicalize()?;
+        let proxy = rustup.as_ref().is_some_and(|rustup| {
+            tool.metadata().ok().zip(rustup.metadata().ok())
+                .is_some_and(|(tool, rustup)| tool.dev() == rustup.dev() && tool.ino() == rustup.ino())
+        });
+        if !proxy || name == "rustup" {
+            return Ok(tool);
+        }
+        // Rustup proxies prepend CARGO_HOME/bin when dispatching. Resolve their
+        // actual toolchain binary before constructing the isolated environment.
+        use crate::bounded_process::{Deadline, run_command};
+        let budget = std::time::Duration::from_secs(2);
+        let mut command = Command::new(rustup.as_ref().unwrap());
+        command.args(["which", name]).current_dir(cwd);
+        let output = run_command(&mut command, Deadline::after(budget), budget)
+            .map_err(|_| anyhow::anyhow!("cannot resolve concrete {name} through rustup"))?;
+        if !output.status.success() {
+            bail!("rustup cannot resolve concrete {name}: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        let direct = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+        if !direct.is_absolute() || !executable(&direct) || direct.canonicalize()? == tool {
+            bail!("rustup did not resolve a concrete executable for {name}");
+        }
+        Ok(direct)
+    };
+    std::os::unix::fs::symlink(concrete("cargo", resolved_cargo)?, bin.path().join("cargo"))?;
+    for name in ["rustc", "rustdoc", "rustup", "cargo-nextest"] {
+        if let Some(tool) = resolve(Path::new(name)) {
+            std::os::unix::fs::symlink(concrete(name, tool)?, bin.path().join(name))?;
+        }
+    }
+    let retained = std::env::split_paths(&search)
+        .map(|dir| if dir.is_absolute() { dir } else { cwd.join(dir) })
+        .filter(|dir| !["cas", "codex", "claude"].iter().any(|name| dir.join(name).is_file()))
+        .collect::<Vec<_>>();
+    let path = std::env::join_paths(std::iter::once(bin.path()).chain(retained.iter().map(PathBuf::as_path)))?;
+    println!(
+        "Worker test PATH: concrete Rust tools + PATH without host harness directories; setup={:.3}ms",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    Ok((bin, path))
+}
+
 fn worker_zig(
     repo: &Path,
     configured: Option<&OsStr>,
@@ -359,7 +463,7 @@ pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) ->
     let mut receipts = passing_test_records(cas_root, repo, head)
         .into_iter()
         .map(|(package, test)| {
-            format!("test: PASS {head} {package} {} {}", test.filter, test.count)
+            format!("test: PASS {head} {package} {} {}{}", test.filter, test.count, test.path_note())
         })
         .collect::<Vec<_>>();
     receipts.sort();
@@ -454,6 +558,7 @@ pub(crate) fn record_passing_test_for_tests(
             filter: filter.to_string(),
             harness: None,
             count: 1,
+            host_path_opt_out: None,
         }),
     };
     std::fs::write(
@@ -644,6 +749,18 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     #[cfg(unix)]
     discard_shared_fingerprints(&repo.join("target"))?;
     let count_file = slots.join(format!("count-{lane_key}"));
+    let host_path_opt_out = if test.is_some() { host_path_opt_out()? } else { None };
+    if let Some(reason) = &host_path_opt_out {
+        println!("Worker test PATH: host opt-out: {reason}");
+    }
+    #[cfg(unix)]
+    let test_path = if test.is_some() && host_path_opt_out.is_none() {
+        Some(isolated_test_path(cargo, cwd, &slots)?)
+    } else { None };
+    #[cfg(unix)]
+    let private_cargo = test_path.as_ref().map(|(bin, _)| bin.path().join("cargo"));
+    #[cfg(unix)]
+    let cargo = private_cargo.as_deref().unwrap_or(cargo);
     let mut command = if test.is_some() {
         // Embed the shared zero-test guard so projects need no cas-src scripts.
         let verified = include_str!("../../scripts/run-verified-tests.sh");
@@ -675,6 +792,10 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         command.arg("check");
         command
     };
+    #[cfg(unix)]
+    if let Some((_, path)) = &test_path {
+        command.env("PATH", path);
+    }
     if let Some(zig) = zig {
         command.env("ZIG", zig);
     }
@@ -743,6 +864,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
                 filter: test.filter,
                 harness: test.harness,
                 count,
+                host_path_opt_out,
             })
         }
         None => None,
@@ -757,8 +879,8 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     std::fs::write(&receipt, serde_json::to_vec(&record)?)?;
     if let Some(test) = record.test {
         println!(
-            "test: PASS {head} {} {} {}",
-            record.packages[0], test.filter, test.count
+            "test: PASS {head} {} {} {}{}",
+            record.packages[0], test.filter, test.count, test.path_note()
         );
     } else {
         println!("check: PASS {head} packages={}", record.packages.join(","));
@@ -815,6 +937,223 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         assert!(execute_at(&root, &args, &repo, &fake).is_err(), "guard execution itself must be nonzero");
         // pin: the failing external invocation must be the fixed guard selection.
         assert!(std::fs::read_to_string(repo.join("target/failed-guard")).unwrap().contains("test_support::"));
+    }
+
+    #[cfg(unix)]
+    fn path_test_child(name: &str, path: &OsStr, bin: &Path) {
+        let test = format!("factory_worker_check::tests::{name}");
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test, "--nocapture"])
+            .env("PATH", path)
+            .env("CAS_A9FC_PATH_CHILD", bin)
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        let stdout = String::from_utf8(child.stdout).unwrap();
+        // pin: Rust's external harness must prove one exact selected child passed.
+        assert!(
+            stdout.contains(&format!("test {test} ... ok")) && stdout.contains("1 passed; 0 failed"),
+            "{stdout}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn named_test_path_hides_host_tools_beside_cargo_cas_a9fc() {
+        let Some(bin) = std::env::var_os("CAS_A9FC_PATH_CHILD") else {
+            let bin = tempfile::tempdir().unwrap();
+            let tools = tempfile::tempdir().unwrap();
+            fake_cargo(&tools.path().join("cas-a9fc-downstream-tool"), "exit 0");
+            for name in ["cas", "codex", "claude"] {
+                fake_cargo(&bin.path().join(name), "exit 0");
+            }
+            let original = std::env::var_os("PATH").unwrap();
+            let path = std::env::join_paths(
+                [bin.path().to_path_buf(), tools.path().to_path_buf()]
+                    .into_iter().chain(std::env::split_paths(&original)),
+            )
+            .unwrap();
+            path_test_child(
+                "named_test_path_hides_host_tools_beside_cargo_cas_a9fc",
+                &path,
+                bin.path(),
+            );
+            return;
+        };
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let bin = PathBuf::from(bin);
+        let cargo = bin.join("cargo");
+        fake_cargo(
+            &cargo,
+            r#"for tool in cas codex claude; do
+    if command -v "$tool" > /dev/null; then
+        printf 'host tool leaked: %s\n' "$tool" >&2
+        exit 23
+    fi
+    done
+    command -v rustc > /dev/null || exit 24
+    command -v git > /dev/null || exit 25
+    command -v cas-a9fc-downstream-tool > /dev/null || exit 26
+    printf '%s\n' "$PATH" > target/selected-path
+    printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
+        );
+        let args = [
+            "nextest",
+            "run",
+            "-p",
+            "cas",
+            "--lib",
+            "-E",
+            "test(selected)",
+        ]
+        .map(str::to_string);
+        execute_at(&root, &args, &repo, &cargo)
+            .expect("selected tests must not see tools beside host cargo");
+        let selected_path = std::fs::read_to_string(repo.join("target/selected-path")).unwrap();
+        assert!(
+            !selected_path.contains(bin.to_str().unwrap()),
+            "{selected_path}"
+        );
+        assert!(
+            passing_test_receipts(&root, &repo, &fixture_head(&repo))[0].ends_with("test(selected) 1")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_rustup_cargo_cannot_restore_host_harness_path_cas_a9fc() {
+        let Some(bin) = std::env::var_os("CAS_A9FC_PATH_CHILD") else {
+            let _env = crate::test_support::TestEnvGuard::new();
+            let original = std::env::var_os("PATH").unwrap_or_default();
+            let Some(rustup) = std::env::split_paths(&original)
+                .map(|dir| dir.join("rustup")).find(|path| executable(path)) else {
+                eprintln!("SKIP real rustup control: rustup is unavailable");
+                return;
+            };
+            let available = Command::new(&rustup).args(["which", "cargo"]).output().unwrap();
+            if !available.status.success() {
+                eprintln!("SKIP real rustup control: no active toolchain");
+                return;
+            }
+            let home = tempfile::tempdir().unwrap();
+            let bin = home.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            for name in ["cargo", "rustc", "rustdoc", "rustup"] {
+                std::os::unix::fs::symlink(&rustup, bin.join(name)).unwrap();
+            }
+            for name in ["cas", "codex", "claude"] {
+                fake_cargo(&bin.join(name), "exit 0");
+            }
+            fake_cargo(&bin.join("cargo-nextest"), r#"for tool in cas codex claude; do
+    if command -v "$tool" > /dev/null; then
+        printf 'rustup restored host tool: %s\n' "$tool" >&2
+        exit 23
+    fi
+done
+printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
+            let path = std::env::join_paths(
+                std::iter::once(bin.clone()).chain(std::env::split_paths(&original)),
+            ).unwrap();
+            path_test_child("real_rustup_cargo_cannot_restore_host_harness_path_cas_a9fc", &path, &bin);
+            return;
+        };
+        let bin = PathBuf::from(bin);
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CARGO_HOME", bin.parent().unwrap());
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(selected)"].map(str::to_string);
+        execute_at(&root, &args, &repo, &bin.join("cargo"))
+            .expect("the real rustup proxy must not restore host harness binaries");
+        assert!(!passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_path_opt_out_is_reasoned_and_receipted_cas_a9fc() {
+        let Some(bin) = std::env::var_os("CAS_A9FC_PATH_CHILD") else {
+            let cas = crate::test_support::fake_cas_on_path();
+            path_test_child(
+                "host_path_opt_out_is_reasoned_and_receipted_cas_a9fc",
+                cas.path(),
+                cas.bin(),
+            );
+            return;
+        };
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let cargo = dir.path().join("cargo");
+        fake_cargo(
+            &cargo,
+            r#"command -v cas > target/selected-cas || exit 23
+    printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
+        );
+        let args = [
+            "nextest",
+            "run",
+            "-p",
+            "cas",
+            "--lib",
+            "-E",
+            "test(selected)",
+        ]
+        .map(str::to_string);
+        env.set(
+            HOST_PATH_OPT_OUT,
+            "exercise operator-installed harness integration",
+        );
+        execute_at(&root, &args, &repo, &cargo).unwrap();
+        let receipts = passing_test_receipts(&root, &repo, &fixture_head(&repo));
+        assert!(
+            receipts[0]
+                .contains("[host PATH opt-out: exercise operator-installed harness integration]")
+        );
+        let selected = std::fs::read_to_string(repo.join("target/selected-cas")).unwrap();
+        assert_eq!(Path::new(selected.trim()), PathBuf::from(bin).join("cas"));
+        env.set(HOST_PATH_OPT_OUT, " ");
+        assert!(
+            execute_at(&root, &args, &repo, &cargo)
+                .unwrap_err()
+                .to_string()
+                .contains("nonempty, single-line reason")
+        );
+        assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_fake_cas_fixture_preserves_process_path_cas_a9fc() {
+        let _env = crate::test_support::TestEnvGuard::new();
+        let original = std::env::var_os("PATH");
+        let cas = crate::test_support::fake_cas_on_path();
+        let found = Command::new("sh")
+            .env("PATH", cas.path())
+            .args(["-c", "command -v cas; cas"])
+            .output()
+            .unwrap();
+        assert!(found.status.success());
+        assert_eq!(
+            String::from_utf8(found.stdout).unwrap().trim(),
+            cas.bin().join("cas").to_str().unwrap()
+        );
+        assert_eq!(std::env::var_os("PATH"), original);
     }
 
     #[test]
@@ -1083,7 +1422,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
         );
         let later = now + CONTINUATION_WINDOW + std::time::Duration::from_secs(60);
         assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, later), "stale PASS");
-        write(&pass("abc", &packages, Some(TestReceipt { filter: "test(x)".into(), harness: None, count: 1 })));
+        write(&pass("abc", &packages, Some(TestReceipt { filter: "test(x)".into(), harness: None, count: 1, host_path_opt_out: None })));
         assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, now), "a test receipt");
     }
 

@@ -151,17 +151,32 @@ pub fn resolved_environment(
     overrides: &[(String, String)],
     removed: &[String],
 ) -> BTreeMap<String, String> {
+    resolved_environment_for_references(overrides, removed, &[])
+}
+
+/// Resolve additional explicitly referenced credentials with the same private
+/// file safety, environment precedence and denials as harness launches.
+pub fn resolved_environment_for_references(
+    overrides: &[(String, String)],
+    removed: &[String],
+    references: &[String],
+) -> BTreeMap<String, String> {
     let mut env: BTreeMap<_, _> = std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
         .collect();
     env.extend(overrides.iter().cloned());
-    for name in removed {
-        env.remove(name);
-    }
+    let removed: BTreeSet<_> = removed
+        .iter()
+        .map(|name| cas_types::violet_compatibility::canonical_violet_credential_name(name))
+        .collect();
+    let denied = |name: &str| {
+        removed.contains(&cas_types::violet_compatibility::canonical_violet_credential_name(name))
+    };
+    env.retain(|name, _| !denied(name));
     if let Some(path) = credential_file() {
         for (name, value) in literal_file_values(&path) {
-            if canonical_credential(&name)
-                && !removed.contains(&name)
+            if (canonical_credential(&name) || references.contains(&name))
+                && !denied(&name)
                 && !value.trim().is_empty()
                 && !env.get(&name).is_some_and(|v| !v.trim().is_empty())
             {
@@ -189,6 +204,22 @@ pub fn registration_references(
     harness: &str,
     env: &BTreeMap<String, String>,
 ) -> (PathBuf, BTreeSet<String>) {
+    registration_env_references(harness, env, false)
+}
+
+/// Bearer references only; bypass and unrelated headers cannot select an account.
+pub fn registration_token_references(
+    harness: &str,
+    env: &BTreeMap<String, String>,
+) -> (PathBuf, BTreeSet<String>) {
+    registration_env_references(harness, env, true)
+}
+
+fn registration_env_references(
+    harness: &str,
+    env: &BTreeMap<String, String>,
+    token_only: bool,
+) -> (PathBuf, BTreeSet<String>) {
     let Some(home) = env.get("HOME").map(PathBuf::from) else {
         return (PathBuf::new(), BTreeSet::new());
     };
@@ -205,8 +236,9 @@ pub fn registration_references(
         let names = doc["mcpServers"]["violet"]["headers"]
             .as_object()
             .into_iter()
-            .flat_map(|h| h.values())
-            .filter_map(|v| v.as_str())
+            .flat_map(|h| h.iter())
+            .filter(|(key, _)| !token_only || key.eq_ignore_ascii_case("Authorization"))
+            .filter_map(|(_, v)| v.as_str())
             .flat_map(references)
             .collect::<Vec<_>>();
         (path, names)
@@ -232,8 +264,9 @@ pub fn registration_references(
         {
             names.extend(
                 headers
-                    .values()
-                    .filter_map(|v| v.as_str())
+                    .iter()
+                    .filter(|(key, _)| !token_only || key.eq_ignore_ascii_case("Authorization"))
+                    .filter_map(|(_, v)| v.as_str())
                     .map(str::to_owned),
             );
         }
@@ -324,6 +357,38 @@ mod tests {
             format!("[mcp_servers.violet]\nbearer_token_env_var='{token}'\n"),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn cas_0a4c_review_shared_denials_cover_credential_aliases() {
+        let mut guard = TestEnvGuard::temp_home();
+        let path = guard.home().join("credentials.env");
+        guard.set("CAS_CREDENTIALS_FILE", &path);
+        let canonical = "VIOLET_SLACK_TOKEN_SUPERVISOR";
+        let legacy = format!(
+            "{}_SUPERVISOR",
+            cas_types::violet_compatibility::violet_compatibility().legacy_token_prefix
+        );
+        private_file(
+            &path,
+            &format!("{canonical}='canonical-fixture'\n{legacy}='legacy-fixture'\n"),
+        );
+        guard.set(canonical, "inherited-canonical-fixture");
+        guard.set(&legacy, "inherited-legacy-fixture");
+        for denied in [canonical, legacy.as_str()] {
+            let values =
+                resolved_environment_for_references(&[], &[denied.into()], &[legacy.clone()]);
+            assert!(!values.contains_key(canonical));
+            assert!(!values.contains_key(&legacy));
+        }
+        guard.remove(canonical);
+        guard.remove(&legacy);
+        for denied in [canonical, legacy.as_str()] {
+            let values =
+                resolved_environment_for_references(&[], &[denied.into()], &[legacy.clone()]);
+            assert!(!values.contains_key(canonical));
+            assert!(!values.contains_key(&legacy));
+        }
     }
 
     #[test]

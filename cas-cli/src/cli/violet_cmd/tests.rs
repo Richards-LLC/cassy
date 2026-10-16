@@ -14,6 +14,9 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use tempfile::TempDir;
 
+#[cfg(feature = "mcp-proxy")]
+mod connect_credentials;
+
 #[derive(Default)]
 struct Script {
     replies: VecDeque<Value>,

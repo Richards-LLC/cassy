@@ -1130,8 +1130,15 @@ fn refresh_all_projects(
     hub_restart: Option<&super::hub::HubRestartOutcome>,
     first_launch_ms: Option<u64>,
 ) -> anyhow::Result<RefreshReport> {
-    refresh_all_projects_with_user_refresh(args, cli, current_cas_root, hub_transport_error,
-        hub_restart, first_launch_ms, || refresh_user_level_store(args, cli))
+    refresh_all_projects_with_user_refresh(
+        args,
+        cli,
+        current_cas_root,
+        hub_transport_error,
+        hub_restart,
+        first_launch_ms,
+        || refresh_user_level_store(args, cli),
+    )
 }
 
 fn refresh_all_projects_with_user_refresh(

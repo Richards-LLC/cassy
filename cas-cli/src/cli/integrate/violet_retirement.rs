@@ -8,7 +8,10 @@ use anyhow::{Context, Result};
 use cas_types::violet_compatibility::{
     canonical_violet_credential_name, is_violet_hub_url, violet_compatibility, violet_hub_url,
 };
-use cmcp_core::config::{ExternalToolConfig, Scope, VIOLET_SERVER, VIOLET_TOOLS};
+use cmcp_core::config::{
+    ExternalToolConfig, Scope, VIOLET_SERVER, VIOLET_TOOLS, violet_credential_names,
+    violet_credential_value,
+};
 
 use super::fs as ifs;
 use super::violet::{HubProbe, ProbeOutcome, ProxyHubProbe};
@@ -283,7 +286,9 @@ fn retire_file(path: &Path, format: &str) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
-    if format == "proxy" { validate_proxy_owner(path)?; }
+    if format == "proxy" {
+        validate_proxy_owner(path)?;
+    }
     let raw = ifs::read_capped(path)?;
     if raw.trim().is_empty() {
         return Ok(false);
@@ -351,15 +356,39 @@ fn proxy_update_advisories(project_proxy: Option<&Path>, apply: bool) -> Vec<(Pa
         let result = (|| -> Result<()> {
             match std::fs::symlink_metadata(&path) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(_) if !apply => return Ok(()),
                 Err(error) => return Err(error.into()),
                 Ok(_) => {}
             }
-            validate_proxy_owner(&path)?;
-            let modified = std::fs::metadata(&path)?.modified().ok();
-            let raw = ifs::read_capped(&path)?;
-            let mut doc: toml_edit::DocumentMut = raw
-                .parse()
-                .map_err(|_| anyhow::anyhow!("parsing Violet proxy config {}", path.display()))?;
+            if apply {
+                validate_proxy_owner(&path)?;
+            }
+            let modified = if apply {
+                std::fs::metadata(&path)?.modified().ok()
+            } else {
+                None
+            };
+            // Runtime accepts dotfile symlinks. Doctor may inspect their target,
+            // but only an unusable default warrants a repair refusal advisory.
+            // Read/parse failures belong to the normal doctor configuration row.
+            let read_path = if apply {
+                path.clone()
+            } else {
+                match path.canonicalize() {
+                    Ok(path) => path,
+                    Err(_) => return Ok(()),
+                }
+            };
+            let raw = match ifs::read_capped(&read_path) {
+                Ok(raw) => raw,
+                Err(_) if !apply => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            let mut doc: toml_edit::DocumentMut = match raw.parse() {
+                Ok(doc) => doc,
+                Err(_) if !apply => return Ok(()),
+                Err(_) => anyhow::bail!("parsing Violet proxy config {}", path.display()),
+            };
             if !default_proxy_auth(&doc) {
                 return Ok(());
             }
@@ -372,9 +401,14 @@ fn proxy_update_advisories(project_proxy: Option<&Path>, apply: bool) -> Vec<(Pa
                 }
                 let home =
                     dirs::home_dir().context("could not determine HOME for Violet migration")?;
+                let refs: Vec<_> = registered_update_accounts(&home)
+                    .into_iter()
+                    .chain(std::iter::once("VIOLET_SLACK_TOKEN_CASSY_PROXY".to_owned()))
+                    .flat_map(|name| violet_credential_names(&name))
+                    .collect();
                 update = Some(UpdateMigration::new(
                     &home,
-                    cas_pty::violet_env::resolved_environment(&[], &[]),
+                    cas_pty::violet_env::resolved_environment_for_references(&[], &[], &refs),
                     &ProxyHubProbe,
                 ));
             }
@@ -382,6 +416,14 @@ fn proxy_update_advisories(project_proxy: Option<&Path>, apply: bool) -> Vec<(Pa
             let Some(replacement) = update.proxy_auth_replacement(&doc, &path)? else {
                 return Ok(());
             };
+            if !apply {
+                validate_proxy_owner(&path)?;
+                anyhow::ensure!(
+                    !std::fs::symlink_metadata(&path)?.file_type().is_symlink(),
+                    "{} is a symlink; refusing to write through it",
+                    path.display()
+                );
+            }
             if apply {
                 set_string(
                     &mut doc["servers"][VIOLET_SERVER]["auth"],
@@ -392,10 +434,7 @@ fn proxy_update_advisories(project_proxy: Option<&Path>, apply: bool) -> Vec<(Pa
                     "Violet proxy config changed during credential repair at {}; retry cas update",
                     path.display()
                 );
-                report.credential_repair(format!(
-                    "{}: VIOLET_SLACK_TOKEN_CASSY_PROXY → {replacement} (registered account)",
-                    path.display()
-                ));
+                report.credential_repair(proxy_repair_message(&path, &replacement));
             }
             Ok(())
         })();
@@ -404,6 +443,18 @@ fn proxy_update_advisories(project_proxy: Option<&Path>, apply: bool) -> Vec<(Pa
         }
     }
     warnings
+}
+
+fn proxy_repair_message(path: &Path, replacement: &str) -> String {
+    let scope = if Scope::User.config_path().is_ok_and(|user| user == path) {
+        "; shared user proxy: this account applies to every inheriting profile"
+    } else {
+        ""
+    };
+    format!(
+        "{}: VIOLET_SLACK_TOKEN_CASSY_PROXY → {replacement} (registered account){scope}",
+        path.display()
+    )
 }
 
 fn validate_proxy_owner(path: &Path) -> Result<()> {
@@ -843,15 +894,13 @@ impl<'a> UpdateMigration<'a> {
             &mut doc["servers"][VIOLET_SERVER]["auth"],
             &format!("env:{replacement}"),
         );
-        report.credential_repair(format!(
-            "{}: VIOLET_SLACK_TOKEN_CASSY_PROXY → {replacement} (registered account)",
-            path.display()
-        ));
+        report.credential_repair(proxy_repair_message(path, &replacement));
         Ok(true)
     }
 
     fn usable(&self, name: &str) -> bool {
-        self.values.get(name).is_some_and(|v| !v.trim().is_empty())
+        violet_credential_value(name, |name| self.values.get(name).cloned())
+            .is_some_and(|value| !value.trim().is_empty())
     }
 
     fn managed_token(name: &str) -> bool {
@@ -894,10 +943,8 @@ impl<'a> UpdateMigration<'a> {
     }
 
     fn value(&self, name: &str) -> Result<String> {
-        self.values
-            .get(name)
+        violet_credential_value(name, |name| self.values.get(name).cloned())
             .filter(|v| !v.trim().is_empty())
-            .cloned()
             .with_context(|| {
                 let candidates = if self.candidates.len() > 1 {
                     format!(

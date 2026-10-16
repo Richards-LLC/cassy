@@ -2021,6 +2021,7 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
         assert!(!project.join(path).exists());
         assert!(cas_6718_git(&project, &["ls-files", "--", path]).is_empty());
     }
+    // pin: user bytes outside the CAS block must survive exactly, including blank lines.
     assert!(std::fs::read_to_string(project.join("CLAUDE.md")).unwrap().starts_with("Project instructions stay.\n\n"));
     let first = cas_6718_git(&project, &["rev-parse", "HEAD"]);
     execute(&args, &update_test_cli(true), Some(&root)).unwrap();

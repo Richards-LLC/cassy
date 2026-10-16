@@ -747,3 +747,25 @@ fn cas_4fe2_retirement_cap_warns_once_across_both_pools() {
     assert_eq!(report.warnings.len(), 1, "one cap warning per tick: {report:?}");
     assert!(report.errors.is_empty());
 }
+
+#[tokio::test]
+async fn cas_4ac8_ack_retries_rate_limit_without_readmission() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::{method, path};
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/api/peer-messages/ack"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
+        .up_to_n_times(1).with_priority(1).expect(1).mount(&server).await;
+    Mock::given(method("POST")).and(path("/api/peer-messages/ack"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "results":[{"id":"pm-1","status":200}]
+        }))).expect(1).mount(&server).await;
+    let endpoint = server.uri();
+    let start = std::time::Instant::now();
+    let result = tokio::task::spawn_blocking(move || {
+        HttpPeerMailbox::new(&endpoint, "test-token")
+            .ack("consumer", &[("pm-1".into(), PeerAckOutcome::Delivered)])
+    }).await.unwrap();
+    assert!(result.is_ok(), "{result:?}");
+    assert!(start.elapsed() >= std::time::Duration::from_secs(1));
+}

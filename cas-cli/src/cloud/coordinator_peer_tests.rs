@@ -291,3 +291,44 @@ async fn cas_f707_heartbeat_404_and_401_mean_register_again() {
     assert!(matches!(outcomes[1], HeartbeatError::NotRegistered { status: 401, .. }));
     assert!(matches!(outcomes[2], HeartbeatError::Failed(_)));
 }
+
+#[tokio::test]
+async fn cas_4ac8_shutdown_and_release_retry_after_rate_limit() {
+    for (route, success) in [
+        ("/api/agents/sup-1/shutdown", json!({"released_locks": 2})),
+        ("/api/agents/tasks/cas-one/release", json!({"status":"ok"})),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path(route))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
+            .up_to_n_times(1).with_priority(1).expect(1).mount(&server).await;
+        Mock::given(method("POST")).and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(success))
+            .expect(1).mount(&server).await;
+        let endpoint = server.uri();
+        let started = Instant::now();
+        let result = tokio::task::spawn_blocking(move || {
+            let client = coordinator(&endpoint).with_agent_id("sup-1");
+            if route.ends_with("shutdown") { client.shutdown().map(|n| assert_eq!(n, 2)) }
+            else { client.release("cas-one") }
+        }).await.unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(started.elapsed() >= Duration::from_secs(1), "Retry-After was ignored");
+    }
+}
+
+#[tokio::test]
+async fn cas_4ac8_presence_names_rate_limiting() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/api/agents/register"))
+        .respond_with(ResponseTemplate::new(429)).expect(1).mount(&server).await;
+    let endpoint = server.uri();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let record = tokio::task::spawn_blocking(move || {
+        crate::cloud::presence::register_now(&coordinator(&endpoint), &root,
+            &Agent::new("sup-1".into(), "sup".into()), chrono::Utc::now())
+    }).await.unwrap();
+    assert!(crate::cloud::presence::render_line(Some(&record), chrono::Utc::now())
+        .contains("rate limited"));
+}

@@ -94,3 +94,33 @@ async fn cas_b8e8_deferred_acceptance_and_receipted_claims_close() {
         close_with_reason(reason, false).await;
     }
 }
+
+#[tokio::test]
+async fn cas_b8e8_unrelated_receipts_and_deferrals_do_not_cover_claims() {
+    for reason in [
+        "Local tests passed; artifact://art-1234abcd. Supervisor reports journeys passed",
+        "Local tests passed artifact://art-1234abcd; supervisor reports journeys passed",
+        "Journeys deferred to merge queue; supervisor reports journeys passed",
+        "Supervisor reports journeys passed; run id pending",
+        "Supervisor reports journeys passed; GitHub issue #1235",
+        "QA says the tests passed",
+        "The merge queue will run the journeys after close",
+    ] {
+        close_with_reason(reason, true).await;
+    }
+}
+
+#[tokio::test]
+async fn cas_b8e8_receipt_forms_and_honest_limits_are_accepted() {
+    for reason in [
+        "Supervisor reports tests passed. Run id 123456789",
+        "Reviewer confirms tests passed\nEvidence: artifact://art-1234abcd",
+        "CI green https://github.com/example/repo/actions/runs/123456789",
+        "Supervisor reports tests passed (run_id=123456789)",
+        "Supervisor reports tests passed (CI 123456789)",
+        "Supervisor has not verified the tests; proof deferred to epic assembly",
+        "Full Rust suite deferred to epic assembly where it will run",
+    ] {
+        close_with_reason(reason, false).await;
+    }
+}

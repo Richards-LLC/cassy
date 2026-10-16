@@ -1,5 +1,6 @@
 pub(crate) mod gate_text;
 mod loaded_proof;
+mod proof_claims;
 #[cfg(test)]
 mod loaded_proof_tests;
 mod task_attribution;
@@ -6840,6 +6841,15 @@ impl CasCore {
                 "TASK CLOSE REJECTED: {} is cancelled without delivery, not closed/delivered. Reopen it first if work should resume; otherwise leave its cancellation history intact.",
                 task.id
             )));
+        }
+
+        // GH #1235: a reported/future proof is not completed evidence merely
+        // because verification is disabled or another gate approves the task.
+        if req.reason.as_deref().is_some_and(proof_claims::has_unreceipted_claim) {
+            return Ok(Self::tool_error(
+                "PROOF CLAIM RECEIPT REQUIRED\nCite a run id or artifact id beside each third-party or future proof claim.\nIf it has not run, write \"deferred to <stage>\" instead of claiming a pass."
+                    .to_string(),
+            ));
         }
 
         // cas-099d, recurring after GH #272/#294/#304/#333: close-time

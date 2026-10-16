@@ -240,6 +240,7 @@ async fn session_start(daemon: &EmbeddedDaemon, session_id: &str, name: &str) {
             clone_path: None,
         })
         .await;
+    daemon.await_cloud_presence().await;
 }
 
 /// One daemon heartbeat tick, waiting for its cloud presence upkeep.
@@ -904,4 +905,41 @@ async fn cas_4ac8_session_start_replies_before_slow_cleanup() {
     assert!(started.elapsed() < std::time::Duration::from_millis(500), "reply waited {:?}", started.elapsed());
     daemon.await_cloud_presence().await;
     assert_eq!(fx.cloud.state().registrations.len(), 2);
+}
+
+#[tokio::test]
+async fn cas_4ac8_same_session_resume_can_end_again() {
+    use wiremock::matchers::{method, path};
+    let (fx, daemon) = fixture("cas-571d").await;
+    let id = "same-session-4ac8";
+    Mock::given(method("POST"))
+        .and(path(format!("/api/agents/{id}/shutdown")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"released_locks": 0})))
+        .expect(2).mount(&fx._server).await;
+    session_start(&daemon, id, "resuming").await;
+    let original = crate::store::open_agent_store(&fx.cas_root).unwrap().get(id).unwrap();
+    for incarnation in 0..2 {
+        if incarnation == 1 {
+            let resumed = daemon_for(&fx.cas_root);
+            session_start(&resumed, id, "resuming").await;
+            let row = crate::store::open_agent_store(&fx.cas_root).unwrap().get(id).unwrap();
+            assert!(row.registered_at > original.registered_at);
+            assert!(!crate::cloud::shutdown::is_ended(&fx.cas_root, &row).unwrap());
+            assert_eq!(fx.cloud.state().registrations.len(), 2);
+        }
+        let root = fx.cas_root.clone();
+        tokio::task::spawn_blocking(move || crate::hooks::handlers::handle_session_end(
+            &crate::hooks::HookInput { session_id: id.into(), ..Default::default() }, Some(&root)))
+            .await.unwrap().unwrap();
+        let root = fx.cas_root.clone();
+        let endpoint = fx._server.uri();
+        tokio::task::spawn_blocking(move || {
+            let coordinator = crate::cloud::CloudCoordinator::new(CloudConfig {
+                endpoint, token: Some("synthetic-test-token".into()), ..Default::default()
+            }).unwrap();
+            crate::cloud::shutdown::drain(&root, &coordinator, chrono::Utc::now()).unwrap();
+        }).await.unwrap();
+        let requests = fx._server.received_requests().await.unwrap();
+        assert_eq!(requests.iter().filter(|r| r.url.path().ends_with("/shutdown")).count(), incarnation + 1);
+    }
 }

@@ -2,19 +2,22 @@
 use std::time::{Duration, Instant};
 
 pub(crate) const CLEANUP_BUDGET: Duration = Duration::from_secs(5);
+/// A bad server header must not suspend cleanup or peer mail indefinitely.
+pub(crate) const MAX_RETRY_AFTER: Duration = Duration::from_secs(15 * 60);
 const ATTEMPTS: u32 = 3;
 
 /// Both HTTP Retry-After forms. Invalid values fall back to exponential backoff.
 pub(crate) fn retry_after(response: &ureq::Response) -> Option<Duration> {
     let value = response.header("Retry-After")?.trim();
     if let Ok(seconds) = value.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
+        return Some(Duration::from_secs(seconds).min(MAX_RETRY_AFTER));
     }
     let at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
     Some(
         (at.with_timezone(&chrono::Utc) - chrono::Utc::now())
             .to_std()
-            .unwrap_or_default(),
+            .unwrap_or_default()
+            .min(MAX_RETRY_AFTER),
     )
 }
 

@@ -1854,46 +1854,9 @@ impl EmbeddedDaemon {
                     );
                 }
 
-                // cas-f707: every SessionStart, new or replayed, makes sure
-                // the agent is registered with Cassy Cloud under its repo
-                // identity and current epic focus (cas-e477). A replay of an
-                // already-registered agent does not push again. A failure is
-                // recorded and retried by the owning daemon's heartbeat.
-                let coordinator = self.fresh_cloud_coordinator().await;
-                if let Some(coordinator) = coordinator {
-                    let cas_root = self.config.cas_root.clone();
-                    let agent = agent.clone();
-                    let record = tokio::task::spawn_blocking(move || {
-                        if let Err(error) = crate::cloud::shutdown::drain(&cas_root, &coordinator, Utc::now()) {
-                            tracing::warn!(%error, "startup cloud shutdown drain failed");
-                        }
-                        crate::cloud::presence::ensure_registered(
-                            &coordinator,
-                            &cas_root,
-                            &agent,
-                            Utc::now(),
-                        )
-                    })
-                    .await;
-                    match record {
-                        Ok(record)
-                            if record.state
-                                == crate::cloud::presence::PresenceState::Registered =>
-                        {
-                            eprintln!(
-                                "[Cassy] Cloud registered agent: {}",
-                                &session_id[..8.min(session_id.len())]
-                            );
-                        }
-                        Ok(record) => eprintln!(
-                            "[Cassy] Cloud agent registration failed, will retry: {}",
-                            record.cause.unwrap_or_default()
-                        ),
-                        Err(error) => {
-                            eprintln!("[Cassy] Cloud agent registration did not run: {error}")
-                        }
-                    }
-                }
+                // Cloud work is owned by the daemon, off the socket reply path.
+                // The hook has a 500ms read timeout; cleanup can take five seconds.
+                self.kick_cloud_presence(agent.id.clone()).await;
             }
         }
 
@@ -1932,9 +1895,6 @@ impl EmbeddedDaemon {
     /// failures under SQLite lock contention can cause workers to be
     /// incorrectly marked stale in multi-agent factory sessions.
     async fn send_agent_heartbeat(&self) {
-        // Drain ended identities even when this daemon no longer owns an agent.
-        let presence_id = self.agent_id.read().await.clone().unwrap_or_default();
-        self.kick_cloud_presence(presence_id).await;
         if let Ok(store) = open_agent_store(&self.config.cas_root) {
             // If we don't have an agent_id yet, try to adopt one by PID.
             // This handles the factory case where another daemon owns the
@@ -1957,7 +1917,7 @@ impl EmbeddedDaemon {
                         let mut pid_sessions = self.pid_sessions.write().await;
                         pid_sessions.insert(our_cc_pid, agent.id.clone());
                     }
-                    self.set_agent_id(agent.id).await;
+                    *self.agent_id.write().await = Some(agent.id);
                 }
             }
 
@@ -2073,6 +2033,8 @@ impl EmbeddedDaemon {
                                 let _ = store.mark_stale(&id);
                                 let mut guard = self.agent_id.write().await;
                                 *guard = None;
+                                drop(guard);
+                                self.kick_cloud_presence(String::new()).await;
                                 return;
                             }
                         }
@@ -2126,12 +2088,6 @@ impl EmbeddedDaemon {
                     );
                 }
 
-                // Cloud presence (cas-f707): heartbeat this daemon's own
-                // agent, registering it again when it is unknown to the
-                // cloud, its last registration failed, or its focus moved.
-                // Runs in a blocking task so the async loop never stalls.
-                self.kick_cloud_presence(id.clone()).await;
-
                 // cas-5f28: keep this agent's Cassy Cloud task claims alive
                 // while it works; once it stops, they run out on their own.
                 if succeeded && !terminal && self.cloud_coordinator.read().await.is_some() {
@@ -2165,6 +2121,9 @@ impl EmbeddedDaemon {
                 tracing::debug!(error = %e, "Daemon heartbeat failed");
             }
         }
+        // Exactly one pass per tick, also when no live identity is owned.
+        let presence_id = self.agent_id.read().await.clone().unwrap_or_default();
+        self.kick_cloud_presence(presence_id).await;
     }
 
     /// Run cloud sync cycle

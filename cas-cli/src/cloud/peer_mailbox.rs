@@ -1166,7 +1166,8 @@ impl HttpPeerMailbox {
             let until = chrono::Duration::from_std(delay)
                 .ok()
                 .and_then(|delay| chrono::Utc::now().checked_add_signed(delay))
-                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
+                .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::seconds(
+                    super::rate_limit::MAX_RETRY_AFTER.as_secs() as i64));
             let mut current = self.retry_at.lock().expect("mailbox retry clock");
             *current = Some(current.map_or(until, |previous| previous.max(until)));
         }

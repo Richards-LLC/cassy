@@ -36,9 +36,13 @@ pub fn mailbox_status_section(root: &Path, session: Option<&str>) -> String {
                 .signed_duration_since(health.written_at)
                 .num_seconds()
                 <= 90
-                || health
-                    .next_retry_at
-                    .is_some_and(|at| at > chrono::Utc::now()) =>
+                || health.next_retry_at.is_some_and(|at| {
+                    let cap = health.written_at
+                        + chrono::Duration::seconds(
+                            super::super::rate_limit::MAX_RETRY_AFTER.as_secs() as i64,
+                        );
+                    at.min(cap) > chrono::Utc::now()
+                }) =>
         {
             if health.receiving {
                 let mut text = "Peer mailbox: receiving.\n".to_string();
@@ -101,6 +105,7 @@ impl PeerMailboxRuntime {
             receiving,
             cause: cause.into(),
             next_retry_at: retry_after
+                .map(|delay| delay.min(super::super::rate_limit::MAX_RETRY_AFTER))
                 .and_then(|delay| chrono::Duration::from_std(delay).ok())
                 .and_then(|delay| chrono::Utc::now().checked_add_signed(delay)),
             warnings: warnings.to_vec(),
@@ -241,7 +246,9 @@ impl PeerMailboxPoller {
                 self.failures = self.failures.saturating_add(1);
                 Duration::from_secs((5u64 << self.failures.saturating_sub(1).min(3)).min(30))
             };
-            let delay = delay.max(report.retry_after.unwrap_or_default());
+            let delay = delay
+                .max(report.retry_after.unwrap_or_default())
+                .min(super::super::rate_limit::MAX_RETRY_AFTER);
             if error != self.last_error {
                 if error.is_empty() {
                     tracing::info!("peer mailbox receiving");
@@ -301,6 +308,7 @@ mod rate_limit_tests {
         .unwrap();
         let mut agent = crate::types::Agent::new("supervisor".into(), "supervisor".into());
         agent.role = AgentRole::Supervisor;
+        agent.pid = Some(std::process::id());
         agent.factory_session = Some("factory-retry".into());
         crate::store::open_agent_store(&root)
             .unwrap()
@@ -351,5 +359,36 @@ mod rate_limit_tests {
         let status = mailbox_status_section(temp.path(), Some("retry-session"));
         assert!(status.contains("rate limited"), "{status}");
         assert!(!status.contains("stale"), "{status}");
+    }
+}
+
+#[cfg(test)]
+mod bounded_health_tests {
+    use super::*;
+
+    #[test]
+    fn cas_4ac8_persisted_huge_cooldown_cannot_keep_dead_daemon_fresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = health_path(temp.path(), "huge-delay");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            file,
+            serde_json::to_vec(&serde_json::json!({
+                "written_at": chrono::Utc::now() - chrono::Duration::minutes(20),
+                "receiving": false,
+                "cause": "rate limited (429)",
+                "next_retry_at": chrono::DateTime::<chrono::Utc>::MAX_UTC,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(mailbox_status_section(temp.path(), Some("huge-delay")).contains("stale"));
+        let runtime = PeerMailboxRuntime::start(temp.path(), "new-delay").unwrap();
+        runtime.record_health(false, "rate limited (429)", &[], Some(Duration::MAX));
+        let health: MailboxHealth =
+            serde_json::from_slice(&std::fs::read(health_path(temp.path(), "new-delay")).unwrap())
+                .unwrap();
+        let delay = health.next_retry_at.unwrap() - health.written_at;
+        assert!(delay >= chrono::Duration::seconds(899) && delay <= chrono::Duration::seconds(901));
     }
 }

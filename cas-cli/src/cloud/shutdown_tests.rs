@@ -5,6 +5,22 @@ use crate::test_support::TestEnvGuard;
 use wiremock::matchers::{method, path as http_path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+// Stable incarnation across repeated enqueue calls; production passes the real row.
+fn ended_agent(agent: &str, session: &str) -> Agent {
+    let mut row = Agent::new(agent.into(), agent.into());
+    row.registered_at = DateTime::<Utc>::UNIX_EPOCH;
+    row.cc_session_id = Some(session.into());
+    row
+}
+
+fn enqueue(root: &Path, agent: &str, session: &str, endpoint: &str) -> std::io::Result<()> {
+    super::enqueue(root, &ended_agent(agent, session), session, endpoint)
+}
+
+fn path(root: &Path, agent: &str, session: &str) -> PathBuf {
+    incarnation_path(root, &ended_agent(agent, session), session)
+}
+
 fn client(endpoint: &str) -> CloudCoordinator {
     CloudCoordinator::new(CloudConfig {
         endpoint: endpoint.into(),
@@ -40,16 +56,26 @@ async fn cas_4ac8_persistent_rate_limit_is_scheduled_then_expires_visibly() {
     tokio::task::spawn_blocking(move || {
         let coordinator = client(&endpoint);
         drain(&r, &coordinator, now).unwrap();
+        let scheduled = read(&path(&r, "ended", "session-one")).unwrap();
+        assert!(scheduled.next_retry_at >= now + chrono::Duration::seconds(600));
         drain(&r, &coordinator, now + chrono::Duration::seconds(10)).unwrap();
         drain(&r, &coordinator, now + chrono::Duration::hours(25)).unwrap();
     })
     .await
     .unwrap();
-    let intent = read(&path(&root, "ended", "session-one")).unwrap();
-    assert!(intent.next_retry_at >= now + chrono::Duration::seconds(600));
+    assert!(!path(&root, "ended", "session-one").exists());
+    let retained: ExpiredHealth = serde_json::from_slice(
+        &std::fs::read(
+            root.join(DIR)
+                .join("expired")
+                .join(path(&root, "ended", "session-one").file_name().unwrap()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(retained.cause.contains("rate limited"));
     assert!(health(&root, now).contains("rate limited"));
     assert!(health(&root, now + chrono::Duration::hours(25)).contains("expired 1"));
-    assert!(intent.completed_at.is_none());
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
@@ -94,9 +120,9 @@ async fn cas_4ac8_drain_retries_fallback_and_completed_intent_fences_old_session
     .unwrap();
     assert!(started.elapsed() >= std::time::Duration::from_millis(600));
     assert!(health(&root, Utc::now()).is_empty());
-    let mut old = Agent::new("ended".into(), "same".into());
+    let mut old = ended_agent("ended", "old");
     old.cc_session_id = Some("old".into());
-    assert!(is_ended(&root, &old));
+    assert!(is_ended(&root, &old).unwrap());
     let coordinator = client(&server.uri());
     assert_eq!(
         crate::cloud::presence::tick(&coordinator, &root, &old, Utc::now()),
@@ -107,7 +133,7 @@ async fn cas_4ac8_drain_retries_fallback_and_completed_intent_fences_old_session
         crate::cloud::presence::PresenceState::Failing
     );
     old.cc_session_id = Some("new".into());
-    assert!(!is_ended(&root, &old));
+    assert!(!is_ended(&root, &old).unwrap());
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 3);
     let recorded = times.lock().unwrap();
@@ -178,14 +204,21 @@ async fn cas_4ac8_resume_same_session_supersedes_pending_completed_and_expired()
         enqueue(&root, state, "same-session", &server.uri()).unwrap();
         let file = path(&root, state, "same-session");
         let mut intent = read(&file).unwrap();
-        if state == "completed" { intent.completed_at = Some(Utc::now()); }
-        if state == "expired" { intent.expires_at = Utc::now() - chrono::Duration::seconds(1); }
+        if state == "completed" {
+            intent.completed_at = Some(Utc::now());
+        }
+        if state == "expired" {
+            intent.expires_at = Utc::now() - chrono::Duration::seconds(1);
+        }
         write(&file, &intent, false).unwrap();
         let mut resumed = Agent::new(state.into(), state.into());
         resumed.cc_session_id = Some("same-session".into());
         resumed.registered_at = intent.created_at + chrono::Duration::seconds(1);
         open_agent_store(&root).unwrap().register(&resumed).unwrap();
-        assert!(!is_ended(&root, &resumed), "{state} must allow a newer incarnation");
+        assert!(
+            !is_ended(&root, &resumed).unwrap(),
+            "{state} must allow a newer incarnation"
+        );
     }
     drain(&root, &client(&server.uri()), Utc::now()).unwrap();
     assert!(server.received_requests().await.unwrap().is_empty());
@@ -197,11 +230,18 @@ fn cas_4ac8_presence_readers_share_lease_and_exclude_drain() {
     let temp = tempfile::tempdir().unwrap();
     let first = presence_lease(temp.path()).unwrap().unwrap();
     let second = presence_lease(temp.path()).unwrap();
-    assert!(second.is_some(), "different presence readers must run concurrently");
-    let exclusive = OpenOptions::new().read(true).write(true)
-        .open(temp.path().join(DIR).join("drain.lock")).unwrap();
+    assert!(
+        second.is_some(),
+        "different presence readers must run concurrently"
+    );
+    let exclusive = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(temp.path().join(DIR).join("drain.lock"))
+        .unwrap();
     assert!(exclusive.try_lock_exclusive().is_err());
-    drop(first); drop(second);
+    drop(first);
+    drop(second);
     exclusive.try_lock_exclusive().unwrap();
     assert!(presence_lease(temp.path()).unwrap().is_none());
 }
@@ -225,20 +265,51 @@ fn cas_4ac8_unreadable_intent_reports_io_error() {
     let root = env.home();
     let mut agent = Agent::new("ended".into(), "ended".into());
     agent.cc_session_id = Some("session".into());
-    let file = path(root, "ended", "session");
+    let file = super::path(root, "ended", "session");
     std::fs::create_dir_all(&file).unwrap();
-    let outcome = crate::cloud::presence::tick(&client("http://example.invalid"), root, &agent, Utc::now());
-    assert!(matches!(outcome, crate::cloud::presence::TickAction::Failed(ref cause) if cause.contains("shutdown intent")), "{outcome:?}");
+    let outcome =
+        crate::cloud::presence::tick(&client("http://example.invalid"), root, &agent, Utc::now());
+    assert!(
+        matches!(outcome, crate::cloud::presence::TickAction::Failed(ref cause) if cause.contains("shutdown intent")),
+        "{outcome:?}"
+    );
 }
 
 #[test]
 fn cas_4ac8_retry_after_is_capped_for_seconds_and_http_dates() {
-    for value in ["86400".to_string(), u64::MAX.to_string(),
-        (Utc::now() + chrono::Duration::days(365)).to_rfc2822()] {
+    for value in [
+        "86400".to_string(),
+        u64::MAX.to_string(),
+        (Utc::now() + chrono::Duration::days(365)).to_rfc2822(),
+    ] {
         // Response construction from raw HTTP retains the real header parser.
-        let raw = format!("HTTP/1.1 429 Too Many Requests\r\nRetry-After: {value}\r\nContent-Length: 0\r\n\r\n");
+        let raw = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: {value}\r\nContent-Length: 0\r\n\r\n"
+        );
         let response: ureq::Response = raw.parse().unwrap();
-        assert_eq!(rate_limit::retry_after(&response), Some(std::time::Duration::from_secs(900)), "{value}");
+        assert_eq!(
+            rate_limit::retry_after(&response),
+            Some(std::time::Duration::from_secs(900)),
+            "{value}"
+        );
         drop(response);
     }
+}
+
+#[test]
+fn cas_4ac8_legacy_fence_allows_resumes_and_expiry() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut old = ended_agent("ended", "same");
+    enqueue(temp.path(), "ended", "same", "http://example.invalid").unwrap();
+    let file = path(temp.path(), "ended", "same");
+    let mut intent = read(&file).unwrap();
+    let legacy = super::path(temp.path(), "ended", "same");
+    std::fs::rename(&file, &legacy).unwrap();
+    assert!(is_ended(temp.path(), &old).unwrap());
+    old.registered_at = intent.created_at + chrono::Duration::seconds(1);
+    assert!(!is_ended(temp.path(), &old).unwrap());
+    old.registered_at = DateTime::<Utc>::UNIX_EPOCH;
+    intent.expires_at = Utc::now() - chrono::Duration::seconds(1);
+    write(&legacy, &intent, false).unwrap();
+    assert!(!is_ended(temp.path(), &old).unwrap());
 }

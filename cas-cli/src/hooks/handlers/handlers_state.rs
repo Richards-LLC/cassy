@@ -194,7 +194,7 @@ pub(crate) fn cleanup_agent_leases(
     // a daemon (including one started by the next session) owns bounded retry.
     if let Some(coordinator) = crate::cloud::presence::project_coordinator(cas_root)
         && let Err(error) = crate::cloud::shutdown::enqueue(
-            cas_root, &agent.id, session_id, &coordinator.cloud_config().endpoint,
+            cas_root, &agent, session_id, &coordinator.cloud_config().endpoint,
         )
     {
         tracing::error!(agent_id = %agent.id, %error, "could not persist cloud shutdown; preserving local identity");

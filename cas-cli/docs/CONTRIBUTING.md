@@ -126,13 +126,16 @@ SessionEnd writes an atomic intent under `.cas/cloud_shutdown/` before deleting
 the local agent. Hooks make no HTTP requests. The embedded daemon drains intents
 at session startup and on its off-loop presence heartbeat, including when it has
 no owned active agent. If no daemon starts, cleanup waits for the next daemon.
-Intents are keyed by agent and harness session; registration, heartbeat and
-shutdown share a nonblocking project lease, and ended sessions cannot register
-again. A rebound agent's newer session is preserved.
+Intents are keyed by agent, harness session and registration timestamp. Presence
+requests share a nonblocking read lease; shutdown takes the exclusive lease.
+A resumed session with a newer registration supersedes older cleanup, including
+legacy intents, and its own SessionEnd creates separate cleanup. Startup replies
+without waiting for Cloud work.
 
 Shutdown, claim release and peer ACK retry HTTP 429 up to three attempts within
 five seconds (or a caller's shorter budget). `Retry-After` seconds and HTTP dates
-are respected; absent or invalid values use 200 ms then 400 ms backoff. A delay
+are respected up to 15 minutes; absent or invalid values use 200 ms then 400 ms
+backoff. A delay
 outside the HTTP budget returns a named rate-limit failure. Durable shutdown
 intents and the mailbox poller preserve longer server delays across later passes;
 mailbox health remains current while waiting for that scheduled retry. Within a
@@ -140,12 +143,13 @@ mailbox pass, later claim chunks, ACKs and metadata requests share the cooldown;
 already claimed messages remain eligible for local admission and later ACK.
 
 Presence and worker status show pending cleanup and its cause even after the
-agent row is gone. After 24 hours a failed intent expires, remains visible for
-operator inspection, and stops retrying. Inspect `.cas/cloud_shutdown/` alongside
-Cloud presence before removing an expired record; removing it does not perform
-shutdown. Successful intents stop appearing in health immediately and retain a
-session fence until their 24-hour retention ends. Intents contain no tokens or
-arbitrary agent metadata.
+agent row is gone. After 24 hours a failed intent expires and stops retrying.
+The daemon retains its agent id and cause under `.cas/cloud_shutdown/expired/`
+before pruning the work item. Inspect these records alongside Cloud presence;
+removing a diagnostic does not perform shutdown. Successful intents stop
+appearing in health immediately and retain an incarnation fence until their
+24-hour retention ends. Completed-only passes need no store or network lease.
+Intents contain no tokens or arbitrary agent metadata.
 
 ## Project issue repository reads
 

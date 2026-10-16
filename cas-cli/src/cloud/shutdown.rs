@@ -1,6 +1,6 @@
 //! Durable SessionEnd cleanup. Hooks only enqueue; daemon presence work drains.
-//! Completed intents fence late local heartbeats until their 24-hour retention
-//! ends. Neither tokens nor agent metadata are copied into the intent.
+//! Intents belong to a registration incarnation, including same-session resumes.
+//! Neither tokens nor agent metadata are copied into the intent.
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -38,6 +38,16 @@ fn path(root: &Path, agent: &str, session: &str) -> PathBuf {
     ))
 }
 
+fn incarnation_path(root: &Path, agent: &Agent, session: &str) -> PathBuf {
+    root.join(DIR).join(format!(
+        "{:x}.json",
+        Sha256::digest(
+            serde_json::to_vec(&(&agent.id, session, agent.registered_at))
+                .expect("incarnation serializes")
+        )
+    ))
+}
+
 fn write(path: &Path, intent: &Intent, create: bool) -> std::io::Result<()> {
     let parent = path.parent().expect("intent directory");
     std::fs::create_dir_all(parent)?;
@@ -59,15 +69,15 @@ fn write(path: &Path, intent: &Intent, create: bool) -> std::io::Result<()> {
 /// Local, atomic and idempotent. A repeated SessionEnd does not reset the TTL.
 pub(crate) fn enqueue(
     root: &Path,
-    agent: &str,
+    agent: &Agent,
     session: &str,
     endpoint: &str,
 ) -> std::io::Result<()> {
     let now = Utc::now();
     write(
-        &path(root, agent, session),
+        &incarnation_path(root, agent, session),
         &Intent {
-            agent_id: agent.into(),
+            agent_id: agent.id.clone(),
             session_id: session.into(),
             endpoint: endpoint.into(),
             created_at: now,
@@ -81,20 +91,29 @@ pub(crate) fn enqueue(
     )
 }
 
-/// Do not register/heartbeat a cloned agent after its SessionEnd has queued
-/// cleanup. A new session using the same durable id has a different key.
-pub(crate) fn is_ended(root: &Path, agent: &Agent) -> bool {
-    path(
-        root,
-        &agent.id,
-        agent.cc_session_id.as_deref().unwrap_or(&agent.id),
-    )
-    .try_exists()
-    .unwrap_or(true)
+/// Fence only this incarnation. Legacy intents are superseded by a newer
+/// registration too; filesystem failures must remain distinguishable from end.
+pub(crate) fn is_ended(root: &Path, agent: &Agent) -> Result<bool, String> {
+    let session = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
+    for file in [
+        incarnation_path(root, agent, session),
+        path(root, &agent.id, session),
+    ] {
+        match read(&file) {
+            Ok(intent)
+                if agent.registered_at <= intent.created_at && Utc::now() < intent.expires_at =>
+            {
+                return Ok(true);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("shutdown intent unavailable: {error}")),
+        }
+    }
+    Ok(false)
 }
 
-fn paths(root: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let dir = root.join(DIR);
+fn json_paths(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -109,8 +128,35 @@ fn paths(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+fn paths(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    json_paths(&root.join(DIR))
+}
+
 fn read(path: &Path) -> std::io::Result<Intent> {
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExpiredHealth {
+    agent_id: String,
+    cause: String,
+}
+
+/// Retain the diagnostic before removing the expired work item. The exclusive
+/// drain lease serializes this with other daemons; rename makes crash replay safe.
+fn retain_expired(root: &Path, file: &Path, intent: &Intent) -> std::io::Result<()> {
+    let dir = root.join(DIR).join("expired");
+    std::fs::create_dir_all(&dir)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
+    tmp.write_all(&serde_json::to_vec(&ExpiredHealth {
+        agent_id: intent.agent_id.clone(),
+        cause: intent.cause.clone(),
+    })?)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(dir.join(file.file_name().expect("intent filename")))
+        .map_err(|error| error.error)?;
+    File::open(&dir)?.sync_all()?;
+    std::fs::remove_file(file)
 }
 
 /// Local status includes failed and expired intents even after the ended
@@ -138,6 +184,21 @@ pub(crate) fn health(root: &Path, now: DateTime<Utc>) -> String {
                 causes.push(format!("{}: {}", intent.agent_id, intent.cause));
             }
         }
+        for file in json_paths(&root.join(DIR).join("expired"))? {
+            // A crash between durable health and unlink must not double-count.
+            if root
+                .join(DIR)
+                .join(file.file_name().expect("health filename"))
+                .exists()
+            {
+                continue;
+            }
+            let record: ExpiredHealth = serde_json::from_slice(&std::fs::read(file)?)?;
+            expired += 1;
+            if causes.len() < 3 {
+                causes.push(format!("{}: {}", record.agent_id, record.cause));
+            }
+        }
         if pending + expired == 0 {
             return Ok(String::new());
         }
@@ -162,10 +223,9 @@ pub(crate) fn health(root: &Path, now: DateTime<Utc>) -> String {
     })
 }
 
-/// Registration/heartbeat and shutdown share this nonblocking lease. An
-/// in-flight registration finishes before cleanup, so it cannot resurrect an
-/// agent after shutdown. Hooks do not acquire this network-work lease.
-pub(crate) fn presence_lease(root: &Path) -> Result<Option<File>, String> {
+/// Readers can register/heartbeat concurrently; cleanup excludes all readers.
+/// Hooks do not acquire this network-work lease.
+fn lease(root: &Path, exclusive: bool) -> Result<Option<File>, String> {
     std::fs::create_dir_all(root.join(DIR)).map_err(|error| error.to_string())?;
     let lock = OpenOptions::new()
         .create(true)
@@ -174,11 +234,20 @@ pub(crate) fn presence_lease(root: &Path) -> Result<Option<File>, String> {
         .write(true)
         .open(root.join(DIR).join("drain.lock"))
         .map_err(|error| error.to_string())?;
-    match lock.try_lock_exclusive() {
+    let result = if exclusive {
+        FileExt::try_lock_exclusive(&lock)
+    } else {
+        FileExt::try_lock_shared(&lock)
+    };
+    match result {
         Ok(()) => Ok(Some(lock)),
         Err(error) if error.kind() == fs2::lock_contended_error().kind() => Ok(None),
         Err(error) => Err(error.to_string()),
     }
+}
+
+pub(crate) fn presence_lease(root: &Path) -> Result<Option<File>, String> {
+    lease(root, false)
 }
 
 /// One nonblocking lease per project prevents concurrent daemons from sending
@@ -188,11 +257,32 @@ pub(crate) fn drain(
     coordinator: &CloudCoordinator,
     now: DateTime<Utc>,
 ) -> Result<(), String> {
-    let files = paths(root).map_err(|error| error.to_string())?;
+    // Completed fences need no store or network lease on every heartbeat.
+    let files: Vec<_> = paths(root)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|file| match read(file) {
+            Ok(intent) if intent.completed_at.is_some() => {
+                if now >= intent.expires_at {
+                    if let Err(error) = std::fs::remove_file(file) {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(%error, "could not prune completed shutdown intent");
+                        }
+                    }
+                }
+                false
+            }
+            Ok(intent) => now >= intent.next_retry_at || now >= intent.expires_at,
+            Err(error) => {
+                tracing::warn!(path=%file.display(), %error, "unreadable cloud shutdown intent");
+                false
+            }
+        })
+        .collect();
     if files.is_empty() {
         return Ok(());
     }
-    let Some(_lease) = presence_lease(root)? else {
+    let Some(_lease) = lease(root, true)? else {
         return Ok(());
     };
     let deadline = Instant::now() + rate_limit::CLEANUP_BUDGET;
@@ -206,12 +296,6 @@ pub(crate) fn drain(
             }
         };
         if intent.completed_at.is_some() {
-            if now >= intent.expires_at {
-                std::fs::remove_file(&file).map_err(|error| error.to_string())?;
-            }
-            continue;
-        }
-        if now >= intent.expires_at || now < intent.next_retry_at {
             continue;
         }
         let left = deadline.saturating_duration_since(Instant::now());
@@ -232,13 +316,19 @@ pub(crate) fn drain(
             }
         };
         if current.is_some_and(|agent| {
-            agent
-                .cc_session_id
-                .as_deref()
-                .is_some_and(|session| session != intent.session_id)
+            agent.registered_at > intent.created_at
+                || agent
+                    .cc_session_id
+                    .as_deref()
+                    .is_some_and(|session| session != intent.session_id)
         }) {
             intent.completed_at = Some(now);
-            intent.cause = "superseded by a new local session".into();
+            intent.cause = "superseded by a new local registration".into();
+        } else if now >= intent.expires_at {
+            retain_expired(root, &file, &intent).map_err(|error| error.to_string())?;
+            continue;
+        } else if now < intent.next_retry_at {
+            continue;
         } else if coordinator.cloud_config().endpoint != intent.endpoint {
             intent.cause = "cloud endpoint changed; awaiting original endpoint".into();
             intent.next_retry_at = now + chrono::Duration::minutes(5);

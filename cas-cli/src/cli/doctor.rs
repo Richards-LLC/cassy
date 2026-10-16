@@ -9790,17 +9790,24 @@ mod tests {
         );
     }
 
-    /// `cas-3efe`: when neon is configured but the live client can't reach
-    /// the platform (LiveNeonClient is a placeholder that always errors),
-    /// every recorded branch becomes McpUnreachable. Doctor reports
-    /// "skipped — MCP not configured" at Warning severity rather than
-    /// hard-failing — so the whole `cas doctor` run still exits cleanly
-    /// in CI environments without an MCP server.
+    /// `cas-3efe`: recorded Neon IDs without an MCP server produce a Warning
+    /// and "MCP not configured", rather than hard-failing doctor.
     #[test]
     fn integration_checks_neon_mcp_unreachable_is_skipped_not_error() {
-        // The binary installs this before dispatch; this standalone library test
-        // exercises reqwest without passing through main.
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        // cas-eba9: the live client merges project and user MCP config. Keep
+        // both scopes private so this unavailable-server fixture cannot spawn
+        // installed Neon/Playwright children that retain nextest's stderr.
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        #[cfg(feature = "mcp-proxy")]
+        {
+            let project = crate::cli::integrate::proxy::proxy_config_path();
+            let config = cmcp_core::config::Config::load_merged(project.as_deref()).unwrap();
+            assert!(
+                config.servers.is_empty(),
+                "unreachable Neon fixture must not inherit configured MCP servers"
+            );
+        }
         let repo = TempDir::new().unwrap();
         let neon_skill = repo.path().join(".claude/skills/neon-database/SKILL.md");
         fs::create_dir_all(neon_skill.parent().unwrap()).unwrap();

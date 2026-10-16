@@ -871,16 +871,24 @@ fn prefer_fresher_base_ref(
 
     match (behind, ahead) {
         (0, _) => (None, None),
-        (behind, 0) => (
-            full_sha(repo_root, &remote),
-            Some(format!(
+        (behind, 0) => {
+            let git = crate::worktree::GitOperations::new(repo_root.to_path_buf());
+            let advance = git.advance_local_branch(
+                base,
+                &full_sha(repo_root, base).expect("resolved local base"),
+                &full_sha(repo_root, &remote).expect("resolved remote base"),
+            );
+            let state = match advance {
+                Ok(()) => "The local branch was fast-forwarded to the fetched tip.".to_string(),
+                Err(error) => format!("The local branch was preserved: {error}. Reconcile its checkout before retrying."),
+            };
+            (full_sha(repo_root, &remote), Some(format!(
                 "SPAWN BASE REFRESHED: local '{base}' ({local_sha}) is {behind} commit(s) behind \
                  '{remote}' ({remote_sha}); the worker worktree was cut from '{remote}' \
                  ({remote_sha}) so it starts on the fetched tip instead of the stale local ref \
-                 (cas-d897 / GH #146). Update the local branch \
-                 (`git fetch && git branch -f {base} {remote}`) to keep the two in step."
-            )),
-        ),
+                 (cas-d897 / GH #146). {state}"
+            )))
+        },
         (behind, ahead) => (
             None,
             Some(format!(

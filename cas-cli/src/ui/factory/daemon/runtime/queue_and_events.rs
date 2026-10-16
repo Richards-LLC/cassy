@@ -984,13 +984,21 @@ fn enqueue_spawn_warning_notice(
         .unwrap_or_else(|| "direct spawn".to_string());
     let summary = format!("Worker spawn base warning: {worker_name}");
     let message = format!("Factory spawn {request} for worker '{worker_name}': {warning}");
-    let id = queue.enqueue_with_summary(
-        "director",
-        supervisor_name,
-        &message,
-        Some(factory_session),
-        Some(&summary),
-    )?;
+    let refreshed = warning.strip_prefix("SPAWN BASE REFRESHED: local '")
+        .and_then(|detail| detail.split_once(") ").map(|(identity, _)| identity));
+    let id = if let Some(identity) = refreshed {
+        // Identity contains the branch and original stale tip, never a worker,
+        // request or changing remote tip. All provisioners share this ledger.
+        match queue.enqueue_idempotent(
+            "director", supervisor_name, &message, Some(factory_session), Some(&summary),
+            None, &format!("spawn-base-refreshed:{identity}"), Some(&cas_store::QueueOrigin::Daemon),
+        )? {
+            cas_store::EnqueueIdempotentResult::Created(id)
+            | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+        }
+    } else {
+        queue.enqueue_with_summary("director", supervisor_name, &message, Some(factory_session), Some(&summary))?
+    };
     super::delivery::wake_daemon_after_enqueue(cas_dir);
     Ok(id)
 }

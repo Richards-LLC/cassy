@@ -7,7 +7,11 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .current_dir(repo)
         .output()
         .unwrap();
-    assert!(result.status.success(), "{args:?}: {}", String::from_utf8_lossy(&result.stderr));
+    assert!(
+        result.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     String::from_utf8(result.stdout).unwrap().trim().to_string()
 }
 
@@ -33,10 +37,17 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
     std::fs::write(repo.join("base"), "current").unwrap();
     git(&repo, &["commit", "-am", "advance parent"]);
     let base = git(&repo, &["rev-parse", "main"]);
-    git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
     git(&repo, &["push", "origin", "main"]);
     let root = crate::store::init_cas_dir(&repo).unwrap();
-    std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"publication-test\"\n").unwrap();
+    std::fs::write(
+        root.join("config.toml"),
+        "[project]\ncanonical_id = \"publication-test\"\n",
+    )
+    .unwrap();
     let mut epic = cas_types::Task::new("cas-unpublished".into(), "Unpublished epic".into());
     epic.task_type = cas_types::TaskType::Epic;
     epic.branch = Some("epic/unpublished".into());
@@ -44,19 +55,50 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
         repo_selector: "project:publication-test".into(),
         target_branch: "main".into(),
     });
-    crate::store::open_task_store(&root).unwrap().add(&epic).unwrap();
-    let receipt = focus_epic(&root, "publication-test", FocusEpic::Pin {
-        epic_id: &epic.id, delivery_mode: None,
-    }).unwrap();
+    crate::store::open_task_store(&root)
+        .unwrap()
+        .add(&epic)
+        .unwrap();
+    let metadata = crate::ui::factory::metadata_path("publication-test");
+    std::fs::create_dir_all(metadata.parent().unwrap()).unwrap();
+    let session = crate::ui::factory::create_metadata(
+        "publication-test",
+        12345,
+        "supervisor",
+        &[],
+        None,
+        repo.to_str(),
+        None,
+    );
+    std::fs::write(metadata, serde_json::to_string(&session).unwrap()).unwrap();
+    let receipt = focus_epic(
+        &root,
+        "publication-test",
+        FocusEpic::Pin {
+            epic_id: &epic.id,
+            delivery_mode: None,
+        },
+    )
+    .unwrap();
     assert_eq!(
-        git(&origin, &["rev-parse", "refs/heads/epic/unpublished"]), base,
+        git(&origin, &["rev-parse", "refs/heads/epic/unpublished"]),
+        base,
         "focus must publish the missing remote epic at its recorded base"
     );
     assert_eq!(git(&repo, &["rev-parse", "epic/unpublished"]), base);
-    assert!(receipt.contains("published") && receipt.contains("epic/unpublished"), "{receipt}");
+    assert!(
+        receipt.contains("published") && receipt.contains("epic/unpublished"),
+        "{receipt}"
+    );
     assert!(receipt.contains("FAST-FORWARDED"), "{receipt}");
-    let repeated = focus_epic(&root, "publication-test", FocusEpic::Pin {
-        epic_id: &epic.id, delivery_mode: None,
-    }).unwrap();
+    let repeated = focus_epic(
+        &root,
+        "publication-test",
+        FocusEpic::Pin {
+            epic_id: &epic.id,
+            delivery_mode: None,
+        },
+    )
+    .unwrap();
     assert!(!repeated.contains("FAST-FORWARDED"), "{repeated}");
 }

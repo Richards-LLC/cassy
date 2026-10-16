@@ -251,13 +251,19 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         return Ok(Vec::new());
     };
     let qa = config.qa();
-    if !qa.evidence_gate
+    let batch_mode = qa.mode == crate::config::QaMode::Batch;
+    let deferred = batch_mode && cas_store::has_qa_batch_deferral(cas_root, &task.id)
+        .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read batch deferral: {e}"))?;
+    if (!qa.evidence_gate
         || task.task_type == TaskType::Epic
-        || task.execution_note.as_deref() == Some("no-code")
+        || task.execution_note.as_deref() == Some("no-code")) && !deferred
     {
         return Ok(Vec::new());
     }
     let Some(head) = delivered_head(task, repo, target_branch, commit_receipt) else {
+        if deferred {
+            return Err("QA EVIDENCE REJECTED: deferred batch delivery has no resolvable head; restore its delivery anchor and record a batch_receipt".into());
+        }
         return Ok(Vec::new());
     };
     let range = (!target_branch.is_empty())
@@ -299,15 +305,12 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         deployed_origins: &qa.deployed_origins,
     };
     let tier = evidence_tier(&reasons, terminal_render);
-    let batch_mode = qa.mode == crate::config::QaMode::Batch;
     let batch_receipt = if batch_mode {
         crate::qa_batch::satisfying_receipt(cas_root, task, repo, target_branch, &head)
             .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read batch receipts: {e}"))?
     } else { None };
     let integrated = batch_mode.then(|| crate::qa_batch::target_tip(repo, target_branch)
         .and_then(|tip| crate::qa_batch::ancestor(repo, &head, &tip))).flatten();
-    let deferred = batch_mode && cas_store::has_qa_batch_deferral(cas_root, &task.id)
-        .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read batch deferral: {e}"))?;
     if deferred && integrated != Some(false) && batch_receipt.is_none() {
         return Err(format!("QA EVIDENCE REJECTED: {} deferred evidence at its batch park; a valid batch_receipt listing this delivery anchor on the configured target is required before close", task.id));
     }

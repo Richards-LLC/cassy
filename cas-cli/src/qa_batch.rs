@@ -93,6 +93,14 @@ pub(crate) fn validate_ledger(
         return Err("published ledger must be Markdown or plain text".into());
     }
     let config = crate::config::Config::load(root).map_err(|e| e.to_string())?;
+    let owner = crate::store::open_task_store(root)
+        .map_err(|e| e.to_string())?
+        .get(&artifact.task_id)
+        .map_err(|e| e.to_string())?;
+    let project = crate::cloud::resolve_canonical_id(root);
+    if !crate::mcp::tools::core::task::task_belongs_to_project(&owner, project.as_deref()) {
+        return Err("ledger artifact owner belongs to another project".into());
+    }
     let paths = crate::config::resolved_factory_artifact_paths(
         root,
         config.factory().artifacts_root.as_deref(),

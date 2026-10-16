@@ -71,7 +71,9 @@ fn record_worker_mcp_activity(core: &CasCore, tool: &str, action: &str) {
     let Ok(agents) = core.open_agent_store() else { return };
     let Ok(agent) = agents.get(&id) else { return };
     if agent.role != AgentRole::Worker {
-        permit.not_worker = true;
+        // Standard is a bootstrap role: registration can reconcile the same
+        // caller to Worker after this request. Only stable factory roles cache.
+        permit.not_worker = matches!(agent.role, AgentRole::Supervisor | AgentRole::Director);
         return;
     }
     if !matches!(agent.status, AgentStatus::Active | AgentStatus::Idle) {
@@ -701,31 +703,33 @@ mod tests {
     fn cas_4e19_authenticated_non_worker_verdict_skips_store_access_across_clones() {
         use crate::mcp::server::{AgentIdentitySource, CasCore};
         let _env = crate::test_support::TestEnvGuard::temp_home();
-        let dir = tempfile::TempDir::new().unwrap();
-        let root = crate::store::init_cas_dir(dir.path()).unwrap();
-        let core = CasCore::with_daemon(root.clone(), None, None);
-        let supervisor = cas_types::Agent::new_with_role("cached-supervisor".into(), "cached-supervisor".into(), cas_types::AgentRole::Supervisor);
-        core.open_agent_store().unwrap().register(&supervisor).unwrap();
-        core.bind_agent_identity(supervisor.id.clone(), AgentIdentitySource::ServerInternal).unwrap();
-        super::record_worker_mcp_activity(&core, "task", "notes");
-        let before = cas_store::wait_budget::store_access_violations();
-        {
-            let _forbid = cas_store::wait_budget::forbid_store_access();
-            for _ in 0..16 {
-                super::record_worker_mcp_activity(&core.clone(), "task", "notes");
+        for role in [cas_types::AgentRole::Supervisor, cas_types::AgentRole::Director] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let root = crate::store::init_cas_dir(dir.path()).unwrap();
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let supervisor = cas_types::Agent::new_with_role("cached-supervisor".into(), "cached-supervisor".into(), role);
+            core.open_agent_store().unwrap().register(&supervisor).unwrap();
+            core.bind_agent_identity(supervisor.id.clone(), AgentIdentitySource::ServerInternal).unwrap();
+            super::record_worker_mcp_activity(&core, "task", "notes");
+            let before = cas_store::wait_budget::store_access_violations();
+            {
+                let _forbid = cas_store::wait_budget::forbid_store_access();
+                for _ in 0..16 {
+                    super::record_worker_mcp_activity(&core.clone(), "task", "notes");
+                }
             }
-        }
-        assert_eq!(cas_store::wait_budget::store_access_violations(), before,
-            "a confirmed non-worker core must not read the store again");
-        assert!(crate::store::open_event_store(&root).unwrap().list_by_type(cas_types::EventType::WorkerActivity, 100).unwrap().is_empty());
+            assert_eq!(cas_store::wait_budget::store_access_violations(), before,
+                "a confirmed non-worker core must not read the store again");
+            assert!(crate::store::open_event_store(&root).unwrap().list_by_type(cas_types::EventType::WorkerActivity, 100).unwrap().is_empty());
 
-        let worker_core = CasCore::with_daemon(root.clone(), None, None);
-        let worker = cas_types::Agent::new_with_role("independent-worker".into(), "independent-worker".into(), cas_types::AgentRole::Worker);
-        worker_core.open_agent_store().unwrap().register(&worker).unwrap();
-        worker_core.bind_agent_identity(worker.id.clone(), AgentIdentitySource::ServerInternal).unwrap();
-        super::record_worker_mcp_activity(&worker_core, "task", "notes");
-        assert!(crate::store::open_event_store(&root).unwrap().latest_worker_activity(&worker.id, &worker.name).unwrap().is_some(),
-            "a non-worker verdict belongs only to that immutable caller core");
+            let worker_core = CasCore::with_daemon(root.clone(), None, None);
+            let worker = cas_types::Agent::new_with_role("independent-worker".into(), "independent-worker".into(), cas_types::AgentRole::Worker);
+            worker_core.open_agent_store().unwrap().register(&worker).unwrap();
+            worker_core.bind_agent_identity(worker.id.clone(), AgentIdentitySource::ServerInternal).unwrap();
+            super::record_worker_mcp_activity(&worker_core, "task", "notes");
+            assert!(crate::store::open_event_store(&root).unwrap().latest_worker_activity(&worker.id, &worker.name).unwrap().is_some(),
+                "a non-worker verdict belongs only to that immutable caller core");
+        }
     }
 
     #[test]

@@ -84,8 +84,8 @@ pub struct CasCore {
 pub(crate) struct WorkerMcpActivityState {
     pub(crate) last_recorded_at: Option<std::time::Instant>,
     pub(crate) recording: bool,
-    /// A registered, server-authenticated caller with a non-worker role.
-    /// The core's identity is immutable; misses and inactive workers aren't cached.
+    /// A registered, server-authenticated Supervisor or Director.
+    /// Standard can reconcile to Worker; misses and inactive workers aren't cached.
     pub(crate) not_worker: bool,
 }
 

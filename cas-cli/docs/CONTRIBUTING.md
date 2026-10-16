@@ -55,9 +55,10 @@ MCP activity emits at most one event per server-bound worker every 30 seconds,
 with the throttle checked in memory before store access. This interval is much
 shorter than the default 300-second quiet threshold; concurrent calls share the
 same reservation and failed writes can retry.
-Confirmed authenticated non-worker roles are cached per immutable server core,
-so supervisor calls skip further activity-related store reads. Missing sessions
-and inactive workers remain retryable.
+Confirmed authenticated Supervisor and Director roles are cached per immutable
+server core, so their calls skip further activity-related store reads. Standard
+bootstrap roles, missing sessions and inactive workers remain retryable; a
+Standard row corrected to Worker starts recording activity on the same core.
 Heartbeat and registration calls remain telemetry, so heartbeat alone cannot
 hide a quiet worker. Call activity uses the server's immutable registered actor;
 request fields naming another worker do not credit that worker. Open harness

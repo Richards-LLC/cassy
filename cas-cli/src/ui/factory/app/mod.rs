@@ -37,7 +37,7 @@ mod imports;
 mod init;
 mod merge_alert;
 #[cfg(test)]
-mod merge_alert_tests;
+pub(crate) mod merge_alert_tests;
 mod panels_and_modes;
 pub(crate) mod render_and_ops;
 mod sidecar_and_selection;
@@ -1613,11 +1613,6 @@ impl FactoryApp {
         let gated_task_ids =
             crate::ui::factory::director::compute_gated_task_ids(&non_closed_ids, &blocks_deps);
 
-        // cas-6883: repo root for the send-time MERGE REQUIRED freshness
-        // check — same derivation as `close_project_root` in close_ops.rs /
-        // `repo_root` in `director.rs::load_all_git_changes` (`.cas`'s
-        // parent is the main checkout all `factory/*` and `epic/*` branches
-        // live in).
         let mut prompts: Vec<Prompt> = Vec::with_capacity(delivery_events.len());
         for event in &delivery_events {
             // cas-d4ae: taskless idle and escalated stall events are factory
@@ -1635,15 +1630,6 @@ impl FactoryApp {
             ) {
                 continue;
             }
-            // cas-6883: re-validate a MERGE REQUIRED / AwaitingMerge idle
-            // signal against live git state, and against what was last
-            // actually sent, immediately before generating its prompt —
-            // as close to true send time as this tick-based pipeline gets.
-            // `NotApplicable` (wrong event shape, task no longer
-            // AwaitingMerge, or no resolvable epic branch) falls through to
-            // `generate_prompt` unaffected, exactly as before this fix.
-            // cas-223f: without a fresh read there is nothing to check the
-            // alert against; it is delivered as detected.
             // An actionable merge demand needs completed exact-tip CI and a
             // successful live-target read. Both were computed on the external
             // lane, alongside this delivery read, never on the loop.
@@ -1685,16 +1671,21 @@ impl FactoryApp {
                 }
                 if let Some(ready) = ready {
                     if !self.event_detector.merge_alert_should_emit(
-                        &ready.evidence.task_id, &ready.evidence.factory_branch,
-                        &ready.tip, ready.ci,
+                        &ready.evidence.task_id, &ready.tip, ready.ci,
                     ) { continue; }
                     if ready.ci == "failure" {
-                        prompt.text = format!(
-                            "CI failed for task {} on {} at {}. Supervisor decision needed: request changes, or explicitly review and override red CI before merging.\n{} unmerged commit(s) vs {} at {}.\nLive task: `task action=show id={}`",
+                        let prefix = self.supervisor_cli.backend().capabilities().tool_prefix;
+                        let text = format!(
+                            "CI failed for task {} on {} at {}. Supervisor decision needed: request changes, or explicitly review and override red CI before merging.\n{} unmerged commit(s) vs {} at {}.\nLive task: `{prefix}task action=show id={}`",
                             ready.evidence.task_id, ready.evidence.factory_branch, ready.tip,
                             ready.evidence.unmerged_count, ready.evidence.checked_epic_ref,
                             ready.evidence.epic_sha, ready.evidence.task_id,
                         );
+                        if let DirectorEvent::WorkerIdle { worker, .. } = event {
+                            prompt.text = super::director::with_response_instructions(&text, worker, self.supervisor_cli);
+                        }
+                    } else {
+                        prompt.text = format!("CI completed successfully for delivery {}.\n{}", ready.tip, prompt.text);
                     }
                 }
                 prompts.push(prompt);

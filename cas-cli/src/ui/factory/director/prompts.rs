@@ -7254,23 +7254,23 @@ mod tests {
             );
 
             assert!(
-                detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", "tip-a", "success"),
+                detector.merge_alert_should_emit("cas-6883t", "tip-a", "success"),
                 "first emission with this evidence must be allowed"
             );
             assert!(
-                !detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", "tip-a", "success"),
+                !detector.merge_alert_should_emit("cas-6883t", "tip-a", "success"),
                 "identical repeat evidence must be suppressed (AC3)"
             );
             assert!(
-                detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", "tip-b", "success"),
+                detector.merge_alert_should_emit("cas-6883t", "tip-b", "success"),
                 "changed delivery tip must re-emit"
             );
             assert!(
-                detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", "tip-b", "failure"),
+                detector.merge_alert_should_emit("cas-6883t", "tip-b", "failure"),
                 "changed CI conclusion must re-emit"
             );
             assert!(
-                !detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", "tip-b", "failure"),
+                !detector.merge_alert_should_emit("cas-6883t", "tip-b", "failure"),
                 "repeat of the new evidence must again be suppressed"
             );
         }

@@ -1558,16 +1558,9 @@ pub struct DirectorEventDetector {
     /// short-circuit below. Set/cleared via [`Self::mark_worker_hold`] /
     /// [`Self::clear_worker_hold`].
     held_workers: HashSet<String>,
-    /// (cas-6883) Evidence `(unmerged_count, epic_sha)` last actually sent
-    /// for a MERGE REQUIRED alert, keyed by `(task_id, factory_branch)`.
-    /// `IDLE_RATE_LIMIT` above only floors re-fire *frequency* (once per 5
-    /// minutes); this floors re-fire *content* — AC3 requires the alert not
-    /// re-emit for the same (task, branch) pair without an intervening
-    /// state change, not merely "not more than once every 5 minutes" (a
-    /// parked task can easily stay parked for 5+ minutes, and did in the
-    /// reported six-stale-alerts session). See
-    /// [`Self::merge_alert_should_emit`].
-    merge_alert_last_evidence: HashSet<(String, String, String, String)>,
+    /// Emitted (task, delivery tip, CI conclusion) merge alerts. Unrelated
+    /// target advances and repeated idle episodes cannot manufacture a new decision.
+    merge_alert_last_evidence: HashSet<(String, String, String)>,
 }
 
 impl DirectorEventDetector {
@@ -1618,22 +1611,16 @@ impl DirectorEventDetector {
         }
     }
 
-    /// (cas-6883) Whether a MERGE REQUIRED alert for `(task_id,
-    /// factory_branch)` carrying `(unmerged_count, epic_sha)` should
-    /// actually be sent — `false` when this exact evidence was the last
-    /// thing sent for this pair (AC3: no re-emit without an intervening
-    /// state change). Records the evidence as "last sent" as a side effect
-    /// whenever it returns `true`, so callers must only invoke this once
-    /// per candidate emission (not use it as a read-only peek).
+    /// Consume one settled delivery decision only after its prompt survives
+    /// rendering and liveness checks. Pending and unknown evidence never call this.
     pub(crate) fn merge_alert_should_emit(
         &mut self,
         task_id: &str,
-        factory_branch: &str,
         branch_tip: &str,
         ci_state: &str,
     ) -> bool {
         self.merge_alert_last_evidence.insert((
-            task_id.to_string(), factory_branch.to_string(), branch_tip.to_string(), ci_state.to_string(),
+            task_id.to_string(), branch_tip.to_string(), ci_state.to_string(),
         ))
     }
 

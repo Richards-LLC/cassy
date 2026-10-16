@@ -161,3 +161,53 @@ fn no_typed_note_reports_all_missing_fields_and_executable_example() {
     validate_risk_close_proofs(&concurrency_task(example), &[], std::path::Path::new("."))
         .expect("the refusal's accepted example must pass without adding SHA/log");
 }
+
+#[tokio::test]
+async fn mcp_typed_note_persistence_preserves_issue_receipt_for_close_and_audit() {
+    use crate::mcp::tools::TaskNotesRequest;
+    use crate::store::{open_agent_store, open_task_store};
+    use crate::test_support::TestEnvGuard;
+    use cas_types::{Agent, AgentRole};
+    use rmcp::handler::server::wrapper::Parameters;
+
+    let mut env = TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    env.set("CAS_ROOT", &root);
+    let store = open_task_store(&root).unwrap();
+    store.init().unwrap();
+    let agents = open_agent_store(&root).unwrap();
+    agents.init().unwrap();
+    let caller = Agent::new_with_role(
+        "receipt-caller".into(),
+        "receipt-caller".into(),
+        AgentRole::Standard,
+    );
+    agents.register(&caller).unwrap();
+    let core = CasCore::with_daemon(root, None, None);
+    core.set_agent_id_for_testing(caller.id);
+    let mut task = concurrency_task("");
+    task.notes.clear();
+    store.add(&task).unwrap();
+
+    core.cas_task_notes(Parameters(TaskNotesRequest {
+        id: task.id.clone(),
+        note: ISSUE_RECEIPT.into(),
+        note_type: "loaded_proof".into(),
+        supervisor_override: None,
+        reason: None,
+    }))
+    .await
+    .expect("the real MCP note writer must persist the receipt");
+
+    let persisted = store.get(&task.id).unwrap();
+    assert!(
+        persisted
+            .notes
+            .contains("🧪 LOADED_PROOF LOADED_PROOF: target=explicit non-Rust")
+    );
+    validate_risk_close_proofs(&persisted, &[], dir.path())
+        .expect("real typed-note write/reload must satisfy the production close gate");
+    assert!(declared_risk_close_gaps(&persisted, &[]).is_empty());
+}

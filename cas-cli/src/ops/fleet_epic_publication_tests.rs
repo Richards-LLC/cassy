@@ -327,3 +327,27 @@ fn cas_bfa1_round3_focus_refuses_cancelled_epic() {
         );
     });
 }
+
+#[test]
+fn cas_bfa1_round4_focus_no_parent_preserves_old_tag_tip() {
+    for self_target in [true, false] {
+        with_fixture(|repo, origin, root, _| {
+            let tasks = crate::store::open_task_store(root).unwrap();
+            let mut epic = tasks.get("cas-unpublished").unwrap();
+            epic.deliverables.work_target = self_target.then(|| cas_types::WorkTarget {
+                repo_selector: "project:publication-test".into(),
+                target_branch: "epic/unpublished".into(),
+            });
+            tasks.update(&epic).unwrap();
+            let old = git(repo, &["rev-parse", "epic/unpublished"]);
+            git(repo, &["tag", "hotfix-base", &old]);
+            let receipt = focus(root);
+            assert_eq!(git(repo, &["rev-parse", "epic/unpublished"]), old);
+            assert_eq!(git(origin, &["rev-parse", "epic/unpublished"]), old);
+            assert!(
+                receipt.contains("published") && !receipt.contains("FAST-FORWARDED"),
+                "{receipt}"
+            );
+        });
+    }
+}

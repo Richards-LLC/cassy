@@ -690,3 +690,125 @@ fn cas_bfa1_round3_seen_remote_with_failed_fetch_is_unverified_not_deleted() {
         );
     });
 }
+
+#[test]
+fn cas_bfa1_round4_no_parent_publishes_exact_tip_even_without_unique_work() {
+    for self_target in [true, false] {
+        with_fixture(|f| {
+            let tasks = open_task_store_cached(&f.root).unwrap();
+            let mut epic = tasks.get("cas-round2-epic").unwrap();
+            epic.deliverables.work_target = self_target.then(|| cas_types::WorkTarget {
+                repo_selector: "project:bfa1-round2".into(),
+                target_branch: "epic/round2".into(),
+            });
+            tasks.update(&epic).unwrap();
+            git(&f.repo, &["tag", "hotfix-base", &f.old]);
+            f.advance_parent();
+            let prep = f
+                .prepare()
+                .expect("an adopted tag lane stays at its recorded tip");
+            assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), f.old);
+            assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), f.old);
+            let work = prep.worktree_info.unwrap();
+            assert_eq!(
+                git(
+                    &f.repo,
+                    &[
+                        "rev-parse",
+                        work.base_ref.as_deref().unwrap_or(&work.parent_branch)
+                    ]
+                ),
+                f.old
+            );
+            assert!(
+                !prep
+                    .warnings
+                    .iter()
+                    .any(|line| line.contains("FAST-FORWARDED"))
+            );
+        });
+    }
+}
+
+#[test]
+fn cas_bfa1_round4_missing_recorded_parent_skips_refresh_with_notice() {
+    for published in [false, true] {
+        with_fixture(|f| {
+            if published {
+                git(&f.repo, &["push", "origin", "epic/round2"]);
+            }
+            let tasks = open_task_store_cached(&f.root).unwrap();
+            let mut epic = tasks.get("cas-round2-epic").unwrap();
+            epic.deliverables
+                .work_target
+                .as_mut()
+                .unwrap()
+                .target_branch = "epic/deleted-outer".into();
+            tasks.update(&epic).unwrap();
+            let prep = f
+                .prepare()
+                .expect("missing recorded parent must not refuse an existing lane");
+            assert!(
+                prep.warnings
+                    .iter()
+                    .any(|line| line.contains("EPIC BASE REFRESH SKIPPED")
+                        && line.contains("epic/deleted-outer")),
+                "{:?}",
+                prep.warnings
+            );
+            assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), f.old);
+            if published {
+                assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), f.old);
+            } else {
+                assert!(
+                    git(
+                        &f.origin,
+                        &[
+                            "for-each-ref",
+                            "--format=%(refname)",
+                            "refs/heads/epic/round2"
+                        ]
+                    )
+                    .is_empty()
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn cas_bfa1_round4_quarantined_epic_cannot_authorize_publication() {
+    with_fixture(|f| {
+        f.advance_parent();
+        let queue = crate::cloud::SyncQueue::open(&f.root).unwrap();
+        queue
+            .quarantine_row(
+                crate::cloud::QUARANTINE_TASK,
+                "cas-round2-epic",
+                "fixture hidden authority",
+            )
+            .unwrap();
+        assert!(
+            open_task_store_cached(&f.root)
+                .unwrap()
+                .list(None)
+                .unwrap()
+                .iter()
+                .all(|task| task.id != "cas-round2-epic")
+        );
+        let prep = f.prepare().unwrap();
+        assert_eq!(prep.worktree_info.unwrap().parent_branch, "epic/round2");
+        assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), f.old);
+        assert!(
+            git(
+                &f.origin,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/heads/epic/round2"
+                ]
+            )
+            .is_empty()
+        );
+    });
+}

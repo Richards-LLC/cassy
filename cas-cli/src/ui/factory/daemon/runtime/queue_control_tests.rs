@@ -36,7 +36,7 @@ fn cas_7b6b_reset_accounts_for_dequeued_completion_before_control_applies_it() {
     assert!(daemon.pending_spawns.is_empty(), "a pre-reset dequeue must not launch after reset");
     let queue = crate::store::open_spawn_queue_store(daemon.app.cas_dir()).unwrap();
     settle_until(|| queue.recent_spawn_lifecycle(&daemon.session_name, 10).unwrap()
-        .iter().any(|row| row.request_id == id && row.state == cas_store::SpawnLifecycleState::Failed));
+        .iter().any(|row| row.id == id && row.state == cas_store::SpawnLifecycleState::Failed));
 }
 
 #[test]
@@ -45,7 +45,7 @@ fn cas_7b6b_shutdown_accounts_for_dequeued_completion_before_draining_results() 
     assert!(daemon.queue_jobs.drain_for_shutdown(daemon.app.cas_dir(), Duration::from_secs(5)));
     let queue = crate::store::open_spawn_queue_store(daemon.app.cas_dir()).unwrap();
     assert!(queue.recent_spawn_lifecycle(&daemon.session_name, 10).unwrap()
-        .iter().any(|row| row.request_id == id && row.state == cas_store::SpawnLifecycleState::Failed),
+        .iter().any(|row| row.id == id && row.state == cas_store::SpawnLifecycleState::Failed),
         "shutdown must account for a dequeued row whose completion control did not consume");
 }
 

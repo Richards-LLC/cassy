@@ -150,7 +150,9 @@ pub(crate) fn enqueue_commander_message(
         let prior = queue
             .message_delivery_report(notification_id)
             .with_context(|| format!("failed to inspect in_reply_to message {notification_id}"))?
-            .ok_or_else(|| anyhow::anyhow!("in_reply_to notification {notification_id} does not exist"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("in_reply_to notification {notification_id} does not exist")
+            })?;
         if !prior.target.eq_ignore_ascii_case(OPERATOR_TARGET) {
             anyhow::bail!(
                 "in_reply_to notification {notification_id} is {} -> {}, not a supervisor turn addressed to the operator",
@@ -213,7 +215,10 @@ pub(crate) fn operator_stamp(
     attribution: &crate::ui::factory::MessageAttribution,
 ) -> cas_store::OperatorStamp {
     let verified = attribution.operator_verified
-        && attribution.device_id.as_deref().is_some_and(|id| !id.is_empty())
+        && attribution
+            .device_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty())
         && attribution
             .credential_id
             .as_deref()
@@ -226,7 +231,6 @@ pub(crate) fn operator_stamp(
         verified,
     }
 }
-
 
 /// What the operator saw when assigning (brief: O5's precondition).
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -268,7 +272,9 @@ pub(crate) async fn assign_task(
     expected: &AssignTaskExpected,
     attribution: &crate::ui::factory::MessageAttribution,
 ) -> Result<serde_json::Value, OperationError> {
-    let assignee = assignee.map(str::trim).filter(|assignee| !assignee.is_empty());
+    let assignee = assignee
+        .map(str::trim)
+        .filter(|assignee| !assignee.is_empty());
     let seen_at = chrono::DateTime::parse_from_rfc3339(&expected.updated_at)
         .map_err(|error| {
             OperationError::Invalid(format!(
@@ -301,9 +307,9 @@ pub(crate) async fn assign_task(
         .await
         .map_err(|error| OperationError::Failed(error.message.to_string()))?;
 
-    let task = store
-        .get(task_id)
-        .map_err(|error| OperationError::Failed(format!("task {task_id} could not be re-read: {error}")))?;
+    let task = store.get(task_id).map_err(|error| {
+        OperationError::Failed(format!("task {task_id} could not be re-read: {error}"))
+    })?;
     let updated_at = task.updated_at.to_rfc3339();
     Ok(serde_json::json!({
         "kind": "assign_task",
@@ -399,6 +405,7 @@ pub(crate) fn focus_epic(
     }
 
     let delivery_mode = requested_delivery_mode.unwrap_or(epic.delivery_mode);
+    let branch_receipt = focus_epic_branch_receipt(cas_root, &epic);
     if requested_delivery_mode.is_some() {
         epic.delivery_mode = delivery_mode;
         task_store.update(&epic).map_err(|error| {
@@ -411,14 +418,71 @@ pub(crate) fn focus_epic(
     persist_session_metadata_delivery_mode_at(&metadata_path, delivery_mode).map_err(|e| {
         OperationError::Failed(format!("Failed to persist factory delivery mode: {e}"))
     })?;
-    record_focus_epic_event(cas_root, factory_session, Some(epic_id), Some(delivery_mode));
-    if let Err(error) = crate::supervisor_notices::integration_overlap(cas_root, &epic, factory_session) {
+    record_focus_epic_event(
+        cas_root,
+        factory_session,
+        Some(epic_id),
+        Some(delivery_mode),
+    );
+    if let Err(error) =
+        crate::supervisor_notices::integration_overlap(cas_root, &epic, factory_session)
+    {
         tracing::warn!(%error, epic_id, "integration overlap notice failed");
     }
 
     Ok(format!(
-        "Pinned epic focus to {epic_id} for factory session {factory_session} (delivery_mode={delivery_mode})"
+        "Pinned epic focus to {epic_id} for factory session {factory_session} (delivery_mode={delivery_mode}){branch_receipt}"
     ))
+}
+
+fn focus_epic_branch_receipt(cas_root: &Path, epic: &cas_types::Task) -> String {
+    use crate::mcp::tools::core::task::repo_context;
+    use crate::worktree::GitOperations;
+    let Some(branch) = epic
+        .branch
+        .as_deref()
+        .filter(|branch| !branch.trim().is_empty())
+    else {
+        return "\nEpic branch not checked: no recorded lane.".into();
+    };
+    let root = cas_root.parent().unwrap_or(cas_root);
+    let Ok(mut repo) = GitOperations::detect_repo_root(root) else {
+        return "\nEpic branch not checked: no Git repository.".into();
+    };
+    if let Some(target) = &epic.deliverables.work_target
+        && !repo_context::repo_answers_to(&repo, &target.repo_selector)
+    {
+        let probe = repo_context::BoundedRepoProbe::new(
+            crate::bounded_process::Deadline::after(std::time::Duration::from_secs(5)),
+            std::time::Duration::from_secs(1),
+            20,
+        );
+        match repo_context::resolve_repo_context_bounded(cas_root, target, &probe) {
+            Ok(context) => repo = context.repo_root,
+            Err(error) => {
+                return format!(
+                    "\nEpic branch not checked: declared repository unavailable ({error:?}); no fallback publication."
+                );
+            }
+        }
+    }
+    let git = GitOperations::new(repo.clone());
+    let base = epic
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|target| target.target_branch.as_str())
+        .filter(|base| *base != branch)
+        .map(str::to_string)
+        .or_else(|| crate::config::Config::configured_epic_base_branch(&repo))
+        .unwrap_or_else(|| git.detect_default_branch());
+    match git.ensure_epic_published(branch, &base) {
+        Ok(Some(receipt)) => format!("\n{receipt}"),
+        Ok(None) => format!("\nEPIC BRANCH READY: '{branch}' already published on origin."),
+        Err(error) => format!(
+            "\nEPIC BRANCH UNVERIFIED: {error}; focus recorded, branch readiness requires attention."
+        ),
+    }
 }
 
 fn record_focus_epic_event(
@@ -576,10 +640,16 @@ pub(crate) async fn run_worker_operation(
             if let Some(task_id) = task_id {
                 fields["task_id"] = serde_json::Value::String(task_id);
             }
-            service.factory_spawn_workers_in(&ctx, request(fields)?).await
+            service
+                .factory_spawn_workers_in(&ctx, request(fields)?)
+                .await
         }
         WorkerOperation::Hold { worker, hold } => {
-            let action = if hold { "hold_worker" } else { "release_worker" };
+            let action = if hold {
+                "hold_worker"
+            } else {
+                "release_worker"
+            };
             service
                 .factory_set_worker_hold_in(
                     &ctx,

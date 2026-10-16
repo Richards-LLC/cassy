@@ -15,8 +15,7 @@ fn git(repo: &Path, args: &[&str]) -> String {
     String::from_utf8(result.stdout).unwrap().trim().to_string()
 }
 
-#[test]
-fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
+fn with_fixture(check: impl FnOnce(&Path, &Path, &Path, &str)) {
     let temp = tempfile::TempDir::new().unwrap();
     let home = tempfile::TempDir::new().unwrap();
     let _env = crate::test_support::TestEnvGuard::with_vars(&[
@@ -71,34 +70,134 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
         None,
     );
     std::fs::write(metadata, serde_json::to_string(&session).unwrap()).unwrap();
-    let receipt = focus_epic(
-        &root,
+    check(&repo, &origin, &root, &base);
+}
+
+fn focus(root: &Path) -> String {
+    focus_epic(
+        root,
         "publication-test",
         FocusEpic::Pin {
-            epic_id: &epic.id,
+            epic_id: "cas-unpublished",
             delivery_mode: None,
         },
     )
-    .unwrap();
-    assert_eq!(
-        git(&origin, &["rev-parse", "refs/heads/epic/unpublished"]),
-        base,
-        "focus must publish the missing remote epic at its recorded base"
-    );
-    assert_eq!(git(&repo, &["rev-parse", "epic/unpublished"]), base);
-    assert!(
-        receipt.contains("published") && receipt.contains("epic/unpublished"),
-        "{receipt}"
-    );
-    assert!(receipt.contains("FAST-FORWARDED"), "{receipt}");
-    let repeated = focus_epic(
-        &root,
-        "publication-test",
-        FocusEpic::Pin {
-            epic_id: &epic.id,
-            delivery_mode: None,
-        },
-    )
-    .unwrap();
-    assert!(!repeated.contains("FAST-FORWARDED"), "{repeated}");
+    .unwrap()
+}
+
+#[test]
+fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
+    with_fixture(|repo, origin, root, base| {
+        let receipt = focus(root);
+        assert_eq!(
+            git(&origin, &["rev-parse", "refs/heads/epic/unpublished"]),
+            base,
+            "focus must publish the missing remote epic at its recorded base"
+        );
+        assert_eq!(git(&repo, &["rev-parse", "epic/unpublished"]), base);
+        assert!(
+            receipt.contains("published") && receipt.contains("epic/unpublished"),
+            "{receipt}"
+        );
+        assert!(receipt.contains("FAST-FORWARDED"), "{receipt}");
+        assert!(receipt.contains("CAS_PUSH_EPIC_BRANCH=0"), "{receipt}");
+        let repeated = focus(root);
+        assert!(!repeated.contains("FAST-FORWARDED"), "{repeated}");
+    });
+}
+
+#[test]
+fn cas_bfa1_self_target_refreshes_trunk_and_preserves_unique_work() {
+    with_fixture(|repo, origin, root, base| {
+        let store = crate::store::open_task_store(root).unwrap();
+        let mut epic = store.get("cas-unpublished").unwrap();
+        epic.deliverables
+            .work_target
+            .as_mut()
+            .unwrap()
+            .target_branch = "epic/unpublished".into();
+        store.update(&epic).unwrap();
+        let receipt = focus(root);
+        assert_eq!(git(repo, &["rev-parse", "epic/unpublished"]), base);
+        assert_eq!(git(origin, &["rev-parse", "epic/unpublished"]), base);
+        assert!(receipt.contains("FAST-FORWARDED"), "{receipt}");
+    });
+    with_fixture(|repo, origin, root, _| {
+        git(repo, &["checkout", "epic/unpublished"]);
+        std::fs::write(repo.join("unique"), "operator work").unwrap();
+        git(repo, &["add", "unique"]);
+        git(repo, &["commit", "-m", "unique work"]);
+        let tip = git(repo, &["rev-parse", "HEAD"]);
+        let receipt = focus(root);
+        assert_eq!(git(repo, &["rev-parse", "epic/unpublished"]), tip);
+        assert_eq!(git(origin, &["rev-parse", "epic/unpublished"]), tip);
+        assert!(
+            receipt.contains("unique local commit") && receipt.contains("unchanged"),
+            "{receipt}"
+        );
+    });
+}
+
+#[test]
+fn cas_bfa1_existing_remote_divergence_is_preserved() {
+    with_fixture(|repo, origin, root, base| {
+        git(origin, &["update-ref", "refs/heads/epic/unpublished", base]);
+        git(repo, &["checkout", "epic/unpublished"]);
+        std::fs::write(repo.join("unique"), "local work").unwrap();
+        git(repo, &["add", "unique"]);
+        git(repo, &["commit", "-m", "local work"]);
+        let local = git(repo, &["rev-parse", "HEAD"]);
+        let receipt = focus(root);
+        assert_eq!(git(repo, &["rev-parse", "epic/unpublished"]), local);
+        assert_eq!(git(origin, &["rev-parse", "epic/unpublished"]), base);
+        assert!(receipt.contains("DIVERGED"), "{receipt}");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("unique")).unwrap(),
+            "local work"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_bfa1_expected_absent_publication_does_not_replace_racing_remote() {
+    use std::os::unix::fs::PermissionsExt;
+    with_fixture(|repo, origin, root, _| {
+        let old = git(repo, &["rev-parse", "main~1"]);
+        let hook = repo.join(".git/hooks/pre-push");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\ngit --git-dir='{}' update-ref refs/heads/epic/unpublished '{}'\n",
+                origin.display(),
+                old
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let receipt = focus(root);
+        assert_eq!(
+            git(origin, &["rev-parse", "epic/unpublished"]),
+            old,
+            "a concurrent creator must not be overwritten"
+        );
+        assert!(
+            receipt.contains("UNPUBLISHED") && receipt.contains("expected-absent"),
+            "{receipt}"
+        );
+    });
+}
+
+#[test]
+fn cas_bfa1_focus_creates_missing_local_lane_at_base() {
+    with_fixture(|repo, origin, root, base| {
+        git(repo, &["branch", "-D", "epic/unpublished"]);
+        let receipt = focus(root);
+        assert_eq!(git(repo, &["rev-parse", "epic/unpublished"]), base);
+        assert_eq!(git(origin, &["rev-parse", "epic/unpublished"]), base);
+        assert!(
+            receipt.contains("created local") && receipt.contains("published"),
+            "{receipt}"
+        );
+    });
 }

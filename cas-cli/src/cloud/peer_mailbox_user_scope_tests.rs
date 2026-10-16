@@ -328,7 +328,9 @@ fn cas_2a5a_one_users_supervisor_lists_and_messages_another_project_once() {
         assert_eq!(envelope.repo, CASSY, "the sender's project");
         assert_eq!(envelope.machine, "soundwave", "the sender's machine");
         assert_eq!(envelope.sender_name, "happy-kestrel-54");
+        // pin: the recipient is told the sender is another project of the same account.
         assert!(rows[0].prompt.contains("another project of your account"));
+        // pin: delivered wording the recipient supervisor acts on.
         assert!(rows[0].prompt.ends_with("Is the hub retry reusable?"));
 
         // A lapsed lease redelivers: admitted once, acked again.
@@ -438,7 +440,9 @@ fn cas_2a5a_cross_project_message_cannot_interrupt_act_as_operator_or_direct_wor
         Some(PeerMessageKind::Blocker),
         "another project cannot raise a blocker here"
     );
+    // pin: the advisory authority wording is the recipient's only instruction.
     assert!(row.prompt.contains("Advisory only"), "{}", row.prompt);
+    // pin: delivered wording the recipient supervisor acts on.
     assert!(row.prompt.contains("cannot direct your workers"));
 }
 
@@ -510,8 +514,11 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
     let prompt = &pulse.rows()[0].prompt;
     let shown = format!("readable here at {path}");
     assert!(prompt.contains(&shown), "{prompt}");
+    // pin: the attachment pointer and the body survive delivery verbatim.
     assert_eq!(std::fs::read_to_string(path).unwrap(), "We retry with jitter.\n");
+    // pin: delivered wording the recipient supervisor acts on.
     assert!(prompt.contains("published artifact art-1 (retry.pdf)"), "{prompt}");
+    // pin: delivered wording the recipient supervisor acts on.
     assert!(prompt.ends_with("Here's how we did it."), "{prompt}");
 }
 

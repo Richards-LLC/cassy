@@ -6159,8 +6159,11 @@ impl CasCore {
         }
         let recorded = task.deliverables.factory_branch_anchor.as_deref()?;
         let candidate = resolve_branch_sha(repo_path, &format!("{candidate}^{{commit}}"))?;
-        let foreign_since = self.sibling_lease_boundary(task_store, task);
         let (target, _) = preferred_live_target_ref_for_delivery(repo_path, parent_branch, task.delivery_mode);
+        if self.rebinds_unpushed_anchor(task_store, task, repo_path, recorded, &candidate, &target) {
+            return Some(candidate);
+        }
+        let foreign_since = self.sibling_lease_boundary(task_store, task);
         parked_anchor_advance_with_target_is_attributable(
             repo_path,
             recorded,
@@ -6170,6 +6173,66 @@ impl CasCore {
             &target,
         )
         .then_some(candidate)
+    }
+
+    /// cas-44e93: a recorded anchor origin never had is no delivery (the merge
+    /// refuses it), and the descendant rule above can never move it back. A
+    /// close retry from the task's pushed tip re-anchors there instead, when:
+    /// - the measured branch is this task's own `factory/<assignee>-<task>`
+    ///   (cas-00eb: a plain lane may carry the next task);
+    /// - `candidate` is exactly `origin/<branch>`, which lacks the recorded anchor;
+    /// - the pushed tip is not yet on the target, its commit names no other
+    ///   task, and it is no other open task's anchor.
+    fn rebinds_unpushed_anchor(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        recorded: &str,
+        candidate: &str,
+        target: &str,
+    ) -> bool {
+        let Some(assignee) = task.assignee.as_deref() else {
+            return false;
+        };
+        let branch = crate::factory_isolation::worker_task_branch(assignee, &task.id);
+        if task.delivery_mode == cas_types::DeliveryMode::LocalMerge
+            || !is_safe_git_refname(&branch)
+        {
+            return false;
+        }
+        let remote = format!("origin/{branch}");
+        if !resolve_branch_sha(repo_path, &format!("{remote}^{{commit}}"))
+            .is_some_and(|pushed| commit_ids_match(&pushed, candidate))
+            || commit_ids_match(recorded, candidate)
+            || git_commit_is_ancestor(repo_path, recorded, &remote)
+            || git_commit_is_ancestor(repo_path, candidate, target)
+        {
+            return false;
+        }
+        let Ok(output) = std::process::Command::new("git")
+            .args(["log", "-1", "--format=%B", candidate, "--"])
+            .current_dir(repo_path)
+            .output()
+        else {
+            return false;
+        };
+        if !output.status.success()
+            || message_claims_other_task(&String::from_utf8_lossy(&output.stdout), Some(&task.id))
+        {
+            return false;
+        }
+        task_store.list(None).is_ok_and(|others| {
+            !others.iter().any(|other| {
+                other.id != task.id
+                    && other.status != TaskStatus::Closed
+                    && other
+                        .deliverables
+                        .factory_branch_anchor
+                        .as_deref()
+                        .is_some_and(|anchor| commit_ids_match(anchor, candidate))
+            })
+        })
     }
 
     /// cas-ba4a: the first lease another unclosed task of the same worker
@@ -6374,9 +6437,16 @@ impl CasCore {
             return;
         };
         let factory_branch_anchor = factory_branch_anchor.as_str();
+        // cas-44e93: a move that does not descend from the recorded anchor is
+        // the re-anchor from an anchor origin never had to the pushed tip.
+        let rebound = task
+            .deliverables
+            .factory_branch_anchor
+            .as_deref()
+            .is_some_and(|recorded| !git_commit_is_ancestor(repo_path, recorded, factory_branch_anchor));
         let mut advanced = task.clone();
         let now = chrono::Utc::now();
-        let Some(audit) = Self::apply_awaiting_merge_anchor_advance(
+        let Some(mut audit) = Self::apply_awaiting_merge_anchor_advance(
             &mut advanced,
             factory_branch_anchor,
             now,
@@ -6386,6 +6456,11 @@ impl CasCore {
         else {
             return;
         };
+        if rebound {
+            let reason = " The prior anchor was never on origin, so this close re-anchored to the pushed tip.";
+            audit.push_str(reason);
+            advanced.notes.push_str(reason);
+        }
 
         match task_store.update(&advanced) {
             Err(error) => {
@@ -7952,6 +8027,25 @@ impl CasCore {
                             &recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(&close_project_root, &task, assignee)),
                         )
                     });
+                    // cas-44e93: the merge reads the pushed branch, so a
+                    // commit origin lacks can never be the delivery anchor.
+                    if let Some(assignee) = task.assignee.as_deref()
+                        && let Some(tip) = anchor.as_deref()
+                    {
+                        let branch = recovery_branch.clone().unwrap_or_else(|| {
+                            close_measured_factory_branch(&close_project_root, &task, assignee)
+                        });
+                        if let Some(pushed) = unpushed_delivery_tip(
+                            &close_project_root,
+                            &branch,
+                            tip,
+                            task.delivery_mode,
+                        ) {
+                            return Ok(Self::tool_error(unpushed_delivery_tip_refusal(
+                                &branch, tip, &pushed,
+                            )));
+                        }
+                    }
                     // cas-d6eb: the blast-radius module check, made while the
                     // worker can still widen proof_targets (parking locks the
                     // scope; after verification only a supervisor fix could).
@@ -13747,6 +13841,39 @@ pub(crate) fn close_measured_factory_branch(
     // the frozen branch holds the other task's commits.
     resolve_close_delivery_branch(repo_path, task, assignee)
         .unwrap_or_else(|_| crate::factory_isolation::worker_task_branch(assignee, &task.id))
+}
+
+/// cas-44e93: the pushed tip of `measured_branch` when `tip`, the commit a
+/// close would park as the delivery anchor, is not on `origin/<branch>`.
+/// cas-e460 parked a local-only child of its pushed tip; the merge reads the
+/// pushed branch and refused it. `None` when origin contains the tip, the
+/// branch was never pushed, the measurement already reads origin, or the
+/// supervisor merges the local branch (`local_merge`).
+pub(crate) fn unpushed_delivery_tip(
+    repo_path: &std::path::Path,
+    measured_branch: &str,
+    tip: &str,
+    delivery_mode: cas_types::DeliveryMode,
+) -> Option<String> {
+    if delivery_mode == cas_types::DeliveryMode::LocalMerge
+        || measured_branch.starts_with("origin/")
+        || !is_safe_git_refname(measured_branch)
+    {
+        return None;
+    }
+    let remote = format!("origin/{measured_branch}");
+    let pushed = resolve_branch_sha(repo_path, &format!("{remote}^{{commit}}"))?;
+    (!git_commit_is_ancestor(repo_path, tip, &remote)).then_some(pushed)
+}
+
+fn unpushed_delivery_tip_refusal(branch: &str, tip: &str, pushed: &str) -> String {
+    format!(
+        "CLOSE REFUSED: the delivery tip `{tip}` on `{branch}` is not on origin. \
+         The pushed tip is `{pushed}` (`origin/{branch}`). The merge reads the pushed \
+         branch, so a local-only commit cannot become this task's delivery anchor. \
+         Push it (`git push origin {branch}`) and close again, or check out the pushed \
+         tip `{pushed}` and close from there."
+    )
 }
 
 /// [`close_measured_factory_branch`], refusing instead of binding to another

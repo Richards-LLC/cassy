@@ -35543,6 +35543,63 @@ mod epic_status_gate_tests {
         );
     }
 
+    /// cas-dbbf: a worker reuses its bare `factory/<worker>` lane for later
+    /// tasks. A closed child that delivered on its per-task branch, now
+    /// merged, must not be stranded by the lane's later commits when every
+    /// one of them claims a different task (cas-c5b8 triage: cas-cfd6 and
+    /// cas-c577 on epic cas-829b). The lane is still measured for the
+    /// child's own work: an unmerged commit naming the child keeps blocking.
+    #[test]
+    fn a_reused_lane_holding_another_tasks_commits_does_not_strand_a_delivered_child_cas_dbbf() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        git(p, &["checkout", "-q", "-b", "factory/worker-cas-d0e1"]);
+        std::fs::write(p.join("delivered.rs"), "fn delivered() {}\n").unwrap();
+        git(p, &["add", "delivered.rs"]);
+        git(p, &["commit", "-q", "-m", "fix: the delivery (cas-d0e1)"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "--no-ff", "-q", "-m", "land cas-d0e1", "factory/worker-cas-d0e1"]);
+        // The worker's bare lane, reused for the next task and not merged.
+        git(p, &["checkout", "-q", "-b", "factory/worker", "main"]);
+        std::fs::write(p.join("next.rs"), "fn next_task() {}\n").unwrap();
+        git(p, &["add", "next.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: next task's work (cas-0be7)"]);
+        git(p, &["checkout", "-q", "main"]);
+
+        let mut delivered = child("cas-d0e1", TaskStatus::Closed, Some("worker"));
+        delivered.deliverables.parked_branch = Some("factory/worker-cas-d0e1".to_string());
+        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&delivered), "main", p);
+        assert_eq!(
+            statuses[0].unmerged_count, 0,
+            "another task's commits on the reused lane strand nothing for this child"
+        );
+        let task = epic("cas-epic-reused-lane");
+        let req = base_req(&task.id);
+        assert!(
+            matches!(
+                run_epic_close_merge_gate(&task, &req, "main", p, std::slice::from_ref(&delivered)),
+                EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)
+            ),
+            "a reused lane must not block the epic close"
+        );
+
+        // The child's own unmerged work on the same lane is still reported.
+        git(p, &["checkout", "-q", "factory/worker"]);
+        std::fs::write(p.join("delivered.rs"), "fn delivered() { follow_up() }\n").unwrap();
+        git(p, &["add", "delivered.rs"]);
+        git(p, &["commit", "-q", "-m", "fix: follow-up (cas-d0e1)"]);
+        git(p, &["checkout", "-q", "main"]);
+        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&delivered), "main", p);
+        assert!(
+            statuses[0].unmerged_count > 0,
+            "this child's own unmerged commit on the bare lane must keep blocking"
+        );
+    }
+
     #[test]
     fn epic_close_still_blocks_a_behind_lane_rather_than_assuming_it_landed() {
         // Fail-closed: being behind is not proof that nothing was lost. The fix

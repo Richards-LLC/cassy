@@ -140,12 +140,15 @@ def record_latency(tag: str, receipt_arg: str, draft_arg: str) -> None:
     budget = values.get("BUDGET_SECONDS", "")
     within = values.get("WITHIN_BUDGET", "")
     interventions = values.get("INTERVENTIONS", "")
+    start_at = values.get("PUBLISH_START_AT") or values.get("TAG_PUSHED_AT", "")
+    start_kind = values.get("PUBLISH_START_KIND", "tag-push")
     if (values.get("TAG") != tag or not seconds.isascii() or not seconds.isdecimal()
             or not budget.isascii() or not budget.isdecimal() or within not in {"true", "false"}
-            or not interventions.isascii() or not interventions.isdecimal()):
+            or not interventions.isascii() or not interventions.isdecimal()
+            or start_kind not in {"gate-green", "main-landed", "tag-push"}):
         fail("missing or incoherent latency measurement")
     try:
-        start = datetime.fromisoformat(values["TAG_PUSHED_AT"].replace("Z", "+00:00"))
+        start = datetime.fromisoformat(start_at.replace("Z", "+00:00"))
         end = datetime.fromisoformat(values["PUBLISHED_AT"].replace("Z", "+00:00"))
     except (KeyError, ValueError):
         fail("missing or incoherent latency measurement")
@@ -157,7 +160,12 @@ def record_latency(tag: str, receipt_arg: str, draft_arg: str) -> None:
         return  # Standalone receipt collection may have no announcement draft.
     bodies = extract_bodies(draft)
     state = "within budget" if within == "true" else "over budget"
-    line = (f"• *Publication timing* — Tag to published: {seconds}s; {state} ({budget}s); "
+    endpoint = {
+        "gate-green": "Green to published",
+        "main-landed": "Main to published",
+        "tag-push": "Tag to published",
+    }[start_kind]
+    line = (f"• *Publication timing* — {endpoint}: {seconds}s; {state} ({budget}s); "
             f"WITHIN_BUDGET={within}.")
     effort = f"• *Release effort* — {int(interventions)} manual interventions were needed to publish this release."
     for index in (1, 3):

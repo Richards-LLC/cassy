@@ -1476,10 +1476,34 @@ fn reset_stale_preassign_holder(
         format!("{}\n\n{audit}", reset.notes)
     };
     reset.updated_at = chrono::Utc::now();
-    store
-        .update(&reset)
-        .map(|_| ())
-        .map_err(|e| format!("could not persist stale-holder reset: {e}"))
+    store.update(&reset)
+        .map_err(|e| format!("could not persist stale-holder reset: {e}"))?;
+    // Reset settles only the retired identities captured above. A replacement
+    // that wins between persistence and this cloud call must keep its claim.
+    let retired_ids: std::collections::HashSet<_> = registered_agents.iter()
+        .filter(|agent| agent.name == holder).map(|agent| agent.id.clone()).collect();
+    {
+        let cas_dir = cas_dir.to_path_buf();
+        let task_id = task.id.clone();
+        let holder = holder.to_string();
+        let release = move || {
+            let Some(claims) = crate::cloud::peer_claims::PeerClaims::for_project(&cas_dir) else {
+                return;
+            };
+            if let Err(error) = claims.release_reset_holder(&task_id, &holder, &retired_ids) {
+                tracing::debug!(task = %task_id, %error, "stale assignee cloud release failed; start will retry");
+            }
+        };
+        // Config, Git discovery, registry/event reads and network all stay off
+        // the factory loop. The exact retired owner
+        // remains fenced if task start wins before this best-effort release.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            drop(runtime.spawn_blocking(release));
+        } else {
+            std::thread::spawn(release);
+        }
+    }
+    Ok(())
 }
 
 /// Why a worker's process was retired, which decides what happens to the
@@ -5513,6 +5537,148 @@ mod tests {
     use super::*;
     use cas_types::{Task, TaskStatus};
     use tempfile::TempDir;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cas_50713_stale_reset_releases_cloud_then_replacement_starts_without_claim_lost() {
+        use std::sync::{Arc, Mutex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for (initial_owner, unregistered) in [("old-session", false), ("old-session", true),
+            ("new-session", false), ("new-session", true)] {
+            let _env = crate::test_support::TestEnvGuard::temp_home();
+            let (_temp, cas_dir) = seeded_cas_dir();
+            let server = MockServer::start().await;
+            let holder = Arc::new(Mutex::new(Some(initial_owner.to_string())));
+            let state = Arc::clone(&holder);
+            let originally_renewed = chrono::Utc::now();
+            Mock::given(wiremock::matchers::path_regex("^/api/agents/tasks/"))
+                .respond_with(move |request: &wiremock::Request| {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+                    let caller = body["agent_id"].as_str().unwrap_or_default();
+                    let action = request.url.path().rsplit('/').next().unwrap();
+                    let mut owner = state.lock().unwrap();
+                    let lock = |id: &str| serde_json::json!({
+                        "id":"lock-id", "task_id":"cas-reset", "agent_id":id, "status":"active",
+                        "expires_at":(chrono::Utc::now()+chrono::Duration::minutes(10)).to_rfc3339(),
+                        "renewed_at":originally_renewed.to_rfc3339(), "renewal_count":0, "epoch":1,
+                        "claim_reason":null
+                    });
+                    let (status, answer) = match action {
+                        "lock" => (200, serde_json::json!({"lock":owner.as_deref().map(lock)})),
+                        "release" => {
+                            if owner.as_deref() == Some(caller) { *owner = None; }
+                            (200, serde_json::json!({"status":"success"}))
+                        }
+                        "claim" if owner.as_deref().is_some_and(|id| id != caller) => (409,
+                            serde_json::json!({"error":"already_claimed", "owner_agent_id":owner.clone(),
+                                "expires_at":(chrono::Utc::now()+chrono::Duration::minutes(10)).to_rfc3339()})),
+                        "claim" => {
+                            *owner = Some(caller.into());
+                            (200, serde_json::json!({"status":"success", "result":"claimed", "lock":lock(caller)}))
+                        }
+                        "renew" => (200, serde_json::json!({"lock":lock(caller)})),
+                        _ => (404, serde_json::json!({"error":"unexpected route"})),
+                    };
+                    ResponseTemplate::new(status).set_body_json(answer)
+                }).mount(&server).await;
+            std::fs::write(
+                cas_dir.join("config.toml"),
+                r#"[project]
+    canonical_id = "github.com/acme/widget"
+    [verification]
+    enabled = false
+    "#,
+            )
+            .unwrap();
+            std::fs::write(
+                cas_dir.join("cloud.json"),
+                serde_json::json!({
+                    "endpoint":server.uri(), "token":"test-token"
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let tasks = open_task_store_cached(&cas_dir).unwrap();
+            let mut task = task_with("cas-reset", Some("dead-worker"), TaskStatus::InProgress);
+            task.notes = "Prior WIP must survive reset".into();
+            tasks.add(&task).unwrap();
+            let agents = open_agent_store(&cas_dir).unwrap();
+            let mut old = cas_types::Agent::new("old-session".into(), "dead-worker".into());
+            agents.register(&old).unwrap();
+            agents.try_claim(&task.id, &old.id, 600, None).unwrap();
+            old.status = cas_types::AgentStatus::Shutdown;
+            old.pid = None;
+            old.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(20);
+            agents.register(&old).unwrap();
+            if unregistered { agents.unregister(&old.id).unwrap(); }
+            agents
+                .register(&cas_types::Agent::new(
+                    "new-session".into(),
+                    "replacement".into(),
+                ))
+                .unwrap();
+            let root = cas_dir.clone();
+            assert!(
+                tokio::task::spawn_blocking(move || assign_task_to_new_worker(
+                    &root,
+                    "cas-reset",
+                    "replacement"
+                ))
+                .await
+                .unwrap()
+            );
+            if initial_owner == "old-session" {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while holder.lock().unwrap().is_some() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }).await.expect("background cloud release must settle the retired owner");
+            }
+            assert_eq!(
+                holder.lock().unwrap().as_deref(),
+                if initial_owner == "old-session" {
+                    None
+                } else {
+                    Some("new-session")
+                },
+                "reset must release only retired cloud owners, preserving a concurrent replacement"
+            );
+            assert!(
+                tasks
+                    .get(&task.id)
+                    .unwrap()
+                    .notes
+                    .contains("Prior WIP must survive reset")
+            );
+            let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+            core.set_agent_id_for_testing("new-session".into());
+            core.cas_task_start_with_options(rmcp::handler::server::wrapper::Parameters(
+                crate::mcp::tools::TaskStartRequest {
+                    id: task.id.clone(),
+                    brief: Some(true),
+                    force: None,
+                },
+            ))
+            .await
+            .unwrap();
+            assert_eq!(holder.lock().unwrap().as_deref(), Some("new-session"));
+            let root = cas_dir.clone();
+            let report = tokio::task::spawn_blocking(move || {
+                crate::cloud::peer_claims::renew_agent_claims(&root, "new-session")
+            })
+            .await
+            .unwrap();
+            assert!(report.conflicts.is_empty());
+            assert!(
+                !crate::store::open_prompt_queue_store(&cas_dir)
+                    .unwrap()
+                    .peek_all(100)
+                    .unwrap()
+                    .iter()
+                    // pin: this alarm class is the externally observed false-conflict regression.
+                    .any(|row| row.prompt.contains("PEER CLAIM LOST"))
+            );
+        }
+    }
 
     fn seeded_cas_dir() -> (TempDir, std::path::PathBuf) {
         let temp = TempDir::new().unwrap();

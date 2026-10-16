@@ -183,13 +183,21 @@ impl Fixture {
 
     fn wake(&self, session: &str, now: DateTime<Utc>) -> VioletWake {
         let metadata = crate::ui::factory::session::create_metadata(
-            session, std::process::id(), "supervisor", &[], None, None, None,
+            session,
+            std::process::id(),
+            "supervisor",
+            &[],
+            None,
+            None,
+            None,
         );
-        crate::ui::factory::session::SessionManager::new().save_metadata(&metadata).unwrap();
+        crate::ui::factory::session::SessionManager::new()
+            .save_metadata(&metadata)
+            .unwrap();
         VioletWake::new(
             PROJECT.into(),
             Vec::new(),
-            CONSUMER.into(),
+            format!("machine:{session}"),
             session.into(),
             self.watch_path.clone(),
             Vec::new(),
@@ -308,7 +316,8 @@ fn cas_639c_claimed_reply_routes_to_existing_thread_watch_owner_before_ack() {
     let original = owner.book().watches[0].clone();
     let mut claimant = fx.wake("claimant", at(20));
     relay.publish(envelope(PROJECT, "C1", "thread_reply", 25, 0, "U2"));
-    let report = claimant.poll_once(&relay, &fx.queue, true, at(30));
+    *relay.fail_ack.borrow_mut() = true;
+    let report = claimant.poll_once(&relay, &fx.queue, false, at(30));
     assert_eq!((report.wakes, report.admitted), (1, 1));
     let rows = fx.wakes();
     assert_eq!(rows.len(), 2);
@@ -316,18 +325,24 @@ fn cas_639c_claimed_reply_routes_to_existing_thread_watch_owner_before_ack() {
         rows.iter()
             .all(|row| row.factory_session.as_deref() == Some("owner"))
     );
-    assert_eq!(
-        relay.outcome(&format!("slack:T0123:C1:{}", ts(25))),
-        Some(AckOutcome::Admitted)
-    );
+    assert_eq!(relay.outcome(&format!("slack:T0123:C1:{}", ts(25))), None);
     let saved = WatchBook::read(&fx.watch_path).unwrap();
     assert_eq!(
         saved.watches.iter().find(|w| w.factory_session == "owner"),
         Some(&original)
     );
+    *relay.fail_ack.borrow_mut() = false;
+    relay.set_now(at(200));
+    let replay = claimant.poll_once(&relay, &fx.queue, false, at(200));
+    assert_eq!((replay.wakes, replay.admitted), (0, 1));
+    assert_eq!(fx.wakes().len(), 2);
+    assert_eq!(
+        relay.outcome(&format!("slack:T0123:C1:{}", ts(25))),
+        Some(AckOutcome::Admitted)
+    );
 
     relay.publish(envelope(PROJECT, "C1", "thread_reply", 90, 80, "U3"));
-    claimant.poll_once(&relay, &fx.queue, true, at(95));
+    claimant.poll_once(&relay, &fx.queue, true, at(295));
     assert_eq!(
         fx.wakes().last().unwrap().factory_session.as_deref(),
         Some("claimant")
@@ -387,23 +402,31 @@ fn cas_639c_concurrent_session_saves_keep_both_watch_sets() {
     let first = fx.wake("first", t0());
     let second = fx.wake("second", t0());
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let handles: Vec<_> = [(first, "C1"), (second, "C2")].into_iter().map(|(mut wake, channel)| {
-        let root = fx._temp.path().to_path_buf();
-        let barrier = barrier.clone();
-        std::thread::spawn(move || {
-            let queue = SqlitePromptQueueStore::open(&root).unwrap();
-            let relay = FakeRelay::new();
-            relay.publish(mention(channel, 0));
-            barrier.wait();
-            for tick in 0..4 {
-                let report = wake.poll_once(&relay, &queue, true, at(10 + tick));
-                assert!(report.errors.is_empty(), "{report:?}");
-            }
+    let handles: Vec<_> = [(first, "C1"), (second, "C2")]
+        .into_iter()
+        .map(|(mut wake, channel)| {
+            let root = fx._temp.path().to_path_buf();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let queue = SqlitePromptQueueStore::open(&root).unwrap();
+                let relay = FakeRelay::new();
+                relay.publish(mention(channel, 0));
+                barrier.wait();
+                for tick in 0..4 {
+                    let report = wake.poll_once(&relay, &queue, true, at(10 + tick));
+                    assert!(report.errors.is_empty(), "{report:?}");
+                }
+            })
         })
-    }).collect();
-    for handle in handles { handle.join().unwrap(); }
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
     let saved = WatchBook::read(&fx.watch_path).unwrap();
-    let owners: BTreeSet<_> = saved.active().map(|watch| watch.factory_session.as_str()).collect();
+    let owners: BTreeSet<_> = saved
+        .active()
+        .map(|watch| watch.factory_session.as_str())
+        .collect();
     assert_eq!(owners, BTreeSet::from(["first", "second"]));
     assert_eq!(fx.wakes().len(), 2);
 }
@@ -418,13 +441,31 @@ fn cas_639c_same_channel_sweeps_route_owned_threads_without_dedupe_collision() {
     let mut second = fx.wake("second", at(20));
     relay.publish(mention("C1", 21));
     second.poll_once(&relay, &fx.queue, true, at(30));
-    let messages = [(100, 0, Some("U1")), (120, 21, Some("U2")), (150, 150, Some("U3"))];
-    assert_eq!(first.apply_sweep(&fx.queue, "C1", read(&messages), at(400)), SweepOutcome::Woke { messages: 2 });
-    assert_eq!(second.apply_sweep(&fx.queue, "C1", read(&messages), at(400)), SweepOutcome::Woke { messages: 2 });
+    let messages = [
+        (100, 0, Some("U1")),
+        (120, 21, Some("U2")),
+        (150, 150, Some("U3")),
+    ];
+    assert_eq!(
+        first.apply_sweep(&fx.queue, "C1", read(&messages), at(400)),
+        SweepOutcome::Woke { messages: 2 }
+    );
+    assert_eq!(
+        second.apply_sweep(&fx.queue, "C1", read(&messages), at(400)),
+        SweepOutcome::Woke { messages: 2 }
+    );
     let rows = fx.wakes();
-    assert_eq!(rows.len(), 4, "each owning session receives its own thread; unknown messages keep channel-watch behavior");
+    assert_eq!(
+        rows.len(),
+        4,
+        "each owning session receives its own thread; unknown messages keep channel-watch behavior"
+    );
     for (session, owned, foreign) in [("first", 100, 120), ("second", 120, 100)] {
-        let row = rows.iter().rev().find(|row| row.factory_session.as_deref() == Some(session)).unwrap();
+        let row = rows
+            .iter()
+            .rev()
+            .find(|row| row.factory_session.as_deref() == Some(session))
+            .unwrap();
         assert!(row.prompt.contains(&format!("message_ts={}", ts(owned))));
         assert!(!row.prompt.contains(&format!("message_ts={}", ts(foreign))));
     }

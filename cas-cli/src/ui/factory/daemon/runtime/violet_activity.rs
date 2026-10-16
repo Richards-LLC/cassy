@@ -651,7 +651,6 @@ impl VioletWake {
         supervisor_live: bool,
         now: DateTime<Utc>,
     ) -> PollReport {
-        self.refresh_peers(now);
         let mut report = PollReport::default();
         let request = ClaimRequest {
             project_ids: vec![self.project_id.clone()],
@@ -688,6 +687,8 @@ impl VioletWake {
             }
             Err(error) => report.errors.push(format!("claim: {error}")),
         }
+        // A peer may open a thread watch while the Cloud request is in flight.
+        self.refresh_peers(now);
         self.admit_held(queue, supervisor_live, now, &mut acks, &mut report);
         report.held = self.held.len();
         for batch in acks.chunks(ACK_BATCH) {
@@ -987,7 +988,11 @@ impl VioletWake {
                     &self.factory_session,
                     &channel_id,
                     &note,
-                    &format!("violet-watch-stopped:{channel_id}:{}", started_at.timestamp()),
+                    &format!(
+                        "violet-watch-stopped:{}:{channel_id}:{}",
+                        self.factory_session,
+                        started_at.timestamp()
+                    ),
                 ) {
                     tracing::warn!(%error, "could not record Violet watch stop");
                 }
@@ -1060,7 +1065,11 @@ impl VioletWake {
                         &self.factory_session,
                         channel_id,
                         &note,
-                        &format!("violet-watch-stopped:{channel_id}:{}", started.timestamp()),
+                        &format!(
+                            "violet-watch-stopped:{}:{channel_id}:{}",
+                            self.factory_session,
+                            started.timestamp()
+                        ),
                     );
                 }
                 return SweepOutcome::ReadFailed { stopped };
@@ -1118,7 +1127,8 @@ impl VioletWake {
         if !items.is_empty() {
             let prompt = violet_activity_envelope(&channel, &channel_name, "sweep", &items);
             let key = format!(
-                "violet-sweep:{channel}:{}",
+                "violet-sweep:{}:{channel}:{}",
+                self.factory_session,
                 items.last().map(|i| i.message_ts.as_str()).unwrap_or_default()
             );
             match enqueue_wake(queue, &self.factory_session, &channel, &channel_name, &prompt, &key) {
@@ -1801,7 +1811,7 @@ impl VioletWakeRuntime {
             slack.violet_bot_user_ids(),
             Utc::now(),
         );
-        tracing::info!(project = %project_id, "Violet push-wake claiming Slack activity from Cloud");
+        tracing::info!(project = %project_id, "Violet push-wake ready; Cloud credentials checked each tick");
         Some(Self {
             state: std::sync::Arc::new(std::sync::Mutex::new(state)),
             cas_dir: cas_dir.to_path_buf(),

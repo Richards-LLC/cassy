@@ -484,6 +484,7 @@ class Agent(threading.Thread):
         self.own_task: str | None = None
         self.client: McpClient | None = None
         self.boot_secs: float | None = None
+        self.boot_failures: list[str] = []
         self.error: str | None = None
 
     def record(self, tool, action, started, latency, ok, detail):
@@ -497,6 +498,45 @@ class Agent(threading.Thread):
                 "ok": ok,
                 "detail": "" if ok else detail[:200],
             })
+
+    def boot(self, env: dict, log_dir: Path) -> None:
+        """Start `cas serve` and create the agent's task.
+
+        A serve that exits during boot is restarted, up to `--boot-retries`
+        times, so a receipt keeps its configured agent count. Each failure is
+        recorded in the receipt (`agent_boot_failures`), so a boot bug stays
+        visible instead of silently thinning the load.
+        """
+        attempts = 1 + max(0, self.args.boot_retries)
+        for attempt in range(attempts):
+            try:
+                started = now()
+                self.client = McpClient(self.args.cas_bin, self.env["project"], env,
+                                        log_dir / f"{self.name_}.stderr")
+                self.client.initialize(CALL_TIMEOUT_SECS)
+                self.boot_secs = now() - started
+                ok, text = self.timed_call("task", "create", {
+                    "action": "create",
+                    "title": f"Load harness work item for {self.name_}",
+                    "description": "Synthetic task owned by one load-harness agent.",
+                    "task_type": "chore",
+                    "risk": "none",
+                    "priority": 3,
+                })
+                if self.client.proc.poll() is not None:
+                    raise RuntimeError(f"cas serve exited ({self.client.proc.returncode})")
+                match = re.search(r"\b(cas-[0-9a-f]{4,6})\b", text)
+                if ok and match:
+                    self.own_task = match.group(1)
+                return
+            except (RuntimeError, TimeoutError, OSError) as error:
+                self.boot_failures.append(f"{type(error).__name__}: {error}")
+                if self.client is not None:
+                    self.client.close()
+                    self.client = None
+                if attempt + 1 == attempts:
+                    raise
+                time.sleep(1.0)
 
     def timed_call(self, tool: str, action: str, arguments: dict) -> tuple[bool, str]:
         started = now()
@@ -560,22 +600,7 @@ class Agent(threading.Thread):
         log_dir = Path(self.args.run_dir) / "serve-logs"
         log_dir.mkdir(exist_ok=True)
         try:
-            started = now()
-            self.client = McpClient(self.args.cas_bin, self.env["project"], env,
-                                    log_dir / f"{self.name_}.stderr")
-            self.client.initialize(CALL_TIMEOUT_SECS)
-            self.boot_secs = now() - started
-            ok, text = self.timed_call("task", "create", {
-                "action": "create",
-                "title": f"Load harness work item for {self.name_}",
-                "description": "Synthetic task owned by one load-harness agent.",
-                "task_type": "chore",
-                "risk": "none",
-                "priority": 3,
-            })
-            match = re.search(r"\b(cas-[0-9a-f]{4,6})\b", text)
-            if ok and match:
-                self.own_task = match.group(1)
+            self.boot(env, log_dir)
             workload = [entry for entry in WORKLOAD
                         if f"{entry[1]}.{entry[2]}" not in self.args.exclude]
             weights = [w for w, _, _ in workload]
@@ -1355,6 +1380,7 @@ def flv2_receipts(receipt: dict) -> list[dict]:
     context = {
         "agents": receipt["agents"],
         "live_agents": live,
+        "agent_boot_failures": sum(len(v) for v in (receipt.get("agent_boot_failures") or {}).values()),
         "cas_bin": receipt.get("cas_bin"),
         "cas_bin_sha256": receipt.get("cas_bin_sha256"),
         "cas_version": receipt.get("cas_version"),
@@ -1649,6 +1675,7 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
         },
         "agent_boot_secs": {a.name_: round(a.boot_secs, 2) if a.boot_secs else None for a in agents},
         "agent_errors": {a.name_: a.error for a in agents if a.error},
+        "agent_boot_failures": {a.name_: a.boot_failures for a in agents if a.boot_failures},
         "calls": calls,
         "lock_waits": {
             "count": len(waits),
@@ -1679,7 +1706,8 @@ def run_once(args: argparse.Namespace) -> tuple[dict, list[dict]]:
 def control_summary(receipt: dict) -> dict:
     """The no-pressure control phase, kept compact inside the main receipt."""
     keep = ("started_at", "finished_at", "run_dir", "background_writers", "calls", "slos",
-            "slos_met", "sqlite_busy", "agent_errors", "host_load", "synthetic_writers",
+            "slos_met", "sqlite_busy", "agent_errors", "agent_boot_failures", "host_load",
+            "synthetic_writers",
             "key_to_echo", "flv2_receipts", "agents")
     summary = {key: receipt[key] for key in keep}
     summary["lock_waits"] = {k: v for k, v in receipt["lock_waits"].items() if k != "episodes"}
@@ -1791,6 +1819,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="time key -> echo on the supervisor pane over the GUI socket")
     parser.add_argument("--echo-interval", type=float, default=0.1,
                         help="seconds between key-to-echo probes")
+    parser.add_argument("--boot-retries", type=int, default=2,
+                        help="restart an agent whose cas serve exits during boot this many "
+                             "times; failures are recorded in the receipt")
     parser.add_argument("--keep-scratch", action="store_true",
                         help="keep the scratch database copy after the run")
     args = parser.parse_args(argv)

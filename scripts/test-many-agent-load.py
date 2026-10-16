@@ -233,6 +233,50 @@ class EchoProbeTest(unittest.TestCase):
         self.assertEqual(echo["max_ms"], 300.0)
 
 
+FAKE_SERVE = r"""#!/usr/bin/env python3
+import json, os, sys
+marker = os.environ["FAKE_SERVE_MARKER"]
+if not os.path.exists(marker):
+    open(marker, "w").close()
+    sys.stderr.write("[ERROR] eager store init failed at 'task_store'\n")
+    sys.exit(1)
+for line in sys.stdin:
+    message = json.loads(line)
+    if "id" not in message:
+        continue
+    result = {"content": [{"type": "text", "text": "Created task: cas-abcd"}]}
+    if message["method"] == "initialize":
+        result = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}) + "\n")
+    sys.stdout.flush()
+"""
+
+
+class AgentBoot(unittest.TestCase):
+    def test_a_serve_that_exits_at_boot_is_restarted_and_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake = root / "cas"
+            fake.write_text(FAKE_SERVE)
+            fake.chmod(0o755)
+            (root / "run").mkdir()
+            args = argparse.Namespace(cas_bin=str(fake), boot_retries=2, seed=1, run_dir=str(root / "run"),
+                                      exclude=[], think_mean=1.0, t0=0.0)
+            agent = load.Agent(1, args, {"project": root}, ["cas-0000"], [], [], threading.Lock(), 0)
+            env = dict(os.environ, FAKE_SERVE_MARKER=str(root / "booted-once"))
+            agent.boot(env, root / "run")
+            self.assertEqual(agent.own_task, "cas-abcd")
+            self.assertEqual(len(agent.boot_failures), 1, agent.boot_failures)
+            agent.client.close()
+
+            agent = load.Agent(2, argparse.Namespace(**{**vars(args), "boot_retries": 0}),
+                               {"project": root}, ["cas-0000"], [], [], threading.Lock(), 0)
+            env["FAKE_SERVE_MARKER"] = str(root / "fresh-marker")
+            with self.assertRaises(RuntimeError):
+                agent.boot(env, root / "run")
+            self.assertEqual(len(agent.boot_failures), 1)
+
+
 class Receipts(unittest.TestCase):
     def receipt(self, pass_ok, echo_p99, agents=16, writers=(38.0, 63.0, 236.0)):
         return {

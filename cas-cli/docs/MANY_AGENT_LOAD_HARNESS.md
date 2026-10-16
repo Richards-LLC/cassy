@@ -73,7 +73,7 @@ The receipt's `flv2_receipts` rows hold the two receipt budgets from spec §7 (`
 - `flv2_control_pass_p99_under_100ms_with_16_agents`: the daemon pass p99, met only with at least 16 live agents;
 - `flv2_key_to_echo_p99_under_50ms_under_load`: the echo p99, met only with at least 16 live agents and every configured synthetic writer delivering.
 
-An agent whose `cas serve` failed is not counted as live. Writer rates compare as a multiset.
+An agent whose `cas serve` failed is not counted as live. A serve that exits during boot is restarted, up to `--boot-retries` times (2 by default). Each restart is recorded in `agent_boot_failures`, so a boot bug stays visible rather than thinning the load; cas-30e3 is one such bug. Writer rates compare as a multiset.
 
 Each row also records:
 - the binary path, its SHA-256 and its version;

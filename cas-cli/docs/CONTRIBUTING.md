@@ -1460,6 +1460,16 @@ after confirming no Cargo process is running and no cache lease is held. It was
 29 GB at discovery; use the inventory receipt for its current byte count.
 Never silently adopt or delete an unknown cache to bypass the liveness check.
 
+Durable task evidence has a separate cleanup opt-in: `gc_cleanup force=true
+dry_run=false` reaps processes and eligible caches while preserving artifacts.
+Deleting task artifact directories additionally requires `artifacts=true`.
+Only tasks closed at least seven days ago are eligible; missing close dates,
+references from open tasks or tasks updated within seven days (including notes),
+and unavailable reference evidence preserve artifacts. References may name the
+task/path or a published artifact ID or durable URL. Unknown directories and
+ambiguous legacy artifact roots remain review-only. Orphan cleanup reaps a
+private process group or fingerprinted descendants, preserving shared groups.
+
 Lane compile previews carry provenance and a lifetime owner lock.
 Previews are direct children of `.cas/worktrees` so the existing private target
 ownership check admits them. Their sibling metadata directory binds the exact

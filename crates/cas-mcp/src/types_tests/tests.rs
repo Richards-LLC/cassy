@@ -540,10 +540,11 @@ fn test_factory_older_than_secs_as_string() {
 #[test]
 fn test_coordination_maps_target_cache_dry_run_to_factory_request() {
     let req: CoordinationRequest =
-        serde_json::from_str(r#"{"action":"gc_cleanup","force":true,"dry_run":false}"#).unwrap();
+        serde_json::from_str(r#"{"action":"gc_cleanup","force":true,"dry_run":false,"artifacts":true}"#).unwrap();
     let factory = req.to_factory_request();
     assert_eq!(factory.force, Some(true));
     assert_eq!(factory.dry_run, Some(false));
+    assert_eq!(factory.artifacts, Some(true));
 }
 
 #[test]

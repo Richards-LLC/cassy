@@ -667,7 +667,10 @@ pub(crate) fn cleanup(cas_root: &Path, report: &OrphanReport, authorized: bool) 
         }
         let killed = match process.process_group {
             Some(pgid) => kill_process_group_fingerprinted(pgid, process.starttime),
-            None => kill_pid_fingerprinted(process.pid, process.starttime),
+            None => super::server_registry::kill_process_tree_fingerprinted(
+                process.pid,
+                process.starttime,
+            ),
         };
         match killed {
             Ok(true) => summary.killed.push(process.pid),
@@ -734,39 +737,6 @@ fn kill_process_group_fingerprinted(pgid: u32, expected_starttime: Option<u64>) 
     Ok(true)
 }
 
-/// SIGKILL a pid only if its `/proc` start time still matches the fingerprint
-/// captured at scan time. Returns `Ok(false)` when the pid was recycled or has
-/// already exited.
-fn kill_pid_fingerprinted(pid: u32, expected_starttime: Option<u64>) -> io::Result<bool> {
-    let Some(expected) = expected_starttime else {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "refusing to signal a process with no start-time fingerprint",
-        ));
-    };
-    match crate::mcp::daemon::read_pid_starttime(pid) {
-        Some(actual) if actual == expected => {}
-        // Recycled onto another process, or already gone. Either way, do not
-        // signal: this is the check that stops GC killing a bystander.
-        _ => return Ok(false),
-    }
-
-    #[cfg(unix)]
-    {
-        // SAFETY: read-only signal to a pid whose identity was just
-        // revalidated against its durable start-time fingerprint.
-        let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-        if rc != 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(error);
-            }
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -814,9 +784,14 @@ mod tests {
     /// which reads `/proc` and does not exist on other targets (GH #93).
     #[cfg(target_os = "linux")]
     fn plant_orphan(cwd: &Path) -> u32 {
+        plant_orphan_command(cwd, "sleep 120 >/dev/null 2>&1 </dev/null & echo $!")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn plant_orphan_command(cwd: &Path, command: &str) -> u32 {
         let output = Command::new("sh")
             .arg("-c")
-            .arg("sleep 120 >/dev/null 2>&1 </dev/null & echo $!")
+            .arg(command)
             .current_dir(cwd)
             .output()
             .expect("spawn orphan");
@@ -1079,7 +1054,29 @@ mod tests {
         let worktree = cas_root.join("worktrees/worker-a");
         std::fs::create_dir_all(&worktree).unwrap();
 
-        let pid = plant_orphan(&worktree);
+        // A wrapper sharing the runner's group must lose its child without
+        // signalling that shared group (the npm-exec/node shape from GH #1248).
+        let pid = plant_orphan_command(
+            &worktree,
+            "sh -c 'sleep 120 & echo $! > gc-child.pid; wait' >/dev/null 2>&1 </dev/null & echo $!",
+        );
+        let _wrapper = PlantedProcess(pid);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let child = loop {
+            if let Some(child) = std::fs::read_to_string(worktree.join("gc-child.pid"))
+                .ok()
+                .and_then(|pid| pid.trim().parse::<u32>().ok())
+            {
+                break child;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "wrapper did not publish its child pid"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        let _child = PlantedProcess(child);
+        assert_eq!(read_proc_stat(child).expect("child stat").ppid, pid);
         let live_sessions = HashSet::new();
         let protected = HashSet::new();
 
@@ -1104,21 +1101,27 @@ mod tests {
             "a preview must never kill: pid {pid} should still be alive"
         );
 
-        // Authorized run reaps it.
+        assert!(
+            crate::mcp::daemon::pid_alive(child),
+            "preview killed the child"
+        );
+
+        // Authorized run reaps the wrapper and its fingerprinted child.
         let done = cleanup(&cas_root, &report, true);
         assert_eq!(done.killed, vec![pid], "errors: {:?}", done.errors);
 
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && crate::mcp::daemon::pid_alive(pid) {
-            std::thread::sleep(Duration::from_millis(25));
+        for victim in [pid, child] {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline
+                && read_proc_stat(victim).is_some_and(|s| s.state != 'Z')
+            {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            assert!(
+                read_proc_stat(victim).is_none_or(|s| s.state == 'Z'),
+                "wrapper {pid} and child {child} must both be dead; survivor {victim}"
+            );
         }
-        // A killed child of init is reaped by init, so the pid disappears.
-        assert!(
-            !crate::mcp::daemon::pid_alive(pid)
-                || read_proc_stat(pid).map(|s| s.state) == Some('Z'),
-            "orphan {pid} should be dead after an authorized cleanup"
-        );
-        kill_if_alive(pid);
     }
 
     #[cfg(target_os = "linux")]
@@ -1298,7 +1301,7 @@ mod tests {
 
             let done = cleanup(&cas_root, &report, true);
             if !done.killed.contains(&pid) {
-                // `kill_pid_fingerprinted` reports `Ok(false)` — skipped, not
+                // `kill_process_tree_fingerprinted` reports `Ok(false)` — skipped, not
                 // killed — for a pid that exited between scan and cleanup. A
                 // still-live pid means the GC genuinely refused to reap it.
                 assert!(

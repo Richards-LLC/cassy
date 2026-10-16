@@ -1048,6 +1048,77 @@ fn process_identity_live(process: ProcessIdentity) -> bool {
         && !process_is_zombie(process.pid)
 }
 
+/// Kill an unregistered orphan and its captured descendants without signalling
+/// a process group it may share with a live worker. Revalidate every identity.
+pub(crate) fn kill_process_tree_fingerprinted(
+    pid: u32,
+    expected_starttime: Option<u64>,
+) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        let root = ProcessIdentity {
+            pid,
+            starttime: expected_starttime.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "refusing orphan cleanup without a start-time fingerprint",
+                )
+            })?,
+        };
+        if !process_identity_live(root) {
+            return Ok(false);
+        }
+        let snapshot = process_snapshot();
+        if !snapshot
+            .iter()
+            .any(|process| process.identity() == Some(root))
+        {
+            return Err(io::Error::other(
+                "orphan ancestry unavailable; refusing cleanup",
+            ));
+        }
+        let mut identities = vec![root];
+        for child in descendants_from_snapshot(pid, &snapshot)
+            .iter()
+            .filter(|child| !child.zombie)
+        {
+            identities.push(child.identity().ok_or_else(|| {
+                io::Error::other("descendant fingerprint unavailable; refusing orphan cleanup")
+            })?);
+        }
+        // The parent must still be the scanned orphan after ancestry capture.
+        if !process_identity_live(root) {
+            return Ok(false);
+        }
+        for process in identities.iter().rev() {
+            signal_fingerprinted(*process, libc::SIGKILL)?;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if !identities
+                .iter()
+                .any(|process| process_identity_live(*process))
+            {
+                return Ok(true);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(io::Error::other(format!(
+                    "orphan {pid} has surviving descendants after cleanup"
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, expected_starttime);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "orphan ancestry unavailable on this platform",
+        ))
+    }
+}
+
 #[cfg(unix)]
 fn signal_fingerprinted(process: ProcessIdentity, signal: libc::c_int) -> io::Result<()> {
     if !process_identity_live(process) {

@@ -1244,7 +1244,7 @@ impl CasService {
                 "sync_all_workers" => {
                     Some(&["action", "id", "branch", "worker_names", "force"])
                 }
-                "gc_cleanup" => Some(&["action", "older_than_secs", "force", "dry_run"]),
+                "gc_cleanup" => Some(&["action", "older_than_secs", "force", "dry_run", "artifacts"]),
                 "server_stop" => Some(&["action", "id"]),
                 "worktree_cleanup" => {
                     Some(&["action", "id", "all", "orphans", "dry_run", "force"])

@@ -3543,11 +3543,11 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
         "close must surface an explicit status hold and its reason: {close_text}"
     );
     assert!(
-        !close_text.contains(&legacy_note_control_id),
+        !close_text.contains("earlier API outage was resolved last week"),
         "old blocker prose alone must not be surfaced as an active hold: {close_text}"
     );
     assert!(
-        !close_text.contains(&dependency_status_control_id),
+        !close_text.contains("Leave blocked until the API dependency closes"),
         "status=blocked while a dependency is unmet must not create a hold: {close_text}"
     );
     let explicit_show = service

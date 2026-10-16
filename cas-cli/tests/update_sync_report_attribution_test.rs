@@ -25,6 +25,7 @@ fn cas_76e4_cli_cases_leave_the_worker_worktree_untouched() {
     support::CasSandbox::new().assert_child_tests_leave_worktree_untouched(&[
         "update_sync_report_attribution_test::sync_attributes_every_claimed_write_to_the_directory_it_landed_in",
         "update_sync_report_attribution_test::codex_sync_reports_its_own_result_and_is_idempotent",
+        #[cfg(unix)]
         "update_sync_report_attribution_test::unwritable_codex_destination_fails_loudly_instead_of_claiming_success",
         "viktor_distribution_test::clean_init_and_sync_distribute_viktor_skill_and_status_never_prints_a_key",
     ]);

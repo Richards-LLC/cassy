@@ -234,8 +234,18 @@ pub(super) fn enqueue_correlated_worker_deaths_relay(
     cas_dir: &std::path::Path,
     group: &[super::queue_and_events::ObservedWorkerExit],
 ) -> WorkerAttentionRelayOutcome {
+    enqueue_folded_worker_deaths_relay(cas_dir, group).0
+}
+
+/// cas-26c8: [`enqueue_correlated_worker_deaths_relay`] plus whether the
+/// folded supervisor prompt is enqueued, which decides whether the held
+/// per-worker relays may be folded away.
+pub(super) fn enqueue_folded_worker_deaths_relay(
+    cas_dir: &std::path::Path,
+    group: &[super::queue_and_events::ObservedWorkerExit],
+) -> (WorkerAttentionRelayOutcome, bool) {
     let Some(first) = group.first() else {
-        return WorkerAttentionRelayOutcome::NotApplicable;
+        return (WorkerAttentionRelayOutcome::NotApplicable, false);
     };
     let last = group.last().unwrap_or(first);
     let spread_ms = (last.at - first.at).num_milliseconds().max(0);
@@ -244,24 +254,108 @@ pub(super) fn enqueue_correlated_worker_deaths_relay(
         .map(|exit| format!("{} ({})", exit.worker, exit.status))
         .collect::<Vec<_>>()
         .join("; ");
+    // cas-26c8 (ct2_p2_died_together_folds): this relay replaces the
+    // per-worker worker_died relays, so each worker's tasks and cleaned tail
+    // (12 lines / 600 chars, clean_death_tail) are listed here.
+    let entries = group
+        .iter()
+        .map(|exit| {
+            let Some(death) = exit.death.as_ref() else {
+                return format!("- {} ({})", exit.worker, exit.status);
+            };
+            let list = |ids: &[String]| {
+                if ids.is_empty() { "none".to_string() } else { ids.join(", ") }
+            };
+            let tail = death
+                .exit
+                .output_tail
+                .as_deref()
+                .map(|tail| {
+                    let quoted = tail.lines().map(|line| format!("    > {line}")).collect::<Vec<_>>();
+                    format!("\n  last output:\n{}", quoted.join("\n"))
+                })
+                .unwrap_or_default();
+            format!(
+                "- {} ({}): held tasks {}; parked {}{tail}",
+                exit.worker,
+                exit.status,
+                list(&death.summary.held_task_ids),
+                list(&death.summary.recovered_task_ids),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let detail = format!(
         "{count} worker harnesses exited within {spread_ms} ms of each other, starting {start}: \
          {workers}. Treat this as one incident with a shared cause (host, harness binary, \
-         account or network) before respawning; each worker's own worker-died relay lists \
-         the tasks it parked.",
+         account or network) before respawning. This relay replaces the per-worker \
+         worker-died relays:\n{entries}",
         count = group.len(),
         start = first.at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     );
     let occurrence = format!("{}:{}", first.worker, first.at.timestamp_millis());
-    enqueue_worker_attention_relay_detail(
+    let folded_incidents = group
+        .iter()
+        .filter_map(|exit| exit.death.as_ref())
+        .map(|death| crate::mcp::tools::service::orphan_recovery::death_incident_key(&death.agent))
+        .collect::<Vec<_>>();
+    enqueue_worker_attention_relay_inner(
         cas_dir,
         "workers_died_together",
         &first.worker,
         None,
         None,
-        &detail,
+        |_| detail.clone(),
         &occurrence,
+        None,
+        &folded_incidents,
     )
+}
+
+/// cas-26c8 review M1: re-drive a folded relay whose durable row (with its
+/// members already stamped) exists but whose prompt never reached the queue,
+/// e.g. the daemon stopped between the two. The stored detail and occurrence
+/// replay the same idempotent key.
+pub(super) fn redrive_folded_worker_deaths_relay(
+    cas_dir: &std::path::Path,
+    notification_id: i64,
+    payload: &serde_json::Value,
+) -> WorkerAttentionRelayOutcome {
+    use cas_store::SupervisorQueueStore;
+    // Re-read on the write lane: a prompt injected since the sweep's read
+    // means there is nothing to re-drive.
+    match crate::store::open_supervisor_queue_store(cas_dir).map(|queue| queue.get(notification_id)) {
+        Ok(Ok(Some(row))) if row.prompt_delivered_at.is_none() => {}
+        _ => return WorkerAttentionRelayOutcome::NotApplicable,
+    }
+    let text = |key: &str| payload.get(key).and_then(serde_json::Value::as_str);
+    let (Some(worker), Some(detail), Some(occurrence)) =
+        (text("worker"), text("detail"), text("occurrence"))
+    else {
+        return WorkerAttentionRelayOutcome::NotApplicable;
+    };
+    let folded_incidents = payload
+        .get("folded_incidents")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    enqueue_worker_attention_relay_inner(
+        cas_dir,
+        "workers_died_together",
+        worker,
+        None,
+        None,
+        |_| detail.to_string(),
+        occurrence,
+        None,
+        &folded_incidents,
+    )
+    .0
 }
 
 /// cas-4143: a teammate permission request CAS did not pre-approve has waited
@@ -896,6 +990,27 @@ fn enqueue_worker_attention_relay_detail_with_key(
     occurrence: &str,
     stable_key: Option<&str>,
 ) -> WorkerAttentionRelayOutcome {
+    enqueue_worker_attention_relay_inner(
+        cas_dir, kind, worker, task_id, elapsed_secs, detail, occurrence, stable_key, &[],
+    )
+    .0
+}
+
+/// The relay plus whether its supervisor prompt is enqueued. A `Pending`
+/// outcome whose prompt is enqueued failed only to stamp the durable row: the
+/// supervisor will still hear it (cas-26c8 L2).
+#[allow(clippy::too_many_arguments)]
+fn enqueue_worker_attention_relay_inner(
+    cas_dir: &std::path::Path,
+    kind: &str,
+    worker: &str,
+    task_id: Option<&str>,
+    elapsed_secs: Option<u64>,
+    detail: impl Fn(&str) -> String,
+    occurrence: &str,
+    stable_key: Option<&str>,
+    folded_incidents: &[String],
+) -> (WorkerAttentionRelayOutcome, bool) {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
         LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_notice_recipient,
     };
@@ -904,12 +1019,12 @@ fn enqueue_worker_attention_relay_detail_with_key(
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
         tracing::warn!("worker attention relay skipped: agent store unavailable");
-        return WorkerAttentionRelayOutcome::Pending;
+        return (WorkerAttentionRelayOutcome::Pending, false);
     };
     let supervisor = resolve_notice_recipient(agent_store.as_ref(), factory_session.as_deref());
     let Ok(supervisor_queue) = crate::store::open_supervisor_queue_store(cas_dir) else {
         tracing::warn!(worker = %worker, kind, "worker attention relay skipped: supervisor queue unavailable");
-        return WorkerAttentionRelayOutcome::Pending;
+        return (WorkerAttentionRelayOutcome::Pending, false);
     };
     // `occurrence` identifies the detected episode, not this delivery attempt.
     // A retry after a durable-only write must reuse it across daemon restarts.
@@ -934,23 +1049,43 @@ fn enqueue_worker_attention_relay_detail_with_key(
         "detail": detail(""),
         "factory_session": factory_session,
         "occurrence": occurrence,
+        "folded_incidents": folded_incidents,
     })
     .to_string();
-    let notification_id = match supervisor_queue.notify_idempotent(
-        &supervisor.id,
-        kind,
-        &payload,
-        NotificationPriority::High,
-        &key,
-    ) {
+    // cas-26c8: a folded multi-worker death replaces Critical worker_died
+    // relays, so it keeps their priority.
+    let priority = if kind == "workers_died_together" {
+        NotificationPriority::Critical
+    } else {
+        NotificationPriority::High
+    };
+    // cas-26c8 review M1: a folded relay is recorded in the same transaction
+    // that stamps the per-worker worker_died rows it replaces.
+    let recorded = if folded_incidents.is_empty() {
+        supervisor_queue.notify_idempotent(&supervisor.id, kind, &payload, priority, &key)
+    } else {
+        supervisor_queue.notify_idempotent_folding(
+            &supervisor.id,
+            kind,
+            &payload,
+            priority,
+            &key,
+            "worker_died",
+            folded_incidents,
+        )
+    };
+    let notification_id = match recorded {
         Ok(NotifyIdempotentResult::Created(id)) => id,
         Ok(NotifyIdempotentResult::AlreadyExists {
             id,
             prompt_delivered: true,
         }) => {
-            return WorkerAttentionRelayOutcome::Persisted {
-                notification_id: id,
-            };
+            return (
+                WorkerAttentionRelayOutcome::Persisted {
+                    notification_id: id,
+                },
+                true,
+            );
         }
         Ok(NotifyIdempotentResult::AlreadyExists {
             id,
@@ -958,12 +1093,12 @@ fn enqueue_worker_attention_relay_detail_with_key(
         }) => id,
         Err(error) => {
             tracing::error!(worker = %worker, kind, %error, "worker attention relay durable enqueue failed");
-            return WorkerAttentionRelayOutcome::Pending;
+            return (WorkerAttentionRelayOutcome::Pending, false);
         }
     };
     let Ok(prompt_queue) = crate::store::open_prompt_queue_store(cas_dir) else {
         tracing::error!(worker = %worker, kind, notification_id, "worker attention relay left pending: prompt queue unavailable");
-        return WorkerAttentionRelayOutcome::Pending;
+        return (WorkerAttentionRelayOutcome::Pending, false);
     };
     // Resolve the registered receiver at this enqueue attempt, including retries
     // after a durable-only write. Missing harness evidence stays neutral; the
@@ -986,7 +1121,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
     if supervisor.id == "operator" {
         body = match crate::supervisor_notices::operator_prompt(&body, kind) {
             Ok(body) => body,
-            Err(_) => return WorkerAttentionRelayOutcome::Pending,
+            Err(_) => return (WorkerAttentionRelayOutcome::Pending, false),
         };
     }
     let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
@@ -996,19 +1131,19 @@ fn enqueue_worker_attention_relay_detail_with_key(
         &body,
         supervisor.session.as_deref(),
         Some(&format!("{kind}: {worker}")),
-        Some(NotificationPriority::High),
+        Some(priority),
         &format!("worker-attention-outbox:{notification_id}"),
         Some(&cas_store::QueueOrigin::Daemon),
     ) {
         tracing::error!(worker = %worker, kind, notification_id, %error, "worker attention relay prompt enqueue failed");
-        return WorkerAttentionRelayOutcome::Pending;
+        return (WorkerAttentionRelayOutcome::Pending, false);
     }
     super::delivery::wake_daemon_after_enqueue(cas_dir);
     if let Err(error) = supervisor_queue.mark_prompt_delivered(notification_id) {
         tracing::warn!(notification_id, %error, "worker attention relay prompt stamp failed; idempotent replay remains safe");
-        return WorkerAttentionRelayOutcome::Pending;
+        return (WorkerAttentionRelayOutcome::Pending, true);
     }
-    WorkerAttentionRelayOutcome::Persisted { notification_id }
+    (WorkerAttentionRelayOutcome::Persisted { notification_id }, true)
 }
 
 #[cfg(test)]
@@ -1442,6 +1577,7 @@ mod worker_attention_tests {
                 at: t0 + chrono::Duration::milliseconds(600 * index as i64),
                 worker: (*worker).to_string(),
                 status: "exited with code 0".to_string(),
+                death: None,
             })
             .collect::<Vec<_>>();
 
@@ -1462,6 +1598,303 @@ mod worker_attention_tests {
         for worker in ["codex-a", "codex-b", "codex-c"] {
             assert!(prompt.contains(&format!("{worker} (exited with code 0)")), "{prompt}");
         }
+    }
+
+    /// cas-26c8 (spec-6194 P2.6, ct2_p2_died_together_folds): workers that die
+    /// unexpectedly together reach the supervisor as ONE Critical relay with
+    /// one entry per worker (tasks and cleaned tail), not N worker_died relays
+    /// plus a workers_died_together relay. A lone death is unchanged: one
+    /// worker_died relay.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ct2_p2_died_together_folds() {
+        use crate::mcp::tools::service::orphan_recovery::recover_worker_deferring_relay;
+        use super::super::queue_and_events::{DeferredWorkerDeath, ObservedWorkerExit};
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "provision-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "provision-test");
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let t0 = chrono::Utc::now() - chrono::Duration::seconds(30);
+        let died_at = |name: &str, at: chrono::DateTime<chrono::Utc>| {
+            let mut worker = Agent::new(format!("{name}-id"), name.to_string());
+            worker.role = AgentRole::Worker;
+            worker.status = AgentStatus::Active;
+            worker.factory_session = Some("provision-test".to_string());
+            agents.register(&worker).unwrap();
+            let exit = crate::prompt_revalidation::WorkerExitCause {
+                exit_code: Some(0),
+                exit_signal: None,
+                output_tail: Some(format!("{name} last line")),
+            };
+            let summary = recover_worker_deferring_relay(
+                &cas_dir,
+                agents.as_ref(),
+                &worker,
+                &[],
+                "exited with code 0",
+                Some(&exit),
+            )
+            .expect("an unexpected death is recorded with its relay held");
+            ObservedWorkerExit {
+                at,
+                worker: name.to_string(),
+                status: exit.status(),
+                death: Some(DeferredWorkerDeath {
+                    agent: worker,
+                    summary,
+                    reason: "exited with code 0".to_string(),
+                    exit,
+                }),
+            }
+        };
+        let died = |name: &str, offset_ms: i64| died_at(name, t0 + chrono::Duration::milliseconds(offset_ms));
+        let notices = || {
+            crate::store::open_supervisor_queue_store(&cas_dir)
+                .unwrap()
+                .list_pending("supervisor-id")
+                .unwrap()
+        };
+        let prompt_rows = || {
+            crate::store::open_prompt_queue_store(&cas_dir)
+                .unwrap()
+                .peek_all(50)
+                .unwrap()
+        };
+
+        daemon.recent_worker_exits = vec![died("codex-a", 0), died("codex-b", 700), died("codex-c", 1_200)];
+        // Review M: each held death is durable at once; only its prompt waits.
+        assert_eq!(
+            notices().iter().filter(|row| row.event_type == "worker_died").count(),
+            3,
+            "the deaths are recorded before the window closes"
+        );
+        // pin: review M contract: a held death has its durable row but no prompt yet.
+        assert!(prompt_rows().is_empty(), "no prompt until the window closes");
+        daemon.last_death_sweep = None;
+        daemon.relay_correlated_worker_deaths();
+        let rows = notices();
+        let kinds: Vec<&str> = rows.iter().map(|row| row.event_type.as_str()).collect();
+        assert_eq!(kinds, ["workers_died_together"], "one folded relay, no per-worker relays");
+        assert_eq!(rows[0].priority, cas_store::NotificationPriority::Critical);
+        let prompts = prompt_rows();
+        // pin: the AC is exactly one supervisor wake for the whole group.
+        assert_eq!(prompts.len(), 1, "one wake: {prompts:?}");
+        let body = &prompts[0].prompt;
+        for worker in ["codex-a", "codex-b", "codex-c"] {
+            let entry = format!("- {worker} (exited with code 0)");
+            let tail = format!("> {worker} last line");
+            // pin: one entry per worker naming its exit status (the folded per-worker relay).
+            assert!(body.contains(&entry), "{body}");
+            // pin: each entry quotes that worker's cleaned output tail.
+            assert!(body.contains(&tail), "each entry carries the worker's cleaned tail: {body}");
+        }
+        assert!(daemon.recent_worker_exits.is_empty());
+
+        daemon.recent_worker_exits = vec![died("codex-d", 0)];
+        daemon.last_death_sweep = None;
+        daemon.relay_correlated_worker_deaths();
+        let rows = notices();
+        let lone: Vec<_> = rows.iter().filter(|row| row.event_type == "worker_died").collect();
+        assert_eq!(lone.len(), 1, "a lone death relays as before: {rows:?}");
+        // pin: review L: the lone death's PROMPT reaches the supervisor, not only its row.
+        assert!(prompt_rows().iter().any(|row| row.prompt.contains("codex-d")), "lone prompt");
+        assert!(lone[0].payload.contains("codex-d"), "{}", lone[0].payload);
+        assert_eq!(lone[0].priority, cas_store::NotificationPriority::Critical);
+        assert_eq!(
+            rows.iter().filter(|row| row.event_type == "workers_died_together").count(),
+            1,
+            "a lone death adds no group relay"
+        );
+
+        // Review M: a daemon that stops or restarts inside the window loses
+        // what it held in memory. While the window is open nothing is sent;
+        // once nothing holds the deaths, the sweep injects their relays.
+        let before = prompt_rows().len();
+        let now = chrono::Utc::now();
+        daemon.recent_worker_exits = vec![died_at("codex-e", now), died_at("codex-f", now)];
+        daemon.last_death_sweep = None;
+        daemon.relay_correlated_worker_deaths();
+        // pin: the sweep must skip deaths the live daemon still holds.
+        assert_eq!(prompt_rows().len(), before, "held deaths wait for their window");
+        daemon.recent_worker_exits.clear(); // the restarted daemon holds nothing
+        daemon.last_death_sweep = None;
+        daemon.relay_correlated_worker_deaths();
+        let injected = prompt_rows();
+        assert_eq!(injected.len(), before + 2, "both deaths still reach the supervisor");
+        for worker in ["codex-e", "codex-f"] {
+            assert!(
+                injected.iter().any(|row| row.prompt.contains(worker)),
+                "{worker}: {injected:?}"
+            );
+        }
+        daemon.last_death_sweep = None;
+        daemon.relay_correlated_worker_deaths();
+        // pin: a second sweep must not inject the same deaths again.
+        assert_eq!(prompt_rows().len(), before + 2, "the sweep injects each death once");
+    }
+
+    /// cas-26c8 review M1 crash test: the daemon stops after the folded
+    /// relay's durable row is written (members stamped in that transaction)
+    /// but before its prompt. The restarted sweep re-drives the folded prompt
+    /// once and injects none of the folded per-worker relays. Review H1: a
+    /// second factory sharing the database is left alone.
+    #[tokio::test(flavor = "current_thread")]
+    async fn folded_relay_survives_a_crash_before_its_prompt_cas_26c8() {
+        use crate::mcp::tools::service::orphan_recovery::{
+            death_incident_key, recover_worker_deferring_relay,
+        };
+        use cas_store::SupervisorQueueStore;
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "provision-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "provision-test");
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut other = Agent::new("other-supervisor-id".to_string(), "other-supervisor".to_string());
+        other.role = AgentRole::Supervisor;
+        other.status = AgentStatus::Active;
+        other.factory_session = Some("other-factory".to_string());
+        agents.register(&other).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let record = |name: &str, session: &str| {
+            let mut worker = Agent::new(format!("{name}-id"), name.to_string());
+            worker.role = AgentRole::Worker;
+            worker.status = AgentStatus::Active;
+            worker.factory_session = Some(session.to_string());
+            agents.register(&worker).unwrap();
+            recover_worker_deferring_relay(&cas_dir, agents.as_ref(), &worker, &[], "exited", None)
+                .expect("recorded");
+            death_incident_key(&worker)
+        };
+        let incidents = vec![record("codex-g", "provision-test"), record("codex-h", "provision-test")];
+        record("other-w", "other-factory");
+
+        // What the folded relay writes before its prompt, then the crash.
+        let occurrence = "codex-g:1";
+        let payload = serde_json::json!({
+            "kind": "workers_died_together",
+            "worker": "codex-g",
+            "detail": "2 worker harnesses exited together: codex-g; codex-h",
+            "factory_session": "provision-test",
+            "occurrence": occurrence,
+            "folded_incidents": incidents,
+        });
+        let queue = crate::store::open_supervisor_queue_store(&cas_dir).unwrap();
+        queue
+            .notify_idempotent_folding(
+                "supervisor-id",
+                "workers_died_together",
+                &payload.to_string(),
+                cas_store::NotificationPriority::Critical,
+                &format!("worker-attention:provision-test:workers_died_together:codex-g:{occurrence}"),
+                "worker_died",
+                &incidents,
+            )
+            .unwrap();
+
+        daemon.last_death_sweep = None;
+        daemon.last_death_sweep = None;
+        daemon.relay_correlated_worker_deaths(); // the restarted daemon holds nothing
+        let prompts = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(20)
+            .unwrap();
+        let folded = prompts
+            .iter()
+            // pin: the folded relay is recognised by its worker-attention kind attribute.
+            .filter(|row| row.prompt.contains("kind=\"workers_died_together\""))
+            .count();
+        // pin: exactly the folded prompt is re-driven after the crash.
+        assert_eq!(folded, 1, "{prompts:?}");
+        let per_worker = prompts
+            .iter()
+            .filter(|row| row.prompt.contains("worker-died") || row.summary.as_deref().is_some_and(|s| s.starts_with("worker died")))
+            .count();
+        assert_eq!(per_worker, 0, "folded members are never injected: {prompts:?}");
+        assert!(
+            !prompts.iter().any(|row| row.prompt.contains("other-w")),
+            "another factory's held death is not swept: {prompts:?}"
+        );
+        daemon.last_death_sweep = None;
+        daemon.relay_correlated_worker_deaths();
+        let again = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(20).unwrap();
+        // pin: review M1: a second sweep must not re-drive the fold again.
+        assert_eq!(again.len(), prompts.len(), "the re-drive happens once");
+    }
+
+    /// cas-26c8 review L: pin the folded relay's L2 signal on the normal path.
+    #[test]
+    fn folded_relay_reports_its_prompt_enqueued_cas_26c8() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "folded-signal",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "folded-signal");
+        let t0 = chrono::Utc::now();
+        let group = ["codex-a", "codex-b"]
+            .iter()
+            .map(|worker| super::super::queue_and_events::ObservedWorkerExit {
+                at: t0,
+                worker: (*worker).to_string(),
+                status: "exited with code 0".to_string(),
+                death: None,
+            })
+            .collect::<Vec<_>>();
+        let (outcome, prompt_enqueued) = enqueue_folded_worker_deaths_relay(&cas_dir, &group);
+        assert!(matches!(outcome, WorkerAttentionRelayOutcome::Persisted { .. }), "{outcome:?}");
+        // pin: review L2 contract: a persisted fold reports prompt_enqueued=true.
+        assert!(prompt_enqueued, "a persisted fold reports its prompt enqueued");
+    }
+
+    /// cas-26c8 review L1: every closed group is listed on its own, so a group
+    /// whose folded relay is retried never holds back a later lone death.
+    #[test]
+    fn a_stuck_death_group_does_not_block_later_deaths_cas_26c8() {
+        use super::super::queue_and_events::{
+            ObservedWorkerExit, WORKER_DEATH_CORRELATION_WINDOW, closed_death_groups,
+            death_group_key,
+        };
+        let t0 = chrono::Utc::now() - chrono::Duration::seconds(60);
+        let exit = |worker: &str, offset_ms: i64| ObservedWorkerExit {
+            at: t0 + chrono::Duration::milliseconds(offset_ms),
+            worker: worker.to_string(),
+            status: "exited with code 0".to_string(),
+            death: None,
+        };
+        let exits = vec![exit("stuck-a", 0), exit("stuck-b", 500), exit("lone-c", 20_000)];
+        let groups = closed_death_groups(&exits, chrono::Utc::now(), WORKER_DEATH_CORRELATION_WINDOW);
+        let names: Vec<Vec<&str>> = groups
+            .iter()
+            .map(|group| group.iter().map(|exit| exit.worker.as_str()).collect())
+            .collect();
+        assert_eq!(names, [vec!["stuck-a", "stuck-b"], vec!["lone-c"]]);
+        assert_ne!(
+            death_group_key(&groups[0]),
+            death_group_key(&groups[1]),
+            "each group has its own write key, so neither waits on the other"
+        );
+    }
+
+    /// cas-26c8 review L2: the per-worker fallback fires only when the folded
+    /// prompt never reached the queue, never on top of an enqueued one whose
+    /// stamp failed.
+    #[test]
+    fn folded_relay_fallback_only_when_its_prompt_never_enqueued_cas_26c8() {
+        use super::super::queue_and_events::{FoldedGroupStep, folded_group_step};
+        let young = chrono::Duration::seconds(30);
+        let old = chrono::Duration::minutes(11);
+        assert_eq!(folded_group_step(true, young), FoldedGroupStep::Fold);
+        assert_eq!(folded_group_step(true, old), FoldedGroupStep::Fold, "no double send");
+        assert_eq!(folded_group_step(false, young), FoldedGroupStep::Retry);
+        assert_eq!(folded_group_step(false, old), FoldedGroupStep::FallBack);
     }
 
     /// cas-4143: a parked teammate permission request becomes one durable
@@ -2204,6 +2637,7 @@ impl FactoryDaemon {
             last_usage_limit_scan: None,
             open_operator_notices: std::collections::HashMap::new(),
             last_permission_request_scan: None,
+            last_death_sweep: None,
             reported_permission_requests: std::collections::HashSet::new(),
             relay_jobs: Default::default(),
             last_commander_mirror_scan: None,

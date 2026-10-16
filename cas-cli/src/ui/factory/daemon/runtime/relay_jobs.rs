@@ -47,6 +47,8 @@ pub(crate) enum Relay {
     AuthFailure,
     Permission,
     Escalation,
+    /// cas-26c8: recorded worker deaths whose prompt no live hold covers.
+    DeathSweep,
 }
 
 impl Relay {
@@ -56,6 +58,7 @@ impl Relay {
             Self::AuthFailure => "auth-failure",
             Self::Permission => "permission",
             Self::Escalation => "escalation",
+            Self::DeathSweep => "death-sweep",
         }
     }
 
@@ -108,10 +111,20 @@ pub(crate) enum RelayOutput {
         request: crate::factory_permission_relay::WorkerPermissionRequest,
         persisted: bool,
     },
+    /// cas-26c8: a death group's write reported. `done` is false only when
+    /// a folded relay must be tried again.
     DeathsRelayed {
         group: Vec<ObservedWorkerExit>,
-        persisted: bool,
+        done: bool,
     },
+    /// cas-26c8: this session's folded relays (`(id, payload)`) and
+    /// per-worker deaths whose prompt never reached the queue.
+    DeathSweepRead {
+        folded: Vec<(i64, serde_json::Value)>,
+        deaths: Vec<crate::mcp::tools::service::orphan_recovery::UnstampedWorkerDeath>,
+    },
+    /// cas-26c8: one swept relay was (re)injected, or found already handled.
+    DeathSweepWritten,
     /// The open operator notices the read asked about, their states
     /// (`None` when unreadable) and the undelivered supervisor relays still
     /// worth an alert.
@@ -147,6 +160,11 @@ pub(crate) struct RelayJobs {
     /// Test hook: give up in-flight reads after this.
     #[cfg(test)]
     pub(crate) timeout_override: Option<Duration>,
+    /// Test hook (cas-26c8): relay a death group with this instead of
+    /// `relay_death_group_io`, e.g. to make a group keep asking for a retry.
+    #[cfg(test)]
+    pub(crate) death_group_override:
+        Option<fn(&std::path::Path, &[ObservedWorkerExit], chrono::Duration) -> bool>,
 }
 
 impl RelayJobs {

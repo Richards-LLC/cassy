@@ -73,6 +73,9 @@ fn structured_targets_accept_non_rust_runners_and_parallelism_forms_without_sha(
         "whole target under -j16, 3 loops; result: PASS",
         "non-Rust target: pnpm test -j16; 3 runs; PASS",
         "entire suite; -j 16; runs 1 2 3; status=0",
+        // Existing numeric adjacency accepts this; preserve AC4 until the
+        // separately approved cas-69b4 repair narrows that grammar.
+        "whole target parallelism=16 loops=2 result=PASS",
     ] {
         let task = concurrency_task(receipt);
         validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
@@ -101,7 +104,7 @@ fn missing_or_contradictory_fields_remain_refused_with_precise_diagnostics() {
             "missing=[parallelism]",
         ),
         (
-            "target=vitest parallelism=16 loops=2 result=PASS",
+            "target=vitest parallelism=16; loops=2 result=PASS",
             "missing=[loops]",
         ),
         (

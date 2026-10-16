@@ -23,6 +23,7 @@ mod discovery;
 mod events;
 mod connection_recovery;
 mod identity;
+pub mod idle_sync;
 pub(crate) mod observation;
 pub mod launch_env;
 pub mod operator_inbox;

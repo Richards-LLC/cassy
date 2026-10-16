@@ -24,6 +24,7 @@ use crate::ui::theme::{ActiveTheme, Icons};
 
 use crate::cli::Cli;
 
+mod idle_sync;
 mod slack_transport;
 mod communication;
 
@@ -229,6 +230,8 @@ impl CheckGroup {
     }
 
     fn for_name(name: &str) -> Self {
+        // Keep exact-name arms literal: check-doctor-snapshot.py reads this
+        // table without a Rust build to validate the accepted row groups.
         match name.to_ascii_lowercase().as_str() {
             "host"
             | "user-level store"
@@ -240,7 +243,8 @@ impl CheckGroup {
             | "registered project roots"
             | "host user skills"
             | "host install parity"
-            | "slack transport" => Self::Host,
+            | "slack transport"
+            | "hub idle sync" => Self::Host,
             "user skills" | "scratchpad policy" => Self::Config,
             "legacy search index"
             | "pre-versioned search index"
@@ -255,6 +259,7 @@ impl CheckGroup {
             | "cloud identity metadata"
             | "project aliases"
             | "cloud sync queue"
+            | "cloud idle sync"
             | "cross-project rows"
             | "foreign knowledge pages"
             | "supervisor relay"
@@ -1016,6 +1021,7 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
         host_hub_service_check(),
         host_hub_transport_check(),
         host_hub_audit_check(),
+        idle_sync::host_check(),
     ];
     // Commander needs a usable provider under the service's environment.
     // Keep one result per CLI so a missing provider is easy to identify. A CLI
@@ -3027,6 +3033,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 cli,
             );
         }
+        checks.extend(idle_sync::project_check(&cas_root));
         checks.push(cloud_queue_check(&cas_root));
         checks.push(cloud_team_only_check(&cas_root));
         checks.extend(cloud_pull_freshness_check(&cas_root));
@@ -9367,6 +9374,21 @@ mod tests {
         let identical = find_divergent_user_skills(&[claude.clone(), codex], &claude);
         assert!(identical.is_empty(), "identical copies are not findings");
         assert!(matches!(divergent_user_skills_check(&identical).status, CheckStatus::Ok));
+    }
+
+    #[test]
+    fn cas_f1fb_idle_sync_rows_preserve_host_and_cloud_groups() {
+        for (name, expected) in [
+            ("registered project roots", CheckGroup::Host),
+            ("host", CheckGroup::Host),
+            (idle_sync::HOST_CHECK, CheckGroup::Host),
+            ("canonical id", CheckGroup::Cloud),
+            ("cloud sync queue", CheckGroup::Cloud),
+            (idle_sync::PROJECT_CHECK, CheckGroup::Cloud),
+        ] {
+            let check = Check::new(name, CheckStatus::Ok, "healthy");
+            assert_eq!(check.group(), expected, "doctor row {name}");
+        }
     }
 
     /// cas-57c02: installed-vs-catalog parity is a host row. Drift names the

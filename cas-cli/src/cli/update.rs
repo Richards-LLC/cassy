@@ -1596,6 +1596,7 @@ fn sync_project_cloud(
             dry_run: false,
             full: false,
             rehome: false,
+            background: false,
         },
         cli,
         cas_root,

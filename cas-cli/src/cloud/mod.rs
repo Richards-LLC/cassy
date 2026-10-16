@@ -44,6 +44,7 @@ pub(crate) mod me;
 /// rows are attributed to their canonical project instead of counted foreign.
 pub mod project_aliases;
 mod sync_queue;
+pub mod sync_lease;
 pub(crate) mod syncer;
 pub mod task_proposals;
 // cas-c117: explicit, verified project↔team registration for `cas cloud sync`.

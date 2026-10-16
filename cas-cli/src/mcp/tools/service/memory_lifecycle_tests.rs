@@ -232,3 +232,68 @@ async fn memory_missing_id_remains_a_lookup_error() {
         );
     }
 }
+
+#[tokio::test]
+async fn cas_e29c_unknown_birth_is_labelled_and_sorts_after_known_dates() {
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let (_dir, service, store, _queue) = service(false);
+    let unknown: Entry = serde_json::from_value(json!({
+        "id": "unknown-fold0123456789ab", "content": "undated memory"
+    }))
+    .unwrap();
+    let mut known = Entry::new("known-date".into(), "dated memory".into());
+    known.created = "2026-10-01T00:00:00Z".parse().unwrap();
+    store.add(&unknown).unwrap();
+    store.add(&known).unwrap();
+    for sort in ["created", "updated"] {
+        for order in ["asc", "desc"] {
+            let listed = memory(
+                &service,
+                json!({"action":"list", "sort":sort, "sort_order":order}),
+            )
+            .await;
+            assert!(!listed.contains("0001-01-01"), "{listed}");
+            assert!(listed.contains("unknown"), "{listed}");
+            assert!(
+                listed.find("[known-date]").unwrap() < listed.find("[unknown-fold").unwrap(),
+                "{listed}"
+            );
+        }
+    }
+    let shown = memory(&service, json!({"action":"get", "id":unknown.id})).await;
+    assert!(shown.contains("Created: unknown"), "{shown}");
+    assert!(!shown.contains("0001-01-01"), "{shown}");
+}
+
+#[tokio::test]
+async fn cas_e29c_search_provenance_never_exposes_unknown_birth_as_a_date() {
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let (_dir, service, store, _queue) = service(false);
+    let entry: Entry = serde_json::from_value(json!({
+        "id":"unknown-fold0123456789ab", "content":"unique sentinel probe"
+    }))
+    .unwrap();
+    store.add(&entry).unwrap();
+    service
+        .inner
+        .open_search_index()
+        .unwrap()
+        .index_entry(&entry)
+        .unwrap();
+    let result = service.search(Parameters(serde_json::from_value(json!({
+        "action":"search", "query":"sentinel probe", "doc_type":"entry", "provenance_version":1
+    })).unwrap())).await.unwrap();
+    let text = result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let payload: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(payload["hits"][0]["id"], entry.id);
+    assert!(
+        payload["hits"][0]["provenance"]["freshness"]["created_at"].is_null(),
+        "{text}"
+    );
+    assert!(!text.contains("0001-01-01"), "{text}");
+}

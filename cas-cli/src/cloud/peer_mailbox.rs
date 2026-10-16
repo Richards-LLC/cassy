@@ -684,6 +684,8 @@ pub struct DeliveryReport {
     pub errors: Vec<String>,
     /// Bounded historical recovery can warn without disabling current mail.
     pub warnings: Vec<String>,
+    /// Server-directed delay that outlives this tick's bounded HTTP retries.
+    pub retry_after: Option<Duration>,
 }
 
 /// Claim this session's peer messages and admit each once.
@@ -1094,6 +1096,7 @@ pub fn http_mailbox(cas_root: &Path) -> Option<HttpPeerMailbox> {
 pub struct HttpPeerMailbox {
     endpoint: String,
     token: String,
+    retry_at: std::sync::Arc<std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
 }
 
 /// Never prints the bearer token (cas-144c).
@@ -1111,6 +1114,7 @@ impl HttpPeerMailbox {
         Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             token: token.to_string(),
+            retry_at: Default::default(),
         }
     }
 }
@@ -1133,10 +1137,45 @@ impl HttpPeerMailbox {
     }
 
     fn post(&self, suffix: &str, body: serde_json::Value) -> Result<ureq::Response, ureq::Error> {
-        ureq::post(&self.url(suffix))
-            .timeout(MAILBOX_TIMEOUT)
-            .set("Authorization", &format!("Bearer {}", self.token))
-            .send_json(body)
+        self.post_with_timeout(suffix, body, MAILBOX_TIMEOUT)
+    }
+
+    fn observe(
+        &self,
+        result: Result<ureq::Response, ureq::Error>,
+    ) -> Result<ureq::Response, ureq::Error> {
+        if let Err(ureq::Error::Status(429, ref response)) = result
+            && let Some(delay) = super::rate_limit::retry_after(response)
+        {
+            let until = chrono::Duration::from_std(delay)
+                .ok()
+                .and_then(|delay| chrono::Utc::now().checked_add_signed(delay))
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
+            let mut current = self.retry_at.lock().expect("mailbox retry clock");
+            *current = Some(current.map_or(until, |previous| previous.max(until)));
+        }
+        result
+    }
+
+    fn post_with_timeout(
+        &self,
+        suffix: &str,
+        body: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<ureq::Response, ureq::Error> {
+        self.observe(
+            ureq::post(&self.url(suffix))
+                .timeout(timeout)
+                .set("Authorization", &format!("Bearer {}", self.token))
+                .send_json(body),
+        )
+    }
+
+    pub(crate) fn retry_after(&self) -> Option<Duration> {
+        self.retry_at
+            .lock()
+            .expect("mailbox retry clock")
+            .and_then(|until| (until - chrono::Utc::now()).to_std().ok())
     }
 }
 
@@ -1261,10 +1300,11 @@ impl PeerMailbox for HttpPeerMailbox {
             let response: AckResponse = Self::read(
                 "peer message ack",
                 super::rate_limit::call(MAILBOX_TIMEOUT, |left| {
-                    ureq::post(&self.url("/ack"))
-                        .timeout(left)
-                        .set("Authorization", &format!("Bearer {}", self.token))
-                        .send_json(serde_json::json!({"consumer_id":consumer_id,"acks":items}))
+                    self.post_with_timeout(
+                        "/ack",
+                        serde_json::json!({"consumer_id":consumer_id,"acks":items}),
+                        left,
+                    )
                 }),
             )?;
             if response.results.len() != batch.len() {
@@ -1306,10 +1346,12 @@ impl PeerMailbox for HttpPeerMailbox {
     fn status(&self, id: &str) -> Result<PeerMessageStatus, String> {
         Self::read(
             "peer message status",
-            ureq::get(&self.url(&format!("/{id}")))
-                .timeout(MAILBOX_TIMEOUT)
-                .set("Authorization", &format!("Bearer {}", self.token))
-                .call(),
+            self.observe(
+                ureq::get(&self.url(&format!("/{id}")))
+                    .timeout(MAILBOX_TIMEOUT)
+                    .set("Authorization", &format!("Bearer {}", self.token))
+                    .call(),
+            ),
         )
     }
 }

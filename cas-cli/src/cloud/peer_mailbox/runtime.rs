@@ -9,6 +9,8 @@ struct MailboxHealth {
     receiving: bool,
     cause: String,
     #[serde(default)]
+    next_retry_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
     warnings: Vec<String>,
 }
 
@@ -33,7 +35,10 @@ pub fn mailbox_status_section(root: &Path, session: Option<&str>) -> String {
             if chrono::Utc::now()
                 .signed_duration_since(health.written_at)
                 .num_seconds()
-                <= 90 =>
+                <= 90
+                || health
+                    .next_retry_at
+                    .is_some_and(|at| at > chrono::Utc::now()) =>
         {
             if health.receiving {
                 let mut text = "Peer mailbox: receiving.\n".to_string();
@@ -42,8 +47,12 @@ pub fn mailbox_status_section(root: &Path, session: Option<&str>) -> String {
                 }
                 text
             } else {
+                let retry = health
+                    .next_retry_at
+                    .map(|at| format!("automatic at {}", at.to_rfc3339()))
+                    .unwrap_or_else(|| "automatic with backoff, at most 30s".into());
                 format!(
-                    "Peer mailbox: not receiving: {}\nRetry: automatic with backoff, at most 30s.\n",
+                    "Peer mailbox: not receiving: {}\nRetry: {retry}.\n",
                     health.cause
                 )
             }
@@ -75,16 +84,25 @@ impl PeerMailboxRuntime {
             .take(200)
             .collect(),
         };
-        runtime.record_health(false, "waiting for first mailbox poll", &[]);
+        runtime.record_health(false, "waiting for first mailbox poll", &[], None);
         Some(runtime)
     }
 
-    fn record_health(&self, receiving: bool, cause: &str, warnings: &[String]) {
+    fn record_health(
+        &self,
+        receiving: bool,
+        cause: &str,
+        warnings: &[String],
+        retry_after: Option<Duration>,
+    ) {
         let path = health_path(&self.cas_dir, &self.factory_session);
         let health = MailboxHealth {
             written_at: chrono::Utc::now(),
             receiving,
             cause: cause.into(),
+            next_retry_at: retry_after
+                .and_then(|delay| chrono::Duration::from_std(delay).ok())
+                .and_then(|delay| chrono::Utc::now().checked_add_signed(delay)),
             warnings: warnings.to_vec(),
         };
         let result = (|| -> anyhow::Result<()> {
@@ -105,6 +123,7 @@ impl PeerMailboxRuntime {
             report.errors.is_empty(),
             &report.errors.join("; "),
             &report.warnings,
+            report.retry_after,
         );
         report
     }
@@ -138,7 +157,7 @@ impl PeerMailboxRuntime {
                     ..Default::default()
                 },
             };
-            let report = deliver_claimed_with_history(
+            let mut report = deliver_claimed_with_history(
                 &mailbox,
                 queue.as_ref(),
                 agents.as_ref(),
@@ -160,6 +179,7 @@ impl PeerMailboxRuntime {
                     Ok(())
                 },
             );
+            report.retry_after = mailbox.retry_after();
             Ok(report)
         };
         let mut report = run().unwrap_or_else(|error| DeliveryReport {
@@ -221,6 +241,7 @@ impl PeerMailboxPoller {
                 self.failures = self.failures.saturating_add(1);
                 Duration::from_secs((5u64 << self.failures.saturating_sub(1).min(3)).min(30))
             };
+            let delay = delay.max(report.retry_after.unwrap_or_default());
             if error != self.last_error {
                 if error.is_empty() {
                     tracing::info!("peer mailbox receiving");
@@ -240,6 +261,7 @@ impl PeerMailboxPoller {
                 report.errors.is_empty(),
                 &report.errors.join("; "),
                 &report.warnings,
+                (!report.errors.is_empty()).then_some(delay),
             );
             self.next_poll = now + delay;
             return Some(report);

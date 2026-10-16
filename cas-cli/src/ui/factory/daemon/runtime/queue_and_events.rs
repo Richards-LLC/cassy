@@ -10389,7 +10389,7 @@ pub(super) fn ci_completed_candidates(
 /// `triggering_event` is the event or external condition that caused this
 /// reminder to fire. Its context is included in the durable payload and
 /// delivered prompt so the recipient knows what happened.
-struct ReminderTriggerContext {
+pub(super) struct ReminderTriggerContext {
     event_type: String,
     data: serde_json::Value,
     description: String,

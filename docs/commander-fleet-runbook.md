@@ -37,10 +37,10 @@ Vercel does not deploy `main` by itself. A routine promotion is:
    cas-src checkout of the exact `main` commit (normally the release tag) into
    `hub-static/public/commander/`, and copy its `index.html` to
    `hub-static/public/index.html`.
-2. **Verify.** Run `verify-dist.sh`. It recomputes the dist digest and the two
-   WASM integrity hashes. The hashes in [`hub-web/README.md`](../hub-web/README.md)
-   are the authority: `ghostty-vt.wasm` `6b1df1a9…3f7e` and
-   `ghostty-write-pty.wasm` `75cb147e…d3d903`. Stop on any mismatch.
+2. **Verify.** Run `verify-dist.sh`. It recomputes the dist digest. Commander
+   ships no WebAssembly since cas-f285: a dist that still holds
+   `ghostty-vt.wasm`, `ghostty-write-pty.wasm` or `symbols.woff2` is stale, and
+   the script's WASM hash check must be retired with it. Stop on any mismatch.
 3. **Record and merge.** Update `PROVENANCE.md` with the commit, dist tree and
    digest, then open a petra-stella-cloud pull request and let it auto-merge.
 4. **Deploy.** From a clean checkout of petra-stella-cloud `origin/main`, run

@@ -17,7 +17,7 @@ import { activityTime, ConversationList, filterConversationRows, groupConversati
 import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands";
 import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
-import { arrivalStore, readMarkStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
+import { arrivalStore, catalogCacheStore, readMarkStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { HeldSendFlushes } from "./held-send-flush";
 import { CommanderJournal, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
@@ -528,7 +528,8 @@ function setDormantRevealed(next: boolean): void {
 }
 
 function visibleSessions(machineId: string): HubSession[] {
-  return visibleCatalog(sessions.get(machineId) ?? [], name => conversationHistories.get(sessionKey(machineId, name))?.hasPending() ?? false,
+  // cas-9846: until the machine answers, its cached catalog is shown as last known.
+  return visibleCatalog(sessions.get(machineId) ?? [], name => cachedCatalogs.has(machineId) || (conversationHistories.get(sessionKey(machineId, name))?.hasPending() ?? false),
     Date.now() < (catalogExpiresAt.get(machineId) ?? Infinity), revealDormant);
 }
 
@@ -588,6 +589,7 @@ async function boot(): Promise<void> {
   selectedMachineId = restoredMachineId ?? machines.keys().next().value;
   if (selectedMachineId) selection = { current: { machineId: selectedMachineId }, history: [] };
   restoreTarget = restoredMachineId && lastSelection?.session ? lastSelection : undefined;
+  showCachedCatalogs();
   render();
   for (const machine of machines.values()) ensureConnection(machine);
   // An invitation that arrived in the URL is the whole reason this page was
@@ -767,6 +769,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onMachineInfo: (info) => { machineInfo.set(machine.id, info); render(); },
     onSessions: (items, freshnessThresholdSecs) => {
       fleetCatalogUpdatedAt.set(machine.id, new Date().toISOString());
+      // cas-9846: the machine answered; its cached catalog gives way, and the
+      // live one is kept for the next reload during an outage.
+      cachedCatalogs.delete(machine.id);
+      if (!conversationPersistenceBlocked.has(machine.id)) catalogCache.save(machine.id, items);
       const ttl = freshnessThresholdSecs !== undefined && Number.isFinite(freshnessThresholdSecs) && freshnessThresholdSecs > 0 ? freshnessThresholdSecs * 1000 : Infinity;
       catalogExpiresAt.set(machine.id, Date.now() + ttl);
       window.clearTimeout(catalogExpiryTimers.get(machine.id));
@@ -775,6 +781,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // A session the operator ended is gone, not unreachable: it is never retained (cas-55a4).
       sessions.set(machine.id, retainPendingSessions(sessions.get(machine.id) ?? [], items, name => !endedSessions.has(sessionKey(machine.id, name)) && (conversationHistories.get(sessionKey(machine.id, name))?.hasPending() ?? false)));
       if (!openPairedSession(machine.id, visibleSessions(machine.id))) restoreLastSession(machine.id, visibleSessions(machine.id));
+      attachPreviewedSession(machine.id);
       render();
     },
     onMachineEvent: (event) => {
@@ -2440,6 +2447,42 @@ const conversationDrafts: Map<string, Draft> = drafts.load();
  * still on screen right after it was purged.
  */
 const conversationPersistenceBlocked = new Set<string>();
+
+/**
+ * cas-9846: each machine's last session catalog, so a reload while it is
+ * unreachable shows its conversations, and reopens the last one with its held
+ * messages, before it answers. `cachedCatalogs` are the machines still showing
+ * theirs; `previewedSession` is the conversation reopened from it, attached
+ * once its machine answers.
+ */
+const catalogCache = catalogCacheStore(conversationStorage);
+const cachedCatalogs = new Set<string>();
+let previewedSession: SessionSelection | undefined;
+
+/** At boot, before any machine answers: last known catalogs, and the last conversation reopened from them. */
+function showCachedCatalogs(): void {
+  for (const id of machines.keys()) {
+    if (sessions.has(id) || conversationPersistenceBlocked.has(id)) continue;
+    const cached = catalogCache.load(id);
+    if (!cached?.length) continue;
+    sessions.set(id, cached.map((session) => ({ ...session, unreachable: true })));
+    cachedCatalogs.add(id);
+  }
+  const target = restoreTarget;
+  if (!target?.session || !cachedCatalogs.has(target.machineId)) return;
+  if (!restorableSession(target, target.machineId, visibleSessions(target.machineId))) return;
+  previewedSession = { machineId: target.machineId, session: target.session };
+  commitSelection(previewedSession);
+}
+
+/** The conversation reopened from a cached catalog attaches once its machine answers, if it is still there. */
+function attachPreviewedSession(machineId: string): void {
+  const target = previewedSession;
+  if (!target || target.machineId !== machineId) return;
+  previewedSession = undefined;
+  if (selectedMachineId !== target.machineId || selectedSession !== target.session || !target.session) return;
+  if (visibleSessions(machineId).some((session) => session.name === target.session)) void attachSelectedSession(machineId, target.session);
+}
 
 /**
  * cas-8d52: when this browser first saw each turn, per conversation, so a
@@ -5289,7 +5332,10 @@ function renderMachineRegister(): void {
     // cas-d043 G03: before any machine has answered with its sessions (a
     // reload during an outage), the count is unknown, not "0 conversations".
     const counted = machines.size === 0 || [...machines.keys()].some((id) => fleetCatalogUpdatedAt.has(id));
-    const markup = machineFooterMarkup(rows, counted ? [...machines.keys()].reduce((sum, id) => sum + visibleSessions(id).filter(session => supervisorTarget(session)).length, 0) : undefined, __HUB_BUILD__, !machineCatalogLoaded);
+    // cas-9846: before any machine answers, a kept catalog is counted as last known.
+    const lastKnown = !counted && cachedCatalogs.size > 0;
+    const total = [...machines.keys()].reduce((sum, id) => sum + visibleSessions(id).filter(session => supervisorTarget(session)).length, 0);
+    const markup = machineFooterMarkup(rows, counted || lastKnown ? total : undefined, __HUB_BUILD__, !machineCatalogLoaded, lastKnown);
     // Preserve the opener itself: dialog Escape must return focus after a catalog tick.
     const button = footer.querySelector<HTMLButtonElement>('#paired-machines-toggle');
     if (!button) footer.innerHTML = markup;
@@ -5354,7 +5400,8 @@ async function forgetPairedMachine(id: string): Promise<void> {
   }
   catch { if (error) { error.hidden = false; error.textContent = 'Could not remove this pairing. Try again.'; } else toast('Could not remove this pairing. Try again.'); return; }
   connections.get(id)?.stop(); firstConnections.forget(id);
-  connections.delete(id); machines.delete(id); sessions.delete(id);
+  connections.delete(id); machines.delete(id); sessions.delete(id); cachedCatalogs.delete(id);
+  if (previewedSession?.machineId === id) previewedSession = undefined;
   // cas-093d: a removed machine has no start-sessions permission to re-allow.
   if (launchDroppedMachines.delete(id)) saveLaunchDropped(launchDroppedStorage, launchDroppedMachines);
   // cas-7752: removing the pairing removes the operator's stored words for it.

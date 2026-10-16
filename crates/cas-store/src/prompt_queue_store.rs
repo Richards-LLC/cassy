@@ -4686,17 +4686,28 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // full acknowledgement. Preserve the activity timestamp but
             // demote it on upgrade: no historical row has transcript evidence
             // solely because a later outbound message happened.
-            conn.execute(
-                "UPDATE prompt_queue
-                 SET assumed_seen_at = COALESCE(assumed_seen_at, acked_at),
-                     acked_at = NULL,
-                     acked_via = NULL,
-                     highest_stage = 'assumed_seen',
-                     last_pending_reason = 'awaiting_ack',
-                     last_pending_detail = 'historical reply activity; awaiting message-specific confirmation'
-                 WHERE acked_via = 'inferred_from_reply'",
+            //
+            // cas-1bc7: every open runs init, and an UPDATE takes the write
+            // lock even when it matches nothing. Nothing writes this value any
+            // more, so read first and write only while such rows remain.
+            let historical_inference: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM prompt_queue WHERE acked_via = 'inferred_from_reply')",
                 [],
+                |row| row.get(0),
             )?;
+            if historical_inference {
+                conn.execute(
+                    "UPDATE prompt_queue
+                     SET assumed_seen_at = COALESCE(assumed_seen_at, acked_at),
+                         acked_at = NULL,
+                         acked_via = NULL,
+                         highest_stage = 'assumed_seen',
+                         last_pending_reason = 'awaiting_ack',
+                         last_pending_detail = 'historical reply activity; awaiting message-specific confirmation'
+                     WHERE acked_via = 'inferred_from_reply'",
+                    [],
+                )?;
+            }
 
             // cas-7a01 (GH #155): the receipt table predates the surfacing
             // path, so existing databases need the provenance column added.
@@ -8219,8 +8230,25 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     fn expire_stale_pending(&self, older_than_secs: i64) -> Result<Vec<QueuedPrompt>> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+            // cas-1bc7: every inbox poll runs this sweep. Look for a candidate
+            // without the write lock first, so a sweep with nothing to expire
+            // never queues behind another writer. A row that turns stale after
+            // this read is expired by the next sweep, and is already filtered
+            // out of delivery meanwhile (cas-d047).
+            let any_candidate: bool = conn.query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM prompt_queue
+                      WHERE processed_at IS NULL AND created_at < ?
+                        AND {OPERATOR_LANE_EXCLUSION})"
+                ),
+                params![cutoff],
+                |row| row.get(0),
+            )?;
+            if !any_candidate {
+                return Ok(Vec::new());
+            }
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now().to_rfc3339();
 
             // cas-f7b0 (contract v2, P3.1/P1.3): the operator lane owns its
@@ -8551,7 +8579,6 @@ impl SqlitePromptQueueStore {
 
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             // cas-d047 (GH #69): never hand a recipient a months-old item, and
             // (GH #70 sibling) never hand it a row the daemon already
             // terminally quarantined as dropped/suppressed/abandoned — neither
@@ -8572,7 +8599,7 @@ impl SqlitePromptQueueStore {
                 ""
             };
             // cas-6853: a broadcast reaches only its real audience.
-            let audience_sql = broadcast_audience_sql(recipient, agents_table_exists(&tx)?);
+            let audience_sql = broadcast_audience_sql(recipient, agents_table_exists(&conn)?);
             // cas-1f0c: once a Teams body fallback carries the row, no hook
             // renders it: any marker for a direct row, this recipient's for a
             // broadcast.
@@ -8733,6 +8760,22 @@ impl SqlitePromptQueueStore {
                     )
                 };
 
+            // cas-1bc7: inbox polls and turn hooks drain an empty inbox most of
+            // the time. Probe with the same query, without the write lock,
+            // and take the lock only when there is a row to receipt. The
+            // selection is re-run under the lock, so a row another drain
+            // took in between is not handed out twice.
+            let any_row = {
+                let mut stmt = conn.prepare_cached(&sql)?;
+                let mut rows = stmt.query(rusqlite::params_from_iter(
+                    query_params.iter().map(|p| p.as_ref()),
+                ))?;
+                rows.next()?.is_some()
+            };
+            if !any_row {
+                return Ok((Vec::new(), Vec::new()));
+            }
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let prompts: Vec<QueuedPrompt> = {
                 let mut stmt = tx.prepare_cached(&sql)?;
                 stmt.query_map(

@@ -69,7 +69,10 @@ obligation survives changes to surface classification, gate settings and
 target or its origin tracking ref can prove integration; a stale origin cannot
 authorize another evidence deferral for code already on the local target.
 Skip/focus safeguards remain active for deferred parks and receipts.
-Normal supervisor override and explicit QA-request authority remain available.
+supervisor_override=true does not clear batch QA debt. A waived QA round also
+does not fulfill it; only a valid listed receipt or a passed independent round
+covering the current delivery anchor does. Explicit QA-request authority remains
+available.
 
 Batch receipts and deferred obligations are local project records in
 `.cas/cas.db` (migration 276). They do not create a cloud synchronization lane.

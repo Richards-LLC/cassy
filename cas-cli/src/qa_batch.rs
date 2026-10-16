@@ -1,4 +1,7 @@
 //! Validation shared by batch recording and close. No process or polling work.
+use crate::mcp::tools::core::task::lifecycle::close_ops::{
+    TaskCommitReceiptWindow, squash_receipt_qa_anchor,
+};
 use cas_store::QaBatchReceipt;
 use cas_types::Task;
 use sha2::{Digest, Sha256};
@@ -362,6 +365,7 @@ pub(crate) fn ensure_deferred_close(
     root: &Path,
     task: &Task,
     receipt: Option<&str>,
+    window: Option<&TaskCommitReceiptWindow>,
 ) -> Result<(), String> {
     if !cas_store::has_qa_batch_deferral(root, &task.id).map_err(|e| e.to_string())? {
         return Ok(());
@@ -371,8 +375,21 @@ pub(crate) fn ensure_deferred_close(
         .or(task.deliverables.factory_branch_anchor.as_deref())
         .and_then(|head| commit(&repo, head))
         .ok_or_else(|| debt_refusal(&task.id))?;
-    if satisfying_receipt(root, task, &repo, &target, &head)?.is_some()
-        || covering_pass(root, task, &repo, &target, &head)?.is_some()
+    let satisfies = |head: &str| -> Result<bool, String> {
+        Ok(
+            satisfying_receipt(root, task, &repo, &target, head)?.is_some()
+                || covering_pass(root, task, &repo, &target, head)?.is_some(),
+        )
+    };
+    if satisfies(&head)? {
+        return Ok(());
+    }
+    // A validated squash can carry the reviewed delivery without retaining
+    // its ancestry. Use the evidence gate's mapping and the same attribution
+    // window, then recheck the immutable anchor, receipt and ledger binding.
+    if let Some(anchor) = window
+        .and_then(|window| squash_receipt_qa_anchor(&repo, &target, window, task, Some(&head)))
+        && satisfies(&anchor)?
     {
         return Ok(());
     }

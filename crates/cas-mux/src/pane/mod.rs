@@ -91,6 +91,22 @@ enum ComposerEscapeState {
     ControlSequence,
 }
 
+/// Whether an injected payload reached the PTY (cas-786a6 review L1).
+#[derive(Debug, Clone, Default)]
+pub struct PayloadWrite(std::sync::Arc<std::sync::Mutex<Option<std::result::Result<(), String>>>>);
+
+impl PayloadWrite {
+    fn finish(&self, result: std::result::Result<(), String>) {
+        *self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+    }
+
+    /// `None` while the bytes wait in the pane's input queue.
+    pub fn result(&self) -> Option<std::result::Result<(), String>> {
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+}
+
+
 /// A pane in the multiplexer
 pub struct Pane {
     /// Unique identifier (usually agent name)
@@ -1316,14 +1332,28 @@ impl Pane {
     /// into "usually, retry if not" rather than leaving it healthy: both paths
     /// were sampling the same swallow, with payload size as the variable.
     pub async fn inject_prompt(&self, prompt: &str) -> Result<()> {
+        self.inject_prompt_tracked(prompt).map(drop)
+    }
+
+    /// [`Self::inject_prompt`], returning a receipt that reports when the
+    /// payload's bytes were written to the PTY, or failed (cas-786a6 review
+    /// L1: a queued write is not yet a written one).
+    pub fn inject_prompt_tracked(&self, prompt: &str) -> Result<PayloadWrite> {
         match &self.backend {
             PaneBackend::Pty(pty) => {
                 let text = prompt.trim();
                 let framed = crate::harness::injection_payload_bytes(self.harness, text);
-                pty.write(&framed).await?;
+                let receipt = PayloadWrite::default();
+                let written = receipt.clone();
+                pty.input().write_then(
+                    &framed,
+                    Box::new(move |result| written.finish(result.map_err(|error| error.to_string()))),
+                )?;
                 // Send carriage return after a settle delay in a background task
-                // so we don't block the daemon event loop for 150-500ms.
-                let writer = pty.writer_handle();
+                // so we don't block the daemon event loop for 150-500ms. The CR
+                // goes through the pane's input queue (factory loop v2 C4a), so
+                // it is written after the payload, never before it.
+                let input = pty.input();
                 let settle_ms = if pty.is_codex() { 500 } else { 150 };
                 // cas-ae6d (GH #100): the submit CR is what turns injected text
                 // into an actual turn. It is written from a detached task, so
@@ -1340,32 +1370,79 @@ impl Pane {
                 self.inject_submit_pending
                     .store(true, std::sync::atomic::Ordering::Release);
                 let submit_pending = std::sync::Arc::clone(&self.inject_submit_pending);
+                // cas-786a6 review round 2, L1: a gate held for this pane
+                // (its provenance envelope still being written) holds the CR,
+                // boundedly, in this detached task.
+                let gate = crate::submit_gate::take(&self.id);
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
-                    let mut guard = writer.lock().await;
-                    match guard.write_all(b"\r").and_then(|()| guard.flush()) {
-                        Ok(()) => {
-                            submit_pending.store(false, std::sync::atomic::Ordering::Release);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "cas::coordination",
-                                stage = "inject_submit_failed",
-                                target_agent = %pane_id,
-                                error = %e,
-                                "injected payload was written but its submit CR failed — the text is \
-                                 sitting unsubmitted in the pane composer and no turn started; later \
-                                 injections remain deferred until this pane is replaced"
-                            );
-                        }
+                    if let Some(gate) = gate
+                        && !gate.opened(crate::submit_gate::SUBMIT_GATE_MAX_WAIT).await
+                    {
+                        tracing::warn!(
+                            target: "cas::coordination",
+                            stage = "inject_submit_gate_timeout",
+                            target_agent = %pane_id,
+                            "submit CR sent without its provenance envelope confirmed written"
+                        );
+                    }
+                    let failed_pane = pane_id.clone();
+                    let report = move |error: String| {
+                        tracing::warn!(
+                            target: "cas::coordination",
+                            stage = "inject_submit_failed",
+                            target_agent = %failed_pane,
+                            error = %error,
+                            "injected payload was written but its submit CR failed — the text is \
+                             sitting unsubmitted in the pane composer and no turn started; later \
+                             injections remain deferred until this pane is replaced"
+                        );
+                    };
+                    let on_failure = report.clone();
+                    // cas-786a6 review H1: a control write, taken past the
+                    // buffer cap, so a full buffer never strands the payload
+                    // unsubmitted.
+                    let queued = input.write_control_then(
+                        b"\r",
+                        Some(Box::new(move |result| match result {
+                            Ok(()) => {
+                                submit_pending.store(false, std::sync::atomic::Ordering::Release);
+                            }
+                            Err(error) => on_failure(error.to_string()),
+                        })),
+                    );
+                    if let Err(error) = queued {
+                        report(error.to_string());
                     }
                 });
                 self.clear_composer_dirty();
                 // Inject submits a prompt → turn is in flight (cas-7f6f).
                 self.mark_turn_in_flight();
-                Ok(())
+                Ok(receipt)
             }
             PaneBackend::None => Err(Error::pty("Pane has no backend")),
+        }
+    }
+
+    /// When this pane was created: its identity across a same-name respawn.
+    pub fn spawned_at(&self) -> std::time::Instant {
+        self.created_at
+    }
+
+    /// Test support: wait until the pane's queued input is written.
+    #[doc(hidden)]
+    pub fn input_drained_for_test(&self) {
+        if let PaneBackend::Pty(pty) = &self.backend {
+            pty.input().wait_drained(std::time::Duration::from_secs(5));
+        }
+    }
+
+    /// Test support: age the pane past its injection grace period without
+    /// sleeping (cas-786a6 review L4).
+    #[doc(hidden)]
+    pub fn backdate_spawn_for_test(&mut self, by: std::time::Duration) {
+        if let Some(at) = self.created_at.checked_sub(by) {
+            self.created_at = at;
         }
     }
 

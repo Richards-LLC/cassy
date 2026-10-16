@@ -101,6 +101,8 @@ fn request(cas_dir: &Path) -> QueueSelectRequest {
         worker_names: vec!["worker-a".into()],
         dead_workers: Default::default(),
         limit: 10,
+        operator_replies: false,
+        adopt_operator_notices: false,
     }
 }
 
@@ -1101,4 +1103,57 @@ fn a_panicked_stamp_job_releases_the_gate_and_holds_its_row_briefly() {
     jobs.settle_injects(&cas_dir);
     settle(&mut jobs, |jobs| !jobs.in_flight().holds_row(other));
     assert!(!jobs.row_settling(other, Instant::now()), "a settle raised no hold and lowers none");
+}
+
+/// cas-786a6 review M1: a claim job whose wait expired, and whose result
+/// lands after a newer job was submitted, never holds the row: its claim is
+/// released, and the row is claimable again.
+#[test]
+fn a_superseded_claim_job_releases_its_claim() {
+    let (_root, cas_dir) = project();
+    let row = enqueue(&cas_dir, "worker-a", "claimed twice");
+    let writer = TestWriter::start(true);
+    let mut jobs = jobs_on(&writer);
+    assert_eq!(
+        jobs.claim_for_inject(&cas_dir, "s", row, "worker-a", "worker-a"),
+        ClaimStep::Waiting
+    );
+    // The first job's wait expires before it ran (a stalled writer).
+    jobs.expire_claims(&cas_dir, Instant::now() + INJECT_OUTCOME_TIMEOUT + Duration::from_secs(1));
+    assert!(!jobs.has_claim(row, "worker-a"));
+    assert_eq!(
+        jobs.claim_for_inject(&cas_dir, "s", row, "worker-a", "worker-a"),
+        ClaimStep::Waiting
+    );
+    writer.open();
+    // Job 1 claims; job 2 then finds a bare claim. Job 1's late token is
+    // released rather than overwritten.
+    // Job 2 comes back (it ran after job 1, so job 1's result is applied
+    // too), then job 1's late claim is released.
+    settle(&mut jobs, |jobs| jobs.claim_resolved(&cas_dir, "s", row, "worker-a", "worker-a"));
+    settle(&mut jobs, |_| claim_source(&cas_dir, row, "worker-a").is_none());
+    assert_eq!(
+        jobs.claim_for_inject(&cas_dir, "s", row, "worker-a", "worker-a"),
+        ClaimStep::NotClaimed,
+        "job 2 found job 1's bare claim"
+    );
+    assert!(store_claim(&cas_dir, row, "worker-a").unwrap().is_some(), "the row is claimable again");
+}
+
+/// cas-786a6 review L4: a claim that came back but whose row was never
+/// delivered is released after the claim TTL.
+#[test]
+fn an_untaken_claim_is_released_after_its_ttl() {
+    let (_root, cas_dir) = project();
+    let row = enqueue(&cas_dir, "worker-a", "claimed, never delivered");
+    let writer = TestWriter::start(false);
+    let mut jobs = jobs_on(&writer);
+    jobs.claim_for_inject(&cas_dir, "s", row, "worker-a", "worker-a");
+    // The claim job's result is back (not just its write).
+    settle(&mut jobs, |jobs| jobs.claim_resolved(&cas_dir, "s", row, "worker-a", "worker-a"));
+    jobs.expire_claims(&cas_dir, Instant::now());
+    assert!(claim_source(&cas_dir, row, "worker-a").is_some(), "held within the TTL");
+    jobs.expire_claims(&cas_dir, Instant::now() + CLAIM_READY_TTL + Duration::from_millis(10));
+    settle(&mut jobs, |_| claim_source(&cas_dir, row, "worker-a").is_none());
+    assert!(!jobs.has_claim(row, "worker-a"));
 }

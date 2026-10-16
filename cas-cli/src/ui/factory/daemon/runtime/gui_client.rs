@@ -480,10 +480,9 @@ impl FactoryDaemon {
                         None,
                     );
                     let settle = self.urgent_settle_duration(&actual);
-                    let _ = self
-                        .app
-                        .mux
-                        .interrupt_and_inject(&actual, &payload, settle)
+                    // cas-786a6: a command; the payload follows the settle on
+                    // a later pass and its outcome is logged there.
+                    self.begin_operator_urgent_inject(&actual, &payload, settle)
                         .await;
                 } else {
                     // Recipient-aware routing (cas-b68a): inject reaches a Codex pane

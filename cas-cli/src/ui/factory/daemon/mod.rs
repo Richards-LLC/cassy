@@ -347,6 +347,12 @@ pub struct FactoryDaemon {
     /// records the pane's output byte count at inject time; a later poll
     /// resolves it against the pane's current count.
     urgent_wake_probes: HashMap<i64, crate::ui::factory::daemon::runtime::UrgentWakeProbe>,
+    /// cas-786a6 (factory loop v2 C4a): urgent injects between their turn
+    /// break and their payload, by mux ticket, with who owns each outcome.
+    urgent_injects: runtime::inject_commands::UrgentInjects,
+    /// cas-786a6 (spec §3.3): the operator pressed Ctrl+R. The loop's next
+    /// pass submits the `DirectorSnapshot` job instead of reading inline.
+    operator_refresh_requested: bool,
     /// cas-bea6: receipts for recent Commander sends by `client_ref`, so a
     /// resent message is answered with its first receipt and queued once.
     send_receipts: runtime::send_dedupe::SendReceipts,

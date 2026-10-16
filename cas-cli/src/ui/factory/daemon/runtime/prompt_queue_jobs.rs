@@ -94,6 +94,39 @@ pub(crate) enum QueueStamp {
         failed: u32,
         detail: Option<String>,
     },
+    /// A Teams inbox copy was written while the row stays pending for a
+    /// later wake (GH #751, cas-786a6 L4).
+    DeferredInbox {
+        pane_bytes: u64,
+        warn_supervisor: String,
+        session: String,
+    },
+    /// One declined wake-gate pass (cas-9e81 detail; cas-786a6 L4). Control
+    /// counts declines from the selection snapshot; this persists the one.
+    WakeDecline { detail: String },
+    /// The strong observed-wake receipt (cas-1a54).
+    ObservedWakeReceipt,
+    /// Withdraw unread rows for a recipient that shut down (cas-786a6 L4).
+    /// `recipient` is the shut-down agent.
+    CancelUnreadForShutdown { session: String, reason: String },
+    /// Stop waking a wake-starved row; keep it for the recipient's next
+    /// turn (cas-d1659; cas-786a6 L4).
+    ParkBusy {
+        detail: String,
+        recheck_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// Terminal: a lifecycle relay that expired undelivered (cas-7787).
+    UndeliveredRelay { notice: String },
+    /// cas-6eab/cas-bc8c: tell the requester why its merge request is
+    /// withheld, then supersede the row. A guidance enqueue that fails leaves
+    /// the row pending, to be decided again (cas-786a6).
+    SupersedeWithGuidance {
+        source: String,
+        session: Option<String>,
+        guidance: String,
+        summary: String,
+        detail: String,
+    },
     /// cas-d5ab: the recipient worker was seen working (a wake-gate decline
     /// for a tool call in flight), recorded through cas-7156's per-worker
     /// activity recorder.
@@ -121,22 +154,25 @@ impl QueueStamp {
             Self::Suppressed { .. } => "suppressed",
             Self::Abandoned { .. } => "abandoned",
             Self::BroadcastOutcome { .. } => "broadcast_outcome",
+            Self::DeferredInbox { .. } => "deferred_inbox",
+            Self::WakeDecline { .. } => "wake_decline",
+            Self::ObservedWakeReceipt => "observed_wake_receipt",
+            Self::CancelUnreadForShutdown { .. } => "cancel_unread_for_shutdown",
+            Self::ParkBusy { .. } => "park_busy",
+            Self::UndeliveredRelay { .. } => "undelivered_relay",
+            Self::SupersedeWithGuidance { .. } => "supersede_with_guidance",
             Self::WorkerActivity { .. } => "worker_activity",
             Self::Settled => "settled",
         }
     }
 
-    fn apply(&self, queue: &dyn cas_store::PromptQueueStore, row: i64, recipient: &str) -> cas_store::Result<()> {
+    pub(crate) fn apply(&self, queue: &dyn cas_store::PromptQueueStore, row: i64, recipient: &str) -> cas_store::Result<()> {
         match self {
             Self::ReleaseClaim { claim_token } => queue
                 .release_recipient_transport_claim(row, recipient, *claim_token)
                 .map(drop),
             Self::TransportDelivered => queue.mark_transport_delivered(row),
-            Self::TransportReceipt => queue.record_recipient_surfaced(
-                row,
-                recipient,
-                cas_store::SurfacingSource::TransportClaimed,
-            ),
+            Self::TransportReceipt => queue.record_recipient_transport_delivered(row, recipient),
             Self::PendingReason { reason, detail } => {
                 queue.record_pending_reason(row, *reason, detail.as_deref())
             }
@@ -156,6 +192,78 @@ impl QueueStamp {
                 failed,
                 detail,
             } => queue.mark_broadcast_outcome(row, *attempted, *succeeded, *failed, detail.as_deref()),
+            Self::DeferredInbox {
+                pane_bytes,
+                warn_supervisor,
+                session,
+            } => queue.record_deferred_inbox(row, *pane_bytes).inspect_err(|_| {
+                // cas-1ba0: the Teams copy survives, but without this marker
+                // a tool boundary cannot take the claim. Report the degraded
+                // path durably, once per row, rather than only in logs.
+                let notice = format!(
+                    "Warning: deferred inbox handoff not recorded: notification_id={row}; \
+                     target={recipient}. tool-boundary surfacing unavailable; the Teams copy \
+                     waits until the recipient's turn boundary. Inspect with \
+                     coordination action=message_status notification_id={row}",
+                );
+                if let Err(notice_error) = queue.enqueue_idempotent(
+                    "daemon",
+                    warn_supervisor,
+                    &notice,
+                    Some(session.as_str()),
+                    Some("Deferred inbox handoff not recorded"),
+                    None,
+                    &format!("deferred-inbox-stamp-failed:{row}"),
+                    Some(&cas_store::QueueOrigin::Daemon),
+                ) {
+                    tracing::error!(
+                        prompt_id = row,
+                        %notice_error,
+                        "failed to persist supervisor warning about deferred inbox handoff"
+                    );
+                }
+            }),
+            Self::WakeDecline { detail } => queue.record_wake_gate_decline(row, detail).map(drop),
+            Self::ObservedWakeReceipt => queue.record_recipient_surfaced(
+                row,
+                recipient,
+                cas_store::SurfacingSource::ObservedWake,
+            ),
+            Self::CancelUnreadForShutdown { session, reason } => queue
+                .cancel_unread_for_shutdown(recipient, Some(session), reason)
+                .map(drop),
+            Self::ParkBusy { detail, recheck_at } => {
+                queue.park_for_busy_recipient(row, Some(detail), *recheck_at).map(drop)
+            }
+            Self::UndeliveredRelay { notice } => queue
+                .mark_undelivered_lifecycle_relay(row, Some(notice))
+                .map(drop),
+            Self::SupersedeWithGuidance {
+                source,
+                session,
+                guidance,
+                summary,
+                detail,
+            } => match queue.enqueue_urgent_with_outcome(
+                "supervisor",
+                source,
+                guidance,
+                session.as_deref(),
+                Some(summary),
+                Some(cas_store::NotificationPriority::High),
+                false,
+                Some(&cas_store::QueueOrigin::Daemon),
+            ) {
+                Ok(_) => queue.mark_superseded(row, detail),
+                Err(error) => {
+                    tracing::warn!(
+                        prompt_id = row,
+                        %error,
+                        "cas-bc8c: worker guidance enqueue failed; retaining original merge request"
+                    );
+                    Ok(())
+                }
+            },
             Self::WorkerActivity {
                 cas_dir,
                 agent_id,
@@ -198,6 +306,10 @@ pub(crate) struct QueueSelectRequest {
     pub(crate) worker_names: Vec<String>,
     pub(crate) dead_workers: HashSet<String>,
     pub(crate) limit: usize,
+    /// Read the operator replies Commander clients are owed (cas-786a6).
+    pub(crate) operator_replies: bool,
+    /// Adopt owner notices first (cas-5c2c): not while shutting down.
+    pub(crate) adopt_operator_notices: bool,
 }
 
 /// One delivery batch and the store state it was selected against.
@@ -218,6 +330,108 @@ pub(crate) struct QueueSelection {
     /// before its transport handoff, so an undelivered selection leaves
     /// nothing behind (review round 1, H1).
     pub(crate) rows: Vec<cas_store::QueuedPrompt>,
+    /// The store reads each row's delivery decision needs, read in the
+    /// selecting job (cas-786a6, H3), so control decides without a store.
+    pub(crate) facts: HashMap<i64, super::queue_and_events::RowFacts>,
+    /// Operator replies to forward to Commander clients, read and stamped
+    /// `Selected` in the selecting job (cas-786a6).
+    pub(crate) operator_replies: Vec<super::queue_and_events::OperatorReplyRead>,
+}
+
+/// What a `ClaimForInject` job found (cas-786a6, H3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClaimOutcome {
+    /// The transport claim was taken: the row may be injected on its next pass.
+    Claimed(cas_store::ClaimToken),
+    /// The recipient already has the row: a delivered handoff, a hook or a
+    /// poll (review M2).
+    HandedOff,
+    /// A bare transport claim nobody handed off holds the row.
+    NotClaimed,
+    /// The fresh re-read found the row consumed, gone or re-addressed.
+    Stale,
+    /// The store failed; the row retries on a later pass.
+    Failed(String),
+}
+
+/// A finished `ClaimForInject` job.
+#[derive(Debug)]
+pub(crate) struct ClaimDone {
+    pub(crate) row: i64,
+    pub(crate) recipient: String,
+    /// The claim job's generation: only the job control waits for may
+    /// deliver its claim; any other `Claimed` token is released (review M1).
+    pub(crate) generation: u64,
+    pub(crate) cas_dir: PathBuf,
+    pub(crate) outcome: ClaimOutcome,
+    /// Rows the QA retarget moved; control forgets their state.
+    pub(crate) retargeted: Vec<i64>,
+}
+
+#[derive(Debug, Clone)]
+enum ClaimState {
+    /// A claim job of this generation is out.
+    Pending(Instant, u64),
+    Ready(ClaimOutcome, Instant),
+}
+
+/// What control may do with a row's transport claim this pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaimStep {
+    /// Claimed: inject now under this token.
+    Claimed(cas_store::ClaimToken),
+    /// The claim job has not come back; the row waits for a later pass.
+    Waiting,
+    /// The recipient already has the row (review M2).
+    HandedOff,
+    /// Not claimed: a bare claim holds the row, or it went stale.
+    NotClaimed,
+}
+
+/// A claim that came back but whose row was not delivered within this
+/// window is released, so hooks and polls can take the row (cas-786a6).
+pub(crate) const CLAIM_READY_TTL: Duration = Duration::from_secs(3);
+
+/// The `ClaimForInject` job (cas-786a6, H3; review round 1, H2): on the
+/// writer, re-target a QA rejection, re-read the row and take its transport
+/// claim for `recipient`. `target` is the row's address as control saw it;
+/// a row that moved is stale, not claimed.
+pub(crate) fn run_claim_for_inject(
+    cas_dir: &Path,
+    session: &str,
+    row: i64,
+    recipient: &str,
+    target: &str,
+    generation: u64,
+) -> ClaimDone {
+    let result = (|| -> anyhow::Result<(ClaimOutcome, Vec<i64>)> {
+        let queue = job_thread_prompt_queue(cas_dir)?;
+        let retargeted = queue.refresh_qa_rejection_targets(session, Some(row))?;
+        let Some(fresh) = queue.queued_prompt(row)? else {
+            return Ok((ClaimOutcome::Stale, retargeted));
+        };
+        if fresh.processed_at.is_some() || fresh.target != target {
+            return Ok((ClaimOutcome::Stale, retargeted));
+        }
+        let outcome = match queue.claim_recipient_transport_token(row, recipient)? {
+            Some(token) => ClaimOutcome::Claimed(token),
+            None if queue.recipient_handed_off(row, recipient)? => ClaimOutcome::HandedOff,
+            None => ClaimOutcome::NotClaimed,
+        };
+        Ok((outcome, retargeted))
+    })();
+    let (outcome, retargeted) = result.unwrap_or_else(|error| {
+        forget_job_thread_stores(cas_dir);
+        (ClaimOutcome::Failed(error.to_string()), Vec::new())
+    });
+    ClaimDone {
+        row,
+        recipient: recipient.to_string(),
+        generation,
+        cas_dir: cas_dir.to_path_buf(),
+        outcome,
+        retargeted,
+    }
 }
 
 /// A fresh read for one retraction decision.
@@ -243,6 +457,8 @@ pub(crate) enum QueueJobOutcome {
         data: anyhow::Result<DirectorData>,
     },
     Pruned(PruneReport),
+    /// A `ClaimForInject` job's result (cas-786a6).
+    Claimed(ClaimDone),
     Mirrored(Box<super::MirrorScanState>),
     /// Another daemon child's job on the same runtime (factory loop v2 C2):
     /// its own result type, handed back by [`QueueJobs::take_external_completions`].
@@ -649,6 +865,7 @@ pub(crate) enum Admission {
     /// An earlier inject of this row has not settled.
     InFlight,
     /// Another channel, or an earlier handoff that keeps its claim, holds it.
+    #[cfg_attr(not(test), allow(dead_code))]
     NotClaimed,
 }
 
@@ -691,6 +908,15 @@ pub(crate) struct QueueJobs {
     /// When each row's latest stamp landed or was deferred, for skipping
     /// rows a selection may have read before their stamp.
     stamp_landed_at: HashMap<i64, Instant>,
+    /// Transport claims taken (or being taken) by `ClaimForInject` jobs,
+    /// by `(row, recipient)` (cas-786a6, H3).
+    claims: HashMap<(i64, String), ClaimState>,
+    /// Rows a claim job's QA retarget moved, until control forgets them.
+    claim_retargeted: Vec<i64>,
+    /// Rows waiting for their claim jobs, with their snapshot facts.
+    carried: HashMap<i64, (cas_store::QueuedPrompt, super::queue_and_events::RowFacts)>,
+    /// The roster of the last selection, for batches of carried rows.
+    last_roster: Option<(Vec<cas_types::Agent>, HashSet<String>)>,
     /// When the current or last QueueSelect was submitted.
     select_submitted_at: Instant,
     /// Mirror results collected, current or stale (tests).
@@ -751,6 +977,10 @@ impl QueueJobs {
             settling_rows: HashMap::new(),
             last_stamp_progress: Instant::now(),
             stamp_landed_at: HashMap::new(),
+            claims: HashMap::new(),
+            claim_retargeted: Vec::new(),
+            carried: HashMap::new(),
+            last_roster: None,
             select_submitted_at: Instant::now(),
             #[cfg(test)]
             mirror_results_seen: 0,
@@ -929,6 +1159,7 @@ impl QueueJobs {
     /// fresh per-row check (review round 1, H2): it fails for a row a hook,
     /// poll or earlier handoff already holds. On `Inject` the row is in
     /// flight from `now` and holds the claim's token.
+    #[cfg(test)]
     pub(crate) fn admit(
         &mut self,
         row: i64,
@@ -1166,6 +1397,17 @@ impl QueueJobs {
                             }
                         }
                         "InboxPrune" => {}
+                        "ClaimForInject" => {
+                            // It may not have claimed; the row retries.
+                            if let Some((row, recipient)) = result
+                                .key
+                                .strip_prefix("ClaimForInject:")
+                                .and_then(|rest| rest.split_once(':'))
+                                && let Ok(row) = row.parse::<i64>()
+                            {
+                                self.claims.remove(&(row, recipient.to_string()));
+                            }
+                        }
                         _ => self.external.push(JobResult {
                             kind: result.kind,
                             key: result.key,
@@ -1232,6 +1474,36 @@ impl QueueJobs {
                 QueueJobOutcome::Pruned(report) => {
                     self.prunes_done += 1;
                     log_prune(&report);
+                }
+                QueueJobOutcome::Claimed(done) => {
+                    self.claim_retargeted.extend(done.retargeted);
+                    let key = (done.row, done.recipient);
+                    let awaited = matches!(
+                        self.claims.get(&key),
+                        Some(ClaimState::Pending(_, generation)) if *generation == done.generation
+                    );
+                    if awaited {
+                        // A claim nobody takes is released by `expire_claims`.
+                        self.claims
+                            .insert(key, ClaimState::Ready(done.outcome, Instant::now()));
+                    } else if let ClaimOutcome::Claimed(claim_token) = done.outcome {
+                        // Review M1: a superseded or expired job's claim is
+                        // never left holding the row.
+                        tracing::debug!(
+                            target: "cas::coordination",
+                            message_id = key.0,
+                            recipient = %key.1,
+                            generation = done.generation,
+                            "factory loop v2: releasing a claim nobody waits for"
+                        );
+                        self.submit_stamp(
+                            &done.cas_dir,
+                            key.0,
+                            &key.1,
+                            0,
+                            QueueStamp::ReleaseClaim { claim_token },
+                        );
+                    }
                 }
                 QueueJobOutcome::Mirrored(state) => {
                     #[cfg(test)]
@@ -1566,10 +1838,250 @@ impl QueueJobs {
     }
 
     /// The finished selection, once.
+    /// Phase one and two of a row's transport claim (cas-786a6, H3): the
+    /// claim is taken by a `ClaimForInject` job on the writer, never on the
+    /// loop. The first call submits it and returns `Waiting`; a call on a
+    /// later pass, once the job came back, returns its outcome. Inline
+    /// (unit tests) the job lands at once and the same call returns it.
+    pub(crate) fn claim_for_inject(
+        &mut self,
+        cas_dir: &Path,
+        session: &str,
+        row: i64,
+        recipient: &str,
+        target: &str,
+    ) -> ClaimStep {
+        let key = (row, recipient.to_string());
+        if !self.claims.contains_key(&key) {
+            self.submit_claim(cas_dir, session, row, recipient, target);
+            if matches!(self.exec, Exec::Inline(_)) {
+                self.apply_completions();
+            }
+        }
+        if !matches!(self.claims.get(&key), Some(ClaimState::Ready(..))) {
+            return ClaimStep::Waiting;
+        }
+        let Some(ClaimState::Ready(outcome, _)) = self.claims.remove(&key) else {
+            return ClaimStep::Waiting;
+        };
+        match outcome {
+            ClaimOutcome::Claimed(token) => ClaimStep::Claimed(token),
+            ClaimOutcome::HandedOff => ClaimStep::HandedOff,
+            ClaimOutcome::NotClaimed | ClaimOutcome::Stale => ClaimStep::NotClaimed,
+            ClaimOutcome::Failed(error) => {
+                tracing::warn!(
+                    target: "cas::coordination",
+                    message_id = row,
+                    %recipient,
+                    %error,
+                    "factory loop v2: transport claim failed; the row retries"
+                );
+                ClaimStep::NotClaimed
+            }
+        }
+    }
+
+    /// Make sure a claim job for `(row, recipient)` is out or back, and say
+    /// whether it is back. A broadcast checks every member this way before
+    /// injecting any (cas-786a6).
+    pub(crate) fn claim_resolved(
+        &mut self,
+        cas_dir: &Path,
+        session: &str,
+        row: i64,
+        recipient: &str,
+        target: &str,
+    ) -> bool {
+        let key = (row, recipient.to_string());
+        if !self.claims.contains_key(&key) {
+            self.submit_claim(cas_dir, session, row, recipient, target);
+            if matches!(self.exec, Exec::Inline(_)) {
+                self.apply_completions();
+            }
+        }
+        matches!(self.claims.get(&key), Some(ClaimState::Ready(..)))
+    }
+
+    fn submit_claim(&mut self, cas_dir: &Path, session: &str, row: i64, recipient: &str, target: &str) {
+        let generation = self.generation();
+        let ready = Arc::clone(&self.ready);
+        let spec = JobSpec {
+            kind: "ClaimForInject",
+            key: format!("ClaimForInject:{row}:{recipient}"),
+            lane: Lane::Write,
+            criticality: Criticality::Critical,
+            generation,
+            budget: QUEUE_JOB_BUDGET,
+        };
+        let (job_dir, job_session, job_recipient, job_target) = (
+            cas_dir.to_path_buf(),
+            session.to_string(),
+            recipient.to_string(),
+            target.to_string(),
+        );
+        // Pending first: inline, the job's result is applied after this.
+        self.claims.insert(
+            (row, recipient.to_string()),
+            ClaimState::Pending(Instant::now(), generation),
+        );
+        let submitted = self.submit_job(spec, false, move || {
+            let done = run_claim_for_inject(
+                &job_dir,
+                &job_session,
+                row,
+                &job_recipient,
+                &job_target,
+                generation,
+            );
+            // Wake the loop: the row's next selection can inject it.
+            ready.store(true, Ordering::Release);
+            QueueJobOutcome::Claimed(done)
+        });
+        if !accepted(&submitted) {
+            self.claims.remove(&(row, recipient.to_string()));
+        }
+    }
+
+    /// Admit a row whose claim came back (spec §4.5 rule 2): in flight from
+    /// `now` under `claim_token`, unless an earlier inject of the row has not
+    /// settled, in which case the new claim is released.
+    pub(crate) fn admit_claimed(
+        &mut self,
+        cas_dir: &Path,
+        row: i64,
+        recipient: &str,
+        claim_token: cas_store::ClaimToken,
+        now: Instant,
+    ) -> Admission {
+        if self.in_flight.holds_row(row) {
+            self.submit_stamp(cas_dir, row, recipient, 0, QueueStamp::ReleaseClaim { claim_token });
+            return Admission::InFlight;
+        }
+        let generation = self.generation();
+        self.in_flight.begin(row, recipient, generation, now, Some(claim_token));
+        Admission::Inject { generation }
+    }
+
+    /// Release claims that came back but were not taken within
+    /// [`CLAIM_READY_TTL`], and forget claim jobs lost past the outcome
+    /// timeout.
+    pub(crate) fn expire_claims(&mut self, cas_dir: &Path, now: Instant) {
+        let mut released = Vec::new();
+        self.claims.retain(|(row, recipient), state| match state {
+            ClaimState::Pending(since, _) => {
+                now.saturating_duration_since(*since) < INJECT_OUTCOME_TIMEOUT
+            }
+            ClaimState::Ready(outcome, since) => {
+                if now.saturating_duration_since(*since) < CLAIM_READY_TTL {
+                    return true;
+                }
+                if let ClaimOutcome::Claimed(token) = outcome {
+                    released.push((*row, recipient.clone(), *token));
+                }
+                false
+            }
+        });
+        for (row, recipient, claim_token) in released {
+            tracing::debug!(
+                target: "cas::coordination",
+                message_id = row,
+                %recipient,
+                "factory loop v2: a claimed row was not delivered in time; releasing its claim"
+            );
+            self.submit_stamp(cas_dir, row, &recipient, 0, QueueStamp::ReleaseClaim { claim_token });
+        }
+    }
+
+    /// Whether a claim job for `(row, recipient)` is out or came back
+    /// untaken (tests).
+    #[cfg(test)]
+    pub(crate) fn has_claim(&self, row: i64, recipient: &str) -> bool {
+        self.claims.contains_key(&(row, recipient.to_string()))
+    }
+
+    /// Rows claim jobs re-targeted since the last call.
+    pub(crate) fn take_claim_retargeted(&mut self) -> Vec<i64> {
+        std::mem::take(&mut self.claim_retargeted)
+    }
+
     pub(crate) fn take_selection(&mut self) -> Option<QueueSelection> {
-        let mut selection = self.selection.take()?;
+        let Some(mut selection) = self.selection.take() else {
+            return self.take_claimed_batch();
+        };
         selection.submitted_at = Some(self.select_submitted_at);
+        self.last_roster = Some((
+            selection.registered_agents.clone(),
+            selection.native_agents.clone(),
+        ));
+        // Rows whose claims are back join the batch (a claimed row is not
+        // selectable again, spec §4.5 rule 1).
+        let ready = self.take_claim_ready_rows();
+        for (row, facts) in ready {
+            if selection.rows.iter().any(|selected| selected.id == row.id) {
+                continue;
+            }
+            selection.facts.insert(row.id, facts);
+            selection.rows.push(row);
+        }
         Some(selection)
+    }
+
+    /// Carry `row` until its claim job comes back: a claimed row is no
+    /// longer selectable, so its second phase is delivered from here
+    /// (cas-786a6, H3).
+    pub(crate) fn carry_claimed_row(
+        &mut self,
+        row: cas_store::QueuedPrompt,
+        facts: super::queue_and_events::RowFacts,
+    ) {
+        self.carried.insert(row.id, (row, facts));
+    }
+
+    /// Carried rows whose every claim job is back, removed from the carry.
+    /// Rows with no claim left (expired) are dropped: they are selectable.
+    fn take_claim_ready_rows(&mut self) -> Vec<(cas_store::QueuedPrompt, super::queue_and_events::RowFacts)> {
+        let claims = &self.claims;
+        let mut ready = Vec::new();
+        self.carried.retain(|id, (row, facts)| {
+            let mut any = false;
+            let mut pending = false;
+            for ((claim_row, _), state) in claims {
+                if claim_row == id {
+                    any = true;
+                    pending |= matches!(state, ClaimState::Pending(..));
+                }
+            }
+            if !any {
+                return false;
+            }
+            if pending {
+                return true;
+            }
+            ready.push((row.clone(), facts.clone()));
+            false
+        });
+        ready.sort_by_key(|(row, _)| row.id);
+        ready
+    }
+
+    /// A batch of only the carried rows whose claims came back, delivered
+    /// against the last selection's roster.
+    fn take_claimed_batch(&mut self) -> Option<QueueSelection> {
+        let (registered_agents, native_agents) = self.last_roster.clone()?;
+        let ready = self.take_claim_ready_rows();
+        if ready.is_empty() {
+            return None;
+        }
+        let mut batch = QueueSelection {
+            registered_agents,
+            native_agents,
+            ..QueueSelection::default()
+        };
+        for (row, facts) in ready {
+            batch.facts.insert(row.id, facts);
+            batch.rows.push(row);
+        }
+        Some(batch)
     }
 
     /// Whether any stamp has been submitted and not landed or deferred.

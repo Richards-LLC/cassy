@@ -1812,6 +1812,14 @@ const PROMPT_QUEUE_RECIPIENT_SEEN_TEAMS_BODY_FALLBACK_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue_recipient_seen ADD COLUMN teams_body_fallback_at TEXT;
 "#;
 
+/// cas-786a6 (factory loop v2 C4a review M2): when the daemon's transport
+/// handed this recipient its copy under a `transport_claimed` receipt. A
+/// claim without it was never handed off, so a restarted daemon can release
+/// it. Store-local `ensure_column` migration.
+const PROMPT_QUEUE_RECIPIENT_SEEN_DELIVERED_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue_recipient_seen ADD COLUMN delivered_at TEXT;
+"#;
+
 /// cas-6ccb (GH #1215): why an `inbox_poll` settled this recipient's receipt
 /// (withheld as already done, not replayed, or shown as a redelivery), so the
 /// next turn's one-time repeat of unacknowledged polled rows skips it.
@@ -2360,6 +2368,30 @@ pub trait PromptQueueStore: Send + Sync {
         recipient: &str,
         source: SurfacingSource,
     ) -> Result<()>;
+
+    /// The daemon's transport handed `recipient` its copy (cas-786a6 review
+    /// M2): the transport receipt, marked delivered so a restart never
+    /// releases it as an orphaned claim.
+    fn record_recipient_transport_delivered(&self, prompt_id: i64, recipient: &str) -> Result<()> {
+        self.record_recipient_surfaced(prompt_id, recipient, SurfacingSource::TransportClaimed)
+    }
+
+    /// Whether `recipient` already has this row: any receipt other than a
+    /// bare transport claim that was never handed off (cas-786a6 review M2).
+    fn recipient_handed_off(&self, prompt_id: i64, recipient: &str) -> Result<bool> {
+        let _ = (prompt_id, recipient);
+        Ok(false)
+    }
+
+    /// At daemon start, release this session's transport claims that were
+    /// never handed off (cas-786a6 review M2, spec §4.5 rule 5): a
+    /// `transport_claimed` receipt with no `delivered_at`, no Teams body
+    /// fallback, on a pending row with no `transport_delivered_at` and no
+    /// held Teams copy (`deferred_inbox_at`). Returns how many were released.
+    fn release_orphaned_transport_claims(&self, factory_session: &str) -> Result<usize> {
+        let _ = factory_session;
+        Ok(0)
+    }
 
     /// Atomically reserve the first delivery channel for a recipient.
     /// Hook and poll drains share this receipt table. A stale daemon snapshot
@@ -4539,6 +4571,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             )?;
             crate::shared_db::ensure_column(
                 &conn,
+                "prompt_queue_recipient_seen",
+                "delivered_at",
+                PROMPT_QUEUE_RECIPIENT_SEEN_DELIVERED_MIGRATION,
+            )?;
+            crate::shared_db::ensure_column(
+                &conn,
                 "prompt_queue_recipient_transport",
                 "device_id",
                 PROMPT_QUEUE_RECIPIENT_TRANSPORT_DEVICE_MIGRATION,
@@ -5993,6 +6031,60 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ],
             )?;
             Ok(())
+        })
+    }
+
+    fn record_recipient_transport_delivered(&self, prompt_id: i64, recipient: &str) -> Result<()> {
+        if recipient.trim().is_empty() {
+            return Ok(());
+        }
+        self.record_recipient_surfaced(prompt_id, recipient, SurfacingSource::TransportClaimed)?;
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            conn.execute(
+                "UPDATE prompt_queue_recipient_seen
+                 SET delivered_at = COALESCE(delivered_at, ?)
+                 WHERE prompt_id = ? AND recipient = ? AND source = 'transport_claimed'",
+                params![Utc::now().to_rfc3339(), prompt_id, recipient],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn recipient_handed_off(&self, prompt_id: i64, recipient: &str) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let handed_off: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM prompt_queue_recipient_seen
+                 WHERE prompt_id = ? AND recipient = ?
+                   AND (COALESCE(source, '') <> 'transport_claimed'
+                        OR delivered_at IS NOT NULL
+                        OR teams_body_fallback_at IS NOT NULL)",
+                params![prompt_id, recipient],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(handed_off.is_some())
+    }
+
+    fn release_orphaned_transport_claims(&self, factory_session: &str) -> Result<usize> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let released = conn.execute(
+                "DELETE FROM prompt_queue_recipient_seen
+                 WHERE source = 'transport_claimed'
+                   AND delivered_at IS NULL
+                   AND teams_body_fallback_at IS NULL
+                   AND prompt_id IN (
+                       SELECT id FROM prompt_queue
+                       WHERE processed_at IS NULL
+                         AND transport_delivered_at IS NULL
+                         AND deferred_inbox_at IS NULL
+                         AND factory_session = ?
+                   )",
+                params![factory_session],
+            )?;
+            Ok(released)
         })
     }
 
@@ -9365,6 +9457,39 @@ mod tests {
             Some(SurfacingSource::HookSurfaced)
         );
         assert!(store.claim_recipient_transport_token(id, "worker-1").unwrap().is_none());
+    }
+
+    /// cas-786a6 review M2: a restarted daemon releases only the transport
+    /// claims its predecessor never handed off. A delivered broadcast member,
+    /// a delivered row and a Teams copy held behind a declined wake keep
+    /// theirs, and so does another session's row.
+    #[test]
+    fn a_restart_releases_only_claims_that_were_never_handed_off_cas_786a6() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-786a6";
+        let orphan = store.enqueue_with_session("supervisor", "worker-1", "claimed, then crash", session).unwrap();
+        let held = store.enqueue_with_session("supervisor", "worker-1", "teams copy behind a declined wake", session).unwrap();
+        let delivered = store.enqueue_with_session("supervisor", "worker-1", "typed and stamped", session).unwrap();
+        let broadcast = store.enqueue_with_session("supervisor", "all_workers", "to everyone", session).unwrap();
+        let elsewhere = store.enqueue_with_session("supervisor", "worker-1", "another factory", "other").unwrap();
+        for id in [orphan, held, delivered, elsewhere] {
+            store.claim_recipient_transport_token(id, "worker-1").unwrap().unwrap();
+        }
+        store.record_deferred_inbox(held, 0).unwrap();
+        store.record_recipient_transport_delivered(delivered, "worker-1").unwrap();
+        store.mark_transport_delivered(delivered).unwrap();
+        store.claim_recipient_transport_token(broadcast, "worker-1").unwrap().unwrap();
+        store.claim_recipient_transport_token(broadcast, "worker-2").unwrap().unwrap();
+        store.record_recipient_transport_delivered(broadcast, "worker-1").unwrap();
+
+        assert_eq!(store.release_orphaned_transport_claims(session).unwrap(), 2);
+        assert!(store.claim_recipient_transport_token(orphan, "worker-1").unwrap().is_some(), "the orphan is claimable again");
+        assert!(store.claim_recipient_transport_token(broadcast, "worker-2").unwrap().is_some(), "the undelivered member is released");
+        assert!(store.claim_recipient_transport_token(broadcast, "worker-1").unwrap().is_none(), "the delivered member keeps its receipt");
+        assert!(store.claim_recipient_transport_token(held, "worker-1").unwrap().is_none(), "the held Teams claim stays (cas-a1ed)");
+        assert!(store.claim_recipient_transport_token(elsewhere, "worker-1").unwrap().is_none(), "another session is untouched");
+        assert!(store.recipient_handed_off(broadcast, "worker-1").unwrap());
+        assert!(!store.recipient_handed_off(broadcast, "worker-2").unwrap(), "a bare claim is not a handoff");
     }
 
     /// cas-a1ed review L1: once the cas-1f0c time fallback re-sent a held

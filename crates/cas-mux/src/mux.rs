@@ -1249,7 +1249,8 @@ impl Mux {
                 continue;
             };
             let inject = &mut self.pending_injects[index];
-            let outcome = match &inject.written {
+            let written = inject.written.clone();
+            let outcome = match &written {
                 Some((receipt, queued_at)) => match receipt.result() {
                     Some(Ok(())) => Some(Ok(InjectOutcome::Delivered)),
                     Some(Err(error)) => Some(Err(Error::pty(format!(
@@ -1375,6 +1376,117 @@ impl Mux {
                 }
             }
         }
+    }
+
+    /// Compatibility no-op retained for callers from cas-1a4d.
+    ///
+    /// Deferred payloads now stay with their durable queue owner; the mux
+    /// intentionally has nothing to flush or carry across pane generations.
+    pub async fn flush_deferred_injections(&self) {}
+
+    /// Total bytes of PTY output observed for a pane by name.
+    ///
+    /// Returns `None` if the pane does not exist. Used by the urgent
+    /// interrupt-and-redirect path to detect output quiescence after a
+    /// turn-break before injecting the correction.
+    pub fn pane_bytes_received(&self, pane_id: &str) -> Option<u64> {
+        self.panes.get(pane_id).map(|p| p.bytes_received())
+    }
+
+    /// Whether an attached operator currently has an unsubmitted draft in this
+    /// pane's composer (cas-f02b / cas-eacc).
+    ///
+    /// `Mux::inject` defers for as long as this remains true. There is no
+    /// elapsed-time escape hatch: time does not make writing into a human draft
+    /// safe. An unknown pane reports `false`; the caller's own liveness checks
+    /// decide whether to proceed.
+    pub fn pane_composer_dirty(&self, pane_id: &str) -> bool {
+        self.panes
+            .get(pane_id)
+            .is_some_and(|p| p.is_composer_dirty())
+    }
+
+    /// Break a specific worker's current turn by name by sending a single
+    /// Esc (0x1b) — the canonical Claude Code "stop this turn" key.
+    ///
+    /// Distinct from [`Mux::interrupt`], which sends Ctrl+C (0x03). Targets a
+    /// pane by name independent of TUI focus.
+    pub async fn break_turn(&self, pane_id: &str) -> Result<()> {
+        let pane = self
+            .panes
+            .get(pane_id)
+            .ok_or_else(|| Error::pane_not_found(pane_id))?;
+        pane.break_turn().await
+    }
+
+    /// Urgent interrupt-and-redirect: break the target worker's in-flight turn
+    /// (Esc), wait for the turn to actually break, then inject the correction
+    /// as the worker's next prompt — by name, independent of TUI focus.
+    ///
+    /// `floor` is the minimum delay between the turn-break and the inject,
+    /// sized per-harness by the caller. For harnesses with a real textbox
+    /// submit (Claude, Grok) this floor alone is honored unconditionally, same
+    /// as before cas-4208 — the "Claude is unaffected" control group in that
+    /// task's report (7 live interrupts, 100% recovery) showed a flat sleep is
+    /// already sufficient there, so that path stays a zero-risk no-op.
+    ///
+    /// For Codex (`!supports_textbox_submit`) `floor` is only the minimum: see
+    /// [`Mux::wait_for_injection_readiness`] for why a flat sleep alone lost a
+    /// real race for that harness and what replaces it.
+    ///
+    /// Takes `&mut self` (not `&self`, as before cas-4208): the quiescence
+    /// poll needs to actively drain the pane via [`Mux::poll_batch`] — see
+    /// that method's doc for why passively reading
+    /// [`Mux::pane_bytes_received`] is not enough on its own.
+    pub async fn interrupt_and_inject(
+        &mut self,
+        pane_id: &str,
+        prompt: &str,
+        floor: std::time::Duration,
+    ) -> Result<()> {
+        // Shared targeted interrupt primitive: Commander pane interrupts and
+        // coordination urgent delivery must never drift into parallel cancel
+        // implementations.
+        self.break_turn(pane_id).await?;
+        self.wait_for_injection_readiness(pane_id, floor).await;
+        let pane = self
+            .panes
+            .get(pane_id)
+            .ok_or_else(|| Error::pane_not_found(pane_id))?;
+        pane.inject_prompt(prompt).await
+    }
+
+    /// Urgent queue delivery that preserves an attached operator's draft.
+    ///
+    /// Urgent still means "interrupt the agent's current turn", but only after
+    /// the human has submitted or cleared their composer. A dirty composer
+    /// returns [`InjectOutcome::DeferredComposerDirty`] without sending Esc or
+    /// payload bytes, allowing the durable queue owner to retry the same urgent
+    /// row at the next safe boundary without losing its priority or attribution.
+    ///
+    /// Deliberately separate from [`Self::interrupt_and_inject`]: explicit
+    /// destructive controls such as context reset still need the raw primitive.
+    pub async fn interrupt_and_inject_preserving_composer(
+        &mut self,
+        pane_id: &str,
+        prompt: &str,
+        floor: std::time::Duration,
+    ) -> Result<InjectOutcome> {
+        let pane = self
+            .panes
+            .get(pane_id)
+            .ok_or_else(|| Error::pane_not_found(pane_id))?;
+        if pane.is_composer_dirty() || pane.inject_submit_pending() {
+            tracing::info!(
+                target: "cas::coordination",
+                stage = "urgent_composer_inject_deferred",
+                target_agent = %pane_id,
+                "urgent queue delivery retained until the composer reaches a safe boundary"
+            );
+            return Ok(InjectOutcome::DeferredComposerDirty);
+        }
+        self.interrupt_and_inject(pane_id, prompt, floor).await?;
+        Ok(InjectOutcome::Delivered)
     }
 
     /// Bounded post-break-turn settle used by [`Mux::interrupt_and_inject`]

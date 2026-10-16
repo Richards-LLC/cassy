@@ -537,6 +537,15 @@ in the TUI. v2 extends these pieces rather than replacing them.
    and reads under `/proc` or of a transcript assert `!ON_LANE`. Release
    builds log once per call site instead of asserting (report mode), until
    C6 (§8) flips the tests to enforce.
+   *C6 status (cas-9db0b):* `lane_guard::enforce_lane` and `enforce_here`
+   enforce; `enter_lane`, which the daemon loop's attachment uses, still
+   reports. An enforced call panics only under a test harness (cas-store
+   `cfg(test)` or `panic_on_enforced_violations()`). Anywhere else, a debug
+   daemon run for QA included, it logs one error per site with its step. The
+   tests of passes proven clean enforce. The loop attachment moves to
+   enforce after C2c (cas-4491f) moves the relays, `inject_director_prompt`
+   and the director-apply I/O off the loop. Each violation site records the
+   step it ran in.
 
 ## 7. Named latency tests
 

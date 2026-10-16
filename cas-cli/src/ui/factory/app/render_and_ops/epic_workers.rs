@@ -2005,15 +2005,25 @@ impl WorkerSpawnContext {
                     });
                 if let Some((epic_branch, recorded_parent)) = recorded_base_parent {
                     if can_refresh_parent {
-                    let refresh = fast_forward_epic_base_from_parent(
-                        &repo_root,
-                        &epic_branch,
-                        &recorded_parent,
-                    )
-                    .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
-                    if let Some(notice) = refresh {
-                        notices.push(notice);
-                    }
+                        let refresh = fast_forward_epic_base_from_parent(
+                            &repo_root,
+                            &epic_branch,
+                            &recorded_parent,
+                        )
+                        .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
+                        if let Some(notice) = refresh {
+                            notices.push(notice);
+                        }
+                    } else if ref_exists(&repo_root, &recorded_parent) {
+                        // Readiness may forbid publication; it must not also
+                        // disable the independent local-history safety check.
+                        let ahead = spawn_git.commits_behind(&recorded_parent, &epic_branch)?;
+                        let behind = spawn_git.commits_behind(&epic_branch, &recorded_parent)?;
+                        if ahead > 0 && behind > 0 {
+                            anyhow::bail!("{}", epic_base_refresh_refusal(&format!(
+                                "epic base '{epic_branch}' and recorded parent '{recorded_parent}' have diverged; no refs changed"
+                            )));
+                        }
                     }
                 }
                 // cas-d897 (GH #146): the winning branch name still has to be

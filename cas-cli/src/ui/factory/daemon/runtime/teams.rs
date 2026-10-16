@@ -626,6 +626,16 @@ impl TeamsManager {
         }
     }
 
+    /// Owned in-memory routing/roster snapshot for off-loop inbox work.
+    pub(crate) fn snapshot(&self) -> Self {
+        Self {
+            team_name: self.team_name.clone(),
+            teams_dir: self.teams_dir.clone(),
+            inboxes_dir: self.inboxes_dir.clone(),
+            config: std::sync::Mutex::new(self.config.lock().unwrap().clone()),
+        }
+    }
+
     /// Get the team name.
     pub fn team_name(&self) -> &str {
         &self.team_name

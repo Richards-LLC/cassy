@@ -362,4 +362,3 @@ fn feature_gated(base: &[&'static str], proxy_only: &[&'static str]) -> Vec<&'st
     }
     actions
 }
-

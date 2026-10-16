@@ -79,7 +79,9 @@ impl std::fmt::Display for JournalError {
                 f,
                 "request_id {request_id} already has different immutable input"
             ),
-            Self::Missing(request_id) => write!(f, "no local operation for request_id {request_id}"),
+            Self::Missing(request_id) => {
+                write!(f, "no local operation for request_id {request_id}")
+            }
         }
     }
 }
@@ -159,11 +161,7 @@ impl SqliteRequestJournal {
 
     /// Freeze the actual provider body before dispatch. It can be set once;
     /// later retries always use the original body and request ID.
-    pub fn set_wire_request(
-        &self,
-        request_id: &str,
-        wire: &Value,
-    ) -> Result<(), JournalError> {
+    pub fn set_wire_request(&self, request_id: &str, wire: &Value) -> Result<(), JournalError> {
         let wire_json = canonical_json(wire)?;
         let conn = self
             .conn
@@ -213,8 +211,14 @@ impl SqliteRequestJournal {
         retry_after: Option<Duration>,
     ) -> Result<(), JournalError> {
         let response_json = canonical_json(response)?;
-        let code = response.get("code").and_then(Value::as_str).unwrap_or_default();
-        let retry = matches!(code, "pending" | "outcome_unknown" | "authority_unavailable");
+        let code = response
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let retry = matches!(
+            code,
+            "pending" | "outcome_unknown" | "authority_unavailable"
+        );
         let stage = if retry { "retry_wait" } else { "terminal" };
         let retry_at = retry.then(|| {
             Utc::now().timestamp_millis()
@@ -229,7 +233,13 @@ impl SqliteRequestJournal {
                 "UPDATE external_work_operations SET stage=?2, response_json=?3,
                  next_retry_ms=?4, lease_token=NULL, lease_until_ms=NULL, updated_at=?5
                  WHERE request_id=?1",
-                params![request_id, stage, response_json, retry_at, Utc::now().to_rfc3339()],
+                params![
+                    request_id,
+                    stage,
+                    response_json,
+                    retry_at,
+                    Utc::now().to_rfc3339()
+                ],
             )
             .map_err(|error| JournalError::Storage(error.to_string()))?;
         if changed == 0 {
@@ -356,11 +366,17 @@ pub struct RemoteError {
 
 impl RemoteError {
     pub fn unavailable(message: impl Into<String>) -> Self {
-        Self { message: message.into(), timed_out: false }
+        Self {
+            message: message.into(),
+            timed_out: false,
+        }
     }
 
     pub fn timeout(message: impl Into<String>) -> Self {
-        Self { message: message.into(), timed_out: true }
+        Self {
+            message: message.into(),
+            timed_out: true,
+        }
     }
 }
 
@@ -387,7 +403,10 @@ pub struct HttpCloudCoordinationPort {
 
 impl HttpCloudCoordinationPort {
     pub fn new(endpoint: impl Into<String>, token: impl Into<String>) -> Self {
-        Self { endpoint: endpoint.into().trim_end_matches('/').to_string(), token: token.into() }
+        Self {
+            endpoint: endpoint.into().trim_end_matches('/').to_string(),
+            token: token.into(),
+        }
     }
 
     fn decode_response(response: ureq::Response) -> Result<Value, RemoteError> {
@@ -447,9 +466,18 @@ pub struct OperationContext {
 
 #[derive(Debug, Clone)]
 pub enum ExternalWorkCommand {
-    Claim { external_ref: String, request_id: Option<String> },
-    ClaimStatus { request_id: String },
-    ReleaseClaim { resource_id: String, expected_generation: u64, request_id: Option<String> },
+    Claim {
+        external_ref: String,
+        request_id: Option<String>,
+    },
+    ClaimStatus {
+        request_id: String,
+    },
+    ReleaseClaim {
+        resource_id: String,
+        expected_generation: u64,
+        request_id: Option<String>,
+    },
     TransferClaim {
         resource_id: String,
         expected_generation: u64,
@@ -457,7 +485,11 @@ pub enum ExternalWorkCommand {
         offer_ttl_secs: Option<u32>,
         request_id: Option<String>,
     },
-    AcceptClaim { handoff_id: String, expected_generation: u64, request_id: Option<String> },
+    AcceptClaim {
+        handoff_id: String,
+        expected_generation: u64,
+        request_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -490,7 +522,13 @@ impl ExternalWorkService {
         violet: Arc<dyn VioletThreadResolver>,
         context: OperationContext,
     ) -> Self {
-        Self { journal, cloud, violet, context, total_budget: TOTAL_REMOTE_BUDGET }
+        Self {
+            journal,
+            cloud,
+            violet,
+            context,
+            total_budget: TOTAL_REMOTE_BUDGET,
+        }
     }
 
     pub fn execute(&self, command: ExternalWorkCommand) -> Result<Value, ExternalWorkError> {
@@ -501,13 +539,31 @@ impl ExternalWorkService {
     }
 
     fn mutate(&self, command: ExternalWorkCommand) -> Result<Value, ExternalWorkError> {
+        command.validate()?;
         let kind = command.kind().to_string();
         let request_id = valid_request_id(command.request_id())?;
         let input = command.input(&self.context);
-        let (mut row, created) = self
-            .journal
-            .prepare(&request_id, &kind, &input)
-            .map_err(journal_error)?;
+        let (mut row, created) = match self.journal.prepare(&request_id, &kind, &input) {
+            Ok(prepared) => prepared,
+            Err(JournalError::IdempotencyConflict { request_id }) => {
+                let mut response = failure_response(
+                    &request_id,
+                    "idempotency_conflict",
+                    "request_input_changed",
+                    "This request ID was already used with different input. Reuse the original input or allocate a new request ID for a new intent.",
+                    "use_original_input",
+                );
+                if let Some(previous) = self.journal.get(&request_id).map_err(journal_error)?
+                    && let Some(response_json) = previous.response_json
+                    && let Ok(previous_response) = serde_json::from_str::<Value>(&response_json)
+                    && let Some(operation_id) = previous_response.pointer("/receipt/operation_id")
+                {
+                    response["receipt"]["operation_id"] = operation_id.clone();
+                }
+                return Ok(response);
+            }
+            Err(error) => return Err(journal_error(error)),
+        };
         if !created {
             if row.stage == "terminal" {
                 return row_response(&row);
@@ -519,33 +575,57 @@ impl ExternalWorkService {
 
         let deadline = Instant::now() + self.total_budget;
         if kind == "claim" && row.wire_json.is_none() {
-            let external_ref = command.claim_external_ref().ok_or_else(|| error("invalid_request", "claim requires external_ref"))?;
+            let external_ref = command
+                .claim_external_ref()
+                .ok_or_else(|| error("invalid_request", "claim requires external_ref"))?;
             let timeout = call_timeout(deadline)?;
             let resolved = match self.violet.resolve(external_ref, timeout) {
                 Ok(value) => value,
                 Err(error) => {
                     let result = failure_response(
                         &request_id,
-                        if error.timed_out { "authority_unavailable" } else { "authority_unavailable" },
+                        if error.timed_out {
+                            "authority_unavailable"
+                        } else {
+                            "authority_unavailable"
+                        },
                         "violet_unavailable",
                         &error.message,
                         "retry_later",
                     );
-                    self.journal.record_result(&request_id, &result, Some(Duration::from_secs(2))).map_err(journal_error)?;
+                    self.journal
+                        .record_result(&request_id, &result, Some(Duration::from_secs(2)))
+                        .map_err(journal_error)?;
                     return Ok(result);
                 }
             };
-            let code = resolved.get("code").and_then(Value::as_str).unwrap_or_default();
+            let code = resolved
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             if code != "completed" {
                 let mut refused = resolved;
                 ensure_local_request_receipt(&mut refused, &request_id);
-                self.journal.record_result(&request_id, &refused, None).map_err(journal_error)?;
+                self.journal
+                    .record_result(&request_id, &refused, None)
+                    .map_err(journal_error)?;
                 return Ok(refused);
             }
-            let identity = resolved.get("thread_identity").ok_or_else(|| error("invalid_response", "Violet response omitted verified thread identity"))?;
+            let identity = resolved.get("thread_identity").ok_or_else(|| {
+                error(
+                    "invalid_response",
+                    "Violet response omitted verified thread identity",
+                )
+            })?;
             let identity_fields = ["provider", "workspace_id", "channel_id", "root_ts"];
-            if identity_fields.iter().any(|field| identity.get(*field).and_then(Value::as_str).is_none()) {
-                return Err(error("invalid_response", "Violet response has incomplete verified thread identity"));
+            if identity_fields
+                .iter()
+                .any(|field| identity.get(*field).and_then(Value::as_str).is_none())
+            {
+                return Err(error(
+                    "invalid_response",
+                    "Violet response has incomplete verified thread identity",
+                ));
             }
             // v1's Cloud fixture binds the verified Slack channel to the
             // authenticated project but has no identity_proof body field.
@@ -562,12 +642,24 @@ impl ExternalWorkService {
                 "external_ref": cloud_identity,
                 "actor": {"registration_id": self.context.registration_id},
             });
-            self.journal.set_wire_request(&request_id, &wire).map_err(journal_error)?;
-            row = self.journal.get(&request_id).map_err(journal_error)?.ok_or_else(|| error("journal_error", "prepared operation disappeared"))?;
+            self.journal
+                .set_wire_request(&request_id, &wire)
+                .map_err(journal_error)?;
+            row = self
+                .journal
+                .get(&request_id)
+                .map_err(journal_error)?
+                .ok_or_else(|| error("journal_error", "prepared operation disappeared"))?;
         } else if row.wire_json.is_none() {
             let wire = command.wire(&request_id, &self.context);
-            self.journal.set_wire_request(&request_id, &wire).map_err(journal_error)?;
-            row = self.journal.get(&request_id).map_err(journal_error)?.ok_or_else(|| error("journal_error", "prepared operation disappeared"))?;
+            self.journal
+                .set_wire_request(&request_id, &wire)
+                .map_err(journal_error)?;
+            row = self
+                .journal
+                .get(&request_id)
+                .map_err(journal_error)?
+                .ok_or_else(|| error("journal_error", "prepared operation disappeared"))?;
         }
 
         self.dispatch(&row, &command, deadline)
@@ -580,14 +672,31 @@ impl ExternalWorkService {
         deadline: Instant,
     ) -> Result<Value, ExternalWorkError> {
         let path = command.path();
-        let payload: Value = serde_json::from_str(row.wire_json.as_deref().ok_or_else(|| error("journal_error", "provider request was not journaled"))?)
-            .map_err(|e| error("journal_error", format!("saved provider request is invalid: {e}")))?;
+        let payload: Value = serde_json::from_str(
+            row.wire_json
+                .as_deref()
+                .ok_or_else(|| error("journal_error", "provider request was not journaled"))?,
+        )
+        .map_err(|e| {
+            error(
+                "journal_error",
+                format!("saved provider request is invalid: {e}"),
+            )
+        })?;
         let timeout = call_timeout(deadline)?;
-        self.journal.begin_attempt(&row.request_id).map_err(journal_error)?;
+        self.journal
+            .begin_attempt(&row.request_id)
+            .map_err(journal_error)?;
         let result = match self.cloud.post(&path, &payload, timeout) {
             Ok(mut response) => {
                 if response.get("code").and_then(Value::as_str).is_none() {
-                    failure_response(&row.request_id, "outcome_unknown", "malformed_response", "Cloud returned no stable operation code; reconcile the original request ID.", "reconcile")
+                    failure_response(
+                        &row.request_id,
+                        "outcome_unknown",
+                        "malformed_response",
+                        "Cloud returned no stable operation code; reconcile the original request ID.",
+                        "reconcile",
+                    )
                 } else {
                     ensure_local_request_receipt(&mut response, &row.request_id);
                     response
@@ -596,13 +705,26 @@ impl ExternalWorkService {
             Err(error) => failure_response(
                 &row.request_id,
                 "outcome_unknown",
-                if error.timed_out { "request_timeout" } else { "cloud_unavailable" },
+                if error.timed_out {
+                    "request_timeout"
+                } else {
+                    "cloud_unavailable"
+                },
                 &error.message,
                 "reconcile",
             ),
         };
-        let retry = matches!(result["code"].as_str(), Some("pending" | "outcome_unknown" | "authority_unavailable"));
-        self.journal.record_result(&row.request_id, &result, retry.then_some(Duration::from_secs(2))).map_err(journal_error)?;
+        let retry = matches!(
+            result["code"].as_str(),
+            Some("pending" | "outcome_unknown" | "authority_unavailable")
+        );
+        self.journal
+            .record_result(
+                &row.request_id,
+                &result,
+                retry.then_some(Duration::from_secs(2)),
+            )
+            .map_err(journal_error)?;
         Ok(result)
     }
 
@@ -611,21 +733,61 @@ impl ExternalWorkService {
         let Some(row) = self.journal.get(&request_id).map_err(journal_error)? else {
             let deadline = Instant::now() + self.total_budget;
             let timeout = call_timeout(deadline)?;
-            return self.cloud.lookup(&request_id, &self.context.registration_id, timeout)
-                .map_err(|e| error("authority_unavailable", e.message));
+            let mut result = self
+                .cloud
+                .lookup(&request_id, &self.context.registration_id, timeout)
+                .map_err(|e| error("authority_unavailable", e.message))?;
+            ensure_local_request_receipt(&mut result, &request_id);
+            return Ok(result);
         };
-        let input: Value = serde_json::from_str(&row.input_json).map_err(|e| error("journal_error", e.to_string()))?;
-        if input.pointer("/actor/registration_id").and_then(Value::as_str) != Some(self.context.registration_id.as_str()) {
-            return Err(error("not_authorized", "operation belongs to a different registered supervisor"));
+        let input: Value = serde_json::from_str(&row.input_json)
+            .map_err(|e| error("journal_error", e.to_string()))?;
+        if input
+            .pointer("/actor/registration_id")
+            .and_then(Value::as_str)
+            != Some(self.context.registration_id.as_str())
+        {
+            return Err(error(
+                "not_authorized",
+                "operation belongs to a different registered supervisor",
+            ));
         }
         if row.stage == "terminal" {
             return row_response(&row);
         }
         if row.kind == "claim" && row.wire_json.is_none() {
-            let ref_link = input.get("external_ref").and_then(Value::as_str).ok_or_else(|| error("journal_error", "claim permalink missing from journal"))?;
-            let timeout = call_timeout(Instant::now() + self.total_budget)?;
-            let resolved = self.violet.resolve(ref_link, timeout).map_err(|e| error("authority_unavailable", e.message))?;
-            let identity = resolved.get("thread_identity").ok_or_else(|| error("invalid_response", "Violet response omitted verified thread identity"))?;
+            let ref_link = input
+                .get("external_ref")
+                .and_then(Value::as_str)
+                .ok_or_else(|| error("journal_error", "claim permalink missing from journal"))?;
+            let deadline = Instant::now() + self.total_budget;
+            let resolved = self
+                .violet
+                .resolve(ref_link, call_timeout(deadline)?)
+                .map_err(|e| error("authority_unavailable", e.message))?;
+            if resolved.get("code").and_then(Value::as_str) != Some("completed") {
+                let mut response = resolved;
+                ensure_local_request_receipt(&mut response, &request_id);
+                self.journal
+                    .record_result(&request_id, &response, None)
+                    .map_err(journal_error)?;
+                return Ok(response);
+            }
+            let identity = resolved.get("thread_identity").ok_or_else(|| {
+                error(
+                    "invalid_response",
+                    "Violet response omitted verified thread identity",
+                )
+            })?;
+            if ["provider", "workspace_id", "channel_id", "root_ts"]
+                .iter()
+                .any(|field| identity.get(*field).and_then(Value::as_str).is_none())
+            {
+                return Err(error(
+                    "invalid_response",
+                    "Violet response has incomplete verified thread identity",
+                ));
+            }
             let wire = json!({
                 "schema": CONTRACT_SCHEMA,
                 "request_id": request_id,
@@ -636,14 +798,33 @@ impl ExternalWorkService {
                 },
                 "actor": {"registration_id": self.context.registration_id},
             });
-            self.journal.set_wire_request(&request_id, &wire).map_err(journal_error)?;
+            self.journal
+                .set_wire_request(&request_id, &wire)
+                .map_err(journal_error)?;
+            let row = self
+                .journal
+                .get(&request_id)
+                .map_err(journal_error)?
+                .ok_or_else(|| error("journal_error", "prepared operation disappeared"))?;
+            let command = ExternalWorkCommand::Claim {
+                external_ref: ref_link.to_string(),
+                request_id: Some(request_id.clone()),
+            };
+            return self.dispatch(&row, &command, deadline);
         }
         self.reconcile(&row)
     }
 
     fn reconcile(&self, row: &JournalOperation) -> Result<Value, ExternalWorkError> {
         let deadline = Instant::now() + self.total_budget;
-        let lookup = self.cloud.lookup(&row.request_id, &self.context.registration_id, call_timeout(deadline)?);
+        self.journal
+            .begin_attempt(&row.request_id)
+            .map_err(journal_error)?;
+        let lookup = self.cloud.lookup(
+            &row.request_id,
+            &self.context.registration_id,
+            call_timeout(deadline)?,
+        );
         let result = match lookup {
             Ok(mut response) => {
                 ensure_local_request_receipt(&mut response, &row.request_id);
@@ -652,24 +833,46 @@ impl ExternalWorkService {
             Err(error) => failure_response(
                 &row.request_id,
                 "outcome_unknown",
-                if error.timed_out { "lookup_timeout" } else { "cloud_unavailable" },
+                if error.timed_out {
+                    "lookup_timeout"
+                } else {
+                    "cloud_unavailable"
+                },
                 &error.message,
                 "reconcile",
             ),
         };
-        let retry = matches!(result["code"].as_str(), Some("pending" | "outcome_unknown" | "authority_unavailable"));
-        self.journal.record_result(&row.request_id, &result, retry.then_some(Duration::from_secs(2))).map_err(journal_error)?;
+        let retry = matches!(
+            result["code"].as_str(),
+            Some("pending" | "outcome_unknown" | "authority_unavailable")
+        );
+        self.journal
+            .record_result(
+                &row.request_id,
+                &result,
+                retry.then_some(Duration::from_secs(2)),
+            )
+            .map_err(journal_error)?;
         Ok(result)
     }
 
     /// One bounded background batch. Callers submit this on an external job
     /// lane; the loop and hooks never call it synchronously.
     pub fn reconcile_due(&self, now_ms: i64) -> Result<Vec<Value>, ExternalWorkError> {
-        let rows = self.journal.lease_due(RECONCILE_BATCH_LIMIT, now_ms, Duration::from_secs(15)).map_err(journal_error)?;
+        let rows = self
+            .journal
+            .lease_due(RECONCILE_BATCH_LIMIT, now_ms, Duration::from_secs(15))
+            .map_err(journal_error)?;
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
-            let result = self.reconcile(&row)?;
-            self.journal.clear_lease(&row.request_id).map_err(journal_error)?;
+            let result = if row.kind == "claim" && row.wire_json.is_none() {
+                self.claim_status(&row.request_id)?
+            } else {
+                self.reconcile(&row)?
+            };
+            self.journal
+                .clear_lease(&row.request_id)
+                .map_err(journal_error)?;
             results.push(result);
         }
         Ok(results)
@@ -677,6 +880,44 @@ impl ExternalWorkService {
 }
 
 impl ExternalWorkCommand {
+    fn validate(&self) -> Result<(), ExternalWorkError> {
+        let path_uuid = match self {
+            Self::ReleaseClaim { resource_id, .. } | Self::TransferClaim { resource_id, .. } => {
+                Some((resource_id, "resource_id"))
+            }
+            Self::AcceptClaim { handoff_id, .. } => Some((handoff_id, "handoff_id")),
+            _ => None,
+        };
+        if let Some((value, field)) = path_uuid {
+            validate_uuid_field(value, field)?;
+        }
+        if let Self::TransferClaim { to_slot_id, .. } = self {
+            validate_uuid_field(to_slot_id, "to_slot_id")?;
+        }
+        let generation = match self {
+            Self::ReleaseClaim {
+                expected_generation,
+                ..
+            }
+            | Self::TransferClaim {
+                expected_generation,
+                ..
+            }
+            | Self::AcceptClaim {
+                expected_generation,
+                ..
+            } => Some(*expected_generation),
+            _ => None,
+        };
+        if generation == Some(0) {
+            return Err(error(
+                "invalid_request",
+                "expected_generation must be positive",
+            ));
+        }
+        Ok(())
+    }
+
     fn kind(&self) -> &'static str {
         match self {
             Self::Claim { .. } => "claim",
@@ -701,9 +942,25 @@ impl ExternalWorkCommand {
         let mut input = match self {
             Self::Claim { external_ref, .. } => json!({"external_ref": external_ref}),
             Self::ClaimStatus { request_id } => json!({"request_id": request_id}),
-            Self::ReleaseClaim { resource_id, expected_generation, .. } => json!({"resource_id": resource_id, "expected_generation": expected_generation}),
-            Self::TransferClaim { resource_id, expected_generation, to_slot_id, offer_ttl_secs, .. } => json!({"resource_id": resource_id, "expected_generation": expected_generation, "to_slot_id": to_slot_id, "offer_ttl_secs": offer_ttl_secs.unwrap_or(600)}),
-            Self::AcceptClaim { handoff_id, expected_generation, .. } => json!({"handoff_id": handoff_id, "expected_generation": expected_generation}),
+            Self::ReleaseClaim {
+                resource_id,
+                expected_generation,
+                ..
+            } => json!({"resource_id": resource_id, "expected_generation": expected_generation}),
+            Self::TransferClaim {
+                resource_id,
+                expected_generation,
+                to_slot_id,
+                offer_ttl_secs,
+                ..
+            } => {
+                json!({"resource_id": resource_id, "expected_generation": expected_generation, "to_slot_id": to_slot_id, "offer_ttl_secs": offer_ttl_secs.unwrap_or(600)})
+            }
+            Self::AcceptClaim {
+                handoff_id,
+                expected_generation,
+                ..
+            } => json!({"handoff_id": handoff_id, "expected_generation": expected_generation}),
         };
         input["project_id"] = json!(context.project_id);
         input["actor"] = json!({"registration_id": context.registration_id});
@@ -714,9 +971,18 @@ impl ExternalWorkCommand {
     fn wire(&self, request_id: &str, context: &OperationContext) -> Value {
         let mut value = match self {
             Self::Claim { .. } | Self::ClaimStatus { .. } => json!({}),
-            Self::ReleaseClaim { expected_generation, .. }
-            | Self::TransferClaim { expected_generation, .. }
-            | Self::AcceptClaim { expected_generation, .. } => json!({"expected_generation": expected_generation}),
+            Self::ReleaseClaim {
+                expected_generation,
+                ..
+            }
+            | Self::TransferClaim {
+                expected_generation,
+                ..
+            }
+            | Self::AcceptClaim {
+                expected_generation,
+                ..
+            } => json!({"expected_generation": expected_generation}),
         };
         value["schema"] = json!(CONTRACT_SCHEMA);
         value["request_id"] = json!(request_id);
@@ -724,7 +990,11 @@ impl ExternalWorkCommand {
         match self {
             Self::Claim { .. } | Self::ClaimStatus { .. } => {}
             Self::ReleaseClaim { .. } => {}
-            Self::TransferClaim { to_slot_id, offer_ttl_secs, .. } => {
+            Self::TransferClaim {
+                to_slot_id,
+                offer_ttl_secs,
+                ..
+            } => {
                 value["to_slot_id"] = json!(to_slot_id);
                 value["offer_ttl_secs"] = json!(offer_ttl_secs.unwrap_or(600));
             }
@@ -735,15 +1005,26 @@ impl ExternalWorkCommand {
 
     fn path(&self) -> String {
         match self {
-            Self::Claim { .. } | Self::ClaimStatus { .. } => "/api/coordination/external-work/claim".to_string(),
-            Self::ReleaseClaim { resource_id, .. } => format!("/api/coordination/external-work/{resource_id}/release"),
-            Self::TransferClaim { resource_id, .. } => format!("/api/coordination/external-work/{resource_id}/handoffs"),
-            Self::AcceptClaim { handoff_id, .. } => format!("/api/coordination/handoffs/{handoff_id}/accept"),
+            Self::Claim { .. } | Self::ClaimStatus { .. } => {
+                "/api/coordination/external-work/claim".to_string()
+            }
+            Self::ReleaseClaim { resource_id, .. } => {
+                format!("/api/coordination/external-work/{resource_id}/release")
+            }
+            Self::TransferClaim { resource_id, .. } => {
+                format!("/api/coordination/external-work/{resource_id}/handoffs")
+            }
+            Self::AcceptClaim { handoff_id, .. } => {
+                format!("/api/coordination/handoffs/{handoff_id}/accept")
+            }
         }
     }
 
     fn claim_external_ref(&self) -> Option<&str> {
-        match self { Self::Claim { external_ref, .. } => Some(external_ref), _ => None }
+        match self {
+            Self::Claim { external_ref, .. } => Some(external_ref),
+            _ => None,
+        }
     }
 }
 
@@ -755,43 +1036,105 @@ fn valid_request_id(candidate: Option<&str>) -> Result<String, ExternalWorkError
 }
 
 fn valid_uuid(value: &str) -> Result<String, ExternalWorkError> {
-    let parsed = Uuid::parse_str(value).map_err(|_| error("invalid_request", "request_id must be a UUID"))?;
+    let parsed = Uuid::parse_str(value)
+        .map_err(|_| error("invalid_request", "request_id must be a UUID"))?;
     let canonical = parsed.to_string();
     if value != canonical {
-        return Err(error("invalid_request", "request_id must be a lowercase canonical UUID"));
+        return Err(error(
+            "invalid_request",
+            "request_id must be a lowercase canonical UUID",
+        ));
     }
     Ok(canonical)
 }
 
+fn validate_uuid_field(value: &str, field: &str) -> Result<(), ExternalWorkError> {
+    let parsed = Uuid::parse_str(value)
+        .map_err(|_| error("invalid_request", format!("{field} must be a UUID")))?;
+    if value != parsed.to_string() {
+        return Err(error(
+            "invalid_request",
+            format!("{field} must be a lowercase canonical UUID"),
+        ));
+    }
+    Ok(())
+}
+
 fn call_timeout(deadline: Instant) -> Result<Duration, ExternalWorkError> {
     let left = deadline.saturating_duration_since(Instant::now());
-    if left.is_zero() { return Err(error("authority_unavailable", "remote wait budget is exhausted")); }
+    if left.is_zero() {
+        return Err(error(
+            "authority_unavailable",
+            "remote wait budget is exhausted",
+        ));
+    }
     Ok(left.min(CALL_REMOTE_BUDGET))
 }
 
 fn row_response(row: &JournalOperation) -> Result<Value, ExternalWorkError> {
-    row.response_json.as_deref().map(serde_json::from_str)
-        .transpose().map_err(|e| error("journal_error", format!("saved response is invalid: {e}")))
-        .map(|result| result.unwrap_or_else(|| failure_response(&row.request_id, "pending", "not_dispatched", "The request is journaled and waiting for dispatch.", "reconcile")))
+    row.response_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| error("journal_error", format!("saved response is invalid: {e}")))
+        .map(|result| {
+            result.unwrap_or_else(|| {
+                failure_response(
+                    &row.request_id,
+                    "pending",
+                    "not_dispatched",
+                    "The request is journaled and waiting for dispatch.",
+                    "reconcile",
+                )
+            })
+        })
 }
 
 fn ensure_local_request_receipt(response: &mut Value, request_id: &str) {
-    if !response.is_object() { *response = json!({}); }
-    if response.get("schema").is_none() { response["schema"] = json!(CONTRACT_SCHEMA); }
-    if !response.get("receipt").is_some_and(Value::is_object) { response["receipt"] = json!({}); }
-    if response.pointer("/receipt/request_id").is_none_or(Value::is_null) {
+    if !response.is_object() {
+        *response = json!({});
+    }
+    if response.get("schema").is_none() {
+        response["schema"] = json!(CONTRACT_SCHEMA);
+    }
+    if !response.get("receipt").is_some_and(Value::is_object) {
+        response["receipt"] = json!({});
+    }
+    if response
+        .pointer("/receipt/request_id")
+        .is_none_or(Value::is_null)
+    {
         response["receipt"]["request_id"] = json!(request_id);
     }
-    if response.pointer("/receipt/observed_at").is_none_or(Value::is_null) {
+    if response
+        .pointer("/receipt/observed_at")
+        .is_none_or(Value::is_null)
+    {
         response["receipt"]["observed_at"] = json!(Utc::now().to_rfc3339());
     }
-    if response.pointer("/receipt/next_action").is_none_or(Value::is_null) {
+    if response
+        .pointer("/receipt/next_action")
+        .is_none_or(Value::is_null)
+    {
         let code = response["code"].as_str().unwrap_or_default();
-        response["receipt"]["next_action"] = json!(if matches!(code, "pending" | "outcome_unknown" | "authority_unavailable") { "reconcile" } else { "none" });
+        response["receipt"]["next_action"] = json!(if matches!(
+            code,
+            "pending" | "outcome_unknown" | "authority_unavailable"
+        ) {
+            "reconcile"
+        } else {
+            "none"
+        });
     }
 }
 
-fn failure_response(request_id: &str, code: &str, reason: &str, guidance: &str, next_action: &str) -> Value {
+fn failure_response(
+    request_id: &str,
+    code: &str,
+    reason: &str,
+    guidance: &str,
+    next_action: &str,
+) -> Value {
     json!({
         "schema": CONTRACT_SCHEMA,
         "code": code,
@@ -810,19 +1153,417 @@ fn failure_response(request_id: &str, code: &str, reason: &str, guidance: &str, 
     })
 }
 
-fn journal_error(error: JournalError) -> ExternalWorkError {
-    match error {
-        JournalError::IdempotencyConflict { request_id } => error("idempotency_conflict", format!("request_id {request_id} was used with different input")),
-        JournalError::Missing(request_id) => error("not_found", format!("no local operation for request_id {request_id}")),
+fn journal_error(journal_error: JournalError) -> ExternalWorkError {
+    match journal_error {
+        JournalError::IdempotencyConflict { request_id } => error(
+            "idempotency_conflict",
+            format!("request_id {request_id} was used with different input"),
+        ),
+        JournalError::Missing(request_id) => error(
+            "not_found",
+            format!("no local operation for request_id {request_id}"),
+        ),
         JournalError::Storage(message) => error("journal_error", message),
     }
 }
 
 fn error(code: &str, message: impl Into<String>) -> ExternalWorkError {
-    ExternalWorkError { code: code.to_string(), message: message.into() }
+    ExternalWorkError {
+        code: code.to_string(),
+        message: message.into(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct _ContractAnchor {
     schema: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const REQUEST_ID: &str = "00000001-2222-4222-8222-000000000001";
+    const RESOURCE_ID: &str = "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d";
+
+    struct FakeCloud {
+        journal: SqliteRequestJournal,
+        posts: AtomicUsize,
+        lookups: Mutex<Vec<String>>,
+        post_result: Mutex<Result<Value, RemoteError>>,
+        lookup_result: Mutex<Result<Value, RemoteError>>,
+        posted: Mutex<Vec<(String, Value)>>,
+    }
+
+    impl FakeCloud {
+        fn new(journal: SqliteRequestJournal) -> Self {
+            Self {
+                journal,
+                posts: AtomicUsize::new(0),
+                lookups: Mutex::new(Vec::new()),
+                post_result: Mutex::new(Ok(acquired_response(REQUEST_ID))),
+                lookup_result: Mutex::new(Ok(acquired_response(REQUEST_ID))),
+                posted: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CloudCoordinationPort for FakeCloud {
+        fn post(
+            &self,
+            path: &str,
+            payload: &Value,
+            _timeout: Duration,
+        ) -> Result<Value, RemoteError> {
+            let id = payload
+                .get("request_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let row = self
+                .journal
+                .get(id)
+                .expect("journal is readable")
+                .expect("request is persisted before Cloud");
+            assert!(
+                row.wire_json.is_some(),
+                "wire request is frozen before dispatch"
+            );
+            assert_eq!(row.stage, "dispatching");
+            assert_eq!(row.attempts, 1);
+            self.posts.fetch_add(1, Ordering::SeqCst);
+            self.posted
+                .lock()
+                .unwrap()
+                .push((path.to_string(), payload.clone()));
+            self.post_result.lock().unwrap().clone()
+        }
+
+        fn lookup(
+            &self,
+            request_id: &str,
+            _registration_id: &str,
+            _timeout: Duration,
+        ) -> Result<Value, RemoteError> {
+            self.lookups.lock().unwrap().push(request_id.to_string());
+            self.lookup_result.lock().unwrap().clone()
+        }
+    }
+
+    struct FakeViolet {
+        calls: AtomicUsize,
+        result: Mutex<Result<Value, RemoteError>>,
+    }
+
+    impl FakeViolet {
+        fn ok() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                result: Mutex::new(Ok(json!({
+                    "schema": CONTRACT_SCHEMA,
+                    "code": "completed",
+                    "thread_identity": {
+                        "provider": "slack", "workspace_id": "T07ABCDEF",
+                        "channel_id": "C08COORD01", "root_ts": "1760616000.123456",
+                        "identity_proof": {"kind": "violet_installation", "proof_ref": "opaque"}
+                    }
+                }))),
+            }
+        }
+    }
+
+    impl VioletThreadResolver for FakeViolet {
+        fn resolve(&self, _external_ref: &str, _timeout: Duration) -> Result<Value, RemoteError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.lock().unwrap().clone()
+        }
+    }
+
+    fn acquired_response(request_id: &str) -> Value {
+        json!({
+            "schema": CONTRACT_SCHEMA,
+            "code": "acquired",
+            "guidance": "You own this thread until it is completed, released or handed off.",
+            "receipt": {
+                "operation_id": "00000b01-1111-4111-8111-000000000b01",
+                "request_id": request_id,
+                "resource": {"id": RESOURCE_ID, "kind": "slack_thread", "state": "claimed"},
+                "visible_owner": {"slot_id": "a1a1a1a1-0000-4000-8000-00000000000a", "registration_id": "reg-supervisor-alpha-01"},
+                "generation": 1,
+                "expires_at": "2026-10-16T14:05:00.000Z",
+                "observed_at": "2026-10-16T14:00:00.000Z",
+                "next_action": "proceed"
+            }
+        })
+    }
+
+    fn service(
+        cloud: Arc<FakeCloud>,
+        violet: Arc<FakeViolet>,
+        journal: SqliteRequestJournal,
+    ) -> ExternalWorkService {
+        ExternalWorkService::new(
+            journal,
+            cloud,
+            violet,
+            OperationContext {
+                project_id: "github.com/richards-llc/cassy".into(),
+                registration_id: "reg-supervisor-alpha-01".into(),
+            },
+        )
+    }
+
+    fn journal() -> SqliteRequestJournal {
+        SqliteRequestJournal::open_connection(Connection::open_in_memory().unwrap()).unwrap()
+    }
+
+    fn fixture(name: &str) -> Value {
+        let source = match name {
+            "claim" => include_str!(
+                "../../tests/fixtures/coordination_contract/v1/external_work--claim.json"
+            ),
+            "release" => include_str!(
+                "../../tests/fixtures/coordination_contract/v1/external_work--release.json"
+            ),
+            "handoff" => include_str!(
+                "../../tests/fixtures/coordination_contract/v1/external_work--handoff_offer.json"
+            ),
+            "accept" => {
+                include_str!("../../tests/fixtures/coordination_contract/v1/handoffs--accept.json")
+            }
+            _ => panic!("unknown fixture {name}"),
+        };
+        serde_json::from_str(source).unwrap()
+    }
+
+    fn claim(request_id: &str, external_ref: &str) -> ExternalWorkCommand {
+        ExternalWorkCommand::Claim {
+            external_ref: external_ref.to_string(),
+            request_id: Some(request_id.to_string()),
+        }
+    }
+
+    #[test]
+    fn request_is_durable_before_dispatch_and_receipt_is_returned() {
+        let journal = journal();
+        let cloud = Arc::new(FakeCloud::new(journal.clone()));
+        let violet = Arc::new(FakeViolet::ok());
+        let result = service(cloud.clone(), violet, journal.clone())
+            .execute(claim(
+                REQUEST_ID,
+                "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456",
+            ))
+            .unwrap();
+        assert_eq!(result["code"], "acquired");
+        assert_eq!(
+            result
+                .pointer("/receipt/request_id")
+                .and_then(Value::as_str),
+            Some(REQUEST_ID)
+        );
+        assert_eq!(
+            result
+                .pointer("/receipt/generation")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(cloud.posts.load(Ordering::SeqCst), 1);
+        assert_eq!(journal.get(REQUEST_ID).unwrap().unwrap().stage, "terminal");
+        let expected = fixture("claim");
+        let posted = cloud.posted.lock().unwrap();
+        assert_eq!(posted[0].0, expected["path"]);
+        assert_eq!(posted[0].1, expected["cases"][0]["request"]["payload"]);
+    }
+
+    #[test]
+    fn changed_input_with_same_request_id_is_rejected_before_any_second_effect() {
+        let journal = journal();
+        let cloud = Arc::new(FakeCloud::new(journal.clone()));
+        let violet = Arc::new(FakeViolet::ok());
+        let service = service(cloud.clone(), violet.clone(), journal);
+        service
+            .execute(claim(
+                REQUEST_ID,
+                "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456",
+            ))
+            .unwrap();
+        let result = service
+            .execute(claim(
+                REQUEST_ID,
+                "https://richards-llc.slack.com/archives/C08COORD01/p1760617000000001",
+            ))
+            .unwrap();
+        assert_eq!(result["code"], "idempotency_conflict");
+        assert_eq!(cloud.posts.load(Ordering::SeqCst), 1);
+        assert_eq!(violet.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn commit_then_timeout_reconciles_by_the_original_request_id_without_reposting() {
+        let journal = journal();
+        let cloud = Arc::new(FakeCloud::new(journal.clone()));
+        *cloud.post_result.lock().unwrap() =
+            Err(RemoteError::timeout("timed out after Cloud committed"));
+        let violet = Arc::new(FakeViolet::ok());
+        let service = service(cloud.clone(), violet, journal);
+        let first = service
+            .execute(claim(
+                REQUEST_ID,
+                "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456",
+            ))
+            .unwrap();
+        assert_eq!(first["code"], "outcome_unknown");
+        let second = service
+            .execute(claim(
+                REQUEST_ID,
+                "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456",
+            ))
+            .unwrap();
+        assert_eq!(second["code"], "acquired");
+        assert_eq!(cloud.posts.load(Ordering::SeqCst), 1);
+        assert_eq!(*cloud.lookups.lock().unwrap(), vec![REQUEST_ID]);
+    }
+
+    #[test]
+    fn claim_status_completes_a_journaled_claim_that_never_reached_cloud() {
+        let journal = journal();
+        let context = OperationContext {
+            project_id: "github.com/richards-llc/cassy".into(),
+            registration_id: "reg-supervisor-alpha-01".into(),
+        };
+        let original = claim(
+            REQUEST_ID,
+            "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456",
+        );
+        journal
+            .prepare(REQUEST_ID, "claim", &original.input(&context))
+            .unwrap();
+        let cloud = Arc::new(FakeCloud::new(journal.clone()));
+        let violet = Arc::new(FakeViolet::ok());
+        let service =
+            ExternalWorkService::new(journal.clone(), cloud.clone(), violet.clone(), context);
+        let result = service
+            .execute(ExternalWorkCommand::ClaimStatus {
+                request_id: REQUEST_ID.into(),
+            })
+            .unwrap();
+        assert_eq!(result["code"], "acquired");
+        assert_eq!(cloud.posts.load(Ordering::SeqCst), 1);
+        assert_eq!(cloud.lookups.lock().unwrap().len(), 0);
+        assert_eq!(violet.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn release_forwards_the_expected_generation_and_preserves_stale_result() {
+        let journal = journal();
+        let cloud = Arc::new(FakeCloud::new(journal.clone()));
+        *cloud.post_result.lock().unwrap() = Ok(json!({
+            "schema": CONTRACT_SCHEMA,
+            "code": "stale_generation",
+            "guidance": "A newer owner holds generation 2; this release does nothing.",
+            "receipt": {"request_id": REQUEST_ID, "generation": 2, "next_action": "none"}
+        }));
+        let service = service(cloud.clone(), Arc::new(FakeViolet::ok()), journal);
+        let result = service
+            .execute(ExternalWorkCommand::ReleaseClaim {
+                resource_id: RESOURCE_ID.into(),
+                expected_generation: 1,
+                request_id: Some(REQUEST_ID.into()),
+            })
+            .unwrap();
+        assert_eq!(result["code"], "stale_generation");
+        let posted = cloud.posted.lock().unwrap();
+        assert!(posted[0].0.ends_with(&format!("/{RESOURCE_ID}/release")));
+        assert_eq!(posted[0].1["expected_generation"], 1);
+    }
+
+    #[test]
+    fn mutation_routes_and_bodies_match_the_v1_fixtures() {
+        let cases = [
+            (
+                "release",
+                ExternalWorkCommand::ReleaseClaim {
+                    resource_id: RESOURCE_ID.into(),
+                    expected_generation: 1,
+                    request_id: Some("00000021-2222-4222-8222-000000000021".into()),
+                },
+            ),
+            (
+                "handoff",
+                ExternalWorkCommand::TransferClaim {
+                    resource_id: RESOURCE_ID.into(),
+                    expected_generation: 1,
+                    to_slot_id: "b2b2b2b2-0000-4000-8000-00000000000b".into(),
+                    offer_ttl_secs: Some(600),
+                    request_id: Some("00000041-2222-4222-8222-000000000041".into()),
+                },
+            ),
+            (
+                "accept",
+                ExternalWorkCommand::AcceptClaim {
+                    handoff_id: "00004a0f-1111-4111-8111-000000004a0f".into(),
+                    expected_generation: 1,
+                    request_id: Some("00000051-2222-4222-8222-000000000051".into()),
+                },
+            ),
+        ];
+        for (name, command) in cases {
+            let fixture = fixture(name);
+            let request = &fixture["cases"][0]["request"];
+            let registration_id = if name == "accept" {
+                "reg-supervisor-beta-07"
+            } else {
+                "reg-supervisor-alpha-01"
+            };
+            let journal = journal();
+            let cloud = Arc::new(FakeCloud::new(journal.clone()));
+            let service = ExternalWorkService::new(
+                journal,
+                cloud.clone(),
+                Arc::new(FakeViolet::ok()),
+                OperationContext {
+                    project_id: "github.com/richards-llc/cassy".into(),
+                    registration_id: registration_id.into(),
+                },
+            );
+            service.execute(command).unwrap();
+            let posted = cloud.posted.lock().unwrap();
+            let path = if name == "accept" {
+                fixture["path"]
+                    .as_str()
+                    .unwrap()
+                    .replace("{id}", request["path_params"]["id"].as_str().unwrap())
+            } else {
+                fixture["path"]
+                    .as_str()
+                    .unwrap()
+                    .replace("{id}", request["path_params"]["id"].as_str().unwrap())
+            };
+            assert_eq!(posted[0].0, path, "{name} route differs from fixture");
+            assert_eq!(
+                posted[0].1, request["payload"],
+                "{name} body differs from fixture"
+            );
+        }
+    }
+
+    #[test]
+    fn violet_outage_fails_closed_without_cloud_mutation() {
+        let journal = journal();
+        let cloud = Arc::new(FakeCloud::new(journal.clone()));
+        let violet = Arc::new(FakeViolet::ok());
+        *violet.result.lock().unwrap() = Err(RemoteError::unavailable("Violet is offline"));
+        let result = service(cloud.clone(), violet.clone(), journal.clone())
+            .execute(claim(
+                REQUEST_ID,
+                "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456",
+            ))
+            .unwrap();
+        assert_eq!(result["code"], "authority_unavailable");
+        assert_eq!(cloud.posts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            journal.get(REQUEST_ID).unwrap().unwrap().stage,
+            "retry_wait"
+        );
+    }
 }

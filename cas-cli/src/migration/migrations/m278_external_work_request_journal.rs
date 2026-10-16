@@ -33,12 +33,20 @@ mod tests {
             "INSERT INTO external_work_operations(request_id,kind,input_digest,input_json,stage,created_at,updated_at)
              VALUES ('id','claim','digest','{}','prepared','now','now')", []
         ).is_ok());
-        assert!(conn.execute(
-            "UPDATE external_work_operations SET input_json='{} changed' WHERE request_id='id'", []
-        ).is_err());
-        assert!(conn.execute(
-            "UPDATE external_work_operations SET wire_json='{}' WHERE request_id='id'", []
-        ).is_ok());
+        assert!(
+            conn.execute(
+                "UPDATE external_work_operations SET input_json='{} changed' WHERE request_id='id'",
+                []
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute(
+                "UPDATE external_work_operations SET wire_json='{}' WHERE request_id='id'",
+                []
+            )
+            .is_ok()
+        );
         assert!(conn.execute(
             r#"UPDATE external_work_operations SET wire_json='{"request_id":"changed"}' WHERE request_id='id'"#, []
         ).is_err());

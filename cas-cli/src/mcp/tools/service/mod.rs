@@ -571,7 +571,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Agent identity, messaging and reminders; only available in factory mode. Actions: whoami, heartbeat, register, unregister, session_start, session_end, message, interrupt (message with urgent=true), inbox_poll (alias inbox), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (this repo's supervisors). Supervisor fleet, worktree, server, database, loop and queue control moved to the `factory` tool; those actions still work here for one release with a deprecation note. Per-action rules are on the parameters they govern."
+        description = "Agent identity, messaging and reminders; only available in factory mode. Actions: whoami, heartbeat, register, unregister, session_start, session_end, message, interrupt (message with urgent=true), inbox_poll (alias inbox), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (this repo's supervisors), claim, claim_status, release_claim, transfer_claim, accept_claim (Slack-thread authority). Supervisor fleet, worktree, server, database, loop and queue control moved to the `factory` tool; those actions still work here for one release with a deprecation note. Per-action rules are on the parameters they govern."
     )]
     pub async fn coordination(
         &self,
@@ -1259,6 +1259,11 @@ impl CasService {
                         "reason",
                     ])
                 }
+                "claim" => Some(&["action", "external_ref", "request_id"]),
+                "claim_status" => Some(&["action", "request_id"]),
+                "release_claim" => Some(&["action", "resource_id", "expected_generation", "request_id"]),
+                "transfer_claim" => Some(&["action", "resource_id", "expected_generation", "to_slot_id", "offer_ttl_secs", "request_id"]),
+                "accept_claim" => Some(&["action", "handoff_id", "expected_generation", "request_id"]),
                 _ => None,
             };
             if let Some(allowed) = allowed {
@@ -1348,6 +1353,11 @@ impl CasService {
 
                 // cas-e477: read-only peer supervisor discovery.
                 "peers" => this.coordination_peers(req).await,
+
+                // cas-72d3: journaled external Slack-thread authority.
+                "claim" | "claim_status" | "release_claim" | "transfer_claim" | "accept_claim" => {
+                    this.external_work(req).await
+                }
 
                 // ---- Disposable database branches (cas-0033) ----
                 "db_branch_create" => this.db_branch_create(&req).await,
@@ -1630,6 +1640,7 @@ pub(crate) mod agent_liveness;
 pub(crate) mod agent_search_system;
 #[cfg(feature = "mcp-proxy")]
 mod artifact_post;
+mod coordination_external_work;
 mod core;
 mod db_branch_ops;
 mod epic_split_ops;

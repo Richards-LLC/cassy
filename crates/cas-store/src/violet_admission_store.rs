@@ -172,6 +172,15 @@ mod tests {
                 .confirm_body_dispatch(&job, "daemon-instance-a", &body_response(&job, &row))
                 .unwrap()
         );
+        let mut lookup = row.clone();
+        lookup.lease_token.clear();
+        let recovered = store
+            .restore_admitted(&lookup, 1, VioletConsumption::DispatchUncertain, Some("daemon-instance-a"))
+            .unwrap();
+        assert_eq!(recovered.admission.prompt_id, admitted.prompt_id);
+        assert_eq!(recovered.consumption, VioletConsumption::Queued,
+            "a live unspent attempt must survive periodic recovery");
+        assert!(recovered.recovery_prompt_id.is_none());
         assert!(
             !queue
                 .authorize_body_handoff(
@@ -731,8 +740,8 @@ mod tests {
             let mut row = input();
             row.lease_token.clear();
             row.delivery_generation = 2;
-            let first = store.restore_admitted(&row, 1, consumption).unwrap();
-            let duplicate = store.restore_admitted(&row, 1, consumption).unwrap();
+            let first = store.restore_admitted(&row, 1, consumption, None).unwrap();
+            let duplicate = store.restore_admitted(&row, 1, consumption, None).unwrap();
             assert!(first.admission.created);
             assert!(!duplicate.admission.created);
             assert_eq!(duplicate.admission.prompt_id, first.admission.prompt_id);
@@ -781,7 +790,7 @@ mod tests {
         row.lease_token.clear();
         assert!(
             store
-                .restore_admitted(&row, 1, VioletConsumption::DispatchUncertain)
+                .restore_admitted(&row, 1, VioletConsumption::DispatchUncertain, None)
                 .is_err()
         );
         let counts: (i64, i64) = db
@@ -985,13 +994,14 @@ impl SqliteVioletAdmissionStore {
         input: &VioletAdmissionInput,
         expected_generation: i64,
         consumption: VioletConsumption,
+        live_instance: Option<&str>,
     ) -> Result<VioletRecoveryReceipt> {
         if !input.lease_token.is_empty() || expected_generation < 1 {
             return Err(StoreError::Other(
                 "restore requires an admitted delivery without a lease".into(),
             ));
         }
-        self.persist(input, Some((expected_generation, consumption)))
+        self.persist(input, Some((expected_generation, consumption, live_instance)))
     }
     pub fn pending_lease_fences(&self, project: &str) -> Result<Vec<VioletLeaseFence>> {
         let conn = crate::shared_db::lock_connection(&self.queue.conn)?;
@@ -1090,7 +1100,7 @@ impl SqliteVioletAdmissionStore {
     ) -> Result<VioletRecoveryReceipt> {
         validate_rebind(binding)?;
         let receipt = crate::shared_db::with_immediate_write_txn_pooled(&self.queue.conn, |tx| {
-            recover_known_in_tx(tx, binding, remote, RecoveryAuthority::Rebind)
+            recover_known_in_tx(tx, binding, remote, RecoveryAuthority::Rebind(None))
         })?;
         if receipt.consumption != VioletConsumption::Consumed {
             self.queue.signal_inbox(&binding.recipient);
@@ -1277,7 +1287,7 @@ impl SqliteVioletAdmissionStore {
     fn persist(
         &self,
         input: &VioletAdmissionInput,
-        recovery: Option<(i64, VioletConsumption)>,
+        recovery: Option<(i64, VioletConsumption, Option<&str>)>,
     ) -> Result<VioletRecoveryReceipt> {
         for value in [
             &input.delivery_id,
@@ -1302,7 +1312,7 @@ impl SqliteVioletAdmissionStore {
             ));
         }
         slack_timestamp_parts(&input.message_ts)?;
-        let recover = |tx: &Connection, expected_generation, consumption| {
+        let recover = |tx: &Connection, expected_generation, consumption, live_instance| {
             recover_known_in_tx(
                 tx,
                 &VioletAdmissionRebind {
@@ -1317,7 +1327,7 @@ impl SqliteVioletAdmissionStore {
                     recipient: input.recipient.clone(),
                 },
                 consumption,
-                RecoveryAuthority::Rebind,
+                RecoveryAuthority::Rebind(live_instance),
             )
         };
         let receipt = crate::shared_db::with_immediate_write_txn_pooled(&self.queue.conn, |tx| {
@@ -1360,8 +1370,8 @@ impl SqliteVioletAdmissionStore {
                         "conflicting restored Violet identity or target".into(),
                     ));
                 }
-                if let Some((expected, consumption)) = recovery {
-                    return recover(tx, expected, consumption);
+                if let Some((expected, consumption, live_instance)) = recovery {
+                    return recover(tx, expected, consumption, live_instance);
                 }
                 if registration != input.registration_id
                     || generation != input.delivery_generation
@@ -1424,8 +1434,8 @@ impl SqliteVioletAdmissionStore {
                     params![input.reader_slot_id,input.workspace_id,input.channel_id,input.message_ts])?;
             }
             let _ = capture_message_event(tx, &source, &input.recipient);
-            let mut receipt = if let Some((expected, consumption)) = recovery {
-                recover(tx, expected, consumption)?
+            let mut receipt = if let Some((expected, consumption, live_instance)) = recovery {
+                recover(tx, expected, consumption, live_instance)?
             } else {
                 VioletRecoveryReceipt {
                     admission: VioletAdmissionReceipt {
@@ -1448,8 +1458,8 @@ impl SqliteVioletAdmissionStore {
 }
 
 #[derive(Clone, Copy)]
-enum RecoveryAuthority {
-    Rebind,
+enum RecoveryAuthority<'a> {
+    Rebind(Option<&'a str>),
     Lease,
 }
 
@@ -1457,7 +1467,7 @@ fn recover_known_in_tx(
     tx: &Connection,
     binding: &VioletAdmissionRebind,
     remote: VioletConsumption,
-    authority: RecoveryAuthority,
+    authority: RecoveryAuthority<'_>,
 ) -> Result<VioletRecoveryReceipt> {
     let current: Option<(i64, String, i64, String, String, String, Option<i64>)> = tx.query_row(
         "SELECT prompt_id,registration_id,delivery_generation,factory_session,recipient,consumption,recovery_prompt_id
@@ -1485,7 +1495,7 @@ fn recover_known_in_tx(
         && session == binding.factory_session
         && recipient == binding.recipient;
     let next_generation = match authority {
-        RecoveryAuthority::Rebind => {
+        RecoveryAuthority::Rebind(_) => {
             generation.checked_add(i64::from(registration != binding.registration_id))
         }
         RecoveryAuthority::Lease => Some(generation),

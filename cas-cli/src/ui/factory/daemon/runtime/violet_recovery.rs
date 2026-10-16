@@ -318,6 +318,7 @@ fn restore_lookup(
             &input,
             expected_generation,
             consumption(&delivery.consumption)?,
+            None,
         )
         .map_err(|e| e.to_string())?;
     Ok(())

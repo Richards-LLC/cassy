@@ -7,13 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-### Added — a batch QA mode: one staging walk covers every task in a batch (#1203, cas-d697)
+### Added — a batch QA mode: one staging walk covers every task in a batch (#1203, cas-d697, cas-5129a)
 
 - With `qa.mode = "batch"`, one non-implementer walks every change in a merged
   batch on staging and records one immutable batch QA receipt: the ledger, the
   task ids and the staging SHA. The close gate accepts that receipt for each
   listed task instead of a per-task QA bundle and independent QA pass. The
   default mode is unchanged.
+- Batch deliveries that were squash-merged, or closed while origin was stale,
+  close correctly: the deferred-close check maps a squash head to its delivery
+  anchor and counts the local target. A supervisor override never clears batch
+  QA debt; only a covering batch receipt or a passed QA round does (cas-5129a).
 
 ### Fixed — Commander renders its designed type on every machine (cas-4427)
 

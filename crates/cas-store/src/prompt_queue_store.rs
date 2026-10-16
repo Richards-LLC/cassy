@@ -1357,6 +1357,68 @@ fn sql_literal(value: &str) -> String {
 
 /// Whether the `agents` table exists on this connection. Prompt-queue tests
 /// and some legacy databases open the queue without it.
+/// cas-1bc7: databases whose cas-dcf2 historical-reply demotion this process
+/// has already run, keyed by the database file path.
+fn historical_demotions_done() -> &'static Mutex<std::collections::HashSet<String>> {
+    static DONE: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    DONE.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// The database a connection serves; `None` for an in-memory database, which
+/// is checked on every open.
+fn historical_demotion_key(conn: &Connection) -> Option<String> {
+    conn.path()
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+}
+
+fn historical_demotion_pending(key: Option<&str>) -> bool {
+    key.is_none_or(|key| {
+        !historical_demotions_done()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(key)
+    })
+}
+
+fn mark_historical_demotion_done(key: Option<String>) {
+    if let Some(key) = key {
+        historical_demotions_done()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key);
+    }
+}
+
+#[cfg(test)]
+fn historical_demotion_scans() -> &'static Mutex<HashMap<String, u32>> {
+    static SCANS: std::sync::OnceLock<Mutex<HashMap<String, u32>>> = std::sync::OnceLock::new();
+    SCANS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn note_historical_demotion_scan(key: Option<&str>) {
+    if let Some(key) = key {
+        *historical_demotion_scans()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(key.to_string())
+            .or_default() += 1;
+    }
+}
+
+/// Test hook: model rows that predate this process's first open.
+#[cfg(test)]
+fn forget_historical_demotion(conn: &Connection) {
+    if let Some(key) = historical_demotion_key(conn) {
+        historical_demotions_done()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key);
+    }
+}
+
 fn agents_table_exists(conn: &Connection) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents')",
@@ -4689,12 +4751,24 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             //
             // cas-1bc7: every open runs init, and an UPDATE takes the write
             // lock even when it matches nothing. Nothing writes this value any
-            // more, so read first and write only while such rows remain.
-            let historical_inference: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM prompt_queue WHERE acked_via = 'inferred_from_reply')",
-                [],
-                |row| row.get(0),
-            )?;
+            // more, so read first and write only while such rows remain. The
+            // read scans prompt_queue, and a tool call opens the queue more
+            // than once, so it runs once per database per process: rows an
+            // older binary still writes are demoted by the next process that
+            // opens the database.
+            let demotion_key = historical_demotion_key(&conn);
+            let historical_inference: bool = if historical_demotion_pending(demotion_key.as_deref())
+            {
+                #[cfg(test)]
+                note_historical_demotion_scan(demotion_key.as_deref());
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM prompt_queue WHERE acked_via = 'inferred_from_reply')",
+                    [],
+                    |row| row.get(0),
+                )?
+            } else {
+                false
+            };
             if historical_inference {
                 conn.execute(
                     "UPDATE prompt_queue
@@ -4708,6 +4782,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     [],
                 )?;
             }
+            mark_historical_demotion_done(demotion_key);
 
             // cas-7a01 (GH #155): the receipt table predates the surfacing
             // path, so existing databases need the provenance column added.
@@ -11686,6 +11761,9 @@ mod tests {
                 params![inferred_at, message],
             )
             .unwrap();
+            // The row stands for one written before this process first opened
+            // the database (cas-1bc7: the check runs once per process).
+            forget_historical_demotion(&conn);
         }
 
         store.init().unwrap();
@@ -18335,6 +18413,22 @@ mod cas_1bc7_tests {
         let _held = foreign_writer(temp.path());
         let expired = within_budget(|| store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS));
         assert!(expired.unwrap().is_empty());
+    }
+
+    /// Review: the demotion check scans prompt_queue, so it runs on the
+    /// first open of a database in this process only.
+    #[test]
+    fn cas_1bc7_second_open_does_not_scan_for_historical_inference() {
+        let temp = TempDir::new().unwrap();
+        let first = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        first.init().unwrap();
+        let key = historical_demotion_key(&first.conn.lock().unwrap()).expect("a file database");
+        let scans = || historical_demotion_scans().lock().unwrap().get(&key).copied();
+        assert_eq!(scans(), Some(1), "the first open checks once");
+        first.init().unwrap();
+        let second = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        second.init().unwrap();
+        assert_eq!(scans(), Some(1), "later opens of the same database do not scan");
     }
 
     #[test]

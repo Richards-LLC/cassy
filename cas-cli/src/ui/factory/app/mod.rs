@@ -642,6 +642,69 @@ fn hardlink_seed_tree_inner(
     Ok(())
 }
 
+/// cas-d741: a kept worktree on the worker's own task lane is reusable only
+/// when no tracked change would ride into the new session and the lane has
+/// not diverged from its pushed copy. Each refusal names the exact remedy.
+fn ensure_task_lane_reusable(
+    worker_name: &str,
+    worktree_path: &std::path::Path,
+    lane: &str,
+) -> anyhow::Result<()> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(worktree_path)
+            .output()
+    };
+    let status = git(&["status", "--porcelain", "--untracked-files=no"])?;
+    if !status.status.success() {
+        anyhow::bail!(
+            "Worker '{worker_name}': cannot inspect its kept worktree {} on '{lane}': {}",
+            worktree_path.display(),
+            String::from_utf8_lossy(&status.stderr).trim()
+        );
+    }
+    if !status.stdout.is_empty() {
+        anyhow::bail!(
+            "Worker '{worker_name}': its kept worktree {} is on its task lane '{lane}' with \
+             uncommitted tracked changes, so a new session cannot take it over. Commit them on \
+             '{lane}' and push, or discard them with `git -C {} checkout -- .`, then retry the \
+             spawn.",
+            worktree_path.display(),
+            worktree_path.display(),
+        );
+    }
+    let resolve = |reference: &str| {
+        git(&["rev-parse", "--verify", "--quiet", reference])
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let remote = format!("refs/remotes/origin/{lane}");
+    if let (Some(local), Some(pushed)) = (resolve("HEAD"), resolve(&remote)) {
+        let ancestor = |a: &str, b: &str| {
+            git(&["merge-base", "--is-ancestor", a, b])
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        };
+        if !ancestor(&local, &pushed) && !ancestor(&pushed, &local) {
+            anyhow::bail!(
+                "Worker '{worker_name}': its kept worktree {} is on its task lane '{lane}', \
+                 which has diverged from origin/{lane} (local {}, origin {}). Reconcile it \
+                 first: rebase onto the pushed lane with `git -C {} pull --rebase origin {lane}`, \
+                 or keep the pushed lane with `git -C {} reset --hard origin/{lane}`. Then retry \
+                 the spawn.",
+                worktree_path.display(),
+                &local[..local.len().min(12)],
+                &pushed[..pushed.len().min(12)],
+                worktree_path.display(),
+                worktree_path.display(),
+            );
+        }
+    }
+    Ok(())
+}
+
 impl WorkerSpawnPrep {
     /// Phase 2: Run the slow git operations (designed for spawn_blocking).
     pub fn run(self) -> anyhow::Result<WorkerSpawnResult> {
@@ -684,6 +747,7 @@ impl WorkerSpawnPrep {
                     Some(&wt.branch_name),
                 )?;
                 let wt_git = GitOperations::new(wt.worktree_path.clone());
+                let mut reused_branch = wt.branch_name.clone();
                 match wt_git.current_branch() {
                     Ok(ref actual_branch) if actual_branch == &wt.branch_name => {
                         // Valid — correct branch confirmed.
@@ -694,6 +758,30 @@ impl WorkerSpawnPrep {
                             reused = true,
                             "spawn prep: worktree validated on correct branch (reuse path)"
                         );
+                    }
+                    // cas-d741: `task start` moves a worker onto its own task
+                    // lane, so a kept worktree is normally there. Reuse it in
+                    // place, keeping the lane, unless it is dirty or diverged.
+                    Ok(actual_branch)
+                        if crate::factory_isolation::own_task_branch_task_id(
+                                &self.worker_name,
+                                &actual_branch,
+                            )
+                            .is_some() =>
+                    {
+                        ensure_task_lane_reusable(
+                            &self.worker_name,
+                            &wt.worktree_path,
+                            &actual_branch,
+                        )?;
+                        tracing::info!(
+                            worker = %self.worker_name,
+                            cwd = %wt.worktree_path.display(),
+                            branch = %actual_branch,
+                            reused = true,
+                            "spawn prep: kept worktree reused on its own task lane"
+                        );
+                        reused_branch = actual_branch;
                     }
                     Ok(actual_branch) => {
                         anyhow::bail!(
@@ -729,7 +817,7 @@ impl WorkerSpawnPrep {
                 }
                 let worktree = Worktree::new(
                     Worktree::generate_id(),
-                    wt.branch_name,
+                    reused_branch,
                     wt.parent_branch,
                     wt.worktree_path.clone(),
                 );
@@ -6365,6 +6453,143 @@ mod spawn_isolation_tests {
             error.contains(&repo.display().to_string()),
             "the refusal must name the shared checkout the path really resolves to: {error}"
         );
+    }
+
+    /// cas-d741: a repo plus a kept worktree for `clever-panther-60` left on
+    /// its own task lane by `task start`, one commit ahead of `main`.
+    fn kept_task_lane_worktree() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        without_spawn_disk_floor(&repo);
+        let worktree_path = repo.join(".cas").join("worktrees").join("clever-panther-60");
+        std::fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(dir).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "factory/clever-panther-60-cas-9db0b",
+                worktree_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+        std::fs::write(worktree_path.join("lane.txt"), "task work\n").unwrap();
+        git(&worktree_path, &["add", "lane.txt"]);
+        git(&worktree_path, &["commit", "-qm", "task work"]);
+        (tmp, repo, worktree_path)
+    }
+
+    fn respawn_prep(repo: &std::path::Path, worktree_path: &std::path::Path) -> WorkerSpawnPrep {
+        WorkerSpawnPrep {
+            worker_name: "clever-panther-60".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worktree_path.to_path_buf(),
+                branch_name: "factory/clever-panther-60".to_string(),
+                parent_branch: "main".to_string(),
+                base_ref: None,
+                repo_root: repo.to_path_buf(),
+                cas_dir: repo.join(".cas"),
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        }
+    }
+
+    fn head_of(path: &std::path::Path) -> (String, String) {
+        let run = |args: &[&str]| {
+            String::from_utf8_lossy(
+                &Command::new("git").args(args).current_dir(path).output().unwrap().stdout,
+            )
+            .trim()
+            .to_string()
+        };
+        (run(&["rev-parse", "--abbrev-ref", "HEAD"]), run(&["rev-parse", "HEAD"]))
+    }
+
+    /// cas-d741 AC1: a same-name respawn onto a clean kept worktree on the
+    /// worker's own task lane reuses it in place; the lane and its commits
+    /// are kept, so the pre-assigned task resumes there.
+    #[test]
+    fn clean_kept_worktree_on_its_task_lane_is_reused_cas_d741() {
+        let (_tmp, repo, worktree_path) = kept_task_lane_worktree();
+        let before = head_of(&worktree_path);
+        let result = respawn_prep(&repo, &worktree_path)
+            .run()
+            .expect("a clean kept task lane is reusable");
+        assert_eq!(result.cwd, worktree_path);
+        assert!(!result.worktree_created, "the kept worktree is reused, not recreated");
+        assert_eq!(
+            result.worktree.as_ref().map(|worktree| worktree.branch.as_str()),
+            Some("factory/clever-panther-60-cas-9db0b")
+        );
+        assert_eq!(head_of(&worktree_path), before, "the task lane is untouched");
+    }
+
+    /// cas-d741 AC2: tracked changes on the kept lane refuse the reuse, and
+    /// the refusal names the lane, the path and the remedy.
+    #[test]
+    fn dirty_kept_task_lane_refuses_with_a_remedy_cas_d741() {
+        let (_tmp, repo, worktree_path) = kept_task_lane_worktree();
+        std::fs::write(worktree_path.join("lane.txt"), "unsaved\n").unwrap();
+        let error = respawn_prep(&repo, &worktree_path)
+            .run()
+            .map(|result| result.cwd)
+            .expect_err("a dirty lane must not be taken over")
+            .to_string();
+        assert!(error.contains("uncommitted tracked changes"), "{error}");
+        assert!(error.contains("factory/clever-panther-60-cas-9db0b"), "{error}");
+        assert!(error.contains("checkout -- ."), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree_path.join("lane.txt")).unwrap(),
+            "unsaved\n",
+            "the refusal touches nothing"
+        );
+    }
+
+    /// cas-d741 AC2: a kept lane that diverged from its pushed copy refuses,
+    /// naming both reconciliations.
+    #[test]
+    fn diverged_kept_task_lane_refuses_with_a_remedy_cas_d741() {
+        let (_tmp, repo, worktree_path) = kept_task_lane_worktree();
+        let other = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        // origin's copy of the lane took a different commit on top of main.
+        let main = other(&["rev-parse", "main"]);
+        let tree = other(&["rev-parse", "main^{tree}"]);
+        let pushed = other(&["commit-tree", &tree, "-p", &main, "-m", "pushed elsewhere"]);
+        other(&[
+            "update-ref",
+            "refs/remotes/origin/factory/clever-panther-60-cas-9db0b",
+            &pushed,
+        ]);
+        let error = respawn_prep(&repo, &worktree_path)
+            .run()
+            .map(|result| result.cwd)
+            .expect_err("a diverged lane must not be taken over")
+            .to_string();
+        assert!(error.contains("diverged from origin/factory/clever-panther-60-cas-9db0b"), "{error}");
+        assert!(error.contains("pull --rebase origin") && error.contains("reset --hard origin/"), "{error}");
+
+        // A lane that is only behind or ahead of its pushed copy is reusable.
+        other(&[
+            "update-ref",
+            "refs/remotes/origin/factory/clever-panther-60-cas-9db0b",
+            &main,
+        ]);
+        respawn_prep(&repo, &worktree_path)
+            .run()
+            .expect("a lane ahead of its pushed copy is reusable");
     }
 
     /// Respawn 1034 class: the path exists as a real worktree but belongs to

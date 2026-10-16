@@ -1662,18 +1662,79 @@ async fn cas_8063_repair_history_warning_keeps_mailbox_receiving() {
     .await
     .unwrap();
     let requests = server.received_requests().await.unwrap();
-    let recipient_count: usize = requests
+    let recipients: Vec<String> = requests
         .iter()
         .filter(|r| r.url.path().ends_with("/claim"))
-        .map(|r| {
+        .flat_map(|r| {
             serde_json::from_slice::<Value>(&r.body).unwrap()["recipient_agent_ids"]
                 .as_array()
                 .unwrap()
-                .len()
+                .iter().map(|id| id.as_str().unwrap().to_string()).collect::<Vec<_>>()
         })
-        .sum();
-    assert!(
-        recipient_count <= 101,
-        "bounded retirement claims plus current: {recipient_count}"
-    );
+        .collect();
+    assert_eq!(recipients.len(), 101, "100 retired recipients plus current");
+    assert!(recipients.iter().any(|id| id == "b"));
+    assert!(recipients.iter().any(|id| id == "retired-337"), "newest retiree is included");
+    assert!(!recipients.iter().any(|id| id == "retired-218"), "120th newest retiree is excluded");
+}
+
+#[tokio::test]
+async fn cas_4fe2_partial_claim_survivors_are_admitted_and_acked_once() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, _, cloud_mail) = fake_cloud_with_mailbox().await;
+    Mock::given(method("POST")).and(path("/api/peer-messages/claim"))
+        .and(wiremock::matchers::body_partial_json(json!({"recipient_agent_ids": (50..100).map(|i| format!("r{i:03}")).collect::<Vec<_>>()})))
+        .respond_with(ResponseTemplate::new(503)).with_priority(1).mount(&server).await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let machine = TestMachine::new("machine-beta");
+        seed_project(&machine, &endpoint, "github.com/acme/widgets");
+        let agents = open_agent_store(&machine.cas_dir).unwrap();
+        for i in 1..=100 {
+            let mut old = Agent::new(format!("r{i:03}"), "sup-b".into());
+            old.role = AgentRole::Supervisor;
+            old.status = cas::types::AgentStatus::Shutdown;
+            old.factory_session = Some("factory-b".into());
+            old.machine_id = Some("machine-beta".into());
+            agents.register(&old).unwrap();
+        }
+        let mut current = Agent::new("r000".into(), "sup-b".into());
+        current.role = AgentRole::Supervisor;
+        current.factory_session = Some("factory-b".into());
+        current.machine_id = Some("machine-beta".into());
+        agents.register(&current).unwrap();
+        for id in ["r001", "r050", "r100"] {
+            cloud_mail.lock().unwrap().push(json!({
+                "id":format!("mail-{id}"), "project_id":"github.com/acme/widgets",
+                "recipient_agent_id":id, "sender_agent_id":"remote", "sender_name":"remote",
+                "body":format!("body-{id}"), "created_at":chrono::Utc::now().to_rfc3339(),
+                "status":"queued", "attempts":0
+            }));
+        }
+        let runtime = cas::cloud::peer_mailbox::PeerMailboxRuntime::start(&machine.cas_dir, "factory-b").unwrap();
+        let report = runtime.tick_blocking();
+        assert_eq!((report.claimed, report.delivered), (2, 2), "{report:?}");
+        assert!(!report.errors.is_empty(), "failed middle batch stays visible");
+        let rows = inbox(&machine.cas_dir);
+        let ids: Vec<_> = rows.iter().map(|r| parse_envelope(&r.prompt).unwrap().id).collect();
+        assert_eq!(ids, ["mail-r001", "mail-r100"]);
+        for row in &rows {
+            assert_eq!(row.target, "sup-b");
+            assert_eq!(row.factory_session.as_deref(), Some("factory-b"));
+        }
+        let mut mail = cloud_mail.lock().unwrap();
+        assert_eq!(mail[0]["status"], "delivered");
+        assert_eq!(mail[1]["status"], "queued", "failed chunk is neither claimed nor ACKed");
+        assert_eq!(mail[2]["status"], "delivered");
+        mail[0]["status"] = json!("queued");
+        mail[2]["status"] = json!("queued");
+        drop(mail);
+        let replay = runtime.tick_blocking();
+        assert_eq!((replay.delivered, replay.duplicates), (0, 2), "{replay:?}");
+        assert_eq!(inbox(&machine.cas_dir).len(), 2);
+        let mail = cloud_mail.lock().unwrap();
+        assert_eq!(mail[0]["status"], "delivered");
+        assert_eq!(mail[1]["status"], "queued");
+        assert_eq!(mail[2]["status"], "delivered");
+    }).await.unwrap();
 }

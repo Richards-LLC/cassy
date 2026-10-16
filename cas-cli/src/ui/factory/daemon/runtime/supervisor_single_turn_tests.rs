@@ -188,7 +188,7 @@ async fn cas_3f90_bounded_event_has_one_body_turn_and_no_relay_copy() {
     env.set("CAS_AGENT_NAME", daemon.app.supervisor_name());
     env.set("CAS_FACTORY_SESSION", &daemon.session_name);
     env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
-    let hook = crate::hooks::types::HookInput {
+    let hook = cas_core::hooks::types::HookInput {
         session_id: "single-turn-supervisor".into(),
         cwd: root.path().to_string_lossy().into_owned(),
         hook_event_name: "UserPromptSubmit".into(),
@@ -439,5 +439,52 @@ async fn cas_3f90_lifecycle_action_has_one_submit_and_no_duplicate_relay() {
             .unwrap()
             .wake_attempt,
         cas_store::WakeAttempt::Fired
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_3f90_quiet_batch_does_not_starve_a_later_action() {
+    if !fixture_child("cas_3f90_quiet_batch_does_not_starve_a_later_action") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    // QueueSelect takes ten rows. These quiet rows precede an action at
+    // the same priority, so failing to park them would hide it forever.
+    for n in 0..12 {
+        queue
+            .enqueue_with_session(
+                "worker",
+                "supervisor",
+                &format!("Work update {n}"),
+                &daemon.session_name,
+            )
+            .unwrap();
+    }
+    let action = event(&daemon, BODY);
+    daemon.process_prompt_queue().await.unwrap();
+    assert!(teams_messages(&daemon).is_empty());
+    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+    daemon.process_prompt_queue().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+    assert!(typed.contains(BODY), "{typed:?}");
+    assert_eq!(typed.matches('\r').count(), 1);
+    assert!(
+        queue
+            .queued_prompt(action)
+            .unwrap()
+            .unwrap()
+            .processed_at
+            .is_some()
+    );
+    let quiet = queue
+        .surface_unseen_for_recipient("supervisor", Some(&daemon.session_name), 20)
+        .unwrap();
+    assert_eq!(
+        quiet.len(),
+        12,
+        "parking spends no wake budget or read receipt"
     );
 }

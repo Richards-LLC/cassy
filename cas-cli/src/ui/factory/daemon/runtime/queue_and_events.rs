@@ -8828,15 +8828,6 @@ impl FactoryDaemon {
                 && cas_store::fits_hook_surface(&prompt_with_instructions)
                 && facts.deferred_inbox.is_none()
                 && !self.inbox_deferred_writes.contains_key(&queued.id);
-            if inline_supervisor_body && !queued.urgent
-                && !Self::row_is_supervisor_wake(
-                    &wake_sender, self.app.supervisor_name(), &queued.source, &queued.prompt,
-                )
-            {
-                // FYI (including task_started) is read on the recipient's
-                // next tool/turn boundary. It never creates a pointer turn.
-                continue;
-            }
             // cas-786a6 (H3): the durable marker, read by QueueSelect.
             let durable_deferred_inbox = claude_inbox_target && facts.deferred_inbox.is_some();
             let deferred_inbox_recorded =
@@ -9320,6 +9311,24 @@ impl FactoryDaemon {
                 }
                 self.last_idle_message_times
                     .insert(queued.source.clone(), now);
+            }
+
+            if inline_supervisor_body && !queued.urgent
+                && !Self::row_is_supervisor_wake(
+                    &wake_sender, self.app.supervisor_name(), &queued.source, &queued.prompt,
+                )
+            {
+                // FYI (including task_started) is read on the recipient's
+                // next tool/turn boundary. Park it out of daemon selection so
+                // a full batch of quiet rows cannot starve later action rows.
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(), queued.id, &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                        detail: "quiet supervisor event; awaiting the recipient's next hook or inbox_poll".into(),
+                        recheck_at: chrono::Utc::now() + chrono::Duration::minutes(1),
+                    },
+                );
+                continue;
             }
 
             // Skip PTY injection for native extension agents that use plain PTY mode —

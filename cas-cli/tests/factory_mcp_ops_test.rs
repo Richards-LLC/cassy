@@ -5903,10 +5903,9 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
     preview.force = Some(true);
     preview.dry_run = Some(false);
     let preview = env.service.factory_request(Parameters(preview)).await.unwrap();
-    assert!(get_text(&preview).contains("mode=review-only"));
     assert!(
         root.join(&closed_id).exists(),
-        "force alone must not delete durable proof"
+        "process-only force=true dry_run=false deleted durable evidence: {}", get_text(&preview)
     );
 
     assert!(

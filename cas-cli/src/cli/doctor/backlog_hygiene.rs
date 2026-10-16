@@ -13,9 +13,61 @@ pub(super) fn check(cas_dir: &Path) -> Check {
     }
 }
 
-/// Pure rendering of one scan.
-pub(super) fn check_for(_report: &crate::backlog_hygiene::BacklogReport) -> Check {
-    Check::new(NAME, CheckStatus::Ok, "no stale open work")
+/// Entries of each kind the row lists before counting the rest.
+const LISTED: usize = 10;
+
+/// Pure rendering of one scan: a summary line, then each finding with its
+/// evidence, and for delivered tasks and finished epics the close call.
+/// Delivered or finished work warns; idle work alone informs.
+pub(super) fn check_for(report: &crate::backlog_hygiene::BacklogReport) -> Check {
+    use crate::backlog_hygiene as hygiene;
+    let reference = report.default_ref.as_deref().unwrap_or("the default branch");
+    let mut lines = Vec::new();
+    if report.is_clean() {
+        lines.push(match report.default_ref.as_deref() {
+            Some(reference) => format!("no stale open work (delivery measured on {reference})"),
+            None => "no stale open work".to_string(),
+        });
+    } else {
+        lines.push(hygiene::summary_line(report));
+    }
+    let section = |label: &str, entries: Vec<String>, lines: &mut Vec<String>| {
+        if entries.is_empty() {
+            return;
+        }
+        lines.push(format!("{label}:"));
+        let more = entries.len().saturating_sub(LISTED);
+        lines.extend(entries.into_iter().take(LISTED).map(|line| format!("  {line}")));
+        if more > 0 {
+            lines.push(format!("  +{more} more"));
+        }
+    };
+    section(
+        "delivered but open",
+        report.delivered.iter().map(|f| hygiene::delivered_line(f, reference)).collect(),
+        &mut lines,
+    );
+    section(
+        "finished epics open",
+        report.finished_epics.iter().map(hygiene::epic_line).collect(),
+        &mut lines,
+    );
+    section(
+        &format!("idle {}+ days", hygiene::IDLE_DAYS),
+        report.idle.iter().map(hygiene::idle_line).collect(),
+        &mut lines,
+    );
+    if let Some(reason) = report.delivery_unknown.as_deref() {
+        lines.push(format!("delivered-on-default-branch check unknown: {reason}"));
+    }
+    let status = if !report.delivered.is_empty() || !report.finished_epics.is_empty() {
+        CheckStatus::Warning
+    } else if !report.idle.is_empty() || report.delivery_unknown.is_some() {
+        CheckStatus::Info
+    } else {
+        CheckStatus::Ok
+    };
+    Check::new(NAME, status, lines.join("\n"))
 }
 
 #[cfg(test)]

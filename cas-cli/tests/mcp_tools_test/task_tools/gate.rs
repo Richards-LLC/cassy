@@ -1287,17 +1287,15 @@ async fn cas_4d67_double_retarget_to_fresh_origin_only_epic_still_requires_merge
     };
     git(remote.path(), &["init", "-q", "--bare"]);
     git(repo, &["init", "-q", "-b", "main"]);
-    // Stable repository identity, but every transport is a local bare fixture.
-    let url = "https://github.com/example/cas4d67-fixture.git";
-    git(repo, &["remote", "add", "origin", url]);
-    git(repo, &["config", &format!("url.{}.insteadOf", remote.path().display()), url]);
+    // Canonical project identity plus a real local bare transport, no network.
+    git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
     std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
     git(repo, &["add", ".gitignore"]);
     git(repo, &["commit", "-q", "-m", "seed"]);
     let base = git(repo, &["rev-parse", "HEAD"]);
     git(repo, &["branch", "epic/old"]);
     git(repo, &["push", "-q", "origin", "main", "epic/old"]);
-    std::fs::write(root.join("config.toml"), "[verification]\nenabled=false\n[qa]\nindependent_pass=false\n").unwrap();
+    std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='cas-4d67-fixture'\n[verification]\nenabled=false\n[qa]\nindependent_pass=false\n").unwrap();
     cas::store::known_repos::ensure_host_schema().unwrap();
     let store = open_task_store(&root).unwrap();
     let mut epic = cas::types::Task::new("cas-4d00".into(), "Retarget parent".into());
@@ -1346,11 +1344,49 @@ async fn cas_4d67_double_retarget_to_fresh_origin_only_epic_still_requires_merge
     assert!(second_fix.contains("Corrected proof scope"), "{second_fix}");
     set_test_agent_role(&root, AgentRole::Worker);
     unified_task(&service, serde_json::json!({"action":"start","id":id})).await;
+    #[cfg(unix)]
+    let notice_socket = {
+        use std::io::Write;
+        let listener = std::os::unix::net::UnixListener::bind(cas::mcp::socket::socket_path(&root)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        // Prove the capture sees writes; final assertions filter the actual
+        // epic-completion event, not this test-boundary control.
+        let mut control = std::os::unix::net::UnixStream::connect(cas::mcp::socket::socket_path(&root)).unwrap();
+        let event = cas::mcp::socket::DaemonEvent::WorkerActivity {
+            session_id: "capture-control".into(), event_type: "capture_control".into(),
+            description: "capture active".into(), entity_id: Some(epic.id.clone()),
+        };
+        writeln!(control, "{}", serde_json::to_string(&event).unwrap()).unwrap();
+        listener
+    };
     let refused = unified_task(&service, serde_json::json!({"action":"close","id":id,"reason":"re-park unchanged tip"})).await;
     assert!(refused.contains("MERGE REQUIRED"), "double retarget must retain merge gate: {refused}");
     assert_eq!(store.get(&id).unwrap().status, TaskStatus::AwaitingMerge);
     assert!(store.get(&id).unwrap().closed_at.is_none());
     assert!(!refused.contains("All subtasks"), "unmerged delivery must not complete its epic: {refused}");
+    #[cfg(unix)]
+    {
+        use std::io::BufRead;
+        let mut captured = Vec::new();
+        loop {
+            match notice_socket.accept() {
+                Ok((stream, _)) => {
+                    stream.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+                    let mut line = String::new();
+                    std::io::BufReader::new(stream).read_line(&mut line).unwrap();
+                    captured.push(serde_json::from_str::<cas::mcp::socket::DaemonEvent>(&line).unwrap());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("read daemon event: {error}"),
+            }
+        }
+        assert!(captured.iter().any(|event| matches!(event,
+            cas::mcp::socket::DaemonEvent::WorkerActivity { event_type, .. } if event_type == "capture_control")));
+        assert!(!captured.iter().any(|event| matches!(event,
+            cas::mcp::socket::DaemonEvent::WorkerActivity { event_type, entity_id, .. }
+            if event_type == "epic_subtasks_complete" && entity_id.as_deref() == Some(epic.id.as_str()))),
+            "an unmerged task must emit no parent-completion notice: {captured:?}");
+    }
     assert_eq!(git(repo, &["rev-parse", &format!("origin/{target}")]), base);
     assert!(!Command::new("git").args(["merge-base", "--is-ancestor", &delivered, &format!("origin/{target}")])
         .current_dir(repo).status().unwrap().success(), "fixture delivery must remain unmerged");

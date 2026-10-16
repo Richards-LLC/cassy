@@ -14,13 +14,25 @@ fn cas_cd42_board_exposes_claim_owned_epic_target_roots_and_unknown_prs() {
     epic.branch = Some("epic/lane".into());
     tasks.add(&epic).unwrap();
     let mut owner = agent("sup", "supervisor", "lane", "alpha", REPO, 1);
-    owner.metadata.insert("clone_path".into(), "/alpha/worktree".into());
-    owner.metadata.insert("scratch_root".into(), "/alpha/scratch".into());
-    let agents = vec![owner, agent("remote", "supervisor", "lane", "beta", REPO, 400)];
+    owner
+        .metadata
+        .insert("clone_path".into(), "/alpha/worktree".into());
+    owner
+        .metadata
+        .insert("scratch_root".into(), "/alpha/scratch".into());
+    let agents = vec![
+        owner,
+        agent("remote", "supervisor", "lane", "beta", REPO, 400),
+    ];
     let locks = vec![lease("cas-epic", "sup", LeaseStatus::Active, 600)];
     let details = assemble_peer_details(
         peers::repo_peers(&agents, REPO, &[], None, Utc::now()),
-        &agents, &locks, &[], tasks.as_ref(), Some("test-user"), Utc::now(),
+        &agents,
+        &locks,
+        &[],
+        tasks.as_ref(),
+        Some("test-user"),
+        Utc::now(),
     );
     let data = serde_json::to_value(&details).unwrap();
     assert_eq!(data[0]["worktree_root"], "/alpha/worktree");
@@ -152,6 +164,7 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
         .metadata
         .insert("focus".into(), format!("\u{1b}[31m\n{}", "界".repeat(100)));
     let report = PeerReport {
+        observed_at: Utc::now(),
         cloud_presence: None,
         cloud_presence_message: String::new(),
         mailbox_status: String::new(),
@@ -235,6 +248,7 @@ fn cas_559c_missing_account_identity_never_means_zero_claims() {
     let agents = vec![agent("sup", "supervisor", "factory-b", "beta", REPO, 1)];
     let peers = peers::repo_peers(&agents, REPO, &[], None, Utc::now());
     let report = PeerReport {
+        observed_at: Utc::now(),
         cloud_presence: None,
         cloud_presence_message: String::new(),
         mailbox_status: String::new(),
@@ -334,6 +348,7 @@ fn cas_a81c_claim_copy_uses_scoped_plain_ids_owner_names_and_missing_title_reaso
         lease(&foreign_key, owner_id, LeaseStatus::Active, 600),
     ];
     let report = PeerReport {
+        observed_at: Utc::now(),
         cloud_presence: None,
         cloud_presence_message: String::new(),
         mailbox_status: String::new(),

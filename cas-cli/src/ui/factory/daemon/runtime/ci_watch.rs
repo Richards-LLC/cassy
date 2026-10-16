@@ -291,6 +291,8 @@ pub(crate) struct DeliveryPrObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct MergeQueuePullRequest {
+    #[serde(default)]
+    pub url: Option<String>,
     pub number: u64,
     #[serde(rename = "headRefName")]
     pub head_branch: String,
@@ -348,6 +350,8 @@ pub(crate) struct SupervisorPr {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct MergeQueuePoll {
+    /// Reuse the bounded poll's actual PR records for read-only peer awareness.
+    pub observed_prs: Vec<crate::cloud::peers_detail::PeerPr>,
     pub queued_prs: BTreeSet<u64>,
     pub ejections: Vec<MergeQueueEjection>,
     pub auto_merge_prs: BTreeSet<u64>,
@@ -986,7 +990,7 @@ impl CiTransport for GhCiTransport {
                     "invalid GitHub repository for merge-queue watcher".to_string(),
                 )
             })?;
-        let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { number headRefName headRefOid isInMergeQueue updatedAt autoMergeRequest { enabledAt } statusCheckRollup { state } } } } }";
+        let query = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100, states: OPEN) { nodes { number url headRefName headRefOid isInMergeQueue updatedAt autoMergeRequest { enabledAt } statusCheckRollup { state } } } } }";
         let response: MergeQueueGraphqlResponse = self.gh_json(&[
             "api".to_string(),
             "graphql".to_string(),
@@ -1134,6 +1138,14 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
     }
 
     let mut poll = MergeQueuePoll::default();
+    poll.observed_prs = pulls.iter().map(|pr| crate::cloud::peers_detail::PeerPr {
+        url: pr.url.clone(),
+        head_sha: pr.head_sha.clone(),
+        branch: pr.head_branch.clone(),
+        number: pr.number,
+        state: "OPEN".into(),
+        in_merge_queue: pr.is_in_merge_queue,
+    }).collect();
     let tracked = deliveries
         .iter()
         .map(|delivery| (&delivery.task_id, delivery.worker.as_str(), &delivery.branch))
@@ -1570,6 +1582,7 @@ mod tests {
 
     fn pull(number: u64, branch: &str, queued: bool, updated_at: &str) -> MergeQueuePullRequest {
         MergeQueuePullRequest {
+            url: Some(format!("https://github.com/acme/widgets/pull/{number}")),
             number,
             head_branch: branch.to_string(),
             head_sha: "deadbeef".to_string(),
@@ -1588,6 +1601,7 @@ mod tests {
         updated_at: &str,
     ) -> MergeQueuePullRequest {
         MergeQueuePullRequest {
+            url: Some(format!("https://github.com/acme/widgets/pull/{number}")),
             number,
             head_branch: branch.to_string(),
             head_sha: head_sha.to_string(),

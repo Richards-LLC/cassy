@@ -44,6 +44,12 @@ const FIXTURES: &[(&str, &str)] = &[
 ];
 
 const MANIFEST: &str = include_str!("../../tests/fixtures/coordination_contract/v1/MANIFEST.json");
+const VIOLET_VENDORED: &[(&str, &str)] = &[
+    fixture!("violet/activity--observe.json"),
+    fixture!("violet/external_work--reply_intents.json"),
+    fixture!("violet/reply_intents--dispatch.json"),
+    fixture!("violet/TOOL_CONTRACT.md"),
+];
 const CAPTURED: &str =
     include_str!("../../tests/fixtures/coordination_contract/v1/captured/production-2026-10-16.json");
 
@@ -207,6 +213,18 @@ fn vendored_cloud_fixtures_are_unchanged() {
             .unwrap_or_else(|| panic!("{name} is pinned but not embedded"));
         let actual = hex::encode(Sha256::digest(text.as_bytes()));
         assert_eq!(&actual, sha.as_str().unwrap(), "{name} differs from Cloud's file");
+    }
+}
+
+/// pin: preserve the exact shipped Violet contract, independently of Cassy's proposals.
+#[test]
+fn cas_c423_vendored_violet_contract_is_unchanged() {
+    let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
+    let pinned = manifest["vendored_violet"]["files"].as_object().unwrap();
+    assert_eq!(pinned.len(), VIOLET_VENDORED.len());
+    for (name, text) in VIOLET_VENDORED {
+        let sha = format!("{:x}", Sha256::digest(text.as_bytes()));
+        assert_eq!(sha, pinned[*name]["sha256"].as_str().unwrap(), "{name}");
     }
 }
 

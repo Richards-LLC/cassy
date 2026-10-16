@@ -1568,6 +1568,11 @@ impl WakeDecision {
         format!("{}: {}", self.kind.as_str(), self.reason)
     }
 
+    #[cfg(test)]
+    pub(crate) fn deny_for_test(reason: &'static str) -> Self {
+        Self::deny(reason)
+    }
+
     /// An eligible row was refused. Diagnosable.
     fn deny(reason: &'static str) -> Self {
         Self {
@@ -2076,6 +2081,25 @@ fn stall_nudge_resumed(
     Ok(event_activity || transcript_activity)
 }
 
+/// cas-d5ab (spec P2.3): the worker activity a wake-gate decline is evidence
+/// of, if any.
+///
+/// Only an observed tool call in flight counts. A pane that has not gone quiet
+/// is not evidence: a spinner redraws every second, so a worker hung on an
+/// API stream or a retry loop never looks silent (review H1). An operator
+/// draft, an unready pane or a taken wake slot say nothing about the worker
+/// either.
+pub(crate) fn gate_decline_activity(
+    decision: WakeDecision,
+    tool_call: ToolCallEvidence,
+) -> Option<&'static str> {
+    (!decision.allowed && tool_call == ToolCallEvidence::InFlight).then_some("tool call in flight")
+}
+
+/// cas-d5ab: the least spacing of gate-decline activity events per worker.
+/// The stall threshold is minutes, so one event a minute keeps the detector
+/// current without writing an event on every declined pass.
+const GATE_ACTIVITY_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
 fn worker_recipient_shut_down(
     target: &str,
@@ -2211,11 +2235,14 @@ fn read_operator_replies(
     cas_dir: &std::path::Path,
     queue: &dyn cas_store::PromptQueueStore,
     session: &str,
+    adopt_notices: bool,
 ) -> anyhow::Result<Vec<OperatorReplyRead>> {
     // cas-5c2c: adopt this session's owner notices before the replies are
-    // read; cas-786a6: in the selecting job, not on the loop. The request
-    // asks for replies only while the daemon is not shutting down.
-    if let Err(error) = crate::supervisor_notices::adopt_operator_notices(cas_dir, session) {
+    // read, unless the daemon is shutting down (another daemon adopts them).
+    // cas-786a6: in the selecting job, not on the loop.
+    if adopt_notices
+        && let Err(error) = crate::supervisor_notices::adopt_operator_notices(cas_dir, session)
+    {
         tracing::warn!(%error, "operator notice adoption failed; continuing queued replies");
     }
     let mut reads = Vec::new();
@@ -2396,7 +2423,12 @@ pub(super) fn run_queue_select(
         }
     }
     if request.operator_replies {
-        match read_operator_replies(&request.cas_dir, queue.as_ref(), session) {
+        match read_operator_replies(
+            &request.cas_dir,
+            queue.as_ref(),
+            session,
+            request.adopt_operator_notices,
+        ) {
             Ok(replies) => selection.operator_replies = replies,
             Err(error) => tracing::debug!(%error, "operator replies unavailable this selection"),
         }
@@ -6168,6 +6200,22 @@ impl FactoryDaemon {
             }))
     }
 
+    /// The selecting job's operator-reply step and its forwarding, in one
+    /// call on `queue` (tests; the daemon runs the read in `QueueSelect`).
+    #[cfg(test)]
+    pub(super) fn process_operator_replies(
+        &mut self,
+        queue: &dyn cas_store::PromptQueueStore,
+    ) -> anyhow::Result<()> {
+        if self.ws_clients.is_empty() {
+            return Ok(());
+        }
+        let adopt = !self.shutdown.load(std::sync::atomic::Ordering::SeqCst);
+        let replies = read_operator_replies(self.app.cas_dir(), queue, &self.session_name, adopt)?;
+        self.forward_operator_replies(replies);
+        Ok(())
+    }
+
     /// Forward the operator replies `QueueSelect` read and stamped
     /// (cas-786a6: the reads and stamps run in that job, not here).
     fn forward_operator_replies(&mut self, replies: Vec<OperatorReplyRead>) {
@@ -6991,6 +7039,54 @@ impl FactoryDaemon {
         }
     }
 
+    /// cas-d5ab (spec P2.3): record a wake-gate decline for a tool call in
+    /// flight as the worker's activity, through cas-7156's per-worker
+    /// recorder, so the stall detector does not call a working worker
+    /// stalled. The write is a queue-job stamp, never inline on the loop.
+    fn record_gate_decline_activity(
+        &mut self,
+        row: i64,
+        target: &str,
+        decision: WakeDecision,
+        tool_call: ToolCallEvidence,
+        agents: &[cas_types::Agent],
+    ) {
+        let Some(reason) = gate_decline_activity(decision, tool_call) else {
+            return;
+        };
+        if self
+            .gate_activity_recorded_at
+            .get(target)
+            .is_some_and(|at| at.elapsed() < GATE_ACTIVITY_MIN_INTERVAL)
+        {
+            return;
+        }
+        let Some(worker) = agents
+            .iter()
+            .filter(|agent| {
+                agent.name == target
+                    && agent.role == cas_types::AgentRole::Worker
+                    && agent.status != cas_types::AgentStatus::Shutdown
+            })
+            .max_by_key(|agent| agent.registered_at)
+        else {
+            return;
+        };
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        self.queue_jobs.stamp(
+            &cas_dir,
+            row,
+            target,
+            super::prompt_queue_jobs::QueueStamp::WorkerActivity {
+                cas_dir: cas_dir.clone(),
+                agent_id: worker.id.clone(),
+                reason: reason.to_string(),
+            },
+        );
+        self.gate_activity_recorded_at
+            .insert(target.to_string(), Instant::now());
+    }
+
     /// Process prompt queue
     pub(super) async fn process_prompt_queue(&mut self) -> anyhow::Result<()> {
         // cas-786a6: urgent injects whose pane has settled type their payload
@@ -7032,8 +7128,8 @@ impl FactoryDaemon {
             worker_names: self.app.worker_names().to_vec(),
             dead_workers: self.dead_workers.clone(),
             limit: 10,
-            operator_replies: !self.ws_clients.is_empty()
-                && !self.shutdown.load(std::sync::atomic::Ordering::SeqCst),
+            operator_replies: !self.ws_clients.is_empty(),
+            adopt_operator_notices: !self.shutdown.load(std::sync::atomic::Ordering::SeqCst),
         };
         self.queue_jobs.submit_select(request, |request, generation| {
             let selection = run_queue_select(request, generation);
@@ -7617,6 +7713,8 @@ impl FactoryDaemon {
                 }
                 let pane = self.pane_wake_state(&queued.target);
                 if let Some(reason) = pane.veto_for_active_looking_recipient() {
+                    // cas-d5ab review H1: the stall nudge's own decline is never
+                    // activity, or the nudge would withdraw itself.
                     // cas-786a6 (L4): QueueStamps; the count comes from the
                     // selection snapshot.
                     self.queue_jobs.stamp(
@@ -8697,6 +8795,14 @@ impl FactoryDaemon {
                             &queued.prompt,
                         )
                     {
+                        // cas-d5ab: a busy recipient is a working one.
+                        self.record_gate_decline_activity(
+                            queued.id,
+                            &pane_target,
+                            wake_decision,
+                            pane_state.tool_call,
+                            current_agents,
+                        );
                         // cas-d9a8: persist the OUTCOME KIND alongside the
                         // reason so `message_status` separates "this was never
                         // a wake" from "this was eligible and refused".

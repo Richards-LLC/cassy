@@ -127,6 +127,14 @@ pub(crate) enum QueueStamp {
         summary: String,
         detail: String,
     },
+    /// cas-d5ab: the recipient worker was seen working (a wake-gate decline
+    /// for a tool call in flight), recorded through cas-7156's per-worker
+    /// activity recorder.
+    WorkerActivity {
+        cas_dir: PathBuf,
+        agent_id: String,
+        reason: String,
+    },
     /// No write: completes after every earlier stamp for the same row and
     /// recipient, and clears the row's in-flight entry.
     Settled,
@@ -153,6 +161,7 @@ impl QueueStamp {
             Self::ParkBusy { .. } => "park_busy",
             Self::UndeliveredRelay { .. } => "undelivered_relay",
             Self::SupersedeWithGuidance { .. } => "supersede_with_guidance",
+            Self::WorkerActivity { .. } => "worker_activity",
             Self::Settled => "settled",
         }
     }
@@ -255,6 +264,12 @@ impl QueueStamp {
                     Ok(())
                 }
             },
+            Self::WorkerActivity {
+                cas_dir,
+                agent_id,
+                reason,
+            } => cas_factory::director::record_worker_activity(cas_dir, agent_id, "wake_gate", reason)
+                .map_err(|error| cas_store::StoreError::Other(error.to_string())),
             Self::Settled => Ok(()),
         }
     }
@@ -293,6 +308,8 @@ pub(crate) struct QueueSelectRequest {
     pub(crate) limit: usize,
     /// Read the operator replies Commander clients are owed (cas-786a6).
     pub(crate) operator_replies: bool,
+    /// Adopt owner notices first (cas-5c2c): not while shutting down.
+    pub(crate) adopt_operator_notices: bool,
 }
 
 /// One delivery batch and the store state it was selected against.

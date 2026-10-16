@@ -368,6 +368,9 @@ pub struct FactoryDaemon {
     /// Wall-clock, because the queue poll is 100ms — counting polls would make
     /// "sustained silence" mean a third of a second.
     pane_silent_since: HashMap<String, std::time::Instant>,
+    /// cas-d5ab: when a busy-recipient gate decline was last recorded as
+    /// each worker's activity.
+    gate_activity_recorded_at: HashMap<String, std::time::Instant>,
     /// Last bounded sweep that terminalized aged prompts for targets no
     /// longer belonging to this factory session.
     last_prompt_poison_sweep: Option<std::time::Instant>,

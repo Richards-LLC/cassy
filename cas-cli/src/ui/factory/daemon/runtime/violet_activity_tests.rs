@@ -246,6 +246,30 @@ fn mention_is_claimed_admitted_acked_and_wakes_the_supervisor_once() {
     assert_eq!(fx.wakes().len(), 1);
 }
 
+#[test]
+fn cas_639c_peer_start_and_interleaved_ticks_preserve_both_sessions_watches() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut first = fx.wake("first", t0());
+    relay.publish(mention("C1", 0));
+    assert_eq!(first.poll_once(&relay, &fx.queue, true, at(10)).wakes, 1);
+
+    let mut second = fx.wake("second", at(20));
+    relay.publish(mention("C2", 21));
+    assert_eq!(second.poll_once(&relay, &fx.queue, true, at(30)).wakes, 1);
+    first.poll_once(&relay, &fx.queue, true, at(40));
+    second.poll_once(&relay, &fx.queue, true, at(50));
+
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    let owners: BTreeSet<_> = saved.active().map(|w| (w.factory_session.as_str(), w.channel_id.as_str())).collect();
+    assert_eq!(owners, BTreeSet::from([("first", "C1"), ("second", "C2")]));
+    assert_eq!(first.due_sweeps(at(400)).iter().map(|s| s.channel_id.as_str()).collect::<Vec<_>>(), vec!["C1"]);
+    assert_eq!(second.due_sweeps(at(400)).iter().map(|s| s.channel_id.as_str()).collect::<Vec<_>>(), vec!["C2"]);
+    first.stop_idle(&fx.queue, at(3600));
+    let saved = WatchBook::read(&fx.watch_path).unwrap();
+    assert!(saved.active().any(|w| w.factory_session == "second"));
+}
+
 /// AC: claim/ack is idempotent across daemon restarts. The ack is lost, the
 /// daemon restarts, the lease expires and Cloud redelivers: the event is
 /// acknowledged again with no second wake.

@@ -660,6 +660,31 @@ mod tests {
     use super::potentially_mutating_call;
 
     #[tokio::test]
+    async fn cas_6eec_mcp_burst_records_one_activity_across_service_clones() {
+        use crate::mcp::server::{CasCore, AgentIdentitySource};
+        use crate::mcp::tools::service::CasService;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let worker = cas_types::Agent::new_with_role("burst-worker".into(), "burst-worker".into(), cas_types::AgentRole::Worker);
+        core.open_agent_store().unwrap().register(&worker).unwrap();
+        core.bind_agent_identity(worker.id.clone(), AgentIdentitySource::ServerInternal).unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        let calls = (0..16).map(|_| {
+            let service = service.clone();
+            async move {
+                service.call_with_deadline_and_grace("task", None, std::time::Duration::from_secs(5),
+                    std::time::Duration::from_secs(5), async { Ok(rmcp::model::CallToolResult::success(vec![])) }).await.unwrap();
+            }
+        });
+        futures::future::join_all(calls).await;
+        let events = crate::store::open_event_store(&root).unwrap();
+        let rows = events.list_by_type(cas_types::EventType::WorkerActivity, 100).unwrap();
+        assert_eq!(rows.len(), 1, "rapid concurrent MCP calls must share one throttled activity row");
+    }
+
+    #[tokio::test]
     async fn cas_6eec_activity_rejects_payload_identity_and_heartbeat_or_public_registration() {
         use crate::mcp::server::{CasCore, AgentIdentitySource};
         use crate::mcp::tools::service::CasService;

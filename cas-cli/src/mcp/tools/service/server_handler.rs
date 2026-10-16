@@ -748,6 +748,29 @@ mod tests {
             "inactive workers must not be cached as non-workers");
     }
 
+    #[test]
+    fn cas_4e19_standard_to_worker_reconciliation_records_activity() {
+        use crate::mcp::server::{AgentIdentitySource, CasCore};
+        use cas_types::{Agent, AgentRole};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let caller = Agent::new("bootstrap-worker".into(), "bootstrap-worker".into());
+        core.open_agent_store().unwrap().register(&caller).unwrap();
+        core.bind_agent_identity(caller.id.clone(), AgentIdentitySource::ServerInternal).unwrap();
+        super::record_worker_mcp_activity(&core, "task", "notes");
+        let events = crate::store::open_event_store(&root).unwrap();
+        assert!(events.latest_worker_activity(&caller.id, &caller.name).unwrap().is_none());
+
+        core.register_agent_with_hints(caller.id.clone(), caller.name.clone(), None, None,
+            Some(AgentRole::Worker), AgentIdentitySource::ServerInternal).unwrap();
+        assert_eq!(core.open_agent_store().unwrap().get(&caller.id).unwrap().role, AgentRole::Worker);
+        super::record_worker_mcp_activity(&core.clone(), "task", "notes");
+        assert!(events.latest_worker_activity(&caller.id, &caller.name).unwrap().is_some(),
+            "a hook-created Standard row corrected to Worker must record MCP activity on the same core");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn cas_6eec_mcp_burst_records_one_activity_across_service_clones() {
         use crate::mcp::server::{CasCore, AgentIdentitySource};

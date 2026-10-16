@@ -7167,6 +7167,14 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
         let stored_pending = stored_reason.as_deref().and_then(PendingReason::parse);
         let (pending_reason, pending_detail) = match stage {
+            // Terminal-task reconciliation retires a formerly transported
+            // relay without erasing its handoff history. Report its durable
+            // expiry reason instead of claiming it is still awaiting an ack.
+            DeliveryStage::Delivered | DeliveryStage::AssumedSeen | DeliveryStage::Confirmed
+                if confirmed_at.is_some() && stored_pending == Some(PendingReason::SupersededStale) =>
+            {
+                (stored_pending, stored_detail)
+            }
             DeliveryStage::Confirmed => (None, None),
             DeliveryStage::AssumedSeen => (
                 Some(PendingReason::AwaitingAck),

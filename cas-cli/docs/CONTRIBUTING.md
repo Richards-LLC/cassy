@@ -1771,9 +1771,12 @@ wire or structural contracts carry `// pin: <reason>` immediately above the
 statement or test/helper declaration, or on the assertion line. A reason does
 not convert a source-order assertion into behavior coverage.
 
-Workers and independent QA run `npm test`, `npm run typecheck` in `hub-web`,
-and `scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected
-journeys at four workers. The wrapper resolves the task's declared target;
+Workers run `npm test`, `npm run typecheck` in `hub-web`, and
+`scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected journeys
+at four workers. Independent QA consumes matching passing worker receipts
+(base/head, selected IDs, native results and execution environment), then runs
+independent adjacent/demo/visual cells; missing or incompatible evidence needs
+its own affected checks. The wrapper resolves the task's declared target;
 `--affected <base>` binds an explicit base. No browser runs for an empty impact
 selection; it emits an explicit receipt. Caller spec/grep filters are refused.
 
@@ -1931,3 +1934,20 @@ from automatic project cleanup: a flat directory can contain more than one
 project's evidence. New writes, issue attachments, QA rounds, message spills,
 search discovery and cleanup use the scoped namespace. No automatic file move
 or ownership guess is made for legacy directories.
+
+
+### First factory push scope and reference admission
+
+The shared CI classifier resolves a first factory push against the unique
+maximal ancestor among fetched `origin/epic/*` refs, falling back to the
+configured default remote branch when no epic parent is available. Local refs,
+unknown bases and incomparable epic parents cannot authorize a Rust skip.
+Subsequent repair pushes compare against the previous push, so unrelated epic
+changes do not widen a test-only repair. All scoped consumers use that resolved
+base; the merge queue still proves the complete integration delta.
+
+The Violet/fixture repository reference scan runs in the existing `ci-diff`
+admission job on factory and epic pushes and PRs, including direct release
+edits. It was removed from the late `test-ci-tiers` queue recipe. Its independent
+boundary self-tests remain there; merge-group admission does not repeat the
+content scan.

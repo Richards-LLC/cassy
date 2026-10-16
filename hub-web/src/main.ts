@@ -1,5 +1,5 @@
 import { openInstallationInventory } from "./installation-inventory";
-import { explorerOrigin, explorerUrl } from "./app-switcher";
+import { closeAppSwitcherAfterFollow, explorerOrigin, explorerUrl } from "./app-switcher";
 import { InstallationAccess, watchInstallations } from "./installation-access";
 import { installationStore } from "./storage";
 
@@ -5208,6 +5208,9 @@ app.addEventListener("focusout", () => {
     deferredRender.focusLeft();
   });
 });
+
+// cas-2a26: following Explorer from the app switcher closes the menu here.
+app.addEventListener("click", (event) => { closeAppSwitcherAfterFollow(event.target); });
 
 // A tap on any artifact (the thread's sheet, the context rail, the operator
 // thread) opens the hosted copy through a signed view URL (cassy issue 910).

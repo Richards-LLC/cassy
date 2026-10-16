@@ -211,6 +211,51 @@ pub(crate) fn target_is_reserved_source(target: &str) -> bool {
 }
 
 
+/// cas-009c: how a row named by `in_reply_to` relates to this send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplyReference {
+    /// The counterparty's row to this sender: the reply answers it, and
+    /// acknowledges it.
+    DirectReply,
+    /// A row in the same conversation that this reply cites without
+    /// answering: the sender's own earlier row to the counterparty or to
+    /// all workers, the counterparty's broadcast, or a row CAS itself wrote
+    /// to the sender (lifecycle, verification dispatch, director, delivery
+    /// watchdog).
+    Thread,
+}
+
+/// Classify a prior row against the two parties' names. `counterparty` and
+/// `me` list every name each side's rows may carry; empty entries are
+/// ignored. `None` means the row belongs to someone else's conversation.
+fn classify_reply_reference(
+    prior_source: &str,
+    prior_target: &str,
+    counterparty: &[&str],
+    me: &[&str],
+) -> Option<ReplyReference> {
+    let is = |name: &str, names: &[&str]| {
+        names
+            .iter()
+            .any(|candidate| !candidate.is_empty() && candidate.eq_ignore_ascii_case(name))
+    };
+    let broadcast = prior_target.eq_ignore_ascii_case("all_workers");
+    let cas_generated = target_is_reserved_source(prior_source)
+        || ["director", "delivery-watchdog"]
+            .iter()
+            .any(|source| prior_source.eq_ignore_ascii_case(source));
+    if is(prior_source, counterparty) && is(prior_target, me) {
+        Some(ReplyReference::DirectReply)
+    } else if (is(prior_source, me) && (is(prior_target, counterparty) || broadcast))
+        || (is(prior_source, counterparty) && broadcast)
+        || (cas_generated && (is(prior_target, me) || broadcast))
+    {
+        Some(ReplyReference::Thread)
+    } else {
+        None
+    }
+}
+
 /// GH #1196: why an operator turn cannot be delivered right now, or `None`
 /// when it can or the state is unknown. Delivery needs a Commander client
 /// connected to the session's daemon or an enrolled cloud operator feed.
@@ -1683,6 +1728,8 @@ impl CasService {
         // This is strong evidence for exactly one row; the conservative
         // generic reply-inference rule below remains unchanged.
         let explicit_reply_to = req.in_reply_to;
+        // Only a direct reply acknowledges the row it names (cas-009c).
+        let mut explicit_reply_acks = false;
         if let Some(notification_id) = explicit_reply_to {
             let prior = queue
                 .message_delivery_report(notification_id)
@@ -1698,39 +1745,46 @@ impl CasService {
                         format!("in_reply_to notification {notification_id} does not exist"),
                     )
                 })?;
-            let expected_prior_sources = [
+            // cas-009c: both parties under every name a row may carry. A
+            // supervisor's rows are stored as the logical `supervisor`
+            // (display_name above), whatever name the other side typed.
+            let counterparty_is_supervisor = addressed_logical_supervisor
+                || resolved_target_agent
+                    .as_ref()
+                    .is_some_and(|agent| agent.role == cas_types::AgentRole::Supervisor);
+            let counterparty = [
                 resolved_target.as_str(),
-                if addressed_logical_supervisor {
-                    "supervisor"
-                } else {
-                    ""
-                },
+                if counterparty_is_supervisor { "supervisor" } else { "" },
             ];
-            let expected_prior_targets = [
+            let me = [
                 display_name.as_str(),
                 env_agent_name.as_deref().unwrap_or_default(),
                 if role == "supervisor" { "supervisor" } else { "" },
             ];
-            let source_matches = expected_prior_sources
-                .iter()
-                .filter(|name| !name.is_empty())
-                .any(|name| prior.source.eq_ignore_ascii_case(name));
-            let target_matches = expected_prior_targets
-                .iter()
-                .filter(|name| !name.is_empty())
-                .any(|name| prior.target.eq_ignore_ascii_case(name));
-            if !source_matches || !target_matches {
-                return Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "in_reply_to notification {notification_id} is {} -> {}, not a direct message from {resolved_target} to this sender",
-                        prior.source, prior.target
-                    ),
-                ));
+            let reference =
+                classify_reply_reference(&prior.source, &prior.target, &counterparty, &me);
+            explicit_reply_acks = reference == Some(ReplyReference::DirectReply);
+            match reference {
+                Some(ReplyReference::DirectReply) => {
+                    message = format!(
+                        "[CAS reply: explicitly acknowledges notification_id={notification_id}]\n{message}"
+                    );
+                }
+                Some(ReplyReference::Thread) => {
+                    message = format!(
+                        "[CAS reply: in thread with notification_id={notification_id}]\n{message}"
+                    );
+                }
+                None => {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "in_reply_to notification {notification_id} is {} -> {}, which is not in a thread between {resolved_target} and this sender",
+                            prior.source, prior.target
+                        ),
+                    ));
+                }
             }
-            message = format!(
-                "[CAS reply: explicitly acknowledges notification_id={notification_id}]\n{message}"
-            );
         }
 
         // P3.8: a worker may explicitly type a status/ready message to its
@@ -2609,7 +2663,7 @@ impl CasService {
                     )
                 })?;
         }
-        if let Some(notification_id) = explicit_reply_to {
+        if let Some(notification_id) = explicit_reply_to.filter(|_| explicit_reply_acks) {
             queue.ack(notification_id).map_err(|error| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,

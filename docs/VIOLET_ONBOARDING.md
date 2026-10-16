@@ -13,11 +13,33 @@ credentials file directly. Factory workers receive the union of native registrat
 references and explicit proxy/config grants, subject to server and environment denials;
 update does not edit shell profiles. Only an unavailable retired managed token
 name may move to a different label, and only when exactly one usable canonical
-token exists. A user proxy document bearing Cassy's `# managed` marker may also
-repair an unavailable `VIOLET_SLACK_TOKEN_CASSY_PROXY` reference under that same
-rule. Every mapping is printed. `PASS (Cassy launches)` covers `cas claude` and `cas codex`; the
+token exists. Update also repairs an unavailable
+`env:VIOLET_SLACK_TOKEN_CASSY_PROXY` in project and user proxy files, including
+unmarked files, when exactly one account bearer reference is registered in an
+active or explicitly configured production Claude/Codex profile and its
+credential is usable. Backup profile directories and exported tokens alone
+cannot select an account. Full update repairs account registrations before
+refreshing project proxies, so one run converges. Multiple registered accounts
+refuse the write with `ambiguous_violet_credential`; absent accounts, malformed,
+symlinked or foreign-owned proxy files produce update warnings while rules
+and skills continue syncing. Doctor retains its normal health result and
+severity, adding repair advisories only for stale defaults; a malformed proxy
+remains an error, and a working custom symlink still reaches the hub probe. Custom refs, custom endpoints, working
+defaults (including managed runtime selection), comments and dispatch policy
+are preserved. The persisted repair serves both
+`cas violet` and the `cas serve` upstream used by MCP artifact posting. Every
+mapping prints variable names only. `PASS (Cassy launches)` covers `cas claude` and `cas codex`; the
 receipt names references absent from the updater's exported environment. Export
-those names before using bare `claude` or `codex`. The private file must be a
+those names before using bare `claude` or `codex`.
+
+The user proxy is shared across profiles. Repair binds its explicit bearer
+reference to the unique account visible in the updater's active or configured
+profiles, and that account then applies to every profile inheriting the user
+proxy. Switching shells or profiles later does not retarget the saved reference.
+Update prints this shared scope alongside the variable-name mapping. Project
+registrations continue to take precedence over the shared user registration.
+
+The private file must be a
 regular file owned by the current user, have no group/other permissions, and be
 at most 1 MiB; symlinks are refused. CLI launches and update print the refused path
 and the ownership/`chmod 600` remedy; update leaves an unsafe file untouched.

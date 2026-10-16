@@ -73,8 +73,20 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
       });
       await journey.stage("Switch to Explorer from the list", async () => {
         await openApps();
-        await followToExplorer(page, switcher.getByRole("link", { name: "Explorer (opens in a new tab)" }), requests, EXPLORER_HOME);
+        const explorerLink = switcher.getByRole("link", { name: "Explorer (opens in a new tab)" });
+        await followToExplorer(page, explorerLink, requests, EXPLORER_HOME);
         await expect(page.locator(".conversation-list-heading")).toBeVisible();
+        // cas-2a26 (journey eval 3.51.0 F02): back in Commander's tab the list
+        // header is as it was, with no menu left open over it.
+        await expect(switcher).toBeHidden();
+        await expect(apps).toBeFocused();
+        // The same by keyboard: Enter on Explorer.
+        await openApps();
+        await explorerLink.focus();
+        const [byKeyboard] = await Promise.all([page.context().waitForEvent("page"), page.keyboard.press("Enter")]);
+        await byKeyboard.close();
+        await expect(switcher).toBeHidden();
+        await expect(apps).toBeFocused();
       });
       await journey.stage("Open this project's tasks in Explorer", async () => {
         await list.getByRole("button", { name: /cas-src/ }).click();

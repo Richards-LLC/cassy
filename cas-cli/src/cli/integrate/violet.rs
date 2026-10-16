@@ -2788,12 +2788,16 @@ pub fn doctor_row(
     let merged =
         match ProxyConfig::load_merged_with_sources_from(Some(&paths.user_proxy), project_proxy) {
             Ok((config, _)) => config,
-            Err(error) => {
+            Err(_) => {
                 return DoctorRow {
                     severity: DoctorSeverity::Error,
                     message: format!(
-                        "proxy configuration could not be read ({error:#}). Repair it, then run \
-                     `cas integrate violet`"
+                        "proxy configuration could not be read (user: {}{}). Repair it, then run \
+                     `cas integrate violet`",
+                        paths.user_proxy.display(),
+                        project_proxy
+                            .map(|path| format!("; project: {}", path.display()))
+                            .unwrap_or_default()
                     ),
                 };
             }
@@ -3292,9 +3296,31 @@ pub fn execute(args: &VioletArgs, json: bool, full: bool) -> Result<IntegrationO
 /// Convenience used by `cas doctor`: resolve machine paths from the real
 /// environment and produce the row.
 pub fn doctor_row_from_env(project_proxy: Option<&Path>) -> Option<DoctorRow> {
+    doctor_row_from_env_with_probe(project_proxy, &ProxyHubProbe)
+}
+
+pub(crate) fn doctor_row_from_env_with_probe(
+    project_proxy: Option<&Path>,
+    probe: &dyn HubProbe,
+) -> Option<DoctorRow> {
     let env = ProcessEnv;
     let paths = MachinePaths::from_env(&env).ok()?;
-    Some(doctor_row(project_proxy, &paths, &env, &ProxyHubProbe))
+    let mut row = doctor_row(project_proxy, &paths, &env, probe);
+    let advisories = super::violet_retirement::proxy_credential_advisories(project_proxy);
+    if !advisories.is_empty() {
+        if row.severity == DoctorSeverity::Ok {
+            row.severity = DoctorSeverity::Warning;
+        }
+        row.message.push_str("; update advisory: ");
+        row.message.push_str(
+            &advisories
+                .into_iter()
+                .map(|(path, reason)| format!("{}: {reason}", path.display()))
+                .collect::<Vec<_>>()
+                .join("; "),
+        );
+    }
+    Some(row)
 }
 
 /// A stable, order-independent view of the credential-bearing strings a

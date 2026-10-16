@@ -1161,8 +1161,6 @@ async fn cas_9735_old_core_after_clear_keeps_new_session_heartbeat() {
                 ResponseTemplate::new(200).set_body_json(json!({"released_locks":0}))
             }).with_priority(1).expect(1).mount(&fx._server).await;
         let store = crate::store::open_agent_store(&fx.cas_root).unwrap();
-        let original = store.get(old_id).unwrap();
-        let intent_path = crate::cloud::shutdown::incarnation_path(&fx.cas_root, &original, old_id);
         let core = crate::mcp::server::CasCore::with_daemon(
             fx.cas_root.clone(), None, Some(Arc::clone(&daemon)),
         );
@@ -1210,7 +1208,7 @@ async fn cas_9735_old_core_after_clear_keeps_new_session_heartbeat() {
         assert_eq!(fx.cloud.state().heartbeats.last().map(|(id, _)| id.as_str()), Some(new_id));
         assert!(!fx.cloud.state().agents.contains_key(old_id), "S's cleanup must complete");
         assert_eq!(fx.cloud.state().registrations.iter().filter(|row| row["id"] == old_id).count(), 1, "old core must not resurrect S in Cloud");
-        let intent: Value = serde_json::from_slice(&std::fs::read(&intent_path).unwrap()).unwrap();
-        assert!(!intent["completed_at"].is_null(), "S remains drainable after old-core activity");
+        fx._server.verify().await; // The real drain completed exactly one shutdown.
+        assert!(crate::cloud::shutdown::is_ended(&fx.cas_root, &store.get(old_id).unwrap()).unwrap());
     }
 }

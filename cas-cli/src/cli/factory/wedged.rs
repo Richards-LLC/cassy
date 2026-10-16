@@ -630,6 +630,7 @@ pub(crate) fn has_crash_signature<R: Read>(reader: R, tail_lines: usize) -> bool
 /// Missing or unreadable files read as "no signature" — the classifier then
 /// treats the absence as Alive/Starved based on pid + mtime alone.
 pub(crate) fn transcript_has_crash_signature(path: &Path, tail_lines: usize) -> bool {
+    cas_store::lane_guard::note_blocking_call(cas_store::lane_guard::BlockingKind::Transcript, "transcript crash signature");
     match std::fs::File::open(path) {
         Ok(f) => has_crash_signature(f, tail_lines),
         Err(_) => false,
@@ -783,6 +784,7 @@ fn codex_has_pending_tool_call(lines: &[String]) -> bool {
 /// falling through to mtime-based classification instead of masking a
 /// genuine stall on a read error.
 pub(crate) fn transcript_has_in_flight_tool_call(path: &Path, cli: cas_mux::SupervisorCli) -> bool {
+    cas_store::lane_guard::note_blocking_call(cas_store::lane_guard::BlockingKind::Transcript, "transcript in-flight tool call");
     match std::fs::File::open(path) {
         Ok(f) => has_in_flight_tool_call(f, cli, IN_FLIGHT_TAIL_LINES),
         Err(_) => false,
@@ -1365,6 +1367,7 @@ pub(crate) struct RealProcessTable;
 impl ProcessTable for RealProcessTable {
     #[cfg(target_os = "linux")]
     fn pids(&self) -> Vec<u32> {
+        cas_store::lane_guard::note_blocking_call(cas_store::lane_guard::BlockingKind::Proc, "/proc scan");
         let Ok(entries) = std::fs::read_dir("/proc") else {
             return Vec::new();
         };
@@ -1617,6 +1620,7 @@ pub(crate) fn background_processes_for(root_pid: u32) -> BackgroundProcessState 
 /// kernel's authoritative parent relation.
 #[cfg(target_os = "linux")]
 fn descendant_pids(parent: u32) -> Option<Vec<u32>> {
+    cas_store::lane_guard::note_blocking_call(cas_store::lane_guard::BlockingKind::Proc, "/proc descendant scan");
     let task_dir = std::fs::read_dir(format!("/proc/{parent}/task")).ok()?;
     let mut children = HashSet::new();
     for task in task_dir.flatten() {
@@ -2239,6 +2243,7 @@ fn reset_worker_tasks(cas_root: &Path, worker_name: &str) -> Result<usize> {
 }
 
 fn read_last_lines(path: &Path, tail: usize) -> Result<Vec<String>> {
+    cas_store::lane_guard::note_blocking_call(cas_store::lane_guard::BlockingKind::Transcript, "transcript tail");
     let f = std::fs::File::open(path)?;
     // cas-4513 correctness P2: delegates to the shared helper which
     // guards `tail == 0` against the unbounded-growth bug (empty ring

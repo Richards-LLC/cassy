@@ -17,7 +17,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 
 /// Cap on user-controlled file reads (SKILL.md, package.json, schema.prisma,
 /// vercel.json, etc.). Anything above this is almost certainly not a doc
@@ -43,8 +43,7 @@ pub fn is_regular_file(path: &Path) -> bool {
 /// files (existing SKILL.md before merge, project manifests during detection,
 /// etc.).
 pub fn read_capped(path: &Path) -> anyhow::Result<String> {
-    let md = fs::symlink_metadata(path)
-        .with_context(|| format!("statting {}", path.display()))?;
+    let md = fs::symlink_metadata(path).with_context(|| format!("statting {}", path.display()))?;
     if md.file_type().is_symlink() {
         anyhow::bail!("{} is a symlink; refusing to follow", path.display());
     }
@@ -59,8 +58,7 @@ pub fn read_capped(path: &Path) -> anyhow::Result<String> {
             MAX_FILE_BYTES
         );
     }
-    let f = fs::File::open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
+    let f = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut s = String::new();
     f.take(MAX_FILE_BYTES + 1)
         .read_to_string(&mut s)
@@ -85,9 +83,29 @@ pub fn read_capped(path: &Path) -> anyhow::Result<String> {
 /// with the process id + a process-local sequence so concurrent invocations
 /// pick distinct names without depending on wall-clock resolution.
 pub fn atomic_write(path: &Path, contents: &str) -> anyhow::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        anyhow!("refusing to write to a root-less path: {}", path.display())
-    })?;
+    atomic_write_guarded(path, contents, None).map(|_| ())
+}
+
+/// Optimistic protection against a harness rewriting its config concurrently.
+/// The comparison runs after the replacement is flushed, just before rename.
+/// A non-cooperating writer can still race the final comparison and rename.
+pub fn atomic_write_if_unchanged(
+    path: &Path,
+    original: &str,
+    modified: Option<std::time::SystemTime>,
+    contents: &str,
+) -> anyhow::Result<bool> {
+    atomic_write_guarded(path, contents, Some((original, modified)))
+}
+
+fn atomic_write_guarded(
+    path: &Path,
+    contents: &str,
+    expected: Option<(&str, Option<std::time::SystemTime>)>,
+) -> anyhow::Result<bool> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("refusing to write to a root-less path: {}", path.display()))?;
     let file_name = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -117,14 +135,20 @@ pub fn atomic_write(path: &Path, contents: &str) -> anyhow::Result<()> {
     );
     let tmp_path = parent.join(tmp_name);
 
-    atomic_write_via_temp_path(path, contents, &tmp_path)
+    atomic_write_via_temp_path_guarded(path, contents, &tmp_path, expected)
 }
 
-fn atomic_write_via_temp_path(
+#[cfg(test)]
+fn atomic_write_via_temp_path(path: &Path, contents: &str, tmp_path: &Path) -> anyhow::Result<()> {
+    atomic_write_via_temp_path_guarded(path, contents, tmp_path, None).map(|_| ())
+}
+
+fn atomic_write_via_temp_path_guarded(
     path: &Path,
     contents: &str,
     tmp_path: &Path,
-) -> anyhow::Result<()> {
+    expected: Option<(&str, Option<std::time::SystemTime>)>,
+) -> anyhow::Result<bool> {
     // Do not arm cleanup until create_new succeeds: an AlreadyExists path is
     // owned by another writer and must never be removed by this invocation.
     let mut f = fs::OpenOptions::new()
@@ -135,7 +159,7 @@ fn atomic_write_via_temp_path(
 
     // Once creation succeeds, this invocation owns tmp_path and may clean it
     // up on a write, flush, or rename failure.
-    let result = (|| -> std::io::Result<()> {
+    let result = (|| -> std::io::Result<bool> {
         // Config files may contain credentials. Retain an existing file's
         // permissions before putting any contents in its replacement.
         if let Ok(metadata) = fs::symlink_metadata(path) {
@@ -146,23 +170,35 @@ fn atomic_write_via_temp_path(
         f.write_all(contents.as_bytes())?;
         f.flush()?;
         drop(f);
-        fs::rename(tmp_path, path)
+        if let Some((original, modified)) = expected {
+            let metadata = fs::symlink_metadata(path)?;
+            if !metadata.is_file()
+                || metadata.modified().ok() != modified
+                || fs::read_to_string(path)? != original
+            {
+                fs::remove_file(tmp_path)?;
+                return Ok(false);
+            }
+        }
+        fs::rename(tmp_path, path)?;
+        Ok(true)
     })();
-    if let Err(e) = result {
-        let _ = fs::remove_file(tmp_path);
-        return Err(anyhow!(
-            "failed to atomically write {}: {e}",
-            path.display()
-        ));
+    match result {
+        Ok(written) => Ok(written),
+        Err(e) => {
+            let _ = fs::remove_file(tmp_path);
+            Err(anyhow!(
+                "failed to atomically write {}: {e}",
+                path.display()
+            ))
+        }
     }
-    Ok(())
 }
 
 /// Convenience: ensure `path`'s parent directory exists, then `atomic_write`.
 pub fn atomic_write_create_dirs(path: &Path, contents: &str) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     atomic_write(path, contents)
 }
@@ -346,16 +382,9 @@ mod tests {
         let stragglers: Vec<_> = fs::read_dir(tmp.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .contains(".cas-integrate.")
-            })
+            .filter(|e| e.file_name().to_string_lossy().contains(".cas-integrate."))
             .collect();
-        assert!(
-            stragglers.is_empty(),
-            "leftover tempfiles: {stragglers:?}"
-        );
+        assert!(stragglers.is_empty(), "leftover tempfiles: {stragglers:?}");
     }
 
     #[test]
@@ -414,8 +443,7 @@ mod tests {
         use std::thread;
         let tmp = TempDir::new().unwrap();
         let p = tmp.path().join("concurrent.txt");
-        let candidates: Vec<String> =
-            (0..16).map(|i| format!("payload-{i:03}")).collect();
+        let candidates: Vec<String> = (0..16).map(|i| format!("payload-{i:03}")).collect();
         let handles: Vec<_> = candidates
             .iter()
             .map(|c| {
@@ -440,11 +468,7 @@ mod tests {
         let stragglers: Vec<_> = fs::read_dir(tmp.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .contains(".cas-integrate.")
-            })
+            .filter(|e| e.file_name().to_string_lossy().contains(".cas-integrate."))
             .collect();
         assert!(stragglers.is_empty(), "leftover: {stragglers:?}");
     }

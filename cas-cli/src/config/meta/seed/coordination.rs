@@ -2,6 +2,75 @@ use crate::config::meta::registry::ConfigRegistry;
 use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 
 pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut ConfigRegistry) {
+    // Runtime FactoryConfig fields must also be discoverable and settable.
+    for (key, name, description, value_type, default, constraint) in [
+        ("factory.warn_stale_assignment", "Warn on Stale Worker Assignment",
+         "Warn when assigning a task to a worker whose worktree is behind its sync target.",
+         ConfigType::Bool, "true", Constraint::None),
+        ("factory.block_stale_assignment", "Block Stale Worker Assignment",
+         "Refuse assignment when a worker is behind its sync target by stale_threshold_commits or more.",
+         ConfigType::Bool, "true", Constraint::None),
+        ("factory.stale_threshold_commits", "Stale Worktree Commit Threshold",
+         "Number of commits behind the sync target that triggers stale assignment blocking.",
+         ConfigType::Int, "1", Constraint::Min(0)),
+        ("factory.stall_threshold_secs", "Worker Activity Stall Threshold",
+         "Seconds without observable worker activity before reporting a stall despite a fresh heartbeat.",
+         ConfigType::Int, "300", Constraint::Min(0)),
+        ("factory.context_recycle_threshold_percent", "Worker Context Recycle Threshold",
+         "Context occupancy percentage at which idle worker status recommends recycling; requires a known context window.",
+         ConfigType::Int, "80", Constraint::Range(0, 100)),
+        ("factory.stall_after_secs", "Supervisor Silence Threshold",
+         "Seconds of supervisor MCP silence before actionable focused-epic state produces a forward-motion wake.",
+         ConfigType::Int, "600", Constraint::Min(0)),
+        ("factory.delivery_stalled_priority_secs", "Priority Message Delivery Threshold",
+         "Seconds before an unread critical or high-priority coordination message produces a delivery-stalled notice.",
+         ConfigType::Int, "600", Constraint::Min(0)),
+        ("factory.delivery_stalled_normal_secs", "Normal Message Delivery Threshold",
+         "Seconds before an unread normal-priority coordination message produces a delivery-stalled notice.",
+         ConfigType::Int, "1800", Constraint::Min(0)),
+        ("factory.strict_cli", "Require Requested Worker CLI",
+         "Refuse fallback to another harness when the requested Codex CLI is unavailable; also enabled by --strict-cli.",
+         ConfigType::Bool, "false", Constraint::None),
+        ("factory.target_cache_high_watermark_percent", "Cargo Cache High Watermark",
+         "Filesystem usage percentage that signals factory Cargo cache pressure.",
+         ConfigType::Int, "85", Constraint::Range(0, 100)),
+        ("factory.target_cache_low_watermark_percent", "Cargo Cache Cleanup Watermark",
+         "Stop cache cleanup once projected filesystem usage reaches this percentage.",
+         ConfigType::Int, "75", Constraint::Range(0, 100)),
+        ("factory.target_cache_min_idle_secs", "Cargo Cache Minimum Idle Time",
+         "Preserve caches and previews written more recently than this many seconds during explicit garbage collection.",
+         ConfigType::Int, "7200", Constraint::Min(0)),
+        ("factory.target_cache_retention_count", "Warm Cargo Cache Retention",
+         "Number of newest stale worker caches retained warm, also bounding parked deliveries with warm target/debug caches.",
+         ConfigType::Int, "1", Constraint::Min(0)),
+    ] {
+        registry.register(ConfigMeta {
+            key,
+            section: "factory",
+            name,
+            description,
+            value_type,
+            default,
+            constraint,
+            advanced: true,
+            requires_feature: None,
+            keywords: &["factory", "worker", "resources"],
+            use_cases: &["Tune factory runtime behavior for this project"],
+        });
+    }
+    registry.register(ConfigMeta {
+        key: "factory.nice_cargo",
+        section: "factory",
+        name: "Lower Worker Scheduling Priority",
+        description: "Run factory workers with nice -n 10 so Cargo builds leave the supervisor responsive. Disable for single-worker sessions or benchmarking.",
+        value_type: ConfigType::Bool,
+        default: "true",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "worker", "cargo", "nice", "priority"],
+        use_cases: &["Keep the supervisor responsive during worker builds"],
+    });
     registry.register(ConfigMeta {
         key: "factory.commander_mirror_enabled",
         section: "factory",
@@ -28,6 +97,20 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             advanced: false, requires_feature: None,
             keywords: &["factory", "worker", "supervisor", "mcp", "credentials", "environment"],
             use_cases: &["Keep deployment and production database access on the supervisor"],
+        });
+    }
+    // cas-d757 (GH #1219): operator-authenticated CLIs and tools, denied to
+    // factory workers by the pre-tool hook.
+    for (key, name, default, description) in [
+        ("factory.worker_denied_clis", "Worker-denied CLIs", "vercel", "Operator-only. Executables a factory worker's shell may not run (matched on basename, through env/sudo/sh -c/npx-style wrappers), because without credentials they start a login that prompts the operator. The worker is told to ask the supervisor with a blocker. Supervisors are unaffected; empty disables the guard."),
+        ("factory.worker_denied_mcp_tools", "Worker-denied MCP Tools", "*vercel*", "Operator-only. MCP and connector tool-name patterns a factory worker may not call (case-insensitive; `*` matches any characters), including calls dispatched through mcp_execute. The worker is told to ask the supervisor with a blocker. Supervisors are unaffected; empty disables the guard."),
+    ] {
+        registry.register(ConfigMeta {
+            key, section: "factory", name, description,
+            value_type: ConfigType::StringList, default, constraint: Constraint::None,
+            advanced: false, requires_feature: None,
+            keywords: &["factory", "worker", "supervisor", "vercel", "auth", "deny", "mcp"],
+            use_cases: &["Keep operator-authenticated CLIs such as vercel away from workers"],
         });
     }
     registry.register(ConfigMeta {
@@ -120,6 +203,48 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             "Keep a shared 32-core host at four concurrent builders",
             "Raise the cap only when the host has spare CPU capacity",
         ],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.worker_memory_high_gib",
+        section: "factory",
+        name: "Worker Build Memory High (GiB)",
+        description: "Per-build MemoryHigh in a dedicated systemd user scope. 0 shares half of host RAM across max_concurrent_builders, bounded to 256 MiB..16 GiB per build. Unavailable user scopes and non-Linux hosts log and run unscoped.",
+        value_type: ConfigType::Int,
+        default: "0",
+        constraint: Constraint::Range(0, 65536),
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "cargo", "build", "memory", "systemd", "scope", "workers"],
+        use_cases: &["Keep worker compilation from swapping out the supervisor and daemon"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.render_max_fps",
+        section: "factory",
+        name: "Factory TUI Output Frame Cap (focused pane)",
+        description: "Most frames per second the factory TUI draws for output from the focused pane. Input echo and layout changes are drawn at once; read when the factory daemon starts.",
+        value_type: ConfigType::Int,
+        default: "15",
+        constraint: Constraint::Range(1, 120),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "tui", "render", "fps", "frames", "terminal", "latency"],
+        use_cases: &["Lower the repaint rate when the host terminal is busy painting worker output"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.render_unfocused_fps",
+        section: "factory",
+        name: "Factory TUI Output Frame Cap (other panes)",
+        description: "Most frames per second the factory TUI draws for output from visible panes other than the focused one. Panes not on screen never draw. The two caps add up, so output frames reach at most render_max_fps + render_unfocused_fps per second (20 by default); read when the factory daemon starts.",
+        value_type: ConfigType::Int,
+        default: "5",
+        constraint: Constraint::Range(1, 120),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "tui", "render", "fps", "frames", "terminal", "workers"],
+        use_cases: &["Keep busy worker panes from repainting the whole factory TUI"],
     });
 
     registry.register(ConfigMeta {

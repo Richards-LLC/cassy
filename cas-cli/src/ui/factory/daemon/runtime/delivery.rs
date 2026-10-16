@@ -404,6 +404,29 @@ pub(crate) fn enqueue_director_prompt(
     Ok(id)
 }
 
+/// Stall nudges always enter the durable lane, even for a ready pane.
+/// The episode identity and its session scope survive daemon retries.
+pub(crate) fn enqueue_worker_stall_nudge(
+    cas_dir: &Path,
+    factory_session: &str,
+    worker: &str,
+    task_id: &str,
+    text: &str,
+    episode_start: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<i64> {
+    let subject = serde_json::json!([worker, task_id]).to_string();
+    let episode =
+        super::lifecycle::attention_episode_key("worker_stall_nudge", &subject, episode_start);
+    let key = format!("worker-attention:{factory_session}:{episode}");
+    let queue = crate::store::open_prompt_queue_store(cas_dir)?;
+    let id = match queue.enqueue_worker_stall_nudge(worker, text, factory_session, task_id, &key)? {
+        cas_store::EnqueueIdempotentResult::Created(id)
+        | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+    };
+    wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
+}
+
 /// Prefix PTY-delivered text with literal sender attribution.
 ///
 /// Emits exactly `Message from <sender>: <text>` — no summary interpolation before
@@ -416,9 +439,10 @@ pub(crate) fn attribute_for_pty(source: &str, text: &str) -> String {
 /// The one line typed into a Claude+teams recipient's pane to WAKE it — never
 /// the message body (cas-cdf9).
 ///
-/// The body is written once, to the teams inbox, and the recipient's harness
-/// renders that copy. Before this, the idle nudge typed the very same body into
-/// the pane as well, so every factory message arrived twice: once wrapped in
+/// The body reaches the recipient once, through the CAS hook (cas-1f0c; see
+/// [`claude_teams_inbox_text`]). Before cas-cdf9, the idle nudge typed the
+/// very same body into the pane as well, so every factory message arrived
+/// twice: once wrapped in
 /// the harness's `<teammate-message>` envelope and once as a bare turn. Both
 /// copies carried the identical `CAS provenance:` header, because that header
 /// is composed once at `queue_and_events.rs` and handed to both writes — so the
@@ -433,18 +457,65 @@ pub(crate) fn attribute_for_pty(source: &str, text: &str) -> String {
 /// all, so it cannot type it.
 ///
 /// The line still NAMES the notification id rather than being an empty wake, so
-/// the wake degrades safely: if the harness ever fails to render the inbox copy,
-/// the recipient still learns a message exists and can `inbox_poll` it, instead
-/// of being woken to silence.
+/// the wake degrades safely: if the body never reaches the recipient, it still
+/// learns a message exists and can `inbox_poll` it, instead of being woken to
+/// silence.
+///
+/// cas-1f0c (contract v2 P1.4): the wording is what actually happens. A hook
+/// expands the named id into an `[incoming messages]` block once (at turn
+/// start, or at the first tool call of a turn no prompt hook served), or a
+/// body too long for a hook, or re-sent by the time fallback, comes as its own
+/// Teams message; a note in the block says which. A turn may end before any
+/// block appears, so the wake makes no promise about "this turn" and names
+/// the `inbox_poll` that always reads the body. The old "(body not repeated
+/// here)" was false: the hook expanded the body and the Teams copy then
+/// rendered it again.
 pub(crate) fn pointer_wake_payload(source: &str, notification_id: Option<i64>) -> String {
     match notification_id {
         Some(id) => format!(
-            "CAS wake: message {id} from {source} is in your inbox — see inbox: \
-             inbox_poll notification_id={id} (body not repeated here)."
+            "CAS wake: message {id} from {source}. CAS shows its body once, in an \
+             [incoming messages] block or as its own message, or a note in that block says why \
+             not. If neither is in front of you, run inbox_poll notification_id={id}."
         ),
         None => format!(
-            "CAS wake: a message from {source} is in your inbox — see inbox (body not repeated here)."
+            "CAS wake: a message from {source} is in your inbox; read it with inbox_poll."
         ),
+    }
+}
+
+/// cas-1f0c (contract v2 P1.4): what the daemon writes to a Claude Teams inbox
+/// for queued message `notification_id`. A pointer, never the body.
+///
+/// Claude Code takes an inbox row into its own pending store as soon as it is
+/// written and renders it as a `<teammate-message>` at the recipient's next
+/// turn boundary; a written body cannot be withdrawn. Meanwhile the CAS hooks
+/// surface the same row: the turn-start hook expands a pointer wake, and the
+/// tool-boundary hook shows a row handed off mid-turn (cas-b5ad). With the body
+/// in both places every pointer-woken message reached the recipient three
+/// times. The hook is now the one body path: this pointer names the id, so the
+/// turn the Teams copy starts expands it (or says it was already shown), and
+/// `inbox_poll notification_id=<id>` reads it if no hook ran.
+///
+/// The `[cas #N …]` provenance line, when present, is kept so the teammate
+/// block still shows the message's id, age and first-delivery stamp.
+///
+/// `body` is the row's own prompt. A body no hook can show whole
+/// ([`cas_store::fits_hook_surface`], measured exactly as the hook measures
+/// it) keeps its full `text` here: Claude Code caps hook context near 10,000
+/// characters, and the hook leaves such a row unread with a note instead.
+pub(crate) fn claude_teams_inbox_text(
+    text: &str,
+    body: &str,
+    source: &str,
+    notification_id: i64,
+) -> String {
+    if !cas_store::fits_hook_surface(body) {
+        return text.to_string();
+    }
+    let pointer = pointer_wake_payload(source, Some(notification_id));
+    match text.lines().next().filter(|line| line.starts_with("[cas #")) {
+        Some(provenance) => format!("{provenance}\n\n{pointer}"),
+        None => pointer,
     }
 }
 
@@ -899,9 +970,68 @@ impl FactoryDaemon {
             retract_worker,
             retract_task,
             retract_epic,
+            None,
         )
         .await
         .map(|(outcome, _)| outcome)
+    }
+
+    /// [`Self::deliver_to_worker`] for queued row `notification_id` with
+    /// prompt `body`: a Claude Teams recipient's inbox gets a pointer to the
+    /// row, and the CAS hook shows the body (cas-1f0c). Every other channel
+    /// carries `text` as before.
+    pub(crate) async fn deliver_queued_to_worker(
+        &self,
+        target: &str,
+        source: &str,
+        text: &str,
+        summary: Option<&str>,
+        notification_id: i64,
+        body: &str,
+    ) -> anyhow::Result<InjectOutcome> {
+        self.deliver_to_worker_via_channel(
+            target,
+            source,
+            text,
+            summary,
+            None,
+            None,
+            None,
+            None,
+            Some((notification_id, body)),
+        )
+        .await
+        .map(|(outcome, _)| outcome)
+    }
+
+    /// cas-1f0c: write `text` to `recipient`'s Claude Teams inbox and
+    /// nowhere else: no PTY fallback, so an error means the write itself
+    /// failed and nothing reached the recipient.
+    pub(crate) fn write_teams_inbox_only(
+        &self,
+        recipient: &str,
+        source: &str,
+        text: &str,
+        summary: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let primary = self
+            .teams
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Claude Agent Teams is not active"))?;
+        let pane_target = if recipient == "supervisor" {
+            self.app.supervisor_name()
+        } else {
+            recipient
+        };
+        let inbox_target = if pane_target == self.app.supervisor_name() {
+            "supervisor"
+        } else {
+            pane_target
+        };
+        let view = self.recipient_teams_view(pane_target);
+        view.as_ref()
+            .unwrap_or(primary)
+            .write_to_inbox(inbox_target, source, text, summary, None)
     }
 
     fn alert_missing_team_tree(&self, teams: &super::teams::TeamsManager) {
@@ -929,6 +1059,7 @@ impl FactoryDaemon {
         retract_worker: Option<&str>,
         retract_task: Option<&str>,
         retract_epic: Option<&str>,
+        queued: Option<(i64, &str)>,
     ) -> anyhow::Result<(InjectOutcome, DeliveryChannel)> {
         // Normalise the target into the two name forms the two channels expect:
         //   - `pane_target`  : the real pane id `Mux::inject` routes on
@@ -964,11 +1095,16 @@ impl FactoryDaemon {
                 if teams.team_tree_missing() {
                     self.alert_missing_team_tree(teams);
                 }
+                // cas-1f0c: a queued row's body reaches a Claude Teams
+                // recipient through the CAS hook only; its inbox gets a pointer.
+                let inbox_text =
+                    queued.map(|(id, body)| claude_teams_inbox_text(text, body, source, id));
+                let inbox_text = inbox_text.as_deref().unwrap_or(text);
                 let write = match (retract_worker, retract_task, retract_epic) {
                     (Some(worker), _, _) => teams.write_to_inbox_for_worker_idle(
                         inbox_target,
                         source,
-                        text,
+                        inbox_text,
                         summary,
                         color,
                         worker,
@@ -976,7 +1112,7 @@ impl FactoryDaemon {
                     (None, Some(task_id), _) => teams.write_to_inbox_for_merge_alert(
                         inbox_target,
                         source,
-                        text,
+                        inbox_text,
                         summary,
                         color,
                         task_id,
@@ -984,13 +1120,13 @@ impl FactoryDaemon {
                     (None, None, Some(epic_id)) => teams.write_to_inbox_for_epic_completion(
                         inbox_target,
                         source,
-                        text,
+                        inbox_text,
                         summary,
                         color,
                         epic_id,
                     ),
                     (None, None, None) => {
-                        teams.write_to_inbox(inbox_target, source, text, summary, color)
+                        teams.write_to_inbox(inbox_target, source, inbox_text, summary, color)
                     }
                 };
                 match write {
@@ -1077,6 +1213,10 @@ impl FactoryDaemon {
     /// `TeamsInbox` row so `prune_stale_merge_alerts` can retract it if the
     /// merge lands before the supervisor ever reads it. `None` for every other
     /// message. Ignored on the `Pty` channel (no queued row exists to tag).
+    ///
+    /// `queued_body` (cas-1f0c): the row's own prompt, which decides whether
+    /// a Claude Teams copy is a pointer or must carry the full `text`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn deliver_to_worker_with_idle_nudge(
         &self,
         target: &str,
@@ -1087,6 +1227,7 @@ impl FactoryDaemon {
         wake: super::queue_and_events::WakeDecision,
         retract_task: Option<&str>,
         notification_id: Option<i64>,
+        queued_body: Option<&str>,
     ) -> anyhow::Result<NudgeReport> {
         let (primary_outcome, channel) = self
             .deliver_to_worker_via_channel(
@@ -1098,6 +1239,7 @@ impl FactoryDaemon {
                 None,
                 retract_task,
                 None,
+                notification_id.zip(queued_body),
             )
             .await?;
 
@@ -1319,6 +1461,35 @@ impl FactoryDaemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ct2_p1_director_nudge_is_measurable() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let start = chrono::Utc::now();
+        let first = enqueue_worker_stall_nudge(
+            &cas_dir,
+            "session",
+            "worker",
+            "cas-poll",
+            "gone quiet",
+            start,
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            enqueue_worker_stall_nudge(&cas_dir, "session", "worker", "cas-poll", "replay", start)
+                .unwrap()
+        );
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, first);
+        // Match the daemon's full-row reread; legacy feed peeks omit kind.
+        let row = queue.queued_prompt(first).unwrap().unwrap();
+        assert_eq!(row.kind.as_deref(), Some("worker_stall_nudge"));
+        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+    }
 
     #[test]
     fn missing_team_path_triggers_fallback_but_other_errors_do_not() {
@@ -1601,6 +1772,7 @@ mod tests {
             queued[0].prompt
         );
         assert!(
+            // pin: the queued assignment wake must carry the start command the worker runs
             queued[0].prompt.contains("action=start"),
             "the queued wake-up must tell the worker how to pick the task up: {}",
             queued[0].prompt
@@ -1932,12 +2104,14 @@ mod tests {
     }
 
     /// The wake names the id so it degrades safely: a recipient woken without
-    /// a rendered inbox copy can still `inbox_poll` the exact message.
+    /// a rendered body can still `inbox_poll` the exact message. cas-1f0c: it
+    /// says where the body is shown and no longer claims it is not repeated.
     #[test]
     fn pointer_wake_names_the_notification_id_and_the_inbox() {
         let wake = pointer_wake_payload("supervisor", Some(24535));
-        assert!(wake.contains("24535"), "{wake}");
-        assert!(wake.contains("see inbox"), "{wake}");
+        assert!(wake.starts_with("CAS wake: message 24535 from supervisor."), "{wake}");
+        assert!(wake.contains("[incoming messages]"), "{wake}");
+        assert!(!wake.contains("not repeated"), "{wake}");
         // cas-ad92: the named poll returns the row even while the transport
         // still holds it claimed, so the wake says exactly how to read it.
         assert!(wake.contains("inbox_poll notification_id=24535"), "{wake}");
@@ -1945,8 +2119,164 @@ mod tests {
 
         // An id-less wake still points at the inbox rather than claiming an id.
         let anonymous = pointer_wake_payload("supervisor", None);
-        assert!(anonymous.contains("see inbox"), "{anonymous}");
+        assert!(anonymous.contains("inbox_poll"), "{anonymous}");
         assert!(!anonymous.contains("message  "), "{anonymous}");
+    }
+
+    /// cas-1f0c (contract v2 P1.4): the Claude Teams inbox copy of a queued
+    /// row is a pointer. It keeps the `[cas #N …]` provenance line and names
+    /// the id the hook expands, and carries no part of the body.
+    #[test]
+    fn claude_teams_inbox_text_is_a_pointer_not_the_body() {
+        let body = "Take (B), but make verification.enabled operator-only.";
+        let text = format!("[cas #24508 supervisor-authored 0s first]\n\n{body}");
+        let inbox = claude_teams_inbox_text(&text, body, "supervisor", 24508);
+        assert!(!inbox.contains(body), "{inbox}");
+        assert!(inbox.starts_with("[cas #24508 supervisor-authored 0s first]\n\n"), "{inbox}");
+        assert!(inbox.ends_with(&pointer_wake_payload("supervisor", Some(24508))), "{inbox}");
+
+        let bare = claude_teams_inbox_text(body, body, "warm-lark-16", 7);
+        assert_eq!(bare, pointer_wake_payload("warm-lark-16", Some(7)));
+    }
+
+    /// cas-1f0c review item 1: a body no hook can show whole (Claude Code caps
+    /// hook context near 10,000 characters) keeps its full text in the Teams
+    /// copy, and the size test is the hook's own, on the row's prompt.
+    #[test]
+    fn claude_teams_inbox_text_keeps_a_body_too_long_for_any_hook() {
+        let long = "x".repeat(cas_store::HOOK_SURFACE_BUDGET_CHARS);
+        assert!(!cas_store::fits_hook_surface(&long));
+        let text = format!("[cas #9 supervisor-authored 0s first]\n\n{long}");
+        assert_eq!(claude_teams_inbox_text(&text, &long, "supervisor", 9), text);
+
+        let fits = "y".repeat(
+            cas_store::HOOK_SURFACE_BUDGET_CHARS - cas_store::HOOK_SURFACE_ROW_OVERHEAD_CHARS,
+        );
+        assert!(cas_store::fits_hook_surface(&fits));
+        let text = format!("[cas #10 supervisor-authored 0s first]\n\n{fits}");
+        assert!(!claude_teams_inbox_text(&text, &fits, "supervisor", 10).contains(&fits));
+    }
+
+    /// cas-1f0c review items 2 and 4, through the real daemon and the real
+    /// Claude Teams inbox file. A queued row's Teams copy is a pointer; a body
+    /// too long for any hook is written whole. When no hook or poll shows a
+    /// pointer's row within the window, the sweep writes the full body once,
+    /// durably; a row a hook already showed, and a row whose copy already
+    /// carried the body, get none.
+    #[tokio::test]
+    async fn claude_teams_queued_write_is_a_pointer_and_the_fallback_writes_the_body_once() {
+        let mut guard = crate::test_support::TestEnvGuard::temp_home();
+        let config_dir = guard.home().join(".claude");
+        guard.set("CLAUDE_CONFIG_DIR", &config_dir);
+        let root = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(root.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let session = daemon.session_name.clone();
+        let worker = "worker-a";
+        let teams = super::super::teams::TeamsManager::new(&session);
+        teams
+            .init_team_config(
+                &[worker.to_string()],
+                root.path(),
+                &std::collections::HashMap::new(),
+                "lead-session",
+            )
+            .unwrap();
+        daemon.teams = Some(teams);
+        daemon.app.add_worker_name_for_test(worker);
+        assert_eq!(daemon.app.harness_for(worker), cas_mux::SupervisorCli::Claude);
+        let inbox_file = config_dir
+            .join("teams")
+            .join(&session)
+            .join("inboxes")
+            .join(format!("{worker}.json"));
+        let read_inbox = || -> Vec<super::super::teams::InboxMessage> {
+            serde_json::from_str(&std::fs::read_to_string(&inbox_file).unwrap()).unwrap()
+        };
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let deliver = |id: i64, body: &str| {
+            let text = format!("[cas #{id} supervisor-authored 0s first]\n\n{body}");
+            let daemon = &daemon;
+            let body = body.to_string();
+            async move {
+                daemon
+                    .deliver_queued_to_worker(worker, "supervisor", &text, None, id, &body)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let body = "Rebase onto the epic tip and re-run the named tests.";
+        let id = queue.enqueue_with_session("supervisor", worker, body, &session).unwrap();
+        assert_eq!(deliver(id, body).await, InjectOutcome::Delivered);
+        let inbox = read_inbox();
+        assert_eq!(inbox.len(), 1);
+        assert!(!inbox[0].text.contains(body), "{}", inbox[0].text);
+        assert!(inbox[0].text.contains(&format!("CAS wake: message {id} from supervisor")));
+
+        let long = "One numbered detail of the brief.\n".repeat(320);
+        let long_id = queue.enqueue_with_session("supervisor", worker, &long, &session).unwrap();
+        deliver(long_id, &long).await;
+        assert!(read_inbox()[1].text.contains(long.trim()), "a too-long body is written whole");
+
+        let shown = "Already read through the hook.";
+        let shown_id = queue.enqueue_with_session("supervisor", worker, shown, &session).unwrap();
+        deliver(shown_id, shown).await;
+        assert_eq!(read_inbox().len(), 3);
+
+        // Each recipient holds a transport claim taken four minutes ago; only
+        // `shown_id` was then shown by a hook.
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let handed_off = (chrono::Utc::now() - chrono::Duration::minutes(4)).to_rfc3339();
+        for row in [id, long_id, shown_id] {
+            assert!(queue.claim_recipient_transport(row, worker).unwrap());
+            conn.execute(
+                "UPDATE prompt_queue_recipient_seen SET seen_at = ?1 WHERE prompt_id = ?2",
+                rusqlite::params![handed_off, row],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            queue
+                .surface_wake_named_for_recipient(worker, Some(&session), &[shown_id])
+                .unwrap()
+                .len(),
+            1
+        );
+
+        daemon.fallback_unsurfaced_teams_pointers(queue.as_ref()).await;
+        let inbox = read_inbox();
+        assert_eq!(inbox.len(), 4, "one fallback write: {inbox:?}");
+        assert!(inbox[3].text.contains(&format!("[cas #{id} ")), "{}", inbox[3].text);
+        assert!(inbox[3].text.contains(body), "{}", inbox[3].text);
+        assert!(queue.teams_body_fallback_claimed(id, worker).unwrap());
+
+        daemon.fallback_unsurfaced_teams_pointers(queue.as_ref()).await;
+        assert_eq!(read_inbox().len(), 4, "the fallback is one-shot");
+
+        // A broadcast pointer gets the same fallback for this peer, five
+        // hours on: the window follows the queue's stale TTL, not one hour.
+        let shared = "All workers: the epic tip moved.";
+        let broadcast = queue
+            .enqueue_with_session("supervisor", "all_workers", shared, &session)
+            .unwrap();
+        let text = format!("[cas #{broadcast} supervisor-authored 0s first]\n\n{shared}");
+        daemon
+            .deliver_queued_to_worker(worker, "supervisor", &text, None, broadcast, shared)
+            .await
+            .unwrap();
+        assert!(!read_inbox()[4].text.contains(shared), "a broadcast copy is a pointer too");
+        assert!(queue.claim_recipient_transport(broadcast, worker).unwrap());
+        conn.execute(
+            "UPDATE prompt_queue_recipient_seen SET seen_at = ?1 WHERE prompt_id = ?2",
+            rusqlite::params![(chrono::Utc::now() - chrono::Duration::hours(5)).to_rfc3339(), broadcast],
+        )
+        .unwrap();
+        daemon.fallback_unsurfaced_teams_pointers(queue.as_ref()).await;
+        let inbox = read_inbox();
+        assert_eq!(inbox.len(), 6, "{inbox:?}");
+        assert!(inbox[5].text.contains(shared), "{}", inbox[5].text);
+        assert!(queue.teams_body_fallback_claimed(broadcast, worker).unwrap());
     }
 
     /// cas-cdf9: the PTY wake is registered against the REAL notification id.

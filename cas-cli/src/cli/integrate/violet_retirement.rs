@@ -1,7 +1,7 @@
 //! Remove only registrations for the retired production hub and move the
 //! production registration to the canonical hostname. Custom upstreams,
 //! restrictive policy, comments and unrelated settings survive.
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -11,6 +11,7 @@ use cas_types::violet_compatibility::{
 use cmcp_core::config::{ExternalToolConfig, Scope, VIOLET_SERVER, VIOLET_TOOLS};
 
 use super::fs as ifs;
+use super::violet::{HubProbe, ProbeOutcome, ProxyHubProbe};
 
 fn retire_toml_entry(document: &mut toml_edit::DocumentMut, key: &str) -> bool {
     let contract = violet_compatibility();
@@ -47,11 +48,7 @@ fn set_string(item: &mut toml_edit::Item, text: &str) {
     }
 }
 
-/// Point the production `violet` entry under `key` at the canonical URL. With
-/// `rename_env`, `env:` credential references are renamed to their `VIOLET_*`
-/// names too: only the proxy resolves references through the legacy fallback,
-/// so harness entries keep their names until `cas integrate violet` renames
-/// the credentials file and rewrites them together.
+/// Point a production entry at the canonical URL; optionally rename proxy refs.
 fn modernize_toml_entry(
     document: &mut toml_edit::DocumentMut,
     key: &str,
@@ -170,6 +167,29 @@ fn retire_proxy_server(document: &mut toml_edit::DocumentMut) -> bool {
 }
 
 fn retire_claude_document(document: &mut serde_json::Value) -> bool {
+    retire_claude_document_with(document, &mut str::to_owned)
+}
+
+/// Rewrite Claude's interpolation syntax without altering literal header text.
+fn substitute_references(text: &str, resolve: &mut impl FnMut(&str) -> String) -> String {
+    let mut result = String::new();
+    let mut rest = text;
+    while let Some((before, after)) = rest.split_once("${") {
+        let Some((name, tail)) = after.split_once('}') else {
+            break;
+        };
+        result.push_str(before);
+        result.push_str(&resolve(name));
+        rest = tail;
+    }
+    result.push_str(rest);
+    result
+}
+
+fn retire_claude_document_with(
+    document: &mut serde_json::Value,
+    rename: &mut impl FnMut(&str) -> String,
+) -> bool {
     let contract = violet_compatibility();
     let Some(servers) = document
         .get_mut("mcpServers")
@@ -190,16 +210,25 @@ fn retire_claude_document(document: &mut serde_json::Value) -> bool {
         servers.entry(VIOLET_SERVER.to_owned()).or_insert(legacy);
         changed = true;
     }
-    // URL only: see `modernize_toml_entry` for why harness credential
-    // references are renamed by `cas integrate violet` alone.
-    if let Some(url) = servers
-        .get_mut(VIOLET_SERVER)
-        .and_then(|server| server.get_mut("url"))
-        && url.as_str().is_some_and(is_violet_hub_url)
-        && url.as_str() != Some(violet_hub_url())
+    if let Some(entry) = servers.get_mut(VIOLET_SERVER)
+        && entry["url"].as_str().is_some_and(is_violet_hub_url)
     {
-        *url = serde_json::Value::from(violet_hub_url());
-        changed = true;
+        if entry["url"].as_str() != Some(violet_hub_url()) {
+            entry["url"] = serde_json::Value::from(violet_hub_url());
+            changed = true;
+        }
+        if let Some(headers) = entry.get_mut("headers").and_then(|h| h.as_object_mut()) {
+            for value in headers.values_mut() {
+                if let Some(text) = value.as_str() {
+                    let rewritten =
+                        substitute_references(text, &mut |name| format!("${{{}}}", rename(name)));
+                    if rewritten != text {
+                        *value = rewritten.into();
+                        changed = true;
+                    }
+                }
+            }
+        }
     }
     changed
 }
@@ -208,8 +237,46 @@ pub(super) fn retire_claude_entry(document: &mut serde_json::Value) -> bool {
     retire_claude_document(document)
 }
 pub(super) fn retire_codex_entry(document: &mut toml_edit::DocumentMut) -> bool {
+    retire_codex_entry_with(document, &mut str::to_owned)
+}
+
+fn retire_codex_entry_with(
+    document: &mut toml_edit::DocumentMut,
+    rename: &mut impl FnMut(&str) -> String,
+) -> bool {
     let retired = retire_toml_entry(document, "mcp_servers");
-    modernize_toml_entry(document, "mcp_servers", false) | retired
+    let mut changed = modernize_toml_entry(document, "mcp_servers", false) | retired;
+    if let Some(entry) = document
+        .get_mut("mcp_servers")
+        .and_then(|servers| servers.get_mut(VIOLET_SERVER))
+        .and_then(|entry| entry.as_table_like_mut())
+        && entry
+            .get("url")
+            .and_then(|v| v.as_str())
+            .is_some_and(is_violet_hub_url)
+    {
+        let mut rewrite = |value: &mut toml_edit::Item| {
+            if let Some(name) = value.as_str() {
+                let canonical = rename(name);
+                if canonical != name {
+                    set_string(value, &canonical);
+                    changed = true;
+                }
+            }
+        };
+        if let Some(value) = entry.get_mut("bearer_token_env_var") {
+            rewrite(value);
+        }
+        if let Some(headers) = entry
+            .get_mut("env_http_headers")
+            .and_then(|h| h.as_table_like_mut())
+        {
+            for (_, value) in headers.iter_mut() {
+                rewrite(value);
+            }
+        }
+    }
+    changed
 }
 
 fn retire_file(path: &Path, format: &str) -> Result<bool> {
@@ -254,6 +321,9 @@ struct ProfileRetirement {
     inspected: usize,
     migrated: usize,
     warnings: Vec<(PathBuf, String)>,
+    authenticated: Vec<PathBuf>,
+    credential_warnings: Vec<String>,
+    unexported: std::collections::BTreeSet<String>,
 }
 
 impl ProfileRetirement {
@@ -261,11 +331,23 @@ impl ProfileRetirement {
         // Display only the outer error context: parser chains may contain
         // credential values from the file being parsed.
         let reason = error.to_string();
+        if self
+            .warnings
+            .contains(&(path.to_path_buf(), reason.clone()))
+        {
+            return;
+        }
         eprintln!(
             "warning: Violet migration skipped {}: {reason}",
             path.display()
         );
         self.warnings.push((path.to_path_buf(), reason));
+    }
+    fn credential_repair(&mut self, warning: String) {
+        if !self.credential_warnings.contains(&warning) {
+            eprintln!("warning: Violet credential reference repaired: {warning}");
+            self.credential_warnings.push(warning);
+        }
     }
 }
 
@@ -297,6 +379,14 @@ fn profile_target(roots: &[PathBuf], path: &Path) -> Result<Option<PathBuf>> {
 /// accounts. Explicit profile directories are included even outside HOME.
 /// One inaccessible profile never interrupts the remaining sync.
 fn retire_machine_profiles(home: &Path, extra: &[(&str, PathBuf)]) -> ProfileRetirement {
+    retire_machine_profiles_with(home, extra, None)
+}
+
+fn retire_machine_profiles_with(
+    home: &Path,
+    extra: &[(&str, PathBuf)],
+    update: Option<&UpdateMigration<'_>>,
+) -> ProfileRetirement {
     let mut report = ProfileRetirement::default();
     let mut roots = match home.canonicalize() {
         Ok(home) => vec![home],
@@ -355,7 +445,12 @@ fn retire_machine_profiles(home: &Path, extra: &[(&str, PathBuf)]) -> ProfileRet
             match profile_target(&roots, &path) {
                 Ok(Some(target)) if visited_files.insert(target.clone()) => {
                     report.inspected += 1;
-                    match retire_file(&target, format) {
+                    let result = if let Some(update) = update {
+                        update.migrate_profile(&target, format, &mut report)
+                    } else {
+                        retire_file(&target, format)
+                    };
+                    match result {
                         Ok(true) => report.migrated += 1,
                         Ok(false) => {}
                         Err(error) => report.warn(&path, error),
@@ -411,9 +506,994 @@ pub fn retire_installed_hub(project_proxy: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+/// `cas update` owns both the rewrite and its authenticated receipt. Run once
+/// in the user-level phase, rather than once for every registered project.
+pub fn migrate_installed_hub_on_update() -> Result<()> {
+    let probe = UpdateBudgetProbe {
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+    };
+    let report = migrate_installed_hub_with_probe(&probe)?;
+    anyhow::ensure!(
+        report.warnings.is_empty(),
+        "Violet update incomplete for {} profile(s); see the named warnings above",
+        report.warnings.len()
+    );
+    Ok(())
+}
+
+struct UpdateBudgetProbe {
+    deadline: std::time::Instant,
+}
+
+impl HubProbe for UpdateBudgetProbe {
+    fn list_tools(&self, server: &cmcp_core::config::ServerConfig) -> ProbeOutcome {
+        let remaining = self
+            .deadline
+            .saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return ProbeOutcome::Skipped {
+                reason: "Violet update probe budget exhausted".into(),
+            };
+        }
+        ProxyHubProbe
+            .list_tools_with_timeout(server, remaining.min(std::time::Duration::from_secs(10)))
+    }
+}
+
+fn migrate_installed_hub_with_probe(probe: &dyn HubProbe) -> Result<ProfileRetirement> {
+    if let Some(refusal) = cas_pty::violet_env::warn_credentials_file_for_cli() {
+        // The CLI helper printed this path once; retain it in the receipt and
+        // refuse unsafe input before a migration can read or rewrite it.
+        let mut report = ProfileRetirement::default();
+        report.warnings.push(refusal);
+        return Ok(report);
+    }
+    let private_before = cas_pty::violet_env::credential_file()
+        .map(|path| cas_pty::violet_env::literal_file_values(&path))
+        .unwrap_or_default();
+    let values = super::violet::update_machine_credentials()?;
+    let home = dirs::home_dir().context("could not determine HOME for Violet migration")?;
+    let extra: Vec<_> = [("claude", "CLAUDE_CONFIG_DIR"), ("codex", "CODEX_HOME")]
+        .into_iter()
+        .filter_map(|(format, name)| std::env::var_os(name).map(|p| (format, PathBuf::from(p))))
+        .collect();
+    let mut update = UpdateMigration::new(&home, values, probe);
+    update.private_before = private_before;
+    let mut report = retire_machine_profiles_with(&home, &extra, Some(&update));
+    if let Ok(user) = Scope::User.config_path()
+        && user.is_file()
+    {
+        match update.migrate_profile(&user, "proxy", &mut report) {
+            Ok(true) => report.migrated += 1,
+            Ok(false) => {}
+            Err(error) => report.warn(&user, error),
+        }
+    }
+    Ok(report)
+}
+
+struct UpdateMigration<'a> {
+    values: BTreeMap<String, String>,
+    candidates: Vec<String>,
+    private_before: BTreeMap<String, String>,
+    probe: &'a dyn HubProbe,
+}
+
+impl<'a> UpdateMigration<'a> {
+    fn new(_home: &Path, values: BTreeMap<String, String>, probe: &'a dyn HubProbe) -> Self {
+        let candidates = values
+            .keys()
+            .filter(|name| {
+                Self::managed_token(name) && values.get(*name).is_some_and(|v| !v.trim().is_empty())
+            })
+            .cloned()
+            .collect();
+        Self {
+            values,
+            candidates,
+            private_before: Default::default(),
+            probe,
+        }
+    }
+
+    fn usable(&self, name: &str) -> bool {
+        self.values.get(name).is_some_and(|v| !v.trim().is_empty())
+    }
+
+    fn managed_token(name: &str) -> bool {
+        name.starts_with("VIOLET_SLACK_TOKEN_") && name != "VIOLET_SLACK_TOKEN_ENV"
+    }
+
+    fn rename(&self, name: &str, path: &Path, report: &mut ProfileRetirement) -> String {
+        let canonical = canonical_violet_credential_name(name);
+        let legacy = name
+            .strip_prefix(violet_compatibility().legacy_token_prefix.as_str())
+            .is_some_and(|suffix| suffix.starts_with('_'));
+        let replacement = if self.usable(&canonical) {
+            canonical
+        } else if legacy
+            && !self.usable(name)
+            && !self
+                .private_before
+                .get(name)
+                .is_some_and(|v| !v.trim().is_empty())
+            && self.candidates.len() == 1
+        {
+            self.candidates[0].clone()
+        } else {
+            name.to_owned()
+        };
+        if replacement != name && !self.usable(name) {
+            let reason = if self
+                .private_before
+                .get(name)
+                .is_some_and(|v| !v.trim().is_empty())
+            {
+                "private credential renamed"
+            } else {
+                "legacy name had no value"
+            };
+            let warning = format!("{}: {name} → {replacement} ({reason})", path.display());
+            report.credential_repair(warning);
+        }
+        replacement
+    }
+
+    fn value(&self, name: &str) -> Result<String> {
+        self.values
+            .get(name)
+            .filter(|v| !v.trim().is_empty())
+            .cloned()
+            .with_context(|| {
+                let candidates = if self.candidates.len() > 1 {
+                    format!(
+                        "; ambiguous canonical candidates: {}",
+                        self.candidates.join(", ")
+                    )
+                } else {
+                    String::new()
+                };
+                format!("credential {name} is empty or unset{candidates}; no request sent")
+            })
+    }
+
+    fn expand(&self, text: &str) -> Result<String> {
+        let mut missing = None;
+        let expanded = substitute_references(text, &mut |name| match self.value(name) {
+            Ok(value) => value,
+            Err(error) => {
+                missing = Some(error);
+                String::new()
+            }
+        });
+        if let Some(error) = missing {
+            return Err(error);
+        }
+        Ok(expanded)
+    }
+
+    fn migrate_profile(
+        &self,
+        path: &Path,
+        format: &str,
+        report: &mut ProfileRetirement,
+    ) -> Result<bool> {
+        self.migrate_profile_transaction(path, format, report, false, &|_| {})
+    }
+
+    fn migrate_profile_transaction(
+        &self,
+        path: &Path,
+        format: &str,
+        report: &mut ProfileRetirement,
+        retried: bool,
+        before_write: &dyn Fn(&Path),
+    ) -> Result<bool> {
+        let modified = std::fs::metadata(path)?.modified().ok();
+        let raw = ifs::read_capped(path)?;
+        if raw.trim().is_empty() {
+            return Ok(false);
+        }
+        let mut referenced = std::collections::BTreeSet::new();
+        let mut headers = std::collections::HashMap::new();
+        let mut auth = None;
+        let (changed, rewritten, url, sse) = if format == "claude" {
+            let mut doc: serde_json::Value = serde_json::from_str(&raw)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            let changed =
+                retire_claude_document_with(&mut doc, &mut |name| self.rename(name, path, report));
+            let entry = &doc["mcpServers"][VIOLET_SERVER];
+            if !entry["url"].as_str().is_some_and(is_violet_hub_url) {
+                return Ok(false);
+            }
+            if let Some(entries) = entry["headers"].as_object() {
+                for (name, value) in entries {
+                    let text = value.as_str().context("Violet header is not a string")?;
+                    substitute_references(text, &mut |name| {
+                        referenced.insert(name.to_owned());
+                        name.to_owned()
+                    });
+                    headers.insert(name.clone(), self.expand(text));
+                }
+            }
+            (
+                changed,
+                format!("{}\n", serde_json::to_string_pretty(&doc)?),
+                entry["url"].as_str().unwrap().to_owned(),
+                entry["type"].as_str() == Some("sse"),
+            )
+        } else if format == "proxy" {
+            // Only the operator's Cassy-managed document permits canonical
+            // account rebinding; native/user-authored harness refs stay strict.
+            if !raw.lines().any(|line| line.trim() == "# managed") {
+                return Ok(false);
+            }
+            let mut doc: toml_edit::DocumentMut = raw
+                .parse()
+                .with_context(|| format!("parsing {}", path.display()))?;
+            let mut changed = retire_proxy_document(&mut doc);
+            let Some(entry) = doc
+                .get_mut("servers")
+                .and_then(|s| s.get_mut(VIOLET_SERVER))
+                .and_then(|s| s.as_table_like_mut())
+            else {
+                return Ok(false);
+            };
+            let Some(url) = entry
+                .get("url")
+                .and_then(|v| v.as_str())
+                .filter(|url| is_violet_hub_url(url))
+                .map(str::to_owned)
+            else {
+                return Ok(false);
+            };
+            if let Some(item) = entry.get_mut("auth") {
+                if let Some(name) = item
+                    .as_str()
+                    .and_then(|v| v.strip_prefix("env:"))
+                    .map(str::to_owned)
+                {
+                    let replacement = if !self.usable(&name)
+                        && name == "VIOLET_SLACK_TOKEN_CASSY_PROXY"
+                        && self.candidates.len() == 1
+                    {
+                        let replacement = self.candidates[0].clone();
+                        report.credential_repair(format!(
+                            "{}: {name} → {replacement} (Cassy-managed proxy)",
+                            path.display()
+                        ));
+                        replacement
+                    } else {
+                        name.clone()
+                    };
+                    if replacement != name {
+                        set_string(item, &format!("env:{replacement}"));
+                        changed = true;
+                    }
+                    referenced.insert(replacement.clone());
+                    auth = Some(self.value(&replacement));
+                } else if let Some(value) = item.as_str() {
+                    auth = Some(Ok(value.into()));
+                }
+            }
+            if let Some(entries) = entry.get("headers").and_then(|h| h.as_table_like()) {
+                for (name, item) in entries.iter() {
+                    let value = item.as_str().context("Violet header is not a string")?;
+                    let value = if let Some(name) = value.strip_prefix("env:") {
+                        referenced.insert(name.into());
+                        self.value(name)
+                    } else {
+                        Ok(value.into())
+                    };
+                    headers.insert(name.into(), value);
+                }
+            }
+            (changed, doc.to_string(), url, false)
+        } else {
+            let mut doc: toml_edit::DocumentMut = raw
+                .parse()
+                .with_context(|| format!("parsing {}", path.display()))?;
+            let changed =
+                retire_codex_entry_with(&mut doc, &mut |name| self.rename(name, path, report));
+            let Some(entry) = doc.get("mcp_servers").and_then(|s| s.get(VIOLET_SERVER)) else {
+                return Ok(false);
+            };
+            if !entry
+                .get("url")
+                .and_then(|v| v.as_str())
+                .is_some_and(is_violet_hub_url)
+            {
+                return Ok(false);
+            }
+            if let Some(name) = entry.get("bearer_token_env_var").and_then(|v| v.as_str()) {
+                referenced.insert(name.to_owned());
+                auth = Some(self.value(name));
+            }
+            if let Some(entries) = entry.get("http_headers").and_then(|h| h.as_table_like()) {
+                for (name, value) in entries.iter() {
+                    headers.insert(
+                        name.into(),
+                        Ok(value
+                            .as_str()
+                            .context("Violet header is not a string")?
+                            .into()),
+                    );
+                }
+            }
+            if let Some(entries) = entry
+                .get("env_http_headers")
+                .and_then(|h| h.as_table_like())
+            {
+                for (name, value) in entries.iter() {
+                    if let Some(name) = value.as_str() {
+                        referenced.insert(name.to_owned());
+                    }
+                    headers.insert(
+                        name.into(),
+                        self.value(
+                            value
+                                .as_str()
+                                .context("Violet header variable is not a string")?,
+                        ),
+                    );
+                }
+            }
+            (
+                changed,
+                doc.to_string(),
+                entry.get("url").and_then(|v| v.as_str()).unwrap().into(),
+                false,
+            )
+        };
+        // Commit repairs even when authentication cannot be verified. The
+        // receipt then names the failure instead of claiming the upgrade worked.
+        if changed {
+            before_write(path);
+            if format == "claude" {
+                if !ifs::atomic_write_if_unchanged(path, &raw, modified, &rewritten)? {
+                    anyhow::ensure!(
+                        !retried,
+                        "Claude config changed twice during Violet migration; retry cas update"
+                    );
+                    return self.migrate_profile_transaction(
+                        path,
+                        format,
+                        report,
+                        true,
+                        before_write,
+                    );
+                }
+            } else {
+                ifs::atomic_write_create_dirs(path, &rewritten)?;
+            }
+        }
+        let headers: std::collections::HashMap<_, _> = headers
+            .into_iter()
+            .map(|(name, value)| value.map(|value| (name, value)))
+            .collect::<Result<_>>()?;
+        let auth = auth.transpose()?;
+        let authorization = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.as_str());
+        let header_auth = authorization.and_then(|value| value.strip_prefix("Bearer "));
+        if authorization.is_some() {
+            anyhow::ensure!(
+                header_auth.is_some_and(|v| !v.trim().is_empty()),
+                "Violet Authorization header has an empty bearer; no request sent"
+            );
+        }
+        anyhow::ensure!(
+            auth.as_deref()
+                .or(header_auth)
+                .is_some_and(|v| !v.trim().is_empty()),
+            "Violet bearer is empty or unset; no request sent"
+        );
+        let server = if sse {
+            cmcp_core::config::ServerConfig::Sse {
+                url,
+                auth,
+                headers,
+                oauth: false,
+            }
+        } else {
+            cmcp_core::config::ServerConfig::Http {
+                url,
+                auth,
+                headers,
+                oauth: false,
+            }
+        };
+        match self.probe.list_tools(&server) {
+            ProbeOutcome::Tools {
+                tools,
+                schema_problems,
+            } if schema_problems.is_empty()
+                && VIOLET_TOOLS
+                    .iter()
+                    .all(|required| tools.iter().any(|t| t == required)) =>
+            {
+                eprintln!(
+                    "Violet {}: authenticated tools/list PASS (Cassy launches) ({})",
+                    path.display(),
+                    tools.join(", ")
+                );
+                let unexported: Vec<_> = referenced
+                    .into_iter()
+                    .filter(|name| {
+                        cas_pty::violet_env::canonical_credential(name)
+                            && !std::env::var(name)
+                                .ok()
+                                .is_some_and(|v| !v.trim().is_empty())
+                            && report.unexported.insert(name.clone())
+                    })
+                    .collect();
+                if !unexported.is_empty() {
+                    eprintln!(
+                        "Violet {}: {} not exported in updater environment; bare claude/codex in a new shell may lack these variables; use cas claude / cas codex or export them",
+                        path.display(),
+                        unexported.join(", ")
+                    );
+                }
+                report.authenticated.push(path.to_owned());
+            }
+            ProbeOutcome::Unauthorized => anyhow::bail!(
+                "authenticated tools/list returned 401; check the named credential references"
+            ),
+            ProbeOutcome::Tools { .. } => anyhow::bail!(
+                "authenticated tools/list lacks required Violet tools or a usable schema"
+            ),
+            ProbeOutcome::Skipped { .. } => anyhow::bail!(
+                "authenticated tools/list skipped: Violet update probe time budget exhausted"
+            ),
+            _ => anyhow::bail!(
+                "authenticated tools/list unavailable; retry cas update when the hub is reachable"
+            ),
+        }
+        Ok(changed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_token(label: &str) -> String {
+        format!("{}_{label}", violet_compatibility().legacy_token_prefix)
+    }
+
+    fn legacy_env_prefix() -> &'static str {
+        violet_compatibility()
+            .legacy_token_prefix
+            .strip_suffix("SLACK_TOKEN")
+            .unwrap()
+    }
+
+    #[test]
+    fn cas_678d_update_rewrites_account_profile_credential_references() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        env.set("XDG_CONFIG_HOME", home.join(".config"));
+        let account = home.join(".claude-support@gabber.studio");
+        std::fs::create_dir_all(&account).unwrap();
+        env.set("CLAUDE_CONFIG_DIR", &account);
+        let path = account.join(".claude.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "mcpServers": {"violet": {"type": "http", "url": violet_hub_url(),
+                    "headers": {"Authorization": format!("Bearer ${{{}}}", legacy_token("CASSY_PROXY")),
+                        "x-vercel-protection-bypass": format!("${{{}}}", violet_compatibility().legacy_bypass_env)}}},
+                "unrelated": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        env.set("VIOLET_SLACK_TOKEN_CASSY_PROXY", "fixture-token");
+        env.set("VIOLET_VERCEL_BYPASS", "fixture-bypass");
+        let probe = UpdateProbe {
+            calls: Default::default(),
+            outcome: ProbeOutcome::Tools {
+                tools: vec!["violet_read".into(), "violet_post".into()],
+                schema_problems: vec![],
+            },
+        };
+        migrate_installed_hub_with_probe(&probe).unwrap();
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            document["mcpServers"]["violet"]["headers"]["Authorization"],
+            "Bearer ${VIOLET_SLACK_TOKEN_CASSY_PROXY}"
+        );
+        assert_eq!(
+            document["mcpServers"]["violet"]["headers"]["x-vercel-protection-bypass"],
+            "${VIOLET_VERCEL_BYPASS}"
+        );
+        assert_eq!(document["unrelated"], true);
+    }
+
+    struct UpdateProbe {
+        calls: std::cell::RefCell<Vec<cmcp_core::config::ServerConfig>>,
+        outcome: ProbeOutcome,
+    }
+
+    impl HubProbe for UpdateProbe {
+        fn list_tools(&self, server: &cmcp_core::config::ServerConfig) -> ProbeOutcome {
+            self.calls.borrow_mut().push(server.clone());
+            self.outcome.clone()
+        }
+    }
+
+    #[test]
+    fn cas_678d_round3_managed_proxy_rebinds_only_unique_candidate() {
+        for (managed, ambiguous, missing) in [
+            (true, false, false),
+            (true, true, false),
+            (false, false, false),
+            (true, false, true),
+        ] {
+            let (mut env, probe) = update_fixture();
+            if missing {
+                std::fs::write(
+                    env.home().join("credentials.env"),
+                    "VIOLET_VERCEL_BYPASS=fixture-bypass\n",
+                )
+                .unwrap();
+            }
+            if ambiguous {
+                env.set("VIOLET_SLACK_TOKEN_SECOND", "second-fixture");
+            }
+            let path = Scope::User.config_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let original = format!(
+                "{}# preserve\nallowlist = ['violet.violet_read']\n[servers.violet]\ntransport = 'http'\nurl = '{}'\nauth = 'env:VIOLET_SLACK_TOKEN_CASSY_PROXY'\n",
+                if managed { "# managed\n" } else { "" },
+                violet_hub_url()
+            );
+            std::fs::write(&path, &original).unwrap();
+            let report = migrate_installed_hub_with_probe(&probe).unwrap();
+            let written = std::fs::read_to_string(&path).unwrap();
+            if managed && !ambiguous && !missing {
+                assert!(written.contains("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"));
+                assert!(written.contains("# preserve"));
+                assert!(report.authenticated.contains(&path));
+                assert!(report.unexported.contains("VIOLET_SLACK_TOKEN_SOUNDWAVE"));
+                assert!(report.credential_warnings.iter().any(|w| {
+                    w.contains("VIOLET_SLACK_TOKEN_CASSY_PROXY → VIOLET_SLACK_TOKEN_SOUNDWAVE")
+                }));
+            } else {
+                assert_eq!(written, original);
+                assert!(!report.authenticated.contains(&path));
+                if managed {
+                    assert!(
+                        report
+                            .warnings
+                            .iter()
+                            .any(|(_, w)| w.contains(if ambiguous {
+                                "ambiguous"
+                            } else {
+                                "empty or unset"
+                            }))
+                    );
+                }
+                assert!(probe.calls.borrow().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn cas_678d_round4_other_managed_account_is_never_rebound() {
+        let (_env, probe) = update_fixture();
+        let path = Scope::User.config_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = format!(
+            "# managed\n[servers.violet]\ntransport='http'\nurl='{}'\nauth='env:VIOLET_SLACK_TOKEN_OTHER_ACCOUNT'\n",
+            violet_hub_url()
+        );
+        std::fs::write(&path, &original).unwrap();
+        let report = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(report.authenticated.is_empty());
+        assert!(probe.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn cas_678d_round4_update_names_refused_credentials_path_and_fix() {
+        use std::os::unix::fs::PermissionsExt;
+        let (env, probe) = update_fixture();
+        let path = env.home().join("credentials.env");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let report = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|(p, w)| p == &path && w.contains("chmod 600") && w.contains("owner"))
+        );
+        assert!(probe.calls.borrow().is_empty());
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    fn update_fixture() -> (crate::test_support::TestEnvGuard, UpdateProbe) {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        // Do not inherit the runner's real credentials, even as fallback candidates.
+        for name in std::env::vars_os()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>()
+        {
+            if name.to_string_lossy().starts_with("VIOLET_")
+                || name.to_string_lossy().starts_with(legacy_env_prefix())
+            {
+                env.remove(&name);
+            }
+        }
+        let home = env.home().to_path_buf();
+        env.set("XDG_CONFIG_HOME", home.join(".config"));
+        env.set("SHELL", "/bin/bash");
+        let credentials = home.join("credentials.env");
+        std::fs::write(&credentials,
+            format!("export VIOLET_SLACK_TOKEN_SOUNDWAVE='fixture-token'\nexport {}='fixture-bypass'\n", violet_compatibility().legacy_bypass_env)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        env.set("CAS_CREDENTIALS_FILE", credentials);
+        env.set(legacy_token("CASSY_PROXY"), "");
+        env.set(&violet_compatibility().legacy_bypass_env, "");
+        env.set("VIOLET_VERCEL_BYPASS", "");
+        (
+            env,
+            UpdateProbe {
+                calls: Default::default(),
+                outcome: ProbeOutcome::Tools {
+                    tools: vec!["violet_read".into(), "violet_post".into()],
+                    schema_problems: vec![],
+                },
+            },
+        )
+    }
+
+    fn stale_claude(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::json!({"unrelated": true,
+            "mcpServers": {"violet": {"type": "http", "url": violet_hub_url(),
+                "headers": {"Authorization": format!("Bearer ${{{}}}", legacy_token("CASSY_PROXY")),
+                    "x-vercel-protection-bypass": format!("${{{}}}", violet_compatibility().legacy_bypass_env)}},
+                "custom": {"url": "https://custom.example/mcp", "headers": {"Authorization": format!("Bearer ${{{}CUSTOM}}", legacy_env_prefix())}}}
+        }).to_string()).unwrap();
+    }
+
+    #[test]
+    fn cas_678d_update_migrates_and_authenticates_every_profile_without_empty_bearer() {
+        let (mut env, probe) = update_fixture();
+        // A bare generic variable is not a labelled machine-token candidate.
+        env.set("VIOLET_SLACK_TOKEN", "unlabelled-fixture");
+        let home = env.home().to_path_buf();
+        let claude_profiles = [
+            home.join(".claude.json"),
+            home.join(".claude-support@gabber.studio/.claude.json"),
+            home.join(".claude-work/.claude.json"),
+        ];
+        for path in &claude_profiles {
+            stale_claude(path);
+        }
+        let external = tempfile::tempdir().unwrap();
+        let external_claude = external.path().join("claude/.claude.json");
+        stale_claude(&external_claude);
+        env.set("CLAUDE_CONFIG_DIR", external_claude.parent().unwrap());
+        let codex_profiles = [
+            home.join(".codex/config.toml"),
+            home.join(".codex-work/config.toml"),
+            external.path().join("codex/config.toml"),
+        ];
+        env.set("CODEX_HOME", codex_profiles[2].parent().unwrap());
+        for path in &codex_profiles {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("# keep comment\n[mcp_servers.violet]\nurl = {:?}\nbearer_token_env_var = '{}'\nenv_http_headers = {{ x-vercel-protection-bypass = '{}' }}\n", violet_hub_url(), legacy_token("CASSY_PROXY"), violet_compatibility().legacy_bypass_env)).unwrap();
+        }
+        let report = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.authenticated.len(), 7);
+        assert_eq!(probe.calls.borrow().len(), 7);
+        assert!(report.credential_warnings.iter().any(|warning| {
+            warning.contains(&format!("{} →", legacy_token("CASSY_PROXY")))
+                && warning.contains("VIOLET_SLACK_TOKEN_SOUNDWAVE")
+        }));
+        for path in claude_profiles
+            .iter()
+            .chain(std::iter::once(&external_claude))
+        {
+            let doc: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(
+                doc["mcpServers"]["violet"]["headers"]["Authorization"],
+                "Bearer ${VIOLET_SLACK_TOKEN_SOUNDWAVE}"
+            );
+            assert_eq!(
+                doc["mcpServers"]["violet"]["headers"]["x-vercel-protection-bypass"],
+                "${VIOLET_VERCEL_BYPASS}"
+            );
+            assert_eq!(
+                doc["mcpServers"]["custom"]["headers"]["Authorization"],
+                format!("Bearer ${{{}CUSTOM}}", legacy_env_prefix())
+            );
+            assert_eq!(doc["unrelated"], true);
+        }
+        for path in &codex_profiles {
+            let raw = std::fs::read_to_string(path).unwrap();
+            let doc: toml::Value = toml::from_str(&raw).unwrap();
+            assert!(raw.contains("# keep comment"));
+            assert_eq!(
+                doc["mcp_servers"]["violet"]["bearer_token_env_var"].as_str(),
+                Some("VIOLET_SLACK_TOKEN_SOUNDWAVE")
+            );
+            assert_eq!(
+                doc["mcp_servers"]["violet"]["env_http_headers"]["x-vercel-protection-bypass"]
+                    .as_str(),
+                Some("VIOLET_VERCEL_BYPASS")
+            );
+        }
+        for server in probe.calls.borrow().iter() {
+            let cmcp_core::config::ServerConfig::Http { auth, headers, .. } = server else {
+                panic!("expected HTTP");
+            };
+            assert_eq!(
+                auth.as_deref().or_else(|| headers
+                    .get("Authorization")
+                    .and_then(|s| s.strip_prefix("Bearer "))),
+                Some("fixture-token")
+            );
+            assert_eq!(
+                headers
+                    .get("x-vercel-protection-bypass")
+                    .map(String::as_str),
+                Some("fixture-bypass")
+            );
+        }
+        let credentials = std::fs::read_to_string(home.join("credentials.env")).unwrap();
+        assert!(!credentials.contains(legacy_env_prefix()));
+        assert!(credentials.contains("VIOLET_VERCEL_BYPASS"));
+        let again = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert_eq!(again.migrated, 0);
+        assert_eq!(again.authenticated.len(), 7);
+    }
+
+    #[test]
+    fn cas_678d_update_diagnoses_missing_ambiguous_and_rejected_credentials() {
+        for mode in ["empty", "unset", "selector-only", "ambiguous", "rejected"] {
+            let (mut env, mut probe) = update_fixture();
+            let path = env
+                .home()
+                .join(".claude-support@gabber.studio/.claude.json");
+            stale_claude(&path);
+            let credentials = env.home().join("credentials.env");
+            if mode == "rejected" {
+                probe.outcome = ProbeOutcome::Unauthorized;
+            } else {
+                std::fs::write(
+                    &credentials,
+                    "export VIOLET_VERCEL_BYPASS='fixture-bypass'\n",
+                )
+                .unwrap();
+                if mode == "empty" {
+                    env.set("VIOLET_SLACK_TOKEN_CASSY_PROXY", "");
+                }
+                if mode == "selector-only" {
+                    env.set("VIOLET_SLACK_TOKEN_ENV", "VIOLET_SLACK_TOKEN_MISSING");
+                }
+                if mode == "ambiguous" {
+                    env.set("VIOLET_SLACK_TOKEN_ONE", "fixture-one");
+                    env.set("VIOLET_SLACK_TOKEN_TWO", "fixture-two");
+                }
+            }
+            let report = migrate_installed_hub_with_probe(&probe).unwrap();
+            assert!(report.authenticated.is_empty());
+            assert_eq!(report.warnings.len(), 1, "{mode}");
+            let warning = &report.warnings[0].1;
+            if mode == "rejected" {
+                assert_eq!(probe.calls.borrow().len(), 1);
+                assert!(warning.contains("401"));
+            } else {
+                assert!(probe.calls.borrow().is_empty(), "{mode}");
+                assert!(
+                    warning.contains(&legacy_token("CASSY_PROXY")),
+                    "{warning}"
+                );
+                assert!(warning.contains("no request sent"));
+            }
+            assert!(!warning.contains("fixture-token"));
+            assert!(!warning.contains("fixture-bypass"));
+            let doc: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert!(doc["mcpServers"]["violet"].is_object());
+        }
+    }
+
+    #[test]
+    fn cas_678d_update_rejects_empty_header_even_with_a_usable_bearer_variable() {
+        let (env, probe) = update_fixture();
+        let path = env.home().join(".codex/config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!(
+            "[mcp_servers.violet]\nurl = {:?}\nbearer_token_env_var = 'VIOLET_SLACK_TOKEN_SOUNDWAVE'\nhttp_headers = {{ Authorization = 'Bearer ' }}\n",
+            violet_hub_url())).unwrap();
+        let report = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert!(probe.calls.borrow().is_empty());
+        assert_eq!(report.warnings.len(), 1);
+        assert!(
+            report.warnings[0]
+                .1
+                .contains("Authorization header has an empty bearer")
+        );
+        assert!(report.warnings[0].1.contains("no request sent"));
+    }
+
+    #[test]
+    fn cas_678d_round1_private_legacy_value_keeps_own_canonical_name() {
+        let (env, probe) = update_fixture();
+        let file = env.home().join("credentials.env");
+        let raw = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(
+            file,
+            format!("{raw}export {}='fixture-account'\n", legacy_token("ACCOUNT")),
+        )
+        .unwrap();
+        let path = env.home().join(".claude-account/.claude.json");
+        stale_claude(&path);
+        let raw = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace(&legacy_token("CASSY_PROXY"), &legacy_token("ACCOUNT"));
+        std::fs::write(&path, raw).unwrap();
+        let report = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert!(report.warnings.is_empty());
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            doc["mcpServers"]["violet"]["headers"]["Authorization"],
+            "Bearer ${VIOLET_SLACK_TOKEN_ACCOUNT}"
+        );
+    }
+
+    #[test]
+    fn cas_678d_round1_claude_concurrent_write_retries_once_and_preserves_changes() {
+        let (env, probe) = update_fixture();
+        let path = env.home().join(".claude-account/.claude.json");
+        stale_claude(&path);
+        let values = super::super::violet::update_machine_credentials().unwrap();
+        let update = UpdateMigration::new(env.home(), values, &probe);
+        let writes = std::cell::Cell::new(0);
+        let hook = |path: &Path| {
+            if writes.replace(writes.get() + 1) == 0 {
+                let mut doc: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+                doc["concurrent-setting"] = true.into();
+                std::fs::write(path, doc.to_string()).unwrap();
+            }
+        };
+        let mut report = ProfileRetirement::default();
+        assert!(
+            update
+                .migrate_profile_transaction(&path, "claude", &mut report, false, &hook)
+                .unwrap()
+        );
+        assert_eq!(writes.get(), 2);
+        assert_eq!(
+            report.credential_warnings.len(),
+            2,
+            "retry must deduplicate token and bypass mappings"
+        );
+        assert_eq!(probe.calls.borrow().len(), 1);
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["concurrent-setting"], true);
+        let hook = |path: &Path| {
+            let raw = std::fs::read_to_string(path).unwrap();
+            std::fs::write(path, format!("{raw}\n")).unwrap();
+        };
+        stale_claude(&path);
+        assert!(
+            update
+                .migrate_profile_transaction(&path, "claude", &mut report, false, &hook)
+                .unwrap_err()
+                .to_string()
+                .contains("changed twice")
+        );
+        assert_eq!(probe.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn cas_678d_round1_expired_probe_budget_does_not_contact_the_hub() {
+        let probe = UpdateBudgetProbe {
+            deadline: std::time::Instant::now(),
+        };
+        let server = cmcp_core::config::ServerConfig::Http {
+            url: violet_hub_url().into(),
+            auth: Some("fixture".into()),
+            headers: Default::default(),
+            oauth: false,
+        };
+        assert!(matches!(
+            probe.list_tools(&server),
+            ProbeOutcome::Skipped { .. }
+        ));
+    }
+
+    #[test]
+    fn cas_678d_round1_unset_canonical_account_is_never_rebound() {
+        let (env, probe) = update_fixture();
+        let path = env.home().join(".claude-account/.claude.json");
+        stale_claude(&path);
+        let raw = std::fs::read_to_string(&path).unwrap().replace(
+            &legacy_token("CASSY_PROXY"),
+            "VIOLET_SLACK_TOKEN_ACCOUNT",
+        );
+        std::fs::write(&path, raw).unwrap();
+        let report = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert!(probe.calls.borrow().is_empty());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|(_, warning)| warning.contains("VIOLET_SLACK_TOKEN_ACCOUNT"))
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            doc["mcpServers"]["violet"]["headers"]["Authorization"],
+            "Bearer ${VIOLET_SLACK_TOKEN_ACCOUNT}"
+        );
+    }
+
+    #[test]
+    fn cas_678d_round1_preferred_token_does_not_break_ambiguity() {
+        let (mut env, probe) = update_fixture();
+        env.set("VIOLET_SLACK_TOKEN_ACCOUNT", "fixture-account");
+        env.set("VIOLET_SLACK_TOKEN_ENV", "VIOLET_SLACK_TOKEN_SOUNDWAVE");
+        let path = env.home().join(".claude-account/.claude.json");
+        stale_claude(&path);
+        let report = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert!(probe.calls.borrow().is_empty());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|(_, warning)| warning.contains("ambiguous"))
+        );
+    }
+
+    #[test]
+    fn cas_678d_update_preserves_working_account_credentials_and_custom_endpoints() {
+        let (mut env, probe) = update_fixture();
+        env.set("VIOLET_SLACK_TOKEN_ACCOUNT", "fixture-account");
+        env.set("VIOLET_SLACK_TOKEN_ENV", "VIOLET_SLACK_TOKEN_SOUNDWAVE");
+        let path = env.home().join(".claude-account/.claude.json");
+        stale_claude(&path);
+        let raw = std::fs::read_to_string(&path).unwrap().replace(
+            &legacy_token("CASSY_PROXY"),
+            "VIOLET_SLACK_TOKEN_ACCOUNT",
+        );
+        std::fs::write(&path, raw).unwrap();
+        let custom = env.home().join(".claude-custom/.claude.json");
+        stale_claude(&custom);
+        let custom_raw = std::fs::read_to_string(&custom)
+            .unwrap()
+            .replace(violet_hub_url(), "https://staging.example/mcp");
+        std::fs::write(&custom, &custom_raw).unwrap();
+        let report = migrate_installed_hub_with_probe(&probe).unwrap();
+        assert!(report.warnings.is_empty());
+        assert_eq!(report.authenticated.len(), 1);
+        assert_eq!(std::fs::read_to_string(custom).unwrap(), custom_raw);
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            doc["mcpServers"]["violet"]["headers"]["Authorization"],
+            "Bearer ${VIOLET_SLACK_TOKEN_ACCOUNT}"
+        );
+    }
 
     fn codex_fixture(path: &Path) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -708,8 +1788,7 @@ mod tests {
                 serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             assert!(doc["mcpServers"].get(&contract.retired_server).is_none());
             assert_eq!(doc["mcpServers"]["violet"]["url"], violet_hub_url());
-            // Harness references keep their names until `cas integrate violet`
-            // renames the credentials file they expand from.
+            // Generic sync retires URLs only; user update resolves credential changes.
             assert_eq!(
                 doc["mcpServers"]["violet"]["headers"]["Authorization"],
                 format!("Bearer ${{{}_LAPTOP}}", contract.legacy_token_prefix)

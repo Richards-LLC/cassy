@@ -23,11 +23,13 @@ pub(super) mod pane_size;
 mod provisioning_tests;
 pub mod queue_and_events;
 pub(super) mod relay;
+pub(crate) mod render_scheduler;
 pub(crate) mod send_dedupe;
 #[cfg(test)]
 mod shutdown_tests;
 pub(super) mod session_summarizer;
 pub(crate) mod store_worker;
+pub(crate) mod jobs;
 pub(crate) mod teams;
 pub(super) mod terminal_exchange;
 pub(crate) mod violet_activity;

@@ -46,6 +46,19 @@ fn test_config_defaults() {
 }
 
 #[test]
+fn terminal_render_defaults_and_explicit_paths_round_trip_cas_2de9() {
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let root = env.home().join("project/.cas");
+    std::fs::create_dir_all(&root).unwrap();
+    let key = "qa.terminal_render_paths";
+    let mut config = Config::default();
+    assert_eq!(config.get(key).unwrap(), meta::registry().get(key).unwrap().default);
+    config.set(key, "src/shared/console.rs").unwrap();
+    config.save(&root).unwrap();
+    assert_eq!(Config::load(&root).unwrap().get(key).as_deref(), Some("src/shared/console.rs"));
+}
+
+#[test]
 fn terminal_interaction_config_round_trips_and_resets_cas_266e() {
     let temp = TempDir::new().unwrap();
     let mut config: Config = toml::from_str("[qa]\nevidence_gate = true\n").unwrap();
@@ -942,11 +955,16 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.supervisor_only_mcp", " vercel, neon ", "vercel,neon"),
         ("factory.supervisor_only_env", " VERCEL_TOKEN, NEON_API_KEY ", "VERCEL_TOKEN,NEON_API_KEY"),
         ("factory.worker_credential_env", " GITHUB_TOKEN, VERCEL_TOKEN ", "GITHUB_TOKEN,VERCEL_TOKEN"),
+        ("factory.worker_denied_clis", " vercel, netlify ", "vercel,netlify"),
+        ("factory.worker_denied_mcp_tools", " *vercel*, mcp__neon__* ", "*vercel*,mcp__neon__*"),
         ("factory.message_max_chars", "3000", "3000"),
         ("factory.message_max_chars_escalation", "6000", "6000"),
         ("factory.note_max_chars", "1800", "1800"),
         ("factory.commander_mirror_enabled", "false", "false"),
         ("factory.max_concurrent_builders", "3", "3"),
+        ("factory.worker_memory_high_gib", "6", "6"),
+        ("factory.render_max_fps", "12", "12"),
+        ("factory.render_unfocused_fps", "3", "3"),
         ("factory.spawn_min_free_gib", "30", "30"),
         ("factory.prompt_retention_days", "14", "14"),
         ("factory.event_telemetry_retention_days", "30", "30"),
@@ -954,6 +972,20 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.supervisor_queue_retention_days", "28", "28"),
         ("factory.worker_build_jobs", "6", "6"),
         ("factory.cargo_build_jobs", "5", "5"),
+        ("factory.nice_cargo", "false", "false"),
+        ("factory.warn_stale_assignment", "false", "false"),
+        ("factory.block_stale_assignment", "false", "false"),
+        ("factory.stale_threshold_commits", "3", "3"),
+        ("factory.stall_threshold_secs", "420", "420"),
+        ("factory.context_recycle_threshold_percent", "85", "85"),
+        ("factory.stall_after_secs", "900", "900"),
+        ("factory.delivery_stalled_priority_secs", "120", "120"),
+        ("factory.delivery_stalled_normal_secs", "240", "240"),
+        ("factory.strict_cli", "true", "true"),
+        ("factory.target_cache_high_watermark_percent", "90", "90"),
+        ("factory.target_cache_low_watermark_percent", "70", "70"),
+        ("factory.target_cache_min_idle_secs", "7200", "7200"),
+        ("factory.target_cache_retention_count", "2", "2"),
         ("factory.epic_base_branch", "staging", "staging"),
         ("factory.ai_enrichment.enabled", "true", "true"),
         ("factory.ai_enrichment.endpoint", "http://127.0.0.1:11434/v1/responses", "http://127.0.0.1:11434/v1/responses"),
@@ -1030,6 +1062,92 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         Some(FACTORY_ARTIFACTS_ROOT_DEFAULT),
         "an unset artifacts_root reads as its default"
     );
+}
+
+#[test]
+fn factory_nice_cargo_round_trips_cas_f7b9() {
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let mut config = Config::default();
+    let registry = meta::registry();
+    registry.validate("factory.nice_cargo", "false").unwrap();
+    config.set("factory.nice_cargo", "false").unwrap();
+    assert!(!config.factory().nice_cargo);
+    assert_eq!(config.get("factory.nice_cargo").as_deref(), Some("false"));
+    assert!(config.list().contains(&("factory.nice_cargo".into(), "false".into())));
+    config.save(env.home()).unwrap();
+    let mut loaded = Config::load(env.home()).unwrap();
+    assert!(!loaded.factory().nice_cargo);
+    loaded.set("factory.nice_cargo", "true").unwrap();
+    assert!(loaded.factory().nice_cargo);
+    assert!(loaded.set("factory.nice_cargo", "invalid").is_err());
+    assert!(loaded.factory().nice_cargo, "invalid input must preserve the value");
+}
+
+/// Discover fields from the serialized runtime configuration, independently
+/// of the registry, so an omitted registry entry cannot hide from coverage.
+#[test]
+fn serialized_factory_fields_have_registry_entries_cas_f7b9() {
+    // Populate fields omitted when empty/None. Retired compatibility fields
+    // deliberately do not serialize and are not runtime settings.
+    let factory = FactoryConfig {
+        artifacts_root: Some("/mnt/factory-artifacts".into()),
+        epic_base_branch: Some("main".into()),
+        write_roots: vec!["/mnt/operator-approved".into()],
+        ..FactoryConfig::default()
+    };
+    let config = Config { factory: Some(factory.clone()), ..Config::default() };
+    let serialized = serde_json::to_value(factory).unwrap();
+    fn collect_keys(prefix: &str, value: &serde_json::Value, keys: &mut Vec<String>) {
+        if let Some(object) = value.as_object() {
+            for (field, value) in object {
+                collect_keys(&format!("{prefix}.{field}"), value, keys);
+            }
+        } else {
+            keys.push(prefix.to_string());
+        }
+    }
+    let mut keys = Vec::new();
+    collect_keys("factory", &serialized, &mut keys);
+    // Each exception must name an internal field and explain why operators
+    // cannot configure it. Currently every serialized field is public.
+    const INTERNAL: &[(&str, &str)] = &[];
+    for (key, reason) in INTERNAL {
+        assert!(!reason.trim().is_empty(), "{key}: internal exception needs a reason");
+        assert!(keys.iter().any(|field| field == key), "{key}: stale internal exception");
+    }
+    let registry = meta::registry();
+    let listed: std::collections::HashMap<_, _> = config.list().into_iter().collect();
+    let mut missing = Vec::new();
+    for key in keys {
+        if INTERNAL.iter().any(|(internal, _)| *internal == key) {
+            continue;
+        }
+        // The serialized legacy name remains settable; discovery lists its
+        // canonical worker_build_jobs name.
+        let canonical = if key == "factory.cargo_build_jobs" {
+            "factory.worker_build_jobs"
+        } else {
+            &key
+        };
+        if registry.get(canonical).is_none() {
+            missing.push(key);
+            continue;
+        }
+        assert!(config.get(&key).is_some(), "{key}: missing get support");
+        assert!(listed.contains_key(canonical), "{key}: missing list support");
+        let pointer = format!("/{}", key.strip_prefix("factory.").unwrap().replace('.', "/"));
+        let value = serialized.pointer(&pointer).unwrap();
+        let expected = match value {
+            serde_json::Value::String(value) => value.clone(),
+            serde_json::Value::Array(values) => values.iter()
+                .map(|value| value.as_str().unwrap())
+                .collect::<Vec<_>>().join(","),
+            _ => value.to_string(),
+        };
+        assert_eq!(config.get(&key).as_deref(), Some(expected.as_str()), "{key}: runtime field differs from get");
+        assert_eq!(listed.get(canonical), Some(&expected), "{key}: runtime field differs from list");
+    }
+    assert!(missing.is_empty(), "serialized factory fields missing registry entries: {missing:?}");
 }
 
 /// GH #1182: `[factory] write_roots` lives in config.toml, is shown by `get`
@@ -1199,4 +1317,160 @@ fn retired_merge_sweep_keys_load_and_are_dropped_on_save_cas_fd0a() {
     assert!(!saved.contains("merge_sweep"), "the retired keys are not written back: {saved}");
     assert!(!saved.contains("release_gate_home_dir"), "{saved}");
     assert!(Config::load(temp.path()).unwrap().factory().retired_keys().is_empty());
+}
+
+#[test]
+fn unset_issue_repo_resolves_local_origin_without_persisting_cas_f398() {
+    let _env = TestEnvGuard::new();
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join(".cas");
+    std::fs::create_dir(&root).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:Richards-LLC/violet_ps.git",
+        ],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(temp.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let before = "[issues.components]\nviolet = \"Richards-LLC/violet_ps\"\n";
+    std::fs::write(root.join("config.toml"), before).unwrap();
+    let config = Config::load(&root).unwrap();
+    assert_eq!(
+        config.get_resolved("issues.repo", &root).as_deref(),
+        Some("Richards-LLC/violet_ps")
+    );
+    assert_eq!(
+        config
+            .issue_repo_registry_for_project(&root)
+            .project
+            .as_deref(),
+        Some("Richards-LLC/violet_ps")
+    );
+    assert!(config.issues.as_ref().unwrap().repo.is_none());
+    assert_eq!(
+        std::fs::read_to_string(root.join("config.toml")).unwrap(),
+        before
+    );
+    assert!(!toml::to_string(&config).unwrap().contains("repo ="));
+}
+
+// Real local Git repositories exercise the same boundary as config CLI reads.
+fn issue_origin_fixture_cas_f398(origin: Option<&str>) -> (TempDir, std::path::PathBuf) {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join(".cas");
+    std::fs::create_dir(&root).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .current_dir(temp.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    if let Some(origin) = origin {
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(temp.path())
+                .args(["remote", "add", "origin", origin])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    (temp, root)
+}
+
+#[test]
+fn issue_repo_origin_forms_and_explicit_override_cas_f398() {
+    let _env = TestEnvGuard::new();
+    for origin in [
+        "https://github.com/example/project.git",
+        "git@github.com:example/project.git",
+        "ssh://git@github.com/example/project.git",
+    ] {
+        let (_temp, root) = issue_origin_fixture_cas_f398(Some(origin));
+        let mut config = Config::default();
+        let inferred = config.issue_repo_registry_for_project(&root);
+        assert_eq!(
+            inferred.project.as_deref(),
+            Some("example/project"),
+            "{origin}"
+        );
+        assert_eq!(inferred.cassy, config.issue_repo_registry().cassy);
+        assert_eq!(inferred.violet, config.issue_repo_registry().violet);
+        assert_eq!(inferred.cloud, config.issue_repo_registry().cloud);
+        config.set("issues.repo", " custom/override ").unwrap();
+        assert_eq!(
+            config.get_resolved("issues.repo", &root).as_deref(),
+            Some("custom/override")
+        );
+        config.set("issues.repo", " ").unwrap();
+        assert_eq!(
+            config.get_resolved("issues.repo", &root).as_deref(),
+            Some("example/project")
+        );
+        assert_eq!(config.get("issues.repo").as_deref(), Some(""));
+        assert_eq!(
+            config.get_resolved("history.github_repo", &root),
+            config.get("history.github_repo")
+        );
+        assert_eq!(config.get_resolved("unknown.key", &root), None);
+        assert!(!root.join("config.toml").exists());
+    }
+}
+
+#[test]
+fn unusable_origin_does_not_infer_component_or_parent_cas_f398() {
+    let _env = TestEnvGuard::new();
+    for origin in [
+        None,
+        Some("https://gitlab.com/example/project.git"),
+        Some("https://github.com/example/project/extra"),
+        Some("https://github.com/example/bad%20repo.git"),
+        Some("https://github.com/example/.git"),
+    ] {
+        let (_temp, root) = issue_origin_fixture_cas_f398(origin);
+        let mut config = Config::default();
+        config
+            .set("issues.components.violet", "example/violet")
+            .unwrap();
+        assert_eq!(
+            config.get_resolved("issues.repo", &root).as_deref(),
+            Some(""),
+            "{origin:?}"
+        );
+        assert!(
+            config
+                .issue_repo_registry_for_project(&root)
+                .project
+                .is_none()
+        );
+    }
+    let (parent, _) = issue_origin_fixture_cas_f398(Some("https://github.com/example/parent.git"));
+    let child = parent.path().join("nested/.cas");
+    std::fs::create_dir_all(&child).unwrap();
+    assert!(
+        Config::default()
+            .issue_repo_registry_for_project(&child)
+            .project
+            .is_none()
+    );
+    let outside = TempDir::new().unwrap();
+    assert!(
+        Config::default()
+            .issue_repo_registry_for_project(outside.path())
+            .project
+            .is_none()
+    );
 }

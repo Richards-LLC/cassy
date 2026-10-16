@@ -164,6 +164,8 @@ impl Config {
             ("factory.supervisor_only_mcp".to_string(), factory.worker_policy.supervisor_only_mcp.join(",")),
             ("factory.supervisor_only_env".to_string(), factory.worker_policy.supervisor_only_env.join(",")),
             ("factory.worker_credential_env".to_string(), factory.worker_policy.worker_credential_env.join(",")),
+            ("factory.worker_denied_clis".to_string(), factory.worker_denied_clis.join(",")),
+            ("factory.worker_denied_mcp_tools".to_string(), factory.worker_denied_mcp_tools.join(",")),
             (
                 "factory.artifacts_root".to_string(),
                 factory
@@ -186,6 +188,74 @@ impl Config {
             (
                 "factory.max_concurrent_builders".to_string(),
                 factory.max_concurrent_builders.to_string(),
+            ),
+            (
+                "factory.worker_memory_high_gib".to_string(),
+                factory.worker_memory_high_gib.to_string(),
+            ),
+            (
+                "factory.render_max_fps".to_string(),
+                factory.render_max_fps.to_string(),
+            ),
+            (
+                "factory.render_unfocused_fps".to_string(),
+                factory.render_unfocused_fps.to_string(),
+            ),
+            (
+                "factory.warn_stale_assignment".to_string(),
+                factory.warn_stale_assignment.to_string(),
+            ),
+            (
+                "factory.block_stale_assignment".to_string(),
+                factory.block_stale_assignment.to_string(),
+            ),
+            (
+                "factory.stale_threshold_commits".to_string(),
+                factory.stale_threshold_commits.to_string(),
+            ),
+            (
+                "factory.stall_threshold_secs".to_string(),
+                factory.stall_threshold_secs.to_string(),
+            ),
+            (
+                "factory.context_recycle_threshold_percent".to_string(),
+                factory.context_recycle_threshold_percent.to_string(),
+            ),
+            (
+                "factory.stall_after_secs".to_string(),
+                factory.stall_after_secs.to_string(),
+            ),
+            (
+                "factory.delivery_stalled_priority_secs".to_string(),
+                factory.delivery_stalled_priority_secs.to_string(),
+            ),
+            (
+                "factory.delivery_stalled_normal_secs".to_string(),
+                factory.delivery_stalled_normal_secs.to_string(),
+            ),
+            (
+                "factory.strict_cli".to_string(),
+                factory.strict_cli.to_string(),
+            ),
+            (
+                "factory.target_cache_high_watermark_percent".to_string(),
+                factory.target_cache_high_watermark_percent.to_string(),
+            ),
+            (
+                "factory.target_cache_low_watermark_percent".to_string(),
+                factory.target_cache_low_watermark_percent.to_string(),
+            ),
+            (
+                "factory.target_cache_min_idle_secs".to_string(),
+                factory.target_cache_min_idle_secs.to_string(),
+            ),
+            (
+                "factory.target_cache_retention_count".to_string(),
+                factory.target_cache_retention_count.to_string(),
+            ),
+            (
+                "factory.nice_cargo".to_string(),
+                factory.nice_cargo.to_string(),
             ),
             (
                 "factory.spawn_min_free_gib".to_string(),

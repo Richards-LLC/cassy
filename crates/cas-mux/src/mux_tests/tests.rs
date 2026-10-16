@@ -13,6 +13,216 @@ fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str
         .map(|(_, v)| v.as_str())
 }
 
+fn violet_registrations(home: &std::path::Path, token: &str, bypass: Option<&str>) {
+    std::fs::write(home.join(".claude.json"), serde_json::json!({"mcpServers":{"violet":{"type":"http", "url":"https://violet-hub.vercel.app/mcp/slack", "headers":{
+        "Authorization":format!("Bearer ${{{token}}}"), "x-vercel-protection-bypass":bypass.map(|v| format!("${{{v}}}")).unwrap_or_default()
+    }}}}).to_string()).unwrap();
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    std::fs::write(home.join(".codex/config.toml"), format!("[mcp_servers.violet]\nurl='https://violet-hub.vercel.app/mcp/slack'\nbearer_token_env_var='{token}'\n{}", bypass.map(|v| format!("env_http_headers={{x-vercel-protection-bypass='{v}'}}\n")).unwrap_or_default())).unwrap();
+}
+fn private_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+#[test]
+fn cas_678d_round3_factory_hydration_obeys_server_and_env_denials() {
+    let mut env = TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.set("XDG_CONFIG_HOME", home.join(".config"));
+    let credentials = home.join("credentials.env");
+    std::fs::write(
+        &credentials,
+        "VIOLET_SLACK_TOKEN_SELECTED='selected'\nVIOLET_SLACK_TOKEN_OTHER='other'\n",
+    )
+    .unwrap();
+    private_permissions(&credentials);
+    env.set("CAS_CREDENTIALS_FILE", &credentials);
+    env.set("VIOLET_SLACK_TOKEN_SELECTED", "");
+    env.set("VIOLET_SLACK_TOKEN_OTHER", "");
+    violet_registrations(&home, "VIOLET_SLACK_TOKEN_SELECTED", None);
+    let root = home.join("project/.cas");
+    std::fs::create_dir_all(&root).unwrap();
+    for (policy, allowed) in [
+        ("", true),
+        ("supervisor_only_mcp=['violet']", false),
+        ("supervisor_only_env=['VIOLET_SLACK_TOKEN_SELECTED']", false),
+    ] {
+        std::fs::write(root.join("config.toml"), format!("[factory]\n{policy}\n")).unwrap();
+        for inherited in [false, true] {
+            env.set(
+                "VIOLET_SLACK_TOKEN_SELECTED",
+                if inherited { "inherited" } else { "" },
+            );
+            for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+                let configs = Mux::factory_pane_configs(&MuxConfig {
+                    cwd: home.join("project"),
+                    cas_root: Some(root.clone()),
+                    workers: 1,
+                    worker_cli: cli,
+                    include_director: false,
+                    ..Default::default()
+                });
+                let mut pane = configs
+                    .into_iter()
+                    .find(|(name, _)| name == "worker-1")
+                    .unwrap()
+                    .1;
+                pane.hydrate_violet_environment();
+                assert_eq!(
+                    env_value(&pane, "VIOLET_SLACK_TOKEN_SELECTED"),
+                    if allowed {
+                        Some(if inherited { "inherited" } else { "selected" })
+                    } else {
+                        None
+                    },
+                    "{cli:?} policy={policy}"
+                );
+                assert!(env_value(&pane, "VIOLET_SLACK_TOKEN_OTHER").is_none());
+                if !allowed {
+                    assert!(
+                        pane.env_remove
+                            .contains(&"VIOLET_SLACK_TOKEN_SELECTED".into())
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cas_678d_round3_factory_authorization_survives_late_file_values() {
+    let mut env = TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
+    env.set("VIOLET_SLACK_TOKEN_LATE", "");
+    violet_registrations(&home, "VIOLET_SLACK_TOKEN_LATE", None);
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        let _ = std::fs::remove_file(home.join("credentials.env"));
+        let configs = Mux::factory_pane_configs(&MuxConfig { cwd: home.clone(), workers: 1, worker_cli: cli, include_director: false, ..Default::default() });
+        let mut pane = configs.into_iter().find(|(name,_)| name == "worker-1").unwrap().1;
+        std::fs::write(home.join("credentials.env"), "VIOLET_SLACK_TOKEN_LATE=late-value\n").unwrap();
+        private_permissions(&home.join("credentials.env"));
+        pane.hydrate_violet_environment();
+        assert_eq!(env_value(&pane,"VIOLET_SLACK_TOKEN_LATE"),Some("late-value"));
+    }
+}
+
+#[test]
+fn cas_678d_round4_proxy_and_explicit_grants_survive_native_scope() {
+    let mut env = TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.set("XDG_CONFIG_HOME", home.join(".config"));
+    env.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
+    env.set("VIOLET_SLACK_TOKEN_PROXY_FIXTURE", "");
+    env.set("VIOLET_SLACK_TOKEN_SELECTED", "");
+    std::fs::write(home.join("credentials.env"), "VIOLET_SLACK_TOKEN_PROXY_FIXTURE=proxy-value\nVIOLET_SLACK_TOKEN_SELECTED=selected-value\n").unwrap();
+    private_permissions(&home.join("credentials.env"));
+    violet_registrations(&home, "VIOLET_SLACK_TOKEN_SELECTED", None);
+    let root = home.join("project/.cas");
+    std::fs::create_dir_all(&root).unwrap();
+    let user = home.join(".config/code-mode-mcp/config.toml");
+    std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+    let proxy = "[servers.violet]\ntransport='http'\nauth='env:VIOLET_SLACK_TOKEN_PROXY_FIXTURE'\n";
+    for source in ["project", "user", "explicit"] {
+        std::fs::write(
+            root.join("proxy.toml"),
+            if source == "project" { proxy } else { "" },
+        )
+        .unwrap();
+        std::fs::write(&user, if source == "user" { proxy } else { "" }).unwrap();
+        for (denial, allowed) in [
+            ("", true),
+            ("supervisor_only_mcp=['violet']", false),
+            (
+                "supervisor_only_env=['VIOLET_SLACK_TOKEN_PROXY_FIXTURE']",
+                false,
+            ),
+        ] {
+            std::fs::write(
+                root.join("config.toml"),
+                format!(
+                    "[factory]\n{denial}\n{}",
+                    if source == "explicit" {
+                        "worker_credential_env=['VIOLET_SLACK_TOKEN_PROXY_FIXTURE']\n"
+                    } else {
+                        ""
+                    }
+                ),
+            )
+            .unwrap();
+            for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+                std::fs::write(
+                    home.join("credentials.env"),
+                    "VIOLET_SLACK_TOKEN_SELECTED=selected-value\n",
+                )
+                .unwrap();
+                let configs = Mux::factory_pane_configs(&MuxConfig {
+                    cwd: home.join("project"),
+                    cas_root: Some(root.clone()),
+                    workers: 1,
+                    worker_cli: cli,
+                    include_director: false,
+                    ..Default::default()
+                });
+                let mut pane = configs
+                    .into_iter()
+                    .find(|(name, _)| name == "worker-1")
+                    .unwrap()
+                    .1;
+                // Authorized proxy values may arrive after config materialization.
+                std::fs::write(home.join("credentials.env"), "VIOLET_SLACK_TOKEN_PROXY_FIXTURE=proxy-value\nVIOLET_SLACK_TOKEN_SELECTED=selected-value\n").unwrap();
+                pane.hydrate_violet_environment();
+                assert_eq!(
+                    env_value(&pane, "VIOLET_SLACK_TOKEN_PROXY_FIXTURE"),
+                    if allowed { Some("proxy-value") } else { None },
+                    "{source} {denial} {cli:?}"
+                );
+                if !allowed {
+                    assert!(
+                        pane.env_remove
+                            .contains(&"VIOLET_SLACK_TOKEN_PROXY_FIXTURE".into())
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cas_678d_factory_launch_uses_private_value_instead_of_shell_expression() {
+    let mut guard = TestEnvGuard::temp_home();
+    let home = guard.home().to_path_buf();
+    guard.set("XDG_CONFIG_HOME", home.join(".config"));
+    guard.set("SHELL", "/bin/bash");
+    guard.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
+    guard.set("VIOLET_SLACK_TOKEN_FACTORY_FIXTURE", "");
+    std::fs::write(
+        home.join("credentials.env"),
+        "export VIOLET_SLACK_TOKEN_FACTORY_FIXTURE='private-fixture'\n",
+    )
+    .unwrap();
+    private_permissions(&home.join("credentials.env"));
+    violet_registrations(&home, "VIOLET_SLACK_TOKEN_FACTORY_FIXTURE", None);
+    std::fs::write(
+        home.join(".profile"),
+        "export VIOLET_SLACK_TOKEN_FACTORY_FIXTURE='$(pass show secret)'\n",
+    )
+    .unwrap();
+    let proxy = home.join(".config/code-mode-mcp/config.toml");
+    std::fs::create_dir_all(proxy.parent().unwrap()).unwrap();
+    std::fs::write(proxy, "[servers.violet]\ntransport='http'\nurl='https://violet-hub.vercel.app/mcp/slack'\nauth='env:VIOLET_SLACK_TOKEN_FACTORY_FIXTURE'\n").unwrap();
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex] {
+        let configs = Mux::factory_pane_configs(&MuxConfig { cwd: home.clone(), workers: 1,
+            worker_cli: cli, include_director: false, ..Default::default() });
+        let (_, pane) = configs.iter().find(|(name, _)| name == "worker-1").unwrap();
+        assert_eq!(env_value(pane, "VIOLET_SLACK_TOKEN_FACTORY_FIXTURE"), Some("private-fixture"));
+    }
+}
+
 #[tokio::test]
 async fn declared_worker_credentials_reach_claude_and_codex_from_env_or_file_cas_82bc() {
     let mut env = TestEnvGuard::temp_home();
@@ -624,6 +834,11 @@ auth = "env:UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE"
     env.set("VIOLET_VERCEL_BYPASS_TEST_WORKER", "bypass-value");
     env.set("UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE", "unrelated");
 
+    violet_registrations(
+        env.home(),
+        "VIOLET_SLACK_TOKEN_TEST_WORKER",
+        Some("VIOLET_VERCEL_BYPASS_TEST_WORKER"),
+    );
     let config = MuxConfig {
         cwd: PathBuf::from("/tmp/test"),
         workers: 1,
@@ -697,6 +912,11 @@ fn factory_panes_forward_both_violet_credential_generations() {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     env.set("XDG_CONFIG_HOME", config_home.path());
     env.set("HOME", config_home.path());
+    violet_registrations(
+        config_home.path(),
+        "VIOLET_SLACK_TOKEN_COMPAT_TEST",
+        Some("VIOLET_VERCEL_BYPASS"),
+    );
     let contract = cas_types::violet_compatibility::violet_compatibility();
     let tokens =
         cas_types::violet_compatibility::violet_credential_names("VIOLET_SLACK_TOKEN_COMPAT_TEST");
@@ -1193,6 +1413,12 @@ x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS"
         "export VIOLET_SLACK_TOKEN_CREDENTIALS_FILE='token-from-file'\nexport VIOLET_VERCEL_BYPASS='bypass-from-file'\n",
     )
     .unwrap();
+    private_permissions(&credentials);
+    violet_registrations(
+        home.path(),
+        "VIOLET_SLACK_TOKEN_CREDENTIALS_FILE",
+        Some("VIOLET_VERCEL_BYPASS"),
+    );
     env.set("CAS_CREDENTIALS_FILE", &credentials);
     env.remove("VIOLET_SLACK_TOKEN_CREDENTIALS_FILE");
     env.remove("VIOLET_VERCEL_BYPASS");
@@ -1230,7 +1456,7 @@ x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS"
 }
 
 #[test]
-fn factory_pane_configs_reads_proxy_credentials_from_login_profile_source() {
+fn factory_pane_configs_requires_private_file_for_canonical_violet() {
     let mut env = TestEnvGuard::temp_home();
     let config_home = tempfile::tempdir().expect("temporary config home");
     env.set("XDG_CONFIG_HOME", config_home.path());
@@ -1259,6 +1485,12 @@ x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS_PROFILE_SOURCE"
         "export VIOLET_SLACK_TOKEN_PROFILE_SOURCE='token-from-profile'\nexport VIOLET_VERCEL_BYPASS_PROFILE_SOURCE='bypass-from-profile'\n",
     )
     .unwrap();
+    private_permissions(&credentials);
+    violet_registrations(
+        home.path(),
+        "VIOLET_SLACK_TOKEN_PROFILE_SOURCE",
+        Some("VIOLET_VERCEL_BYPASS_PROFILE_SOURCE"),
+    );
     std::fs::write(
         home.path().join(".profile"),
         format!(
@@ -1277,6 +1509,11 @@ x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS_PROFILE_SOURCE"
         include_director: false,
         ..MuxConfig::default()
     };
+    let configs = Mux::factory_pane_configs(&config);
+    let (_, initial_worker) = configs.iter().find(|(name, _)| name == "worker-1").unwrap();
+    assert_eq!(env_value(initial_worker, "VIOLET_SLACK_TOKEN_PROFILE_SOURCE"), None);
+    // Canonical Violet launches do not depend on whether a login shell ran.
+    env.set("CAS_CREDENTIALS_FILE", &credentials);
     let configs = Mux::factory_pane_configs(&config);
     let (_, worker_config) = configs
         .iter()

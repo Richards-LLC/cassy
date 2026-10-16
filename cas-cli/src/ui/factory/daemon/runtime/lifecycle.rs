@@ -15,6 +15,29 @@ pub(crate) fn attention_episode_key(
     serde_json::json!([kind, subject, episode_start.to_rfc3339()]).to_string()
 }
 
+/// Route only typed routine nudges through the durable lane. The fallback
+/// baseline is durable task state (or a fixed unknown baseline), never retry time.
+/// With no baseline, UNIX_EPOCH coalesces unknown episodes for this worker/task/session
+/// until a durable baseline becomes available.
+fn enqueue_stall_nudge_prompt(
+    cas_dir: &std::path::Path,
+    session: &str,
+    prompt: &crate::ui::factory::director::Prompt,
+    episode_start: Option<chrono::DateTime<chrono::Utc>>,
+) -> anyhow::Result<Option<i64>> {
+    let Some(task_id) = prompt.stall_nudge_task.as_deref() else { return Ok(None); };
+    let start = episode_start.unwrap_or_else(|| {
+        let fallback = crate::store::open_task_store_local(cas_dir).ok()
+            .and_then(|store| store.get(task_id).ok()).map(|task| task.updated_at)
+            .unwrap_or(chrono::DateTime::UNIX_EPOCH);
+        tracing::warn!(worker = %prompt.target, task_id, %fallback,
+            "stall nudge missing episode baseline; using durable fallback");
+        fallback
+    });
+    super::delivery::enqueue_worker_stall_nudge(cas_dir, session, &prompt.target, task_id,
+        &prompt.text, start).map(Some)
+}
+
 /// Persist one worker-health incident and hand it to the supervisor's durable
 /// prompt queue. The detector has already debounced the episode and the event
 /// has already been delivery-revalidated when this runs.
@@ -833,11 +856,11 @@ pub(super) fn enqueue_supervisor_unread_relay(
 ) -> WorkerAttentionRelayOutcome {
     let detail = if unread == 1 {
         format!(
-            "1 message addressed to you has gone unread past its delivery threshold — message {oldest_id}, from {oldest_sender}. It was delivered; it does not wake this pane because it carries no merge-request or lifecycle envelope."
+            "1 message addressed to you has gone unread past its delivery threshold — message {oldest_id}, from {oldest_sender}. No message-specific read or wake confirmation has been recorded."
         )
     } else {
         format!(
-            "{unread} messages addressed to you have gone unread past their delivery threshold. The oldest is message {oldest_id}, from {oldest_sender}. They were delivered; they do not wake this pane because they carry no merge-request or lifecycle envelope."
+            "{unread} messages addressed to you have gone unread past their delivery threshold. The oldest is message {oldest_id}, from {oldest_sender}. No message-specific read or wake confirmation has been recorded for this backlog."
         )
     };
     let key = format!("supervisor-unread:{oldest_id}");
@@ -2165,6 +2188,7 @@ impl FactoryDaemon {
             last_auth_failure_scan: None,
             cancelled_spawns: std::collections::HashSet::new(),
             last_idle_message_times: HashMap::new(),
+            stall_nudge_gate_checks: HashMap::new(),
             lifecycle_redelivery_attempts: HashMap::new(),
             lifecycle_redelivery_counts: HashMap::new(),
             inbox_deferred_writes: std::collections::HashMap::new(),
@@ -2191,6 +2215,7 @@ impl FactoryDaemon {
 
     /// Run the daemon main loop with TUI rendering
     pub async fn run(&mut self) -> anyhow::Result<()> {
+        crate::factory_build_memory::protect_interactive_memory();
         // Backstop for every entry path: a gone client must not kill the
         // daemon (cas-5918). The process entry points set it earlier.
         crate::server_signals::ignore_sigpipe_for_server();
@@ -2350,6 +2375,21 @@ impl FactoryDaemon {
             self.session_name.clone(),
             std::sync::Arc::clone(&self.shutdown),
         );
+        // cas-77f39 (GH #1210, factory loop v2 §5): output frames are capped
+        // and coalesced; input echo is drawn at once. The caps are read once,
+        // before this thread becomes a lane.
+        // What the TUI draws besides pane contents, as of the last pass.
+        let mut last_render_fingerprint = self.app.render_fingerprint();
+        let mut render_scheduler = super::render_scheduler::RenderScheduler::new(
+            super::render_scheduler::RenderCaps::from_config(
+                &crate::config::Config::load(self.app.cas_dir()).unwrap_or_default(),
+            ),
+        );
+        // cas-6931 (factory loop v2 §6): this thread is the daemon's io and
+        // control lane. Steps marked below and inside the prompt queue and
+        // the director apply reach the watchdog, and blocking calls made on
+        // this thread are reported (report mode).
+        let _loop_lane = loop_progress.attach(super::loop_watchdog::Lane::Control);
         let mut last_reset_check = std::time::Instant::now();
         // GH #1165: store writes whose result the loop does not need on the
         // spot run on one ordered background thread, and the task-sync repair
@@ -2392,6 +2432,10 @@ impl FactoryDaemon {
 
             // Read and process input from clients
             let input_activity = self.process_client_input().await?;
+            // cas-77f39: output from the pane that took input is its echo.
+            let input_pane = input_activity
+                .then(|| self.app.mux.focused_id().map(str::to_string))
+                .flatten();
 
             // Read and process input from GUI clients
             let gui_activity = self.process_gui_client_input().await;
@@ -2437,6 +2481,8 @@ impl FactoryDaemon {
                     }
                 }
                 let _ = self.process_prompt_queue().await;
+                // The pass's sub-steps end here (cas-6931).
+                loop_progress.enter(super::loop_watchdog::LoopPhase::PromptQueue);
                 // cas-ecff: auto-drain pending lifecycle outbox (durable
                 // task_lifecycle rows with prompt_delivered_at unset) so
                 // partial failures recover without re-running task mutations.
@@ -2826,8 +2872,29 @@ impl FactoryDaemon {
             }
 
             let spawning = self.app.spawning_count > 0;
-            let dirty = had_output
-                || input_activity
+            // cas-6931: the watchdog's badge (worst slow step, or a live job
+            // wedge). It changes at most once a second. This loop cannot show
+            // its own wedge: when it gets here, the wedge is over.
+            let loop_health_changed = self.app.set_loop_health(loop_progress.status_line());
+            // cas-77f39 (GH #1210): a frame is drawn when the render scheduler
+            // says so. Input and its echo draw now; other changes coalesce
+            // within 16 ms; pane output is capped per focus and never draws
+            // for a pane that is not on screen.
+            let frame_now = std::time::Instant::now();
+            if input_activity {
+                render_scheduler.note_input(input_pane.as_deref(), frame_now);
+            }
+            for pane in self.terminal_exchange.take_output_panes() {
+                let view = if !self.app.pane_on_screen(&pane) {
+                    super::render_scheduler::PaneView::Hidden
+                } else if self.app.mux.focused_id() == Some(pane.as_str()) {
+                    super::render_scheduler::PaneView::Focused
+                } else {
+                    super::render_scheduler::PaneView::Unfocused
+                };
+                render_scheduler.note_output(&pane, view, frame_now);
+            }
+            let layout_changed = loop_health_changed
                 || gui_activity
                 || ws_activity
                 || refreshed
@@ -2837,12 +2904,29 @@ impl FactoryDaemon {
                 || needs_full_redraw
                 || needs_compact_redraw
                 || resize_applied
-                || spawning
-                || error_cleared_by_timeout
-                || self.app.task_dialog_load.is_loading();
+                || error_cleared_by_timeout;
+            // Spawn completion, crash banners and pane-set changes used to
+            // ride on pane output (cas-77f39 review).
+            let render_fingerprint = self.app.render_fingerprint();
+            let state_changed = render_fingerprint != last_render_fingerprint;
+            last_render_fingerprint = render_fingerprint;
+            if layout_changed || state_changed {
+                render_scheduler.note_layout();
+            }
+            // The spawn spinner and a loading dialog animate at <= 10 fps.
+            if spawning || self.app.task_dialog_load.is_loading() {
+                render_scheduler.note_animation();
+            }
+            // A pending resize keeps its causes for the frame after it.
+            let frame = if resize_pending {
+                None
+            } else {
+                render_scheduler.take_frame(frame_now)
+            };
+            let mut frame_bytes = 0usize;
             // GH #1165: drawing must not touch the store.
             let store_free_draw = cas_store::wait_budget::forbid_store_access();
-            if dirty && !resize_pending {
+            if frame.is_some() {
                 // Render full TUI for full-mode clients (and relay clients)
                 let has_full_clients = self
                     .clients
@@ -2855,6 +2939,7 @@ impl FactoryDaemon {
                         terminal.backend_mut().set_cursor_style(state)?;
                     }
                     let output = terminal.backend_mut().take_buffer();
+                    frame_bytes += output.len();
                     if !output.is_empty() {
                         if has_full_clients {
                             self.broadcast_output_to(&output, ClientViewMode::Full);
@@ -2877,11 +2962,18 @@ impl FactoryDaemon {
                             ct.backend_mut().set_cursor_style(state)?;
                         }
                         let output = ct.backend_mut().take_buffer();
+                        frame_bytes += output.len();
                         if !output.is_empty() {
                             self.broadcast_output_to(&output, ClientViewMode::Compact);
                         }
                     }
                 }
+            }
+            // An empty diff sends nothing and is not a frame.
+            if let Some(frame) = frame
+                && frame_bytes > 0
+            {
+                loop_progress.record_frame(frame.cause.name(), frame.coalesced, frame_bytes);
             }
             // Flush any pending client output even if nothing new was rendered
             if !self.clients.is_empty() && self.clients.values().any(|c| !c.output_buf.is_empty()) {
@@ -3368,6 +3460,23 @@ impl FactoryDaemon {
                 );
                 continue;
             }
+            // A routine nudge has one queryable row and uses the queue's
+            // busy-recipient gate. Never write it directly into a Teams inbox.
+            if let Some(task_id) = prompt.stall_nudge_task.clone() {
+                let event = delivery_events.iter().find(|event| matches!(event,
+                    crate::ui::factory::director::DirectorEvent::WorkerStalled {
+                        worker, task_id: event_task, escalate: false, ..
+                    } if worker == &prompt.target && event_task == &task_id));
+                let episode_start = event.and_then(|event| self.app.worker_attention_episode_start(event));
+                let cas_dir = self.app.cas_dir().to_path_buf();
+                let session = self.session_name.clone();
+                store_worker.submit("worker stall nudge", move || {
+                    if let Err(error) = enqueue_stall_nudge_prompt(&cas_dir, &session, &prompt, episode_start) {
+                        tracing::warn!(%error, "worker stall nudge enqueue failed");
+                    }
+                });
+                continue;
+            }
             // GH #682: the event snapshot was read before this
             // loop. Re-read assignment state at the final direct
             // transport boundary so a task that moved beyond Open
@@ -3535,5 +3644,28 @@ impl FactoryDaemon {
                 ),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod stall_nudge_routing_rework_tests {
+    use super::*;
+
+    #[test]
+    fn stalled_nudge_lifecycle_routes_missing_episode_durably_and_ignores_other_prompts() {
+        let root = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(root.path()).unwrap();
+        let mut prompt = crate::ui::factory::director::Prompt {
+            target: "worker".into(), text: "quiet".into(), stall_nudge_task: Some("cas-unknown".into()),
+            retract_worker: None, retract_task: None, retract_epic: None,
+            drop_if_worker_assigned: None, durable_retry: true,
+        };
+        let first = enqueue_stall_nudge_prompt(&cas_dir, "session", &prompt, None).unwrap().unwrap();
+        assert_eq!(enqueue_stall_nudge_prompt(&cas_dir, "session", &prompt, None).unwrap(), Some(first));
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        assert_eq!(queue.queued_prompt(first).unwrap().unwrap().kind.as_deref(), Some("worker_stall_nudge"));
+        prompt.stall_nudge_task = None;
+        assert_eq!(enqueue_stall_nudge_prompt(&cas_dir, "session", &prompt, Some(chrono::Utc::now())).unwrap(), None);
+        assert_eq!(queue.peek_all(10).unwrap().len(), 1);
     }
 }

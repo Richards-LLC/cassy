@@ -18,6 +18,28 @@ use cas_types::{
 
 use crate::changes::{FileChangeInfo, GitFileStatus, SourceChangesInfo};
 
+/// Record observed activity for the director's per-worker liveness read.
+/// This is the cas-d5ab integration seam; it currently has no production caller.
+/// Call only for real work (e.g. a tool-call or pane-busy wake-gate decline),
+/// never for a periodic heartbeat or a delivery attempt alone.
+pub fn record_worker_activity(
+    cas_dir: &Path,
+    agent_id: &str,
+    source: &str,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let event = Event::new(
+        EventType::WorkerActivity,
+        cas_types::EventEntityType::Agent,
+        agent_id,
+        reason,
+    )
+    .with_session(agent_id)
+    .with_metadata(serde_json::json!({"source": source, "reason": reason}));
+    SqliteEventStore::open(cas_dir)?.record(&event)?;
+    Ok(())
+}
+
 /// cas-e98e: lightweight PID liveness for FACTORY pane reconciliation.
 /// Linux: `/proc/<pid>` exists. Other platforms: conservatively false
 /// (no false "live" without a real probe).
@@ -478,7 +500,7 @@ impl DirectorData {
             owned_event = SqliteEventStore::open(cas_dir)?;
             &owned_event
         };
-        let activity = event_store.list_recent(50)?; // Load more to find worker activities
+        let activity = event_store.list_recent(50)?; // Bounded panel feed, not health evidence
 
         // Load agents
         let owned_agent;
@@ -497,34 +519,12 @@ impl DirectorData {
         // cas-1829: the event store is project-wide. Keep ACTIVITY and the
         // per-agent status line to this factory session's agents.
         let activity = retain_factory_session_events(activity, &agents_list, &foreign_agents);
-        let agent_name_to_id: HashMap<&str, &str> = agents_list
-            .iter()
-            .map(|a| (a.name.as_str(), a.id.as_str()))
-            .collect();
-
-        // Build map of agent_id -> latest worker activity
-        let worker_activity_types = [
-            EventType::WorkerSubagentSpawned,
-            EventType::WorkerSubagentCompleted,
-            EventType::WorkerFileEdited,
-            EventType::WorkerGitCommit,
-            EventType::WorkerVerificationBlocked,
-            EventType::WorkerPushBlocked,
-            EventType::VerificationStarted,
-            EventType::VerificationAdded,
-            EventType::TaskNoteAdded,
-            EventType::AuditTrailGap,
-        ];
-        let mut agent_latest_activity: HashMap<String, (String, chrono::DateTime<chrono::Utc>)> =
-            HashMap::new();
-        for event in &activity {
-            if worker_activity_types.contains(&event.event_type)
-                && let Some(owner_id) = activity_owner_id(event, &agent_name_to_id)
-            {
-                // Only keep the latest (first encountered since list is sorted by time desc)
-                agent_latest_activity
-                    .entry(owner_id.to_string())
-                    .or_insert_with(|| (event.summary.clone(), event.created_at));
+        // The panel feed is bounded; health evidence must not be. Query each
+        // subject directly so a busy fleet cannot evict another worker's work.
+        let mut agent_latest_activity = HashMap::new();
+        for agent in &agents_list {
+            if let Some(event) = event_store.latest_worker_activity(&agent.id, &agent.name)? {
+                agent_latest_activity.insert(agent.id.clone(), (event.summary, event.created_at));
             }
         }
         let mut close_rejections: HashMap<(String, String), String> = HashMap::new();
@@ -922,21 +922,6 @@ pub(crate) fn retain_factory_session_events(
         .collect()
 }
 
-/// The agent whose FACTORY row an activity event describes (cas-1829).
-///
-/// A push block is about the worker the guard named, not about whichever
-/// session's environment recorded it. Every other event belongs to the
-/// session that caused it.
-fn activity_owner_id<'a>(
-    event: &'a Event,
-    agent_name_to_id: &HashMap<&str, &'a str>,
-) -> Option<&'a str> {
-    if event.event_type == EventType::WorkerPushBlocked {
-        return agent_name_to_id.get(event.entity_id.as_str()).copied();
-    }
-    event.session_id.as_deref()
-}
-
 /// Newest `updated_at` across an epic group (the epic row and all of its
 /// subtasks). Used to order the TASKS panel by recency of activity so the
 /// supervisor's current focus stays on top (cas-2fb6). Returns `None` only when
@@ -1284,6 +1269,74 @@ mod tests {
         assert!(
             activity_age < crate::config::DEFAULT_STALL_THRESHOLD_SECS as i64,
             "recent task-note activity must keep the stall predicate below threshold"
+        );
+    }
+
+    #[test]
+    fn ct2_p2_activity_read_per_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let stores = DirectorStores::open(temp.path()).unwrap();
+        stores.task_store.init().unwrap();
+        stores.agent_store.init().unwrap();
+        stores.event_store.init().unwrap();
+        let worker = Agent::new_with_role("session-worker".into(), "worker".into(), AgentRole::Worker);
+        stores.agent_store.register(&worker).unwrap();
+        let event = Event::new(EventType::TaskNoteAdded, EventEntityType::Task, "cas-poll", "worker progress").with_session(&worker.id);
+        stores.event_store.record(&event).unwrap();
+        for _ in 0..80 {
+            stores.event_store.record(&Event::new(EventType::TaskNoteAdded, EventEntityType::Task, "cas-other", "other worker").with_session("other")).unwrap();
+        }
+        let data = DirectorData::load_with_stores(temp.path(), None, false, Some(&stores)).unwrap();
+        assert_eq!(
+            data.agents
+                .iter()
+                .find(|a| a.id == worker.id)
+                .unwrap()
+                .latest_activity
+                .as_ref()
+                .map(|(s, _)| s.as_str()),
+            Some("worker progress")
+        );
+    }
+
+    #[test]
+    fn worker_gate_activity_recorder_feeds_director_without_heartbeat_activity() {
+        let temp = tempfile::tempdir().unwrap();
+        let stores = DirectorStores::open(temp.path()).unwrap();
+        stores.task_store.init().unwrap();
+        stores.agent_store.init().unwrap();
+        let worker = Agent::new_with_role(
+            "gate-worker".into(),
+            "gate-worker".into(),
+            AgentRole::Worker,
+        );
+        stores.agent_store.register(&worker).unwrap();
+        record_worker_activity(temp.path(), &worker.id, "wake_gate", "tool call in flight")
+            .unwrap();
+        for _ in 0..80 {
+            stores
+                .event_store
+                .record(
+                    &Event::new(
+                        EventType::AgentHeartbeat,
+                        EventEntityType::Agent,
+                        &worker.id,
+                        "heartbeat",
+                    )
+                    .with_session(&worker.id),
+                )
+                .unwrap();
+        }
+        let data = DirectorData::load_with_stores(temp.path(), None, false, Some(&stores)).unwrap();
+        assert_eq!(
+            data.agents
+                .iter()
+                .find(|a| a.id == worker.id)
+                .unwrap()
+                .latest_activity
+                .as_ref()
+                .map(|(s, _)| s.as_str()),
+            Some("tool call in flight")
         );
     }
 

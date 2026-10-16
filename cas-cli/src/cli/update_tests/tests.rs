@@ -11,6 +11,33 @@ use crate::cli::Cli;
 use crate::ui::components::{Formatter, OutputMode};
 
 #[test]
+fn cas_678d_round1_offline_violet_does_not_block_builtin_sync() {
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    std::fs::create_dir_all(env.home().join(".claude")).unwrap();
+    sync_user_builtins_with_violet(&update_test_cli(true), || anyhow::bail!("hub offline"))
+        .unwrap();
+    assert!(
+        env.home()
+            .join(".claude/skills/cas-worker/SKILL.md")
+            .is_file()
+    );
+}
+
+#[test]
+fn cas_678d_round1_dry_run_without_user_store_does_not_write() {
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    std::fs::create_dir_all(env.home().join(".claude")).unwrap();
+    let mut args = update_test_args();
+    args.dry_run = true;
+    let phase = refresh_user_level_store(&args, &update_test_cli(true));
+    assert!(matches!(phase, ProjectPhase::Planned(_)));
+    args.user = true;
+    execute(&args, &update_test_cli(true), None).unwrap();
+    assert!(!env.home().join(".claude/skills").exists());
+    assert!(!env.home().join(".config/cas/credentials.env").exists());
+}
+
+#[test]
 fn test_is_newer() {
     assert!(is_newer("0.3.0", "0.2.0"));
     assert!(is_newer("0.2.1", "0.2.0"));

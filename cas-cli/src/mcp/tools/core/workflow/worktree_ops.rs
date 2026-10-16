@@ -297,6 +297,10 @@ pub(crate) fn delivery_ci_pending(branch: &str, target: &str, cwd: &Path) -> boo
 /// Otherwise query the latest code commit in merge-base..tip, or Docs Lint at
 /// the tip for a pure docs delivery. Both lookups are bounded and never poll.
 fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
+    cas_store::lane_guard::note_blocking_call(
+        cas_store::lane_guard::BlockingKind::Command,
+        "gh branch CI lookup",
+    );
     let (tip, code_sha) = match delivery_ci_commit(branch, target, cwd) {
         Ok(selected) => selected,
         Err(reason) => {
@@ -5501,6 +5505,29 @@ mod tests {
             .expect("branchless epic WorkTarget must replace the legacy field");
         assert_eq!(resolved.branch, "epic/declared-lane");
         assert!(resolved.reason.contains("legacy epic.branch absent"));
+    }
+
+    /// GH #1216 (cas-cf8e0): an epic created with target_branch=epic/x
+    /// records epic/x as both its branch and its WorkTarget, and its child
+    /// inherits it. worktree_merge must land on epic/x, as the epic's lane.
+    #[test]
+    fn declared_merge_target_for_an_adopted_explicit_epic_lane_gh_1216() {
+        let lane = cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "epic/violet-log-hygiene".into(),
+        };
+        let mut epic = cas_types::Task::new("cas-c3da".into(), "epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/violet-log-hygiene".into());
+        epic.deliverables.work_target = Some(lane.clone());
+        let mut child = cas_types::Task::new("cas-c3da-child".into(), "child".into());
+        child.deliverables.work_target = Some(lane);
+
+        let resolved = declared_system_b_merge_target(&child, Some(&epic), &child.id)
+            .expect("the adopted lane resolves");
+        assert_eq!(resolved.branch, "epic/violet-log-hygiene");
+        assert!(resolved.epic_lane, "{}", resolved.reason);
+        assert!(!resolved.trunk_fallback);
     }
 
     #[test]

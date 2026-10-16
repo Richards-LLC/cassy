@@ -35,6 +35,7 @@ use std::time::Duration;
 /// backoff (in `shared_db::with_write_retry`) handles longer contention.
 pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub mod lane_guard;
 pub mod shared_db;
 pub mod wait_budget;
 
@@ -264,6 +265,8 @@ pub use surfaced_artifact_store::{
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
     AdmissionOutcome, OperatorCommandAdmission,
+    BudgetedSurface, HOOK_SURFACE_BUDGET_CHARS, HOOK_SURFACE_ROW_OVERHEAD_CHARS, HookDrain,
+    fits_hook_surface, hook_surface_cost,
     OPERATOR_CLOUD_SCHEMA_STATEMENTS, OperatorCloudBacklog, OperatorCloudClaim,
     OperatorCloudSettlement, OperatorFeedBinding, OperatorSealedBytes, is_routing_id,
     session_routing_id,

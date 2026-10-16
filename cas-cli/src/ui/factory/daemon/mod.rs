@@ -294,6 +294,10 @@ pub struct FactoryDaemon {
     /// Tracks last idle-like message time per worker source for dedup.
     /// Prevents idle spam when workers send repeated "standing by" / "ready" messages.
     last_idle_message_times: HashMap<String, std::time::Instant>,
+    /// Next bounded nudge gate probe and its cheap pane signature. A pane
+    /// transition bypasses backoff; steady busy panes do no nudge-specific I/O.
+    /// The final counter bounds warnings/backoff for consecutive store errors.
+    stall_nudge_gate_checks: HashMap<i64, (std::time::Instant, (bool, bool, bool), u32)>,
     /// cas-d732 (GH #119): when each still-pending lifecycle row was last
     /// delivered, keyed by `prompt_queue.id`.
     ///

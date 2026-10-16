@@ -156,7 +156,9 @@ impl IssueRepoRegistry {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IssuesConfig {
-    /// GitHub repository in `owner/repo` form used by Cassy-system bug filing.
+    /// Explicit project GitHub issue repository in `owner/repo` form. CLI
+    /// reads may infer origin; legacy Cassy-system bug filing uses only this
+    /// stored override or the Cassy component destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
 
@@ -344,8 +346,8 @@ pub struct QaConfig {
 
     /// Interactive terminal surfaces exercised through the real-build ledger,
     /// rather than a command's stdout capture. Other output paths in the same
-    /// delivery still require terminal-qa; CLI command paths always do when
-    /// output checks are enabled (terminal_render_paths is non-empty).
+    /// delivery still require terminal-qa; CLI commands and mux pane rendering
+    /// always do when output checks are enabled (terminal_render_paths is non-empty).
     #[serde(default = "default_terminal_interaction_paths")]
     pub terminal_interaction_paths: Vec<String>,
 
@@ -417,10 +419,13 @@ pub fn default_terminal_render_paths() -> Vec<String> {
         "**/cli/**",
         "**/ui/**",
         "**/tui/**",
-        "**/*render*",
-        "**/*output*",
-        "**/*theme*",
-        "**/*progress*",
+        "**/terminal/**",
+        "**/doctor.rs",
+        "**/doctor/**",
+        "**/cas-mux/**",
+        "**/ghostty_vt/**",
+        "**/ghostty_vt_sys/**",
+        "**/cas-diffs/**",
     ]
     .into_iter()
     .map(ToOwned::to_owned)
@@ -519,6 +524,15 @@ pub struct FactoryConfig {
     /// Resource denials applied to every factory worker, across harnesses.
     #[serde(flatten)]
     pub worker_policy: cas_types::factory_worker_policy::FactoryWorkerPolicy,
+    /// cas-d757 (GH #1219): operator-authenticated CLIs a factory worker's
+    /// shell may not run. Without credentials they start a login that pops
+    /// up on the operator's screen. Matched on the executable's basename.
+    #[serde(default = "default_worker_denied_clis")]
+    pub worker_denied_clis: Vec<String>,
+    /// cas-d757 (GH #1219): MCP/connector tool-name patterns a factory worker
+    /// may not call. Case-insensitive; `*` matches any run of characters.
+    #[serde(default = "default_worker_denied_mcp_tools")]
+    pub worker_denied_mcp_tools: Vec<String>,
     /// Durable, per-task proof/artifact directory. Factory workers may write
     /// under this root/project-key in addition to their worktree. If unset, the hook
     /// resolves a real-disk fallback under `~/.cas/artifacts`.
@@ -603,6 +617,26 @@ pub struct FactoryConfig {
     /// `force=true` overrides only that spawn-time check.
     #[serde(default = "default_max_concurrent_builders")]
     pub max_concurrent_builders: usize,
+
+    /// Per-build systemd MemoryHigh in GiB. 0 reserves half of host RAM
+    /// across max_concurrent_builders (bounded to 256 MiB..16 GiB per build).
+    /// Non-Linux hosts or unavailable user sessions log and run unscoped.
+    #[serde(default)]
+    pub worker_memory_high_gib: u32,
+
+    /// Most frames per second the factory TUI draws for output from the
+    /// focused pane (GH #1210). Input echo and layout changes are not capped.
+    /// Read when the daemon starts.
+    #[serde(default = "default_render_max_fps")]
+    pub render_max_fps: u32,
+
+    /// Most frames per second the factory TUI draws for output from visible
+    /// panes other than the focused one. Panes not on screen never draw.
+    /// The caps add up: at most `render_max_fps + render_unfocused_fps`
+    /// output frames/s. Read when the daemon starts; a hand-edited 0 reads
+    /// as 1.
+    #[serde(default = "default_render_unfocused_fps")]
+    pub render_unfocused_fps: u32,
 
     /// Minimum GiB available before starting a worker on its filesystem.
     /// Checked before creating or reusing a worktree, even with target seeding off. 0 disables it.
@@ -879,17 +913,35 @@ fn default_target_cache_low_watermark_percent() -> u8 {
 }
 
 fn default_target_cache_min_idle_secs() -> u64 {
-    60 * 60
+    2 * 60 * 60
 }
 
 fn default_target_cache_retention_count() -> usize {
     1
 }
 
+fn default_worker_denied_clis() -> Vec<String> {
+    vec!["vercel".to_string()]
+}
+
+fn default_worker_denied_mcp_tools() -> Vec<String> {
+    vec!["*vercel*".to_string()]
+}
+
+fn default_render_max_fps() -> u32 {
+    15
+}
+
+fn default_render_unfocused_fps() -> u32 {
+    5
+}
+
 impl Default for FactoryConfig {
     fn default() -> Self {
         Self {
             worker_policy: Default::default(),
+            worker_denied_clis: default_worker_denied_clis(),
+            worker_denied_mcp_tools: default_worker_denied_mcp_tools(),
             artifacts_root: None,
             commander_mirror_enabled: true,
             write_roots: Vec::new(),
@@ -902,6 +954,9 @@ impl Default for FactoryConfig {
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
             max_concurrent_builders: default_max_concurrent_builders(),
+            worker_memory_high_gib: 0,
+            render_max_fps: default_render_max_fps(),
+            render_unfocused_fps: default_render_unfocused_fps(),
             spawn_min_free_gib: default_spawn_min_free_gib(),
             prompt_retention_days: default_prompt_retention_days(),
             event_telemetry_retention_days: default_event_telemetry_retention_days(),
@@ -1897,7 +1952,7 @@ mod tests {
         assert_eq!(fc.epic_base_branch, None);
         assert_eq!(fc.target_cache_high_watermark_percent, 85);
         assert_eq!(fc.target_cache_low_watermark_percent, 75);
-        assert_eq!(fc.target_cache_min_idle_secs, 3600);
+        assert_eq!(fc.target_cache_min_idle_secs, 7200);
         assert_eq!(fc.target_cache_retention_count, 1);
         assert_eq!(fc.message_max_chars, 1200);
         assert_eq!(fc.message_max_chars_escalation, 2500);

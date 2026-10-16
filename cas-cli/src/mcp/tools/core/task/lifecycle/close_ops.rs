@@ -6980,6 +6980,7 @@ impl CasCore {
         // caller needs before its MCP deadline, and the full narrative is
         // appended from a detached task after that row commits.
         let mut deferred_epic_override_note = None;
+        let mut epic_issue_warning = String::new();
         if task.task_type == TaskType::Epic {
             if let Some(ref owner) = task.epic_verification_owner {
                 let caller_id = self.get_agent_id().ok();
@@ -7372,6 +7373,15 @@ impl CasCore {
                     ));
                 }
             }
+            // cas-dd56: name the issues the children reference that are
+            // still open, so a shipped epic does not leave them behind.
+            // Bounded and offline-tolerant; it never blocks the close.
+            epic_issue_warning = crate::issue_reconcile::epic_open_issue_warning(
+                &subtasks,
+                crate::github_issue_attach::default_repo_for(&self.cas_root).as_deref(),
+                &crate::issue_reconcile::GhIssueStates::new(crate::issue_reconcile::GH_BUDGET),
+            )
+            .unwrap_or_default();
         }
 
         // cas-95ce / cas-4b3f / cas-cf64: per-task close-time merge-state
@@ -10388,6 +10398,7 @@ impl CasCore {
                 "\n\nReceipt: epic close committed. The full stranded-branch override narrative is queued as a durable decision note.",
             );
         }
+        receipt.push_str(&epic_issue_warning);
         if used_deprecated_override_alias {
             receipt.push_str("\n\n");
             receipt.push_str(DEPRECATED_BYPASS_WARNING);
@@ -13971,7 +13982,23 @@ fn run_factory_branch_merge_gate_for_delivery(
     let local_merge = task.delivery_mode == cas_types::DeliveryMode::LocalMerge;
     let origin_parent_branch = format!("origin/{parent_branch}");
     let mut origin_fetch_attempted = false;
-    let mut stranded = count_unmerged_factory_commits(repo_path, commit_ish, parent_branch);
+    // cas-1cc7: a new target may exist only on origin after a retarget.
+    // Unknown local Git state is not the local-epic KnownZero exception.
+    let mut stranded = match known_unmerged_factory_commits(repo_path, commit_ish, parent_branch) {
+        KnownUnmergedCount::KnownZero => 0,
+        KnownUnmergedCount::KnownPositive(count) => count,
+        KnownUnmergedCount::Unknown => {
+            origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+            match known_unmerged_factory_commits(repo_path, commit_ish, &origin_parent_branch) {
+                KnownUnmergedCount::KnownZero if !local_merge => 0,
+                KnownUnmergedCount::KnownPositive(count) if !local_merge => count,
+                _ => return MergeStateGateOutcome::Unresolved(format!(
+                    "MERGE STATE UNVERIFIABLE: delivery `{commit_ish}` could not be measured against target `{parent_branch}`{}. No integration evidence was obtained; restore the target ref and retry close.",
+                    if local_merge { String::new() } else { format!(" or `{origin_parent_branch}`") },
+                )),
+            }
+        }
+    };
     let mut local_only_trunk_target = false;
     if stranded == 0 {
         // A local trunk ref is not shared integration evidence. Refresh and
@@ -18121,6 +18148,12 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
     // direction is measured once rather than once per child.
     let mut direction_memo: std::collections::HashMap<(String, String), BranchContentDirection> =
         std::collections::HashMap::new();
+    // cas-0a27: whether each delivery lane is already released (contained in
+    // the default branch), measured once per lane rather than per child.
+    let mut released_lanes: std::collections::HashMap<String, Option<ReleasedLane>> =
+        std::collections::HashMap::new();
+    let mut contained_anchors: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
 
     for t in subtasks.iter().skip(offset).take(page_len) {
         // GH #1038: retargeting the epic for a follow-up does not retarget
@@ -18169,6 +18202,58 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             .chain(additional_factory_branches.iter())
             .cloned()
             .collect::<Vec<_>>();
+        // cas-0a27: once a closed child's lane is released (contained in the
+        // default branch) and the child's recorded anchor is contained there
+        // too, its delivery is shipped. The lane check runs once per lane
+        // and every anchor is checked in one batched `rev-list`, so a
+        // 41-child released epic costs two Git calls instead of re-running
+        // each child's content proof. A child whose anchor is not contained
+        // (a squash, or a rebase that dropped work) keeps the full proof.
+        if !options.summary && t.status == TaskStatus::Closed && has_delivery {
+            let released = released_lanes
+                .entry(parent_branch.to_string())
+                .or_insert_with(|| released_lane_evidence(repo_path, parent_branch, &git_snapshot))
+                .clone();
+            let anchor_shipped = released.as_ref().zip(resolved_anchor).is_some_and(|(lane, anchor)| {
+                contained_anchors
+                    .entry(lane.default_ref.clone())
+                    .or_insert_with(|| {
+                        anchors_contained_in(repo_path, subtasks, &git_snapshot, &lane.default_ref)
+                    })
+                    .contains(anchor)
+            });
+            if let Some(evidence) = released.filter(|_| anchor_shipped).map(|lane| lane.evidence) {
+                let checked_ref_reads = fallback_branches
+                    .iter()
+                    .map(|branch| git_snapshot.read_ref(branch))
+                    .collect();
+                statuses.push(EpicChildBranchStatus {
+                    task_id: t.id.clone(),
+                    task_status: t.status,
+                    assignee: t.assignee.clone(),
+                    dead_or_stale_assignee: false,
+                    recorded_anchor: recorded_anchor.map(str::to_string),
+                    factory_branch,
+                    additional_factory_branches,
+                    unmerged_count: 0,
+                    last_commit_unix: None,
+                    merge_evidence_note: Some(format!(
+                        "decision: child task `{}` is closed, its delivery lane \
+                         `{parent_branch}` is released ({evidence}) and its recorded \
+                         anchor is contained in the same branch, so its delivery shipped \
+                         and was not re-proven.",
+                        t.id
+                    )),
+                    content_evolution_note: None,
+                    dropped_paths: Vec::new(),
+                    content_check_error: None,
+                    checked_ref_reads,
+                    refs_unresolved: false,
+                    content_directions: Vec::new(),
+                });
+                continue;
+            }
+        }
         let mut cache_key = (!options.summary).then(|| {
             epic_verdict_cache::verdict_key(
                 t,
@@ -18651,6 +18736,97 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         budget_exhausted,
         reused_verdicts,
     }
+}
+
+/// cas-0a27: how `lane` is contained in the repository's default branch
+/// (`[factory] epic_base_branch`, else the detected default), or `None` when
+/// it is not, is the default branch itself, or cannot be read. Containment
+/// is ancestry of the lane tip (a merge release) or, for a squash release,
+/// the lane tip's tree on the default branch's history.
+#[derive(Debug, Clone)]
+struct ReleasedLane {
+    /// How the lane is contained, for the decision note.
+    evidence: String,
+    /// The default-branch ref that contains it.
+    default_ref: String,
+}
+
+/// The recorded anchors of `subtasks` that `default_ref` contains, from one
+/// `git rev-list <anchors> --not <default_ref>`: an anchor in its output is
+/// not contained. Anchors this checkout lacks are never contained.
+fn anchors_contained_in(
+    repo_path: &std::path::Path,
+    subtasks: &[Task],
+    snapshot: &EpicGitSnapshot,
+    default_ref: &str,
+) -> std::collections::HashSet<String> {
+    use std::process::Command;
+    let anchors: Vec<&str> = subtasks
+        .iter()
+        .filter_map(|task| task.deliverables.factory_branch_anchor.as_deref())
+        .filter(|anchor| is_safe_git_refname(anchor) && snapshot.commit_exists(anchor))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if anchors.is_empty() || !is_safe_git_refname(default_ref) {
+        return std::collections::HashSet::new();
+    }
+    let output = Command::new("git")
+        .arg("rev-list")
+        .args(&anchors)
+        .args(["--not", default_ref])
+        .current_dir(repo_path)
+        .measurement_output();
+    let Ok(output) = output else {
+        return std::collections::HashSet::new();
+    };
+    if !output.status.success() {
+        return std::collections::HashSet::new();
+    }
+    let uncontained: std::collections::HashSet<&str> =
+        std::str::from_utf8(&output.stdout).unwrap_or("").lines().collect();
+    anchors
+        .into_iter()
+        .filter(|anchor| !uncontained.iter().any(|commit| commit.starts_with(anchor)))
+        .map(str::to_string)
+        .collect()
+}
+
+fn released_lane_evidence(
+    repo_path: &std::path::Path,
+    lane: &str,
+    snapshot: &EpicGitSnapshot,
+) -> Option<ReleasedLane> {
+    let default = resolve_standalone_merge_target(repo_path).ok()?;
+    if default == lane || !is_safe_git_refname(lane) || !is_safe_git_refname(&default) {
+        return None;
+    }
+    let lane_read = snapshot.read_ref(lane);
+    let lane_ref = lane_read.read_ref()?.to_string();
+    let candidates: Vec<String> = [format!("origin/{default}"), default]
+        .into_iter()
+        .filter(|candidate| git_ref_exists(repo_path, candidate))
+        .collect();
+    let lane_sha = snapshot
+        .ref_info(&lane_ref)
+        .map(|info| info.commit.chars().take(10).collect::<String>())
+        .unwrap_or_default();
+    if let Some(candidate) = candidates
+        .iter()
+        .find(|candidate| git_commit_is_ancestor(repo_path, &lane_ref, candidate))
+    {
+        return Some(ReleasedLane {
+            evidence: format!("`{lane_ref}` @ {lane_sha} is an ancestor of `{candidate}`"),
+            default_ref: candidate.clone(),
+        });
+    }
+    candidates
+        .iter()
+        .find(|candidate| commit_tip_tree_reachable_from(repo_path, &lane_ref, candidate))
+        .map(|candidate| ReleasedLane {
+            evidence: format!("the tree of `{lane_ref}` @ {lane_sha} is on `{candidate}`'s history"),
+            default_ref: candidate.clone(),
+        })
 }
 
 fn memoized_branch_content_direction(
@@ -23922,6 +24098,242 @@ mod merge_state_gate_tests {
     use crate::test_support::TestEnvGuard;
     use std::process::Command;
     use tempfile::TempDir;
+
+    // A newly created epic exists only on origin; the worker's old parent
+    // and its prior review cycle must not supply integration evidence.
+    #[tokio::test]
+    async fn retargeted_remote_only_epic_parks_unmerged_delivery_cas_1cc7() {
+        use crate::mcp::CasService;
+        use cas_store::TaskStore;
+        use cas_types::{Agent, AgentRole, WorkTarget};
+
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let dir = init_factory_repo("retarget-worker");
+        let p = dir.path();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(
+            p,
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        git(p, &["push", "-q", "origin", "main:epic/new-target"]);
+        let branch = "factory/retarget-worker-cas-retarget";
+        git(p, &["checkout", "-q", "-b", branch]);
+        std::fs::write(p.join("delivery.rs"), "// cas-retarget delivery\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-retarget): delivery"]);
+        git(p, &["push", "-q", "origin", branch]);
+        let tip = rev_parse_local(p, branch);
+        let root = p.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-retarget-fixture\"\n[verification]\nenabled = false\n",
+        )
+        .unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                "retarget-supervisor".into(),
+                "supervisor".into(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
+        core.set_agent_id_for_testing("retarget-supervisor".into());
+        let mut task = Task::new("cas-retarget".into(), "Retargeted delivery".into());
+        task.status = TaskStatus::InProgress;
+        task.task_type = TaskType::Bug;
+        task.assignee = Some("retarget-worker".into());
+        task.risk = vec![TaskRisk::None];
+        task.deliverables.factory_branch_anchor = Some(tip.clone());
+        task.deliverables.parked_branch = Some(branch.into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-retarget-fixture".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&task).unwrap();
+        for (id, target) in [
+            ("cas-old-parent", "main"),
+            ("cas-new-parent", "epic/new-target"),
+        ] {
+            let mut epic = Task::new(id.into(), "Parent epic".into());
+            epic.task_type = TaskType::Epic;
+            epic.deliverables.work_target = Some(WorkTarget {
+                repo_selector: "project:cas-retarget-fixture".into(),
+                target_branch: target.into(),
+            });
+            store.add(&epic).unwrap();
+        }
+        let service = CasService::new(core, None);
+        for request in [
+            serde_json::json!({"action":"dep_add", "id":task.id, "to_id":"cas-old-parent", "dep_type":"parent"}),
+            serde_json::json!({"action":"dep_remove", "id":task.id, "to_id":"cas-old-parent", "dep_type":"parent"}),
+            serde_json::json!({"action":"dep_add", "id":task.id, "to_id":"cas-new-parent", "dep_type":"parent"}),
+            serde_json::json!({"action":"update", "id":task.id, "target_branch":"epic/new-target"}),
+        ] {
+            let response = service
+                .task(Parameters(serde_json::from_value(request).unwrap()))
+                .await
+                .unwrap();
+            assert_ne!(response.is_error, Some(true), "{response:?}");
+        }
+        assert!(!git_ref_exists(p, "epic/new-target"));
+        assert!(!git_commit_is_ancestor(p, &tip, "origin/epic/new-target"));
+        agents
+            .register(&Agent::new_with_role(
+                "retarget-worker-id".into(),
+                "retarget-worker".into(),
+                AgentRole::Worker,
+            ))
+            .unwrap();
+        env.set("CAS_AGENT_ROLE", "worker");
+        let worker = CasCore::with_daemon(root, None, None);
+        worker.set_agent_id_for_testing("retarget-worker-id".into());
+        let service = CasService::new(worker, None);
+        let response = service.task(Parameters(serde_json::from_value(serde_json::json!({"action":"close", "id":task.id, "reason":"ready for review"})).unwrap())).await.unwrap();
+        assert_eq!(
+            store.get(&task.id).unwrap().status,
+            TaskStatus::AwaitingMerge,
+            "{response:?}"
+        );
+        assert_eq!(response.is_error, Some(true));
+        assert!(response.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.contains("MERGE REQUIRED"))));
+    }
+
+    #[tokio::test]
+    async fn ordinary_reopen_keeps_unreviewed_merge_request_actionable_cas_1cc7() {
+        use crate::prompt_revalidation::{
+            MergeRequestDecision, MergeRequestDelivery, MergeRequestEnvelope,
+            merge_request_delivery_decision,
+        };
+        use cas_store::TaskStore;
+        use cas_types::{Agent, AgentRole};
+
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let dir = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(dir.path().to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                "reopen-supervisor".into(),
+                "supervisor".into(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
+        core.set_agent_id_for_testing("reopen-supervisor".into());
+        let mut task = Task::new("cas-unreviewed".into(), "Premature close recovery".into());
+        task.status = TaskStatus::Closed;
+        task.assignee = Some("worker".into());
+        let tip = "4".repeat(40);
+        task.deliverables.factory_branch_anchor = Some(tip.clone());
+        task.deliverables.historical_factory_branch_anchors = vec!["2".repeat(40)];
+        store.add(&task).unwrap();
+        core.cas_task_reopen(Parameters(TaskReopenRequest {
+            id: task.id.clone(),
+            reason: Some("This unmerged tip has never been reviewed".into()),
+        }))
+        .await
+        .unwrap();
+        let reopened = store.get(&task.id).unwrap();
+        let envelope = MergeRequestEnvelope {
+            task_id: task.id,
+            branch_tip: tip,
+            target_branch: "epic/new-target".into(),
+            target_branch_tip: "b".repeat(40),
+            anchor_tip: None,
+            commits_not_on_target_base: 8,
+            pr_number: None,
+            source_freshness_unavailable: None,
+        };
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&reopened),
+                &envelope,
+                &MergeRequestDecision::Pending {
+                    target_tip: envelope.target_branch_tip.clone()
+                }
+            ),
+            MergeRequestDelivery::Deliver
+        );
+        // A later actual review rejection of that same recovered tip must
+        // now suppress it, and the disposition must survive the store roundtrip.
+        let mut reviewed = reopened.clone();
+        reviewed.status = TaskStatus::AwaitingMerge;
+        reviewed.deliverables.factory_branch_anchor = Some(envelope.branch_tip.clone());
+        store.update(&reviewed).unwrap();
+        cas_store::request_changes_for_parked_delivery(
+            dir.path(),
+            &reviewed.id,
+            "reopen-supervisor",
+            "Reviewed delivery needs corrective work",
+        )
+        .unwrap();
+        let reviewed = store.get(&reviewed.id).unwrap();
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&reviewed),
+                &envelope,
+                &MergeRequestDecision::Unverifiable
+            ),
+            MergeRequestDelivery::SuppressRequestChanges {
+                status: TaskStatus::Open
+            }
+        );
+        let mut declined = envelope;
+        declined.branch_tip = "2".repeat(40);
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&reopened),
+                &declined,
+                &MergeRequestDecision::Unverifiable
+            ),
+            MergeRequestDelivery::SuppressRequestChanges {
+                status: TaskStatus::Open
+            }
+        );
+    }
+
+    #[test]
+    fn remote_only_target_needs_known_integration_cas_1cc7() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(
+            p,
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        git(p, &["push", "-q", "origin", "main:epic/remote-only"]);
+        std::fs::write(p.join("delivery.rs"), "// cas-test1\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-test1): delivery"]);
+        let task = worker_task("worker");
+        let request = base_req(&task.id);
+        assert!(matches!(
+            run_factory_branch_merge_gate(&task, &request, "epic/remote-only", p),
+            MergeStateGateOutcome::Reject(_)
+        ));
+        git(p, &["push", "-q", "origin", "HEAD:epic/remote-only"]);
+        assert!(matches!(
+            run_factory_branch_merge_gate(&task, &request, "epic/remote-only", p),
+            MergeStateGateOutcome::Proceed
+        ));
+        assert!(matches!(
+            run_factory_branch_merge_gate(&task, &request, "epic/missing-target", p),
+            MergeStateGateOutcome::Unresolved(_)
+        ));
+    }
 
     fn close_relay_fixture_cas_3a82(
         root: &std::path::Path,
@@ -33168,6 +33580,143 @@ mod epic_status_gate_tests {
             assert!(report.contains("Partial result"));
             assert!(report.contains("not checked"));
         }
+    }
+
+    /// An epic lane with `children` closed children, each merged into the
+    /// lane from a reusable worker lane that later moved on to other work,
+    /// as a real burn-down epic looks after its last child closes. With
+    /// `released`, the lane is merged into `main`.
+    fn released_epic_fixture(children: usize, released: bool) -> (TempDir, Vec<Task>) {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let lane = "epic/released-cas-0a27";
+        git(p, &["branch", lane, "main"]);
+        let workers = 8;
+        for worker in 0..workers {
+            git(p, &["branch", &format!("factory/w{worker}"), lane]);
+        }
+        let mut subtasks = Vec::new();
+        for index in 0..children {
+            let worker = format!("w{}", index % workers);
+            let branch = format!("factory/{worker}");
+            git(p, &["checkout", "-q", &branch]);
+            let file = format!("child-{index}.rs");
+            std::fs::write(p.join(&file), format!("// child {index}\n")).unwrap();
+            git(p, &["add", &file]);
+            git(p, &["commit", "-q", "-m", &format!("feat: child {index}")]);
+            let anchor = epic_git_stdout(p, &["rev-parse", "HEAD"]);
+            git(p, &["checkout", "-q", lane]);
+            git(p, &["merge", "-q", "--no-ff", "-m", &format!("merge child {index}"), &branch]);
+            let mut task = child(&format!("cas-rel-{index}"), TaskStatus::Closed, Some(&worker));
+            task.deliverables.factory_branch_anchor = Some(anchor);
+            subtasks.push(task);
+        }
+        // The reused lanes carry later, unrelated work past the epic.
+        for worker in 0..workers {
+            git(p, &["checkout", "-q", &format!("factory/w{worker}")]);
+            let file = format!("later-{worker}.rs");
+            std::fs::write(p.join(&file), "// later work\n").unwrap();
+            git(p, &["add", &file]);
+            git(p, &["commit", "-q", "-m", "feat: a later task"]);
+        }
+        git(p, &["checkout", "-q", "main"]);
+        if released {
+            git(p, &["merge", "-q", "--no-ff", "-m", "release", lane]);
+        }
+        (dir, subtasks)
+    }
+
+    /// cas-0a27: closing the released v41 epic proved about one child per
+    /// attempt in the 8 s budget. A released lane proves every closed child
+    /// with one ancestry check: a 40-child epic closes in one attempt, well
+    /// inside the budget, with each child's evidence recorded.
+    #[test]
+    fn released_epic_closes_in_one_attempt_with_every_child_proven_cas_0a27() {
+        let (dir, subtasks) = released_epic_fixture(40, true);
+        let task = epic("cas-rel-epic");
+        let req = base_req(&task.id);
+        let started = std::time::Instant::now();
+        let outcome = run_epic_close_merge_gate(
+            &task,
+            &req,
+            "epic/released-cas-0a27",
+            dir.path(),
+            &subtasks,
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(outcome, EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)),
+            "a released 40-child epic must close in one attempt: {outcome:?}"
+        );
+        assert!(
+            elapsed < EPIC_CLOSE_GATE_BUDGET / 4,
+            "40 released children took {elapsed:?} of the {EPIC_CLOSE_GATE_BUDGET:?} budget"
+        );
+
+        let collection = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "epic/released-cas-0a27",
+            dir.path(),
+            EpicStatusOptions {
+                offset: 0,
+                limit: None,
+                summary: false,
+                budget: EPIC_CLOSE_GATE_BUDGET,
+            },
+        );
+        assert!(!collection.budget_exhausted);
+        assert_eq!(collection.statuses.len(), 40);
+        for status in &collection.statuses {
+            assert!(!status.blocks_epic_close(), "{status:?}");
+            let note = status.merge_evidence_note.as_deref().unwrap_or_default();
+            assert!(
+                note.contains("is released") && note.contains("is an ancestor of `main`"),
+                "{note}"
+            );
+        }
+    }
+
+    /// cas-0a27: an unreleased lane keeps the per-child proof, and an open
+    /// child of a released lane is still measured, not waved through.
+    #[test]
+    fn unreleased_epic_keeps_per_child_proofs_cas_0a27() {
+        let (dir, mut subtasks) = released_epic_fixture(4, false);
+        let collection = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "epic/released-cas-0a27",
+            dir.path(),
+            EpicStatusOptions::full_unbounded(),
+        );
+        assert_eq!(collection.statuses.len(), 4);
+        for status in &collection.statuses {
+            assert!(!status.blocks_epic_close(), "{status:?}");
+            assert!(
+                !status
+                    .merge_evidence_note
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("is released"),
+                "{status:?}"
+            );
+        }
+
+        // Released lane, but one child is still in progress with unmerged
+        // work on its lane: it is measured and blocks.
+        let (dir, _) = released_epic_fixture(0, true);
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "factory/open-worker", "main"]);
+        std::fs::write(p.join("open.rs"), "// unmerged\n").unwrap();
+        git(p, &["add", "open.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: open work"]);
+        git(p, &["checkout", "-q", "main"]);
+        subtasks = vec![child("cas-rel-open", TaskStatus::InProgress, Some("open-worker"))];
+        let collection = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "epic/released-cas-0a27",
+            p,
+            EpicStatusOptions::full_unbounded(),
+        );
+        assert!(collection.statuses[0].blocks_epic_close(), "{:?}", collection.statuses[0]);
     }
 
     #[test]

@@ -103,12 +103,33 @@ impl Config {
             "factory.supervisor_only_mcp" => Some(factory.worker_policy.supervisor_only_mcp.join(",")),
             "factory.supervisor_only_env" => Some(factory.worker_policy.supervisor_only_env.join(",")),
             "factory.worker_credential_env" => Some(factory.worker_policy.worker_credential_env.join(",")),
+            "factory.worker_denied_clis" => Some(factory.worker_denied_clis.join(",")),
+            "factory.worker_denied_mcp_tools" => {
+                Some(factory.worker_denied_mcp_tools.join(","))
+            }
             "factory.message_max_chars_escalation" => {
                 Some(factory.message_max_chars_escalation.to_string())
             }
             "factory.note_max_chars" => Some(factory.note_max_chars.to_string()),
             "factory.commander_mirror_enabled" => Some(factory.commander_mirror_enabled.to_string()),
             "factory.max_concurrent_builders" => Some(factory.max_concurrent_builders.to_string()),
+            "factory.worker_memory_high_gib" => Some(factory.worker_memory_high_gib.to_string()),
+            "factory.render_max_fps" => Some(factory.render_max_fps.to_string()),
+            "factory.render_unfocused_fps" => Some(factory.render_unfocused_fps.to_string()),
+            "factory.warn_stale_assignment" => Some(factory.warn_stale_assignment.to_string()),
+            "factory.block_stale_assignment" => Some(factory.block_stale_assignment.to_string()),
+            "factory.stale_threshold_commits" => Some(factory.stale_threshold_commits.to_string()),
+            "factory.stall_threshold_secs" => Some(factory.stall_threshold_secs.to_string()),
+            "factory.context_recycle_threshold_percent" => Some(factory.context_recycle_threshold_percent.to_string()),
+            "factory.stall_after_secs" => Some(factory.stall_after_secs.to_string()),
+            "factory.delivery_stalled_priority_secs" => Some(factory.delivery_stalled_priority_secs.to_string()),
+            "factory.delivery_stalled_normal_secs" => Some(factory.delivery_stalled_normal_secs.to_string()),
+            "factory.strict_cli" => Some(factory.strict_cli.to_string()),
+            "factory.target_cache_high_watermark_percent" => Some(factory.target_cache_high_watermark_percent.to_string()),
+            "factory.target_cache_low_watermark_percent" => Some(factory.target_cache_low_watermark_percent.to_string()),
+            "factory.target_cache_min_idle_secs" => Some(factory.target_cache_min_idle_secs.to_string()),
+            "factory.target_cache_retention_count" => Some(factory.target_cache_retention_count.to_string()),
+            "factory.nice_cargo" => Some(factory.nice_cargo.to_string()),
             "factory.spawn_min_free_gib" => Some(factory.spawn_min_free_gib.to_string()),
             "factory.prompt_retention_days" => Some(factory.prompt_retention_days.to_string()),
             "factory.event_telemetry_retention_days" => {

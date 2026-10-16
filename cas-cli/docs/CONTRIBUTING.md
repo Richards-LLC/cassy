@@ -71,6 +71,30 @@ the alias first, then run `cas cloud project --adopt-aliases`,
 repair remote ownership; alias adoption rewrites local task provenance and
 does not move Cloud rows.
 
+## Project issue repository reads
+
+`cas config get issues.repo` returns the stored project tracker, or resolves an
+unset value from that checkout's local GitHub `origin`. It parses the local URL
+without contacting GitHub and accepts HTTPS, SCP-style SSH and `ssh://` remotes.
+A missing, invalid or non-GitHub origin leaves the result empty; nested folders
+without their own Git repository do not borrow a parent repository's origin.
+An explicit `issues.repo` always wins, independently of component repositories.
+
+Plain `get` prints only `owner/repo`, so it remains usable in `gh --repo
+"$(cas config get issues.repo)"`. Human `list`, `describe` and `search` label an
+inferred value `(from origin; unset in config)`; their JSON views and JSON `get`
+include `source` (`origin`, `config` or `unset`) and `configured` for this key.
+`cas doctor` warns when the setting is unset and names the resolved origin or
+explains how to set a tracker when none can be resolved.
+
+These reads never save the inferred value. Raw `Config::get`/`list`, editing,
+serialization and `config diff` retain stored values. Legacy `report_cas_bug`,
+automatic issue triage and release-report GitHub intake retain their explicit
+configuration contracts; they do not infer a project target from origin.
+`report_cas_bug` continues using its explicit legacy override or the Cassy
+component repository. Only project initialization may persist a discovered
+origin; routine reads and updates do not backfill it.
+
 ## Canonical install path
 
 Cassy must be installed to **one** location: `~/.local/bin/cas`. Any other
@@ -289,7 +313,17 @@ supervisor_only_env = ["VERCEL_TOKEN", "NEON_API_KEY"]
 ```
 
 Both lists default to empty and appear in `cas config list`. Server names are
-exact. These denials override project proxy credential grants and read-only
+exact.
+
+Operator-authenticated CLIs and connector tools are refused to workers at the
+pre-tool hook (GH #1219). `factory.worker_denied_clis` (default `vercel`) names
+executables a worker's shell may not run, matched on basename through wrappers
+(`env`, `sudo`, `timeout`, `sh -c`, `eval`, `npx`, `pnpm dlx`, paths).
+`factory.worker_denied_mcp_tools` (default `*vercel*`) holds case-insensitive
+tool-name patterns, also applied to each `server.tool` an `mcp_execute`
+dispatches. The refusal sends the worker to the supervisor with
+`blocker=true`; supervisors are unaffected. Both keys are operator-only, and
+an empty list disables its check. These denials override project proxy credential grants and read-only
 server declarations for every worker harness. The supervisor's configuration
 and environment are preserved. Spawn diagnostics record denied names only.
 
@@ -519,7 +553,7 @@ cargo build --profile release-fast   # Fast release (thin LTO, 16 codegen units)
 cargo check -p cas --lib --tests     # Compile feedback, no test linking/runs
 scripts/run-scoped-tests.sh -p cas --lib module_name
 scripts/run-scoped-tests.sh -p cas --test integration_cli cli_test::
-cargo nextest run -p cas             # Full suite: epic assembly and release gates
+cargo nextest run -p cas             # Full suite: final-tree integration gate
 cargo test -p cas --doc              # Doctests (nextest does not support them)
 cargo bench --bench code_indexing    # Benchmarks
 make test-release-panic              # Verify A2/A3/B3 panic isolation under release profiles
@@ -536,7 +570,7 @@ Install the standard local runner once with `cargo install cargo-nextest` (or
 `make -C cas-cli install-tools`). `scripts/run-scoped-tests.sh` defaults to
 nextest and rejects a silent zero-test success.
 
-### Worker checks, targeted tests and supervisor assembly
+### Worker checks, targeted tests and merge-queue integration
 
 Workers may type-check their committed change with exactly
 `cargo check -p <affected crate> [-p <crate> ...] --lib` for lib-only edits or
@@ -557,28 +591,24 @@ copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
 
+On Linux, the capped runner launches each build in a dedicated
+`systemd-run --user --scope` with `MemoryHigh`, keeping compiler reclaim separate
+from the supervisor and daemon. `factory.worker_memory_high_gib` sets the limit
+in GiB; default `0` divides half of total RAM by `max_concurrent_builders`, bounded
+to 256 MiB..16 GiB per build (8 GiB on a 64 GiB host with four builders).
+Unavailable user scopes and other platforms log a fallback and run unscoped.
+Only scope startup failures fall back; a failed build is never rerun unscoped.
+Scope launches disable systemd's argument expansion so embedded proof scripts
+reach Bash and Python unchanged. A bounded version probe omits the unsupported
+switch on systemd older than 254, whose scopes already pass arguments literally.
+Daemon startup also tries to give its inherited interactive cgroup (including
+the supervisor) at least 256 MiB `memory.low`, preserving stronger operator
+settings. Missing controllers or user-manager permissions leave startup working.
+
 Shell redirection opens logs before the runner checks that commit. Use a
 Git-ignored `target/worker-check.log` or the task's artifacts directory; create
 the parent directory first. In-repo logs that Git does not ignore are refused
 by the hook. The clean-head gate still rejects source changes.
-
-Rust-touching supervisor lane merges require separate combined-tree evidence.
-Run `python3 scripts/check-lane-compile.py . <target> <source> --prove` as a
-supervisor before merging, backgrounded with a log. It uses the same capped
-runner for package-scoped `--lib` and `--tests` checks in a private preview and
-records PASS only for the resulting tree. Lane-tip receipts do not qualify.
-The preview preflight, `release-train.sh --check-lane`, and the actual detached
-Git merge enforce this evidence before the epic ref advances. Docs/scripts-only
-merges need no compile receipt. Rust merges require clean linked target checkouts.
-
-The no-build lane preview uses a load-aware wall budget for fast rows: 60 seconds
-times `(1 + one-minute load / CPU count)`, capped at 600 seconds. At load of
-1–1.5 times the core count, this allows 120–150 seconds. An exhausted budget
-reports unfinished rows from the gate's plan and timing receipts, plus a retry
-command. Supervisors can rerun
-`python3 scripts/check-lane-fast-rows.py . <target> <source> --timeout-secs 180`
-with an explicit bound of 1–1800 seconds. The preview preserves branch refs and
-cleans its temporary checkout on success, row failure, and timeout.
 
 Workers may also run exactly
 `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`.
@@ -590,34 +620,39 @@ environment prefixes, compound commands, repeated packages and broader flags.
 The same capped runner invokes the shared `run-verified-tests.sh` zero-test
 guard, forces the private target, and records only successful nonzero counts
 against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`.
+In the Cassy source repository, every named run first executes the fixed cheap
+guards: `test_support::lib_test_process_env_mutation_is_isolated`,
+`config::mod_tests::serialized_factory_fields_have_registry_entries_cas_f7b9`,
+and `scripts/check-test-shape.py --changed-since <task-target-base>`. Guard tests
+run separately from the requested selection, so their passes cannot hide a
+zero-match requested filter. The runner prints `guards: PASS` with the separate
+guard count and elapsed seconds; the `test: PASS` count remains the requested
+selection's count. Both invocations share the builder slot, private target and
+memory scope. Other repositories retain their existing named-test behavior.
+
+The same preflight compares removed/changed string literals against tracked
+test references and prints `Worker changed-string warning: <file>:<line> test
+<name>` for surviving assertions. Run or update the named assertions before
+push. This is a warning heuristic, not a complete dependency analysis. The diff
+uses the active task's integration target, with configured epic/default-branch
+fallbacks for standalone runs; pushing the worker branch never clears it.
 Failed retries invalidate that scope's receipt; close imports all matching
 exact-delivery receipts. Targeted receipts complement full-suite assembly proof.
 
-The merge queue is the integration proof (cas-2970). The path from a green
-lane to `main` runs no local full suite: lane CI (Scoped Validation) and the
-supervisor's lane compile admit each lane to the epic; the epic PR enters the
-merge queue; the queue's Fast Validation runs the CI script tiers, the
-Commander web checks, the complete workspace suite sharded from an archive in
-a plain checkout, doctests and macOS Check on the exact merged tree; that tree
-becomes `main`. Do not run `python3 scripts/assembly-proof.py prove
-<epic-worktree>` before opening the PR. It stays an opt-in diagnostic: run it
-when a queue run fails and the failure needs a local two-context reproduction,
-and record `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd>
-log=<path>` on the epic when you do. An epic closes once its tip is contained
-in the default branch, or with a covering `ASSEMBLY_PROOF`.
-Workers still cannot run build/test/clippy/run or unfiltered nextest,
-`rustc`, scoped-test scripts, or `make test*`. Child closes reference the
-epic's integration proof rather than scoped `--proof` or `loaded_proof` notes.
-That holds for a worker's close and for a supervisor closing an epic child
-whose delivery is already on the integration branch: close records a
-pending-integration note until the epic lands through the queue or carries a
-covering `ASSEMBLY_PROOF`. Standalone tasks still carry
-their own receipts. A scoped receipt may be the runner's `SCOPED_PROOF:
-targets=…` or `command=…` line, or, when that exceeds the task-note limit, the
-short `SCOPED_PROOF_RECEIPT: id=… path=…` line; `--proof` always writes that
-file (default `<git-common-dir>/cas/scoped-proof/<head>.receipt`) and close
-verifies its digest. Non-Rust suites are unaffected. An older runtime that denies the check exception requires parking
-with the unverified crates and test filters named for assembly.
+Lane CI runs the project's fast checks once for each lane. The merge queue is
+the final-tree integration gate and the only gate to `main`; its required
+checks, including the Rust suite, run once on the exact merged tree. Commander
+journeys run there only when `hub-web/` product inputs change. Do not add
+lane-merge compile or fast-row checks, park receipts, or a separate assembly
+journey run. The normal epic close follows the green queue landing. Where the
+epic close gate accepts a local `ASSEMBLY_PROOF`, it covers the Rust build and
+suite only; it does not replace the queue's path to `main` or require a
+journey receipt.
+
+Workers may run the capped compile checks and named targeted tests described
+above, but the full Rust build and suite run in the merge queue. Child closes
+reference the epic integration proof. Non-Rust suites retain their own task
+checks; a documentation-only change proves its documentation acceptance check.
 
 The opt-in assembly command runs the gate's `ci-script-tests` row:
 `make -C cas-cli test-ci-tiers`, with factory identity and inherited make
@@ -630,9 +665,8 @@ or subject (`scripts/<stem>.*` for `scripts/test-<stem>.*`) the lane changed.
 Entries that take over 20 seconds alone are reported as deferred to the full
 row.
 
-The fast rows also run the no-build checks that the October 2026 release cut
-found only at assembly.
-Each runs when the lane changes its inputs, and the full gate always runs it:
+Fast rows include the no-build checks below. Lane CI selects each row when its
+inputs change; the merge queue runs its required fast-row job on the final tree:
 
 - `journey-catalog`: `journeys-for-diff.py --check`, so every catalog step
   still matches a `test.step` title in its journey spec.
@@ -647,9 +681,7 @@ Each runs when the lane changes its inputs, and the full gate always runs it:
 Contract phrases were already part of `builtin-doc-hygiene`. On this host a
 lane spanning that release's three epics ran every fast row in about 25 seconds.
 
-Each second-scale failure that reached CI or the merge queue on 2026-10-14
-is refused at park (cas-7bce). `scripts/test-fast-release-rows.py` holds one
-fixture per failure:
+`scripts/test-fast-release-rows.py` holds a fixture for each fast-row failure:
 
 - `test-shape`: integration tests under `cas-cli/tests` and `crates/*/tests`
   may not use `env!("CARGO_BIN_EXE_<name>")`, which is a build-host path that
@@ -663,8 +695,8 @@ fixture per failure:
 - `builtin-projections-src`: the no-build half of `builtin-projections`. It
   checks that the root task-verifier projection matches its embedded body.
 
-A failed row prints `FIX <row>: …`. On a committed tree the run writes a FAIL
-receipt that names the rows and those fixes, and the park refusal quotes them.
+A failed row prints `FIX <row>: …` so lane CI or the merge queue identifies the
+row to repair.
 
 The `call-shapes` row is the only implementation of the MCP call-shape lint
 (cas-043b). It runs `scripts/check-call-shapes.py` over shipped builtins and
@@ -672,12 +704,6 @@ runtime Rust templates, using the committed `scripts/mcp-call-surface.json`.
 `mcp_action_surface_test::call_shape_surface_snapshot_matches_the_published_surface`
 keeps that snapshot equal to the live surface. On drift the test prints the
 `cp` command that refreshes the snapshot.
-
-The worker pre-push guard runs `scripts/fast-rows-pre-push.sh` for pushes of
-`refs/heads/factory/*`. A same-tip PASS receipt is reused. Otherwise the guard
-runs the fast rows against the CI push base and refuses a failure with its
-`FIX` lines. `CAS_SKIP_FAST_ROWS=<reason> git push` skips the guard. Each skip
-is appended to `<git-common-dir>/cas/fast-rows/overrides.log`.
 
 Release scripts used from macOS source `scripts/release-portable.sh` for
 timestamp parsing and canonical paths. The timestamp helper retains GNU date
@@ -1051,6 +1077,24 @@ lease-managed targets tolerate opaque unrelated processes while still checking
 every readable output handle, executable and mapping. Unknown legacy targets,
 replaced inodes and unavailable owner identities remain retained with bytes;
 they are never silently adopted. macOS keeps the conservative `lsof` probe.
+
+Explicit target-cache GC has a Linux-only exception for canonical,
+non-symlink `.cas/worktrees/<lane>/target` caches. Unrelated opaque processes
+no longer count as positive liveness. Reclamation requires no readable process
+use, no fresh registered owner with a matching PID start identity, a gone owner
+or terminal tasks, and no writes within `factory.target_cache_min_idle_secs`
+(default: 7200 seconds). GC holds the lane lock, every Cargo `.cargo-lock`, and
+any existing target lifetime lease through quarantine and deletion. It checks
+registry, recency, containment, target/worktree inodes and Cargo-lock identities
+again before renaming. Preview takes no lane or Cargo locks; selected bytes are
+what cleanup would try. One stat walk records recency, directory identities and
+the Cargo lock set; checks under the locks re-stat directories and known locks
+without walking every artifact again. Output includes per-target `scan_ms` (JSON
+`scan_elapsed_ms`). A busy lock without positive readable process evidence is
+`indeterminate`, with its lock path. Reports distinguish `live_process`,
+`indeterminate` and reclaimable (`eligible` or `selected`) caches. Integration trees, custom targets,
+previews and interrupted quarantines keep conservative opaque-process handling;
+legacy targets are never adopted into the lifetime-owner registry.
 
 Assembly and release scratch uses an owner record, PID start-time identity and
 an inherited lifetime flock. TERM, INT and HUP stop and reap child groups before
@@ -1513,12 +1557,13 @@ selection; it emits an explicit receipt. Caller spec/grep filters are refused.
 Factory PreToolUse denies worker/reviewer `--full`, unfiltered Playwright and
 unfiltered journey npm scripts. Named spec or canonical-ID runs remain allowed
 for iteration; a failing spec may be rerun at one worker, retaining the original
-failure. Reuse implementer exact-tip receipts in independent QA and do not
-rerun browsers for doc/ledger-only commits with unchanged evaluated inputs.
-The supervisor runs `scripts/journey-eval.sh <epic-artifact-dir> --full --workers=4`
-once at epic assembly; merge queue runs the full suite again. Receipts fold all
-native parts by actual catalog ID and record full base/head, pass/fail/skip
-counts, Playwright version and the native exit code. Native runners refuse
+failure. Do not rerun browsers for doc/ledger-only commits with unchanged
+evaluated inputs.
+Do not require a journey receipt at task close, independent QA, or epic
+assembly. The merge queue runs Commander journeys only when `hub-web/` product
+inputs change. Receipts fold all native parts by actual catalog ID and record
+full base/head, pass/fail/skip counts, Playwright version and the native exit
+code. Native runners refuse
 successful zero-test summaries and export the passing count to `VERIFIED_TEST_COUNT_FILE`
 when requested. Rust re-exec helpers require the exact child name, one selected
 test, and one passing result; intentional signal/atexit children instead prove
@@ -1534,10 +1579,10 @@ lists hub-web, the journey catalog, design tokens, `scripts/visual-qa.mjs`, the
 worker-memory wrapper with its imports, and the classifier itself. Any other
 `scripts/` or `.github/` change skips them, including a `.github/workflows/ci.yml`
 edit, whose Commander step wiring `scripts/test-hub-web-gate.py` pins instead; a
-classifier failure runs them. The release train still runs the full journeys.
+classifier failure runs them.
 `scripts/test-hub-web-gate.py` fails when hub-web reads a repo-level file that
 the list omits. Markdown fixtures beneath hub-web still require web tests. The
-no-build fast gate keeps its cheap rows, while the scoped lane runs the npm checks.
+scoped lane and merge queue select web checks from their changed inputs.
 
 Closing a task that changes a committed `*.snap` or
 `opencode_projection.snapshot.json` requires one task decision note per

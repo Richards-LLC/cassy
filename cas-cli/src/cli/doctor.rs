@@ -266,7 +266,7 @@ impl CheckGroup {
             | "sync target"
             | "models"
             | "sessionstart budget" => Self::Config,
-            "issue repositories" => Self::Config,
+            "issue repositories" | "shipped issues" => Self::Config,
             "integrations" | "violet" | "violet wake" | "github origin" => Self::Integrations,
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,
@@ -1619,20 +1619,74 @@ fn lesson_recurrence_check(runs: &[crate::cli::release_report::LessonRecurrence]
     Some(Check::new("lesson recurrence", CheckStatus::Warning, message))
 }
 
-/// Render the resolved issue destinations as one healthy Config row. The
-/// project destination can be unset, but component destinations are always
-/// available from compiled defaults; neither condition is a doctor warning.
-fn issue_repositories_check(config: &Config) -> Check {
-    let repos = config.issue_repo_registry();
+/// cas-dd56: open GitHub issues whose every referencing task is closed with
+/// its delivery in a release tag. A failed `gh` is a stated skip, not an
+/// empty list.
+fn shipped_issues_check(
+    tasks: &[crate::types::Task],
+    default_repo: Option<&str>,
+    states: &dyn crate::issue_reconcile::IssueStates,
+    tag_containing: &dyn Fn(&str) -> Option<String>,
+) -> Check {
+    const NAME: &str = "shipped issues";
+    let Some(repo) = default_repo else {
+        return Check::new(NAME, CheckStatus::Info, "skipped: no GitHub repository resolved for this project");
+    };
+    match crate::issue_reconcile::shipped_open_issues(tasks, Some(repo), states, tag_containing) {
+        Err(error) => Check::new(NAME, CheckStatus::Info, format!("skipped: could not list open issues ({error})")),
+        Ok(shipped) if shipped.is_empty() => Check::new(
+            NAME,
+            CheckStatus::Ok,
+            format!("no open {repo} issue has all of its referencing tasks shipped"),
+        ),
+        Ok(shipped) => Check::new(
+            NAME,
+            CheckStatus::Warning,
+            format!(
+                "{} open issue(s) whose referencing tasks have all shipped; close them with the \
+                 release version: {}",
+                shipped.len(),
+                shipped
+                    .iter()
+                    .map(|item| format!(
+                        "{} ({})",
+                        item.issue,
+                        item.tasks
+                            .iter()
+                            .map(|(task, tag)| format!("{task} in {tag}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        ),
+    }
+}
+
+/// Report the effective destinations and distinguish an inferred project
+/// repository from an explicit setting. This check never writes config.
+fn issue_repositories_check(config: &Config, cas_root: &Path) -> Check {
+    let repos = config.issue_repo_registry_for_project(cas_root);
+    let configured = config.issue_repo_registry().project.is_some();
+    let project = if configured {
+        format!("project={}", repos.project.as_deref().unwrap_or_default())
+    } else if let Some(repo) = &repos.project {
+        format!("issues.repo unset; resolved from origin {repo}")
+    } else {
+        "issues.repo unset; no usable GitHub origin; set `cas config set issues.repo owner/repo`"
+            .to_string()
+    };
     Check::new(
         "issue repositories",
-        CheckStatus::Ok,
+        if configured {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Warning
+        },
         format!(
-            "project={} | cassy={} | violet={} | cloud={}",
-            repos.project.as_deref().unwrap_or("<unset>"),
-            repos.cassy,
-            repos.violet,
-            repos.cloud,
+            "{project} | cassy={} | violet={} | cloud={}",
+            repos.cassy, repos.violet, repos.cloud,
         ),
     )
 }
@@ -2562,7 +2616,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                     }
                 ),
             });
-            checks.push(issue_repositories_check(&config));
+            checks.push(issue_repositories_check(&config, &cas_root));
         }
         Err(error) => {
             checks.push(Check {
@@ -2572,7 +2626,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                     "{error}; run `cas doctor --fix --yes` to preserve and repair config.toml, or restore a known-good backup"
                 ),
             });
-            checks.push(issue_repositories_check(&Config::default()));
+            checks.push(issue_repositories_check(&Config::default(), &cas_root));
         }
     }
 
@@ -2745,6 +2799,14 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 open_count,
                 blocked_count,
                 &health,
+            ));
+            // cas-dd56: issues still open although their fixes shipped.
+            let repo_root = cas_root.parent().unwrap_or(cas_root.as_path()).to_path_buf();
+            checks.push(shipped_issues_check(
+                &tasks,
+                crate::github_issue_attach::default_repo_for(&cas_root).as_deref(),
+                &crate::issue_reconcile::GhIssueStates::new(crate::issue_reconcile::GH_BUDGET),
+                &|commit: &str| crate::issue_reconcile::release_tag_containing(&repo_root, commit),
             ));
         }
     }
@@ -6341,17 +6403,116 @@ mod tests {
         assert!(!check.message.contains("cas-other"), "{}", check.message);
     }
 
+    /// cas-dd56 item 4: the doctor row names open issues whose fixes have
+    /// shipped, and reports an offline `gh` as a skip rather than "none".
     #[test]
-    fn issue_repository_doctor_row_resolves_defaults_without_warning() {
-        let check = issue_repositories_check(&Config::default());
+    fn shipped_issues_doctor_row_lists_open_issues_whose_fixes_shipped_cas_dd56() {
+        struct States(Result<std::collections::HashSet<u64>, String>);
+        impl crate::issue_reconcile::IssueStates for States {
+            fn open_issues(&self, _repo: &str) -> Result<std::collections::HashSet<u64>, String> {
+                self.0.clone()
+            }
+        }
+        let mut shipped = crate::types::Task::new("cas-ship".into(), "GH #1158: fix".into());
+        shipped.status = crate::types::TaskStatus::Closed;
+        shipped.deliverables.factory_branch_anchor = Some("aaa111".into());
+        let mut unshipped = crate::types::Task::new("cas-open".into(), "GH #1170: fix".into());
+        unshipped.status = crate::types::TaskStatus::Closed;
+        unshipped.deliverables.factory_branch_anchor = Some("ccc333".into());
+        let tasks = vec![shipped, unshipped];
+        let tags = |sha: &str| (sha == "aaa111").then(|| "v3.50.0".to_string());
+        let repo = Some("Richards-LLC/cassy");
+
+        let check = shipped_issues_check(&tasks, repo, &States(Ok([1158, 1170].into())), &tags);
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            check.message.contains("Richards-LLC/cassy#1158 (cas-ship in v3.50.0)"),
+            "{}",
+            check.message
+        );
+        assert!(!check.message.contains("#1170"), "{}", check.message);
+
+        let check = shipped_issues_check(&tasks, repo, &States(Ok([1170].into())), &tags);
+        assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+
+        let check = shipped_issues_check(&tasks, repo, &States(Err("gh: offline".into())), &tags);
+        assert!(matches!(check.status, CheckStatus::Info), "{}", check.message);
+        assert!(check.message.contains("skipped: could not list open issues (gh: offline)"));
+
+        let check = shipped_issues_check(&tasks, None, &States(Ok([1158].into())), &tags);
+        assert!(check.message.starts_with("skipped: no GitHub repository"), "{}", check.message);
+    }
+
+    #[test]
+    fn doctor_names_unset_issue_repo_and_local_origin_cas_f398() {
+        let _env = crate::test_support::TestEnvGuard::new();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".cas");
+        fs::create_dir(&root).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Richards-LLC/violet_ps.git",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(temp.path())
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let check = issue_repositories_check(&Config::default(), &root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check
+                .message
+                .contains("issues.repo unset; resolved from origin Richards-LLC/violet_ps"),
+            "{}",
+            check.message
+        );
+        assert!(!root.join("config.toml").exists());
+    }
+
+    #[test]
+    fn issue_repository_doctor_row_warns_when_project_is_unset() {
+        let temp = tempfile::tempdir().unwrap();
+        let check = issue_repositories_check(&Config::default(), temp.path());
         assert_eq!(check.name, "issue repositories");
-        assert!(matches!(check.status, CheckStatus::Ok));
-        assert!(check.message.contains("project=<unset>"));
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check
+                .message
+                .contains("issues.repo unset; no usable GitHub origin")
+        );
+        assert!(
+            check
+                .message
+                .contains("cas config set issues.repo owner/repo")
+        );
         assert!(check.message.contains("cassy=Richards-LLC/cassy"));
         assert!(check.message.contains("violet=Richards-LLC/violet_ps"));
-        assert!(check
-            .message
-            .contains("cloud=Richards-LLC/petra-stella-cloud"));
+        assert!(
+            check
+                .message
+                .contains("cloud=Richards-LLC/petra-stella-cloud")
+        );
+    }
+
+    #[test]
+    fn issue_repository_doctor_explicit_override_is_healthy_cas_f398() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.set("issues.repo", "example/explicit").unwrap();
+        let check = issue_repositories_check(&config, temp.path());
+        assert!(matches!(check.status, CheckStatus::Ok));
+        assert!(check.message.contains("project=example/explicit"));
+        assert!(!check.message.contains("unset"));
     }
 
     #[test]

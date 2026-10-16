@@ -1504,6 +1504,19 @@ pub(crate) fn settle_retired_worker_bindings(
     held_task_ids: &[String],
     retirement: WorkerRetirement,
 ) -> usize {
+    settle_retired_worker_bindings_reporting(cas_dir, agent_store, agent, held_task_ids, retirement)
+        .0
+}
+
+/// [`settle_retired_worker_bindings`], also returning the task ids the
+/// shutdown parked so the shutdown receipt can name them (cas-b06f).
+pub(crate) fn settle_retired_worker_bindings_reporting(
+    cas_dir: &std::path::Path,
+    agent_store: &dyn cas_store::AgentStore,
+    agent: &cas_types::Agent,
+    held_task_ids: &[String],
+    retirement: WorkerRetirement,
+) -> (usize, Vec<String>) {
     if retirement == WorkerRetirement::Recycle {
         // cas-a622: parking or releasing here is what cost proud-newt-45 its
         // assignment. The replacement is the same name in the same worktree,
@@ -1515,19 +1528,21 @@ pub(crate) fn settle_retired_worker_bindings(
             held = held_task_ids.len(),
             "cas-a622: recycle keeps the worker's task bindings"
         );
-        return 0;
+        return (0, Vec::new());
     }
-    // Emit the same durable supervisor lifecycle relay used for unexpected
-    // PTY exits. The process is already gone, and this runs before the legacy
-    // binding cleanup, so the relay records and parks any task that was held
-    // at termination instead of reporting a misleading empty task set.
-    crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
+    // Park any task held at termination through the same recovery used for
+    // unexpected PTY exits (GH #197). The process is already gone, and this
+    // runs before the legacy binding cleanup. The supervisor asked for this
+    // stop, so it gets one shutdown receipt naming these tasks instead of a
+    // Critical death alarm per worker (cas-b06f, spec-6194 P2.6).
+    let recovered = crate::mcp::tools::service::orphan_recovery::recover_worker_retired_on_request(
         cas_dir,
         agent_store,
         agent,
         held_task_ids,
         "worker terminated by shutdown request",
-    );
+    )
+    .recovered_task_ids;
 
     // cas-7a94: clear pure Open pre-assigns and any binding the recovery
     // path could not inspect. Assignees are display names (cas-dbbb), so
@@ -1540,7 +1555,7 @@ pub(crate) fn settle_retired_worker_bindings(
             "cas-7a94: released remaining task bindings on shutdown_worker"
         );
     }
-    released
+    (released, recovered)
 }
 
 /// The brief a recycled worker receives so its fresh conversation resumes its
@@ -1801,6 +1816,17 @@ fn defer_worker_retirement(cas_dir: &std::path::Path, agent_id: &str, first_erro
                 .map_err(|error| error.to_string())
         },
     );
+}
+
+/// What one shutdown request did to each targeted worker (cas-b06f): the
+/// basis of the single receipt the supervisor gets instead of one death alarm
+/// per worker (spec-6194 P2.6).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ShutdownReport {
+    /// Workers stopped, each with the task ids its shutdown parked.
+    pub stopped: Vec<(String, Vec<String>)>,
+    /// Workers that could not be stopped, each with the reason.
+    pub failed: Vec<(String, String)>,
 }
 
 fn shutdown_scope(count: Option<usize>, names: &[String]) -> &'static str {
@@ -2448,7 +2474,8 @@ impl FactoryApp {
     /// * `name`  - Worker name to shutdown
     /// * `force` - `true` → SIGKILL the process group immediately;
     ///             `false` → SIGTERM with group-wide SIGKILL escalation
-    pub async fn shutdown_worker(&mut self, name: &str, force: bool) -> anyhow::Result<()> {
+    /// Returns the task ids the shutdown parked (cas-b06f receipt).
+    pub async fn shutdown_worker(&mut self, name: &str, force: bool) -> anyhow::Result<Vec<String>> {
         self.shutdown_worker_inner(name, force, false).await
     }
 
@@ -2460,7 +2487,7 @@ impl FactoryApp {
         &mut self,
         name: &str,
     ) -> anyhow::Result<()> {
-        self.shutdown_worker_inner(name, false, true).await
+        self.shutdown_worker_inner(name, false, true).await.map(|_| ())
     }
 
     async fn shutdown_worker_inner(
@@ -2468,7 +2495,7 @@ impl FactoryApp {
         name: &str,
         force: bool,
         preserve_worktree: bool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<String>> {
         // cas-00d5 (GH #1190, #1195): the daemon runs this inside a loop pass
         // whose store-wait budget earlier work has often spent. Every store
         // call below then failed fast, retirement bailed, and the worker kept
@@ -2488,7 +2515,7 @@ impl FactoryApp {
             {
                 self.last_db_fingerprint = None;
                 let _ = self.refresh_data();
-                return Ok(());
+                return Ok(Vec::new());
             }
             anyhow::bail!("Worker '{name}' not found");
         }
@@ -2584,7 +2611,7 @@ impl FactoryApp {
 
         // Only after the process is actually gone: a shutdown parks and
         // releases what the worker held; a recycle keeps it (cas-a622).
-        settle_retired_worker_bindings(
+        let (_, released_task_ids) = settle_retired_worker_bindings_reporting(
             &cas_dir,
             agent_store.as_ref(),
             agent,
@@ -2640,7 +2667,7 @@ impl FactoryApp {
         // Sync pane sizes to adjust layout
         let _ = self.sync_pane_sizes();
 
-        Ok(())
+        Ok(released_task_ids)
     }
 
     /// Shared teardown: attempt to remove a worker's worktree on graceful close
@@ -2903,7 +2930,7 @@ impl FactoryApp {
         count: Option<usize>,
         names: &[String],
         force: bool,
-    ) -> anyhow::Result<usize> {
+    ) -> ShutdownReport {
         let scope = shutdown_scope(count, names);
         let requested = if !names.is_empty() {
             names.len()
@@ -2920,41 +2947,36 @@ impl FactoryApp {
             ],
         );
 
-        let mut shutdown_count = 0;
-        let mut failures = Vec::new();
-
-        if !names.is_empty() {
-            // Shutdown specific workers by name
-            for name in names {
-                if let Err(e) = self.shutdown_worker(name, force).await {
-                    failures.push(format!("{name}: {e}"));
-                } else {
-                    shutdown_count += 1;
-                }
-            }
+        let targets: Vec<String> = if !names.is_empty() {
+            names.to_vec()
         } else {
             // Shutdown by count (0 = all)
             let target = count.unwrap_or(0);
-            let workers_to_shutdown: Vec<String> = if target == 0 {
+            if target == 0 {
                 self.worker_names.clone()
             } else {
                 self.worker_names.iter().take(target).cloned().collect()
-            };
+            }
+        };
 
-            for name in workers_to_shutdown {
-                if let Err(e) = self.shutdown_worker(&name, force).await {
-                    failures.push(format!("{name}: {e}"));
-                } else {
-                    shutdown_count += 1;
-                }
+        let mut report = ShutdownReport::default();
+        for name in targets {
+            match self.shutdown_worker(&name, force).await {
+                Ok(released) => report.stopped.push((name, released)),
+                Err(error) => report.failed.push((name, error.to_string())),
             }
         }
 
-        if !failures.is_empty() {
-            let summary = failures.join("; ");
+        let shutdown_count_str = report.stopped.len().to_string();
+        if !report.failed.is_empty() {
+            let summary = report
+                .failed
+                .iter()
+                .map(|(name, error)| format!("{name}: {error}"))
+                .collect::<Vec<_>>()
+                .join("; ");
             self.set_error(format!("Shutdown had failures: {summary}"));
-            let shutdown_count_str = shutdown_count.to_string();
-            let failure_count_str = failures.len().to_string();
+            let failure_count_str = report.failed.len().to_string();
             crate::telemetry::track(
                 "factory_worker_shutdown_result",
                 vec![
@@ -2964,20 +2986,17 @@ impl FactoryApp {
                     ("failure_count", &failure_count_str),
                 ],
             );
-            anyhow::bail!("Shutdown had failures: {summary}");
+        } else {
+            crate::telemetry::track(
+                "factory_worker_shutdown_result",
+                vec![
+                    ("success", "true"),
+                    ("scope", scope),
+                    ("shutdown_count", &shutdown_count_str),
+                ],
+            );
         }
-
-        let shutdown_count_str = shutdown_count.to_string();
-        crate::telemetry::track(
-            "factory_worker_shutdown_result",
-            vec![
-                ("success", "true"),
-                ("scope", scope),
-                ("shutdown_count", &shutdown_count_str),
-            ],
-        );
-
-        Ok(shutdown_count)
+        report
     }
 }
 

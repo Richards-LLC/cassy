@@ -298,7 +298,7 @@ pub(crate) fn merge_request_delivery_decision(
         if task.status != TaskStatus::AwaitingMerge {
             if task
                 .deliverables
-                .historical_factory_branch_anchors
+                .declined_factory_anchors()
                 .iter()
                 .any(|anchor| anchor == &envelope.branch_tip)
             {
@@ -320,8 +320,17 @@ pub(crate) fn merge_request_delivery_decision(
             }
         }
         let current_anchor = task.deliverables.factory_branch_anchor.as_deref();
+        // An administrative reopen invalidates close authority, not a review
+        // verdict. Its exact unreviewed tip is still an actionable delivery;
+        // a newer active anchor or a terminal task remains authoritative.
+        let recovered_unreviewed_tip = task.status != TaskStatus::AwaitingMerge
+            && !task.is_terminal()
+            && current_anchor.is_none()
+            && task.deliverables.historical_factory_branch_anchors.contains(&envelope.branch_tip)
+            && !task.deliverables.declined_factory_anchors().contains(&envelope.branch_tip);
         if current_anchor != Some(&envelope.branch_tip)
             && !(current_anchor.is_some() && envelope.anchor_tip.as_deref() == current_anchor)
+            && !recovered_unreviewed_tip
         {
             return MergeRequestDelivery::SuppressInvalidatedAnchor {
                 current_anchor: task.deliverables.factory_branch_anchor.clone(),

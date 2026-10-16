@@ -5392,6 +5392,14 @@ impl FactoryDaemon {
                 if crate::prompt_revalidation::parse_blocker_envelope(prompt).is_some() {
                     return Some(SupervisorWakeClass::Blocker);
                 }
+                // cas-835e: a reminder the daemon fired. The authority is the
+                // daemon stamp, which no request field can set; the
+                // `Reminder #<id>:` opening is the delivery fire_reminder
+                // renders, read from the start of the row so a reminder quoted
+                // inside other text is not one.
+                if cas_store::parse_reminder_delivery_id(prompt).is_some() {
+                    return Some(SupervisorWakeClass::Reminder);
+                }
                 (is_lifecycle_wake_source(source)
                     && crate::prompt_revalidation::is_supervisor_wake_envelope(prompt))
                 .then_some(SupervisorWakeClass::Lifecycle)
@@ -5589,7 +5597,7 @@ impl FactoryDaemon {
                     "stamped sender no longer resolves to a registered agent (cas-d9a8)"
                 }
                 WakeSender::Daemon | WakeSender::Registered { .. } => {
-                    "supervisor rows wake the pane only for lifecycle, peer-supervisor, merge-request, worker action, blocker, verification-dispatch or Slack-activity envelopes (cas-dab2, cas-d9a8, cas-48e5, cas-8725, cas-e753)"
+                    "supervisor rows wake the pane only for lifecycle, peer-supervisor, merge-request, worker action, blocker, verification-dispatch, Slack-activity or fired-reminder envelopes (cas-dab2, cas-d9a8, cas-48e5, cas-8725, cas-e753, cas-835e)"
                 }
             });
         };
@@ -10720,8 +10728,22 @@ pub(super) fn fire_reminder(
                 )
                 .map(|_| ())
         } else {
+            // cas-835e: the daemon fires reminders, so it stamps the row with
+            // its own origin; an unstamped row can never wake a pane. The
+            // source names the owner by agent name, as other mail does, and
+            // the dedupe key keeps a stale snapshot from writing it twice.
+            let owner = reminder_owner_name(reminder, agent_id_to_name, cas_dir);
             queue
-                .enqueue_with_session(&reminder.owner_id, &target, &prompt, session_name)
+                .enqueue_idempotent(
+                    &owner,
+                    &target,
+                    &prompt,
+                    Some(session_name),
+                    None,
+                    None,
+                    &format!("reminder-fired:{}", reminder.id),
+                    Some(&cas_store::QueueOrigin::Daemon),
+                )
                 .map(|_| ())
         };
         if let Err(e) = enqueued {
@@ -10737,6 +10759,28 @@ pub(super) fn fire_reminder(
             );
         }
     }
+}
+
+/// cas-835e: the reminder owner's agent name. Reminders record the owner's
+/// agent id (a harness session id for workers, e.g. `codex-steady-swan-22-…`);
+/// mail elsewhere names its sender. Falls back to the id when the owner no
+/// longer resolves.
+fn reminder_owner_name(
+    reminder: &cas_store::Reminder,
+    agent_id_to_name: &std::collections::HashMap<String, String>,
+    cas_dir: &std::path::Path,
+) -> String {
+    agent_id_to_name
+        .get(&reminder.owner_id)
+        .cloned()
+        .or_else(|| {
+            crate::store::open_agent_store(cas_dir)
+                .ok()?
+                .get(&reminder.owner_id)
+                .ok()
+                .map(|agent| agent.name)
+        })
+        .unwrap_or_else(|| reminder.owner_id.clone())
 }
 
 /// Whether this factory daemon session may fire the reminder (cas-fcd4).

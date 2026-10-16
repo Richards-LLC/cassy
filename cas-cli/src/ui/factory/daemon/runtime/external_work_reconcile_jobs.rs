@@ -14,6 +14,12 @@ use crate::coordination::external_work::{
 pub(crate) fn reconcile_due(cas_dir: &Path) -> Result<usize, String> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let journal = SqliteRequestJournal::open(cas_dir).map_err(|error| error.to_string())?;
+    if !journal
+        .has_authority_due(now_ms)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(0);
+    }
 
     use crate::store::AgentStore;
     let session_id = std::env::var("CAS_SESSION_ID")
@@ -34,12 +40,6 @@ pub(crate) fn reconcile_due(cas_dir: &Path) -> Result<usize, String> {
         project_id,
         registration_id: agent.id.clone(),
     };
-    if !journal
-        .has_due(now_ms, &context)
-        .map_err(|error| error.to_string())?
-    {
-        return Ok(0);
-    }
     let cloud = crate::cloud::CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_dir)
         .map_err(|error| error.to_string())?;
     let token = cloud

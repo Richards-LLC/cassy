@@ -266,7 +266,9 @@ impl SqliteRequestJournal {
         load_operation(&*conn, request_id)
     }
 
-    pub fn has_due(&self, now_ms: i64, context: &OperationContext) -> Result<bool, JournalError> {
+    /// Cheap no-op preflight, never an authorization or lease decision.
+    /// Actual reconciliation leases additionally require the current actor/project.
+    pub fn has_authority_due(&self, now_ms: i64) -> Result<bool, JournalError> {
         let conn = self
             .conn
             .lock()
@@ -276,12 +278,10 @@ impl SqliteRequestJournal {
                 SELECT 1 FROM external_work_operations
                 WHERE stage IN ('prepared','retry_wait','dispatching')
                   AND kind IN ('claim','release_claim','transfer_claim','accept_claim')
-                  AND json_extract(input_json, '$.actor.registration_id') = ?2
-                  AND json_extract(input_json, '$.project_id') = ?3
                   AND (next_retry_ms IS NULL OR next_retry_ms <= ?1)
                   AND (lease_until_ms IS NULL OR lease_until_ms <= ?1)
              )",
-            params![now_ms, context.registration_id, context.project_id],
+            [now_ms],
             |row| row.get(0),
         )
         .map_err(|error| JournalError::Storage(error.to_string()))

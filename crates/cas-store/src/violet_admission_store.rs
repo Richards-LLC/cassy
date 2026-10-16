@@ -491,6 +491,14 @@ mod tests {
                 receipts.iter().filter(|result| result.is_ok()).count(),
                 if competing_successors { 1 } else { 2 }
             );
+            for error in receipts.iter().filter_map(|result| result.as_ref().err()) {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("stale Violet delivery generation"),
+                    "{error}"
+                );
+            }
             let db = Connection::open(root.path().join("cas.db")).unwrap();
             let state: (i64, i64, i64) = db
                 .query_row(

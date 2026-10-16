@@ -54,7 +54,7 @@ impl StatusBar {
         let styles = &app.theme().styles;
         let mut left_spans = Vec::new();
         let mut right_spans = Vec::new();
-        let claude_account = Self::focused_claude_profile(app).map(|profile| {
+        let claude_account = Self::focused_claude_profile(app).map(|(harness, profile)| {
             let is_alt = profile != "main";
             let profile_style = if is_alt {
                 Style::default()
@@ -64,7 +64,7 @@ impl StatusBar {
             } else {
                 styles.text_muted
             };
-            Span::styled(format!("CLAUDE {profile}"), profile_style)
+            Span::styled(format!("{harness} {profile}"), profile_style)
         });
 
         // Left side: Mode indicator
@@ -735,7 +735,7 @@ impl StatusBar {
     /// A worker without an explicit config-dir override inherits the factory
     /// process environment, just like its PTY does. Codex, Grok, shell, and
     /// director panes intentionally have no Claude account badge.
-    fn focused_claude_profile(app: &FactoryApp) -> Option<String> {
+    fn focused_claude_profile(app: &FactoryApp) -> Option<(&'static str, String)> {
         let pane = app.mux.focused()?;
         // cas-e1f4: a Codex pane shows its account too, from its CODEX_HOME.
         if pane.harness() == SupervisorCli::Codex {
@@ -749,7 +749,7 @@ impl StatusBar {
                 PaneKind::Supervisor => std::env::var("CODEX_HOME").ok(),
                 PaneKind::Director | PaneKind::Shell => return None,
             };
-            return Some(Self::codex_profile_from_home(home.as_deref()));
+            return Some(("CODEX", Self::codex_profile_from_home(home.as_deref())));
         }
         if pane.harness() != SupervisorCli::Claude {
             return None;
@@ -780,9 +780,9 @@ impl StatusBar {
             PaneKind::Director | PaneKind::Shell => return None,
         };
 
-        Some(Self::claude_profile_from_selectors(
-            config_dir.as_deref(),
-            secure_storage_dir.as_deref(),
+        Some((
+            "CLAUDE",
+            Self::claude_profile_from_selectors(config_dir.as_deref(), secure_storage_dir.as_deref()),
         ))
     }
 
@@ -1241,7 +1241,8 @@ mod tests {
         for (name, expected) in [
             ("inherited-worker", Some("CLAUDE requester")),
             ("main-supervisor", Some("CLAUDE main")),
-            ("codex-worker", None),
+            // cas-e1f4: a Codex pane names its own account, never Claude's.
+            ("codex-worker", Some("CODEX ")),
         ] {
             assert!(app.mux.focus(name));
             let mut terminal = Terminal::new(TestBackend::new(100, 1)).unwrap();
@@ -1255,6 +1256,12 @@ mod tests {
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect();
+            if name == "codex-worker" {
+                assert!(
+                    !rendered.contains("CLAUDE "),
+                    "a Codex focus never shows a Claude badge: {rendered}"
+                );
+            }
             match expected {
                 Some(label) => assert!(rendered.contains(label), "{name}: {rendered}"),
                 None => assert!(

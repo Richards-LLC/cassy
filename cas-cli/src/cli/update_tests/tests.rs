@@ -2212,6 +2212,14 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
                 .any(|p| p == path),
             "{receipt}"
         );
+        if path == ".gitignore" {
+            let (result, human) = capture_phase(true, || {
+                execute(&args, &update_test_cli(false), Some(&root))
+            });
+            result.unwrap();
+            assert!(human.starts_with("Managed files: 1 conflicts preserved;"), "{human}");
+            assert!(!human.contains("[OK] Syncing"), "{human}");
+        }
         assert_eq!(std::fs::read_to_string(&file).unwrap(), conflicted);
         assert_eq!(cas_6718_git(&project, &["ls-files", "--stage"]), index);
         std::fs::write(file, original).unwrap();

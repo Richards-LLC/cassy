@@ -7204,24 +7204,32 @@ impl CasService {
             target_cache_mutation_authorized,
         );
         let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
-        let closed_task_ids = crate::store::open_task_store(&self.inner.cas_root)
-            .ok()
-            .and_then(|store| store.list(Some(cas_types::TaskStatus::Closed)).ok())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|task| task.id)
-            .collect();
+        let tasks = crate::store::open_task_store(&self.inner.cas_root)
+            .and_then(|store| store.list(None));
+        let closed_task_ids = tasks.as_ref().map(|tasks| tasks.iter()
+            .filter(|task| task.status == cas_types::TaskStatus::Closed)
+            .map(|task| task.id.clone()).collect()).unwrap_or_default();
         let artifact_root = crate::config::project_factory_artifacts_root(&self.inner.cas_root, &crate::config::resolved_factory_artifacts_root(
             config.factory().artifacts_root.as_deref(),
         ));
-        // Durable receipts are deleted only after their task is closed, and
-        // only through a separate artifact opt-in plus the destructive gate.
-        // Unknown directories are inventory-only: an operator must review them.
-        let artifact_cleanup = factory_artifact_cleanup(
-            &artifact_root,
-            &closed_task_ids,
-            target_cache_mutation_authorized && req.artifacts.unwrap_or(false),
-        );
+        // Artifact deletion is separate from process/cache cleanup. Unknown
+        // close dates or reference evidence must preserve durable receipts.
+        let artifact_authorized = target_cache_mutation_authorized && req.artifacts.unwrap_or(false);
+        let eligible = if artifact_authorized {
+            tasks.as_ref().map_err(|error| error.to_string()).and_then(|tasks|
+                eligible_artifact_tasks(&self.inner.cas_root, tasks, chrono::Utc::now()))
+        } else {
+            Ok(Default::default())
+        };
+        let artifact_cleanup = match eligible {
+            Ok(eligible) => factory_artifact_cleanup(
+                &artifact_root, &closed_task_ids, artifact_authorized, &eligible),
+            Err(error) => {
+                let mut inventory = factory_artifact_inventory(artifact_root, &closed_task_ids);
+                inventory.error = Some(format!("retention/reference evidence unavailable; preserved all artifacts: {error}"));
+                inventory
+            }
+        };
         let target_cache_result = {
             let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
             let known_roots = known_target_cache_worktrees(
@@ -7383,6 +7391,7 @@ impl FactoryArtifactInventory {
                 path.display()
             ));
         }
+        out.push_str("  Retention: at least 7 days since close; open tasks and tasks updated in the last 7 days preserve referenced evidence.\n");
         if let Some(error) = &self.error {
             out.push_str(&format!("  - artifact inventory unavailable: {error}\n"));
         } else if self.dry_run && !self.closed.is_empty() {
@@ -7435,15 +7444,53 @@ fn factory_artifact_inventory(
     inventory
 }
 
+/// Keep at least seven days of evidence after close. Any nonterminal task,
+/// or task updated in that window (including appended notes), can keep older
+/// evidence alive by citing its task/path or a published artifact alias.
+fn eligible_artifact_tasks(
+    cas_root: &std::path::Path,
+    tasks: &[cas_types::Task],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let cutoff = now - chrono::Duration::days(7);
+    let references = serde_json::to_string(&tasks.iter()
+        .filter(|task| !task.is_terminal() || task.updated_at >= cutoff)
+        .collect::<Vec<_>>()).map_err(|error| error.to_string())?;
+    let artifacts = cas_store::SqliteArtifactStore::open(cas_root)
+        .map_err(|error| error.to_string())?;
+    let mut eligible = std::collections::BTreeSet::new();
+    for task in tasks.iter().filter(|task| task.status == cas_types::TaskStatus::Closed
+        && task.closed_at.is_some_and(|closed| closed <= cutoff)) {
+        if references.contains(&task.id) {
+            continue;
+        }
+        let published = artifacts.list_for_task(&task.id).map_err(|error| error.to_string())?;
+        let referenced = published.iter().any(|artifact| {
+            std::iter::once(Some(artifact.id.as_str()))
+                .chain([artifact.cloud_artifact_id.as_deref(), artifact.cloud_url.as_deref(),
+                        artifact.slack_permalink.as_deref()])
+                .flatten().any(|alias| !alias.is_empty() && references.contains(alias))
+        });
+        if !referenced {
+            eligible.insert(task.id.clone());
+        }
+    }
+    Ok(eligible)
+}
+
 fn factory_artifact_cleanup(
     root: &std::path::Path,
     closed_task_ids: &std::collections::BTreeSet<String>,
     authorized: bool,
+    eligible: &std::collections::BTreeSet<String>,
 ) -> FactoryArtifactInventory {
     let mut inventory = factory_artifact_inventory(root.to_path_buf(), closed_task_ids);
     inventory.dry_run = !authorized;
     if authorized {
         for path in &inventory.closed {
+            if !path.file_name().and_then(|name| name.to_str()).is_some_and(|id| eligible.contains(id)) {
+                continue;
+            }
             if std::fs::remove_dir_all(path).is_ok() {
                 inventory.removed += 1;
             }
@@ -19294,7 +19341,7 @@ mod artifact_project_scope_tests {
             std::fs::write(dir.join("proof.md"), "evidence").unwrap();
         }
         let closed = ["cas-a4b1".to_string()].into_iter().collect();
-        let report = factory_artifact_cleanup(&a_root, &closed, true);
+        let report = factory_artifact_cleanup(&a_root, &closed, true, &closed);
         assert_eq!(report.removed, 1);
         assert!(!a_root.join("cas-a4b1").exists());
         assert!(b_root.join("cas-a4b1/proof.md").is_file());

@@ -230,6 +230,8 @@ impl CheckGroup {
     }
 
     fn for_name(name: &str) -> Self {
+        // Keep exact-name arms literal: check-doctor-snapshot.py reads this
+        // table without a Rust build to validate the accepted row groups.
         match name.to_ascii_lowercase().as_str() {
             "host"
             | "user-level store"
@@ -242,7 +244,7 @@ impl CheckGroup {
             | "host user skills"
             | "host install parity"
             | "slack transport"
-            | idle_sync::HOST_CHECK => Self::Host,
+            | "hub idle sync" => Self::Host,
             "user skills" | "scratchpad policy" => Self::Config,
             "legacy search index"
             | "pre-versioned search index"
@@ -257,7 +259,7 @@ impl CheckGroup {
             | "cloud identity metadata"
             | "project aliases"
             | "cloud sync queue"
-            | idle_sync::PROJECT_CHECK
+            | "cloud idle sync"
             | "cross-project rows"
             | "foreign knowledge pages"
             | "supervisor relay"
@@ -9232,6 +9234,21 @@ mod tests {
         let identical = find_divergent_user_skills(&[claude.clone(), codex], &claude);
         assert!(identical.is_empty(), "identical copies are not findings");
         assert!(matches!(divergent_user_skills_check(&identical).status, CheckStatus::Ok));
+    }
+
+    #[test]
+    fn cas_f1fb_idle_sync_rows_preserve_host_and_cloud_groups() {
+        for (name, expected) in [
+            ("registered project roots", CheckGroup::Host),
+            ("host", CheckGroup::Host),
+            (idle_sync::HOST_CHECK, CheckGroup::Host),
+            ("canonical id", CheckGroup::Cloud),
+            ("cloud sync queue", CheckGroup::Cloud),
+            (idle_sync::PROJECT_CHECK, CheckGroup::Cloud),
+        ] {
+            let check = Check::new(name, CheckStatus::Ok, "healthy");
+            assert_eq!(check.group(), expected, "doctor row {name}");
+        }
     }
 
     /// cas-57c02: installed-vs-catalog parity is a host row. Drift names the

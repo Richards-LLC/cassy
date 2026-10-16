@@ -250,3 +250,30 @@ fn cas_bfa1_dirty_checkout_and_unreachable_origin_are_preserved() {
         );
     });
 }
+
+#[test]
+fn cas_bfa1_failed_base_fetch_does_not_publish_local_fallback() {
+    with_fixture(|repo, origin, root, _| {
+        git(origin, &["update-ref", "-d", "refs/heads/main"]);
+        let old = git(repo, &["rev-parse", "epic/unpublished"]);
+        let receipt = focus(root);
+        assert!(
+            receipt.contains("UNVERIFIED")
+                && receipt.contains("base")
+                && receipt.contains("fetch failed"),
+            "{receipt}"
+        );
+        assert_eq!(git(repo, &["rev-parse", "epic/unpublished"]), old);
+        assert!(
+            git(
+                origin,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/heads/epic/unpublished"
+                ]
+            )
+            .is_empty()
+        );
+    });
+}

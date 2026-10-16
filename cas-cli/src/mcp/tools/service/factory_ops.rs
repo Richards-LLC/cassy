@@ -6734,20 +6734,9 @@ impl CasService {
 
         let clear = req.clear.unwrap_or(false);
         let epic_id = req.id.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let request = if clear {
-            FocusEpic::Clear
-        } else {
-            let Some(epic_id) = epic_id else {
-                return Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    "focus_epic requires `id=<epic-id>` or `clear=true`",
-                ));
-            };
-            FocusEpic::Pin {
-                epic_id,
-                delivery_mode: requested_delivery_mode,
-            }
-        };
+        if !clear && epic_id.is_none() {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, "focus_epic requires `id=<epic-id>` or `clear=true`"));
+        }
 
         // cas-566b: the body is the operator facade the Commander hub also
         // calls; this arm keeps MCP's request parsing and error codes.
@@ -6757,7 +6746,16 @@ impl CasService {
         let pinned_epic = (!clear).then(|| epic_id.map(str::to_string)).flatten();
         let cas_root = self.inner.cas_root.clone();
         let agent_id = self.inner.get_agent_id().ok();
-        let text = focus_epic(&self.inner.cas_root, &factory_session, request).map_err(
+        let focus_root = self.inner.cas_root.clone();
+        let focus_session = factory_session.clone();
+        let focus_id = pinned_epic.clone();
+        let text = tokio::task::spawn_blocking(move || {
+            let request = match focus_id.as_deref() {
+                Some(epic_id) => FocusEpic::Pin { epic_id, delivery_mode: requested_delivery_mode },
+                None => FocusEpic::Clear,
+            };
+            focus_epic(&focus_root, &focus_session, request)
+        }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("focus worker failed: {error}")))?.map_err(
             |error| match error {
                 OperationError::Failed(message) => Self::error(ErrorCode::INTERNAL_ERROR, message),
                 OperationError::NotFound(message) | OperationError::Invalid(message) => {

@@ -5,6 +5,13 @@ use std::time::Duration;
 
 use super::GitOperations;
 
+/// One network observation, reused by local preparation and publication.
+pub(crate) struct EpicPublicationObservation {
+    pub remote: Result<Option<bool>, String>,
+    pub base_fetched: bool,
+    pub previous_remote: bool,
+}
+
 pub(crate) struct EpicBranchReadiness {
     pub notice: Option<String>,
     pub can_refresh_parent: bool,
@@ -35,6 +42,101 @@ impl GitOperations {
         branch: &str,
         base: &str,
     ) -> Result<EpicBranchReadiness, String> {
+        let observation = self.observe_epic_publication(branch, base);
+        self.ensure_epic_published_observed(branch, base, &observation)
+    }
+
+    pub(crate) fn observe_epic_publication(
+        &self,
+        branch: &str,
+        base: &str,
+    ) -> EpicPublicationObservation {
+        let previous_remote = self.resolve_commit(&format!("origin/{branch}")).is_some();
+        let remote = if !self.has_origin_remote() {
+            Ok(None)
+        } else {
+            let mut command = Command::new("git");
+            command
+                .args([
+                    "ls-remote",
+                    "--heads",
+                    "origin",
+                    &format!("refs/heads/{branch}"),
+                ])
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .current_dir(&self.repo_root);
+            match Self::run_command_bounded(command, Duration::from_secs(10)) {
+                Ok(output) if output.status.success() => {
+                    if output.stdout.is_empty() {
+                        Ok(Some(false))
+                    } else {
+                        self.fetch_branch(branch)
+                            .map(|_| Some(true))
+                            .map_err(|e| e.to_string())
+                    }
+                }
+                Ok(output) => Err(format!(
+                    "origin presence unverified: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+                Err(error) => Err(format!("origin presence unverified: {error}")),
+            }
+        };
+        let base_fetched = self.has_origin_remote()
+            && self
+                .fetch_branch(base.strip_prefix("origin/").unwrap_or(base))
+                .is_ok();
+        EpicPublicationObservation {
+            remote,
+            base_fetched,
+            previous_remote,
+        }
+    }
+
+    /// The same cached local/origin comparison used by legacy spawn preparation.
+    /// Fetch is owned by the observation, so retries here add no network work.
+    pub(crate) fn shared_parent_ref(&self, branch: &str) -> Result<String, String> {
+        if branch.starts_with("origin/") {
+            return Ok(branch.into());
+        }
+        let local = self
+            .resolve_commit(branch)
+            .ok_or_else(|| format!("could not resolve recorded parent '{branch}'"))?;
+        let remote_ref = format!(
+            "origin/{}",
+            branch.strip_prefix("refs/heads/").unwrap_or(branch)
+        );
+        let Some(remote) = self.resolve_commit(&remote_ref) else {
+            return Ok(branch.into());
+        };
+        if local == remote {
+            return Ok(branch.into());
+        }
+        let ahead = self
+            .commits_behind(&remote, &local)
+            .map_err(|e| e.to_string())?;
+        let behind = self
+            .commits_behind(&local, &remote)
+            .map_err(|e| e.to_string())?;
+        if ahead == 0 {
+            return Ok(remote_ref);
+        }
+        if behind == 0 {
+            return Err(format!(
+                "local parent '{branch}' ({local}) is ahead of shared '{remote_ref}' ({remote}); refusing unpublished local parent"
+            ));
+        }
+        Err(format!(
+            "recorded parent '{branch}' and fetched '{remote_ref}' have diverged; refusing to choose a worker base"
+        ))
+    }
+
+    pub(crate) fn ensure_epic_published_observed(
+        &self,
+        branch: &str,
+        base: &str,
+        observation: &EpicPublicationObservation,
+    ) -> Result<EpicBranchReadiness, String> {
         let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
         let refname = format!("refs/heads/{branch}");
         let valid = Command::new("git")
@@ -50,25 +152,19 @@ impl GitOperations {
         let setting = std::env::var("CAS_PUSH_EPIC_BRANCH")
             .unwrap_or_else(|_| "unset (disabled at create)".into());
         let mut receipts = Vec::new();
-        let remote_present = if self.has_origin_remote() {
-            let mut command = Command::new("git");
-            command
-                .args(["ls-remote", "--heads", "origin", &refname])
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .current_dir(&self.repo_root);
-            let result = Self::run_command_bounded(command, Duration::from_secs(10))
-                .map_err(|e| format!("origin presence for '{branch}' is unverified: {e}"))?;
-            if !result.status.success() {
-                return Err(format!(
-                    "origin presence for '{branch}' is unverified: {}",
-                    String::from_utf8_lossy(&result.stderr).trim()
-                ));
+        let initial_tip = self
+            .resolve_commit(&refname)
+            .unwrap_or_else(|| "missing".into());
+        let remote_present = match &observation.remote {
+            Ok(Some(present)) => *present,
+            Ok(None) => {
+                return Ok(EpicBranchReadiness::ready(Some(format!(
+                    "EPIC BRANCH LOCAL-ONLY: '{branch}' ({}); origin is not configured (CAS_PUSH_EPIC_BRANCH={setting}).",
+                    self.resolve_commit(&refname)
+                        .unwrap_or_else(|| "missing".into())
+                ))));
             }
-            !result.stdout.is_empty()
-        } else {
-            return Ok(EpicBranchReadiness::ready(Some(format!(
-                "EPIC BRANCH LOCAL-ONLY: '{branch}'; origin is not configured (CAS_PUSH_EPIC_BRANCH={setting})."
-            ))));
+            Err(error) => return Err(error.clone()),
         };
         if remote_present {
             self.fetch_branch(branch).map_err(|e| e.to_string())?;
@@ -103,36 +199,44 @@ impl GitOperations {
                 ))));
             }
             return Ok(EpicBranchReadiness::ready(Some(format!(
-                "EPIC BRANCH PRESERVED: '{branch}' has {ahead} unpublished unique commit(s); existing origin {remote} was not rewritten."
+                "EPIC BRANCH PRESERVED: '{branch}' ({local}) has {ahead} unpublished unique commit(s); existing origin {remote} was not rewritten."
             ))));
         }
-        let base = self.resolve_fresh_base(base).map_err(|e| e.to_string())?;
-        if base.sha.is_empty() {
+        if observation.previous_remote {
             return Err(format!(
-                "cannot publish '{branch}': recorded/configured base is unresolved"
+                "previously published '{branch}' is now absent on origin; refusing automatic resurrection"
             ));
         }
+        if !observation.base_fetched {
+            return Err(format!(
+                "base '{base}' fetch failed; publication is unverified, no local fallback was published"
+            ));
+        }
+        let base_ref = self.shared_parent_ref(base)?;
+        let base_sha = self
+            .resolve_commit(&base_ref)
+            .ok_or_else(|| format!("base '{base_ref}' unresolved"))?;
         if let Some(local) = self.resolve_commit(&refname) {
-            if local != base.sha {
+            if local != base_sha {
                 let unique = self
-                    .commits_behind(&base.sha, &local)
+                    .commits_behind(&base_sha, &local)
                     .map_err(|e| e.to_string())?;
                 if unique == 0 {
-                    self.advance_local_branch(branch, &local, &base.sha)?;
+                    self.advance_local_branch(branch, &local, &base_sha)?;
                     receipts.push(format!(
                         "FAST-FORWARDED local '{branch}' from {local} to base '{}' at {}",
-                        base.branch_ref, base.sha
+                        base_ref, base_sha
                     ));
                 } else {
                     receipts.push(format!("preserved {unique} unique local commit(s) on '{branch}' at {local} unchanged"));
                 }
             }
         } else {
-            self.create_branch_from(branch, &base.sha)
+            self.create_branch_from(branch, &base_sha)
                 .map_err(|e| e.to_string())?;
             receipts.push(format!(
                 "created local '{branch}' from base '{}' at {}",
-                base.branch_ref, base.sha
+                base_ref, base_sha
             ));
         }
         let tip = self
@@ -156,8 +260,12 @@ impl GitOperations {
             })?;
         if !publication.status.success() {
             return Ok(EpicBranchReadiness::preserved(format!(
-                "EPIC BRANCH UNPUBLISHED: {}; expected-absent publication of '{branch}' refused: {}. No existing remote ref was rewritten (CAS_PUSH_EPIC_BRANCH={setting}).",
-                receipts.join("; "),
+                "EPIC BRANCH UNPUBLISHED: '{branch}' ({initial_tip}); {}expected-absent publication refused: {}. No existing remote ref was rewritten (CAS_PUSH_EPIC_BRANCH={setting}).",
+                if receipts.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}; ", receipts.join("; "))
+                },
                 String::from_utf8_lossy(&publication.stderr).trim()
             )));
         }

@@ -60,6 +60,10 @@ pub(super) fn with_fixture(check: impl FnOnce(&mut Fixture)) {
         ("HOME", home.path().to_str().unwrap()),
         ("CAS_FACTORY_SESSION", "bfa1-round2"),
         ("CAS_PUSH_EPIC_BRANCH", "0"),
+        (
+            "GIT_TRACE2_EVENT",
+            temp.path().join("git-trace.json").to_str().unwrap(),
+        ),
     ]);
     let repo = temp.path().join("repo");
     let origin = temp.path().join("origin.git");
@@ -318,4 +322,100 @@ fn cas_bfa1_spawn_preserves_unique_epic_work() {
                 .any(|line| line.contains("unique") && line.contains("preserved"))
         );
     });
+}
+
+#[test]
+fn cas_bfa1_spawn_network_observation_is_reused() {
+    for published in [false, true] {
+        with_fixture(|f| {
+            if published {
+                git(&f.repo, &["push", "origin", "epic/round2"]);
+            }
+            f.advance_parent();
+            let trace = f.repo.parent().unwrap().join("git-trace.json");
+            std::fs::write(&trace, "").unwrap();
+            f.prepare().unwrap();
+            let entries: Vec<serde_json::Value> = std::fs::read_to_string(trace)
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect();
+            let count = |command: &str, branch: Option<&str>| {
+                entries
+                    .iter()
+                    .filter(|entry| {
+                        let Some(args) = entry.get("argv").and_then(|args| args.as_array()) else {
+                            return false;
+                        };
+                        entry["event"] == "start"
+                            && args.get(1).and_then(|value| value.as_str()) == Some(command)
+                            && branch.is_none_or(|branch| {
+                                args.iter().any(|value| value.as_str() == Some(branch))
+                            })
+                    })
+                    .count()
+            };
+            assert_eq!(count("ls-remote", None), 1);
+            assert_eq!(count("fetch", Some("main")), 1);
+            assert_eq!(count("fetch", Some("epic/round2")), usize::from(published));
+        });
+    }
+}
+
+#[test]
+fn cas_bfa1_real_spawn_notices_deduplicate_within_session() {
+    for kind in ["UNVERIFIED", "PRESERVED", "UNPUBLISHED"] {
+        with_fixture(|f| {
+            if kind == "UNVERIFIED" {
+                f.offline();
+            }
+            if kind == "PRESERVED" {
+                git(&f.repo, &["push", "origin", "epic/round2"]);
+                git(&f.repo, &["checkout", "epic/round2"]);
+                commit(&f.repo, "unique");
+                git(&f.repo, &["checkout", "main"]);
+            }
+            if kind == "UNPUBLISHED" {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let hook = f.origin.join("hooks/pre-receive");
+                    std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+                    std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+                }
+                #[cfg(not(unix))]
+                {
+                    return;
+                }
+            }
+            let mut original = None;
+            for request in 1..=8 {
+                let prep = f.prepare().unwrap();
+                let notice = prep
+                    .warnings
+                    .iter()
+                    .find(|line| line.starts_with(&format!("EPIC BRANCH {kind}")))
+                    .expect("real notice");
+                let id = crate::ui::factory::daemon::runtime::queue_and_events::enqueue_spawn_warning_notice(
+                    &f.root, "supervisor", "session-a", Some(request), &format!("worker-{request}"), notice,
+                ).unwrap();
+                assert_eq!(*original.get_or_insert(id), id);
+                if request == 8 {
+                    let other = crate::ui::factory::daemon::runtime::queue_and_events::enqueue_spawn_warning_notice(
+                        &f.root, "supervisor", "session-b", Some(request), "other-worker", notice,
+                    ).unwrap();
+                    assert_ne!(other, id, "each factory session gets its own notice");
+                }
+                assert!(!notice.contains("UNPUBLISHED: ;"));
+            }
+            assert_eq!(
+                crate::store::open_prompt_queue_store(&f.root)
+                    .unwrap()
+                    .peek_all(100)
+                    .unwrap()
+                    .len(),
+                2
+            );
+        });
+    }
 }

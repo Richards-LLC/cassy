@@ -73,7 +73,7 @@ fn ct2_p3_dead_owner_notice_rerouted() {
 }
 
 #[test]
-fn pending_lifecycle_notice_follows_live_peer_after_owner_ends() {
+fn cas_5c2c_review_pending_lifecycle_does_not_follow_unrelated_peer() {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
         LifecycleTransition, drain_lifecycle_outbox_with_agents, emit_task_lifecycle_transition,
     };
@@ -111,15 +111,7 @@ fn pending_lifecycle_notice_follows_live_peer_after_owner_ends() {
     agents.register(&peer).unwrap();
     let report =
         drain_lifecycle_outbox_with_agents(sq.as_ref(), pq.as_ref(), agents.as_ref(), 10).unwrap();
-    assert_eq!(report.recovered, 1);
+    assert_eq!(report.recovered, 0);
     let rows = pq.peek_all(10).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].target, peer.name);
-    assert_eq!(rows[0].factory_session, peer.factory_session);
-    assert_eq!(
-        drain_lifecycle_outbox_with_agents(sq.as_ref(), pq.as_ref(), agents.as_ref(), 10)
-            .unwrap()
-            .attempted,
-        0
-    );
+    assert!(rows.is_empty());
 }

@@ -2,7 +2,7 @@ use super::{FocusEpic, focus_epic};
 use cas_types::{Agent, AgentRole, Task, TaskStatus, TaskType, WorkTarget};
 
 #[test]
-fn ct2_p3_integration_conflict_notifies_both() {
+fn cas_5c2c_review_integration_conflict_notifies_both() {
     let home = tempfile::TempDir::new().unwrap();
     let _env =
         crate::test_support::TestEnvGuard::with_vars(&[("HOME", home.path().to_str().unwrap())]);
@@ -70,6 +70,10 @@ fn ct2_p3_integration_conflict_notifies_both() {
                     .contains(tasks.get("cas-lane-a").unwrap().branch.as_deref().unwrap())
         );
     }
+    let mut edited = tasks.get("cas-lane-b").unwrap();
+    edited.notes = "Unrelated progress update".into();
+    edited.updated_at += chrono::Duration::seconds(1);
+    tasks.update(&edited).unwrap();
     focus_epic(
         &root,
         "session-a",
@@ -82,7 +86,7 @@ fn ct2_p3_integration_conflict_notifies_both() {
     assert_eq!(
         queue.peek_all(100).unwrap().len(),
         2,
-        "a repeated focus does not repeat the conflict"
+        "a repeated focus or unrelated task edit does not repeat the conflict"
     );
 }
 

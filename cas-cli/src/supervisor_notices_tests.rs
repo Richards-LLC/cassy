@@ -1,5 +1,37 @@
 use super::*;
 
+#[test]
+fn cas_5c2c_review_orphan_resume_and_same_name_successor() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let agents = open_agent_store(&root).unwrap();
+    let tasks = open_task_store(&root).unwrap();
+    let mut ending = Agent::new_with_role("ending-id".into(), "owner".into(), AgentRole::Supervisor);
+    ending.factory_session = Some("ended-session".into());
+    agents.register(&ending).unwrap();
+    let mut epic = cas_types::Task::new("cas-owned".into(), "Owned".into());
+    epic.task_type = TaskType::Epic;
+    epic.epic_verification_owner = Some(ending.id.clone());
+    tasks.add(&epic).unwrap();
+    orphan_epics(&root, &ending).unwrap();
+    let mut epic = tasks.get(&epic.id).unwrap();
+    epic.epic_verification_owner = Some(ending.id.clone());
+    tasks.update(&epic).unwrap();
+    orphan_epics(&root, &ending).unwrap();
+    let sq = open_supervisor_queue_store(&root).unwrap();
+    assert_eq!(sq.peek("operator", 10).unwrap().len(), 2, "a resumed same-id owner's second end is a distinct occurrence");
+    orphan_epics(&root, &ending).unwrap();
+    assert_eq!(sq.peek("operator", 10).unwrap().len(), 2, "ownership already cleared is idempotent");
+    let mut successor = Agent::new_with_role("successor-id".into(), ending.name.clone(), AgentRole::Supervisor);
+    successor.registered_at = ending.registered_at + chrono::Duration::seconds(1);
+    successor.factory_session = Some("successor-session".into());
+    agents.register(&successor).unwrap();
+    epic.epic_verification_owner = Some(ending.name.clone());
+    tasks.update(&epic).unwrap();
+    orphan_epics(&root, &ending).unwrap();
+    assert_eq!(tasks.get(&epic.id).unwrap().epic_verification_owner, Some(ending.name));
+}
+
 #[tokio::test]
 async fn remote_focus_conflict_uses_mailbox_and_operator_fallback() {
     use crate::cloud::{CloudConfig, peer_claims::PeerHold};

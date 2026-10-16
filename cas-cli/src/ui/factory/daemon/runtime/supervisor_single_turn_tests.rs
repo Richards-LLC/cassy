@@ -270,7 +270,6 @@ async fn cas_3f90_over_hook_budget_event_relays_the_whole_body() {
     if !fixture_child("cas_3f90_over_hook_budget_event_relays_the_whole_body") {
         return;
     }
-    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     // A body over the hook budget, and one that fits alone but not with row
     // framing: both take the Teams relay with the body untruncated.
     let framed = cas_store::HOOK_SURFACE_BUDGET_CHARS - cas_store::HOOK_SURFACE_ROW_OVERHEAD_CHARS - BODY.len();
@@ -278,6 +277,8 @@ async fn cas_3f90_over_hook_budget_event_relays_the_whole_body() {
         ("oversized", "detail".repeat(cas_store::HOOK_SURFACE_BUDGET_CHARS), false),
         ("framing over cap", "x".repeat(framed), true),
     ] {
+        // A fresh home per case: the Teams inbox lives under HOME.
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         let (_root, mut daemon) = fixture().await;
         let body = BODY.replace("review the lane.", &format!("review the lane.{padding}"));
         assert_eq!(cas_store::fits_hook_surface(&body), fits_alone, "{case}");

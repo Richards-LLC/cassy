@@ -684,11 +684,20 @@ async fn cas_cc89_reset_cancels_a_claimed_pointer_before_file_delivery() {
     assert!(queue.teams_body_fallback_claimed(row, "worker-a").unwrap());
     // Even an in-flight-key refusal must delay the next ownership clone.
     let pointer_key = format!("teams-fallback:{row}:worker-a");
-    daemon.queue_jobs.poison_jobs.pointers.get_mut(&pointer_key).unwrap().retry_at = Instant::now()-Duration::from_secs(1);
+    daemon
+        .queue_jobs
+        .poison_jobs
+        .pointers
+        .get_mut(&pointer_key)
+        .unwrap()
+        .retry_at = Instant::now() - Duration::from_secs(1);
     let retried = Instant::now();
     daemon.drain_relay_jobs();
-    assert!(daemon.queue_jobs.poison_jobs.pointers[&pointer_key].retry_at >= retried+Duration::from_millis(900),
-        "an in-flight phase refusal must back off");
+    assert!(
+        daemon.queue_jobs.poison_jobs.pointers[&pointer_key].retry_at
+            >= retried + Duration::from_millis(900),
+        "an in-flight phase refusal must back off"
+    );
     daemon.forget_probe_pane("worker-a");
     release.send(()).unwrap();
     while !daemon.queue_jobs.poison_jobs.pointers.is_empty() {
@@ -750,10 +759,11 @@ fn cas_cc89_old_sweep_shape_panics_under_enforcement_control() {
     let _env = crate::test_support::TestEnvGuard::temp_home();
     let (_temp, daemon, queue, _row) = fixture(false);
     let progress = loop_watchdog::LoopProgress::new();
-    let (_attachment, _enforce) = loop_watchdog::enforced_daemon_step(
-        &progress, loop_watchdog::LoopPhase::PromptQueue,
-    );
-    queue.delivery_stalled_candidates(&daemon.session_name, 600, 1800, 50).unwrap();
+    let (_attachment, _enforce) =
+        loop_watchdog::enforced_daemon_step(&progress, loop_watchdog::LoopPhase::PromptQueue);
+    queue
+        .delivery_stalled_candidates(&daemon.session_name, 600, 1800, 50)
+        .unwrap();
 }
 
 #[tokio::test]
@@ -762,38 +772,70 @@ async fn cas_cc89_stopped_worker_does_not_starve_pointer_or_bounce() {
     let (temp, mut daemon, queue, row) = fixture(false);
     let inbox = setup_pointer(&mut daemon, queue.as_ref(), row, temp.path(), &mut env).await;
     let root = daemon.app.cas_dir().to_path_buf();
-    let mut stopped = cas_types::Agent::new_with_role("stopped-id".into(), "stopped-worker".into(), cas_types::AgentRole::Worker);
+    let mut stopped = cas_types::Agent::new_with_role(
+        "stopped-id".into(),
+        "stopped-worker".into(),
+        cas_types::AgentRole::Worker,
+    );
     stopped.factory_session = Some(daemon.session_name.clone());
     stopped.status = cas_types::AgentStatus::Shutdown;
-    crate::store::open_agent_store(&root).unwrap().register(&stopped).unwrap();
+    crate::store::open_agent_store(&root)
+        .unwrap()
+        .register(&stopped)
+        .unwrap();
     daemon.app.add_worker_name_for_test("stopped-worker");
     daemon.dead_workers.insert("stopped-worker".into());
     daemon.normal_delivery_probes.clear();
-    rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
-        "UPDATE prompt_queue SET created_at=? WHERE id=?",
-        rusqlite::params![(chrono::Utc::now()-chrono::Duration::minutes(31)).to_rfc3339(), row],
-    ).unwrap();
+    rusqlite::Connection::open(root.join("cas.db"))
+        .unwrap()
+        .execute(
+            "UPDATE prompt_queue SET created_at=? WHERE id=?",
+            rusqlite::params![
+                (chrono::Utc::now() - chrono::Duration::minutes(31)).to_rfc3339(),
+                row
+            ],
+        )
+        .unwrap();
     daemon.queue_jobs = prompt_queue_jobs::QueueJobs::start_with_private_writer(root.clone(), None);
     daemon.queue_jobs.store(&root).unwrap();
     daemon.last_commander_mirror_scan = Some(Instant::now());
-    daemon.last_prompt_poison_sweep = Some(Instant::now()-PROMPT_POISON_SWEEP_INTERVAL);
+    daemon.last_prompt_poison_sweep = Some(Instant::now() - PROMPT_POISON_SWEEP_INTERVAL);
     let request = prompt_queue_jobs::QueueSelectRequest {
-        cas_dir: root.clone(), session_name: daemon.session_name.clone(),
-        supervisor_name: daemon.app.supervisor_name().into(), worker_names: daemon.app.worker_names().to_vec(),
-        dead_workers: daemon.dead_workers.clone(), limit: 0,
-        operator_replies: false, adopt_operator_notices: false,
+        cas_dir: root.clone(),
+        session_name: daemon.session_name.clone(),
+        supervisor_name: daemon.app.supervisor_name().into(),
+        worker_names: daemon.app.worker_names().to_vec(),
+        dead_workers: daemon.dead_workers.clone(),
+        limit: 0,
+        operator_replies: false,
+        adopt_operator_notices: false,
     };
     let release = hold_lane(&mut daemon, jobs::Lane::Blocking);
     // Real select -> real delivery: the repeated stopped-recipient list is
     // produced by the same path that caused the production starvation.
     let selected = run_queue_select(&request, 1).unwrap();
-    assert!(selected.shut_down_recipients.iter().any(|name| name == "stopped-worker"));
+    assert!(
+        selected
+            .shut_down_recipients
+            .iter()
+            .any(|name| name == "stopped-worker")
+    );
     daemon.deliver_queue_selection(selected).await.unwrap();
-    assert!(daemon.relay_jobs.reading(super::super::relay_jobs::Relay::TeamsPointers));
+    assert!(
+        daemon
+            .relay_jobs
+            .reading(super::super::relay_jobs::Relay::TeamsPointers)
+    );
     release.send(()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
-    while daemon.queue_jobs.job_lanes().unwrap().lane_stats().iter()
-        .any(|stats| stats.running.is_some() || stats.queued > 0) {
+    while daemon
+        .queue_jobs
+        .job_lanes()
+        .unwrap()
+        .lane_stats()
+        .iter()
+        .any(|stats| stats.running.is_some() || stats.queued > 0)
+    {
         assert!(Instant::now() < deadline, "held scan never finished");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -802,17 +844,39 @@ async fn cas_cc89_stopped_worker_does_not_starve_pointer_or_bounce() {
     let original = queue.queued_prompt(row).unwrap().unwrap().prompt;
     loop {
         let selected = run_queue_select(&request, 2).unwrap();
-        assert!(selected.shut_down_recipients.iter().any(|name| name == "stopped-worker"));
+        assert!(
+            selected
+                .shut_down_recipients
+                .iter()
+                .any(|name| name == "stopped-worker")
+        );
         daemon.deliver_queue_selection(selected).await.unwrap();
-        let messages: Vec<super::super::teams::InboxMessage> = serde_json::from_str(&std::fs::read_to_string(&inbox).unwrap()).unwrap();
-        let bounces = queue.peek_all(30).unwrap().iter().filter(|message| message.source == "delivery-watchdog").count();
-        if messages.iter().any(|message| message.text.contains(&original)) && bounces > 0 {
+        let messages: Vec<super::super::teams::InboxMessage> =
+            serde_json::from_str(&std::fs::read_to_string(&inbox).unwrap()).unwrap();
+        let bounces = queue
+            .peek_all(30)
+            .unwrap()
+            .iter()
+            .filter(|message| message.source == "delivery-watchdog")
+            .count();
+        if messages
+            .iter()
+            .any(|message| message.text.contains(&original))
+            && bounces > 0
+        {
             assert_eq!(messages.len(), 2, "one pointer plus one fallback body");
             assert_eq!(bounces, 1, "one durable sender bounce");
             break;
         }
-        assert!(Instant::now() < deadline, "stopped-worker selections starved fallback or bounce");
+        assert!(
+            Instant::now() < deadline,
+            "stopped-worker selections starved fallback or bounce"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    assert!(daemon.queue_jobs.drain_for_shutdown(&root, Duration::from_secs(3)));
+    assert!(
+        daemon
+            .queue_jobs
+            .drain_for_shutdown(&root, Duration::from_secs(3))
+    );
 }

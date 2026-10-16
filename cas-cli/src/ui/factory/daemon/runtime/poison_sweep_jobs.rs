@@ -19,6 +19,9 @@ pub(crate) struct PoisonJobs {
     pub(crate) generation: u64,
     pub(crate) stopping: bool,
     epochs: HashMap<String, Arc<AtomicBool>>,
+    // QueueSelect repeats these names until registration changes. Keep the
+    // current set only, so observing the same stopped pane is idempotent.
+    stopped_panes: HashSet<String>,
     pub(crate) pointers: HashMap<String, PendingPointer>,
     pub(crate) idle_relayed: HashSet<i64>,
 }
@@ -47,6 +50,16 @@ impl PoisonJobs {
             keep
         });
     }
+    pub(crate) fn observe_stopped_panes(&mut self, panes: &[String]) {
+        let current: HashSet<_> = panes.iter().cloned().collect();
+        let newly_stopped: Vec<_> = current.difference(&self.stopped_panes).cloned().collect();
+        for pane in newly_stopped {
+            self.forget_pane(&pane);
+        }
+        // A name that resumes is removed, so its next stop invalidates again.
+        self.stopped_panes = current;
+    }
+
     pub(crate) fn forget_pane(&mut self, pane: &str) {
         self.generation = self.generation.wrapping_add(1);
         if let Some(live) = self.epochs.remove(pane) {

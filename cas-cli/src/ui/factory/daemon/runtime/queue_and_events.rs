@@ -4419,7 +4419,7 @@ impl FactoryDaemon {
             .map(|(key, pending)| (key.clone(), pending.phase, pending.work.clone())).collect();
         for (key, phase, work) in pending {
             let pending_key = key.clone();
-            let submitted = match phase {
+            match phase {
                 PointerPhase::Claim => {
                     let job_key = format!("{key}:claim");
                     self.relay_jobs.submit_write(&mut self.queue_jobs, &job_key, None, move ||
@@ -4436,10 +4436,10 @@ impl FactoryDaemon {
                         RelayOutput::PointerReleased { key: key.clone(), released: pointer::release_pointer(&work) })
                 }
             };
-            if submitted {
-                if let Some(pending) = self.queue_jobs.poison_jobs.pointers.get_mut(&pending_key) {
-                    pending.retry_at = Instant::now() + Duration::from_secs(1);
-                }
+            // A held phase refuses the duplicate key. Back off that attempt
+            // too, instead of cloning every pending body on every drain.
+            if let Some(pending) = self.queue_jobs.poison_jobs.pointers.get_mut(&pending_key) {
+                pending.retry_at = Instant::now() + Duration::from_secs(1);
             }
         }
     }
@@ -8213,10 +8213,12 @@ impl FactoryDaemon {
         {
             self.forget_row_delivery_state(id);
         }
+        // Invalidate scan ownership on the stop transition, not on every
+        // selection containing the same stopped worker (cas-cc89 review H).
+        self.queue_jobs.poison_jobs.observe_stopped_panes(&shut_down_recipients);
         for name in &shut_down_recipients {
             self.normal_delivery_probes.retain(|_, probe| probe.pane != *name && probe.target != *name);
             self.queue_jobs.normal_probe_jobs.forget_pane(name);
-            self.queue_jobs.poison_jobs.forget_pane(name);
             self.urgent_wake_probes.retain(|_, probe| probe.pane != *name && probe.target != *name);
         }
 

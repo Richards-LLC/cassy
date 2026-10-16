@@ -61,56 +61,37 @@ fn sweep(
 }
 
 #[test]
-fn idle_cloud_linked_store_is_synced_and_recorded() {
+fn idle_linked_stores_sync_under_their_own_roots_and_unregistered_ones_drop_out() {
     let dir = tempfile::tempdir().unwrap();
-    let repo = linked_repo(dir.path(), "alpha");
+    let alpha = linked_repo(dir.path(), "alpha");
+    let beta = linked_repo(dir.path(), "beta");
     let state = dir.path().join("hub").join(STATE_FILE);
+    let config = IdleSyncConfig::default();
     let runner = FakeRunner::default();
     let now = Utc::now();
 
-    let report = sweep(
-        &IdleSyncConfig::default(),
-        &[repo.clone()],
-        &runner,
-        &state,
-        now,
+    let mut ran = sweep(&config, &[alpha.clone(), beta.clone()], &runner, &state, now).ran;
+    ran.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(ran, vec![(alpha.clone(), SweepOutcome::Synced), (beta.clone(), SweepOutcome::Synced)]);
+    let mut calls = runner.calls();
+    calls.sort();
+    assert_eq!(
+        calls,
+        vec![(alpha.clone(), alpha.join(".cas")), (beta.clone(), beta.join(".cas"))],
+        "each store syncs under its own root"
     );
-
-    assert_eq!(report.ran, vec![(repo.clone(), SweepOutcome::Synced)]);
-    assert_eq!(runner.calls(), vec![(repo.clone(), repo.join(".cas"))]);
     let saved = IdleSyncState::load(&state).unwrap();
-    let record = saved.record(&repo).expect("the sweep records the store");
+    let record = saved.record(&alpha).expect("the sweep records the store");
     assert_eq!(record.outcome, SweepOutcome::Synced);
     assert_eq!(record.last_success_at, Some(now));
     assert_eq!(record.next_attempt_after, None);
     assert_eq!(saved.last_sweep_at, Some(now));
-}
 
-#[test]
-fn each_store_runs_bound_to_its_own_root_one_at_a_time() {
-    let dir = tempfile::tempdir().unwrap();
-    let alpha = linked_repo(dir.path(), "alpha");
-    let beta = linked_repo(dir.path(), "beta");
-    let state = dir.path().join(STATE_FILE);
-    let runner = FakeRunner::default();
-
-    sweep(
-        &IdleSyncConfig::default(),
-        &[alpha.clone(), beta.clone()],
-        &runner,
-        &state,
-        Utc::now(),
-    );
-
-    let calls = runner.calls();
-    assert_eq!(calls.len(), 2);
-    for (repo, cas_root) in calls {
-        assert_eq!(
-            cas_root,
-            repo.join(".cas"),
-            "a store syncs under its own root"
-        );
-    }
+    // A store no longer registered drops out of the state.
+    sweep(&config, &[alpha.clone()], &runner, &state, now);
+    let saved = IdleSyncState::load(&state).unwrap();
+    assert!(saved.record(&alpha).is_some());
+    assert!(saved.record(&beta).is_none());
 }
 
 #[cfg(unix)]
@@ -124,27 +105,12 @@ fn store_with_a_live_serve_is_skipped() {
     let state = dir.path().join(STATE_FILE);
     let runner = FakeRunner::default();
 
-    let report = sweep(
-        &IdleSyncConfig::default(),
-        &[repo.clone()],
-        &runner,
-        &state,
-        Utc::now(),
-    );
+    let report = sweep(&IdleSyncConfig::default(), &[repo.clone()], &runner, &state, Utc::now());
 
-    assert!(
-        runner.calls().is_empty(),
-        "a live serve's store is not synced by the sweep"
-    );
+    assert!(runner.calls().is_empty(), "a live serve's store is not synced by the sweep");
     assert_eq!(report.live, vec![repo.clone()]);
-    assert_eq!(
-        IdleSyncState::load(&state)
-            .unwrap()
-            .record(&repo)
-            .unwrap()
-            .outcome,
-        SweepOutcome::LiveServe
-    );
+    let outcome = IdleSyncState::load(&state).unwrap().record(&repo).unwrap().outcome;
+    assert_eq!(outcome, SweepOutcome::LiveServe);
 }
 
 #[test]
@@ -161,13 +127,8 @@ fn unlinked_and_opted_out_stores_are_not_synced() {
     let state = dir.path().join(STATE_FILE);
     let runner = FakeRunner::default();
 
-    let report = sweep(
-        &IdleSyncConfig::default(),
-        &[unlinked.clone(), opted_out.clone()],
-        &runner,
-        &state,
-        Utc::now(),
-    );
+    let report =
+        sweep(&IdleSyncConfig::default(), &[unlinked, opted_out], &runner, &state, Utc::now());
 
     assert!(runner.calls().is_empty());
     assert!(report.ran.is_empty());
@@ -193,13 +154,7 @@ fn sweep_cap_defers_the_rest_and_the_next_sweep_takes_the_least_recent() {
     assert_eq!(first.ran.len(), 2);
     assert_eq!(first.deferred, vec![repos[2].clone()]);
 
-    let second = sweep(
-        &config,
-        &repos,
-        &runner,
-        &state,
-        first_at + chrono::Duration::minutes(5),
-    );
+    let second = sweep(&config, &repos, &runner, &state, first_at + chrono::Duration::minutes(5));
     assert_eq!(
         second.ran.first().map(|(repo, _)| repo),
         Some(&repos[2]),
@@ -218,43 +173,20 @@ fn failure_backs_off_until_its_next_attempt_and_success_clears_it() {
     let t0 = Utc::now();
 
     sweep(&config, &[repo.clone()], &failing, &state, t0);
-    let record = IdleSyncState::load(&state)
-        .unwrap()
-        .record(&repo)
-        .cloned()
-        .unwrap();
+    let record = IdleSyncState::load(&state).unwrap().record(&repo).cloned().unwrap();
     assert_eq!(record.outcome, SweepOutcome::Failed);
     assert_eq!(record.detail.as_deref(), Some("exit 1: boom"));
     assert_eq!(record.consecutive_failures, 1);
-    let next = record
-        .next_attempt_after
-        .expect("a failure schedules a backoff");
-    assert_eq!(
-        next,
-        t0 + chrono::Duration::from_std(config.backoff(1)).unwrap()
-    );
+    let next = record.next_attempt_after.expect("a failure schedules a backoff");
+    assert_eq!(next, t0 + chrono::Duration::from_std(config.backoff(1)).unwrap());
 
-    let early = sweep(
-        &config,
-        &[repo.clone()],
-        &failing,
-        &state,
-        next - chrono::Duration::seconds(1),
-    );
+    let early = sweep(&config, &[repo.clone()], &failing, &state, next - chrono::Duration::seconds(1));
     assert_eq!(early.backing_off, vec![repo.clone()]);
-    assert_eq!(
-        failing.calls().len(),
-        1,
-        "no retry inside the backoff window"
-    );
+    assert_eq!(failing.calls().len(), 1, "no retry inside the backoff window");
 
     let healthy = FakeRunner::default();
     sweep(&config, &[repo.clone()], &healthy, &state, next);
-    let record = IdleSyncState::load(&state)
-        .unwrap()
-        .record(&repo)
-        .cloned()
-        .unwrap();
+    let record = IdleSyncState::load(&state).unwrap().record(&repo).cloned().unwrap();
     assert_eq!(record.outcome, SweepOutcome::Synced);
     assert_eq!(record.consecutive_failures, 0);
     assert_eq!(record.next_attempt_after, None);
@@ -266,34 +198,6 @@ fn backoff_doubles_and_is_capped() {
     assert_eq!(config.backoff(1), Duration::from_secs(600));
     assert_eq!(config.backoff(2), Duration::from_secs(1200));
     assert_eq!(config.backoff(40), config.backoff_max);
-}
-
-#[test]
-fn unregistered_stores_drop_out_of_the_state() {
-    let dir = tempfile::tempdir().unwrap();
-    let alpha = linked_repo(dir.path(), "alpha");
-    let beta = linked_repo(dir.path(), "beta");
-    let state = dir.path().join(STATE_FILE);
-    let runner = FakeRunner::default();
-    sweep(
-        &IdleSyncConfig::default(),
-        &[alpha.clone(), beta.clone()],
-        &runner,
-        &state,
-        Utc::now(),
-    );
-
-    sweep(
-        &IdleSyncConfig::default(),
-        &[alpha.clone()],
-        &runner,
-        &state,
-        Utc::now(),
-    );
-
-    let saved = IdleSyncState::load(&state).unwrap();
-    assert!(saved.record(&alpha).is_some());
-    assert!(saved.record(&beta).is_none());
 }
 
 #[cfg(unix)]
@@ -364,17 +268,8 @@ mod process_runner {
         assert!(env.lines().any(|line| line.starts_with("CAS_ROOT=")));
     }
 
-    #[test]
-    fn lease_busy_exit_is_reported_as_busy() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = linked_repo(dir.path(), "alpha");
-        let binary = script(dir.path(), &format!("exit {SYNC_LEASE_BUSY_EXIT}"));
-        assert_eq!(
-            run(&binary, &repo, Duration::from_secs(30)),
-            RunResult::Busy
-        );
-    }
-
+    // A held lease's exit code is proven end to end by
+    // tests/hub_idle_sync_test.rs against the real binary.
     #[test]
     fn failure_carries_the_last_output_line() {
         let dir = tempfile::tempdir().unwrap();
@@ -386,10 +281,7 @@ mod process_runner {
         );
         let log =
             std::fs::read_to_string(repo.join(".cas").join("logs").join(STORE_LOG_FILE)).unwrap();
-        assert!(
-            log.contains("cloud said no"),
-            "the store keeps the sync's output"
-        );
+        assert!(log.contains("cloud said no"), "the store keeps the sync's output");
     }
 
     #[test]

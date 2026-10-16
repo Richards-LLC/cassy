@@ -205,16 +205,15 @@ Source: release assets.
         for jargon in ('issue-bearing', 'verified closure', 'closure stitch', 'no listed issues'):
             self.assertNotIn(jargon, output.lower())
 
-    def test_changes_by_area_rejects_zero_rows_and_miscounts(self):
-        for bad in (BY_AREA.replace('| Sessions | 2 | Typing during cleanup; Peer ownership board |',
-                                    '| Sessions | 2 | Typing during cleanup; Peer ownership board |\n| Commander | 0 | Nothing |'),
-                    BY_AREA.replace('| Sessions | 2 |', '| Sessions | 3 |')):
-            with self.subTest(bad=bad[-40:]), self.assertRaises(ValueError):
+    def test_changes_by_area_rejects_zero_rows_miscounts_and_repeated_issues(self):
+        row = '| Sessions | 2 | Typing during cleanup; Peer ownership board |'
+        for name, bad in {
+            'zero-change row': BY_AREA.replace(row, row + '\n| Commander | 0 | Nothing |'),
+            'miscount': BY_AREA.replace('| Sessions | 2 |', '| Sessions | 3 |'),
+            'repeated ledger issue': BY_AREA.replace('[#1222]', '[#1215]'),
+        }.items():
+            with self.subTest(name), self.assertRaises(ValueError):
                 renderer.render(bad)
-
-    def test_changes_by_area_ledger_needs_unique_issues(self):
-        with self.assertRaisesRegex(ValueError, 'fixes ledger'):
-            renderer.render(BY_AREA.replace('[#1222]', '[#1215]'))
 
 
 if __name__ == '__main__':

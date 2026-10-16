@@ -1480,50 +1480,34 @@ fn unusable_origin_does_not_infer_component_or_parent_cas_f398() {
     );
 }
 
+/// Round-trips, defaults and listing live in the table above; this covers
+/// refusals. A refused value keeps the previous one, an empty value clears an
+/// optional key, and persisted TOML is validated like `config set`.
+/// cas-3f93: a relative scratch root would resolve against a spawn's cwd.
 #[test]
-fn cas_569f_claude_config_rejects_invalid_input_and_clears_fallback() {
+fn factory_claude_and_scratch_root_refuse_invalid_values_cas_569f_940c_3f93() {
     let mut config = Config::default();
-    config.set("factory.claude.fallback_model", "sonnet").unwrap();
-    assert!(config.set("factory.claude.fallback_model", "sonnet\nhaiku").is_err());
-    assert_eq!(config.get("factory.claude.fallback_model").as_deref(), Some("sonnet"));
-    assert!(config.set("factory.claude.remote_control", "invalid").is_err());
-    assert!(!config.factory().claude.remote_control);
-    config.set("factory.claude.fallback_model", "").unwrap();
-    assert!(config.factory().claude.fallback_model.is_none());
-    let invalid = "[factory.claude]\nfallback_model=\"sonnet\\nhaiku\"";
-    assert!(toml::from_str::<Config>(invalid).is_err());
-}
-
-/// cas-3f93: `factory.scratch_root` is unset by default, refuses a relative
-/// path (it would resolve against whichever cwd a spawn ran in) and clears
-/// back to unset with an empty value.
-#[test]
-fn factory_scratch_root_is_absolute_or_unset_cas_3f93() {
-    let mut config = Config::default();
-    assert_eq!(config.factory().scratch_root, None);
-    assert_eq!(config.get("factory.scratch_root").as_deref(), Some(""));
-    let error = config.set("factory.scratch_root", "rewind/cas").unwrap_err();
-    assert!(error.to_string().contains("absolute"), "{error}");
-    assert_eq!(config.factory().scratch_root, None);
-    config.set("factory.scratch_root", "/mnt/rewind/cas").unwrap();
-    assert_eq!(config.factory().scratch_root.as_deref(), Some("/mnt/rewind/cas"));
-    config.set("factory.scratch_root", "").unwrap();
-    assert_eq!(config.factory().scratch_root, None);
-}
-
-#[test]
-fn cas_940c_worker_mcp_config_roundtrip_and_invalid_rejection() {
-    let mut config = Config::default();
-    assert_eq!(config.get("factory.claude.worker_mcp").as_deref(), Some("cas_only"));
-    for mode in ["inherit", "cas_only"] {
-        config.set("factory.claude.worker_mcp", mode).unwrap();
-        assert_eq!(config.get("factory.claude.worker_mcp").as_deref(), Some(mode));
-        assert!(config.list().contains(&("factory.claude.worker_mcp".into(), mode.into())));
-        config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
-        assert_eq!(config.get("factory.claude.worker_mcp").as_deref(), Some(mode));
-        assert!(config.set("factory.claude.worker_mcp", "all").is_err());
-        assert_eq!(config.get("factory.claude.worker_mcp").as_deref(), Some(mode));
+    for (key, good, bad) in [
+        ("factory.claude.fallback_model", "sonnet", "sonnet\nhaiku"),
+        ("factory.claude.remote_control", "true", "invalid"),
+        ("factory.claude.worker_mcp", "inherit", "all"),
+        ("factory.scratch_root", "/mnt/rewind/cas", "rewind/cas"),
+    ] {
+        config.set(key, good).unwrap();
+        let error = config.set(key, bad).unwrap_err().to_string();
+        assert_eq!(config.get(key).as_deref(), Some(good), "{key} kept after {bad:?}");
+        if key == "factory.scratch_root" {
+            assert!(error.contains("absolute"), "{error}");
+        }
     }
-    // pin: persisted TOML must reject modes outside the two operator-facing values.
-    assert!(toml::from_str::<Config>("[factory.claude]\nworker_mcp='all'").is_err());
+    config.set("factory.claude.fallback_model", "").unwrap();
+    config.set("factory.scratch_root", "").unwrap();
+    assert!(config.factory().claude.fallback_model.is_none());
+    assert_eq!(config.factory().scratch_root, None);
+    for invalid in [
+        "[factory.claude]\nfallback_model=\"sonnet\\nhaiku\"",
+        "[factory.claude]\nworker_mcp='all'",
+    ] {
+        assert!(toml::from_str::<Config>(invalid).is_err(), "{invalid}");
+    }
 }

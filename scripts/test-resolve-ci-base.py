@@ -76,27 +76,24 @@ class LaneBaseTests(unittest.TestCase):
         self.assertEqual(out['class'], 'hub-web-only')
         self.assertEqual(out['changed-files'], '1')
 
-    def test_missing_base_fails_closed(self):
-        self.assertEqual(self.classify(before='1' * 40)['rust-unaffected'], 'false')
-
-    def test_untrusted_fallback_fails_closed(self):
-        self.assertEqual(self.classify(fallback='HEAD')['rust-unaffected'], 'false')
-
-    def test_tag_creation_does_not_use_epic(self):
-        self.assertEqual(self.classify(ref='refs/tags/v0.0.0')['rust-unaffected'], 'false')
-
-    def test_missing_default_fails_closed(self):
-        self.assertEqual(self.classify(fallback='origin/missing')['rust-unaffected'], 'false')
+    def test_unprovable_bases_fail_closed(self):
+        for name, kwargs in {
+            'missing base': {'before': '1' * 40},
+            'untrusted fallback': {'fallback': 'HEAD'},
+            'missing default': {'fallback': 'origin/missing'},
+            'tag creation': {'ref': 'refs/tags/v0.0.0'},
+            'non-factory first push': {'ref': 'refs/heads/epic/release'},
+        }.items():
+            with self.subTest(name):
+                self.assertEqual(self.classify(**kwargs)['rust-unaffected'], 'false')
 
     def test_no_shared_epic_keeps_default_branch_coverage(self):
         self.git('update-ref', '-d', 'refs/remotes/origin/epic/approved')
         self.assertEqual(self.classify()['rust-unaffected'], 'false')
 
-    def test_nonfactory_first_push_does_not_narrow_to_epic(self):
-        self.assertEqual(self.classify(ref='refs/heads/epic/release')['rust-unaffected'], 'false')
-
-    def test_equal_epic_aliases_do_not_create_false_ambiguity(self):
+    def test_equal_aliases_and_older_ancestor_epics_keep_the_newest_fork(self):
         self.git('update-ref', 'refs/remotes/origin/epic/alias', self.epic)
+        self.git('update-ref', 'refs/remotes/origin/epic/older', self.main)
         self.assertEqual(self.classify()['class'], 'hub-web-only')
 
     def test_epic_advancing_after_spawn_preserves_task_fork(self):
@@ -110,25 +107,20 @@ class LaneBaseTests(unittest.TestCase):
         self.assertEqual(out['class'], 'hub-web-only')
         self.assertEqual(out['comparison-base'], self.epic)
 
-    def test_most_recent_ancestor_epic_wins(self):
-        self.git('update-ref', 'refs/remotes/origin/epic/older', self.main)
-        self.assertEqual(self.classify()['class'], 'hub-web-only')
-
-    def test_unrelated_epic_is_not_a_parent(self):
-        self.git('checkout', '-qb', 'other', self.main)
+    def other_epic(self, name):
+        back = self.git('rev-parse', 'HEAD')
+        self.git('checkout', '-qb', name, self.main)
         self.write('other.rs', '// other epic\n')
         self.commit('other')
-        self.git('update-ref', 'refs/remotes/origin/epic/unrelated', 'HEAD')
-        self.git('checkout', '-q', 'main')
+        self.git('update-ref', f'refs/remotes/origin/epic/{name}', 'HEAD')
+        self.git('checkout', '-q', back)
+
+    def test_unrelated_epic_is_not_a_parent(self):
+        self.other_epic('unrelated')
         self.assertEqual(self.classify()['class'], 'hub-web-only')
 
     def test_incomparable_parent_epics_fail_closed(self):
-        lane = self.git('rev-parse', 'HEAD')
-        self.git('checkout', '-qb', 'other', self.main)
-        self.write('other.rs', '// other epic\n')
-        self.commit('other')
-        self.git('update-ref', 'refs/remotes/origin/epic/other', 'HEAD')
-        self.git('checkout', '-q', lane)
+        self.other_epic('other')
         self.git('merge', '--no-edit', 'other')
         self.assertEqual(self.classify()['rust-unaffected'], 'false')
 

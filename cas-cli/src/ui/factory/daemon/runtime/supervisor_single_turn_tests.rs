@@ -94,24 +94,48 @@ pub(super) async fn fixture() -> (tempfile::TempDir, FactoryDaemon) {
     (root, daemon)
 }
 
-fn event(daemon: &FactoryDaemon, body: &str) -> i64 {
+fn enqueue(daemon: &FactoryDaemon, source: &str, body: &str, origin: cas_store::QueueOrigin) -> i64 {
     let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
     match queue
-        .enqueue_idempotent(
-            "lifecycle-wake:ci-red-run:factory/test:abc",
-            "supervisor",
-            body,
-            Some(&daemon.session_name),
-            None,
-            None,
-            body,
-            Some(&cas_store::QueueOrigin::Daemon),
-        )
+        .enqueue_idempotent(source, "supervisor", body, Some(&daemon.session_name), None, None, body, Some(&origin))
         .unwrap()
     {
         cas_store::EnqueueIdempotentResult::Created(id) => id,
         _ => panic!("fresh event"),
     }
+}
+
+fn event(daemon: &FactoryDaemon, body: &str) -> i64 {
+    enqueue(daemon, "lifecycle-wake:ci-red-run:factory/test:abc", body, cas_store::QueueOrigin::Daemon)
+}
+
+/// A task-lifecycle wake body for a freshly stored task.
+fn lifecycle_body(daemon: &FactoryDaemon, status: cas_types::TaskStatus, transition: &str, old: &str, notification: u32, text: &str) -> String {
+    let mut task = cas_types::Task::new(format!("cas-{notification}"), text.into());
+    task.status = status;
+    crate::store::open_task_store_local(daemon.app.cas_dir()).unwrap().add(&task).unwrap();
+    format!(
+        "<task-lifecycle transition=\"{transition}\" task_id=\"{}\" old=\"{old}\" new=\"{}\" actor=\"worker\" notification_id=\"{notification}\" occurrence=\"{}\">{text}</task-lifecycle>",
+        task.id,
+        status,
+        task.updated_at.to_rfc3339()
+    )
+}
+
+/// The supervisor PTY received exactly one submitted turn containing `needle`
+/// and no Teams relay was written.
+pub(super) async fn typed_once(root: &tempfile::TempDir, daemon: &FactoryDaemon, needle: &str) -> String {
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+    assert!(typed.contains(needle), "{typed:?}");
+    assert_eq!(typed.matches('\r').count(), 1, "one PTY submit: {typed:?}");
+    assert!(teams_messages(daemon).is_empty(), "no relay copy");
+    typed
+}
+
+fn nothing_typed_or_relayed(root: &tempfile::TempDir, daemon: &FactoryDaemon) {
+    assert!(teams_messages(daemon).is_empty());
+    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
 }
 const BODY: &str = "<ci-red-run branch=\"factory/test\" head_sha=\"abc\" run_id=\"42\">CI failed; review the lane.</ci-red-run>";
 
@@ -134,58 +158,22 @@ async fn cas_3f90_bounded_event_has_one_body_turn_and_no_relay_copy() {
     let (root, mut daemon) = fixture().await;
     let id = event(&daemon, BODY);
     daemon.process_prompt_queue().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
-    let inbox = teams_messages(&daemon);
-    assert!(
-        typed.contains(BODY),
-        "wake must carry its full body: {typed:?}; inbox={inbox:?}"
-    );
-    assert!(
-        typed.contains(&format!("[cas #{id} ")),
-        "row identity must survive: {typed:?}"
-    );
-    assert_eq!(
-        typed.matches('\r').count(),
-        1,
-        "one PTY submit per event: {typed:?}"
-    );
-    assert!(
-        inbox.is_empty(),
-        "no held relay may create another turn: {inbox:?}"
-    );
-    let report = crate::store::open_prompt_queue_store(daemon.app.cas_dir())
-        .unwrap()
-        .message_delivery_report(id)
-        .unwrap()
-        .unwrap();
-    assert!(
-        !report
-            .recipient_receipt
-            .is_some_and(SurfacingSource::is_surfaced),
-        "typing is not proof of rendering"
-    );
+    let typed = typed_once(&root, &daemon, BODY).await;
+    assert!(typed.contains(&format!("[cas #{id} ")), "row identity must survive: {typed:?}");
+    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    let receipt = || queue.message_delivery_report(id).unwrap().unwrap().recipient_receipt;
+    assert!(!receipt().is_some_and(SurfacingSource::is_surfaced), "typing is not proof of rendering");
     // A full-body PTY handoff must never enter the timed Teams-pointer
     // fallback, even if no hook has run and the transport receipt ages.
     rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db"))
         .unwrap()
         .execute(
             "UPDATE prompt_queue_recipient_seen SET seen_at = ?1 WHERE prompt_id = ?2",
-            rusqlite::params![
-                (chrono::Utc::now() - chrono::Duration::minutes(2)).to_rfc3339(),
-                id
-            ],
+            rusqlite::params![(chrono::Utc::now() - chrono::Duration::minutes(2)).to_rfc3339(), id],
         )
         .unwrap();
-    daemon
-        .fallback_unsurfaced_teams_pointers(
-            &*crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap(),
-        )
-        .await;
-    assert!(
-        teams_messages(&daemon).is_empty(),
-        "inline delivery is not a Teams pointer"
-    );
+    daemon.fallback_unsurfaced_teams_pointers(&*queue).await;
+    assert!(teams_messages(&daemon).is_empty(), "inline delivery is not a Teams pointer");
     // The actual prompt hook receipts the body already in the submitted
     // turn. It must not add that body again or leave it for the next turn.
     env.set("CAS_AGENT_ROLE", "supervisor");
@@ -201,41 +189,17 @@ async fn cas_3f90_bounded_event_has_one_body_turn_and_no_relay_copy() {
         ..Default::default()
     };
     let context =
-        crate::hooks::handlers::handle_user_prompt_submit(&hook, Some(daemon.app.cas_dir()))
-            .unwrap();
+        crate::hooks::handlers::handle_user_prompt_submit(&hook, Some(daemon.app.cas_dir())).unwrap();
     assert!(
-        !context
-            .user_prompt_context()
-            .unwrap_or_default()
-            .contains(BODY),
+        !context.user_prompt_context().unwrap_or_default().contains(BODY),
         "inline body must not be rendered by the hook again"
     );
-    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
-    assert_eq!(
-        queue.recipient_receipt(id, "supervisor").unwrap(),
-        Some(SurfacingSource::HookSurfaced)
-    );
-    assert!(
-        queue
-            .poll_unseen_for_recipient("supervisor", Some(&daemon.session_name), 20)
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(receipt(), Some(SurfacingSource::HookSurfaced));
+    assert!(queue.poll_unseen_for_recipient("supervisor", Some(&daemon.session_name), 20).unwrap().is_empty());
     daemon.process_prompt_queue().await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(
-        std::fs::read_to_string(root.path().join("input")).unwrap(),
-        typed
-    );
-    let report = crate::store::open_prompt_queue_store(daemon.app.cas_dir())
-        .unwrap()
-        .message_delivery_report(id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        report.recipient_receipt,
-        Some(SurfacingSource::HookSurfaced)
-    );
+    assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap(), typed, "no second turn");
+    assert_eq!(receipt(), Some(SurfacingSource::HookSurfaced));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -247,25 +211,16 @@ async fn cas_3f90_rendered_receipt_retires_pending_redelivery() {
     let (root, mut daemon) = fixture().await;
     let id = event(&daemon, BODY);
     let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
-    queue
-        .record_recipient_surfaced(id, "supervisor", SurfacingSource::HookSurfaced)
-        .unwrap();
+    queue.record_recipient_surfaced(id, "supervisor", SurfacingSource::HookSurfaced).unwrap();
     // A rendered row can outlive an asynchronous delivered stamp. A stale
     // retry budget must never turn that successful read into a failed relay.
     daemon
         .lifecycle_redelivery_counts
         .insert(id, super::queue_and_events::LIFECYCLE_MAX_RENUDGE_ATTEMPTS);
     daemon.process_prompt_queue().await.unwrap();
-    assert_eq!(
-        queue.recipient_receipt(id, "supervisor").unwrap(),
-        Some(SurfacingSource::HookSurfaced)
-    );
-    assert_ne!(
-        queue.message_delivery_report(id).unwrap().unwrap().stage,
-        cas_store::DeliveryStage::Abandoned
-    );
-    assert!(teams_messages(&daemon).is_empty());
-    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+    assert_eq!(queue.recipient_receipt(id, "supervisor").unwrap(), Some(SurfacingSource::HookSurfaced));
+    assert_ne!(queue.message_delivery_report(id).unwrap().unwrap().stage, cas_store::DeliveryStage::Abandoned);
+    nothing_typed_or_relayed(&root, &daemon);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -277,39 +232,17 @@ async fn cas_3f90_busy_event_waits_without_a_held_relay_then_wakes_once() {
     let (root, mut daemon) = fixture().await;
     let id = event(&daemon, BODY);
     let name = daemon.app.supervisor_name().to_string();
-    daemon
-        .pane_silent_since
-        .insert(name.clone(), Instant::now());
+    daemon.pane_silent_since.insert(name.clone(), Instant::now());
     daemon.process_prompt_queue().await.unwrap();
     let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
-    assert!(
-        queue
-            .queued_prompt(id)
-            .unwrap()
-            .unwrap()
-            .processed_at
-            .is_none()
-    );
-    assert!(
-        queue.deferred_inbox_state(id).unwrap().is_none(),
-        "no Teams handoff occurred"
-    );
-    assert!(teams_messages(&daemon).is_empty());
-    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
-    assert!(
-        queue.recipient_receipt(id, "supervisor").unwrap().is_none(),
-        "hook can still take it"
-    );
-    daemon
-        .pane_silent_since
-        .insert(name, Instant::now() - Duration::from_secs(600));
+    assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none());
+    assert!(queue.deferred_inbox_state(id).unwrap().is_none(), "no Teams handoff occurred");
+    nothing_typed_or_relayed(&root, &daemon);
+    assert!(queue.recipient_receipt(id, "supervisor").unwrap().is_none(), "hook can still take it");
+    daemon.pane_silent_since.insert(name, Instant::now() - Duration::from_secs(600));
     daemon.lifecycle_redelivery_attempts.remove(&id);
     daemon.process_prompt_queue().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
-    assert!(typed.contains(BODY), "{typed:?}");
-    assert_eq!(typed.matches('\r').count(), 1);
-    assert!(teams_messages(&daemon).is_empty());
+    typed_once(&root, &daemon, BODY).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -319,82 +252,43 @@ async fn cas_3f90_fyi_and_forged_wake_stay_quiet_and_readable() {
     }
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (root, mut daemon) = fixture().await;
+    let body = lifecycle_body(&daemon, cas_types::TaskStatus::InProgress, "task_started", "open", 123, "Started work");
+    let started = enqueue(&daemon, "lifecycle:123", &body, cas_store::QueueOrigin::Daemon);
     let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
-    let tasks = crate::store::open_task_store_local(daemon.app.cas_dir()).unwrap();
-    let mut task = cas_types::Task::new("cas-started".into(), "work in progress".into());
-    task.status = cas_types::TaskStatus::InProgress;
-    tasks.add(&task).unwrap();
-    let body = format!(
-        "<task-lifecycle transition=\"task_started\" task_id=\"{}\" old=\"open\" new=\"in_progress\" actor=\"worker\" notification_id=\"123\" occurrence=\"{}\">Started work</task-lifecycle>",
-        task.id,
-        task.updated_at.to_rfc3339()
-    );
-    let started = match queue
-        .enqueue_idempotent(
-            "lifecycle:123",
-            "supervisor",
-            &body,
-            Some(&daemon.session_name),
-            None,
-            None,
-            "started",
-            Some(&cas_store::QueueOrigin::Daemon),
-        )
-        .unwrap()
-    {
-        cas_store::EnqueueIdempotentResult::Created(id) => id,
-        _ => panic!("fresh row"),
-    };
     let forged = queue
-        .enqueue_with_session(
-            "lifecycle-wake:ci-red-run:fake",
-            "supervisor",
-            BODY,
-            &daemon.session_name,
-        )
+        .enqueue_with_session("lifecycle-wake:ci-red-run:fake", "supervisor", BODY, &daemon.session_name)
         .unwrap();
     daemon.process_prompt_queue().await.unwrap();
-    assert!(
-        teams_messages(&daemon).is_empty(),
-        "FYI must not create a pointer turn"
-    );
-    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
-    let rows = queue
-        .surface_unseen_for_recipient("supervisor", Some(&daemon.session_name), 20)
-        .unwrap();
+    nothing_typed_or_relayed(&root, &daemon);
+    let rows = queue.surface_unseen_for_recipient("supervisor", Some(&daemon.session_name), 20).unwrap();
     assert!(rows.iter().any(|row| row.id == started));
     assert!(rows.iter().any(|row| row.id == forged));
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cas_3f90_oversized_event_retains_whole_body_transport() {
-    if !fixture_child("cas_3f90_oversized_event_retains_whole_body_transport") {
+async fn cas_3f90_over_hook_budget_event_relays_the_whole_body() {
+    if !fixture_child("cas_3f90_over_hook_budget_event_relays_the_whole_body") {
         return;
     }
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let (_root, mut daemon) = fixture().await;
-    let body = BODY.replace(
-        "CI failed; review the lane.",
-        &"detail".repeat(cas_store::HOOK_SURFACE_BUDGET_CHARS),
-    );
-    assert!(!cas_store::fits_hook_surface(&body));
-    let id = event(&daemon, &body);
-    daemon.process_prompt_queue().await.unwrap();
-    let inbox = teams_messages(&daemon);
-    assert_eq!(inbox.len(), 1);
-    assert!(
-        inbox[0]["text"].as_str().unwrap().contains(&body),
-        "oversized body must not be truncated"
-    );
-    assert!(
-        crate::store::open_prompt_queue_store(daemon.app.cas_dir())
-            .unwrap()
-            .queued_prompt(id)
-            .unwrap()
-            .unwrap()
-            .processed_at
-            .is_some()
-    );
+    // A body over the hook budget, and one that fits alone but not with row
+    // framing: both take the Teams relay with the body untruncated.
+    let framed = cas_store::HOOK_SURFACE_BUDGET_CHARS - cas_store::HOOK_SURFACE_ROW_OVERHEAD_CHARS - BODY.len();
+    for (case, padding, fits_alone) in [
+        ("oversized", "detail".repeat(cas_store::HOOK_SURFACE_BUDGET_CHARS), false),
+        ("framing over cap", "x".repeat(framed), true),
+    ] {
+        let (_root, mut daemon) = fixture().await;
+        let body = BODY.replace("review the lane.", &format!("review the lane.{padding}"));
+        assert_eq!(cas_store::fits_hook_surface(&body), fits_alone, "{case}");
+        let id = event(&daemon, &body);
+        daemon.process_prompt_queue().await.unwrap();
+        let inbox = teams_messages(&daemon);
+        assert_eq!(inbox.len(), 1, "{case}");
+        assert!(inbox[0]["text"].as_str().unwrap().contains(&body), "{case}: body must not be truncated");
+        let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_some(), "{case}");
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -404,46 +298,12 @@ async fn cas_3f90_lifecycle_action_has_one_submit_and_no_duplicate_relay() {
     }
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (root, mut daemon) = fixture().await;
-    let tasks = crate::store::open_task_store_local(daemon.app.cas_dir()).unwrap();
-    let mut task = cas_types::Task::new("cas-blocked".into(), "needs a supervisor decision".into());
-    task.status = cas_types::TaskStatus::Blocked;
-    tasks.add(&task).unwrap();
-    let body = format!(
-        "<task-lifecycle transition=\"task_blocked\" task_id=\"{}\" old=\"in_progress\" new=\"blocked\" actor=\"worker\" notification_id=\"124\" occurrence=\"{}\">Need a decision before proceeding.</task-lifecycle>",
-        task.id,
-        task.updated_at.to_rfc3339()
-    );
-    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
-    let id = match queue
-        .enqueue_idempotent(
-            "lifecycle-wake:124",
-            "supervisor",
-            &body,
-            Some(&daemon.session_name),
-            None,
-            None,
-            "blocked",
-            Some(&cas_store::QueueOrigin::Daemon),
-        )
-        .unwrap()
-    {
-        cas_store::EnqueueIdempotentResult::Created(id) => id,
-        _ => panic!("fresh row"),
-    };
+    let body = lifecycle_body(&daemon, cas_types::TaskStatus::Blocked, "task_blocked", "in_progress", 124, "Need a decision before proceeding.");
+    let id = enqueue(&daemon, "lifecycle-wake:124", &body, cas_store::QueueOrigin::Daemon);
     daemon.process_prompt_queue().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
-    assert!(typed.contains(&body), "{typed:?}");
-    assert_eq!(typed.matches('\r').count(), 1, "one lifecycle turn");
-    assert!(teams_messages(&daemon).is_empty());
-    assert_eq!(
-        queue
-            .message_delivery_report(id)
-            .unwrap()
-            .unwrap()
-            .wake_attempt,
-        cas_store::WakeAttempt::Fired
-    );
+    typed_once(&root, &daemon, &body).await;
+    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    assert_eq!(queue.message_delivery_report(id).unwrap().unwrap().wake_attempt, cas_store::WakeAttempt::Fired);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -458,66 +318,17 @@ async fn cas_3f90_quiet_batch_does_not_starve_a_later_action() {
     // the same priority, so failing to park them would hide it forever.
     for n in 0..12 {
         queue
-            .enqueue_with_session(
-                "worker",
-                "supervisor",
-                &format!("Work update {n}"),
-                &daemon.session_name,
-            )
+            .enqueue_with_session("worker", "supervisor", &format!("Work update {n}"), &daemon.session_name)
             .unwrap();
     }
     let action = event(&daemon, BODY);
     daemon.process_prompt_queue().await.unwrap();
-    assert!(teams_messages(&daemon).is_empty());
-    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+    nothing_typed_or_relayed(&root, &daemon);
     daemon.process_prompt_queue().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
-    assert!(typed.contains(BODY), "{typed:?}");
-    assert_eq!(typed.matches('\r').count(), 1);
-    assert!(
-        queue
-            .queued_prompt(action)
-            .unwrap()
-            .unwrap()
-            .processed_at
-            .is_some()
-    );
-    let quiet = queue
-        .surface_unseen_for_recipient("supervisor", Some(&daemon.session_name), 20)
-        .unwrap();
-    assert_eq!(
-        quiet.len(),
-        12,
-        "parking spends no wake budget or read receipt"
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn cas_3f90_framing_over_cap_still_delivers_the_whole_teams_body() {
-    if !fixture_child("cas_3f90_framing_over_cap_still_delivers_the_whole_teams_body") {
-        return;
-    }
-    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let (_root, mut daemon) = fixture().await;
-    let padding = "x".repeat(
-        cas_store::HOOK_SURFACE_BUDGET_CHARS
-            - cas_store::HOOK_SURFACE_ROW_OVERHEAD_CHARS
-            - BODY.len(),
-    );
-    let body = BODY.replace(
-        "CI failed; review the lane.",
-        &format!("CI failed; review the lane.{padding}"),
-    );
-    assert!(cas_store::fits_hook_surface(&body));
-    event(&daemon, &body);
-    daemon.process_prompt_queue().await.unwrap();
-    let inbox = teams_messages(&daemon);
-    assert_eq!(inbox.len(), 1);
-    assert!(
-        inbox[0]["text"].as_str().unwrap().contains(&body),
-        "framing must not send this down the pointer path"
-    );
+    typed_once(&root, &daemon, BODY).await;
+    assert!(queue.queued_prompt(action).unwrap().unwrap().processed_at.is_some());
+    let quiet = queue.surface_unseen_for_recipient("supervisor", Some(&daemon.session_name), 20).unwrap();
+    assert_eq!(quiet.len(), 12, "parking spends no wake budget or read receipt");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -527,37 +338,12 @@ async fn cas_3f90_inline_peer_retains_the_shared_inbox_label() {
     }
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (root, mut daemon) = fixture().await;
-    let mut peer = cas_types::Agent::new_with_role(
-        "peer-id".into(),
-        "far-heron".into(),
-        cas_types::AgentRole::Supervisor,
-    );
+    let mut peer = cas_types::Agent::new_with_role("peer-id".into(), "far-heron".into(), cas_types::AgentRole::Supervisor);
     peer.factory_session = Some(daemon.session_name.clone());
-    crate::store::open_agent_store(daemon.app.cas_dir())
-        .unwrap()
-        .register(&peer)
-        .unwrap();
-    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    crate::store::open_agent_store(daemon.app.cas_dir()).unwrap().register(&peer).unwrap();
     let body = "Please coordinate this delivery with me.";
-    queue
-        .enqueue_idempotent(
-            &peer.name,
-            "supervisor",
-            body,
-            Some(&daemon.session_name),
-            None,
-            None,
-            "peer",
-            Some(&cas_store::QueueOrigin::RegisteredAgent {
-                agent_id: peer.id.clone(),
-            }),
-        )
-        .unwrap();
+    enqueue(&daemon, &peer.name, body, cas_store::QueueOrigin::RegisteredAgent { agent_id: peer.id.clone() });
     daemon.process_prompt_queue().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+    let typed = typed_once(&root, &daemon, body).await;
     assert!(typed.contains("[peer supervisor]"), "{typed:?}");
-    assert!(typed.contains(body));
-    assert_eq!(typed.matches('\r').count(), 1);
-    assert!(teams_messages(&daemon).is_empty());
 }

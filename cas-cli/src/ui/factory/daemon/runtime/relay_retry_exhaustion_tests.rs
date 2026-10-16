@@ -114,11 +114,11 @@ async fn exhausted_message(body: String, summary: &str, context: &[&str]) {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cas_af23_exhausted_merge_request_keeps_actual_task_and_merge_guidance() {
-    if !child("cas_af23_exhausted_merge_request_keeps_actual_task_and_merge_guidance") {
+async fn cas_af23_exhausted_action_message_keeps_its_task_and_guidance() {
+    if !child("cas_af23_exhausted_action_message_keeps_its_task_and_guidance") {
         return;
     }
-    let envelope = MergeRequestEnvelope {
+    let merge = MergeRequestEnvelope {
         task_id: "cas-af23".into(),
         branch_tip: "delivery-tip".into(),
         target_branch: "epic/v46".into(),
@@ -128,85 +128,30 @@ async fn cas_af23_exhausted_merge_request_keeps_actual_task_and_merge_guidance()
         pr_number: None,
         source_freshness_unavailable: None,
     };
-    exhausted_message(
-        attach_merge_request_envelope(
-            "Merge delivery-tip into epic/v46 for cas-af23; then re-close.",
-            &envelope,
+    let recovery = "cas-af23 verification timed out; supervisor recovery required.";
+    // The task id comes from the summary, the envelope, or nowhere (fails open).
+    let cases: [(String, &str, &[&str]); 5] = [
+        (
+            attach_merge_request_envelope("Merge delivery-tip into epic/v46 for cas-af23; then re-close.", &merge),
+            "green delivery awaits review",
+            &["cas-af23", "delivery-tip", "epic/v46"],
         ),
-        "green delivery awaits review",
-        &["cas-af23", "delivery-tip", "epic/v46"],
-    )
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn cas_af23_exhausted_status_about_open_task_remains_readable() {
-    if !child("cas_af23_exhausted_status_about_open_task_remains_readable") {
-        return;
+        (attach_worker_action_envelope(recovery, WorkerActionKind::Status, "worker", None), "cas-af23 verification timed out", &["cas-af23"]),
+        (
+            attach_worker_action_envelope("Supervisor recovery required.", WorkerActionKind::Status, "worker", Some("cas-af23")),
+            "verification timed out",
+            &["cas-af23"],
+        ),
+        (attach_blocker_envelope(recovery, "worker", Some("cas-af23")), "cas-af23 blocked on verification", &["cas-af23"]),
+        (
+            attach_blocker_envelope("Need supervisor help; the task could not be resolved.", "worker", None),
+            "unresolved blocker",
+            &["task unspecified"],
+        ),
+    ];
+    for (body, summary, context) in cases {
+        exhausted_message(body, summary, context).await;
     }
-    exhausted_message(
-        attach_worker_action_envelope(
-            "cas-af23 verification timed out; supervisor recovery required.",
-            WorkerActionKind::Status,
-            "worker",
-            None,
-        ),
-        "cas-af23 verification timed out",
-        &["cas-af23"],
-    )
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn cas_af23_exhausted_status_uses_envelope_task_without_summary_id() {
-    if !child("cas_af23_exhausted_status_uses_envelope_task_without_summary_id") {
-        return;
-    }
-    exhausted_message(
-        attach_worker_action_envelope(
-            "Supervisor recovery required.",
-            WorkerActionKind::Status,
-            "worker",
-            Some("cas-af23"),
-        ),
-        "verification timed out",
-        &["cas-af23"],
-    )
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn cas_af23_exhausted_blocker_about_open_task_remains_readable() {
-    if !child("cas_af23_exhausted_blocker_about_open_task_remains_readable") {
-        return;
-    }
-    exhausted_message(
-        attach_blocker_envelope(
-            "cas-af23 verification timed out; supervisor recovery required.",
-            "worker",
-            Some("cas-af23"),
-        ),
-        "cas-af23 blocked on verification",
-        &["cas-af23"],
-    )
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn cas_af23_exhausted_unknown_task_blocker_fails_open() {
-    if !child("cas_af23_exhausted_unknown_task_blocker_fails_open") {
-        return;
-    }
-    exhausted_message(
-        attach_blocker_envelope(
-            "Need supervisor help; the task could not be resolved.",
-            "worker",
-            None,
-        ),
-        "unresolved blocker",
-        &["task unspecified"],
-    )
-    .await;
 }
 
 #[tokio::test]
@@ -314,52 +259,24 @@ async fn daemon_relay(
 }
 
 #[tokio::test]
-async fn cas_af23_current_lifecycle_survives_exhaustion() {
-    let report = daemon_relay(false, cas_types::TaskStatus::AwaitingMerge).await;
-    assert_ne!(
-        report.stage,
-        cas_store::DeliveryStage::Abandoned,
-        "{report:?}"
-    );
-    let detail = report.pending_detail.unwrap();
-    assert!(
-        detail.contains("cas-af23") && detail.contains("wake retries exhausted"),
-        "{detail}"
-    );
-    assert!(!detail.contains("expired premise"), "{detail}");
-}
-
-#[tokio::test]
-async fn cas_af23_positive_stale_lifecycle_keeps_withdrawal_notice() {
-    let report = daemon_relay(false, cas_types::TaskStatus::InProgress).await;
-    assert_eq!(
-        report.stage,
-        cas_store::DeliveryStage::Abandoned,
-        "{report:?}"
-    );
-    let detail = report.pending_detail.unwrap();
-    assert!(
-        detail.contains("cas-af23") && detail.contains("task moved on"),
-        "{detail}"
-    );
-    assert!(detail.contains("expired premise"), "{detail}");
-}
-
-#[tokio::test]
-async fn cas_af23_worker_death_keeps_its_dedicated_failure_notice() {
-    let report = daemon_relay(true, cas_types::TaskStatus::InProgress).await;
-    assert_eq!(
-        report.stage,
-        cas_store::DeliveryStage::Abandoned,
-        "{report:?}"
-    );
-    let detail = report.pending_detail.unwrap();
-    assert!(
-        detail.contains("departed-worker") && detail.contains("worker is still gone"),
-        "{detail}"
-    );
-    assert!(
-        !detail.contains("expired premise") && !detail.contains("unknown task"),
-        "{detail}"
-    );
+async fn cas_af23_exhausted_lifecycle_abandons_only_on_positive_stale_evidence() {
+    // (case, worker death relay, task status, abandoned, detail must contain)
+    for (case, death, status, abandoned, expected) in [
+        ("current lifecycle", false, cas_types::TaskStatus::AwaitingMerge, false, &["cas-af23", "wake retries exhausted"][..]),
+        ("task moved on", false, cas_types::TaskStatus::InProgress, true, &["cas-af23", "task moved on", "expired premise"]),
+        ("worker death", true, cas_types::TaskStatus::InProgress, true, &["departed-worker", "worker is still gone"]),
+    ] {
+        let report = daemon_relay(death, status).await;
+        assert_eq!(report.stage == cas_store::DeliveryStage::Abandoned, abandoned, "{case}: {report:?}");
+        let detail = report.pending_detail.unwrap();
+        for text in expected {
+            assert!(detail.contains(text), "{case}: {detail}");
+        }
+        if case != "task moved on" {
+            assert!(!detail.contains("expired premise"), "{case}: {detail}");
+        }
+        if death {
+            assert!(!detail.contains("unknown task"), "{case}: {detail}");
+        }
+    }
 }

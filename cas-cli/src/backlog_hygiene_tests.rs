@@ -263,6 +263,30 @@ fn session_start_block_shows_evidence_and_close_calls_within_its_cap() {
     assert!(full.contains("more"), "the rest are counted: {full}");
     assert!(compact.contains("cas doctor"), "{compact}");
     assert!(session_start_block(&BacklogReport::default()).is_none());
+
+    // cas-d9038: sixty heavy kind-4 findings still fit, on their own line.
+    let mut report = sample_report();
+    report.stale_citations = (0..60)
+        .map(|n| StaleCitations {
+            task_id: format!("cas-s{n}"),
+            title: "x".repeat(200),
+            status: "open".into(),
+            gone: (0..8)
+                .map(|m| GoneCitation {
+                    kind: CitationKind::Symbol,
+                    cited: format!("crate::very::long::module::path::symbol_{m}_{}", "y".repeat(60)),
+                    removed_in: "abc123456".into(),
+                    removed_on: "2026-10-01".into(),
+                })
+                .collect(),
+        })
+        .collect();
+    let (full, compact) = session_start_block(&report).unwrap();
+    assert!(full.len() <= SESSION_START_CAP_BYTES, "{} bytes", full.len());
+    assert!(compact.len() <= SESSION_START_CAP_BYTES);
+    assert!(full.lines().next().unwrap().contains("60 citing removed code"), "{full}");
+    let line = stale_citation_line(&report.stale_citations[0]);
+    assert!(line.len() <= 400, "one entry is bounded: {} bytes", line.len());
 }
 
 /// Supervisor startup only: a worker's SessionStart never carries the block,
@@ -377,32 +401,4 @@ fn stale_citations_reads_only_open_non_epic_tasks_within_the_cap() {
     let (found, unchecked) = stale_citations(&repo, "main", &tasks, budget);
     assert_eq!(found.len(), 1);
     assert_eq!(unchecked, 1);
-}
-
-/// Acceptance 3: with many findings the doctor-facing summary and the
-/// SessionStart block stay within budget, and kind 4 has its own line.
-#[test]
-fn stale_citations_stay_within_the_session_start_budget() {
-    let mut report = sample_report();
-    report.stale_citations = (0..60)
-        .map(|n| StaleCitations {
-            task_id: format!("cas-s{n}"),
-            title: "x".repeat(200),
-            status: "open".into(),
-            gone: (0..8)
-                .map(|m| GoneCitation {
-                    kind: CitationKind::Symbol,
-                    cited: format!("crate::very::long::module::path::symbol_{m}_{}", "y".repeat(60)),
-                    removed_in: "abc123456".into(),
-                    removed_on: "2026-10-01".into(),
-                })
-                .collect(),
-        })
-        .collect();
-    let (full, compact) = session_start_block(&report).unwrap();
-    assert!(full.len() <= SESSION_START_CAP_BYTES, "{} bytes", full.len());
-    assert!(compact.len() <= SESSION_START_CAP_BYTES);
-    assert!(full.lines().next().unwrap().contains("60 citing removed code"), "{full}");
-    let line = stale_citation_line(&report.stale_citations[0]);
-    assert!(line.len() <= 400, "one entry is bounded: {} bytes", line.len());
 }

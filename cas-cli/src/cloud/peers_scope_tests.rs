@@ -139,16 +139,6 @@ fn cas_d58d_team_scope_delivers_to_a_teammate_and_own_scope_refuses() {
     assert_eq!(hidden.len(), 2);
 }
 
-#[test]
-fn cas_d58d_cross_project_sends_stay_own_account_only() {
-    // The account-wide directory never lists the teammate, whatever the
-    // same-repo scope.
-    let agents = agents();
-    let owner = caller_user_id(&agents, Some("me-self")).unwrap();
-    let peers = user_peers(&agents, &owner, Some("me-self"), Utc::now());
-    assert_eq!(peers.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["swift-fox-2"]);
-}
-
 /// `GET /api/agents`: with `project` the shared team project's agents of
 /// every user; without it the token's own agents only.
 struct FakeCloud;

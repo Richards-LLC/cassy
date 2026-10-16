@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 # cas-baa8: fixtures never read this host's `cas config get factory.scratch_root`.
@@ -62,16 +63,11 @@ class TargetTests(unittest.TestCase):
         # cas-baa8: assembly clones seed from the baseline the refresh script
         # published, under [factory] scratch_root when it is set.
         b = self.b_worktree()
-        scratch = self.base / 'scratch'
-        old = os.environ.get('CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT')
-        self.addCleanup(lambda: os.environ.__setitem__('CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT', old)
-                        if old is not None else os.environ.pop('CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT', None))
-        os.environ['CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT'] = ''
         self.assertEqual(targets.cache_root(b), self.a.resolve() / '.cas/build-cache')
-        os.environ['CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT'] = str(scratch)
-        root = targets.cache_root(b)
-        self.assertEqual(root.parent.parent, scratch)
-        self.assertEqual(root.name, 'build-cache')
+        scratch = self.base / 'scratch'
+        with mock.patch.dict(os.environ, {'CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT': str(scratch)}):
+            root = targets.cache_root(b)
+        self.assertEqual((root.parent.parent, root.name), (scratch, 'build-cache'))
         self.assertTrue(root.parent.name.startswith('A-'))
 
     def test_two_worktrees_never_share_inherited_freshness(self):

@@ -3232,256 +3232,101 @@ async fn test_close_auto_unblocks_blocked_dependents() {
     );
 }
 
+async fn create_task_titled(service: &CasCore, title: &str) -> String {
+    let created = service
+        .cas_task_create(Parameters(make_task_create_req(title)))
+        .await
+        .expect("task create");
+    extract_task_id(&extract_text(created)).expect("task id").to_string()
+}
+
+async fn update_task_json(service: &CasCore, request: serde_json::Value) {
+    let request: TaskUpdateRequest = serde_json::from_value(request).expect("update request");
+    service
+        .cas_task_update(Parameters(request))
+        .await
+        .expect("task update");
+}
+
+async fn task_show_text(service: &CasCore, id: &str) -> String {
+    let show = service
+        .cas_task_show(Parameters(TaskShowRequest { id: id.to_string(), with_deps: false }))
+        .await
+        .expect("task show");
+    extract_text(show)
+}
+
+/// A hold set with status=blocked survives its dependency closing and is
+/// surfaced by that close; a dependency-only block (even with an old blocker
+/// note, or status=blocked while the dependency is unmet) auto-unblocks.
 #[tokio::test]
 async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
-    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    promote_default_test_agent(&cas_dir);
     let session_id = format!("test-session-{}", std::process::id());
-    let mut agent = agent_store.get(&session_id).expect("test agent");
-    agent.role = cas::types::AgentRole::Supervisor;
-    agent_store.update(&agent).expect("mark caller supervisor");
+    let task_store = open_task_store(&cas_dir).expect("task store");
+    let hold_of = |id: &str| {
+        task_store
+            .get_execution_state(id)
+            .expect("execution state")
+            .and_then(|state| state.get("blocked_hold").cloned())
+    };
+    let blocker_id = create_task_titled(&service, "Decision hold blocker").await;
+    let decision_id = create_task_titled(&service, "Operator-held Slack ownership decision").await;
+    let explicit_id = create_task_titled(&service, "Explicit status hold").await;
+    let legacy_id = create_task_titled(&service, "Old blocker note control").await;
+    let dependency_id = create_task_titled(&service, "Status set while dependency is open").await;
 
-    let blocker = service
-        .cas_task_create(Parameters(TaskCreateRequest {
-            depth: None,
-            title: "Decision hold blocker".to_string(),
-            description: None,
-            priority: 1,
-            task_type: "task".to_string(),
-            risk: Some("none".to_string()),
-            door: None,
-            proof_targets: None,
-            supervisor_override: None,
-            reason: None,
-            labels: None,
-            notes: None,
-            blocked_by: None,
-            design: None,
-            acceptance_criteria: None,
-            external_ref: None,
-            assignee: None,
-            demo_statement: None,
-            execution_note: None,
-            epic: None,
-        }))
-        .await
-        .expect("blocker create should succeed");
-    let blocker_id = extract_task_id(&extract_text(blocker))
-        .expect("blocker id")
-        .to_string();
-
-    let dependent = service
-        .cas_task_create(Parameters(TaskCreateRequest {
-            depth: None,
-            title: "Operator-held Slack ownership decision".to_string(),
-            description: None,
-            priority: 2,
-            task_type: "task".to_string(),
-            risk: Some("none".to_string()),
-            door: None,
-            proof_targets: None,
-            supervisor_override: None,
-            reason: None,
-            labels: None,
-            notes: None,
-            blocked_by: None,
-            design: None,
-            acceptance_criteria: None,
-            external_ref: None,
-            assignee: None,
-            demo_statement: None,
-            execution_note: None,
-            epic: None,
-        }))
-        .await
-        .expect("dependent create should succeed");
-    let dependent_id = extract_task_id(&extract_text(dependent))
-        .expect("dependent id")
-        .to_string();
-
+    // Decision hold: a decision note, then status=blocked records who/when/why.
+    let decision_reason = "Wait for the operator to resolve Slack ownership after the peer board ships.";
     service
         .cas_task_notes(Parameters(TaskNotesRequest {
-            id: dependent_id.clone(),
-            note: "Hold until the operator resolves Slack ownership after the peer board ships."
-                .to_string(),
+            id: decision_id.clone(),
+            note: "Hold until the operator resolves Slack ownership.".to_string(),
             note_type: "decision".to_string(),
             supervisor_override: None,
             reason: None,
         }))
         .await
-        .expect("decision hold note should be recorded");
-    let decision_hold: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
-        "id": dependent_id.clone(),
-        "status": "blocked",
-        "notes": "Wait for the operator to resolve Slack ownership after the peer board ships.",
+        .expect("decision note");
+    update_task_json(&service, serde_json::json!({"id": decision_id, "status": "blocked", "notes": decision_reason})).await;
+    let hold = hold_of(&decision_id).expect("status=blocked persists a structured hold");
+    assert_eq!(hold["reason"], decision_reason);
+    assert_eq!(hold["who"], session_id);
+    chrono::DateTime::parse_from_rfc3339(hold["when"].as_str().expect("hold time"))
+        .expect("hold timestamp should be RFC3339");
+    // Callers cannot forge a hold through state_patch.
+    let forged: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update", "id": decision_id,
+        "state_patch": {"blocked_hold": {"reason": "forged", "who": session_id, "when": "2026-10-16T15:00:00Z"}},
     }))
-    .expect("decision hold status request");
-    service
-        .cas_task_update(Parameters(decision_hold))
-        .await
-        .expect("status=blocked should persist the decision hold");
-    let task_store = open_task_store(&cas_dir).expect("task store");
-    let hold_state = task_store
-        .get_execution_state(&dependent_id)
-        .expect("read structured hold")
-        .expect("blocked status should persist execution state");
-    assert_eq!(
-        hold_state["blocked_hold"]["reason"],
-        "Wait for the operator to resolve Slack ownership after the peer board ships."
-    );
-    assert_eq!(hold_state["blocked_hold"]["who"], session_id);
-    chrono::DateTime::parse_from_rfc3339(
-        hold_state["blocked_hold"]["when"]
-            .as_str()
-            .expect("hold timestamp string"),
-    )
-    .expect("hold timestamp should be RFC3339");
-    let unified_service = CasService::new(service.clone(), None);
-    let caller_hold_patch: cas_mcp::TaskRequest =
-        serde_json::from_value(serde_json::json!({
-            "action": "update",
-            "id": dependent_id.clone(),
-            "state_patch": {
-                "blocked_hold": {
-                    "reason": "caller supplied hold",
-                    "who": session_id.clone(),
-                    "when": "2026-10-16T15:00:00Z"
-                }
-            }
-        }))
-        .expect("caller hold patch update request");
+    .expect("forged hold request");
     assert!(
-        unified_service
-            .task(Parameters(caller_hold_patch))
-            .await
-            .is_err(),
+        CasService::new(service.clone(), None).task(Parameters(forged)).await.is_err(),
         "caller-supplied non-null blocked_hold should be rejected"
     );
-    service
-        .cas_task_update(Parameters(TaskUpdateRequest {
-            blocked_by: Some(blocker_id.clone()),
-            depth: None,
-            id: dependent_id.clone(),
-            title: None,
-            notes: None,
-            priority: None,
-            labels: None,
-            description: None,
-            design: None,
-            acceptance_criteria: None,
-            demo_statement: None,
-            execution_note: None,
-            risk: None,
-            door: None,
-            status: None,
-            epic: None,
-            origin_project: None,
-            epic_verification_owner: None,
-            assignee: None,
-            external_ref: None,
-            proof_targets: None,
-        }))
-        .await
-        .expect("adding a blocker should preserve the decision hold");
 
-    let explicit_hold = service
-        .cas_task_create(Parameters(make_task_create_req("Explicit status hold")))
-        .await
-        .expect("explicit-hold task create should succeed");
-    let explicit_hold_id = extract_task_id(&extract_text(explicit_hold))
-        .expect("explicit-hold task id")
-        .to_string();
-    let explicit_status_hold: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
-        "id": explicit_hold_id.clone(),
-        "status": "blocked",
-        "notes": "Operator hold: wait for Slack ownership to be decided.",
-    }))
-    .expect("explicit status request");
-    service
-        .cas_task_update(Parameters(explicit_status_hold))
-        .await
-        .expect("an explicit status hold should be recorded");
-    let add_explicit_dependency: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
-        "id": explicit_hold_id.clone(),
-        "blocked_by": blocker_id.clone(),
-    }))
-    .expect("dependency update request");
-    service
-        .cas_task_update(Parameters(add_explicit_dependency))
-        .await
-        .expect("adding a blocker should preserve the explicit status hold");
-
-    let legacy_note_control = service
-        .cas_task_create(Parameters(make_task_create_req("Old blocker note control")))
-        .await
-        .expect("legacy-note control create should succeed");
-    let legacy_note_control_id = extract_task_id(&extract_text(legacy_note_control))
-        .expect("legacy-note control id")
-        .to_string();
+    // Explicit status hold, then the dependency is added.
+    update_task_json(&service, serde_json::json!({"id": explicit_id, "status": "blocked", "notes": "Operator hold: wait for Slack ownership to be decided."})).await;
+    // Legacy control: an old blocker note is not a hold.
     service
         .cas_task_notes(Parameters(TaskNotesRequest {
-            id: legacy_note_control_id.clone(),
+            id: legacy_id.clone(),
             note: "Old blocker: the earlier API outage was resolved last week.".to_string(),
             note_type: "blocker".to_string(),
             supervisor_override: None,
             reason: None,
         }))
         .await
-        .expect("legacy blocker note should be recorded");
-    let add_legacy_control_dependency: TaskUpdateRequest =
-        serde_json::from_value(serde_json::json!({
-            "id": legacy_note_control_id.clone(),
-            "blocked_by": blocker_id.clone(),
-        }))
-        .expect("legacy-note dependency request");
-    service
-        .cas_task_update(Parameters(add_legacy_control_dependency))
-        .await
-        .expect("legacy-note control should be dependency blocked only");
-
-    let dependency_status_control = service
-        .cas_task_create(Parameters(make_task_create_req(
-            "Status set while dependency is open",
-        )))
-        .await
-        .expect("dependency-status control create should succeed");
-    let dependency_status_control_id =
-        extract_task_id(&extract_text(dependency_status_control))
-            .expect("dependency-status control id")
-            .to_string();
-    let add_dependency_status_control: TaskUpdateRequest =
-        serde_json::from_value(serde_json::json!({
-            "id": dependency_status_control_id.clone(),
-            "blocked_by": blocker_id.clone(),
-        }))
-        .expect("dependency-status control dependency request");
-    service
-        .cas_task_update(Parameters(add_dependency_status_control))
-        .await
-        .expect("dependency-status control should be blocked");
-    let explicit_dependency_status: TaskUpdateRequest =
-        serde_json::from_value(serde_json::json!({
-            "id": dependency_status_control_id.clone(),
-            "status": "blocked",
-            "notes": "Leave blocked until the API dependency closes.",
-        }))
-        .expect("explicit dependency-blocked status request");
-    service
-        .cas_task_update(Parameters(explicit_dependency_status))
-        .await
-        .expect("explicit status update should preserve dependency-only blocking");
-    let dependency_status_state = task_store
-        .get_execution_state(&dependency_status_control_id)
-        .expect("read dependency-status execution state");
-    assert!(
-        dependency_status_state
-            .as_ref()
-            .and_then(|state| state.get("blocked_hold"))
-            .is_none(),
-        "status=blocked with an unmet dependency must not create a non-dependency hold"
-    );
+        .expect("legacy blocker note");
+    for id in [&decision_id, &explicit_id, &legacy_id, &dependency_id] {
+        update_task_json(&service, serde_json::json!({"id": id, "blocked_by": blocker_id})).await;
+    }
+    // Dependency control: status=blocked while the dependency is unmet is not a hold.
+    update_task_json(&service, serde_json::json!({"id": dependency_id, "status": "blocked", "notes": "Leave blocked until the API dependency closes."})).await;
+    assert!(hold_of(&dependency_id).is_none(), "an unmet dependency must not create a non-dependency hold");
 
     let dispatch = cas_store::create_verification_dispatch(
         &cas_dir,
@@ -3518,91 +3363,27 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
         }))
         .await
         .expect("blocker close should succeed");
-
-    let show = service
-        .cas_task_show(Parameters(TaskShowRequest {
-            id: dependent_id.clone(),
-            with_deps: false,
-        }))
-        .await
-        .expect("task_show should succeed");
-    let text = extract_text(show);
-    assert!(
-        text.contains("Status: Blocked"),
-        "closing a dependency must not release the operator's decision hold: {text}"
-    );
     let close_text = extract_text(close);
-    assert!(
-        close_text.contains(&dependent_id)
-            && close_text.contains("operator to resolve Slack ownership"),
-        "close must surface the remaining hold and its reason: {close_text}"
-    );
-    assert!(
-        close_text.contains(&explicit_hold_id)
-            && close_text.contains("Operator hold: wait for Slack ownership"),
-        "close must surface an explicit status hold and its reason: {close_text}"
-    );
-    assert!(
-        !close_text.contains("earlier API outage was resolved last week"),
-        "old blocker prose alone must not be surfaced as an active hold: {close_text}"
-    );
-    assert!(
-        !close_text.contains("Leave blocked until the API dependency closes"),
-        "status=blocked while a dependency is unmet must not create a hold: {close_text}"
-    );
-    let explicit_show = service
-        .cas_task_show(Parameters(TaskShowRequest {
-            id: explicit_hold_id.clone(),
-            with_deps: false,
-        }))
-        .await
-        .expect("explicit-hold task_show should succeed");
-    assert!(
-        extract_text(explicit_show).contains("Status: Blocked"),
-        "an explicit status hold remains blocked when its dependency closes"
-    );
-    let legacy_show = service
-        .cas_task_show(Parameters(TaskShowRequest {
-            id: legacy_note_control_id.clone(),
-            with_deps: false,
-        }))
-        .await
-        .expect("legacy-note task_show should succeed");
-    assert!(
-        extract_text(legacy_show).contains("Status: Open"),
-        "an old worker blocker note must not prevent dependency auto-unblock"
-    );
-    let dependency_status_show = service
-        .cas_task_show(Parameters(TaskShowRequest {
-            id: dependency_status_control_id,
-            with_deps: false,
-        }))
-        .await
-        .expect("dependency-status control task_show should succeed");
-    assert!(
-        extract_text(dependency_status_show).contains("Status: Open"),
-        "status=blocked with an unmet dependency must still auto-unblock when it closes"
-    );
 
-    let clear_hold: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
-        "id": explicit_hold_id.clone(),
-        "status": "open",
-    }))
-    .expect("status-open hold clear request");
-    service
-        .cas_task_update(Parameters(clear_hold))
-        .await
-        .expect("status=open should clear the explicit hold");
-    let state_after_clear = task_store
-        .get_execution_state(&explicit_hold_id)
-        .expect("read explicit hold state after clear");
-    assert!(
-        state_after_clear
-            .as_ref()
-            .and_then(|state| state.get("blocked_hold"))
-            .is_none(),
-        "status=open should remove the structured hold field: {state_after_clear:?}"
-    );
+    for (case, id, status, surfaced) in [
+        ("decision hold", &decision_id, "Blocked", Some("operator to resolve Slack ownership")),
+        ("explicit hold", &explicit_id, "Blocked", Some("Operator hold: wait for Slack ownership")),
+        ("old blocker note", &legacy_id, "Open", None),
+        ("status=blocked behind a dependency", &dependency_id, "Open", None),
+    ] {
+        let show = task_show_text(&service, id).await;
+        assert!(show.contains(&format!("Status: {status}")), "{case}: {show}");
+        assert_eq!(
+            surfaced.is_some_and(|reason| close_text.contains(id.as_str()) && close_text.contains(reason)),
+            surfaced.is_some(),
+            "{case}: close surfaces exactly the remaining holds: {close_text}"
+        );
+    }
+    assert!(!close_text.contains("earlier API outage"), "{close_text}");
+    assert!(!close_text.contains("Leave blocked until the API dependency closes"), "{close_text}");
+
+    update_task_json(&service, serde_json::json!({"id": explicit_id, "status": "open"})).await;
+    assert!(hold_of(&explicit_id).is_none(), "status=open removes the structured hold");
 }
 
 #[tokio::test]

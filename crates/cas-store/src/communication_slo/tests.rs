@@ -27,6 +27,9 @@ fn values(conn: &Connection) -> CommunicationSlos {
 fn now() -> DateTime<Utc> {
     NOW.parse().unwrap()
 }
+fn scalar(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> i64 {
+    conn.query_row(sql, params, |r| r.get(0)).unwrap()
+}
 
 #[test]
 fn cas_7e24_false_abandon_pass_and_breach() {
@@ -138,27 +141,16 @@ fn cas_7e24_duplicate_bodies_pass_and_breach_through_real_drains() {
     queue
         .record_recipient_surfaced(id, "observer", SurfacingSource::TransportDelivered)
         .unwrap();
-    assert_eq!(
-        conn.query_row(
-            "SELECT COUNT(*) FROM communication_body_observations WHERE prompt_id=?",
-            [id],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
-    );
+    let observed = "SELECT COUNT(*) FROM communication_body_observations WHERE prompt_id=?";
+    assert_eq!(scalar(&conn, observed, [id]), 0);
     for _ in 0..2 {
         queue
             .record_recipient_surfaced(id, "observer", SurfacingSource::ObservedWake)
             .unwrap();
     }
+    let bodies = "SELECT body_count FROM communication_body_observations WHERE prompt_id=?";
     assert_eq!(
-        conn.query_row(
-            "SELECT body_count FROM communication_body_observations WHERE prompt_id=?",
-            [id],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
+        scalar(&conn, bodies, [id]),
         1,
         "wake observation retries are bookkeeping"
     );
@@ -272,15 +264,8 @@ fn cas_7e24_additive_schema_preserves_seen_pk_and_epoch() {
         queue.init().unwrap();
     }
     assert_eq!(values(&conn).body_observed_since, epoch);
-    assert_eq!(
-        conn.query_row(
-            "SELECT COUNT(*) FROM prompt_queue_recipient_seen WHERE prompt_id=1",
-            [],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
-        1
-    );
+    let seen = "SELECT COUNT(*) FROM prompt_queue_recipient_seen WHERE prompt_id=1";
+    assert_eq!(scalar(&conn, seen, []), 1);
     assert!(conn.execute("INSERT INTO prompt_queue_recipient_seen(prompt_id,recipient,seen_at,source) VALUES(1,'worker',?,'inbox_poll')", [NOW]).is_err(), "existing PK semantics preserved");
 }
 
@@ -304,15 +289,8 @@ fn cas_7e24_body_observation_failure_rolls_back_the_surfacing_receipt() {
             .poll_unseen_for_recipient("reader", Some(SESSION), 10)
             .is_err()
     );
-    assert_eq!(
-        conn.query_row(
-            "SELECT COUNT(*) FROM prompt_queue_recipient_seen WHERE prompt_id=?",
-            [id],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
-    );
+    let seen = "SELECT COUNT(*) FROM prompt_queue_recipient_seen WHERE prompt_id=?";
+    assert_eq!(scalar(&conn, seen, [id]), 0);
     for statement in SCHEMA_STATEMENTS {
         conn.execute_batch(statement).unwrap();
     }

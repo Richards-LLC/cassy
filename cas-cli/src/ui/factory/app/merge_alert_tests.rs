@@ -167,13 +167,30 @@ impl Fixture {
         }
         git(integration.path(), &["push", "-q", "origin", "epic/test"]);
     }
+
+    /// Serve `https://github.com/acme/cas.git` from `to` instead of `from`.
+    fn reroute_origin(&self, from: &Path, to: &Path) {
+        let key = |path: &Path| format!("url.{}.insteadOf", path.display());
+        git(self.repo.path(), &["config", "--unset-all", &key(from)]);
+        git(
+            self.repo.path(),
+            &["config", &key(to), "https://github.com/acme/cas.git"],
+        );
+    }
 }
 
 #[test]
 fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
     let mut f = Fixture::new();
+    let now = Utc::now();
     f.ci(None);
+    f.app.merge_alert_retries.now = Some(now);
     assert!(f.relay().is_empty(), "CI pending is not actionable");
+    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(30));
+    assert!(
+        f.relay().is_empty(),
+        "the missing-CI fallback never turns pending into a merge demand"
+    );
     f.ci(Some("success"));
     assert_eq!(
         f.relay().len(),
@@ -218,16 +235,6 @@ fn cas_9efb_relay_dedupes_task_tip_ci_despite_unrelated_target_move() {
         "changed CI conclusion needs one decision"
     );
     assert!(decision[0].text.contains("CI failed"));
-    assert!(f.relay().is_empty());
-}
-
-#[test]
-fn cas_9efb_red_ci_relays_one_decision() {
-    let mut f = Fixture::new();
-    f.ci(Some("failure"));
-    let prompts = f.relay();
-    assert_eq!(prompts.len(), 1);
-    assert!(prompts[0].text.contains("CI failed"), "{}", prompts[0].text);
     assert!(f.relay().is_empty());
 }
 
@@ -301,17 +308,6 @@ fn cas_9efb_missing_ci_retry_survives_an_unchanged_director_snapshot() {
 }
 
 #[test]
-fn cas_9efb_missing_ci_fallback_never_turns_pending_into_a_merge_demand() {
-    let mut f = Fixture::new();
-    let now = Utc::now();
-    f.ci(None);
-    f.app.merge_alert_retries.now = Some(now);
-    assert!(f.relay().is_empty());
-    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(30));
-    assert!(f.relay().is_empty(), "pending stays silent");
-}
-
-#[test]
 fn cas_9efb_docs_only_and_cancelled_ci_have_terminal_decisions() {
     let mut f = Fixture::new();
     git(f.repo.path(), &["reset", "--hard", "epic/test"]);
@@ -365,68 +361,23 @@ fn cas_9efb_unknown_or_partly_pending_ci_defers_without_consuming_decision() {
 #[test]
 fn cas_9efb_failed_target_fetch_defers_cached_positive_evidence() {
     let mut f = Fixture::new();
-    git(
-        f.repo.path(),
-        &[
-            "config",
-            "--unset-all",
-            &format!("url.{}.insteadOf", f.remote.path().display()),
-        ],
-    );
+    let remote = f.remote.path().to_path_buf();
     let missing = f.repo.path().join("missing-remote");
-    git(
-        f.repo.path(),
-        &[
-            "config",
-            &format!("url.{}.insteadOf", missing.display()),
-            "https://github.com/acme/cas.git",
-        ],
-    );
+    f.reroute_origin(&remote, &missing);
     assert!(
         f.relay().is_empty(),
         "failed fetch cannot call cached origin live"
     );
-    git(
-        f.repo.path(),
-        &[
-            "config",
-            "--unset-all",
-            &format!("url.{}.insteadOf", missing.display()),
-        ],
-    );
-    git(
-        f.repo.path(),
-        &[
-            "config",
-            &format!("url.{}.insteadOf", f.remote.path().display()),
-            "https://github.com/acme/cas.git",
-        ],
-    );
+    f.reroute_origin(&missing, &remote);
     let recovered = f.relay();
     assert_eq!(
         recovered.len(),
         1,
         "a recovered probe still owes its first decision"
     );
-    git(
-        f.repo.path(),
-        &[
-            "config",
-            "--unset-all",
-            &format!("url.{}.insteadOf", f.remote.path().display()),
-        ],
-    );
-    git(
-        f.repo.path(),
-        &[
-            "config",
-            &format!("url.{}.insteadOf", missing.display()),
-            "https://github.com/acme/cas.git",
-        ],
-    );
-    let prompt = recovered.first().unwrap();
+    f.reroute_origin(&remote, &missing);
     assert!(
-        !f.app.prompt_is_still_deliverable(prompt),
+        !f.app.prompt_is_still_deliverable(&recovered[0]),
         "a late failed fetch must defer transport too"
     );
 }

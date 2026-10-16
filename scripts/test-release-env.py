@@ -191,27 +191,22 @@ class FactoryScratchRoot(Fixture):
             release_env.project_key(Path("/srv/demo repo/.cas")),
             "demo-repo-57694f919d7a09378d7bd9dde4b21bd900b11644a97685c8a94b79ecc97046c8")
 
-    def test_scratch_root_unset_keeps_the_checkout_filesystem_base(self):
-        resolved = self.resolve()
-        self.assertEqual((resolved.base, resolved.problem), (str(self.home / "cas-release-gate/base"), ""))
-
     def test_scratch_root_on_another_device_is_accepted_and_created(self):
+        unset = self.resolve()
+        self.assertEqual((unset.base, unset.problem), (str(self.home / "cas-release-gate/base"), ""))
         self.env["CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT"] = str(self.scratch)
         resolved = self.resolve(create=True)
         self.assertEqual((resolved.base, resolved.source, resolved.problem),
                          (str(self.base), "factory.scratch_root", ""))
         self.assertTrue(self.base.is_dir())
 
-    def test_an_exported_base_inside_the_scratch_root_is_accepted_across_devices(self):
+    def test_an_exported_cross_device_base_must_sit_inside_the_scratch_root(self):
         # The gate exports the resolved base to its children, which re-check it.
         self.env["CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT"] = str(self.scratch)
+        (self.rewind / "elsewhere").mkdir()
         self.base.parent.mkdir(parents=True)
         self.env[release_env.GATE_VAR] = str(self.base)
         self.assertEqual(self.resolve().problem, "")
-
-    def test_an_unrelated_cross_device_base_is_still_refused(self):
-        self.env["CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT"] = str(self.scratch)
-        (self.rewind / "elsewhere").mkdir()
         self.env[release_env.GATE_VAR] = str(self.rewind / "elsewhere/base")
         self.assertIn("filesystem boundary", self.resolve().problem)
 

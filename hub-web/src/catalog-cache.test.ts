@@ -20,7 +20,7 @@ const session = (name: string, extra: Partial<HubSession> = {}): HubSession => (
 });
 
 describe("cached session catalog (cas-9846)", () => {
-  it("keeps each machine's last catalog across a reload, without browser-only flags", () => {
+  it("keeps each machine's last catalog across a reload, without browser-only flags, until it empties", () => {
     const storage = memoryStorage();
     catalogCacheStore(storage).save("atlas", [session("cas-src", { unreachable: true, last_activity_at: "2026-10-16T15:00:00Z" })]);
     const reloaded = catalogCacheStore(storage);
@@ -28,14 +28,9 @@ describe("cached session catalog (cas-9846)", () => {
       { name: "cas-src", supervisor: "supervisor", workers: ["worker-1"], liveness: "live", project_dir: "/repo/cas-src", ws_port: 4100, last_activity_at: "2026-10-16T15:00:00Z" },
     ]);
     expect(reloaded.load("pelican")).toBeUndefined();
-  });
-
-  it("an empty catalog removes the machine's entry", () => {
-    const storage = memoryStorage();
-    const store = catalogCacheStore(storage);
-    store.save("atlas", [session("cas-src")]);
-    store.save("atlas", []);
-    expect(store.load("atlas")).toBeUndefined();
+    // An empty catalog removes the machine's entry.
+    reloaded.save("atlas", []);
+    expect(reloaded.load("atlas")).toBeUndefined();
   });
 
   it("is purged with the machine's pairing, like every conversation namespace", () => {

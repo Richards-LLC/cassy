@@ -2359,7 +2359,8 @@ fn epic_close_tip(task: &Task, commit_receipt: Option<&str>, repo: &std::path::P
 }
 
 /// One integration proof for every code epic, including non-Rust deliveries.
-/// Confirm a queue before treating containment as proof. Without a queue,
+/// Enforce CI only for confirmed no-queue GitHub repositories; otherwise keep
+/// the existing containment policy. Without a queue,
 /// read successful CI or an exact-SHA supervisor receipt for the landed tree.
 fn epic_build_proof_basis(
     task: &Task,
@@ -2391,10 +2392,21 @@ fn epic_build_proof_basis(
                         timeout,
                     )
                 });
-            if matches!(queue, Ok(true)) {
-                return Ok(format!(
-                    "its tip {short} is already contained in {target}, whose merge queue proved the landed tree"
-                ));
+            match queue {
+                Ok(true) => {
+                    return Ok(format!(
+                        "its tip {short} is already contained in {target}, whose merge queue proved the landed tree"
+                    ));
+                }
+                // Preserve the pre-existing containment path outside confirmed
+                // no-queue GitHub repositories: local/non-GitHub projects and
+                // unavailable queue metadata do not opt into this CI policy.
+                Err(reason) => {
+                    return Ok(format!(
+                        "its tip {short} is already contained in {target}; merge queue state is unconfirmed ({reason}), so the existing containment proof is retained"
+                    ));
+                }
+                Ok(false) => {}
             }
             // A cached/local main must not borrow CI while the remote main
             // has advanced. Read one current default SHA; no test is run.
@@ -2420,17 +2432,13 @@ fn epic_build_proof_basis(
                     "its tip {short} is already contained in {target}; the supervisor's {line} proves exact default-branch SHA {sha}"
                 ));
             }
-            // An exact supervisor receipt is independent of GitHub access
-            // (including non-GitHub origins). Unknown queue state alone is
-            // never proof; without a receipt it must still fail closed.
-            queue?;
             let ci = crate::mcp::tools::core::workflow::epic_tip_ci_proof(&sha, repo)?;
             Ok(format!(
                 "its tip {short} is already contained in {target}; {ci}"
             ))
         })();
         return proof.map(Some).map_err(|reason| format!(
-            "EPIC CI REQUIRED: refusing close of {}: {reason}. Without a confirmed merge queue, default-branch containment needs successful CI on its exact SHA, or an ASSEMBLY_PROOF for that SHA recorded on the epic. Read the existing receipt; do not rerun a passing check. A registered supervisor may retry with supervisor_override=true and a non-empty reason.", task.id
+            "EPIC CI REQUIRED: refusing close of {}: {reason}. A GitHub repository confirmed to have no merge queue needs successful CI on its exact SHA, or an ASSEMBLY_PROOF for that SHA recorded on the epic. Read the existing receipt; do not rerun a passing check. A registered supervisor may retry with supervisor_override=true and a non-empty reason.", task.id
         ));
     }
     Ok(matching_assembly_proof(&task.notes, repo, Some(tip))
@@ -2573,7 +2581,7 @@ enum BuildProofs {
 ///
 /// cas-74cb: an epic's own close defers only with an assembly basis from
 /// [`epic_build_proof_basis`]: its own ASSEMBLY_PROOF covers the epic tip, or
-/// the tip is already contained in the default branch. Otherwise it still
+/// the tip has an accepted default-branch integration proof. Otherwise it still
 /// owes the scoped proof.
 fn close_build_proofs(
     is_factory_worker: bool,
@@ -27380,7 +27388,7 @@ esac
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn epic_close_queue_detection_fails_closed_cas_7e91e() {
+    async fn epic_close_unknown_queue_preserves_existing_containment_cas_7e91e() {
         for queue in [
             "not-json",
             r#"{"data":{"repository":null}}"#,
@@ -27393,9 +27401,22 @@ esac
                 false,
             )
             .await;
-            assert!(run.is_error, "unknown queue is not proof: {}", run.text);
-            assert_ne!(run.task.status, TaskStatus::Closed);
-            assert!(run.text.contains("merge queue lookup"), "{}", run.text);
+            assert!(
+                !run.is_error,
+                "unknown queue preserves prior behaviour: {}",
+                run.text
+            );
+            assert_eq!(run.task.status, TaskStatus::Closed);
+            assert!(
+                run.task.notes.contains("merge queue state is unconfirmed"),
+                "{}",
+                run.task.notes
+            );
+            assert!(
+                !run.text.contains("/check-runs"),
+                "unknown queue adds no CI policy: {}",
+                run.text
+            );
         }
     }
 
@@ -27426,10 +27447,11 @@ esac
                 let head = if current { rev_parse_local(p, "main") } else { old };
                 ("epic/landed".into(), format!("ASSEMBLY_PROOF: head={head} result=PASS command=integrated-suite log=assembly.log"))
             }, Some((&gh, false))).await;
-                assert_eq!(run.is_error, !current, "{}", run.text);
+                let closes = current || queue == r#"{"data":null}"#;
+                assert_eq!(run.is_error, !closes, "{}", run.text);
                 assert_eq!(
                     run.task.status == TaskStatus::Closed,
-                    current,
+                    closes,
                     "{}",
                     run.text
                 );

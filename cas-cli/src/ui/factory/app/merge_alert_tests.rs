@@ -294,11 +294,11 @@ fn cas_9efb_failed_target_fetch_defers_cached_positive_evidence() {
             "https://github.com/acme/cas.git",
         ],
     );
-    assert_eq!(
-        f.relay().len(),
-        1,
-        "a recovered probe still owes its first decision"
-    );
+    let recovered = f.relay();
+    assert_eq!(recovered.len(), 1, "a recovered probe still owes its first decision");
+    git(f.repo.path(), &["config", "--unset-all", &format!("url.{}.insteadOf", f.remote.path().display())]);
+    git(f.repo.path(), &["config", &format!("url.{}.insteadOf", missing.display()), "https://github.com/acme/cas.git"]);
+    assert!(!f.app.prompt_is_still_deliverable(&recovered[0]), "a late failed fetch must defer transport too");
 }
 
 #[test]

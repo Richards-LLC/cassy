@@ -657,7 +657,7 @@ pub(crate) fn prompt_is_still_deliverable(
     let merge_is_still_required = prompt.retract_task.as_deref().is_none_or(|task_id| {
         !matches!(
             check_merge_alert_freshness_for_task(task_id, data, repo_root),
-            MergeAlertFreshness::Stale
+            MergeAlertFreshness::Stale | MergeAlertFreshness::Unavailable
         )
     });
     let harness_still_waiting = prompt

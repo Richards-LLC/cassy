@@ -21,6 +21,10 @@ class LaneBaseTests(unittest.TestCase):
         self.git('init', '-q', '-b', 'main')
         self.git('config', 'user.email', 'fixture@example.test')
         self.git('config', 'user.name', 'Fixture')
+        # No detached background git (auto maintenance, fsmonitor) may write
+        # into .git while TemporaryDirectory cleanup removes it.
+        self.git('config', 'maintenance.auto', 'false')
+        self.git('config', 'core.fsmonitor', 'false')
         for name in ('classify-ci-diff.sh', 'classify-fast-admission.sh', 'classify-web-inputs.py',
                      'resolve-ci-base.sh'):
             source = ROOT / 'scripts' / name

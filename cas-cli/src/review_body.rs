@@ -119,7 +119,11 @@ pub(crate) fn merge_request_review(
     worker_message: &str,
 ) -> String {
     let (summary, details) = match delivery_summary(repo, base, head) {
-        Ok(summary) => (summary, String::new()),
+        // cas-5a52: informational only; nothing gates on the delta.
+        Ok(summary) => match line_delta(repo, base, head) {
+            Ok(delta) => (format!("{summary}\n\n{delta}"), String::new()),
+            Err(_) => (summary, String::new()),
+        },
         Err(error) => (
             format!("```text\n{base} -> {head}\n```"),
             format!("\nGit comparison unavailable: {error}\n"),
@@ -203,6 +207,134 @@ fn delivery_summary(repo: &Path, base: &str, head: &str) -> Result<String> {
         }
     );
     Ok(summary)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum LineKind {
+    Test,
+    Source,
+    Docs,
+}
+
+/// Test files by path convention across the languages Cassy projects use.
+fn path_kind(path: &str) -> LineKind {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let test_dir = path.split('/').any(|segment| {
+        matches!(
+            segment,
+            "tests" | "test" | "__tests__" | "e2e" | "snapshots"
+        )
+    });
+    let test_name = name == "tests.rs"
+        || [".test.", ".spec.", "_test.", "_tests."]
+            .iter()
+            .any(|marker| name.contains(marker))
+        || (name.starts_with("test_") && name.ends_with(".py"));
+    if test_dir || test_name {
+        LineKind::Test
+    } else if name.ends_with(".md") {
+        LineKind::Docs
+    } else {
+        LineKind::Source
+    }
+}
+
+/// First line (1-based) of an inline Rust `#[cfg(test)] mod name {` block;
+/// everything from it on counts as test code.
+fn inline_test_start(text: &str) -> Option<usize> {
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    lines.iter().enumerate().find_map(|(index, line)| {
+        (*line == "#[cfg(test)]"
+            && lines[index + 1..]
+                .iter()
+                .find(|next| !next.starts_with("#["))
+                .is_some_and(|next| next.starts_with("mod ") && next.ends_with('{')))
+        .then_some(index + 1)
+    })
+}
+
+/// One side of a changed file: its path kind and any inline test module.
+#[derive(Clone, Copy)]
+struct FileLines {
+    kind: LineKind,
+    inline_tests_from: Option<usize>,
+}
+
+impl FileLines {
+    fn read(repo: &Path, rev: &str, path: &str) -> Self {
+        let kind = path_kind(path);
+        let inline_tests_from = (kind == LineKind::Source && path.ends_with(".rs"))
+            .then(|| git(repo, &["show", &format!("{rev}:{path}")]).ok())
+            .flatten()
+            .and_then(|text| inline_test_start(&text));
+        Self {
+            kind,
+            inline_tests_from,
+        }
+    }
+
+    fn kind_at(self, line: usize) -> LineKind {
+        match self.inline_tests_from {
+            Some(start) if line >= start => LineKind::Test,
+            _ => self.kind,
+        }
+    }
+}
+
+/// Added and removed lines of `base...head`, split into test, source and docs.
+fn line_delta(repo: &Path, base: &str, head: &str) -> Result<String> {
+    let (base_sha, head_sha) = resolve_pair(repo, base, head)?;
+    let old_rev = git(repo, &["merge-base", &base_sha, &head_sha])?;
+    let range = format!("{old_rev}..{head_sha}");
+    let diff = git(
+        repo,
+        &[
+            "diff",
+            "-U0",
+            "--no-color",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            &range,
+        ],
+    )?;
+    let unknown = FileLines {
+        kind: LineKind::Source,
+        inline_tests_from: None,
+    };
+    // [added, removed] per kind, indexed Test, Source, Docs.
+    let mut counts = [[0usize; 2]; 3];
+    let (mut old, mut new) = (unknown, unknown);
+    let (mut old_line, mut new_line, mut in_hunk) = (0usize, 0usize, false);
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            (old, new, in_hunk) = (unknown, unknown, false);
+        } else if !in_hunk && let Some(path) = line.strip_prefix("--- a/") {
+            old = FileLines::read(repo, &old_rev, path.trim_end_matches('\t'));
+        } else if !in_hunk && let Some(path) = line.strip_prefix("+++ b/") {
+            new = FileLines::read(repo, &head_sha, path.trim_end_matches('\t'));
+        } else if let Some(ranges) = line.strip_prefix("@@ -") {
+            // `@@ -old[,n] +new[,n] @@`
+            let start = |text: &str| text.split(',').next()?.parse().ok();
+            let mut ranges = ranges.split(' ');
+            old_line = ranges.next().and_then(start).unwrap_or(0);
+            new_line = ranges
+                .next()
+                .and_then(|text| start(text.strip_prefix('+')?))
+                .unwrap_or(0);
+            in_hunk = true;
+        } else if in_hunk && line.starts_with('+') {
+            counts[new.kind_at(new_line) as usize][0] += 1;
+            new_line += 1;
+        } else if in_hunk && line.starts_with('-') {
+            counts[old.kind_at(old_line) as usize][1] += 1;
+            old_line += 1;
+        }
+    }
+    let [test, source, docs] = counts.map(|[added, removed]| format!("+{added} -{removed}"));
+    Ok(format!(
+        "**Lines:** test {test} · source {source} · docs {docs}"
+    ))
 }
 
 /// Resolve both refs to immutable commits before diffing; no shell interpolation.
@@ -363,6 +495,50 @@ mod tests {
             // pin: cas-8b0e AC2: the PR-body prompts must never read as failures in the envelope.
             assert!(!missing.contains(prompt), "{prompt}: {missing}");
         }
+    }
+
+    /// cas-5a52: the merge request shows test and source line deltas,
+    /// counting an inline `#[cfg(test)] mod` as test code.
+    #[test]
+    fn merge_request_review_splits_lines_into_test_source_and_docs() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let write = |path: &str, text: &str| {
+            let path = repo.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        git(repo, &["init", "-q"]).unwrap();
+        git(repo, &["config", "user.email", "fixture@example.test"]).unwrap();
+        git(repo, &["config", "user.name", "Fixture"]).unwrap();
+        write(
+            "src/lib.rs",
+            "fn a() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n",
+        );
+        write("README.md", "x\n");
+        git(repo, &["add", "."]).unwrap();
+        git(repo, &["commit", "-qm", "base"]).unwrap();
+        let base = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        write(
+            "src/lib.rs",
+            "fn a() {}\nfn b() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn u() {}\n}\n",
+        );
+        write("tests/it.rs", "#[test]\nfn it() {}\n");
+        write("README.md", "y\n");
+        git(repo, &["add", "."]).unwrap();
+        git(repo, &["commit", "-qm", "change"]).unwrap();
+
+        let review = merge_request_review(
+            repo,
+            &Task::new("cas-fixture".into(), "Fixture".into()),
+            &base,
+            "HEAD",
+            "",
+        );
+        assert!(
+            review.contains("**Lines:** test +3 -1 · source +1 -0 · docs +1 -1"),
+            "{review}"
+        );
     }
 
     /// cas-8b0e: only exact `proof:` and `ci:` keys count, in any case, and

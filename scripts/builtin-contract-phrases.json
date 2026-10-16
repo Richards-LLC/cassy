@@ -97,6 +97,10 @@
         {
           "text": "standing suspension",
           "reason": "Keep the operational, evidence, accessibility or review safeguard from grok supervisor skill carries model tiering rule."
+        },
+        {
+          "text": "../cas-tdd/SKILL.md#fewest-tests",
+          "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
         }
       ],
       "absent": [
@@ -267,6 +271,10 @@
         {
           "text": "references/recovery.md",
           "reason": "Keep the installed workflow/reference route reachable; worker failure recovery reference and merge check are linked."
+        },
+        {
+          "text": "../cas-tdd/SKILL.md#fewest-tests",
+          "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
         }
       ],
       "absent": [
@@ -452,6 +460,10 @@
         {
           "text": "Do not dispatch a separate review workflow",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "../../cas-tdd/SKILL.md#fewest-tests",
+          "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
         }
       ],
       "absent": [
@@ -551,6 +563,10 @@
         {
           "text": "check: PASS <sha>",
           "reason": "Preserve a command, schema, receipt or markup token consumed by worker skills teach capped checks and targeted tests."
+        },
+        {
+          "text": "../../cas-tdd/SKILL.md#fewest-tests",
+          "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
         }
       ],
       "absent": [
@@ -720,6 +736,10 @@
         {
           "text": "principles.md",
           "reason": "Keep the installed workflow/reference route reachable; codebase design principles are installed and linked."
+        },
+        {
+          "text": "## Fewest tests",
+          "reason": "Keep the canonical Fewest tests principle at the anchor its citations link to."
         }
       ],
       "absent": [],
@@ -737,6 +757,10 @@
         {
           "text": "principles.md",
           "reason": "Keep the installed workflow/reference route reachable; codebase design principles are installed and linked."
+        },
+        {
+          "text": "../cas-tdd/SKILL.md#fewest-tests",
+          "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
         }
       ],
       "absent": [],
@@ -3044,6 +3068,10 @@
         {
           "text": "verification_type=epic",
           "reason": "Use the supported epic verdict type when verifying the assembled result."
+        },
+        {
+          "text": "../cas-tdd/SKILL.md#fewest-tests",
+          "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
         }
       ],
       "absent": [
@@ -3390,6 +3418,10 @@
         {
           "text": "verification_type=epic",
           "reason": "Use the supported epic verdict type when verifying the assembled result."
+        },
+        {
+          "text": "../cas-tdd/SKILL.md#fewest-tests",
+          "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
         }
       ],
       "absent": [
@@ -3898,6 +3930,10 @@
         {
           "text": "[cas-worker/references/close-gate.md](../cas-worker/references/close-gate.md)",
           "reason": "Keep the installed workflow/reference route reachable; tests pass link resolves to worker close gate in all flavors."
+        },
+        {
+          "text": "../cas-tdd/SKILL.md#fewest-tests",
+          "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
         }
       ],
       "absent": [],
@@ -4618,6 +4654,23 @@
         {
           "text": "print/PDF",
           "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas dataviz."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-qa-craft/references/independent-pass.md": {
+      "source": "cas-cli/src/builtins/skills/cas-qa-craft/references/independent-pass.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "../../cas-tdd/SKILL.md#fewest-tests",
+          "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
         }
       ],
       "absent": [],

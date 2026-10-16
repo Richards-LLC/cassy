@@ -3,8 +3,22 @@
 use cas_types::{AgentRole, Task, TaskStatus, TaskType};
 use std::path::Path;
 
+/// The one-line form of cas-tdd's "Fewest tests" principle. A macro so the
+/// assignment policy below can `concat!` it.
+macro_rules! test_principle {
+    () => {
+        "Elegant tests, not copious: write the fewest tests that fail without the change, one per behaviour, \
+         through the real path; extend an existing test before adding one, and fix or delete a flaky test \
+         instead of retrying it (cas-tdd, Fewest tests)."
+    };
+}
+
+/// Carried by every assignment, spawn brief and task start (cas-5a52).
+pub(crate) const TEST_PRINCIPLE: &str = test_principle!();
+
 pub(crate) const WORKER_ASSIGNMENT_TEST_POLICY: &str = concat!(
-    "Assignment authorizes and requires adding or updating tests for the change and running its affected targeted tests (",
+    test_principle!(),
+    " Assignment authorizes and requires those tests and running the change's affected targeted tests (",
     "`node --test`, `vitest`, `tsc`, or capped Cargo tests per CONTRIBUTING). ",
     "Factory workers run the targeted tests for their change themselves. ",
     "For Rust, use one package, a named-test `-E` filter, and the capped runner; ",

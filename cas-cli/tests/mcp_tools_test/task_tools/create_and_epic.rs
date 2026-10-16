@@ -103,6 +103,11 @@ async fn test_task_create_and_start() {
         start_text.contains("mcp__cas__search"),
         "Workflow guidance should mention CAS search: {start_text}"
     );
+    // pin: cas-5a52 every task start carries the one-line test principle.
+    assert!(
+        start_text.contains("Elegant tests, not copious"),
+        "Task start should carry the test principle: {start_text}"
+    );
 }
 
 #[tokio::test]

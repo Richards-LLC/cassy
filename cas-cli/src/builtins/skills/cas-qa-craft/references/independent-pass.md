@@ -36,7 +36,9 @@ native report and recorded Playwright version against the reviewed build's
 lockfile and execution environment. Cite the original receipt/log paths in the
 round bundle and ledger; preserve their producer and timestamps. Reuse matching
 unit/typecheck receipts as well. Run independent adjacent/demo/visual cells in
-steps 3–4; the automated selection is the worker's responsibility.
+steps 3–4; the automated selection is the worker's responsibility. Read the
+tests the delivery adds against [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests):
+bloat, restated implementation, sleeps and retry-wrapped flakes are Normal findings.
 
 If that evidence is absent, failed, incomplete, or belongs to different inputs
 or an incompatible environment, run the missing checks. For affected journeys:

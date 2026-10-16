@@ -54,7 +54,8 @@ Commit first; zero matched tests fail. Success records
 receipts. Run the red test before fixing it, then commit and run the green test.
 
 Write or update Rust tests, read the diff, and trace callers, struct literals,
-and match arms across consumers. Full Rust builds and suites, cargo test,
+and match arms across consumers. Before the push, cut the tests you added to the
+[fewest that fail without the change](../../cas-tdd/SKILL.md#fewest-tests). Full Rust builds and suites, cargo test,
 clippy, rustc, and scoped-test scripts remain supervisor-owned. Do not record
 a scoped `--proof`,
 `SCOPED_PROOF:` or `loaded_proof` receipt. If the installed runtime predates the
@@ -82,12 +83,6 @@ and QA do not require a journey receipt. Documentation/ledger-only rebinds must
 prove product/catalog/tool inputs are unchanged. A failure control runs only
 the failing spec with one worker and keeps the original failure; it never
 reports that failure as PASS.
-
-## Other non-Rust checks
-
-Run non-Rust suites (for example `npm`/`vitest`/`playwright`) in the worker.
-Record exact passed and failed counts in the close note. A green exit without
-a nonzero test count is a failure to run.
 
 ## Clean-CI environment
 

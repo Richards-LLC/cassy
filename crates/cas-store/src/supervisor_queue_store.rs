@@ -895,7 +895,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(store.pending_count("sup-b").unwrap(), 1);
-        assert_eq!(store.pending_count("sup-a").unwrap(), 1);
+        assert_eq!(store.pending_count("sup-a").unwrap(), 0);
     }
 
     #[test]

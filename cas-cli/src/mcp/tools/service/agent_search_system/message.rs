@@ -3885,13 +3885,17 @@ const SEND_OUTCOME_POLL: std::time::Duration = std::time::Duration::from_millis(
 const SEND_OUTCOME_BACKLOG_LIMIT: usize = 10;
 
 /// Whether the daemon has made its first decision on a fresh row: handed it
-/// over, held it, or stated why it waits (review M4). The wake attempt is
-/// stamped before the hold, so it is not the signal.
+/// over, held it, or stated why it waits (review M4). A row nobody has looked
+/// at reports `awaiting_delivery`; native-extension recipients, whose rows
+/// keep that reason, are not waited on at all. The wake attempt is stamped
+/// before the hold, so it is not the signal.
 fn send_outcome_settled(report: &cas_store::MessageDeliveryReport) -> bool {
     !matches!(
         report.stage,
         cas_store::DeliveryStage::Enqueued | cas_store::DeliveryStage::Selected
-    ) || report.pending_reason.is_some()
+    ) || report
+        .pending_reason
+        .is_some_and(|reason| reason != cas_store::PendingReason::AwaitingDelivery)
 }
 
 /// Whether a daemon is listening on the notify socket. A stale socket left by
@@ -6776,12 +6780,12 @@ mod cas_d5ab_send_outcome_tests {
         let root = tempfile::tempdir().unwrap();
         let queue = cas_store::SqlitePromptQueueStore::open(root.path()).unwrap();
         queue.init().unwrap();
-        let waiting = queue.enqueue_with_session("supervisor", "native-agent", "ping", "s").unwrap();
+        let waiting = queue.enqueue_with_session("supervisor", "worker", "ping", "s").unwrap();
         queue
             .record_pending_reason(
                 waiting,
-                cas_store::PendingReason::AwaitingDelivery,
-                Some("native extension agent — delivered via its own polling API"),
+                cas_store::PendingReason::AdapterRetryable,
+                Some("transport busy; retrying"),
             )
             .unwrap();
         let started = std::time::Instant::now();

@@ -255,3 +255,6 @@ mod tests;
 
 #[path = "violet_recovery.rs"]
 pub(crate) mod recovery;
+
+#[path = "violet_binding_evidence.rs"]
+pub(crate) mod activation;

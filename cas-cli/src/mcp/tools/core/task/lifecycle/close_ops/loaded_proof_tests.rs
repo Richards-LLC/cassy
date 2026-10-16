@@ -60,3 +60,104 @@ fn cas_a576_split_notes_report_each_incomplete_receipt() {
         );
     }
 }
+
+#[test]
+fn structured_targets_accept_non_rust_runners_and_parallelism_forms_without_sha() {
+    for receipt in [
+        "target=explicit non-Rust (vitest a + jest b) parallelism=-j16 loops=3 result=PASS",
+        "target=non-Rust (vitest a) --jobs 16 loops=3 result=PASS",
+        "target=vitest src/example.test.ts parallelism=16 loops=3 result=PASS",
+        "target=jest tests/example.test.js concurrency=16 loops=4 exit=0",
+        "target=custom-runner a --jobs=16 3x; SUCCESS",
+        "target=whole target cargo test -j16; 3 loops; PASS",
+        "whole target under -j16, 3 loops; result: PASS",
+        "non-Rust target: pnpm test -j16; 3 runs; PASS",
+        "entire suite; -j 16; runs 1 2 3; status=0",
+    ] {
+        let task = concurrency_task(receipt);
+        validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
+            .unwrap_or_else(|error| panic!("valid receipt {receipt}: {error}"));
+        assert!(declared_risk_close_gaps(&task, &[]).is_empty());
+    }
+}
+
+#[test]
+fn missing_or_contradictory_fields_remain_refused_with_precise_diagnostics() {
+    for (receipt, expected) in [
+        ("-j16 loops=3 result=PASS", "missing=[target]"),
+        ("target= -j16 loops=3 result=PASS", "missing=[target]"),
+        ("target=loops=3 -j16 result=PASS", "missing=[target]"),
+        (
+            "log=target=vitest -j16 loops=3 result=PASS",
+            "missing=[target]",
+        ),
+        ("target=vitest loops=3 result=PASS", "missing=[parallelism]"),
+        (
+            "target=vitest -j160 loops=3 result=PASS",
+            "missing=[parallelism]",
+        ),
+        (
+            "target=vitest concurrency=160 loops=3 result=PASS",
+            "missing=[parallelism]",
+        ),
+        (
+            "target=vitest parallelism=16 loops=2 result=PASS",
+            "missing=[loops]",
+        ),
+        (
+            "target=vitest parallelism=16 receipt=1234 result=PASS",
+            "missing=[loops]",
+        ),
+        ("target=vitest parallelism=16 loops=3", "missing=[result]"),
+        (
+            "target=vitest parallelism=16 loops=3 result=FAIL",
+            "missing=[result]",
+        ),
+        (
+            "target=vitest parallelism=16 loops=3 result=PASS exit=1",
+            "missing=[result]",
+        ),
+        (
+            "target=vitest parallelism=16 loops=3 result=PASS status=2",
+            "missing=[result]",
+        ),
+    ] {
+        let task = concurrency_task(receipt);
+        let error =
+            validate_risk_close_proofs(&task, &[], std::path::Path::new(".")).expect_err(receipt);
+        assert!(error.contains(expected), "{receipt}: {error}");
+        assert!(error.contains("parsed=["), "{error}");
+        assert!(
+            error.contains("Accepted example: LOADED_PROOF: target="),
+            "{error}"
+        );
+        let gaps = declared_risk_close_gaps(&task, &[]).join("; ");
+        assert!(gaps.contains(expected), "audit differs: {gaps}");
+        assert!(
+            gaps.contains("Accepted example: LOADED_PROOF: target="),
+            "{gaps}"
+        );
+    }
+}
+
+#[test]
+fn no_typed_note_reports_all_missing_fields_and_executable_example() {
+    let mut task = concurrency_task("");
+    task.notes = "progress: target=vitest parallelism=16 loops=3 result=PASS".into();
+    let error = validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
+        .expect_err("untyped progress cannot satisfy concurrency risk");
+    assert!(error.contains("typed note_type=loaded_proof"), "{error}");
+    assert!(
+        error.contains("parsed=[] missing=[target, parallelism, loops, result]"),
+        "{error}"
+    );
+    let example = error
+        .split("Accepted example: ")
+        .nth(1)
+        .unwrap()
+        .split(". Add one with")
+        .next()
+        .unwrap();
+    validate_risk_close_proofs(&concurrency_task(example), &[], std::path::Path::new("."))
+        .expect("the refusal's accepted example must pass without adding SHA/log");
+}

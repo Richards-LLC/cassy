@@ -1386,3 +1386,35 @@ async fn cas_9735_clear_context_keeps_durable_worker_heartbeat_and_lease() {
         assert!(fx.cloud.state().agents.contains_key(old_id));
     }
 }
+
+#[tokio::test]
+async fn cas_9735_startup_pid_adoption_replaces_mcp_bootstrap_owner() {
+    let (fx, daemon) = fixture("cas-9735").await;
+    let daemon = Arc::new(daemon);
+    let store = crate::store::open_agent_store(&fx.cas_root).unwrap();
+    let mut cached = Agent::new("cached-mcp-session".into(), "cached-mcp".into());
+    cached.pid = Some(std::process::id());
+    cached.role = AgentRole::Supervisor;
+    store.register(&cached).unwrap();
+    daemon.set_agent_id(cached.id.clone()).await;
+    daemon.await_cloud_presence().await;
+    let mut current = Agent::new("current-pid-session".into(), "current-harness".into());
+    current.pid = Some(our_cc_pid());
+    current.role = AgentRole::Supervisor;
+    store.register(&current).unwrap();
+    let running = tokio::spawn(Arc::clone(&daemon).run());
+    let adopted = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if daemon.pid_sessions.read().await.get(&our_cc_pid()) == Some(&current.id) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await;
+    daemon.shutdown();
+    tokio::time::timeout(std::time::Duration::from_secs(3), running).await.unwrap().unwrap().unwrap();
+    daemon.await_cloud_presence().await;
+    assert!(adopted.is_ok(), "real daemon startup must adopt the harness PID");
+    assert_eq!(daemon.agent_id.read().await.as_deref(), Some(current.id.as_str()));
+    assert!(fx.cloud.state().agents.contains_key(&current.id));
+}

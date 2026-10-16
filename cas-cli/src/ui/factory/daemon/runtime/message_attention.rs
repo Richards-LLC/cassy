@@ -20,7 +20,7 @@ fn close_instruction_tasks(prompt: &str) -> Vec<String> {
         .collect()
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct AttentionInputs {
     pub(crate) cas_dir: std::path::PathBuf,
     pub(crate) session_name: String,

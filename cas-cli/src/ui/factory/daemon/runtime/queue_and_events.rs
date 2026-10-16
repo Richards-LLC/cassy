@@ -24,12 +24,12 @@ use crate::ui::factory::director::AgentSummary;
 const PROMPT_POISON_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// cas-1f0c: how long a Claude Teams pointer copy may go unexpanded (no hook
 /// or poll showing its row) before the daemon writes the full body instead.
-const TEAMS_POINTER_FALLBACK_AFTER_SECS: i64 = 3 * 60;
+pub(crate) const TEAMS_POINTER_FALLBACK_AFTER_SECS: i64 = 3 * 60;
 /// cas-1f0c: how far back the sweep looks for unexpanded pointer copies:
 /// the queue's own stale TTL, so a daemon that was down for hours still
 /// covers every row a hook could still show. The re-sent copy keeps the
 /// row's `[cas #N … age]` line, so an old message does not read as new.
-const TEAMS_POINTER_FALLBACK_WINDOW_SECS: i64 = cas_store::PROMPT_QUEUE_STALE_TTL_SECS;
+pub(crate) const TEAMS_POINTER_FALLBACK_WINDOW_SECS: i64 = cas_store::PROMPT_QUEUE_STALE_TTL_SECS;
 const SPAWN_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Registration proves that the MCP child answered, not that the interactive
 /// harness accepted the selected model. Keep watching the pane for this long
@@ -630,7 +630,7 @@ fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
 /// cas-1f0c: the full Teams copy of `queued`, framed as the queue loop frames
 /// it (provenance line, reply hint, body), so the teammate turn that renders it
 /// carries the `[cas #N …]` envelope and body the turn recorder matches.
-fn teams_body_fallback_text(queued: &cas_store::QueuedPrompt) -> String {
+pub(crate) fn teams_body_fallback_text(queued: &cas_store::QueuedPrompt) -> String {
     use crate::mcp::tools::service::agent_search_system::message::{
         commander_reply_command, first_message_provenance,
     };
@@ -647,7 +647,7 @@ fn teams_body_fallback_text(queued: &cas_store::QueuedPrompt) -> String {
 /// Sender-visible details for a message whose recipient never read it. Keep
 /// this as one rendered envelope so a sender can switch channels without
 /// separately polling `message_status` during an incident.
-fn delivery_stalled_notice(
+pub(crate) fn delivery_stalled_notice(
     queued: &cas_store::QueuedPrompt,
     recipient_harness: cas_mux::SupervisorCli,
     report: Option<&cas_store::MessageDeliveryReport>,
@@ -3597,7 +3597,7 @@ const DELIVERY_STALLED_DEADLINE_MARGIN_SECS: i64 = 3 * 60;
 /// (30 minutes) outlasted the 15-minute abandonment deadline, so a
 /// supervisor's decision to a busy worker could be dropped without its
 /// sender ever being told.
-fn delivery_stalled_threshold_before_abandonment(configured_secs: u64) -> i64 {
+pub(crate) fn delivery_stalled_threshold_before_abandonment(configured_secs: u64) -> i64 {
     delivery_stalled_threshold_i64(configured_secs)
         .min(cas_store::PROMPT_RETRY_MAX_AGE_SECS - DELIVERY_STALLED_DEADLINE_MARGIN_SECS)
 }
@@ -3742,6 +3742,7 @@ impl FactoryDaemon {
     pub(super) fn drain_relay_jobs(&mut self) {
         use super::relay_jobs::RelayOutput;
         for _ in 0..8 {
+            self.advance_pointer_jobs();
             let finished = self.relay_jobs.take(&mut self.queue_jobs);
             if finished.is_empty() {
                 return;
@@ -3865,7 +3866,75 @@ impl FactoryDaemon {
                             }
                         }
                     }
-                    RelayOutput::IdleUnreadRead { context, candidates } => self.decide_idle_unread_probe(basis, context, candidates),
+                    RelayOutput::IdleUnreadRead { context: _, candidates, generation } => {
+                        if generation == self.queue_jobs.poison_jobs.generation {
+                            let context = message_attention::AttentionInputs::from_daemon(self);
+                            self.decide_idle_unread_probe(context, candidates);
+                        }
+                    }
+                    RelayOutput::IdleValidated { context, generation, candidate, live } => {
+                        if generation == self.queue_jobs.poison_jobs.generation
+                            && context == message_attention::AttentionInputs::from_daemon(self)
+                            && live.load(Ordering::Acquire) {
+                            if let Some(candidate) = candidate {
+                                let row_id = candidate.row.id;
+                                let supervisor = self.app.supervisor_name().to_string();
+                                self.relay_jobs.submit_write(&mut self.queue_jobs, &format!("idle-unacked:{row_id}"), Some(basis), move || {
+                                    let persisted = super::delivery_probe_jobs::write_idle_unread(&context, &supervisor, candidate, &live);
+                                    RelayOutput::IdleWritten { row_id, persisted }
+                                });
+                            }
+                        }
+                    }
+                    RelayOutput::IdleWritten { row_id, persisted } => {
+                        if persisted { self.queue_jobs.poison_jobs.idle_relayed.insert(row_id); }
+                    }
+                    RelayOutput::NormalFlagValidated { fresh, evidence } => {
+                        let row_id = fresh.row_id;
+                        if self.normal_delivery_probes.get(&row_id) != Some(&fresh.probe)
+                            || !fresh.live.load(Ordering::Acquire) { continue; }
+                        if fresh.activity == RecipientActivity::Found || fresh.evidence == NormalDeliveryTurnEvidence::TurnStarted {
+                            self.normal_delivery_probes.remove(&row_id);
+                            self.queue_jobs.normal_probe_jobs.forget_row(row_id);
+                        } else if fresh.activity == RecipientActivity::Unknown || fresh.evidence == NormalDeliveryTurnEvidence::RecipientBusy {
+                            self.normal_delivery_probes.get_mut(&row_id).unwrap().next_check_at = Some(Instant::now() + NORMAL_DELIVERY_BUSY_RECHECK);
+                        } else {
+                            let cas_dir = self.app.cas_dir().to_path_buf();
+                            let session = self.session_name.clone();
+                            self.relay_jobs.submit_write(&mut self.queue_jobs, &format!("normal-flag:{row_id}"), Some(basis), move || {
+                                let done = super::delivery_probe_jobs::write_normal_flag(&cas_dir, &session, row_id, &fresh.probe, evidence, &fresh.live);
+                                RelayOutput::NormalFlagWritten { row_id, probe: fresh.probe, done }
+                            });
+                        }
+                    }
+                    RelayOutput::PointerRead { generation, rows } => self.decide_pointer_read(generation, rows),
+                    RelayOutput::PointerClaimed { key, claimed } => match claimed {
+                        Ok(true) => {
+                            if let Some(pending) = self.queue_jobs.poison_jobs.pointers.get_mut(&key) {
+                                pending.phase = super::poison_sweep_jobs::PointerPhase::File;
+                            }
+                        }
+                        Ok(false) => { self.queue_jobs.poison_jobs.pointers.remove(&key); }
+                        Err(error) => {
+                            tracing::warn!(%error, %key, "could not claim Teams fallback; retrying");
+                            if let Some(pending) = self.queue_jobs.poison_jobs.pointers.get_mut(&key) {
+                                pending.retry_at = Instant::now() + Duration::from_secs(1);
+                            }
+                        }
+                    },
+                    RelayOutput::PointerFiled { key, delivered } => {
+                        if delivered { self.queue_jobs.poison_jobs.pointers.remove(&key); }
+                        else if let Some(pending) = self.queue_jobs.poison_jobs.pointers.get_mut(&key) {
+                            pending.phase = super::poison_sweep_jobs::PointerPhase::Release;
+                        }
+                    }
+                    RelayOutput::PointerReleased { key, released } => {
+                        if released { self.queue_jobs.poison_jobs.pointers.remove(&key); }
+                        else if let Some(pending) = self.queue_jobs.poison_jobs.pointers.get_mut(&key) {
+                            pending.retry_at = Instant::now() + Duration::from_secs(1);
+                        }
+                    }
+                    RelayOutput::BouncesRead { context, generation, rows } => self.decide_bounces(context, generation, rows),
                     RelayOutput::ProbeWritten => {}
                     RelayOutput::EscalationRead {
                         notice_ids,
@@ -4196,9 +4265,8 @@ impl FactoryDaemon {
         let cas_dir = self.app.cas_dir().to_path_buf();
         let session = self.session_name.clone();
         let targets: Vec<String> = valid_targets.to_vec();
-        super::store_worker::submit_write("prompt queue poison sweep", move || {
-            let queue = super::prompt_queue_jobs::job_thread_prompt_queue(&cas_dir)
-                .map_err(|error| error.to_string())?;
+        self.relay_jobs.submit_write(&mut self.queue_jobs, "poison-store-sweep", None, move || {
+            let Ok(queue) = super::prompt_queue_jobs::job_thread_prompt_queue(&cas_dir) else { return super::relay_jobs::RelayOutput::ProbeWritten; };
             let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
             if let Ok(expired) = queue.abandon_ineligible_session_targets(
                 &targets,
@@ -4245,8 +4313,9 @@ impl FactoryDaemon {
                     );
                 }
             }
-            Ok::<(), String>(())
+            super::relay_jobs::RelayOutput::ProbeWritten
         });
+        self.drain_relay_jobs();
     }
 
     /// cas-1f0c: the time fallback for a Claude Teams pointer copy. The
@@ -4265,79 +4334,85 @@ impl FactoryDaemon {
     /// later sweep retries. (A crash between claim and write leaves the claim
     /// held: the row is then read by `inbox_poll`, which the pointer names.)
     pub(super) async fn fallback_unsurfaced_teams_pointers(
-        &mut self,
-        queue: &dyn cas_store::PromptQueueStore,
+        &mut self, _queue: &dyn cas_store::PromptQueueStore,
     ) {
-        if self.teams.is_none() {
-            return;
-        }
-        // Only live Claude Teams recipients got pointer copies; the store
-        // filters on them (and on bodies a hook can show) before its limit.
-        let is_claude_teams = |harness: cas_mux::SupervisorCli| {
-            harness == cas_mux::SupervisorCli::Claude
-                && super::delivery::choose_channel(harness, true)
-                    == super::delivery::DeliveryChannel::TeamsInbox
-        };
-        let supervisor_name = self.app.supervisor_name().to_string();
-        let worker_names = self.app.worker_names().to_vec();
-        let mut recipients: Vec<String> = worker_names
-            .iter()
+        use super::relay_jobs::{Relay, RelayOutput};
+        if self.teams.is_none() { return; }
+        self.drain_relay_jobs();
+        let recipients = self.teams_pointer_recipients();
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        let session = self.session_name.clone();
+        let generation = self.queue_jobs.poison_jobs.generation;
+        self.relay_jobs.submit_read(&mut self.queue_jobs, Relay::TeamsPointers, move || {
+            RelayOutput::PointerRead { generation,
+                rows: super::poison_sweep_jobs::read_pointers(&cas_dir, &session, &recipients) }
+        });
+        self.drain_relay_jobs();
+    }
+
+    fn teams_pointer_recipients(&self) -> Vec<String> {
+        let supervisor = self.app.supervisor_name();
+        let mut recipients: Vec<_> = self.app.worker_names().iter()
             .filter(|name| !self.dead_workers.contains(*name))
-            .filter(|name| is_claude_teams(self.app.harness_for(name)))
-            .cloned()
-            .collect();
-        if is_claude_teams(self.app.harness_for(&supervisor_name)) {
-            recipients.push("supervisor".to_string());
-            recipients.push(supervisor_name.clone());
+            .filter(|name| self.app.harness_for(name) == cas_mux::SupervisorCli::Claude)
+            .cloned().collect();
+        if self.app.harness_for(supervisor) == cas_mux::SupervisorCli::Claude {
+            recipients.extend(["supervisor".to_string(), supervisor.to_string()]);
         }
-        let now = chrono::Utc::now();
-        let candidates = match queue.teams_pointer_fallback_candidates(
-            &self.session_name,
-            &recipients,
-            now - chrono::Duration::seconds(TEAMS_POINTER_FALLBACK_WINDOW_SECS),
-            now - chrono::Duration::seconds(TEAMS_POINTER_FALLBACK_AFTER_SECS),
-            20,
-        ) {
-            Ok(candidates) => candidates,
-            Err(error) => {
-                tracing::warn!(%error, "cas-1f0c: failed to scan unexpanded Teams pointer copies");
-                return;
-            }
-        };
-        for (queued, recipient) in candidates {
-            if !cas_store::fits_hook_surface(&queued.prompt) {
-                continue;
-            }
-            match queue.claim_teams_body_fallback(queued.id, &recipient) {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(error) => {
-                    tracing::warn!(message_id = queued.id, %error, "cas-1f0c: could not claim a Teams body fallback");
-                    continue;
+        recipients
+    }
+
+    fn decide_pointer_read(&mut self, generation: u64, rows: Vec<(cas_store::QueuedPrompt, String)>) {
+        use super::poison_sweep_jobs::{PendingPointer, PointerPhase, PointerWork};
+        if generation != self.queue_jobs.poison_jobs.generation { return; }
+        let Some(primary) = self.teams.as_ref().map(|team| Arc::new(team.snapshot())) else { return; };
+        let recipients = self.teams_pointer_recipients();
+        let workers = self.app.worker_names().to_vec();
+        let supervisor = self.app.supervisor_name().to_string();
+        for (row, recipient) in rows {
+            if !recipients.contains(&recipient) || !cas_store::fits_hook_surface(&row.prompt) { continue; }
+            let key = format!("teams-fallback:{}:{recipient}", row.id);
+            if self.queue_jobs.poison_jobs.pointers.contains_key(&key) { continue; }
+            // Failed phases remain owned until they settle; cap admission, not retries.
+            if self.queue_jobs.poison_jobs.pointers.len() >= 60 { break; }
+            let pane = if recipient == "supervisor" { &supervisor } else { &recipient };
+            let config_dir = (pane != &supervisor).then(|| {
+                let spec = self.app.mux.effective_worker_spec(pane, None);
+                super::delivery::recipient_config_dir(&spec)
+            }).flatten();
+            let source = self.inbox_source_name(&row.source, &workers, &supervisor);
+            let live = self.queue_jobs.poison_jobs.epoch(pane);
+            self.queue_jobs.poison_jobs.pointers.insert(key, PendingPointer {
+                work: PointerWork { cas_dir: self.app.cas_dir().to_path_buf(), row,
+                    recipient: if pane == &supervisor { "supervisor".into() } else { recipient },
+                    source, primary: primary.clone(), config_dir, live },
+                phase: PointerPhase::Claim, retry_at: Instant::now(),
+            });
+        }
+    }
+
+    fn advance_pointer_jobs(&mut self) {
+        use super::poison_sweep_jobs::{self as pointer, PointerPhase};
+        use super::relay_jobs::RelayOutput;
+        let pending: Vec<_> = self.queue_jobs.poison_jobs.pointers.iter()
+            .filter(|(_, pending)| pending.retry_at <= Instant::now())
+            .map(|(key, pending)| (key.clone(), pending.phase, pending.work.clone())).collect();
+        for (key, phase, work) in pending {
+            match phase {
+                PointerPhase::Claim => {
+                    let job_key = format!("{key}:claim");
+                    self.relay_jobs.submit_write(&mut self.queue_jobs, &job_key, None, move ||
+                        RelayOutput::PointerClaimed { key, claimed: pointer::claim_pointer(&work) });
                 }
-            }
-            let source = self.inbox_source_name(&queued.source, &worker_names, &supervisor_name);
-            let text = teams_body_fallback_text(&queued);
-            match self.write_teams_inbox_only(&recipient, &source, &text, queued.summary.as_deref()) {
-                Ok(()) => tracing::warn!(
-                    target: "cas::coordination",
-                    stage = "teams_pointer_body_fallback",
-                    message_id = queued.id,
-                    recipient = %recipient,
-                    "cas-1f0c: no hook showed the Teams pointer's row; wrote the full body once"
-                ),
-                // Only the write itself failed, so nothing reached the
-                // recipient: release the claim for a later sweep.
-                Err(error) => {
-                    tracing::warn!(
-                        message_id = queued.id,
-                        recipient = %recipient,
-                        %error,
-                        "cas-1f0c: Teams body fallback write failed; claim released for a later sweep"
-                    );
-                    if let Err(error) = queue.release_teams_body_fallback(queued.id, &recipient) {
-                        tracing::warn!(message_id = queued.id, %error, "cas-1f0c: could not release a Teams body fallback claim");
-                    }
+                PointerPhase::File => {
+                    let job_key = format!("{key}:file");
+                    self.relay_jobs.submit_blocking_write(&mut self.queue_jobs, &job_key, move ||
+                        RelayOutput::PointerFiled { key, delivered: pointer::file_pointer(&work) });
+                }
+                PointerPhase::Release => {
+                    let job_key = format!("{key}:release");
+                    self.relay_jobs.submit_write(&mut self.queue_jobs, &job_key, None, move ||
+                        RelayOutput::PointerReleased { key, released: pointer::release_pointer(&work) });
                 }
             }
         }
@@ -4346,107 +4421,62 @@ impl FactoryDaemon {
     /// Bounce aged direct messages to their original sender. The prompt store
     /// owns the read/ack race and one-shot marker; this daemon layer adds the
     /// live recipient harness and the authoritative delivery-state context.
-    fn enqueue_delivery_stalled_bounces(&mut self, queue: &dyn cas_store::PromptQueueStore) {
-        // cas-d2a2: cached, reloaded only when the config file changes.
-        let cas_dir = self.app.cas_dir().to_path_buf();
-        let config = self.queue_jobs.config(&cas_dir);
-        let factory = config.factory();
-        let candidates = match queue.delivery_stalled_candidates(
-            &self.session_name,
-            delivery_stalled_threshold_before_abandonment(factory.delivery_stalled_priority_secs),
-            delivery_stalled_threshold_before_abandonment(factory.delivery_stalled_normal_secs),
-            50,
-        ) {
-            Ok(candidates) => candidates,
-            Err(error) => {
-                tracing::warn!(%error, "failed to scan aged unread coordination messages");
-                return;
-            }
-        };
-        let decisions = self.message_attention_decisions(queue, &candidates);
-        let candidates: Vec<_> = candidates.into_iter()
-            .filter(|row| decisions.get(&row.id) == Some(&MessageAttention::Needed))
-            .collect();
-
-        // cas-d9a8: the same scan already knows which supervisor-addressed
-        // messages have gone unread past their threshold. Bouncing to the
-        // sender tells the WORKER; nobody was telling the supervisor, which is
-        // how a verification dispatch-id handoff sat unread while the task it
-        // was blocking stayed open. `delivery_stalled_candidates` is ordered
-        // oldest-first, so the head of this list is the backlog head.
-        let supervisor_name = self.app.supervisor_name().to_string();
-        let unread_for_supervisor: Vec<&cas_store::QueuedPrompt> = candidates
-            .iter()
-            .filter(|queued| {
-                queued.target.eq_ignore_ascii_case(&supervisor_name)
-                    // Wake-eligible relays are excluded, and this is load-
-                    // bearing rather than tidiness: the summary this emits IS
-                    // one of them, so counting them would let an unread
-                    // summary become the backlog head and mint a fresh summary
-                    // about itself, forever. They also need no help — a
-                    // lifecycle row is held pending until it actually wakes
-                    // the pane (cas-f02b).
-                    && !crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(
-                        &queued.source,
-                    )
-            })
-            .collect();
-        if let Some(oldest) = unread_for_supervisor.iter().min_by_key(|queued| queued.id) {
-            let outcome = super::lifecycle::enqueue_supervisor_unread_relay(
-                self.app.cas_dir(),
-                &oldest.source,
-                oldest.id,
-                unread_for_supervisor.len(),
-            );
-            if let super::lifecycle::WorkerAttentionRelayOutcome::Persisted { notification_id } =
-                outcome
-            {
-                tracing::warn!(
-                    target: "cas::coordination",
-                    stage = "supervisor_unread_backlog",
-                    notification_id,
-                    unread = unread_for_supervisor.len(),
-                    oldest_message_id = oldest.id,
-                    "cas-d9a8: supervisor has unread delivered messages that do not wake the pane"
-                );
-            }
+    fn enqueue_delivery_stalled_bounces(&mut self, _queue: &dyn cas_store::PromptQueueStore) {
+        use super::relay_jobs::{Relay, RelayOutput};
+        self.drain_relay_jobs();
+        let context = message_attention::AttentionInputs::from_daemon(self);
+        let generation = self.queue_jobs.poison_jobs.generation;
+        let mut harnesses = HashMap::new();
+        for name in self.app.worker_names().iter().chain(std::iter::once(&self.app.supervisor_name().to_string())) {
+            harnesses.insert(name.clone(), self.app.harness_for(name));
         }
+        harnesses.insert("supervisor".into(), self.app.harness_for(self.app.supervisor_name()));
+        let default = self.app.mux.effective_worker_spec("", None).cli;
+        self.relay_jobs.submit_read(&mut self.queue_jobs, Relay::StalledBounces, move || {
+            let rows = super::poison_sweep_jobs::read_bounces(&context, &harnesses, default);
+            RelayOutput::BouncesRead { context, generation, rows }
+        });
+        self.drain_relay_jobs();
+    }
 
-        for queued in candidates {
-            let report = match queue.message_delivery_report(queued.id) {
-                Ok(report) => report,
-                Err(error) => {
-                    tracing::warn!(message_id = queued.id, %error, "failed to read delivery state for sender bounce");
-                    None
+    fn decide_bounces(&mut self, context: message_attention::AttentionInputs, generation: u64,
+        rows: Vec<super::poison_sweep_jobs::BounceCandidate>)
+    {
+        use super::relay_jobs::RelayOutput;
+        if generation != self.queue_jobs.poison_jobs.generation
+            || context != message_attention::AttentionInputs::from_daemon(self) { return; }
+        let supervisor = self.app.supervisor_name().to_string();
+        let unread: Vec<_> = rows.iter().filter(|candidate| candidate.row.target.eq_ignore_ascii_case(&supervisor)
+            && !crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(&candidate.row.source))
+            .map(|candidate| candidate.row.clone()).collect();
+        if !unread.is_empty() {
+            let cas_dir = context.cas_dir.clone();
+            let live = self.queue_jobs.poison_jobs.epoch(&supervisor);
+            let key = format!("supervisor-unread:{}", unread.iter().map(|row| row.id).min().unwrap());
+            self.relay_jobs.submit_write(&mut self.queue_jobs, &key, None, move || {
+                if live.load(Ordering::Acquire) {
+                    if let Ok(queue) = crate::store::open_prompt_queue_store(&cas_dir) {
+                        let unread: Vec<_> = unread.iter().filter(|row| super::poison_sweep_jobs::still_unread(queue.as_ref(), row)).collect();
+                        if let Some(oldest) = unread.iter().min_by_key(|row| row.id) {
+                            let outcome = super::lifecycle::enqueue_supervisor_unread_relay(&cas_dir, &oldest.source, oldest.id, unread.len());
+                            if let super::lifecycle::WorkerAttentionRelayOutcome::Persisted { notification_id } = outcome {
+                                tracing::warn!(target: "cas::coordination", stage = "supervisor_unread_backlog", notification_id,
+                                    unread = unread.len(), oldest_message_id = oldest.id, "supervisor has unread delivered messages");
+                            }
+                        }
+                    }
                 }
-            };
-            let notice = delivery_stalled_notice(
-                &queued,
-                self.app.harness_for(&queued.target),
-                report.as_ref(),
-            );
-            match queue.enqueue_delivery_stalled_bounce(
-                queued.id,
-                &self.session_name,
-                &notice,
-                "delivery stalled — recipient unread",
-            ) {
-                Ok(Some(bounce_id)) => tracing::warn!(
-                    target: "cas::coordination",
-                    stage = "delivery_stalled_bounced",
-                    message_id = queued.id,
-                    bounce_id,
-                    sender = %queued.source,
-                    recipient = %queued.target,
-                    "aged unread message bounced to its sender"
-                ),
-                Ok(None) => {}
-                Err(error) => tracing::warn!(
-                    message_id = queued.id,
-                    %error,
-                    "failed to queue sender-side delivery-stalled bounce"
-                ),
-            }
+                RelayOutput::ProbeWritten
+            });
+        }
+        for candidate in rows {
+            let live = self.queue_jobs.poison_jobs.epoch(&candidate.row.target);
+            let key = format!("sender-bounce:{}", candidate.row.id);
+            let context = context.clone();
+            self.relay_jobs.submit_write(&mut self.queue_jobs, &key, None, move || {
+                super::poison_sweep_jobs::write_bounce(&context, candidate, live);
+                RelayOutput::ProbeWritten
+            });
         }
     }
 
@@ -4496,43 +4526,34 @@ impl FactoryDaemon {
         self.drain_relay_jobs();
         let context = message_attention::AttentionInputs::from_daemon(self);
         let supervisor = self.app.supervisor_name().to_string();
-        self.relay_jobs
-            .submit_read(&mut self.queue_jobs, Relay::IdleUnread, move || {
-                let candidates =
-                    super::delivery_probe_jobs::read_idle_unread(&context, &supervisor);
-                RelayOutput::IdleUnreadRead {
-                    context,
-                    candidates,
-                }
-            });
+        let generation = self.queue_jobs.poison_jobs.generation;
+        self.relay_jobs.submit_read(&mut self.queue_jobs, Relay::IdleUnread, move || {
+            let candidates = super::delivery_probe_jobs::read_idle_unread(&context, &supervisor);
+            RelayOutput::IdleUnreadRead { context, candidates, generation }
+        });
         self.drain_relay_jobs();
     }
-    fn decide_idle_unread_probe(
-        &mut self,
-        basis: u64,
-        context: message_attention::AttentionInputs,
-        candidates: Vec<super::delivery_probe_jobs::IdleCandidate>,
-    ) {
+    fn decide_idle_unread_probe(&mut self, context: message_attention::AttentionInputs,
+        candidates: Vec<super::delivery_probe_jobs::IdleCandidate>)
+    {
+        let current: HashSet<_> = candidates.iter().map(|candidate| candidate.row.id).collect();
+        self.queue_jobs.poison_jobs.idle_relayed.retain(|id| current.contains(id));
         for candidate in candidates {
             let row = &candidate.row;
-            if !idle_unacked_relay_due(
-                chrono::Utc::now(),
-                row.created_at,
-                candidate.completion,
-                self.pane_silent_since
-                    .get(&row.target)
-                    .map(|since| since.elapsed()),
-            ) {
-                continue;
-            }
-            let key = format!("idle-unacked:{}", row.id);
-            let supervisor = self.app.supervisor_name().to_string();
+            if self.queue_jobs.poison_jobs.idle_relayed.contains(&row.id)
+                || !idle_unacked_relay_due(chrono::Utc::now(), row.created_at, candidate.completion,
+                    self.pane_silent_since.get(&row.target).map(|since| since.elapsed())) { continue; }
+            let key = format!("idle-check:{}", row.id);
+            if self.relay_jobs.writing(&format!("idle-unacked:{}", row.id)) { continue; }
+            let live = self.queue_jobs.poison_jobs.epoch(&row.target);
             let context = context.clone();
-            self.relay_jobs
-                .submit_write(&mut self.queue_jobs, &key, Some(basis), move || {
-                    super::delivery_probe_jobs::write_idle_unread(&context, &supervisor, candidate);
-                    super::relay_jobs::RelayOutput::ProbeWritten
-                });
+            let generation = self.queue_jobs.poison_jobs.generation;
+            self.relay_jobs.submit_blocking_write(&mut self.queue_jobs, &key, move || {
+                let candidate = if live.load(Ordering::Acquire) {
+                    super::delivery_probe_jobs::validate_idle_unread(&context, candidate)
+                } else { None };
+                super::relay_jobs::RelayOutput::IdleValidated { context, generation, candidate, live }
+            });
         }
     }
 
@@ -4658,6 +4679,7 @@ impl FactoryDaemon {
                 normal_delivery_probe_due(probe.delivered_at, probe.next_check_at, now)
                     && !self.queue_jobs.normal_probe_jobs.ready.contains_key(id)
                     && !self.relay_jobs.writing(&format!("normal-flag:{id}"))
+                    && !self.relay_jobs.writing(&format!("normal-flag-validate:{id}"))
             })
             .take(50)
             .map(|(id, probe)| (*id, probe.clone()))
@@ -4792,19 +4814,10 @@ impl FactoryDaemon {
                     }
                     let cas_dir = self.app.cas_dir().to_path_buf();
                     let session = self.session_name.clone();
-                    self.relay_jobs.submit_write(
-                        &mut self.queue_jobs,
-                        &format!("normal-flag:{row_id}"),
-                        None,
-                        move || {
-                            let done = super::delivery_probe_jobs::write_normal_flag(
-                                &cas_dir, &session, row_id, &probe, evidence, &live,
-                            );
-                            RelayOutput::NormalFlagWritten {
-                                row_id,
-                                probe,
-                                done,
-                            }
+                    self.relay_jobs.submit_blocking_write(
+                        &mut self.queue_jobs, &format!("normal-flag-validate:{row_id}"), move || {
+                            let fresh = super::delivery_probe_jobs::read_normal_probe(&cas_dir, &session, row_id, probe, None, live);
+                            RelayOutput::NormalFlagValidated { fresh, evidence }
                         },
                     );
                 }
@@ -6600,6 +6613,7 @@ impl FactoryDaemon {
         self.normal_delivery_probes
             .retain(|_, probe| probe.pane != pane && probe.target != pane);
         self.queue_jobs.normal_probe_jobs.forget_pane(pane);
+        self.queue_jobs.poison_jobs.forget_pane(pane);
     }
 
     /// Resolve a row's stamped origin into the value the wake gate reasons

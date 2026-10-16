@@ -1,0 +1,161 @@
+//! Poison-sweep snapshots and retryable Teams file delivery (cas-cc89).
+//! Heavy reads and file writes run off the store writer; only short durable
+//! claims, releases and enqueues use Write. The loop owns each pending phase.
+use super::queue_and_events::message_attention::{AttentionInputs, MessageAttention};
+use super::queue_and_events::{
+    delivery_stalled_notice, delivery_stalled_threshold_before_abandonment,
+    teams_body_fallback_text, TEAMS_POINTER_FALLBACK_AFTER_SECS,
+    TEAMS_POINTER_FALLBACK_WINDOW_SECS,
+};
+use super::teams::TeamsManager;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::time::Instant;
+
+#[derive(Default)]
+pub(crate) struct PoisonJobs {
+    pub(crate) generation: u64,
+    epochs: HashMap<String, Arc<AtomicBool>>,
+    pub(crate) pointers: HashMap<String, PendingPointer>,
+    pub(crate) idle_relayed: HashSet<i64>,
+}
+impl PoisonJobs {
+    pub(crate) fn epoch(&mut self, pane: &str) -> Arc<AtomicBool> {
+        self.epochs.entry(pane.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(true))).clone()
+    }
+    pub(crate) fn forget_pane(&mut self, pane: &str) {
+        self.generation = self.generation.wrapping_add(1);
+        if let Some(live) = self.epochs.remove(pane) {
+            live.store(false, Ordering::Release);
+        }
+    }
+}
+#[derive(Clone)]
+pub(crate) struct PointerWork {
+    pub(crate) cas_dir: std::path::PathBuf,
+    pub(crate) row: cas_store::QueuedPrompt,
+    pub(crate) recipient: String,
+    pub(crate) source: String,
+    pub(crate) primary: Arc<TeamsManager>,
+    pub(crate) config_dir: Option<String>,
+    pub(crate) live: Arc<AtomicBool>,
+}
+#[derive(Clone, Copy)]
+pub(crate) enum PointerPhase { Claim, File, Release }
+pub(crate) struct PendingPointer {
+    pub(crate) work: PointerWork,
+    pub(crate) phase: PointerPhase,
+    pub(crate) retry_at: Instant,
+}
+/// Queue ID alone is not a message identity when a held job outlives a change.
+pub(crate) fn same_message(a: &cas_store::QueuedPrompt, b: &cas_store::QueuedPrompt) -> bool {
+    a.id == b.id && a.created_at == b.created_at && a.target == b.target
+        && a.source == b.source && a.prompt == b.prompt && a.factory_session == b.factory_session
+}
+pub(crate) fn still_unread(queue: &dyn cas_store::PromptQueueStore, old: &cas_store::QueuedPrompt) -> bool {
+    let Ok(Some(row)) = queue.queued_prompt(old.id) else { return false; };
+    if !same_message(&row, old) || row.acked_at.is_some() { return false; }
+    let Ok(Some(report)) = queue.message_delivery_report(old.id) else { return false; };
+    report.confirmed_at.is_none()
+        && !report.recipient_receipt.is_some_and(cas_store::SurfacingSource::is_surfaced)
+        && !matches!(report.stage, cas_store::DeliveryStage::Dropped
+            | cas_store::DeliveryStage::Abandoned | cas_store::DeliveryStage::Suppressed)
+}
+pub(crate) fn read_pointers(cas_dir: &std::path::Path, session: &str, recipients: &[String])
+    -> Vec<(cas_store::QueuedPrompt, String)>
+{
+    let now = chrono::Utc::now();
+    crate::store::open_prompt_queue_store(cas_dir).and_then(|queue| Ok(queue.teams_pointer_fallback_candidates(
+        session, recipients,
+        now - chrono::Duration::seconds(TEAMS_POINTER_FALLBACK_WINDOW_SECS),
+        now - chrono::Duration::seconds(TEAMS_POINTER_FALLBACK_AFTER_SECS), 20,
+    )?)).unwrap_or_else(|error| {
+        tracing::warn!(%error, "cas-1f0c: failed to scan unexpanded Teams pointer copies");
+        vec![]
+    })
+}
+pub(crate) fn claim_pointer(work: &PointerWork) -> Result<bool, String> {
+    if !work.live.load(Ordering::Acquire) { return Ok(false); }
+    let queue = crate::store::open_prompt_queue_store(&work.cas_dir).map_err(|e| e.to_string())?;
+    let current = queue.queued_prompt(work.row.id).map_err(|e| e.to_string())?;
+    if !current.as_ref().is_some_and(|row| same_message(row, &work.row)) { return Ok(false); }
+    queue.claim_teams_body_fallback(work.row.id, &work.recipient).map_err(|e| e.to_string())
+}
+/// File-only phase. On panic the loop still owns this phase and resubmits it;
+/// Teams' content dedupe makes a replay of the same body harmless.
+pub(crate) fn file_pointer(work: &PointerWork) -> bool {
+    if !work.live.load(Ordering::Acquire) { return false; }
+    let Ok(queue) = crate::store::open_prompt_queue_store(&work.cas_dir) else { return false; };
+    let Ok(Some(row)) = queue.queued_prompt(work.row.id) else { return false; };
+    if !same_message(&row, &work.row) || row.acked_at.is_some() { return false; }
+    let pane = &work.recipient;
+    let view = work.primary.view_for_config_dir(work.config_dir.as_deref());
+    let view = view.filter(|view| {
+        view.provision_mirror_from(&work.primary, pane).map_err(|error| {
+            tracing::warn!(%error, recipient = %pane, "could not provision recipient Teams tree; using primary");
+        }).is_ok()
+    });
+    if !work.live.load(Ordering::Acquire) { return false; }
+    match view.as_ref().unwrap_or(&work.primary).write_to_inbox(
+        pane, &work.source, &teams_body_fallback_text(&row), row.summary.as_deref(), None,
+    ) {
+        Ok(()) => {
+            tracing::warn!(target: "cas::coordination", stage = "teams_pointer_body_fallback",
+                message_id = row.id, recipient = %pane, "cas-1f0c: wrote full Teams body once");
+            true
+        }
+        Err(error) => {
+            tracing::warn!(%error, message_id = row.id, recipient = %pane,
+                "cas-1f0c: Teams body fallback failed; releasing claim for retry");
+            false
+        }
+    }
+}
+pub(crate) fn release_pointer(work: &PointerWork) -> bool {
+    crate::store::open_prompt_queue_store(&work.cas_dir).and_then(|queue| {
+        Ok(queue.release_teams_body_fallback(work.row.id, &work.recipient)?)
+    }).map_err(|error| tracing::warn!(%error, "failed to release Teams fallback claim")).is_ok()
+}
+pub(crate) struct BounceCandidate {
+    pub(crate) row: cas_store::QueuedPrompt,
+    pub(crate) notice: String,
+}
+pub(crate) fn read_bounces(context: &AttentionInputs, harnesses: &HashMap<String, cas_mux::SupervisorCli>,
+    default_harness: cas_mux::SupervisorCli) -> Vec<BounceCandidate>
+{
+    // Config metadata and load belong to the read job too, even on a cache hit.
+    let config = crate::config::Config::load(&context.cas_dir).unwrap_or_default();
+    let factory = config.factory();
+    let Ok(queue) = crate::store::open_prompt_queue_store(&context.cas_dir) else { return vec![]; };
+    let rows = match queue.delivery_stalled_candidates(&context.session_name,
+        delivery_stalled_threshold_before_abandonment(factory.delivery_stalled_priority_secs),
+        delivery_stalled_threshold_before_abandonment(factory.delivery_stalled_normal_secs), 50)
+    {
+        Ok(rows) => rows,
+        Err(error) => { tracing::warn!(%error, "failed to scan aged unread coordination messages"); return vec![]; }
+    };
+    let decisions = context.decisions(queue.as_ref(), &rows);
+    rows.into_iter().filter(|row| decisions.get(&row.id) == Some(&MessageAttention::Needed))
+        .map(|row| {
+            let report = queue.message_delivery_report(row.id).unwrap_or_else(|error| {
+                tracing::warn!(%error, message_id = row.id, "failed to read delivery state for sender bounce"); None
+            });
+            let notice = delivery_stalled_notice(&row, harnesses.get(&row.target).copied().unwrap_or(default_harness), report.as_ref());
+            BounceCandidate { row, notice }
+        }).collect()
+}
+pub(crate) fn write_bounce(context: &AttentionInputs, candidate: BounceCandidate, live: Arc<AtomicBool>) {
+    if !live.load(Ordering::Acquire) { return; }
+    let Ok(queue) = crate::store::open_prompt_queue_store(&context.cas_dir) else { return; };
+    if !still_unread(queue.as_ref(), &candidate.row) { return; }
+    match queue.enqueue_delivery_stalled_bounce(candidate.row.id, &context.session_name,
+        &candidate.notice, "delivery stalled — recipient unread")
+    {
+        Ok(Some(bounce_id)) => tracing::warn!(target: "cas::coordination", stage = "delivery_stalled_bounced",
+            message_id = candidate.row.id, bounce_id, sender = %candidate.row.source,
+            recipient = %candidate.row.target, "aged unread message bounced to its sender"),
+        Ok(None) => {},
+        Err(error) => tracing::warn!(%error, message_id = candidate.row.id, "failed to queue sender-side delivery-stalled bounce"),
+    }
+}

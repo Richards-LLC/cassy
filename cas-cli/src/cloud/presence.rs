@@ -734,6 +734,10 @@ mod round5_tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn late_fence(mode: &str) {
+        late_fence_case(mode, false, false).await;
+    }
+
+    async fn late_fence_case(mode: &str, equal_mtime: bool, replace_unrelated: bool) {
         let env = TestEnvGuard::temp_home();
         let root = init_cas_dir(env.home()).unwrap();
         let server = MockServer::start().await;
@@ -762,9 +766,49 @@ mod round5_tests {
         }
         // Start with an existing directory generation: enqueue must exercise
         // the changed-generation comparison, rather than the None fallback.
-        drop(super::super::shutdown::presence_lease(&root).unwrap().unwrap());
+        drop(
+            super::super::shutdown::presence_lease(&root)
+                .unwrap()
+                .unwrap(),
+        );
+        let dir = root.join("cloud_shutdown");
+        if replace_unrelated {
+            let mut unrelated = Agent::new("unrelated".into(), "unrelated".into());
+            unrelated.cc_session_id = Some("other".into());
+            super::super::shutdown::enqueue(&root, &unrelated, "other", &server.uri()).unwrap();
+        }
+        let intent_files = || {
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|file| file.extension().is_some_and(|ext| ext == "json"))
+                .collect::<Vec<_>>()
+        };
+        let original_intents = intent_files();
+        let original_mtime = std::fs::metadata(&dir).unwrap().modified().unwrap();
         let mut snapshot = super::super::shutdown::Snapshot::load(&root);
+        if replace_unrelated {
+            // Model another drainer retiring an older intent in the same tick.
+            std::fs::remove_file(&original_intents[0]).unwrap();
+        }
         super::super::shutdown::enqueue(&root, &agent, "same", &server.uri()).unwrap();
+        if equal_mtime {
+            std::fs::File::open(&dir)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+                .unwrap();
+            assert_eq!(
+                std::fs::metadata(&dir).unwrap().modified().unwrap(),
+                original_mtime
+            );
+        }
+        if replace_unrelated {
+            assert_eq!(
+                intent_files().len(),
+                original_intents.len(),
+                "entry count alone cannot detect replacement"
+            );
+        }
         let endpoint = server.uri();
         let mode = mode.to_string();
         let (action, record) = tokio::task::spawn_blocking(move || {
@@ -824,5 +868,20 @@ mod round5_tests {
     #[tokio::test]
     async fn cas_4ac8_round5_late_fence_blocks_direct_registration() {
         late_fence("register").await;
+    }
+
+    #[tokio::test]
+    async fn cas_12e7_equal_mtime_late_intent_fences_heartbeat() {
+        late_fence_case("heartbeat", true, false).await;
+    }
+
+    #[tokio::test]
+    async fn cas_12e7_equal_mtime_and_count_replacement_fences_heartbeat() {
+        late_fence_case("heartbeat", true, true).await;
+    }
+
+    #[tokio::test]
+    async fn cas_12e7_equal_mtime_late_intent_blocks_registration() {
+        late_fence_case("register", true, false).await;
     }
 }

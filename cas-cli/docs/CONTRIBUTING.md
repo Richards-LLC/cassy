@@ -156,6 +156,9 @@ after `/clear` remains fenced without a session id, regardless of PID ancestry.
 Shutdown checks supersession without the network lease and takes the exclusive
 lease only for due work. Presence shares parsed fences within each pass and
 refreshes them after acquiring its lease when the intent directory changes.
+Change detection compares mtime plus the exact sorted intent filenames, so a
+late intent is detected even when timestamps and entry counts coincide. Readers
+remain lock-free; unchanged generations retain their parsed intent cache.
 A listing failure fails closed for an unknown harness session; known sessions
 can still check their direct fences. Cleanup re-reads pending work before writing
 so a stale pass cannot recreate retired files or overwrite a completion. Startup

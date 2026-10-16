@@ -21853,8 +21853,11 @@ pub(crate) fn run_declared_pre_close_hook(
             // be on its next task's per-task branch; that checkout is neither
             // this task's evidence nor a history rewrite, and its tip is
             // never offered as this task's receipt.
+            // A task that names no delivery branch keeps measuring HEAD.
+            let candidates = task_delivery_branch_candidates(task);
             let own_ref: Option<String> = if task.status == TaskStatus::AwaitingMerge
-                && !task_delivery_branch_candidates(task).contains(&head_branch)
+                && !candidates.is_empty()
+                && !candidates.contains(&head_branch)
             {
                 task_delivery_branch(path, task)
             } else {

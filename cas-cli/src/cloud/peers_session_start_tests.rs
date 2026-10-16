@@ -150,10 +150,7 @@ async fn cas_97ff_one_live_two_stale_names_the_live_peer_and_counts_stale() {
     }
     assert!(full.contains("2 stale"), "{full}");
     assert!(!full.contains("old-owl"), "stale peers collapse to a count: {full}");
-    assert!(
-        full.contains("mcp__cas__coordination action=peers detail=true"),
-        "{full}"
-    );
+    assert!(full.contains("`cas peers --detail`"), "{full}");
     assert!(block.compact.contains("1 live") && block.compact.contains("2 stale"));
 }
 
@@ -321,4 +318,29 @@ async fn cas_97ff_only_supervisors_get_the_block() {
     let requests = server.received_requests().await.unwrap();
     assert!(!requests.is_empty());
     assert!(requests.len() <= 3, "one lookup: {}", requests.len());
+}
+
+/// The call-shapes lint accepts only published fields: `detail` is not on
+/// coordination's published surface, so no rendering may advertise it.
+#[test]
+fn cas_97ff_block_advertises_only_published_calls() {
+    let (agents, locks) = one_live_two_stale();
+    let report = report_from(&agents, &locks);
+    let mut failed = report_from(&agents, &locks);
+    failed.status = "lookup_failed".into();
+    failed.error = Some("connection refused".into());
+    let rendered = [
+        render_session_start_peers(&report, PREFIX).unwrap(),
+        compact_session_start_peers(&report, PREFIX).unwrap(),
+        render_session_start_peers(&failed, PREFIX).unwrap(),
+    ];
+    for text in &rendered {
+        assert!(!text.contains("detail="), "{text}");
+        for call in text.split("coordination action=").skip(1) {
+            let action = call.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next();
+            assert_eq!(action, Some("peers"), "{text}");
+        }
+    }
+    assert!(rendered[0].contains(DETAIL_COMMAND) && rendered[1].contains(DETAIL_COMMAND));
+    assert!(rendered[2].contains("mcp__cas__coordination action=peers`"), "{}", rendered[2]);
 }

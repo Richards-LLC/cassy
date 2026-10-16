@@ -117,7 +117,7 @@ after `/clear`. The block reads the same snapshot as `cas peers`:
 ## Live peer supervisors on this repo (Cassy Cloud)
 - qa7e32-b-b251eb on soundwave: heartbeat 13s ago, focus cas-3775, 3 claimed tasks
 2 stale (seen in the last 24h, not live)
-Their claims and work: `coordination action=peers detail=true`. Coordinate before taking the same tasks.
+Their claims and work: `cas peers --detail`. Coordinate before taking the same tasks.
 ```
 
 There is no block when no peer is live, when the project does not use Cassy

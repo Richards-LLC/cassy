@@ -48,9 +48,15 @@ fn clean(value: &str, max: usize) -> String {
     out
 }
 
+/// The peers board, as a published `coordination` call. Its claims and
+/// workers view (`detail`) is not on coordination's published surface, so
+/// the block points at the CLI for that ([`DETAIL_COMMAND`]).
 fn command(tool_prefix: &str) -> String {
-    format!("{tool_prefix}coordination action=peers detail=true")
+    format!("{tool_prefix}coordination action=peers")
 }
+
+/// Each peer's claims, workers and branches, from the same report.
+pub const DETAIL_COMMAND: &str = "cas peers --detail";
 
 /// The report's lookup failed: one line, never "no peers". `None` when the
 /// project does not use Cassy Cloud (not logged in, or no repo identity).
@@ -125,8 +131,7 @@ pub fn render_session_start_peers(report: &PeerReport, tool_prefix: &str) -> Opt
         out.push_str("\nClaims could not be read for every peer.");
     }
     out.push_str(&format!(
-        "\nTheir claims and work: `{}`. Coordinate before taking the same tasks.",
-        command(tool_prefix)
+        "\nTheir claims and work: `{DETAIL_COMMAND}`. Coordinate before taking the same tasks."
     ));
     Some(out)
 }
@@ -139,8 +144,7 @@ pub fn compact_session_start_peers(report: &PeerReport, tool_prefix: &str) -> Op
     let (live, stale) = counts(report);
     (live > 0).then(|| {
         format!(
-            "{HEADING}\n{live} live, {stale} stale; run `{}`",
-            command(tool_prefix)
+            "{HEADING}\n{live} live, {stale} stale; run `{DETAIL_COMMAND}`"
         )
     })
 }

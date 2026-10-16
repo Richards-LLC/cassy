@@ -704,3 +704,31 @@ async fn cas_cc89_reset_cancels_a_claimed_pointer_before_file_delivery() {
             .drain_for_shutdown(&root, Duration::from_secs(3))
     );
 }
+
+#[tokio::test]
+async fn cas_cc89_shutdown_releases_a_pointer_claim_waiting_on_the_writer() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let (temp, mut daemon, queue, row) = fixture(false);
+    let _inbox = setup_pointer(&mut daemon, queue.as_ref(), row, temp.path(), &mut env).await;
+    let root = daemon.app.cas_dir().to_path_buf();
+    daemon.queue_jobs = prompt_queue_jobs::QueueJobs::start_with_private_writer(root, None);
+    let release = hold_lane(&mut daemon, jobs::Lane::Write);
+    daemon.fallback_unsurfaced_teams_pointers(queue.as_ref()).await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let key = format!("teams-fallback:{row}:worker-a:claim");
+    while !daemon.relay_jobs.writing(&key) {
+        daemon.drain_relay_jobs();
+        assert!(Instant::now() < deadline, "claim never reached held writer");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let releasing = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        let _ = release.send(());
+    });
+    let worker = super::super::store_worker::StoreWorker::start();
+    assert!(daemon.finish_shutdown_writes(&worker, Duration::from_secs(3)));
+    releasing.join().unwrap();
+    assert!(!queue.teams_body_fallback_claimed(row, "worker-a").unwrap(),
+        "shutdown must not leave a durable claim without scheduling its body");
+    assert!(daemon.queue_jobs.poison_jobs.pointers.is_empty());
+}

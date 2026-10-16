@@ -30,3 +30,13 @@ artifact directory. Final delivery reruns bind this review to the delivered code
 
 Reviewed by sharp-koala-95, 2026-10-16. The fixture is labelled as fixture evidence;
 actual Cloud/empty-board and CLI-help captures are separate real-build evidence.
+
+## Team claim extension (cas-8ea7)
+
+Cloud #155 authorizes project-scoped teammate locks. Team claims carry
+`claims_visibility: "team_project"`; the existing `user_id`, `team_id` and
+`project_id` identify the account, while each claim identifies its owning agent.
+The terminal labels `Claims visible (team project)` and `Account <user_id>`
+before the existing claim rows, which remain bounded to 72 columns. Failed
+reads remain unavailable. Personal projects keep the private boundary. Start,
+claim and spawn refusals include the agent, machine and account from the 409.

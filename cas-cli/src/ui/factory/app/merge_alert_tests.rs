@@ -241,7 +241,7 @@ fn cas_9efb_missing_ci_has_one_bounded_unknown_decision() {
     assert!(f.relay().is_empty());
     f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
     let prompts = f.relay();
-    assert_eq!(prompts.len(), 1, "missing CI must not silence the request forever");
+    assert_eq!(prompts.len(), 1, "missing CI");
     assert!(prompts[0].text.contains("CI unknown"), "{}", prompts[0].text);
     assert!(f.relay().is_empty());
     f.ci(Some("success"));

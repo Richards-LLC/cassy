@@ -192,7 +192,7 @@ test.describe("write access without factory:manage cas_ab04", () => {
         return Boolean(reason.compareDocumentPosition(also) & Node.DOCUMENT_POSITION_FOLLOWING);
       })).toBe(true);
       await expect(manage.locator(".fleet-permission-control")).toHaveCount(0);
-      await expect(manage.locator("code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
+      await expect(manage.locator("code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:operate,factory:manage$/);
     });
   });
 });

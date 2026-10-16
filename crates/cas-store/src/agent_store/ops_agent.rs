@@ -249,7 +249,8 @@ impl SqliteAgentStore {
             let rows = conn.execute(
                 "UPDATE agents SET name = ?1, agent_type = ?2, role = ?3, status = ?4, pid = ?5,
              ppid = ?6, cc_session_id = ?7, parent_id = ?8, machine_id = ?9, last_heartbeat = ?10,
-             active_tasks = ?11, metadata = ?12, pid_starttime = ?13, factory_session = COALESCE(?14, factory_session)
+             active_tasks = ?11, metadata = ?12, pid_starttime = ?13, factory_session = COALESCE(?14, factory_session),
+             registered_at = MAX(registered_at, ?16)
              WHERE id = ?15",
                 params![
                     agent.name,
@@ -267,6 +268,10 @@ impl SqliteAgentStore {
                     agent.pid_starttime.map(|v| v as i64),
                     agent.factory_session.as_deref(),
                     agent.id,
+                    // Explicit SessionStart can advance a retained active row.
+                    // UTC RFC3339 epochs sort chronologically; stale snapshots
+                    // must not roll an already resumed incarnation backward.
+                    agent.registered_at.to_rfc3339(),
                 ],
             )?;
 

@@ -4543,11 +4543,6 @@ impl SqlitePromptQueueStore {
     }
 }
 
-/// cas-e829: a Commander turn (`target = 'operator'`) belongs to the session
-/// that wrote it. Live delivery and history both select on
-/// `factory_session`, so a row without one could never be delivered and
-/// would only surface as an orphan in some later session's view. Refuse it
-/// at the write instead of storing it.
 /// Metadata-only evidence shared by the watchdog read and atomic bounce write.
 /// A daemon reminder bearing a worker's name is not recipient-authored work.
 fn recipient_action_satisfies_alarm_on_conn(conn: &Connection, prompt_id: i64) -> Result<bool> {
@@ -4600,6 +4595,11 @@ fn recipient_action_satisfies_alarm_on_conn(conn: &Connection, prompt_id: i64) -
         |row| row.get(0),
     )?)
 }
+/// cas-e829: a Commander turn (`target = 'operator'`) belongs to the session
+/// that wrote it. Live delivery and history both select on
+/// `factory_session`, so a row without one could never be delivered and
+/// would only surface as an orphan in some later session's view. Refuse it
+/// at the write instead of storing it.
 fn require_operator_session(target: &str, factory_session: Option<&str>) -> Result<()> {
     if target.trim().eq_ignore_ascii_case("operator")
         && factory_session.is_none_or(|session| session.trim().is_empty())
@@ -5887,7 +5887,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                      WHERE q.id = ?
                        AND q.target <> 'all_workers'
                        AND q.source <> 'all_workers'
-               AND lower(q.source) <> lower(q.target)
+                       AND lower(q.source) <> lower(q.target)
                        AND NOT (lower(q.target) = 'operator' AND (
                            COALESCE(q.kind, '') IN ('answer', 'status', 'receipt')
                            OR COALESCE(q.dedupe_key, '') LIKE 'commander-mirror:%'

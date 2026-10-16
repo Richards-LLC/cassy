@@ -161,6 +161,40 @@ async fn cas_d697_round2_passed_explicit_qa_satisfies_deferred_close() {
     );
 }
 
+#[tokio::test]
+async fn cas_d697_round2_direct_update_cannot_drop_debt() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    fx.unmerge();
+    let parked = fx.close("cas-bq01").await;
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::AwaitingMerge,
+        "{parked}"
+    );
+    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
+    let request = || {
+        serde_json::from_value(serde_json::json!({
+            "action":"update", "id":"cas-bq01", "status":"closed"
+        }))
+        .unwrap()
+    };
+    let result = fx.supervisor.task(Parameters(request())).await;
+    assert_ne!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::Closed,
+        "{result:?}"
+    );
+    fx.record().await;
+    let result = fx.supervisor.task(Parameters(request())).await;
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::Closed,
+        "{result:?}"
+    );
+}
+
 fn git(repo: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)

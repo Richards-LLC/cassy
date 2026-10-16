@@ -284,6 +284,7 @@ impl FactoryApp {
             error_set_at: None,
             sidecar_collapsed: false,
             worktree_manager,
+            crash_cleanups_pending: Default::default(),
             selected_worker_tab: 0,
             tabbed_workers: config.tabbed_workers,
             is_tabbed: config.tabbed_workers,
@@ -474,6 +475,7 @@ impl FactoryApp {
             error_set_at: None,
             sidecar_collapsed: false,
             worktree_manager,
+            crash_cleanups_pending: Default::default(),
             selected_worker_tab: 0,
             tabbed_workers,
             is_tabbed: tabbed_workers,
@@ -637,6 +639,11 @@ impl FactoryApp {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_worktree_manager_for_test(&mut self, manager: WorktreeManager) {
+        self.worktree_manager = Some(manager);
+    }
+
+    #[cfg(test)]
     pub(crate) fn adopt_worker_pane_for_test(&mut self, pane: cas_mux::Pane) {
         self.worker_names.push(pane.id().to_string());
         self.mux.add_pane(pane);
@@ -730,6 +737,7 @@ impl FactoryApp {
             error_set_at: None,
             sidecar_collapsed: false,
             worktree_manager: None,
+            crash_cleanups_pending: Default::default(),
             selected_worker_tab: 0,
             tabbed_workers: false,
             is_tabbed: false,

@@ -1733,6 +1733,14 @@ impl QueueJobs {
         std::mem::take(&mut self.external)
     }
 
+    /// Finished external jobs applied but not yet taken (tests: wait for a
+    /// whole batch to finish without taking it).
+    #[cfg(test)]
+    pub(crate) fn external_completions_ready(&mut self) -> usize {
+        self.apply_completions();
+        self.external.len()
+    }
+
     /// The finished external jobs whose kind matches `owns`, leaving the
     /// rest for their own owner (cas-4491f: the relays and the director
     /// refresh share this runtime).

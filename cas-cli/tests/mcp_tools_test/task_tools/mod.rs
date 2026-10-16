@@ -11,6 +11,7 @@ mod aliases;
 mod operations;
 mod peer_claims;
 mod qa_evidence_gate;
+mod batch_qa;
 mod reopen_atomicity;
 mod verification_flow;
 

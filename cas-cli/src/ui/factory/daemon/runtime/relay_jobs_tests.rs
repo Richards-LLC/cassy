@@ -632,7 +632,7 @@ async fn cas_26c8_a_retrying_group_does_not_hold_back_a_later_death() {
     let (_dir, cas_dir) = project_with_worker();
     let mut daemon = daemon_on_lanes(&cas_dir);
     // The stuck group's relay never gets its prompt queued; a lone death relays.
-    daemon.relay_jobs.death_group_override = Some(|_, group, _| group.len() < 2);
+    daemon.relay_jobs.death_group_override = Some(|_, _, group, _| group.len() < 2);
     let t0 = chrono::Utc::now() - chrono::Duration::seconds(60);
     let exit = |worker: &str, offset_ms: i64| super::ObservedWorkerExit {
         at: t0 + chrono::Duration::milliseconds(offset_ms),
@@ -708,7 +708,7 @@ async fn cas_ff42_crash_stale_mark_writes_nothing_inside_the_enforced_step() {
 /// the enforced step, trips the lane guard. This is what makes the test above
 /// a real proof rather than a guard that never fires.
 #[tokio::test]
-#[should_panic]
+#[should_panic(expected = "enforce mode: move it to the jobs lane")]
 async fn cas_ff42_inline_death_record_trips_the_enforced_step() {
     let (_dir, cas_dir) = project_with_worker();
     let progress = super::loop_watchdog::LoopProgress::new();
@@ -725,5 +725,38 @@ async fn cas_ff42_inline_death_record_trips_the_enforced_step() {
         "exited with code 1",
         None,
         crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred,
+        None,
     );
+}
+
+/// cas-ff42 review M: a death record job that panics reports nothing. Its
+/// exit is settled without a death instead of staying `recording`, so its
+/// group and the sweep's hold on that worker are released.
+#[tokio::test]
+async fn cas_ff42_a_panicked_death_record_does_not_hold_its_exit_forever() {
+    let (_dir, cas_dir) = project_with_worker();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    daemon.relay_jobs.death_record_override = Some(|_, _, _, _, _, _, _, _| panic!("record job panicked"));
+    let at = chrono::Utc::now() - chrono::Duration::seconds(60);
+    daemon.recent_worker_exits.push(super::ObservedWorkerExit {
+        at,
+        worker: "relay-worker".into(),
+        status: "exited with code 1".into(),
+        death: None,
+        recording: true,
+    });
+    daemon.mark_registered_worker_stale(
+        "relay-worker",
+        "exited with code 1",
+        None,
+        crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred,
+        Some(at),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !daemon.recent_worker_exits.is_empty() {
+        daemon.relay_correlated_worker_deaths();
+        assert!(Instant::now() < deadline, "the exit stayed recording: {:?}", daemon.recent_worker_exits);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    settle_relays(&mut daemon).await;
 }

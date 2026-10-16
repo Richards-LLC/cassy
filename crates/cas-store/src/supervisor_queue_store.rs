@@ -445,9 +445,10 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
             };
             // cas-ff42 L2: every other recipient of a folded member (a live
             // Director, say) gets its own copy of the fold, so stamping its
-            // member rows never leaves it without the group alert. A copy
-            // carries no prompt of its own: it waits in that recipient's
-            // queue like the per-worker rows it replaces.
+            // member rows never leaves it without the group alert. The copy
+            // is unstamped and names its recipient (`fold_copy_for`), so the
+            // death sweep injects its prompt like the per-worker prompts it
+            // replaces.
             for prefix in folded_key_prefixes {
                 let member = format!("{prefix}:");
                 let others: Vec<String> = {
@@ -467,8 +468,8 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
                     tx.execute(
                         "INSERT OR IGNORE INTO supervisor_queue
                             (supervisor_id, event_type, payload, priority, created_at,
-                             transition_key, prompt_delivered_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?5)",
+                             transition_key)
+                         VALUES (?1, ?2, json_set(?3, '$.fold_copy_for', ?1), ?4, ?5, ?6)",
                         params![
                             other,
                             event_type,
@@ -1540,14 +1541,16 @@ mod tests {
         let untouched = store.get(lookalike).unwrap().unwrap();
         assert!(untouched.prompt_delivered_at.is_none() && untouched.processed_at.is_none());
         // cas-ff42 L2: sup-b's member row was folded away, so sup-b holds its
-        // own copy of the fold, already prompt-stamped and still unread.
+        // own copy of the fold, awaiting its prompt and naming its recipient.
         let copy = store
             .get_by_transition_key("fold:w1:100:sup-b")
             .unwrap()
             .expect("the other recipient keeps the group alert");
         assert_eq!(copy.supervisor_id, "sup-b");
         assert_eq!(copy.event_type, "workers_died_together");
-        assert!(copy.prompt_delivered_at.is_some() && copy.processed_at.is_none());
+        assert!(copy.prompt_delivered_at.is_none() && copy.processed_at.is_none());
+        let copy_payload: serde_json::Value = serde_json::from_str(&copy.payload).unwrap();
+        assert_eq!(copy_payload["fold_copy_for"], "sup-b");
         assert!(
             store.get_by_transition_key("fold:w1:100:sup-a").unwrap().is_none(),
             "the fold's own recipient gets no copy"

@@ -244,27 +244,38 @@ pub(crate) struct GivenUpDeath {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FoldedGroupStep {
     /// The fold's durable row is committed, which stamped the held
-    /// per-worker rows in the same transaction: the group is done, and the
-    /// death sweep owns a prompt that has not reached the queue yet.
+    /// per-worker rows in the same transaction, and either its prompt is
+    /// queued or the death sweep re-drives it: the group is done.
     Fold,
-    /// Not committed yet: keep the group and try again next tick.
+    /// Not finished yet: keep the group and try again next tick.
     Retry,
     /// Not committed after ten minutes: relay each death on its own. Its
     /// members were never stamped, so they still can be.
     FallBack,
+    /// cas-ff42 review: committed, but its prompt is not queued and the sweep
+    /// never re-drives this recipient (`operator`, or one outside this
+    /// session). After ten minutes of retries, stop and say so.
+    GiveUp,
 }
 
-/// cas-ff42 L1: a committed fold has exactly one recovery path, the death
-/// sweep's re-drive; the group retry and the per-worker fallback only cover a
-/// fold whose row never committed. (cas-26c8 L2's guarantee stands: an
-/// enqueued prompt implies a committed row, so it never falls back.)
-pub(crate) fn folded_group_step(fold_recorded: bool, age: chrono::Duration) -> FoldedGroupStep {
-    if fold_recorded {
-        FoldedGroupStep::Fold
-    } else if age < chrono::Duration::minutes(10) {
-        FoldedGroupStep::Retry
-    } else {
-        FoldedGroupStep::FallBack
+/// cas-ff42 L1: a committed fold has exactly one recovery path. The death
+/// sweep re-drives the prompt of a fold to this session's live supervisors;
+/// for any other recipient the group write keeps retrying, then gives up with
+/// a warning. The per-worker fallback only covers a fold whose row never
+/// committed, so it never sends twice. (cas-26c8 L2's guarantee stands: an
+/// enqueued prompt implies a committed row.)
+pub(crate) fn folded_group_step(
+    fold_recorded: bool,
+    prompt_enqueued: bool,
+    sweep_redrives: bool,
+    age: chrono::Duration,
+) -> FoldedGroupStep {
+    let young = age < chrono::Duration::minutes(10);
+    match (fold_recorded, prompt_enqueued || sweep_redrives, young) {
+        (true, true, _) => FoldedGroupStep::Fold,
+        (_, _, true) => FoldedGroupStep::Retry,
+        (true, false, false) => FoldedGroupStep::GiveUp,
+        (false, _, false) => FoldedGroupStep::FallBack,
     }
 }
 
@@ -303,6 +314,7 @@ pub(crate) fn death_group_key(group: &[ObservedWorkerExit]) -> String {
 /// relays after ten minutes. Returns false when the group must be retried.
 pub(crate) fn relay_death_group_io(
     cas_dir: &std::path::Path,
+    factory_session: &str,
     group: &[ObservedWorkerExit],
     age: chrono::Duration,
 ) -> bool {
@@ -311,11 +323,33 @@ pub(crate) fn relay_death_group_io(
         return true;
     }
     let attempt = super::lifecycle::enqueue_folded_worker_deaths_relay(cas_dir, group);
-    match folded_group_step(attempt.recorded, age) {
+    let sweep_redrives = attempt.recipient.as_deref().is_some_and(|recipient| {
+        open_agent_store(cas_dir).is_ok_and(|agents| {
+            crate::mcp::tools::service::orphan_recovery::live_session_supervisors(
+                agents.as_ref(),
+                factory_session,
+            )
+            .iter()
+            .any(|live| live == recipient)
+        })
+    });
+    match folded_group_step(attempt.recorded, attempt.prompt_enqueued, sweep_redrives, age) {
         FoldedGroupStep::Retry => false,
         FoldedGroupStep::Fold => true,
         FoldedGroupStep::FallBack => {
             relay_held_worker_deaths_io(cas_dir, group);
+            true
+        }
+        FoldedGroupStep::GiveUp => {
+            tracing::warn!(
+                target: "cas::coordination",
+                stage = "worker_death_fold_gave_up",
+                recipient = %attempt.recipient.as_deref().unwrap_or("unknown"),
+                workers = %group.iter().map(|exit| exit.worker.as_str()).collect::<Vec<_>>().join(","),
+                "a folded worker-death relay was recorded but its prompt never reached the queue \
+                 in ten minutes; the death sweep does not re-drive this recipient, so retries stop \
+                 (the row stays in the recipient's queue)"
+            );
             true
         }
     }
@@ -338,10 +372,16 @@ fn relay_held_worker_deaths_io(cas_dir: &std::path::Path, group: &[ObservedWorke
     }
 }
 
+/// cas-ff42 C6: the write-lane key of one exit's death record.
+pub(crate) fn worker_death_record_key(worker: &str, at: chrono::DateTime<chrono::Utc>) -> String {
+    format!("worker-death:{worker}:{}", at.timestamp_nanos_opt().unwrap_or_default())
+}
+
 /// cas-ff42 C6 (write lane): mark an exited worker's registration stale,
 /// park its leases and record its death. A death relayed later
 /// ([`DeathRelay::Deferred`](crate::mcp::tools::service::orphan_recovery::DeathRelay))
 /// comes back for the correlation window.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_worker_death_io(
     cas_dir: &std::path::Path,
     factory_session: &str,
@@ -350,6 +390,7 @@ pub(crate) fn record_worker_death_io(
     reason: &str,
     exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
     relay: crate::mcp::tools::service::orphan_recovery::DeathRelay,
+    exit_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Option<DeferredWorkerDeath> {
     let Ok(agent_store) = open_agent_store(cas_dir) else {
         return None;
@@ -368,6 +409,9 @@ pub(crate) fn record_worker_death_io(
                     .filter(|agent| {
                         agent.name == worker_name
                             && agent.factory_session.as_deref() == Some(factory_session)
+                            // cas-ff42 review: a same-name respawn that
+                            // registered after this exit is not the dead one.
+                            && exit_at.is_none_or(|at| agent.last_heartbeat <= at)
                     })
                     .max_by_key(|agent| agent.last_heartbeat)
             })
@@ -5536,12 +5580,13 @@ impl FactoryDaemon {
         let worker = worker_name.to_string();
         let reason = reason.to_string();
         let exit = exit.cloned();
-        let key = format!(
-            "worker-death:{worker_name}:{}",
-            exit_at.unwrap_or_else(chrono::Utc::now).timestamp_nanos_opt().unwrap_or_default()
-        );
+        let key = worker_death_record_key(worker_name, exit_at.unwrap_or_else(chrono::Utc::now));
+        #[cfg(test)]
+        let record = self.relay_jobs.death_record_override.unwrap_or(record_worker_death_io);
+        #[cfg(not(test))]
+        let record = record_worker_death_io;
         let submitted = self.relay_jobs.submit_write(&mut self.queue_jobs, &key, None, move || {
-            let death = record_worker_death_io(
+            let death = record(
                 &cas_dir,
                 &session,
                 &worker,
@@ -5549,6 +5594,7 @@ impl FactoryDaemon {
                 &reason,
                 exit.as_ref(),
                 relay,
+                exit_at,
             );
             super::relay_jobs::RelayOutput::WorkerDeathRecorded { worker, at: exit_at, death }
         });
@@ -5598,6 +5644,28 @@ impl FactoryDaemon {
     /// cas-26c8 L1: submit every closed group that has no write in flight,
     /// each under its own key, lone deaths included.
     fn advance_correlated_worker_deaths(&mut self) {
+        // cas-ff42 review M: a record job that panicked (or was dropped)
+        // reports nothing and frees its key. Its exit must not stay recording,
+        // which would hold its group and the sweep's name hold forever.
+        let vanished = self
+            .recent_worker_exits
+            .iter()
+            .filter(|exit| {
+                exit.recording
+                    && !self
+                        .relay_jobs
+                        .writing(&worker_death_record_key(&exit.worker, exit.at))
+            })
+            .map(|exit| (exit.worker.clone(), exit.at))
+            .collect::<Vec<_>>();
+        for (worker, at) in vanished {
+            tracing::warn!(
+                target: "cas::coordination",
+                worker = %worker,
+                "cas-ff42: a worker's death record job ended without reporting; its exit is relayed without a held death"
+            );
+            self.settle_worker_death_record(&worker, at, None);
+        }
         let now = chrono::Utc::now();
         for group in
             closed_death_groups(&self.recent_worker_exits, now, WORKER_DEATH_CORRELATION_WINDOW)
@@ -5609,13 +5677,14 @@ impl FactoryDaemon {
                 continue;
             }
             let cas_dir = self.app.cas_dir().to_path_buf();
+            let session = self.session_name.clone();
             let age = now - group[0].at;
             #[cfg(test)]
             let relay = self.relay_jobs.death_group_override.unwrap_or(relay_death_group_io);
             #[cfg(not(test))]
             let relay = relay_death_group_io;
             self.relay_jobs.submit_write(&mut self.queue_jobs, &key, None, move || {
-                let done = relay(&cas_dir, &group, age);
+                let done = relay(&cas_dir, &session, &group, age);
                 super::relay_jobs::RelayOutput::DeathsRelayed { group, done }
             });
         }
@@ -5709,7 +5778,13 @@ impl FactoryDaemon {
                 &format!("death-sweep:fold:{id}"),
                 Some(basis),
                 move || {
-                    super::lifecycle::redrive_folded_worker_deaths_relay(&cas_dir, id, &payload);
+                    // cas-ff42 L2: a per-recipient copy prompts its own
+                    // recipient; the fold itself replays its relay.
+                    if payload.get("fold_copy_for").is_some() {
+                        super::lifecycle::inject_fold_copy_prompt(&cas_dir, id, &payload);
+                    } else {
+                        super::lifecycle::redrive_folded_worker_deaths_relay(&cas_dir, id, &payload);
+                    }
                     RelayOutput::DeathSweepWritten
                 },
             );

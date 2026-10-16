@@ -1806,6 +1806,32 @@ fn assemble_markdown(
             "Rescued stages plus recorded hand fixes".to_string(),
         )),
     }
+    // The stat strip shows a short figure; any qualifier joins its definition.
+    let glance = glance
+        .into_iter()
+        .map(|(measure, value, definition)| {
+            let split = value.split_once(" — ").or_else(|| {
+                (measure == "Lesson recurrence")
+                    .then(|| value.split_once(" ("))
+                    .flatten()
+            });
+            match split {
+                Some((figure, qualifier)) => {
+                    let qualifier = if value.contains(" — ") {
+                        let mut chars = qualifier.chars();
+                        chars
+                            .next()
+                            .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+                            .unwrap_or_default()
+                    } else {
+                        format!("({qualifier}")
+                    };
+                    (measure, figure.to_string(), format!("{qualifier}; {definition}"))
+                }
+                None => (measure, value, definition),
+            }
+        })
+        .collect::<Vec<_>>();
     let mut method = vec![format!(
         "Changes and GitHub issues are counted separately. A change is one titled entry in the {tag} CHANGELOG section; tests and documentation entries are listed under the hood but not counted."
     )];
@@ -3420,7 +3446,7 @@ Dev reply
              BLOCKER_COUNT=2\nBLOCKER_COSTS=gate:600,pipeline:1700\nBLOCKED_SECS=2300\n",
         ));
         let report = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
-        assert!(report.contains("| Tag to published | 15m 8s — over budget (10m 0s budget) |"));
+        assert!(report.contains("| Tag to published | 15m 8s | Over budget (10m 0s budget);"));
         assert!(report.contains("| Manual interventions | 8 |"));
         // cas-a629: the whole wall clock and each blocker's cost.
         assert!(
@@ -3434,7 +3460,7 @@ Dev reply
         sources.release_evidence.green_to_published_seconds = Some(626);
         let green_report = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
         assert!(
-            green_report.contains("| Green to published | 10m 26s — over budget (10m 0s budget) |"),
+            green_report.contains("| Green to published | 10m 26s | Over budget (10m 0s budget);"),
             "{green_report}"
         );
         assert!(
@@ -3457,11 +3483,11 @@ Dev reply
         );
         assert!(
             main_landed_report
-                .contains("| Main to published | 10m 16s — over budget (10m 0s budget) |"),
+                .contains("| Main to published | 10m 16s | Over budget (10m 0s budget);"),
             "{main_landed_report}"
         );
         assert!(
-            report.contains("| Blockers | 2 — 38m 20s blocked: gate 10m 0s; pipeline 28m 20s |"),
+            report.contains("| Blockers | 2 | 38m 20s blocked: gate 10m 0s; pipeline 28m 20s;"),
             "{report}"
         );
         // cas-9734: the release's lesson recurrence rate.
@@ -3475,7 +3501,7 @@ Dev reply
         let measured = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
         assert!(
             measured.contains(
-                "| Lesson recurrence | 2 of 4 rescues (50%) repeated a learned lesson: scratch-base, version-literals |"
+                "| Lesson recurrence | 2 of 4 rescues | (50%) repeated a learned lesson: scratch-base, version-literals;"
             ),
             "{measured}"
         );

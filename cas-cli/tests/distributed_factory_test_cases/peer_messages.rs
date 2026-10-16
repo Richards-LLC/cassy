@@ -1373,3 +1373,65 @@ fn cas_a19b_peer_abandonment_survives_an_unregistered_sender() {
     // pin: the future-session notice must identify its own durable outbox receipt.
     assert!(future[0].prompt.contains("peer-outbox:43"));
 }
+
+
+#[tokio::test]
+async fn ct2_p3_peer_mail_survives_restart() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    for unregister in [false, true] {
+        let (server, registry, mailbox) = fake_cloud_with_mailbox().await;
+        let endpoint = server.uri();
+        let alpha = TestMachine::new("machine-alpha");
+        let beta = TestMachine::new("machine-beta");
+        tokio::task::spawn_blocking(move || {
+            seed_project(&alpha, &endpoint, "github.com/acme/widgets");
+            seed_project(&beta, &endpoint, "github.com/acme/widgets");
+            supervisor(&alpha, "a");
+            let register = |id: &str| {
+                let mut agent = Agent::new(id.into(), "peer-beta".into());
+                agent.role = AgentRole::Supervisor;
+                agent.machine_id = Some("machine-beta".into());
+                agent.factory_session = Some(format!("factory-{id}"));
+                let config = cas::cloud::CloudConfig::load_from_cas_dir(&beta.cas_dir).unwrap();
+                cas::cloud::CloudCoordinator::new(config).unwrap()
+                    .with_canonical_id(Some("github.com/acme/widgets".into()))
+                    .register_with_focus(&agent, Some("cas-571d")).unwrap();
+                open_agent_store(&beta.cas_dir).unwrap().register(&agent).unwrap();
+            };
+            register("b-old");
+            let agents = open_agent_store(&beta.cas_dir).unwrap();
+            if unregister { agents.unregister("b-old").unwrap(); }
+            else {
+                let mut old = agents.get("b-old").unwrap();
+                old.status = cas::types::AgentStatus::Shutdown;
+                agents.update(&old).unwrap();
+            }
+            registry.lock().unwrap().get_mut("b-old").unwrap()["status"] = json!("shutdown");
+            let peers = peers_of(&alpha.cas_dir, "a");
+            let old_peer = resolve_peer_target(&peers, "peer-beta@machine-beta").unwrap().unwrap();
+            let receipt = send_to_peer(&alpha.cas_dir, "a", old_peer, "mail while down", None, None).unwrap();
+            assert_eq!(mailbox.lock().unwrap()[0]["recipient_agent_id"], "b-old");
+            assert!(inbox(&beta.cas_dir).is_empty());
+            register("b-new");
+            let report = tick(&beta.cas_dir, "b-new");
+            assert_eq!((report.claimed, report.delivered, report.rejected), (1, 1, 0), "unregister={unregister}: {report:?}");
+            let rows = inbox(&beta.cas_dir);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].target, "peer-beta");
+            assert_eq!(rows[0].factory_session.as_deref(), Some("factory-b-new"));
+            assert_eq!(parse_envelope(&rows[0].prompt).unwrap().id, receipt.id);
+            // pin: restart recovery must preserve the original cross-machine body.
+            assert!(rows[0].prompt.ends_with("mail while down"));
+            assert_eq!(tick(&beta.cas_dir, "b-new").claimed, 0);
+            assert_eq!(http_mailbox(&alpha.cas_dir).unwrap().status(&receipt.id).unwrap().status, "delivered");
+            // Model redelivery after an uncertain ACK. The durable Cloud ID
+            // remains the queue idempotency key, including across restarts.
+            mailbox.lock().unwrap()[0]["status"] = json!("queued");
+            let replay = tick(&beta.cas_dir, "b-new");
+            assert_eq!((replay.delivered, replay.duplicates), (0, 1), "{replay:?}");
+            assert_eq!(inbox(&beta.cas_dir).len(), 1);
+            let peers = peers_of(&alpha.cas_dir, "a");
+            assert_eq!(resolve_peer_target(&peers, "peer-beta@machine-beta").unwrap().unwrap().agent_id, "b-new");
+        }).await.unwrap();
+    }
+}

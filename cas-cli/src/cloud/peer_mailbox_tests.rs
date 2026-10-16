@@ -430,3 +430,21 @@ fn http_peer_mailbox_debug_never_prints_its_token() {
     assert!(printed.contains("[REDACTED]"), "{printed}");
     assert!(printed.contains("https://cloud.example"), "{printed}");
 }
+
+
+#[test]
+fn cas_8063_name_at_machine_prefers_live_successor_and_disambiguates_live_twins() {
+    let mut old = peer("same", "box", false);
+    old.agent_id = "old-id".into();
+    let mut new = peer("same", "box", true);
+    new.agent_id = "new-id".into();
+    let peers = vec![old.clone(), new.clone()];
+    assert_eq!(resolve_peer_target(&peers, "same@box").unwrap().unwrap().agent_id, "new-id");
+    old.live = true;
+    let peers = vec![old, new];
+    let ambiguity = resolve_peer_target(&peers, "same@box").unwrap_err();
+    for id in ["old-id", "new-id"] {
+        assert!(ambiguity.contains(id), "{ambiguity}");
+        assert_eq!(resolve_peer_target(&peers, id).unwrap().unwrap().agent_id, id);
+    }
+}

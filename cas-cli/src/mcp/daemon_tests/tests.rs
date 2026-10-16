@@ -497,16 +497,25 @@ async fn embedded_daemon_cloud_cycle_drains_team_queue() {
     const TEAM_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
     let server = MockServer::start().await;
+    // cas-9b5d: a team-linked daemon pulls in team scope only (cas-421e);
+    // a personal pull from it would be refused or miss teammates' rows.
     let personal_pull_path = ["/api/sync", "pull"].join("/");
     Mock::given(method("GET"))
         .and(path(personal_pull_path))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{TEAM_ID}/sync/pull")))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "entries": [], "tasks": [], "rules": [], "skills": [],
-            "specs": [], "events": [], "prompts": [],
-            "file_changes": [], "commit_links": [],
+            "task_dependencies": [],
             "pulled_at": chrono::Utc::now().to_rfc3339(),
+            "team_id": TEAM_ID,
+            "status": "ok",
         })))
-        .expect(1)
+        .expect(1..)
         .mount(&server)
         .await;
     Mock::given(method("POST"))

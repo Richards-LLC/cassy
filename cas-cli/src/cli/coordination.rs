@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::coordination::external_work::{
     ExternalWorkCommand, ExternalWorkService, HttpCloudCoordinationPort, OperationContext,
-    RemoteError, SqliteRequestJournal, VioletThreadResolver,
+    RemoteError, SqliteRequestJournal, VioletThreadResolver, decode_violet_result,
 };
 
 #[derive(Debug, Clone, Subcommand)]
@@ -223,7 +223,8 @@ fn build_violet(
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let proxy = Arc::new(runtime.block_on(cmcp_core::ProxyEngine::from_configs(config.servers.clone()))?);
+    let proxy =
+        Arc::new(runtime.block_on(cmcp_core::ProxyEngine::from_configs(config.servers.clone()))?);
     runtime.block_on(crate::mcp::install_proxy_policy(&proxy, &config));
     Ok(Arc::new(CliViolet {
         runtime: Mutex::new(runtime),
@@ -243,26 +244,4 @@ fn build_violet(_cas_root: &Path, _caller: ()) -> anyhow::Result<Arc<dyn VioletT
         }
     }
     Ok(Arc::new(Unavailable))
-}
-
-#[cfg(feature = "mcp-proxy")]
-fn decode_violet_result(value: Value) -> Result<Value, RemoteError> {
-    if let Some(structured) = value
-        .get("structuredContent")
-        .or_else(|| value.get("structured_content"))
-    {
-        return Ok(structured.clone());
-    }
-    if let Some(items) = value.get("content").and_then(Value::as_array) {
-        for item in items {
-            if let Some(text) = item.get("text").and_then(Value::as_str) {
-                if let Ok(value) = serde_json::from_str::<Value>(text) {
-                    return Ok(value);
-                }
-            }
-        }
-    }
-    Err(RemoteError::unavailable(
-        "Violet returned no structured thread identity",
-    ))
 }

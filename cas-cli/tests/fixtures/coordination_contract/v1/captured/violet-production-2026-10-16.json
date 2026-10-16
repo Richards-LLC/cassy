@@ -1,0 +1,71 @@
+{
+  "captured_at": "2026-10-16 18:12:12 UTC",
+  "source": "Violet production via authenticated violet.violet_read",
+  "source_ref": "a401a1841f0a9d10f5d157f694d853fe22d497ea",
+  "notes": "Identity-only reads: no Slack message bodies fetched, no post, claim, lease or binding activation. Raw MCP receipts retained; reads may populate Violet identity cache.",
+  "cases": [
+    {
+      "name": "identity object",
+      "request": {
+        "external_ref": {
+          "workspace_id": "T011K7W2FK8",
+          "channel_id": "C0B44GUKDK2",
+          "root_ts": "1792161452.497159"
+        },
+        "include_threads": false,
+        "include_channels": false,
+        "include_files": false
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"ok\":true,\"schema_version\":1,\"identity\":{\"workspace_id\":\"T011K7W2FK8\",\"channel_id\":\"C0B44GUKDK2\",\"root_thread_ts\":\"1792161452.497159\"}}"
+          }
+        ]
+      },
+      "is_mutation": false
+    },
+    {
+      "name": "root permalink",
+      "request": {
+        "external_ref": "https://richards-llc.slack.com/archives/C0B44GUKDK2/p1792161452497159",
+        "include_threads": false,
+        "include_channels": false,
+        "include_files": false
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"ok\":true,\"schema_version\":1,\"identity\":{\"workspace_id\":\"T011K7W2FK8\",\"channel_id\":\"C0B44GUKDK2\",\"root_thread_ts\":\"1792161452.497159\"}}"
+          }
+        ]
+      },
+      "is_mutation": false
+    },
+    {
+      "name": "foreign workspace refused",
+      "request": {
+        "external_ref": {
+          "workspace_id": "T0FOREIGN",
+          "channel_id": "C0B44GUKDK2",
+          "root_ts": "1792161452.497159"
+        },
+        "include_threads": false,
+        "include_channels": false,
+        "include_files": false
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"ok\":false,\"error\":{\"code\":\"foreign_workspace\",\"message\":\"The reference belongs to another Slack workspace.\",\"retryable\":false}}"
+          }
+        ],
+        "isError": true
+      },
+      "is_mutation": false
+    }
+  ]
+}

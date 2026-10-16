@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use super::{CasService, CoordinationRequest, McpError};
 use crate::coordination::external_work::{
     ExternalWorkCommand, ExternalWorkService, HttpCloudCoordinationPort, OperationContext,
-    RemoteError, SqliteRequestJournal, VioletThreadResolver,
+    RemoteError, SqliteRequestJournal, VioletThreadResolver, decode_violet_result,
 };
 
 #[cfg(feature = "mcp-proxy")]
@@ -55,27 +55,6 @@ impl VioletThreadResolver for ProxyVioletThreadResolver {
             Err(_) => Err(RemoteError::timeout("Violet thread resolution timed out")),
         }
     }
-}
-
-fn decode_violet_result(value: Value) -> Result<Value, RemoteError> {
-    if let Some(structured) = value.get("structuredContent") {
-        return Ok(structured.clone());
-    }
-    if let Some(structured) = value.get("structured_content") {
-        return Ok(structured.clone());
-    }
-    if let Some(items) = value.get("content").and_then(Value::as_array) {
-        for item in items {
-            if let Some(text) = item.get("text").and_then(Value::as_str) {
-                if let Ok(parsed) = serde_json::from_str::<Value>(text) {
-                    return Ok(parsed);
-                }
-            }
-        }
-    }
-    Err(RemoteError::unavailable(
-        "Violet returned no structured thread identity",
-    ))
 }
 
 #[cfg(not(feature = "mcp-proxy"))]

@@ -419,8 +419,98 @@ pub trait CloudCoordinationPort: Send + Sync {
 }
 
 pub trait VioletThreadResolver: Send + Sync {
-    /// Resolve only through Violet's authenticated `violet_read` contract.
+    /// Resolve only through Violet's authenticated `violet_read` contract and
+    /// return its normalized, verified thread identity.
     fn resolve(&self, external_ref: &str, timeout: Duration) -> Result<Value, RemoteError>;
+}
+
+/// Decode the MCP envelope around Violet's deployed `violet_read` response and
+/// normalize the identity-only v1 contract for the external-work service.
+/// Violet intentionally returns no message body or identity-proof field.
+pub(crate) fn decode_violet_result(value: Value) -> Result<Value, RemoteError> {
+    let payload = value
+        .get("structuredContent")
+        .or_else(|| value.get("structured_content"))
+        .cloned()
+        .or_else(|| {
+            value
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items.iter().find_map(|item| {
+                        item.get("text")
+                            .and_then(Value::as_str)
+                            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                    })
+                })
+        })
+        .or_else(|| value.get("ok").map(|_| value.clone()))
+        .ok_or_else(|| RemoteError::unavailable("Violet returned no structured thread identity"))?;
+
+    if payload.get("ok").is_some() {
+        if payload.get("ok").and_then(Value::as_bool) == Some(false) {
+            let refusal = payload.get("error").cloned().unwrap_or(Value::Null);
+            let code = refusal
+                .get("code")
+                .and_then(Value::as_str)
+                .filter(|code| *code != "completed")
+                .unwrap_or("identity_refused");
+            let guidance = refusal
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Violet refused to verify this Slack thread identity.");
+            return Ok(json!({
+                "schema": CONTRACT_SCHEMA,
+                "code": code,
+                "guidance": guidance,
+            }));
+        }
+        if payload.get("ok").and_then(Value::as_bool) != Some(true)
+            || payload.get("schema_version").and_then(Value::as_u64) != Some(1)
+        {
+            return Err(RemoteError::unavailable(
+                "Violet returned an unsupported identity response schema",
+            ));
+        }
+
+        let identity = payload.get("identity").ok_or_else(|| {
+            RemoteError::unavailable("Violet omitted the verified Slack thread identity")
+        })?;
+        let identity_fields = ["workspace_id", "channel_id", "root_thread_ts"];
+        if identity_fields.iter().any(|field| {
+            identity
+                .get(*field)
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+        }) {
+            return Err(RemoteError::unavailable(
+                "Violet returned an incomplete verified Slack thread identity",
+            ));
+        }
+        return Ok(json!({
+            "schema": CONTRACT_SCHEMA,
+            "code": "completed",
+            "thread_identity": {
+                "provider": "slack",
+                "workspace_id": identity["workspace_id"],
+                "channel_id": identity["channel_id"],
+                "root_ts": identity["root_thread_ts"],
+            }
+        }));
+    }
+
+    // Some internal test doubles already speak the normalized interface. Keep
+    // accepting that service-level shape; production proxy responses are
+    // normalized above from the deployed Violet contract.
+    if payload.get("code").and_then(Value::as_str) == Some("completed")
+        && payload.get("thread_identity").is_some()
+    {
+        return Ok(payload);
+    }
+
+    Err(RemoteError::unavailable(
+        "Violet returned no structured thread identity",
+    ))
 }
 
 #[derive(Clone)]
@@ -1362,6 +1452,34 @@ mod tests {
             _ => panic!("unknown fixture {name}"),
         };
         serde_json::from_str(source).unwrap()
+    }
+
+    #[test]
+    fn violet_resolver_decodes_the_deployed_identity_only_contract_fixture() {
+        let capture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/coordination_contract/v1/captured/violet-production-2026-10-16.json"
+        ))
+        .unwrap();
+        let cases = capture["cases"].as_array().unwrap();
+
+        let from_identity_object = decode_violet_result(cases[0]["response"].clone()).unwrap();
+        let from_permalink = decode_violet_result(cases[1]["response"].clone()).unwrap();
+        let expected_identity = json!({
+            "schema": CONTRACT_SCHEMA,
+            "code": "completed",
+            "thread_identity": {
+                "provider": "slack",
+                "workspace_id": "T011K7W2FK8",
+                "channel_id": "C0B44GUKDK2",
+                "root_ts": "1792161452.497159",
+            }
+        });
+        assert_eq!(from_identity_object, expected_identity);
+        assert_eq!(from_permalink, expected_identity);
+
+        let foreign_workspace = decode_violet_result(cases[2]["response"].clone()).unwrap();
+        assert_eq!(foreign_workspace["code"], "foreign_workspace");
+        assert_ne!(foreign_workspace["code"], "completed");
     }
 
     fn claim(request_id: &str, external_ref: &str) -> ExternalWorkCommand {

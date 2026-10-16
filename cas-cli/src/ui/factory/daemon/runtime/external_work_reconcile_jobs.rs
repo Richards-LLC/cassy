@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::coordination::external_work::{
     ExternalWorkService, HttpCloudCoordinationPort, OperationContext, RemoteError,
-    SqliteRequestJournal, VioletThreadResolver,
+    SqliteRequestJournal, VioletThreadResolver, decode_violet_result,
 };
 
 pub(crate) fn reconcile_due(cas_dir: &Path) -> Result<usize, String> {
@@ -150,26 +150,4 @@ fn build_violet(
         }
     }
     Ok(Arc::new(Unavailable))
-}
-
-#[cfg(feature = "mcp-proxy")]
-fn decode_violet_result(value: Value) -> Result<Value, RemoteError> {
-    if let Some(structured) = value
-        .get("structuredContent")
-        .or_else(|| value.get("structured_content"))
-    {
-        return Ok(structured.clone());
-    }
-    if let Some(items) = value.get("content").and_then(Value::as_array) {
-        for item in items {
-            if let Some(text) = item.get("text").and_then(Value::as_str)
-                && let Ok(value) = serde_json::from_str::<Value>(text)
-            {
-                return Ok(value);
-            }
-        }
-    }
-    Err(RemoteError::unavailable(
-        "Violet returned no structured thread identity",
-    ))
 }

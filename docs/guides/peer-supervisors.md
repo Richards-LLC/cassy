@@ -168,7 +168,7 @@ Address one by project, name, or `name@machine`. A project name that still
 names more than one supervisor is refused with every candidate listed:
 
 ```text
-coordination action=message target=supervisor:violet summary="retry design?" message="How did you build the hub retry?" attachment=docs/retry.md
+coordination action=message target=supervisor:gabber-studio summary="retry design?" message="How did you build the hub retry?" attachment=docs/retry.md
 ```
 
 `attachment` takes a published artifact id, or a file in your checkout as

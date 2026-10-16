@@ -355,32 +355,30 @@ impl Reconcile {
             before.insert(path, working);
         }
         if conflicts.is_empty() {
-            let dirty: Vec<_> = TRACKED
+            let mut dirty = Vec::new();
+            for path in TRACKED
                 .iter()
                 .filter(|p| p.ends_with(".json") || p.ends_with(".toml"))
-                .filter_map(|path| {
-                    let bytes = before.get(*path)?.as_ref()?;
-                    let indexed = index
-                        .get(*path)
-                        .map(|(_, b)| b.as_slice())
-                        .unwrap_or_default();
-                    Some(Ok((
-                        path,
-                        owned_fragment(path, bytes)?,
-                        owned_fragment(path, indexed)?,
-                    )))
-                })
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .filter(|(_, a, b)| a != b)
-                .collect();
+            {
+                let Some(Some(bytes)) = before.get(*path) else {
+                    continue;
+                };
+                let indexed = index
+                    .get(*path)
+                    .map(|(_, b)| b.as_slice())
+                    .unwrap_or_default();
+                let local = owned_fragment(path, bytes)?;
+                if local != owned_fragment(path, indexed)? {
+                    dirty.push((path, local));
+                }
+            }
             if !dirty.is_empty() {
                 let seed = before
                     .iter()
                     .filter_map(|(p, b)| b.clone().map(|b| (p.clone(), b)))
                     .collect();
                 let projected = configuration_projection(root, &seed)?;
-                for (path, local, _) in dirty {
+                for (path, local) in dirty {
                     let expected = std::fs::read(projected.path().join(path)).unwrap_or_default();
                     if local != owned_fragment(path, &expected)? {
                         conflicts.push((*path).to_string());

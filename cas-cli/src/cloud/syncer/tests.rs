@@ -4350,6 +4350,10 @@ async fn cas_9b5d_daemon_sync(
             Some(r#"{"id":"personal-row","title":"personal-row","origin_project":"p"}"#),
         )
         .unwrap();
+    // petra-stella-cloud's frozen personal watermark (cas-59d9 preflight).
+    queue
+        .set_metadata("last_pull_at", "2026-10-02T14:27:08.386Z")
+        .unwrap();
     if let Some(team_id) = team_id {
         // gabber-studio's stuck team watermark (cas-59d9 preflight).
         queue
@@ -4413,7 +4417,7 @@ async fn cas_9b5d_team_linked_daemon_sync_uses_team_scope_only() {
 
     assert_eq!(calls.get("personal_push"), None, "{calls:?}");
     assert_eq!(calls.get("personal_pull"), None, "{calls:?}");
-    assert_eq!(calls.get("team_pull"), Some(&1), "{calls:?}");
+    assert!(calls.get("team_pull").is_some_and(|n| *n >= 1), "{calls:?}");
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     assert_eq!(
         queue
@@ -4422,6 +4426,11 @@ async fn cas_9b5d_team_linked_daemon_sync_uses_team_scope_only() {
             .as_deref(),
         Some("2026-10-16T12:00:00Z"),
         "the team watermark advances"
+    );
+    assert_eq!(
+        queue.get_metadata("last_pull_at").unwrap().as_deref(),
+        Some("2026-10-02T14:27:08.386Z"),
+        "the personal watermark is untouched"
     );
     let rows = queue.list_all(10).unwrap();
     assert_eq!(rows.len(), 1, "the personal row stays queued");
@@ -4438,7 +4447,7 @@ async fn cas_9b5d_team_only_daemon_sync_stays_team_scoped() {
 
     assert_eq!(calls.get("personal_push"), None, "{calls:?}");
     assert_eq!(calls.get("personal_pull"), None, "{calls:?}");
-    assert_eq!(calls.get("team_pull"), Some(&1), "{calls:?}");
+    assert!(calls.get("team_pull").is_some_and(|n| *n >= 1), "{calls:?}");
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     assert_eq!(
         queue

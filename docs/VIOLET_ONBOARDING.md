@@ -13,9 +13,15 @@ credentials file directly. Factory workers receive the union of native registrat
 references and explicit proxy/config grants, subject to server and environment denials;
 update does not edit shell profiles. Only an unavailable retired managed token
 name may move to a different label, and only when exactly one usable canonical
-token exists. A user proxy document bearing Cassy's `# managed` marker may also
-repair an unavailable `VIOLET_SLACK_TOKEN_CASSY_PROXY` reference under that same
-rule. Every mapping is printed. `PASS (Cassy launches)` covers `cas claude` and `cas codex`; the
+token exists. Update also repairs an unavailable
+`env:VIOLET_SLACK_TOKEN_CASSY_PROXY` in project and user proxy files, including
+unmarked files, when exactly one account bearer reference is registered in a
+production Claude/Codex profile and its credential is usable. Exported tokens
+alone cannot select an account. Multiple registered accounts refuse with
+`ambiguous_violet_credential`; custom refs, custom endpoints, working defaults,
+comments and dispatch policy are preserved. The persisted repair serves both
+`cas violet` and the `cas serve` upstream used by MCP artifact posting. Every
+mapping prints variable names only. `PASS (Cassy launches)` covers `cas claude` and `cas codex`; the
 receipt names references absent from the updater's exported environment. Export
 those names before using bare `claude` or `codex`. The private file must be a
 regular file owned by the current user, have no group/other permissions, and be

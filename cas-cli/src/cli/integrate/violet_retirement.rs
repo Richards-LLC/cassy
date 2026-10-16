@@ -320,18 +320,7 @@ pub fn retire_project_proxy(path: &Path) -> Result<bool> {
 /// `cas serve` loads them. This is deliberately separate from runtime fallback.
 /// Host-wide update calls it for each discovered project's native sync phase.
 pub fn repair_proxy_credentials_on_update(project_proxy: Option<&Path>) -> Result<()> {
-    if let Some((path, reason)) = cas_pty::violet_env::warn_credentials_file_for_cli() {
-        anyhow::bail!(
-            "Violet credential repair refused {}: {reason}",
-            path.display()
-        );
-    }
-    let home = dirs::home_dir().context("could not determine HOME for Violet migration")?;
-    let update = UpdateMigration::new(
-        &home,
-        super::violet::update_machine_credentials()?,
-        &ProxyHubProbe,
-    );
+    let mut update = None;
     let mut report = ProfileRetirement::default();
     let mut paths = Vec::new();
     if let Ok(user) = Scope::User.config_path() {
@@ -349,7 +338,28 @@ pub fn repair_proxy_credentials_on_update(project_proxy: Option<&Path>) -> Resul
         let mut doc: toml_edit::DocumentMut = raw
             .parse()
             .map_err(|_| anyhow::anyhow!("parsing Violet proxy config {}", path.display()))?;
-        if update.repair_proxy_auth(&mut doc, &path, &mut report)? {
+        if !default_proxy_auth(&doc) {
+            continue;
+        }
+        if update.is_none() {
+            if let Some((path, reason)) = cas_pty::violet_env::warn_credentials_file_for_cli() {
+                anyhow::bail!(
+                    "Violet credential repair refused {}: {reason}",
+                    path.display()
+                );
+            }
+            let home = dirs::home_dir().context("could not determine HOME for Violet migration")?;
+            update = Some(UpdateMigration::new(
+                &home,
+                cas_pty::violet_env::resolved_environment(&[], &[]),
+                &ProxyHubProbe,
+            ));
+        }
+        if update
+            .as_ref()
+            .expect("initialized above")
+            .repair_proxy_auth(&mut doc, &path, &mut report)?
+        {
             anyhow::ensure!(
                 ifs::atomic_write_if_unchanged(&path, &raw, modified, &doc.to_string())?,
                 "Violet proxy config changed during credential repair at {}; retry cas update",
@@ -358,6 +368,19 @@ pub fn repair_proxy_credentials_on_update(project_proxy: Option<&Path>) -> Resul
         }
     }
     Ok(())
+}
+
+fn default_proxy_auth(doc: &toml_edit::DocumentMut) -> bool {
+    doc.get("servers")
+        .and_then(|servers| servers.get(VIOLET_SERVER))
+        .is_some_and(|entry| {
+            entry
+                .get("url")
+                .and_then(|v| v.as_str())
+                .is_some_and(is_violet_hub_url)
+                && entry.get("auth").and_then(|v| v.as_str())
+                    == Some("env:VIOLET_SLACK_TOKEN_CASSY_PROXY")
+        })
 }
 
 /// Only bearer references at the production hub are account registrations.
@@ -401,7 +424,7 @@ fn registered_update_accounts(home: &Path) -> std::collections::BTreeSet<String>
         let Ok(raw) = ifs::read_capped(&path) else {
             continue;
         };
-        let token = if format == "claude" {
+        let tokens: Vec<String> = if format == "claude" {
             let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
                 continue;
             };
@@ -413,11 +436,12 @@ fn registered_update_accounts(home: &Path) -> std::collections::BTreeSet<String>
                 .as_object()
                 .into_iter()
                 .flat_map(|headers| headers.iter())
-                .find(|(key, _)| key.eq_ignore_ascii_case("Authorization"))
-                .and_then(|(_, value)| value.as_str())
-                .and_then(|text| text.strip_prefix("Bearer ${"))
-                .and_then(|text| text.strip_suffix('}'))
+                .filter(|(key, _)| key.eq_ignore_ascii_case("Authorization"))
+                .filter_map(|(_, value)| value.as_str())
+                .filter_map(|text| text.strip_prefix("Bearer ${"))
+                .filter_map(|text| text.strip_suffix('}'))
                 .map(str::to_owned)
+                .collect()
         } else {
             let Ok(doc) = raw.parse::<toml_edit::DocumentMut>() else {
                 continue;
@@ -432,16 +456,38 @@ fn registered_update_accounts(home: &Path) -> std::collections::BTreeSet<String>
             {
                 continue;
             }
-            entry
+            let mut tokens: Vec<_> = entry
                 .get("bearer_token_env_var")
                 .and_then(|v| v.as_str())
                 .map(str::to_owned)
+                .into_iter()
+                .collect();
+            if let Some(headers) = entry
+                .get("env_http_headers")
+                .and_then(|v| v.as_table_like())
+            {
+                tokens.extend(
+                    headers
+                        .iter()
+                        .filter(|(key, _)| key.eq_ignore_ascii_case("Authorization"))
+                        .filter_map(|(_, value)| value.as_str())
+                        .map(str::to_owned),
+                );
+            }
+            tokens
         };
-        if let Some(token) = token.map(|name| canonical_violet_credential_name(&name))
-            && UpdateMigration::managed_token(&token)
-            && token != "VIOLET_SLACK_TOKEN_CASSY_PROXY"
+        for token in tokens
+            .into_iter()
+            .map(|name| canonical_violet_credential_name(&name))
         {
-            names.insert(token);
+            if UpdateMigration::managed_token(&token)
+                && token != "VIOLET_SLACK_TOKEN_CASSY_PROXY"
+                && token
+                    .bytes()
+                    .all(|b| b == b'_' || b.is_ascii_alphanumeric())
+            {
+                names.insert(token);
+            }
         }
     }
     names
@@ -735,6 +781,9 @@ impl<'a> UpdateMigration<'a> {
         path: &Path,
         report: &mut ProfileRetirement,
     ) -> Result<bool> {
+        if !default_proxy_auth(doc) || self.usable("VIOLET_SLACK_TOKEN_CASSY_PROXY") {
+            return Ok(false);
+        }
         let Some(entry) = doc
             .get_mut("servers")
             .and_then(|servers| servers.get_mut(VIOLET_SERVER))
@@ -742,16 +791,6 @@ impl<'a> UpdateMigration<'a> {
         else {
             return Ok(false);
         };
-        if !entry
-            .get("url")
-            .and_then(|v| v.as_str())
-            .is_some_and(is_violet_hub_url)
-            || entry.get("auth").and_then(|v| v.as_str())
-                != Some("env:VIOLET_SLACK_TOKEN_CASSY_PROXY")
-            || self.usable("VIOLET_SLACK_TOKEN_CASSY_PROXY")
-        {
-            return Ok(false);
-        }
         let accounts = registered_update_accounts(&self.home);
         anyhow::ensure!(
             accounts.len() <= 1,

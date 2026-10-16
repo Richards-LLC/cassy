@@ -85,13 +85,18 @@ fn cas_8235_update_sync_repairs_unmarked_project_and_user_proxy_references() {
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
             original.replace(
-                "env:VIOLET_SLACK_TOKEN_CASSY_PROXY",
-                "env:VIOLET_SLACK_TOKEN_SOUNDWAVE"
+                "'env:VIOLET_SLACK_TOKEN_CASSY_PROXY'",
+                "\"env:VIOLET_SLACK_TOKEN_SOUNDWAVE\""
             ),
             "update left stale proxy reference in {}",
             path.display()
         );
     }
+    let config = crate::mcp::load_proxy_config_for_process(&root).unwrap();
+    let cmcp_core::config::ServerConfig::Http { auth, .. } = &config.servers["violet"] else {
+        panic!("serve must load the repaired HTTP upstream");
+    };
+    assert_eq!(auth.as_deref(), Some("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"));
     // Repeat the actual update operation: repairs must be idempotent.
     execute(&args, &update_test_cli(true), Some(&root)).unwrap();
 }
@@ -152,7 +157,7 @@ fn cas_8235_update_refuses_ambiguous_registered_accounts_without_leaking_secrets
     let alternate = env.home().join(".codex-second");
     std::fs::create_dir_all(&alternate).unwrap();
     std::fs::write(alternate.join("config.toml"), format!(
-        "[mcp_servers.violet]\nurl = '{}'\nbearer_token_env_var = 'VIOLET_SLACK_TOKEN_SECOND'\n",
+        "[mcp_servers.violet]\nurl = '{}'\nenv_http_headers = {{ Authorization = 'VIOLET_SLACK_TOKEN_SECOND' }}\n",
         cas_types::violet_compatibility::violet_hub_url())).unwrap();
     let path = root.join("proxy.toml");
     let original = cas_8235_proxy("env:VIOLET_SLACK_TOKEN_CASSY_PROXY");
@@ -171,6 +176,33 @@ fn cas_8235_update_refuses_ambiguous_registered_accounts_without_leaking_secrets
     }
     assert_eq!(std::fs::read_to_string(path).unwrap(), original);
     assert!(!format!("{error}{output}").contains("cas-8235-private-fixture"));
+}
+
+#[test]
+#[cfg(feature = "mcp-proxy")]
+fn cas_8235_update_uses_private_registered_credential_without_writing_its_value() {
+    let mut env = cas_8235_fixture();
+    env.set("VIOLET_SLACK_TOKEN_SOUNDWAVE", "");
+    let credentials = env.home().join("credentials.env");
+    let private = "VIOLET_SLACK_TOKEN_SOUNDWAVE='cas-8235-file-private'\n";
+    std::fs::write(&credentials, private).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
+    env.set("CAS_ROOT", &root);
+    let path = root.join("proxy.toml");
+    std::fs::write(&path, cas_8235_proxy("env:VIOLET_SLACK_TOKEN_CASSY_PROXY")).unwrap();
+    let mut args = update_test_args();
+    args.sync = true;
+    let (result, output) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+    result.unwrap();
+    let written = std::fs::read_to_string(path).unwrap();
+    assert!(written.contains("env:VIOLET_SLACK_TOKEN_SOUNDWAVE"));
+    assert!(!format!("{written}{output}").contains("cas-8235-file-private"));
+    assert_eq!(std::fs::read_to_string(credentials).unwrap(), private);
 }
 
 #[test]

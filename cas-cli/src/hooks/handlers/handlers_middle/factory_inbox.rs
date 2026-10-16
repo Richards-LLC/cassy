@@ -1019,12 +1019,9 @@ fn wake_named_ids(prompt: &str) -> Vec<i64> {
 /// Pure so the shape is testable without a store. The rendering states the
 /// sender and the message id for every row, because the recipient's only way
 /// to acknowledge or reply is to name that id back.
+#[cfg(test)]
 pub(crate) fn render_surfaced(rows: &[QueuedPrompt]) -> String {
-    render_surfaced_with_header(rows, TURN_START_HEADER)
-}
-
-fn render_surfaced_with_header(rows: &[QueuedPrompt], header: &str) -> String {
-    render_rows_with_header(rows, &[], header)
+    render_rows_with_header(rows, &[], TURN_START_HEADER)
 }
 
 /// `lanes[i]` labels `rows[i]`; a missing lane renders as ordinary.

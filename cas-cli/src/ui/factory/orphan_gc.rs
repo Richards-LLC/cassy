@@ -667,7 +667,7 @@ pub(crate) fn cleanup(cas_root: &Path, report: &OrphanReport, authorized: bool) 
         }
         let killed = match process.process_group {
             Some(pgid) => kill_process_group_fingerprinted(pgid, process.starttime),
-            None => kill_pid_fingerprinted(process.pid, process.starttime),
+            None => super::server_registry::kill_process_tree_fingerprinted(process.pid, process.starttime),
         };
         match killed {
             Ok(true) => summary.killed.push(process.pid),
@@ -730,39 +730,6 @@ fn kill_process_group_fingerprinted(pgid: u32, expected_starttime: Option<u64>) 
     #[cfg(unix)] {
         let rc = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
         if rc != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) { return Err(std::io::Error::last_os_error()); }
-    }
-    Ok(true)
-}
-
-/// SIGKILL a pid only if its `/proc` start time still matches the fingerprint
-/// captured at scan time. Returns `Ok(false)` when the pid was recycled or has
-/// already exited.
-fn kill_pid_fingerprinted(pid: u32, expected_starttime: Option<u64>) -> io::Result<bool> {
-    let Some(expected) = expected_starttime else {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "refusing to signal a process with no start-time fingerprint",
-        ));
-    };
-    match crate::mcp::daemon::read_pid_starttime(pid) {
-        Some(actual) if actual == expected => {}
-        // Recycled onto another process, or already gone. Either way, do not
-        // signal: this is the check that stops GC killing a bystander.
-        _ => return Ok(false),
-    }
-
-    #[cfg(unix)]
-    {
-        // SAFETY: read-only signal to a pid whose identity was just
-        // revalidated against its durable start-time fingerprint.
-        let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-        if rc != 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(error);
-            }
-            return Ok(false);
-        }
     }
     Ok(true)
 }

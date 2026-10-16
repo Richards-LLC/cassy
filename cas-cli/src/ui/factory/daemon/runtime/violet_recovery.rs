@@ -14,13 +14,117 @@ pub(crate) struct KnownRebind {
 }
 
 pub(crate) fn rebind_known_unread(
-    _cloud: &dyn CloudCoordinationPort,
-    _journal: &SqliteRequestJournal,
-    _store: &SqliteVioletAdmissionStore,
-    _context: &OperationContext,
-    _request: &KnownRebind,
+    cloud: &dyn CloudCoordinationPort,
+    journal: &SqliteRequestJournal,
+    store: &SqliteVioletAdmissionStore,
+    context: &OperationContext,
+    request: &KnownRebind,
 ) -> Result<VioletAdmissionReceipt, String> {
-    Err("known rebind is not implemented".into())
+    // UUIDs are path inputs, not caller-controlled endpoint fragments.
+    for id in [&request.request_id, &request.delivery_id] {
+        uuid::Uuid::parse_str(id).map_err(|_| "invalid rebind request/delivery UUID")?;
+    }
+    if request.expected_generation < 1 {
+        return Err("invalid rebind expected generation".into());
+    }
+    let started = Instant::now();
+    let timeout = || {
+        let remaining = TOTAL_REMOTE_BUDGET
+            .saturating_sub(started.elapsed())
+            .min(CALL_REMOTE_BUDGET);
+        if remaining.is_zero() {
+            Err("rebind remote budget exhausted".to_string())
+        } else {
+            Ok(remaining)
+        }
+    };
+    let actor = json!({"registration_id":context.registration_id});
+    let wire = json!({"schema":CONTRACT_SCHEMA, "request_id":request.request_id,
+        "actor":actor, "expected_delivery_generation":request.expected_generation});
+    // Local routing is part of the immutable logical input, but never sent to
+    // Cloud as authority or a caller-provided reader list.
+    let logical = json!({"actor":actor,"project_id":context.project_id,"wire":wire,
+        "delivery_id":request.delivery_id,"occurrence_id":request.occurrence_id,
+        "reader_slot_id":request.reader_slot_id,"factory_session":request.factory_session,
+        "recipient":request.recipient});
+    let (operation, _) = journal
+        .prepare(&request.request_id, "delivery_rebind", &logical)
+        .map_err(|error| error.to_string())?;
+    let response: Value = if operation.stage == "terminal" {
+        serde_json::from_str(
+            operation
+                .response_json
+                .as_deref()
+                .ok_or("rebind terminal receipt is missing")?,
+        )
+        .map_err(|error| format!("invalid rebind journal receipt: {error}"))?
+    } else {
+        let first_dispatch = matches!(operation.stage.as_str(), "prepared" | "ready");
+        if first_dispatch {
+            journal
+                .set_wire_request(&request.request_id, &wire)
+                .map_err(|error| error.to_string())?;
+        }
+        let budget = timeout()?;
+        journal
+            .begin_attempt(&request.request_id)
+            .map_err(|error| error.to_string())?;
+        let remote = if first_dispatch {
+            cloud.post(
+                &format!(
+                    "/api/coordination/activity/deliveries/{}/rebind",
+                    request.delivery_id
+                ),
+                &wire,
+                budget,
+            )
+        } else {
+            // Dispatch might have committed. Reconcile its original identity;
+            // never issue another rebind or invent a new request ID.
+            cloud.lookup(&request.request_id, &context.registration_id, budget)
+        };
+        let response = remote.unwrap_or_else(|error| {
+            json!({"schema":CONTRACT_SCHEMA,
+            "code":"outcome_unknown","guidance":error.message,
+            "receipt":{"operation_id":null,"request_id":request.request_id,
+                "resource":null,"visible_owner":null,"generation":null,"expires_at":null,
+                "observed_at":chrono::Utc::now().to_rfc3339(),"next_action":"reconcile"}})
+        });
+        journal
+            .record_result(&request.request_id, &response, Some(Duration::from_secs(2)))
+            .map_err(|error| error.to_string())?;
+        response
+    };
+    require_completed(&response)?;
+    if response["receipt"]["request_id"].as_str() != Some(request.request_id.as_str()) {
+        return Err("rebind receipt request identity mismatch".into());
+    }
+    let delivery: ReaderDelivery = serde_json::from_value(response["receipt"]["delivery"].clone())
+        .map_err(|error| format!("invalid rebind delivery identity: {error}"))?;
+    if delivery.id != request.delivery_id
+        || delivery.occurrence_id != request.occurrence_id
+        || delivery.reader_slot_id != request.reader_slot_id
+        || delivery.registration_id != context.registration_id
+        || delivery.status != "admitted"
+    {
+        return Err("rebind receipt delivery/reader/registration identity mismatch".into());
+    }
+    if !matches!(delivery.consumption.as_str(), "unread" | "queued") {
+        return Err("rebind consumption requires recovery; never replay the ask".into());
+    }
+    store
+        .adopt_unread(&VioletAdmissionRebind {
+            delivery_id: delivery.id,
+            occurrence_id: delivery.occurrence_id,
+            reader_slot_id: delivery.reader_slot_id,
+            project_id: context.project_id.clone(),
+            registration_id: context.registration_id.clone(),
+            expected_generation: request.expected_generation,
+            delivery_generation: delivery.delivery_generation,
+            factory_session: request.factory_session.clone(),
+            recipient: request.recipient.clone(),
+        })
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -48,14 +152,12 @@ mod tests {
     }
     impl CloudCoordinationPort for Cloud {
         fn post(&self, path: &str, body: &Value, timeout: Duration) -> Result<Value, RemoteError> {
-            assert!(
-                path.ends_with(&format!(
+            assert!(path.ends_with(&format!(
                     "/{}/rebind",
                     body["delivery_id"]
                         .as_str()
                         .unwrap_or("0000de1b-1111-4111-8111-00000000de1b")
-                ))
-            );
+                )));
             assert!(!timeout.is_zero() && timeout <= CALL_REMOTE_BUDGET);
             let db = rusqlite::Connection::open(&self.db).unwrap();
             let (stage, wire): (String, Option<String>) = db

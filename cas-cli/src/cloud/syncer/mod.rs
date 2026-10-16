@@ -26,6 +26,8 @@ mod team_push;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod entry_collision_tests;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct PushBacklog {

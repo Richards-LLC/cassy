@@ -72,8 +72,8 @@ fn cas_d58d_every_peer_names_its_owning_account() {
         "{labels:?}"
     );
     let text = render_peers(REPO, &peers);
-    assert!(text.contains("owner you |"), "{text}");
-    assert!(text.contains("owner teammate bob@example.com |"), "{text}");
+    assert!(text.contains("    owner you\n"), "{text}");
+    assert!(text.contains("    owner teammate bob@example.com\n"), "{text}");
     for line in text.lines() {
         assert!(line.chars().count() <= 80, "wider than 80 columns: {line}");
     }

@@ -378,9 +378,10 @@ pub fn render_peers(canonical_id: &str, peers: &[Peer]) -> String {
     }
     for peer in peers {
         let state = if peer.live { "live" } else { "stale" };
-        // cas-d58d: every peer names its owning account.
+        // cas-d58d: every peer names its owning account, on its own line so
+        // a long email never pushes the session line past 80 columns.
         out.push_str(&format!(
-            "  {} [{state}] on {}, heartbeat {} ago\n    owner {} | session {} | focus {}\n",
+            "  {} [{state}] on {}, heartbeat {} ago\n    owner {}\n    session {} | focus {}\n",
             peer.name,
             peer.machine,
             age(peer.heartbeat_age_secs),

@@ -89,7 +89,8 @@ Cloud presence: registered (focus -, branch main, registered 3s ago)
 Peers (github.com/petrastella-live-check/qa-b9d2-29dfcb, via Cassy
   Cloud):
   qa-6f85-b-29dfcb [live] on soundwave, heartbeat 3s ago
-    owner you | session qa6f85-b-29dfcb | focus -
+    owner you
+    session qa6f85-b-29dfcb | focus -
 Peer mailbox: receiving.
 ```
 

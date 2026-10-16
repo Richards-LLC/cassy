@@ -491,7 +491,13 @@ fn cas_8063_retired_routes_require_same_identity_and_no_live_competitor() {
             "earlier-successor" => {
                 old.registered_at = chrono::Utc::now() + chrono::Duration::days(1)
             }
-            "live" => old.status = AgentStatus::Active,
+            "live" => {
+                old.status = AgentStatus::Active;
+                // An active address in another factory must not become this
+                // factory's restart alias. Current IDs in our own factory
+                // remain legitimate direct mailbox recipients.
+                old.factory_session = Some("other-factory".into());
+            }
             "unknown-machine" => old.machine_id = None,
             _ => {}
         }

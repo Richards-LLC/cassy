@@ -4860,56 +4860,6 @@ impl FactoryDaemon {
         observed.reaction.is_some() || observed.wake.is_some()
     }
 
-    /// Whether a recipient completed a harness turn after the last wake-gate
-    /// attempt for this row. A completed turn is the precise retry boundary:
-    /// it does not prove this message was consumed, but it proves the busy
-    /// turn that caused the decline is over.
-    /// cas-913c: whether `pane_target` is inside a turn by its harness
-    /// transcript (latest turn start not yet followed by a turn end), or
-    /// `None` when no transcript can be read.
-    /// cas-5129: activity and first-prompt evidence for a Claude recipient,
-    /// read from its transcript and registry row. Unknown evidence is the
-    /// default (no activity, not booting), which keeps the existing cadence.
-    fn recipient_wake_evidence(&self, pane_target: &str) -> RecipientWakeEvidence {
-        let Some(agent) = open_agent_store(self.app.cas_dir())
-            .ok()
-            .and_then(|store| store.list(None).ok())
-            .and_then(|agents| agents.into_iter().find(|agent| agent.name == pane_target))
-        else {
-            return RecipientWakeEvidence::default();
-        };
-        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
-        let path = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
-            self.app.cas_dir(),
-            &agent,
-        )
-        .filter(|path| path.exists());
-        let now = chrono::Utc::now();
-        match path {
-            Some(path) => {
-                let written_recently = std::fs::metadata(&path)
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(|written| std::time::SystemTime::now().duration_since(written).ok())
-                    .is_some_and(|age| age <= CLAUDE_ACTIVE_TRANSCRIPT_WINDOW);
-                RecipientWakeEvidence {
-                    recently_active: written_recently
-                        || crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
-                            &path, cli,
-                        ),
-                    awaiting_first_prompt: false,
-                }
-            }
-            None => RecipientWakeEvidence {
-                recently_active: false,
-                awaiting_first_prompt: cli == cas_mux::SupervisorCli::Claude
-                    && (now - agent.registered_at)
-                        .to_std()
-                        .is_ok_and(|age| age <= CLAUDE_FIRST_PROMPT_GRACE),
-            },
-        }
-    }
-
     /// cas-ac97 (GH #1153): classify what the recipient's harness transcript
     /// says happened after a normal delivery. Pane output growth is only the
     /// fallback when no authoritative transcript exists, because the PTY echo
@@ -5058,7 +5008,7 @@ impl FactoryDaemon {
         escalate: bool,
     ) -> bool {
         let silent =
-            escalate && wake_starved_needs_supervisor(self.recipient_wake_evidence(pane_target));
+            escalate && wake_starved_needs_supervisor(self.prepared_wake_evidence(pane_target));
         let detail = if silent {
             format!(
                 "wake budget spent after {attempts} attempts and the recipient's transcript has been \
@@ -6766,7 +6716,7 @@ impl FactoryDaemon {
             .prompt_preparation
             .recipient(pane)
             .map(|inputs| inputs.wake_evidence(chrono::Utc::now()))
-            .unwrap_or_default()
+            .unwrap_or(RecipientWakeEvidence { recently_active: false, awaiting_first_prompt: true })
     }
 
     /// Forward pending supervisor replies to the authenticated Commander hub
@@ -8010,7 +7960,7 @@ impl FactoryDaemon {
             let queued = selected;
             if queued.processed_at.is_some() { continue; }
             let facts = row_facts.get(&queued.id).cloned().unwrap_or_default();
-            if !self.queue_jobs.prompt_preparation.is_fresh(Instant::now()) {
+            if !self.queue_jobs.prompt_preparation.allows_delivery(Instant::now()) {
                 // Earlier injects/probes can outlive this batch's evidence.
                 // Claimed rows stay owned; unclaimed rows remain selectable.
                 self.queue_jobs.carry_claimed_row(queued, facts);
@@ -9698,7 +9648,7 @@ impl FactoryDaemon {
         let scan_stalls = self.last_spawn_queue_stall_scan.is_none_or(|last| {
             now.saturating_duration_since(last) >= SPAWN_QUEUE_STALL_SCAN_INTERVAL
         });
-        let request = super::queue_control_jobs::SpawnPollRequest {
+        let request = || super::queue_control_jobs::SpawnPollRequest {
             cas_dir: self.app.cas_dir().to_path_buf(),
             session: self.session_name.clone(),
             supervisor: self.app.supervisor_name().to_string(),
@@ -9718,7 +9668,10 @@ impl FactoryDaemon {
         let Some(batch) = ready else {
             return Ok(());
         };
-        let batch = batch.map_err(|error| anyhow::anyhow!("{error}"))?;
+        let batch = batch.map_err(|error| {
+            tracing::error!(%error, "cas-2702: spawn queue poll failed");
+            anyhow::anyhow!("{error}")
+        })?;
         for (id, _) in batch.stalled {
             self.reported_stalled_spawn_requests.insert(id);
         }
@@ -19420,7 +19373,7 @@ mod stall_nudge_rework_tests {
         make_worker_ready_for(daemon, cas_mux::SupervisorCli::Codex).await;
     }
 
-    async fn make_worker_ready_for(daemon: &mut FactoryDaemon, harness: cas_mux::SupervisorCli) {
+    pub(super) async fn make_worker_ready_for(daemon: &mut FactoryDaemon, harness: cas_mux::SupervisorCli) {
         let pty = cas_mux::Pty::spawn("worker-a", cas_mux::PtyConfig {
             command: "sh".into(), args: vec!["-c".into(), "printf ready; sleep 30".into()],
             cwd: Some(std::env::temp_dir()), env: vec![], env_remove: vec![], rows: 24, cols: 80,

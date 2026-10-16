@@ -117,6 +117,88 @@ fn cas_7b6b_round2_slow_reads_eventually_release_batch_off_the_loop() {
     assert!(!preparation.has_pending());
 }
 
+#[tokio::test]
+async fn cas_7b6b_round2_deliver_and_park_use_prepared_inputs_under_c6() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("claude-config");
+    std::fs::create_dir_all(config.join("teams/provision-test/inboxes")).unwrap();
+    let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[(
+        "CLAUDE_CONFIG_DIR",
+        config.to_str(),
+    )]);
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let mut worker = cas_types::Agent::new_with_role(
+        "worker-id".into(),
+        "worker-a".into(),
+        cas_types::AgentRole::Worker,
+    );
+    worker.factory_session = Some("provision-test".into());
+    worker.registered_at = chrono::Utc::now() - chrono::Duration::hours(1);
+    crate::store::open_agent_store(&root)
+        .unwrap()
+        .register(&worker)
+        .unwrap();
+    let mut daemon = super::super::provisioning_tests::daemon(&root);
+    super::stall_nudge_rework_tests::make_worker_ready_for(
+        &mut daemon,
+        cas_mux::SupervisorCli::Claude,
+    )
+    .await;
+    daemon
+        .pane_silent_since
+        .insert("worker-a".into(), Instant::now());
+    daemon.teams = Some(super::super::teams::TeamsManager::new("provision-test"));
+    let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+    let id = queue
+        .enqueue_with_session(
+            "supervisor",
+            "worker-a",
+            "decision to deliver and park",
+            "provision-test",
+        )
+        .unwrap();
+    for _ in 0..3 {
+        queue.record_wake_gate_decline(id, "busy").unwrap();
+    }
+    daemon.queue_jobs = super::super::prompt_queue_jobs::QueueJobs::start(root, None);
+    daemon.queue_jobs.store(daemon.app.cas_dir()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        {
+            let progress = super::super::loop_watchdog::LoopProgress::new();
+            let _lane = super::super::loop_watchdog::enforced_daemon_step(
+                &progress,
+                super::super::loop_watchdog::LoopPhase::PromptQueue,
+            );
+            daemon.process_prompt_queue().await.unwrap();
+        }
+        let conn = rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db")).unwrap();
+        let parked: Option<String> = conn
+            .query_row(
+                "SELECT next_attempt_at FROM prompt_queue WHERE id=?",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if parked.is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual delivery path must reach the exhausted-budget park"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        queue
+            .queued_prompt(id)
+            .unwrap()
+            .unwrap()
+            .processed_at
+            .is_none()
+    );
+}
+
 fn settle_until(mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !done() {
@@ -554,7 +636,7 @@ fn cas_7b6b_wake_snapshot_reuses_fresh_inputs_and_refreshes_after_cadence() {
     assert!(preparation.recipient("worker-a").unwrap().wait.task_blocked);
     let later = Instant::now() + Duration::from_secs(1);
     assert!(
-        !preparation.is_fresh(later),
+        !preparation.allows_delivery(later),
         "expired evidence cannot authorize transport"
     );
     std::thread::sleep(Duration::from_millis(110));

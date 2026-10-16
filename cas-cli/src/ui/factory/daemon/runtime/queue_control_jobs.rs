@@ -119,7 +119,7 @@ impl SpawnIngress {
     pub(crate) fn advance(
         &mut self,
         jobs: &mut QueueJobs,
-        request: SpawnPollRequest,
+        request: impl FnOnce() -> SpawnPollRequest,
         now: Instant,
     ) -> bool {
         self.collect(jobs);
@@ -132,6 +132,7 @@ impl SpawnIngress {
         {
             return false;
         }
+        let request = request();
         self.generation += 1;
         let generation = self.generation;
         self.context = Some(request.clone());
@@ -360,6 +361,7 @@ struct WakeInputs {
     recipients: HashMap<String, RecipientInputs>,
     captured_at: Instant,
     worker_wait_loaded: bool,
+    unknown_fallback: bool,
 }
 
 /// Owns the raw batch until its off-loop evidence is ready. All batches pass
@@ -372,6 +374,7 @@ pub(crate) struct PromptPreparation {
     last_submitted: Option<Instant>,
     ready: Option<WakeInputs>,
     current: Option<WakeInputs>,
+    unusable_reads: u8,
     #[cfg(test)]
     pub(crate) read_delay: Duration,
 }
@@ -380,10 +383,77 @@ impl PromptPreparation {
     pub(crate) fn has_pending(&self) -> bool {
         self.pending.is_some()
     }
-    pub(crate) fn is_fresh(&self, now: Instant) -> bool {
-        self.current
-            .as_ref()
-            .is_some_and(|inputs| now.saturating_duration_since(inputs.captured_at) <= WAKE_MAX_AGE)
+    pub(crate) fn allows_delivery(&self, now: Instant) -> bool {
+        self.current.as_ref().is_some_and(|inputs| {
+            inputs.unknown_fallback
+                || now.saturating_duration_since(inputs.captured_at) <= WAKE_MAX_AGE
+        })
+    }
+
+    fn take_usable(
+        &mut self,
+        workers: &[String],
+        supervisor: &str,
+        now: Instant,
+    ) -> Option<QueueSelection> {
+        if let Some(inputs) = self.ready.take() {
+            if now.saturating_duration_since(inputs.captured_at) <= WAKE_MAX_AGE {
+                let mut selection = self.pending.take()?;
+                selection.registered_agents = inputs.agents.clone();
+                self.current = Some(inputs);
+                self.unusable_reads = 0;
+                return Some(selection);
+            }
+            self.unusable_reads = self.unusable_reads.saturating_add(1);
+        }
+        if self.unusable_reads < 3 {
+            return None;
+        }
+        let selection = self.pending.take()?;
+        let mut recipients = HashMap::new();
+        let until = chrono::Utc::now()
+            + chrono::Duration::from_std(super::queue_and_events::CLAUDE_FIRST_PROMPT_GRACE)
+                .unwrap();
+        for row in &selection.rows {
+            let names = if row.target == "all_workers" {
+                workers.to_vec()
+            } else if row.target == "supervisor" {
+                vec![supervisor.to_owned()]
+            } else {
+                vec![row.target.clone()]
+            };
+            for name in names {
+                recipients.insert(
+                    name,
+                    RecipientInputs {
+                        latest: Default::default(),
+                        tool_call: ToolCallEvidence::Unknown,
+                        has_transcript: false,
+                        wait: WorkerWaitState {
+                            harness_waiting_for_input: false,
+                            task_blocked: false,
+                        },
+                        active_until: None,
+                        first_prompt_until: Some(until),
+                    },
+                );
+            }
+        }
+        // Unavailable evidence is not sender authority or proof of silence.
+        // Retain the selection's roster for routing, but grant no registered
+        // sender privileges from an unreadable or old wake snapshot.
+        self.current = Some(WakeInputs {
+            agents: vec![],
+            recipients,
+            captured_at: now,
+            worker_wait_loaded: false,
+            unknown_fallback: true,
+        });
+        self.unusable_reads = 0;
+        tracing::warn!(
+            "wake inputs unavailable after 3 attempts; releasing batch with Unknown evidence"
+        );
+        Some(selection)
     }
     pub(crate) fn agents(&self) -> &[cas_types::Agent] {
         self.current
@@ -437,7 +507,8 @@ impl PromptPreparation {
                     }
                     _ => false,
                 });
-                if now.saturating_duration_since(inputs.captured_at) < POLL_CADENCE
+                if !inputs.unknown_fallback
+                    && now.saturating_duration_since(inputs.captured_at) < POLL_CADENCE
                     && covered
                     && (!needs_wait || inputs.worker_wait_loaded)
                 {
@@ -446,18 +517,11 @@ impl PromptPreparation {
                     return Some(selection);
                 }
             }
+            self.unusable_reads = 0;
             self.pending = Some(selection);
         }
-        if let Some(inputs) = self.ready.take() {
-            if now.saturating_duration_since(inputs.captured_at) <= WAKE_MAX_AGE {
-                let mut selection = self.pending.take()?;
-                selection.registered_agents = inputs.agents.clone();
-                self.current = Some(inputs);
-                return Some(selection);
-            }
-            // A completion held past its usable age is replaceable evidence.
-            // The raw selection and its claims remain owned while it refreshes.
-            self.last_submitted = None;
+        if let Some(selection) = self.take_usable(&workers, &supervisor, now) {
+            return Some(selection);
         }
         if self.pending.is_none()
             || self.in_flight.is_some()
@@ -491,6 +555,7 @@ impl PromptPreparation {
         let generation = self.generation;
         #[cfg(test)]
         let read_delay = self.read_delay;
+        let job_supervisor = supervisor.clone();
         let submitted = jobs.submit_external(
             JobSpec {
                 kind: WAKE_GATE_READ,
@@ -504,8 +569,13 @@ impl PromptPreparation {
                 let captured_at = Instant::now();
                 #[cfg(test)]
                 std::thread::sleep(read_delay);
-                let inputs =
-                    read_wake_inputs(&cas_dir, &supervisor, &recipients, &sender_ids, captured_at);
+                let inputs = read_wake_inputs(
+                    &cas_dir,
+                    &job_supervisor,
+                    &recipients,
+                    &sender_ids,
+                    captured_at,
+                );
                 super::delivery::wake_daemon_after_enqueue(&cas_dir);
                 Box::new(inputs)
             },
@@ -518,34 +588,31 @@ impl PromptPreparation {
                 | Submitted::Coalesced { .. }
         ) {
             self.in_flight = Some(generation);
+        } else {
+            self.unusable_reads = self.unusable_reads.saturating_add(1);
         }
         self.last_submitted = Some(now);
         jobs.apply_completions();
         self.collect(jobs);
-        if let Some(inputs) = self.ready.take() {
-            if Instant::now().saturating_duration_since(inputs.captured_at) > WAKE_MAX_AGE {
-                self.last_submitted = None;
-                return None;
-            }
-            let mut selection = self.pending.take()?;
-            selection.registered_agents = inputs.agents.clone();
-            self.current = Some(inputs);
-            return Some(selection);
-        }
-        None
+        self.take_usable(&workers, &supervisor, Instant::now())
     }
+
     fn collect(&mut self, jobs: &mut QueueJobs) {
         for result in jobs.take_external_completions_where(|kind| kind == WAKE_GATE_READ) {
             if self.in_flight != Some(result.generation) {
                 continue;
             }
             self.in_flight = None;
+            self.unusable_reads = self.unusable_reads.saturating_add(1);
             match result.outcome {
                 Ok(ExternalOutcome::Done(value)) => match value
                     .downcast::<Result<WakeInputs, String>>()
                 {
                     Ok(value) => match *value {
-                        Ok(inputs) => self.ready = Some(inputs),
+                        Ok(inputs) => {
+                            self.unusable_reads = self.unusable_reads.saturating_sub(1);
+                            self.ready = Some(inputs);
+                        }
                         Err(error) => {
                             tracing::warn!(%error, "prompt wake inputs unavailable; retaining batch")
                         }
@@ -596,7 +663,13 @@ fn read_wake_inputs(
                     tool_call: ToolCallEvidence::Unknown,
                     has_transcript: false,
                     active_until: None,
-                    first_prompt_until: None,
+                    first_prompt_until: Some(
+                        chrono::Utc::now()
+                            + chrono::Duration::from_std(
+                                super::queue_and_events::CLAUDE_FIRST_PROMPT_GRACE,
+                            )
+                            .unwrap(),
+                    ),
                     wait: WorkerWaitState {
                         harness_waiting_for_input: false,
                         task_blocked: blocked.contains(&name.to_ascii_lowercase()),
@@ -668,5 +741,6 @@ fn read_wake_inputs(
         recipients: observations,
         captured_at,
         worker_wait_loaded: need_worker_wait,
+        unknown_fallback: false,
     })
 }

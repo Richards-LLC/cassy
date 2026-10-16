@@ -561,7 +561,7 @@ fn cas_69b4_numeric_and_word_run_aliases_keep_their_own_values() {
                 .expect_err(&receipt);
         assert!(error.contains("missing=[loops]"), "{receipt}: {error}");
         assert!(
-            error.contains("3x or x3"),
+            error.contains("3x or -j16 x3"),
             "accepted forms missing: {error}"
         );
     }
@@ -655,6 +655,40 @@ async fn cas_69b4_review_x_repetition_requires_adjacent_parallelism() {
             ("x3 underscore suffix", "whole target -j16 x3_host; PASS"),
         ],
         Some("loops"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn cas_69b4_review_bound_repetition_forms_remain_accepted() {
+    exercise_close_receipts_cas_69b4(
+        &[
+            ("compact j repetition", "whole target -j16 x3; PASS"),
+            ("spaced j repetition", "whole target -j 16 x4; PASS"),
+            ("jobs option repetition", "whole target --jobs 16 x3; PASS"),
+            ("jobs equals repetition", "whole target --jobs=16 x3; PASS"),
+            (
+                "parallelism repetition",
+                "whole target parallelism=16 x3; PASS",
+            ),
+            (
+                "parallelism flag repetition",
+                "whole target parallelism=-j16 x3; PASS",
+            ),
+            (
+                "concurrency repetition",
+                "whole target concurrency: 16 x3; PASS",
+            ),
+            (
+                "valid explicit count with host architecture",
+                "whole target -j16 loops=3 host=x86_64 result=PASS",
+            ),
+            (
+                "valid explicit count with host x64",
+                "whole target -j16 runs=3 host x64 result=PASS",
+            ),
+        ],
+        None,
     )
     .await;
 }

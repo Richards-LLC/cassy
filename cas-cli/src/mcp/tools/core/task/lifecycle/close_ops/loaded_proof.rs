@@ -5,7 +5,7 @@ const NAMES: [&str; 4] = ["target", "parallelism", "loops", "result"];
 const REQUIREMENTS: [&str; 4] = [
     "whole/entire/full target or explicit non-Rust target (target=<scope>)",
     "parallelism at 16 jobs (-j16, --jobs 16, parallelism=16 or concurrency=16)",
-    "at least 3 loops/runs (loops=3, 3 loops, 3x or x3)",
+    "at least 3 loops/runs (loops=3, 3 loops, 3x or -j16 x3)",
     "passing result (PASS, SUCCESS, exit 0, or status 0)",
 ];
 const EXAMPLE: &str = "LOADED_PROOF: target=explicit non-Rust (vitest src/example.test.ts + jest tests/example.test.js) parallelism=16 loops=3 result=PASS";

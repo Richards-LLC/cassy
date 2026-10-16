@@ -743,7 +743,7 @@ fn proof_numeric_tokens(field: &str) -> Vec<&str> {
     let mut tokens = Vec::new();
     let mut start = None;
     for (index, character) in field.char_indices() {
-        if character.is_ascii_alphanumeric() {
+        if character.is_ascii_alphanumeric() || character == '_' {
             start.get_or_insert(index);
         } else {
             if let Some(start) = start.take() {
@@ -969,27 +969,70 @@ fn has_parallelism_16(lower: &str) -> bool {
 }
 
 fn has_at_least_three_runs(lower: &str) -> bool {
+    const LABELS: &[&str] = &[
+        "loop",
+        "loops",
+        "run",
+        "runs",
+        "iteration",
+        "iterations",
+        "time",
+        "times",
+    ];
+    // A stated low count is decisive even if another token resembles a
+    // repetition shorthand, or a later field claims a larger count.
+    if lower.split([';', ',', '|']).any(|field| {
+        proof_numeric_tokens(field).windows(3).any(|window| {
+            LABELS.contains(&window[0])
+                && matches!(window[1], "=" | ":")
+                && window[2].parse::<u32>().is_ok_and(|number| number < 3)
+        })
+    }) {
+        return false;
+    }
     if has_adjacent_words(lower, &["1", "2", "3"]) {
         return true;
     }
     if lower.split([';', ',', '|']).any(|field| {
-        proof_numeric_tokens(field).iter().any(|token| {
-            token
+        let tokens = proof_numeric_tokens(field);
+        tokens.iter().enumerate().any(|(index, token)| {
+            if token
                 .strip_suffix('x')
-                .or_else(|| token.strip_prefix('x'))
                 .and_then(|number| number.parse::<u32>().ok())
                 .is_some_and(|number| number >= 3)
+            {
+                return true;
+            }
+            // xN is the receipt's parallelism repetition suffix, not an
+            // arbitrary host/architecture token. Keep underscores intact.
+            let bound_to_parallelism = index.checked_sub(1).is_some_and(|previous| {
+                tokens[previous] == "j16"
+                    || (tokens[previous] == "16"
+                        && previous.checked_sub(1).is_some_and(|label| {
+                            matches!(tokens[label], "j" | "jobs" | "parallelism" | "concurrency")
+                                || (matches!(tokens[label], "=" | ":")
+                                    && label.checked_sub(1).is_some_and(|label| {
+                                        matches!(
+                                            tokens[label],
+                                            "jobs" | "parallelism" | "concurrency"
+                                        )
+                                    }))
+                        }))
+            });
+            bound_to_parallelism
+                && token
+                    .strip_prefix('x')
+                    .and_then(|number| number.parse::<u32>().ok())
+                    .is_some_and(|number| number >= 3)
         })
     }) {
         return true;
     }
 
-    ["loop", "loops", "run", "runs", "iteration", "iterations", "time", "times"]
-        .iter()
-        .any(|label| {
-            has_adjacent_number(lower, label, |number| number >= 3)
-                || has_adjacent_words(lower, &["three", label])
-        })
+    LABELS.iter().any(|label| {
+        has_adjacent_number(lower, label, |number| number >= 3)
+            || has_adjacent_words(lower, &["three", label])
+    })
 }
 
 /// A platform proof is deliberately a typed note rather than an unstructured

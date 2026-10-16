@@ -72,6 +72,14 @@ database at a guessed path. Writable prompt-queue opens remove a regular empty
 files, symlinks and sidecar-backed artifacts remain untouched for investigation.
 Read-only queue opens never perform this cleanup.
 
+A parked task can merge its pushed delivery while its worker checkout holds
+uncommitted work for a later task. With `cleanup=false`, `worktree_merge` checks
+that the local source and a fresh origin fetch both equal the parked anchor,
+then merges that immutable commit in an isolated checkout. Its receipt names
+the pushed ref and states that the worker checkout was left untouched.
+Unpushed or mismatched tips retain the dirty-checkout refusal; cleanup requests
+retain the existing protection against deleting uncommitted work.
+
 ## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client

@@ -2008,6 +2008,61 @@ async fn cas_cfd1_merges_pushed_parked_ref_without_touching_reused_dirty_worker(
 }
 
 #[tokio::test]
+async fn cas_cfd1_dirty_source_refuses_unpushed_mismatched_or_destructive_merge() {
+    let mut env = test_env();
+    let fixture_parent = cas::test_paths::runtime_fixture_parent();
+    for case in ["unpushed", "remote_mismatch", "anchor_mismatch", "cleanup"] {
+        let repo = GitRepo::new();
+        let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
+        disable_system_a(&cas_root);
+        let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+        run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
+        run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
+        run_git(&["branch", "epic/parked"], &repo.root);
+        run_git(&["push", "origin", "epic/parked"], &repo.root);
+        let target_before = git_stdout(&repo.root, &["rev-parse", "epic/parked"]);
+        let (_, task_id) = create_epic_and_worker_task(&cas_root, "epic/parked", Some("alice"));
+        let worker = cas_root.join("worktrees/alice");
+        repo.add_worktree(&worker, "factory/alice");
+        std::fs::write(worker.join("delivered.txt"), "delivery\n").unwrap();
+        run_git(&["add", "delivered.txt"], &worker);
+        run_git(&["commit", "-m", "delivery"], &worker);
+        let anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
+        if case == "remote_mismatch" {
+            run_git(&["push", "origin", "main:refs/heads/factory/alice"], &worker);
+        } else if case != "unpushed" {
+            run_git(&["push", "origin", "factory/alice"], &worker);
+        }
+        if case == "anchor_mismatch" {
+            run_git(&["commit", "--allow-empty", "-m", "later task tip"], &worker);
+            run_git(&["push", "origin", "factory/alice"], &worker);
+        }
+        let tasks = open_task_store(&cas_root).unwrap();
+        let mut task = tasks.get(&task_id).unwrap();
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor);
+        tasks.update(&task).unwrap();
+        let dirty = "uncommitted next task\n";
+        std::fs::write(worker.join("README.md"), dirty).unwrap();
+        let head_before = git_stdout(&worker, &["rev-parse", "HEAD"]);
+        let status_before = git_stdout(&worker, &["status", "--porcelain"]);
+        env.set_current_dir(&repo.root);
+        let svc = make_service(cas_root);
+        let mut req = coord_req("worktree_merge");
+        req.id = Some("factory/alice".into());
+        req.task_id = Some(task_id);
+        req.cleanup = Some(case == "cleanup");
+        let error = svc.coordination(Parameters(req)).await.expect_err(case);
+        assert!(error.message.contains("uncommitted changes"), "{case}: {error:?}");
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/parked"]), target_before, "{case}");
+        assert_eq!(git_stdout(&worker, &["rev-parse", "HEAD"]), head_before, "{case}");
+        assert_eq!(git_stdout(&worker, &["status", "--porcelain"]), status_before, "{case}");
+        assert_eq!(std::fs::read_to_string(worker.join("README.md")).unwrap(), dirty, "{case}");
+        env.set_current_dir(&fixture_parent);
+    }
+}
+
+#[tokio::test]
 async fn test_worktree_merge_refuses_explicit_task_whose_parent_epic_is_closed() {
     let repo = GitRepo::new();
     let mut env = test_env();

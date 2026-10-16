@@ -2491,6 +2491,10 @@ impl Pty {
             ));
         }
 
+        if is_codex && config.env.iter().any(|(key, value)| key == "CAS_AGENT_ROLE" && value == "worker") {
+            crate::codex_hook_warning::warn_at_launch(&config);
+        }
+
         // Create PTY system and open a PTY pair
         let pty_system = native_pty_system();
         let pair = pty_system

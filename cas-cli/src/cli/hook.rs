@@ -18,6 +18,8 @@ use crate::cli::hook::config_gen::{
 };
 
 pub(crate) mod config_gen;
+mod native_pre_tool;
+pub use native_pre_tool::{execute_native_pre_tool_use, is_native_codex_pre_tool};
 pub use crate::cli::hook::config_gen::{
     configure_mcp_server, global_has_cas_hooks, provision_codex_project,
     provision_codex_user_config, strip_cas_hooks,

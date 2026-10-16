@@ -110,3 +110,48 @@ fn codex_worker_apply_patch_into_the_main_checkout_is_refused_cas_49c0() {
         "a patch inside the worktree is not refused: {allowed}"
     );
 }
+
+#[test]
+fn native_codex_entry_rewrites_cargo_and_denies_bad_input_cas_2c8e() {
+    let project = TempDir::new().unwrap();
+    let root = project.path().join(".cas");
+    std::fs::create_dir(&root).unwrap();
+    let input = serde_json::json!({
+        "session_id":"cas-2c8e-native", "cwd":project.path(),
+        "hook_event_name":"PreToolUse", "tool_name":"Bash",
+        "tool_input":{"command":"cargo check -p cas --tests"}
+    });
+    for (payload, rewrite) in [(input.to_string(), true), ("{malformed".into(), false)] {
+        let output = cas_cmd(&project)
+            .args(["hook", "PreToolUse"])
+            .env("CAS_HOOK_HARNESS", "codex")
+            .env("CAS_AGENT_ROLE", "worker")
+            .env("CAS_ROOT", &root)
+            .env("CAS_CLONE_PATH", project.path())
+            .timeout(std::time::Duration::from_secs(5))
+            .write_stdin(payload)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let specific = &value["hookSpecificOutput"];
+        if rewrite {
+            assert_eq!(specific["permissionDecision"], "allow", "{value}");
+            assert!(
+                specific["updatedInput"]["command"]
+                    .as_str()
+                    .unwrap()
+                    .contains(" factory worker-check --cas-root "),
+                "{value}"
+            );
+        } else {
+            assert_eq!(specific["permissionDecision"], "deny", "{value}");
+            assert!(
+                specific["permissionDecisionReason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("GUARD UNAVAILABLE")
+            );
+        }
+    }
+}

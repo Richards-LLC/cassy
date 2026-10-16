@@ -286,6 +286,36 @@ mod tests {
     }
 
     #[test]
+    fn cas_c423_store_successor_lease_before_ack_preserves_admission_and_fences_old_poll() {
+        let root = tempfile::tempdir().unwrap();
+        let old = input();
+        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        let first = store.admit(&old).unwrap();
+        let fence = store.pending_lease_fences(&old.project_id).unwrap().pop().unwrap();
+        let old_ack = store.pending_acknowledgements(&old.registration_id, &old.project_id).unwrap().pop().unwrap();
+        let mut next = old.clone();
+        next.registration_id = "successor-registration".into();
+        next.recipient = "successor-supervisor".into();
+        next.factory_session = "successor-factory".into();
+        next.lease_token = "successor-lease".into();
+        let resumed = store.adopt_lease(&fence, &next).unwrap();
+        assert_eq!(resumed.admission.prompt_id, first.prompt_id);
+        assert_eq!(resumed.consumption, VioletConsumption::Queued);
+        assert_eq!(resumed.recovery_prompt_id, None);
+        let pending = store.pending_acknowledgements(&next.registration_id, &next.project_id).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].delivery_generation, 1, "Cloud re-leases without advancing generation");
+        assert_eq!(pending[0].lease_token, next.lease_token);
+        assert!(!store.settle_acknowledgement(&old_ack, &old.registration_id, &old.project_id).unwrap());
+        assert!(store.adopt_lease(&fence, &old).is_err(), "a poll begun before takeover cannot move the admission back");
+        let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+        assert!(queue.peek_unseen_for_recipient(&old.recipient, Some(&old.factory_session), 10).unwrap().is_empty());
+        let inbox = queue.peek_unseen_for_recipient(&next.recipient, Some(&next.factory_session), 10).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].id, first.prompt_id);
+    }
+
+    #[test]
     fn cas_c423_store_rebind_rolls_back_both_routes_and_refuses_transport_evidence() {
         let root = tempfile::tempdir().unwrap();
         let row = input();
@@ -568,6 +598,16 @@ pub struct VioletAdmissionAck {
     pub lease_token: String,
 }
 
+/// Snapshot taken before the remote lease call. Its token fences a delayed
+/// predecessor poll even when Cloud retains the same delivery generation.
+#[derive(Debug, Clone)]
+pub struct VioletLeaseFence {
+    pub delivery_id: String,
+    registration_id: String,
+    delivery_generation: i64,
+    lease_token: String,
+}
+
 /// Apply only a validated Cloud rebind receipt for an existing local unread
 /// admission. This is not discovery, ownership, or dispatch authorization.
 #[derive(Debug, Clone)]
@@ -588,6 +628,19 @@ pub struct SqliteVioletAdmissionStore {
 }
 
 impl SqliteVioletAdmissionStore {
+    pub fn pending_lease_fences(&self, project: &str) -> Result<Vec<VioletLeaseFence>> {
+        let conn = crate::shared_db::lock_connection(&self.queue.conn)?;
+        let mut stmt = conn.prepare_cached("SELECT delivery_id,registration_id,delivery_generation,lease_token
+            FROM violet_admissions WHERE project_id=?1 AND ack_pending=1")?;
+        let rows = stmt.query_map([project], |r|Ok(VioletLeaseFence {
+            delivery_id:r.get(0)?,registration_id:r.get(1)?,delivery_generation:r.get(2)?,lease_token:r.get(3)? }))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn adopt_lease(&self, _fence: &VioletLeaseFence, _input: &VioletAdmissionInput) -> Result<VioletRecoveryReceipt> {
+        Err(StoreError::Other("successor lease adoption is not implemented".into()))
+    }
+
     /// Apply a validated successor receipt without inferring unread from a
     /// dead process. Local recipient and transport evidence remains binding.
     pub fn recover_known(

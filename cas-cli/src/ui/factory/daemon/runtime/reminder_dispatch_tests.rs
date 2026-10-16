@@ -156,9 +156,21 @@ async fn cas_f265_busy_self_reminder_never_becomes_an_abandoned_relay() {
     if !child("cas_f265_busy_self_reminder_never_becomes_an_abandoned_relay") {
         return;
     }
+    busy_self_reminder(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_f265_replaced_owner_self_reminder_never_becomes_an_abandoned_relay() {
+    if !child("cas_f265_replaced_owner_self_reminder_never_becomes_an_abandoned_relay") {
+        return;
+    }
+    busy_self_reminder(true).await;
+}
+
+async fn busy_self_reminder(takeover: bool) {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (root, mut daemon) = fixture().await;
-    let (id, body) = dispatch(&mut daemon, true, false);
+    let (id, body) = dispatch(&mut daemon, true, takeover);
     daemon
         .pane_silent_since
         .insert(daemon.app.supervisor_name().to_string(), Instant::now());

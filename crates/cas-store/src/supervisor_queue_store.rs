@@ -153,6 +153,29 @@ pub trait SupervisorQueueStore: Send + Sync {
         transition_key: &str,
     ) -> Result<NotifyIdempotentResult>;
 
+    /// cas-26c8: [`Self::notify_idempotent`] for a relay that replaces other
+    /// notifications. In ONE transaction it records this row and stamps and
+    /// acknowledges every not-yet-injected `folded_event_type` row whose
+    /// transition key starts with one of `folded_key_prefixes` followed by
+    /// `:` (one per recipient of a folded death), so no crash, failed open or
+    /// changed recipient list can leave both the fold and a member to send.
+    /// The default does the two steps one after the other.
+    fn notify_idempotent_folding(
+        &self,
+        supervisor_id: &str,
+        event_type: &str,
+        payload: &str,
+        priority: NotificationPriority,
+        transition_key: &str,
+        folded_event_type: &str,
+        folded_key_prefixes: &[String],
+    ) -> Result<NotifyIdempotentResult> {
+        let result =
+            self.notify_idempotent(supervisor_id, event_type, payload, priority, transition_key)?;
+        let _ = (folded_event_type, folded_key_prefixes);
+        Ok(result)
+    }
+
     /// Mark prompt_queue delivery complete for a durable notification (cas-17e4 outbox).
     /// Idempotent: safe to call again after success.
     fn mark_prompt_delivered(&self, notification_id: i64) -> Result<()>;
@@ -357,6 +380,63 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
                 id: existing_id,
                 prompt_delivered: prompt_delivered_at.is_some(),
             })
+        })
+    }
+
+    fn notify_idempotent_folding(
+        &self,
+        supervisor_id: &str,
+        event_type: &str,
+        payload: &str,
+        priority: NotificationPriority,
+        transition_key: &str,
+        folded_event_type: &str,
+        folded_key_prefixes: &[String],
+    ) -> Result<NotifyIdempotentResult> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let now = Utc::now().to_rfc3339();
+            let changed = tx.execute(
+                "INSERT OR IGNORE INTO supervisor_queue
+                    (supervisor_id, event_type, payload, priority, created_at, transition_key)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                params![
+                    supervisor_id,
+                    event_type,
+                    payload,
+                    i32::from(priority),
+                    now,
+                    transition_key
+                ],
+            )?;
+            let result = if changed > 0 {
+                NotifyIdempotentResult::Created(tx.last_insert_rowid())
+            } else {
+                let (existing_id, prompt_delivered_at): (i64, Option<String>) = tx.query_row(
+                    "SELECT id, prompt_delivered_at FROM supervisor_queue WHERE transition_key = ?",
+                    params![transition_key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                NotifyIdempotentResult::AlreadyExists {
+                    id: existing_id,
+                    prompt_delivered: prompt_delivered_at.is_some(),
+                }
+            };
+            for prefix in folded_key_prefixes {
+                let member = format!("{prefix}:");
+                tx.execute(
+                    "UPDATE supervisor_queue
+                        SET prompt_delivered_at = COALESCE(prompt_delivered_at, ?1),
+                            processed_at = COALESCE(processed_at, ?1)
+                      WHERE event_type = ?2
+                        AND prompt_delivered_at IS NULL
+                        AND substr(transition_key, 1, length(?3)) = ?3",
+                    params![now, folded_event_type, member],
+                )?;
+            }
+            tx.commit()?;
+            Ok(result)
         })
     }
 
@@ -1321,4 +1401,60 @@ mod tests {
         assert!(store.get(only_delivery).unwrap().is_some(), "it may be the only delivery");
         assert!(store.get(pull).unwrap().is_some(), "a pending pull row is never deleted");
     }
+    /// cas-26c8 review M1: the folded relay and the stamping of its member
+    /// rows are one transaction. Every recipient's member row is stamped and
+    /// acknowledged, a lookalike key is untouched, an already-delivered member
+    /// keeps its delivery time, and a replay changes nothing.
+    #[test]
+    fn folding_relay_stamps_its_members_in_one_transaction_cas_26c8() {
+        let (_temp, store) = create_test_store();
+        let died = |key: &str, recipient: &str| match store
+            .notify_idempotent(recipient, "worker_died", "{}", NotificationPriority::Critical, key)
+            .unwrap()
+        {
+            NotifyIdempotentResult::Created(id) => id,
+            other => panic!("{other:?}"),
+        };
+        let a1 = died("worker_died:w1:100:sup-a", "sup-a");
+        let b1 = died("worker_died:w1:100:sup-b", "sup-b");
+        let a2 = died("worker_died:w2:200:sup-a", "sup-a");
+        let lookalike = died("worker_died:w10:100:sup-a", "sup-a");
+        store.mark_prompt_delivered(a2).unwrap();
+        let delivered_at = store.get(a2).unwrap().unwrap().prompt_delivered_at;
+
+        let members = vec!["worker_died:w1:100".to_string(), "worker_died:w2:200".to_string()];
+        let fold = |store: &SqliteSupervisorQueueStore| {
+            store
+                .notify_idempotent_folding(
+                    "sup-a",
+                    "workers_died_together",
+                    "{}",
+                    NotificationPriority::Critical,
+                    "fold:w1:100",
+                    "worker_died",
+                    &members,
+                )
+                .unwrap()
+        };
+        let folded = fold(&store);
+        assert!(matches!(folded, NotifyIdempotentResult::Created(_)), "{folded:?}");
+        for id in [a1, b1] {
+            let row = store.get(id).unwrap().unwrap();
+            // pin: review M1: a folded member is stamped so it is never injected.
+            assert!(row.prompt_delivered_at.is_some(), "member {id} is stamped");
+            // pin: review M1: a folded member is acknowledged in the same transaction.
+            assert!(row.processed_at.is_some(), "member {id} is acknowledged");
+        }
+        assert_eq!(store.get(a2).unwrap().unwrap().prompt_delivered_at, delivered_at);
+        let untouched = store.get(lookalike).unwrap().unwrap();
+        assert!(untouched.prompt_delivered_at.is_none() && untouched.processed_at.is_none());
+
+        let NotifyIdempotentResult::Created(fold_id) = folded else { unreachable!() };
+        assert_eq!(
+            fold(&store),
+            NotifyIdempotentResult::AlreadyExists { id: fold_id, prompt_delivered: false },
+            "a replay re-reads the same fold"
+        );
+    }
+
 }

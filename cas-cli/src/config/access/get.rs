@@ -149,6 +149,7 @@ impl Config {
             "factory.ai_enrichment.api_key_env" => Some(factory.ai_enrichment.api_key_env.clone()),
             "factory.ai_enrichment.model" => Some(factory.ai_enrichment.model.clone()),
             "factory.ai_enrichment.effort" => Some(factory.ai_enrichment.effort.clone()),
+            "qa.mode" => Some(qa.mode.to_string()),
             "qa.independent_pass" => Some(qa.independent_pass.to_string()),
             "qa.evidence_gate" => Some(qa.evidence_gate.to_string()),
             "qa.terminal_render_paths" => Some(qa.terminal_render_paths.join(",")),

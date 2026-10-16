@@ -315,8 +315,30 @@ impl Default for TasksConfig {
 }
 
 /// User-facing QA gate configuration. Lives at `[qa]` in `.cas/config.toml`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QaMode {
+    #[default]
+    PerTask,
+    Batch,
+}
+
+impl QaMode {
+    pub fn is_per_task(&self) -> bool { *self == Self::PerTask }
+}
+
+impl std::fmt::Display for QaMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self { Self::PerTask => "per_task", Self::Batch => "batch" })
+    }
+}
+
+/// User-facing QA gate configuration. Lives at `[qa]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QaConfig {
+    /// Batch mode defers evidence until one staging ledger covers the deliveries.
+    #[serde(default, skip_serializing_if = "QaMode::is_per_task")]
+    pub mode: QaMode,
     /// Labels that opt a task into the non-empty `demo_statement` creation gate.
     #[serde(default = "default_user_facing_labels")]
     pub user_facing_labels: Vec<String>,
@@ -474,6 +496,7 @@ pub fn default_user_facing_labels() -> Vec<String> {
 impl Default for QaConfig {
     fn default() -> Self {
         Self {
+            mode: QaMode::PerTask,
             user_facing_labels: default_user_facing_labels(),
             telemetry_sweep: None,
             independent_pass: default_independent_pass(),

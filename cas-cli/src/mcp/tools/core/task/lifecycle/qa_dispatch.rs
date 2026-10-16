@@ -675,6 +675,15 @@ impl CasCore {
     ) -> Option<QaDispatchStatus> {
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
+        if qa.mode == crate::config::QaMode::Batch && requested.is_none() {
+            let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
+            if !crate::qa_pass::gate_applies(task, &qa, &passes) {
+                if let Some(head) = head {
+                    crate::qa_pass::github_gate::publish_not_required(&self.cas_root, repo, head);
+                }
+                return None;
+            }
+        }
         let implementer = task.assignee.as_deref()?;
         // cas-7877: the close backstop reaches here for a delivery that is not
         // integrated yet, with no change set. Judging it from the demo alone
@@ -1235,6 +1244,19 @@ impl CasCore {
                 .clone()
                 .filter(|tip| own_tip && is_ancestor(repo, tip, &classification_target))
         });
+        if qa.mode == crate::config::QaMode::Batch {
+            if !crate::qa_pass::gate_applies(task, &qa, &passes) {
+                // The evidence gate owns the durable deferred-evidence obligation.
+                return QaCloseGate::Clear;
+            }
+            if let Some(head) = head.as_deref() {
+                match crate::qa_batch::satisfying_receipt(&self.cas_root, task, repo, target_branch, head) {
+                    Ok(Some(_)) => return QaCloseGate::Clear,
+                    Err(e) => return QaCloseGate::Refuse(format!("INDEPENDENT QA REQUIRED: cannot read batch receipt: {e}")),
+                    Ok(None) => {}
+                }
+            }
+        }
         if passes.iter().any(|pass| {
             qa_pass_covers_integrated_delivery(
                 repo,

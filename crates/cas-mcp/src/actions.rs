@@ -202,6 +202,7 @@ pub const SYSTEM_PROXY_ACTIONS: &[&str] =
     &["proxy_add", "proxy_remove", "proxy_list", "proxy_health"];
 
 pub const VERIFICATION_ACTIONS: &[&str] = &[
+    "batch_receipt",
     "shadow",
     "add",
     "show",

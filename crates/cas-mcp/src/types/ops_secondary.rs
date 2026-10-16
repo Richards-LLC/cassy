@@ -355,6 +355,18 @@ pub struct SystemRequest {
 /// Unified verification operations request
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct VerificationRequest {
+    /// PASS tasks covered by one staging walk; duplicates are collapsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "batch_receipt: 1 to 500 PASS task IDs; duplicates collapse")]
+    pub task_ids: Option<Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "batch_receipt: published ledger artifact ID in this project")]
+    pub ledger_artifact_id: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "batch_receipt: full 40-hex staging commit SHA, contained in each task's configured target")]
+    pub staging_sha: Option<String>,
     /// Typed shadow-review operation, encoded as bounded JSON. These records
     /// never contribute verification verdicts to task or merge gates.
     #[schemars(
@@ -366,7 +378,7 @@ pub struct VerificationRequest {
     /// Action to perform
     #[schemars(
         schema_with = "crate::actions::verification_action_schema",
-        description = "Operation. qa_record records an independent QA reviewer's verdict, never the implementer's; qa_waive is a logged supervisor waiver; qa_request is a logged supervisor request that opens a round for a parked delivery Cassy did not judge user-facing; external_verify is registered-supervisor-only receipted external verification."
+        description = "Operation. batch_receipt records one immutable published staging ledger for PASS task_ids in qa.mode=batch (registered supervisor, no self-review). qa_record records an independent QA reviewer's verdict, never the implementer's; qa_waive is a logged supervisor waiver; qa_request opens an explicit independent round; qa_status includes batch receipts; external_verify is registered-supervisor-only receipted external verification."
     )]
     pub action: String,
 
@@ -453,7 +465,7 @@ pub struct VerificationRequest {
     pub required_checks: Option<String>,
 
     /// cas-619f: absolute path of the independent QA round's LEDGER.md.
-    #[schemars(description = "qa_record: absolute path of this round's LEDGER.md")]
+    #[schemars(description = "qa_record or batch_receipt: absolute ledger path; batch_receipt revalidates bytes against ledger_artifact_id")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ledger_path: Option<String>,
 

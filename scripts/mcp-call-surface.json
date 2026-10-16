@@ -597,6 +597,7 @@
     "verification": {
       "actions": [
         "add",
+        "batch_receipt",
         "external_verify",
         "latest",
         "list",
@@ -616,15 +617,18 @@
         "head_sha",
         "id",
         "issues",
+        "ledger_artifact_id",
         "ledger_path",
         "limit",
         "local_proof_reference",
         "message",
         "required_checks",
         "review",
+        "staging_sha",
         "status",
         "summary",
         "task_id",
+        "task_ids",
         "verification_type",
         "verifier_capability"
       ]

@@ -152,6 +152,8 @@ pub(crate) fn add_interruption_note(task: &mut crate::types::Task, agent_id: &st
 /// Note: Agents are registered with their session_id, so we use session_id
 /// as the agent_id for lookup and cleanup.
 /// PID → session mapping is handled by the daemon via socket events.
+/// The reasonless form, for callers with no harness SessionEnd payload.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn cleanup_agent_leases(
     cas_root: &std::path::Path,
     session_id: &str,

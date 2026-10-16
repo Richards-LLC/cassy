@@ -161,9 +161,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   only real CI verdicts are relayed.
 - **Worker status** — Was: a slow `gh` call could stall worker status. → Now:
   its subprocesses are time-limited.
-- **Neon setup** — Was: `cas integrate neon init` failed on its first call.
-  → Now: it lists organizations correctly, so disposable database branches can
-  be created.
+- **Neon setup** — Was: `cas integrate neon init` failed on its first call,
+  and it and its generated skills depended on a Neon MCP server. → Now: they
+  use `neonctl`, so disposable database branches work without that server.
 - **Dependency edits** — Was: adding and removing a dependency read its type
   differently. → Now: both use one parser.
 

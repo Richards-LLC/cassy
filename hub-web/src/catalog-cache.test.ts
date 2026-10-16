@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import { catalogCacheStore, CONVERSATION_STORE_PREFIX, purgeConversations, validCachedSession } from "./conversation-store";
 import type { HubSession } from "./types";
@@ -62,5 +63,17 @@ describe("cached session catalog (cas-9846)", () => {
     const store = catalogCacheStore(denied);
     expect(() => store.save("atlas", [session("cas-src")])).not.toThrow();
     expect(store.load("atlas")).toBeUndefined();
+  });
+});
+
+describe("footer count before any machine answers (cas-9846)", () => {
+  it("counts a kept catalog as last known, never as not loaded or zero", async () => {
+    const { machineFooterMarkup } = await import("./paired-machines");
+    const meta = (markup: string) => { const node = document.createElement("div"); node.innerHTML = markup; return node.querySelector(".hub-footer-meta span")?.textContent; };
+    // pin: the footer's words for each catalog state.
+    expect(meta(machineFooterMarkup([], undefined, "b"))).toBe("Conversations not loaded yet");
+    expect(meta(machineFooterMarkup([], 1, "b", false, true))).toBe("1 conversation, last known");
+    expect(meta(machineFooterMarkup([], 3, "b", false, true))).toBe("3 conversations, last known");
+    expect(meta(machineFooterMarkup([], 3, "b"))).toBe("3 conversations");
   });
 });

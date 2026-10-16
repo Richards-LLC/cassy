@@ -713,7 +713,14 @@ test("HUB-J12 network switch: a reload while the machine is unreachable reopens 
     await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ })).toBeVisible({ timeout: 1_000 });
     await expect(bubble("Keep this through the reload")).toBeVisible({ timeout: 1_000 });
     await expect(held).toHaveCount(1, { timeout: 1_000 });
+    // On screen, not under the outage card: the point at its centre is the bubble.
+    await expect(bubble("Keep this through the reload")).toBeInViewport();
+    const box = (await bubble("Keep this through the reload").boundingBox())!;
+    const hit = await page.evaluate(([x, y]) => document.elementFromPoint(x, y)?.closest(".bub")?.textContent ?? "", [box.x + box.width / 2, box.y + box.height / 2]);
+    expect(hit).toContain("Keep this through the reload");
     await expect(page.getByText(/\b0 conversations\b/)).toHaveCount(0);
+    // The footer counts the kept catalog as last known, not "not loaded yet".
+    await expect(page.locator(".hub-footer-meta")).toContainText("1 conversation, last known");
     expect(sentTimes(hub, "Keep this through the reload")).toBe(0);
   });
   await journey.stage("The machine answers: the same conversation attaches and the message goes once", async () => {

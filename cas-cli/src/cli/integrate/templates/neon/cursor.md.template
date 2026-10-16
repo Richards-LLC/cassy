@@ -1,22 +1,15 @@
 ---
 name: neon-database
-description: |
-  Project-specific Neon database config for {{PROJECT_BASENAME}}. Use for all
-  SQL queries, migrations, and schema work on this project. Refer to user-level
-  mcp-neon skill for tool usage patterns — this skill provides projectId,
-  branchIds, and databaseName.
-  Triggers: query the database, run SQL, add column, migration, check schema,
-  inspect table, neon, branch.
+description: Use for SQL queries, migrations, schema inspection, and branch routing on {{PROJECT_BASENAME}} with the Neon CLI.
 metadata:
   category: database
-  server: user-neon
   managed_by: cas
 ---
 
 # Neon Database — {{PROJECT_BASENAME}}
 
-Refer to `~/.cursor/skills/mcp-neon/SKILL.md` for tool usage. This skill
-provides project-specific IDs and branch routing.
+Use `neonctl` (install with `npm install -g neonctl`, authenticate with
+`neonctl auth`). Pass the project, branch and database explicitly.
 
 ## Project Config
 
@@ -32,20 +25,23 @@ provides project-specific IDs and branch routing.
 
 ## Quick Reference
 
-```
-# Default-branch query
-run_sql({ params: { sql: "...", projectId: "{{PROJECT_ID}}" }})
+Choose a branch ID from the table above:
 
-# Non-default branch — pass branchId from the table above
-run_sql({ params: { sql: "...", projectId: "{{PROJECT_ID}}", branchId: "<branchId>" }})
-```
-
-## Safety Rules
-
-```
-NEVER: prisma db push --accept-data-loss
-NEVER: prisma migrate reset
-NEVER: prisma db push --force-reset
+```bash
+neonctl branches list --project-id "{{PROJECT_ID}}" --output json
+neonctl connection-string "<branchId>" --project-id "{{PROJECT_ID}}" \
+  --database-name "{{DATABASE_NAME}}" --psql -- -c "SELECT 1;"
 ```
 
-Always use the 3-step migration flow: prepare → verify → complete.
+## Migration and Safety
+
+Create a disposable branch with `neonctl branches create --project-id
+"{{PROJECT_ID}}" --parent "<branchId>" --name "migration-check" --output json`.
+Apply and verify migrations there before applying reviewed SQL through the
+project's deployment process. Get explicit approval before production changes;
+creating a branch does not promote schema changes.
+
+Never run destructive SQL on production without explicit confirmation, or
+`prisma migrate reset`, `prisma db push --force-reset`, or
+`prisma db push --accept-data-loss` on shared branches. Confirm `DATABASE_URL`
+targets the intended branch. Keep connection URLs out of logs.

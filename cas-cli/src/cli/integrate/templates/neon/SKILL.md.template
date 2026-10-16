@@ -1,11 +1,6 @@
 ---
 name: neon-database
-description: |
-  Project-specific Neon database config. Use for SQL queries, migrations, schema
-  inspection, and branch routing on this project. Refer to user-level mcp-neon
-  guidance for tool usage patterns; this skill provides the IDs and branch map.
-  Triggers: query the database, run SQL, add column, migration, check schema,
-  inspect table, neon, branch, prisma migrate.
+description: Use for SQL queries, migrations, schema inspection, and branch routing on {{PROJECT_BASENAME}} with the Neon CLI.
 metadata:
   category: database
   managed_by: cas
@@ -13,9 +8,9 @@ metadata:
 
 # Neon Database — {{PROJECT_BASENAME}}
 
-The IDs and branch routing for this project's Neon database. Pass `projectId`
-and `databaseName` explicitly on every MCP call; pass `branchId` whenever you
-target a non-default branch.
+Use `neonctl` (install with `npm install -g neonctl`, authenticate with
+`neonctl auth`). Pass `--project-id` and the intended branch explicitly;
+for SQL, also pass `--database-name`. Use `--output json` for metadata reads.
 
 ## Project Config
 
@@ -31,22 +26,26 @@ target a non-default branch.
 
 ## Quick Reference
 
-```
-# Default-branch query
-mcp__neon__run_sql({
-  projectId: "{{PROJECT_ID}}",
-  databaseName: "{{DATABASE_NAME}}",
-  sql: "SELECT 1 AS neon_mcp_ok;"
-})
+Choose a branch ID from the table above before running a query:
+
+```bash
+neonctl branches list --project-id "{{PROJECT_ID}}" --output json
+neonctl connection-string "<branchId>" --project-id "{{PROJECT_ID}}" \
+  --database-name "{{DATABASE_NAME}}" --psql -- -c "SELECT 1 AS neon_cli_ok;"
 ```
 
-For staging or other non-default branches, add `branchId:` from the table above.
+The connection command passes credentials to psql; keep connection URLs out of logs.
 
 ## Migration Workflow
 
-Always use the 3-step flow: `prepare_database_migration` →
-`describe_branch` (verify on the temp branch) → `complete_database_migration`.
-Never run migrations directly on a production branch.
+1. Create a disposable branch with `neonctl branches create --project-id
+   "{{PROJECT_ID}}" --parent "<branchId>" --name "migration-check" --output json`.
+2. Apply the migration file with `neonctl connection-string "<tempBranchId>"
+   --project-id "{{PROJECT_ID}}" --database-name "{{DATABASE_NAME}}" --psql --
+   -v ON_ERROR_STOP=1 -f migration.sql`, then verify queries and schema there.
+3. After review and explicit approval for production, apply the verified migration
+   through this project's deployment process to the intended branch. Branch
+   creation or schema diff does not promote database changes.
 
 ## Safety Rules
 
@@ -54,4 +53,4 @@ Never run migrations directly on a production branch.
 - Never `prisma migrate reset` or `prisma db push --accept-data-loss` on shared branches.
 - Confirm the active env's `DATABASE_URL` points at the branch you intend to touch.
 
-See `references/queries.md` for common SQL workflows and per-branch routing recipes.
+See `references/queries.md` for SQL workflows and branch routing recipes.

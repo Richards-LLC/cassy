@@ -1,4 +1,4 @@
-//! Fixture-driven tests for the Neon MCP response parsers exposed by
+//! Legacy Neon JSON/MCP-envelope compatibility fixtures for parsers exposed by
 //! [`super::neon`] (cas-1549).
 //!
 //! Each fixture lives under `cas-cli/src/cli/integrate/fixtures/neon/` and is
@@ -8,8 +8,8 @@
 //! invariant holds — a future regression to a parser is caught by a test in a
 //! file whose name advertises its subject.
 //!
-//! End-to-end tests against live Neon MCP stay manual (same scope cap as
-//! cas-7417 vercel wiring); cargo test never depends on a live endpoint.
+//! LiveNeonClient uses neonctl; these fixtures preserve the pure parsers
+//! without requiring any live endpoint or MCP registration.
 
 #![cfg(test)]
 

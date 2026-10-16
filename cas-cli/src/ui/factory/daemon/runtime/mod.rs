@@ -1,6 +1,8 @@
 pub(crate) mod ci_watch;
 pub(crate) mod external_wake;
 pub(crate) mod merge_queue_ejection;
+#[cfg(test)]
+mod busy_claude_delivery_tests;
 mod client_input;
 mod cloud;
 mod commander_mirror;

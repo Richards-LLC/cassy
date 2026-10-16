@@ -135,6 +135,17 @@ pub fn handle_user_prompt_submit(
             }
         }
     }
+    // cas-a1ed: a turn whose prompt is a Teams copy Claude Code rendered
+    // delivered that row. Record it after the "already shown" read above, so
+    // no later tool boundary shows it again (cas-7bfa does the same for a
+    // turn that fires no UserPromptSubmit).
+    if is_factory && let Some(root) = cas_root {
+        super::factory_inbox::record_turn_prompt_envelopes(
+            root,
+            input,
+            input.submitted_prompt().unwrap_or_default(),
+        );
+    }
     if is_supervisor {
         if let (Some(root), Some(prompt), Ok(session)) = (
             cas_root,

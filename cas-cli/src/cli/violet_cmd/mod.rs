@@ -14,6 +14,8 @@
 //! Hub error codes pass through unchanged and every `ok: false` exits
 //! non-zero.
 
+#[cfg(feature = "mcp-proxy")]
+mod credentials;
 pub mod files;
 pub mod hub;
 

@@ -64,6 +64,7 @@ pub mod harness_policy;
 pub mod history;
 pub mod db_branch;
 pub mod hooks;
+pub mod issue_reconcile;
 pub mod hub;
 pub mod hybrid_search;
 pub(crate) mod internal_llm;
@@ -110,6 +111,8 @@ pub(crate) mod test_child;
 #[cfg(test)]
 pub(crate) mod test_support {
     pub(crate) use crate::test_env_guard::TestEnvGuard;
+    #[cfg(unix)]
+    pub(crate) use crate::test_env_guard::fake_cas_on_path;
     pub(crate) use crate::test_paths::private_hub_tempdir;
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};

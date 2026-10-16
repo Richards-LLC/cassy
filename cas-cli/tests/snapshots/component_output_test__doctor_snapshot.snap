@@ -2,7 +2,7 @@
 source: cas-cli/tests/component_output_test.rs
 expression: redacted
 ---
-[WARN] 4 warnings · 29 ok · [PROJECT] · [VERSION]
+[WARN] 4 warnings · 29 ok · 1 info · [PROJECT] · [VERSION]
 ────────────────────────────────────────────────────────────────────────────────
 Host          [OK] registered project roots
   [WARN] host  host: [N] finding(s) — see `cas doctor --host`
@@ -13,6 +13,7 @@ Indexes       [OK] legacy search index  [OK] symbol index  [OK] code index copie
 Cloud         [OK] supervisor relay  [OK] delivery retries  [OK] canonical id  [OK] cloud sync queue  [OK] cross-project rows
 Config        [OK] SessionStart budget  [OK] configuration  [OK] MCP stdio upstreams  [OK] MCP upstream reachability  [OK] sync target  [OK] mcp config
   [WARN] issue repositories  issues.repo unset; no usable GitHub origin; set `cas config set issues.repo owner/repo` | cassy=Richards-LLC/cassy | violet=Richards-LLC/violet_ps | cloud=Richards-LLC/petra-stella-cloud
+  [INFO] shipped issues      skipped: no GitHub repository resolved for this project
 Integrations  [OK] integrations
 
-29 ok · 4 warnings · 0 errors · [DURATION] · cas doctor --verbose for timings and full messages
+29 ok · 1 info · 4 warnings · 0 errors · [DURATION] · cas doctor --verbose for timings and full messages

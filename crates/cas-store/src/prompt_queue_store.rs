@@ -253,22 +253,46 @@ pub(crate) const INBOX_POLL_ORDER_SQL: &str = "ORDER BY (q.processed_at IS NOT N
                                    q.processed_at DESC,
                                    q.id DESC";
 
+/// cas-a1ed: the transport claim a tool boundary may take over. The daemon
+/// stamps `deferred_inbox_at` only after it wrote the Teams copy and left the
+/// row pending because the wake was declined; that handoff will not finish
+/// until the recipient's turn ends. A PTY inject (a Codex or OpenCode
+/// recipient, the Teams ENOENT fallback, any urgent interrupt) never stamps
+/// it, so its claim stays with the transport even while its Delivered stamp
+/// lands late (cas-9568: a tool boundary never replays an injected turn).
+macro_rules! held_teams_claim_sql {
+    () => {
+        "seen.source = 'transport_claimed'
+         AND q.transport_delivered_at IS NULL
+         AND q.deferred_inbox_at IS NOT NULL
+         AND q.urgent = 0"
+    };
+}
+
 /// Eligibility for [`TransportEligibility::After`]; binds the turn start.
 ///
-/// cas-b5ad: a row the daemon claimed for its transport after the turn began,
-/// but whose handoff it never completed, is eligible too. A busy worker's
-/// pane is never silent, so the daemon declines the wake after the claim and
-/// leaves the row gated (any Agent-Teams copy is held by Claude Code until
-/// the turn ends); without this the claim hid the row from every tool
-/// boundary of a long turn. A completed handoff (`transport_delivered_at`)
-/// keeps its claim (cas-27ad). Both placeholders bind the turn start.
-const DELIVERED_AFTER_TURN_START_RECEIPT_SQL: &str =
+/// cas-b5ad: a row the daemon claimed for its transport, but whose handoff it
+/// never completed, is eligible too. A busy worker's pane is never silent, so
+/// the daemon declines the wake after the claim and leaves the row gated (any
+/// Agent-Teams copy is held by Claude Code until a turn boundary); without
+/// this the claim hid the row from every tool boundary of a long turn. A
+/// completed handoff (`transport_delivered_at`) keeps its claim (cas-27ad).
+///
+/// cas-a1ed: the claim may predate the current turn. Messages 4189870 and
+/// 4189924 were claimed in one turn, the next turn began without their Teams
+/// copies, and a claim-after-turn-start condition hid both for good. Only a
+/// claim the daemon parked behind a declined wake is eligible
+/// (`held_teams_claim_sql!`); a claim whose body is being typed into the pane
+/// is not. The hook leaves out a row whose body is the turn's own prompt, and
+/// a Teams copy rendered as a turn is receipted when that turn starts.
+const DELIVERED_AFTER_TURN_START_RECEIPT_SQL: &str = concat!(
     "AND (((seen.prompt_id IS NULL OR seen.source = 'transport_delivered')
            AND (q.transport_delivered_at IS NULL
                 OR julianday(q.transport_delivered_at) > julianday(?)))
-          OR (seen.source = 'transport_claimed'
-              AND q.transport_delivered_at IS NULL
-              AND julianday(seen.seen_at) > julianday(?)))";
+          OR (",
+    held_teams_claim_sql!(),
+    "))"
+);
 
 /// cas-ad92: eligibility for rows a pointer wake named in the turn it started.
 /// The daemon's claim (`transport_claimed`) hides a handed-off row from every
@@ -282,8 +306,16 @@ const WAKE_NAMED_RECEIPT_SQL: &str = "AND (seen.prompt_id IS NULL
 /// turn, this path must never replay a row whose transport handoff was
 /// already recorded: the preceding injected turn is precisely the delivery
 /// being recovered from. (cas-9568)
-const UNSEEN_RECIPIENT_RECEIPT_SQL: &str =
-    "AND seen.prompt_id IS NULL AND q.transport_delivered_at IS NULL";
+///
+/// cas-a1ed: a claim held behind a declined wake (`held_teams_claim_sql!`)
+/// is not a handoff. When the hook cannot place the current turn (its first
+/// line is deep in a long transcript), such a row must still reach the busy
+/// recipient.
+const UNSEEN_RECIPIENT_RECEIPT_SQL: &str = concat!(
+    "AND ((seen.prompt_id IS NULL AND q.transport_delivered_at IS NULL) OR (",
+    held_teams_claim_sql!(),
+    "))"
+);
 
 /// cas-dcf2 (GH #390): may later activity be recorded as a weak, visibly
 /// non-confirming indication that a delivered message might have been seen?
@@ -8008,11 +8040,11 @@ impl SqlitePromptQueueStore {
                 if let Some(session) = factory_session {
                     let mut params: Vec<Box<dyn rusqlite::ToSql>> =
                         vec![Box::new(recipient.to_string())];
-                    // cas-b5ad: the receipt clause binds the turn start twice.
+                    // The receipt clause binds the turn start once (cas-a1ed).
                     params.extend(
                         turn_start_param
                             .iter()
-                            .flat_map(|at| [at.clone(), at.clone()])
+                            .cloned()
                             .map(|at| Box::new(at) as Box<dyn rusqlite::ToSql>),
                     );
                     params.push(Box::new(stale_cutoff.clone()));
@@ -8057,11 +8089,11 @@ impl SqlitePromptQueueStore {
                 } else {
                     let mut params: Vec<Box<dyn rusqlite::ToSql>> =
                         vec![Box::new(recipient.to_string())];
-                    // cas-b5ad: the receipt clause binds the turn start twice.
+                    // The receipt clause binds the turn start once (cas-a1ed).
                     params.extend(
                         turn_start_param
                             .iter()
-                            .flat_map(|at| [at.clone(), at.clone()])
+                            .cloned()
                             .map(|at| Box::new(at) as Box<dyn rusqlite::ToSql>),
                     );
                     params.push(Box::new(stale_cutoff.clone()));
@@ -8147,12 +8179,14 @@ impl SqlitePromptQueueStore {
                      WHERE prompt_queue_recipient_seen.source = 'transport_delivered'
                         OR (?5 AND prompt_queue_recipient_seen.source = 'transport_claimed')",
                 )?;
-                // cas-b5ad: a tool-boundary drain returns a claimed row only
-                // when the claim came after the turn began; it takes that
-                // claim over as the pointer wake's turn does.
+                // cas-b5ad, cas-a1ed: a tool-boundary drain returns a claimed
+                // row only while its handoff is unfinished; it takes that claim
+                // over as the pointer wake's turn does.
                 let takes_claim = matches!(
                     transport,
-                    TransportEligibility::WakeNamed | TransportEligibility::After(_)
+                    TransportEligibility::WakeNamed
+                        | TransportEligibility::After(_)
+                        | TransportEligibility::NoneRecorded
                 );
                 for prompt in &prompts {
                     stmt.execute(params![prompt.id, recipient, seen_at, source.as_str(), takes_claim])?;
@@ -8678,8 +8712,11 @@ mod tests {
     /// so the worker took many tool calls without seeing it (13+ minutes,
     /// message 4184454). A row claimed after the current turn began is
     /// surfaced at the next tool boundary and its claim becomes the hook's
-    /// receipt; one claimed before the turn began (possibly the turn's own
-    /// prompt) is not.
+    /// receipt. cas-a1ed: so is an unfinished claim made before the turn
+    /// began (messages 4189870 and 4189924 were claimed in one turn and the
+    /// next turn started without their Teams copies). Leaving out the turn's
+    /// own prompt is the hook's job: it holds the prompt text, and a rendered
+    /// copy is receipted when its turn starts.
     #[test]
     fn tool_boundary_surfaces_rows_claimed_for_transport_after_the_turn_began_cas_b5ad() {
         let (_temp, store) = create_test_store();
@@ -8688,6 +8725,8 @@ mod tests {
             .enqueue_with_session("supervisor", "worker-1", "the turn's own prompt", session)
             .unwrap();
         assert!(store.claim_recipient_transport(before, "worker-1").unwrap());
+        // The daemon wrote the Teams copy and deferred the wake (cas-a1ed).
+        store.record_deferred_inbox(before, 0).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         let turn_started_at = Utc::now();
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -8695,14 +8734,15 @@ mod tests {
             .enqueue_with_session("supervisor", "worker-1", "scope decision: take (A)", session)
             .unwrap();
         assert!(store.claim_recipient_transport(decision, "worker-1").unwrap());
+        store.record_deferred_inbox(decision, 0).unwrap();
 
         let ids = |rows: Vec<QueuedPrompt>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
         assert_eq!(
             ids(store
                 .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
                 .unwrap()),
-            vec![decision],
-            "the mid-turn claim reaches the worker at its next tool call"
+            vec![before, decision],
+            "every unfinished claim reaches the worker at its next tool call"
         );
         assert!(
             store
@@ -8730,6 +8770,153 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "a completed handoff is not surfaced a second time"
+        );
+    }
+
+    /// cas-a1ed: a tool boundary that cannot place the current turn still
+    /// takes a row whose transport claim never completed. A long turn pushed
+    /// the turn's first line out of the transcript window, and this query hid
+    /// the claimed decision at every tool call. A completed handoff stays
+    /// excluded (cas-9568).
+    #[test]
+    fn tool_boundary_without_a_turn_takes_unfinished_claims_only_cas_a1ed() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-a1ed";
+        let claimed = store
+            .enqueue_with_session("supervisor", "worker-1", "decision held by the wake gate", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(claimed, "worker-1").unwrap());
+        store.record_deferred_inbox(claimed, 0).unwrap();
+        let handed_off = store
+            .enqueue_with_session("supervisor", "worker-1", "typed into the pane", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(handed_off, "worker-1").unwrap());
+        store.mark_transport_delivered(handed_off).unwrap();
+
+        let surfaced = store
+            .surface_unseen_for_recipient_without_transport_delivery("worker-1", Some(session), 10)
+            .unwrap();
+        assert_eq!(surfaced.iter().map(|row| row.id).collect::<Vec<_>>(), vec![claimed]);
+        let report = store.message_delivery_report(claimed).unwrap().unwrap();
+        assert_eq!(report.recipient_receipt, Some(SurfacingSource::HookSurfaced));
+        assert!(
+            store
+                .surface_unseen_for_recipient_without_transport_delivery("worker-1", Some(session), 10)
+                .unwrap()
+                .is_empty(),
+            "surfaced once"
+        );
+    }
+
+    /// cas-a1ed review H1: a claim whose body is being typed into the pane is
+    /// not a held Teams copy. The daemon claims, PTY-injects (a Codex
+    /// recipient, or an urgent interrupt to Claude) and stamps Delivered
+    /// afterwards, possibly late. No tool boundary may take that claim over,
+    /// with or without a known turn, or the body is shown twice (cas-9568).
+    #[test]
+    fn a_claim_held_during_a_pty_inject_is_never_surfaced_by_a_tool_boundary_cas_a1ed() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-a1ed";
+        let turn_started_at = Utc::now() - chrono::Duration::minutes(5);
+        let injecting = store
+            .enqueue_with_session("supervisor", "worker-1", "typed into a Codex pane", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(injecting, "worker-1").unwrap());
+        let urgent = store
+            .enqueue_urgent("supervisor", "worker-1", "urgent redirect", Some(session), None, None, true)
+            .unwrap();
+        assert!(store.claim_recipient_transport(urgent, "worker-1").unwrap());
+        // Even a stray deferral stamp cannot hand an urgent row to the hook.
+        store.record_deferred_inbox(urgent, 0).unwrap();
+
+        assert!(
+            store
+                .surface_unseen_for_recipient_without_transport_delivery("worker-1", Some(session), 10)
+                .unwrap()
+                .is_empty(),
+            "the no-turn drain leaves injecting claims to the transport"
+        );
+        assert!(
+            store
+                .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+                .unwrap()
+                .is_empty(),
+            "the per-turn drain leaves injecting claims to the transport"
+        );
+        for id in [injecting, urgent] {
+            assert_eq!(
+                store.message_delivery_report(id).unwrap().unwrap().recipient_receipt,
+                Some(SurfacingSource::TransportClaimed)
+            );
+        }
+        // The late stamp then lands; the row stays out of every hook drain.
+        store.mark_transport_delivered(injecting).unwrap();
+        assert!(
+            store
+                .surface_unseen_for_recipient_without_transport_delivery("worker-1", Some(session), 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// cas-a1ed review L1: the C3 prompt-queue job claims with a token and
+    /// releases by that token. A tool boundary that took a held claim over
+    /// races that release; the release must not drop the hook's receipt, and
+    /// the job cannot claim the row again.
+    #[test]
+    fn a_token_release_after_the_hook_took_a_held_claim_keeps_the_receipt_cas_a1ed() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-a1ed";
+        let id = store
+            .enqueue_with_session("supervisor", "worker-1", "decision held by the wake gate", session)
+            .unwrap();
+        let token = store.claim_recipient_transport_token(id, "worker-1").unwrap().unwrap();
+        store.record_deferred_inbox(id, 0).unwrap();
+
+        let surfaced = store
+            .surface_unseen_for_recipient_without_transport_delivery("worker-1", Some(session), 10)
+            .unwrap();
+        assert_eq!(surfaced.iter().map(|row| row.id).collect::<Vec<_>>(), vec![id]);
+        assert!(
+            !store.release_recipient_transport_claim(id, "worker-1", token).unwrap(),
+            "the job's release finds no claim left to release"
+        );
+        assert_eq!(
+            store.message_delivery_report(id).unwrap().unwrap().recipient_receipt,
+            Some(SurfacingSource::HookSurfaced)
+        );
+        assert!(store.claim_recipient_transport_token(id, "worker-1").unwrap().is_none());
+    }
+
+    /// cas-a1ed review L1: once the cas-1f0c time fallback re-sent a held
+    /// row's body as a Teams copy, neither tool-boundary drain renders it.
+    #[test]
+    fn a_held_claim_whose_body_fallback_was_sent_is_not_surfaced_again_cas_a1ed() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-a1ed";
+        let id = store
+            .enqueue_with_session("supervisor", "worker-1", "decision held by the wake gate", session)
+            .unwrap();
+        assert!(store.claim_recipient_transport(id, "worker-1").unwrap());
+        store.record_deferred_inbox(id, 0).unwrap();
+        assert!(store.claim_teams_body_fallback(id, "worker-1").unwrap());
+
+        assert!(
+            store
+                .surface_unseen_for_recipient_without_transport_delivery("worker-1", Some(session), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .surface_unseen_for_recipient_delivered_after(
+                    "worker-1",
+                    Some(session),
+                    10,
+                    Utc::now() - chrono::Duration::minutes(5),
+                )
+                .unwrap()
+                .is_empty()
         );
     }
 

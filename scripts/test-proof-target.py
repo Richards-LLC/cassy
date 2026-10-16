@@ -12,7 +12,7 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[1]
 # cas-baa8: fixtures never read this host's `cas config get factory.scratch_root`.
-os.environ.setdefault('CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT', '')
+os.environ['CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT'] = ''
 spec = importlib.util.spec_from_file_location('proof_target', REPO / 'scripts/proof_target.py')
 targets = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(targets)

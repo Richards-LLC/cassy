@@ -460,19 +460,15 @@ struct RetiredRecipient {
     registered_at: chrono::DateTime<chrono::Utc>,
 }
 
-fn retired_recipients(cas_root: &Path) -> Result<Vec<RetiredRecipient>, String> {
+fn retired_recipients(cas_root: &Path) -> Result<(Vec<RetiredRecipient>, Option<String>), String> {
     const HISTORY_LIMIT: usize = 10_000;
     let events = crate::store::open_event_store(cas_root)
         .map_err(|e| e.to_string())?
         .list_by_type(crate::types::EventType::AgentShutdown, HISTORY_LIMIT)
         .map_err(|e| e.to_string())?;
-    if events.len() == HISTORY_LIMIT {
-        return Err(
-            "retired peer identity history reached its limit; older addresses were not checked"
-                .into(),
-        );
-    }
-    Ok(events
+    let warning = (events.len() == HISTORY_LIMIT).then(||
+        "retired peer identity history reached its limit; older addresses were not checked".into());
+    let retired = events
         .into_iter()
         .filter_map(|event| {
             if event.entity_type != crate::types::EventEntityType::Agent {
@@ -483,7 +479,8 @@ fn retired_recipients(cas_root: &Path) -> Result<Vec<RetiredRecipient>, String> 
             identity.id = event.entity_id;
             Some(identity)
         })
-        .collect())
+        .collect();
+    Ok((retired, warning))
 }
 
 fn live_supervisor(agent: &crate::types::Agent) -> bool {

@@ -145,6 +145,17 @@ within five minutes and must match both the peer's factory session and machine.
 A missing branch is shown as unknown. Worker details are read-only: these rows
 do not register remote workers locally or make them message or spawn targets.
 Cloud failures are reported as unavailable, never as an empty claim list.
+Peer mail follows a supervisor's name and stable machine identity across a
+restart. A live successor claims verified retired addresses from this project's
+registry and unregister history; Cloud message IDs still deduplicate local
+admission. A reused live identity, worker, different machine or ambiguous
+successor is not a retired address. When multiple live peers share a displayed
+address, message-target ambiguity lists distinct agent IDs that can be used as
+explicit targets. Legacy deleted rows without retirement identity cannot be
+safely recovered from a name alone; resend to the current peer address. History
+lookup failure or truncation appears in mailbox health while current verified
+addresses continue receiving.
+
 Cloud locks are private to one user account: a team peer on another account shows
 `Claims not visible (different account)` and worker tasks as `not visible`.
 If the caller's account identity is unknown, the report says so. JSON includes

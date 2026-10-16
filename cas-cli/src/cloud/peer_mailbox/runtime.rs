@@ -132,7 +132,7 @@ impl PeerMailboxRuntime {
             // cas-4736: record epic split proposals and answers before ack.
             let cas_dir = self.cas_dir.clone();
             let (retired, history_error) = match retired_recipients(&self.cas_dir) {
-                Ok(retired) => (retired, None),
+                Ok((retired, warning)) => (retired, warning),
                 Err(error) => (Vec::new(), Some(format!("retired peer identity lookup failed: {error}"))),
             };
             let mut report = deliver_claimed_with_history(

@@ -529,4 +529,3 @@ fn cas_8063_retired_routes_require_same_identity_and_no_live_competitor() {
         }
     }
 }
-

@@ -1505,4 +1505,3 @@ fn cas_8063_unregister_retains_minimal_peer_identity_once() {
     assert!(metadata["retired_agent"].get("metadata").is_none());
     assert!(!metadata.to_string().contains("private-value"));
 }
-

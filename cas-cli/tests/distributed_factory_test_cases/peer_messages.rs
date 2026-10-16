@@ -1472,4 +1472,3 @@ async fn ct2_p3_peer_mail_survives_restart() {
 async fn cas_8063_peer_mail_survives_unregister_restart() {
     restart_peer_mail(true).await;
 }
-

@@ -659,7 +659,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Steps
 
 1. Commander is the current app — the list header's lockup ("Cassy Cloud apps") opens the switcher, with Commander current and Explorer as a link
-2. Switch to Explorer from the list — Explorer opens at the cloud origin's /explorer in its own tab, with no referrer, cookie or authorization sent, and Commander stays as it was
+2. Switch to Explorer from the list — Explorer opens at the cloud origin's /explorer in its own tab, with no referrer, cookie or authorization sent, and Commander stays as it was; by click or Enter, the switcher closes in Commander's tab and focus returns to the Cassy Cloud apps button
 3. Open this project's tasks in Explorer — from Tasks & progress, "All tasks in Explorer" opens /explorer/tasks?project_id=<the project's cloud id>; on desktop the switcher points there too
 4. A project without a cloud identity opens Explorer's home — its conversation offers no project link, and the switcher opens /explorer
 

@@ -131,6 +131,7 @@ async fn c4491f_correlated_deaths_relay_writes_nothing_on_the_loop() {
                 at,
                 worker: worker.into(),
                 status: "exit 1".into(),
+                death: None,
             });
     }
     {
@@ -319,13 +320,13 @@ async fn c4491f_relay_write_is_never_given_up() {
     relays.timeout_override = Some(Duration::ZERO);
     assert!(relays.submit_write(&mut daemon.queue_jobs, "correlated-deaths", None, move || {
         let _ = wait.recv();
-        RelayOutput::DeathsRelayed { group: Vec::new(), persisted: true }
+        RelayOutput::DeathsRelayed { group: Vec::new(), done: true }
     }));
     assert!(relays.take(&mut daemon.queue_jobs).is_empty());
     assert!(relays.writing("correlated-deaths"), "a slow write keeps its key");
     assert!(
         !relays.submit_write(&mut daemon.queue_jobs, "correlated-deaths", None, || {
-            RelayOutput::DeathsRelayed { group: Vec::new(), persisted: true }
+            RelayOutput::DeathsRelayed { group: Vec::new(), done: true }
         }),
         "no second write while the first runs"
     );
@@ -620,4 +621,34 @@ fn c4491f_write_records_do_not_accumulate() {
     relays.take(&mut jobs);
     relays.take(&mut jobs);
     assert_eq!(relays.write_records(), 0, "no read predates any of them");
+}
+
+/// cas-26c8 review L1 (wiring): a death group whose folded relay keeps
+/// asking for a retry stays held under its own key, while a later lone death
+/// is written and settles on the same pass instead of waiting behind it.
+#[tokio::test]
+async fn cas_26c8_a_retrying_group_does_not_hold_back_a_later_death() {
+    let (_dir, cas_dir) = project_with_worker();
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    // The stuck group's relay never gets its prompt queued; a lone death relays.
+    daemon.relay_jobs.death_group_override = Some(|_, group, _| group.len() < 2);
+    let t0 = chrono::Utc::now() - chrono::Duration::seconds(60);
+    let exit = |worker: &str, offset_ms: i64| super::ObservedWorkerExit {
+        at: t0 + chrono::Duration::milliseconds(offset_ms),
+        worker: worker.into(),
+        status: "exit 1".into(),
+        death: None,
+    };
+    daemon.recent_worker_exits = vec![exit("stuck-a", 0), exit("stuck-b", 500), exit("lone-c", 20_000)];
+
+    daemon.relay_correlated_worker_deaths();
+    settle_relays(&mut daemon).await;
+    assert_eq!(
+        daemon.recent_worker_exits.iter().map(|exit| exit.worker.as_str()).collect::<Vec<_>>(),
+        ["stuck-a", "stuck-b"],
+        "the lone death settled; only the retrying group is still held"
+    );
+    daemon.relay_correlated_worker_deaths();
+    settle_relays(&mut daemon).await;
+    assert_eq!(daemon.recent_worker_exits.len(), 2, "the group is retried, not dropped");
 }

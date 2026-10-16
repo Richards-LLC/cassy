@@ -224,59 +224,6 @@ pub(super) const WORKER_DEATH_CORRELATION_WINDOW: std::time::Duration =
 /// to `worker_status` rather than surfacing as a fresh alarm.
 pub(super) const UNSTAMPED_WORKER_DEATH_MAX_AGE: chrono::Duration = chrono::Duration::minutes(30);
 
-/// cas-26c8 review M1/H1: after a restart, or a failed write, nothing holds
-/// a recorded death any more. For this session only:
-/// 1. a folded relay whose durable row (members already stamped in the same
-///    transaction) never got its prompt is re-driven, and
-/// 2. any per-worker worker_died row that is neither folded nor held is
-///    injected on its own.
-pub(super) fn sweep_held_worker_death_relays(
-    cas_dir: &std::path::Path,
-    agent_store: &dyn cas_store::AgentStore,
-    factory_session: &str,
-    held: &std::collections::HashSet<String>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> usize {
-    use crate::mcp::tools::service::orphan_recovery;
-    let mut redriven = 0;
-    if let Ok(queue) = crate::store::open_supervisor_queue_store(cas_dir) {
-        for supervisor in orphan_recovery::live_session_supervisors(agent_store, factory_session) {
-            let Ok(rows) = queue.list_pending_prompt_outbox(&supervisor, "workers_died_together", 20)
-            else {
-                continue;
-            };
-            for row in rows {
-                if now - row.created_at > UNSTAMPED_WORKER_DEATH_MAX_AGE {
-                    continue;
-                }
-                let Ok(payload) = serde_json::from_str::<serde_json::Value>(&row.payload) else {
-                    continue;
-                };
-                if payload.get("factory_session").and_then(serde_json::Value::as_str)
-                    != Some(factory_session)
-                {
-                    continue;
-                }
-                if matches!(
-                    super::lifecycle::redrive_folded_worker_deaths_relay(cas_dir, &payload),
-                    super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
-                ) {
-                    redriven += 1;
-                }
-            }
-        }
-    }
-    redriven
-        + orphan_recovery::sweep_unstamped_worker_deaths(
-            cas_dir,
-            agent_store,
-            factory_session,
-            held,
-            now,
-            UNSTAMPED_WORKER_DEATH_MAX_AGE,
-        )
-}
-
 /// cas-26c8: what to do with a death group after one folded-relay attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FoldedGroupStep {
@@ -301,25 +248,122 @@ pub(crate) fn folded_group_step(prompt_enqueued: bool, age: chrono::Duration) ->
     }
 }
 
-/// cas-26c8 L1: relay every closed death group independently. A group that
-/// `relay` keeps (returns false) stays queued without blocking the groups
-/// after it; exits whose window is still open stay too.
-pub(crate) fn drive_death_groups(
-    mut exits: Vec<ObservedWorkerExit>,
+/// cas-26c8 L1: every closed death group, in order. Each is relayed on its
+/// own, so a group whose folded relay must be retried never holds back the
+/// groups after it.
+pub(crate) fn closed_death_groups(
+    exits: &[ObservedWorkerExit],
     now: chrono::DateTime<chrono::Utc>,
     window: std::time::Duration,
-    mut relay: impl FnMut(&[ObservedWorkerExit]) -> bool,
-) -> Vec<ObservedWorkerExit> {
-    let mut kept = Vec::new();
-    while let Some(group) = closed_death_group(&exits, now, window) {
-        let rest = exits.split_off(group.len());
-        if !relay(&group) {
-            kept.extend(group);
-        }
-        exits = rest;
+) -> Vec<Vec<ObservedWorkerExit>> {
+    let mut groups = Vec::new();
+    let mut rest = exits;
+    while let Some(group) = closed_death_group(rest, now, window) {
+        rest = &rest[group.len()..];
+        groups.push(group);
     }
-    kept.extend(exits);
-    kept
+    groups
+}
+
+/// cas-26c8: the write-lane key of one death group.
+pub(crate) fn death_group_key(group: &[ObservedWorkerExit]) -> String {
+    let first = &group[0];
+    format!(
+        "correlated-deaths:{}:{}",
+        first.worker,
+        first.at.timestamp_millis()
+    )
+}
+
+/// cas-26c8 (write lane): relay one closed death group. A lone death sends
+/// its held worker_died relay; a group sends one folded relay that stamps
+/// its members in the same transaction (review M1), falling back to
+/// per-worker relays only when the folded prompt never reached the queue in
+/// ten minutes (review L2). Returns false when the group must be retried.
+pub(crate) fn relay_death_group_io(
+    cas_dir: &std::path::Path,
+    group: &[ObservedWorkerExit],
+    age: chrono::Duration,
+) -> bool {
+    if group.len() < 2 {
+        relay_held_worker_deaths_io(cas_dir, group);
+        return true;
+    }
+    let (_, prompt_enqueued) =
+        super::lifecycle::enqueue_folded_worker_deaths_relay(cas_dir, group);
+    match folded_group_step(prompt_enqueued, age) {
+        FoldedGroupStep::Retry => false,
+        FoldedGroupStep::Fold => true,
+        FoldedGroupStep::FallBack => {
+            relay_held_worker_deaths_io(cas_dir, group);
+            true
+        }
+    }
+}
+
+/// cas-26c8 (write lane): the per-worker worker_died relays held for `group`.
+fn relay_held_worker_deaths_io(cas_dir: &std::path::Path, group: &[ObservedWorkerExit]) {
+    let Ok(agent_store) = open_agent_store(cas_dir) else {
+        return;
+    };
+    for death in group.iter().filter_map(|exit| exit.death.as_ref()) {
+        crate::mcp::tools::service::orphan_recovery::relay_worker_death(
+            cas_dir,
+            agent_store.as_ref(),
+            &death.agent,
+            &death.summary,
+            &death.reason,
+            Some(&death.exit),
+        );
+    }
+}
+
+/// cas-26c8 (relay read job, review H1/M1): this session's folded relays
+/// whose prompt never reached the queue, and its per-worker deaths whose
+/// prompt never did either.
+fn read_death_sweep(
+    cas_dir: &std::path::Path,
+    factory_session: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> super::relay_jobs::RelayOutput {
+    use crate::mcp::tools::service::orphan_recovery;
+    let mut folded = Vec::new();
+    let mut deaths = Vec::new();
+    if let Ok(agent_store) = open_agent_store(cas_dir) {
+        if let Ok(queue) = crate::store::open_supervisor_queue_store(cas_dir) {
+            for supervisor in
+                orphan_recovery::live_session_supervisors(agent_store.as_ref(), factory_session)
+            {
+                let Ok(rows) =
+                    queue.list_pending_prompt_outbox(&supervisor, "workers_died_together", 20)
+                else {
+                    continue;
+                };
+                for row in rows {
+                    if now - row.created_at > UNSTAMPED_WORKER_DEATH_MAX_AGE {
+                        continue;
+                    }
+                    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&row.payload)
+                    else {
+                        continue;
+                    };
+                    if payload.get("factory_session").and_then(serde_json::Value::as_str)
+                        == Some(factory_session)
+                    {
+                        folded.push((row.id, payload));
+                    }
+                }
+            }
+        }
+        deaths = orphan_recovery::list_unstamped_worker_deaths(
+            cas_dir,
+            agent_store.as_ref(),
+            factory_session,
+            now,
+            UNSTAMPED_WORKER_DEATH_MAX_AGE,
+        );
+    }
+    super::relay_jobs::RelayOutput::DeathSweepRead { folded, deaths }
 }
 
 /// One observed harness exit, kept briefly to detect correlated deaths.
@@ -3595,9 +3639,13 @@ impl FactoryDaemon {
                             );
                         }
                     }
-                    RelayOutput::DeathsRelayed { group, persisted } => {
-                        self.settle_correlated_deaths_relay(group, persisted);
+                    RelayOutput::DeathsRelayed { group, done } => {
+                        self.settle_correlated_deaths_relay(group, done);
                     }
+                    RelayOutput::DeathSweepRead { folded, deaths } => {
+                        self.decide_recorded_worker_deaths(basis, folded, deaths)
+                    }
+                    RelayOutput::DeathSweepWritten => {}
                     RelayOutput::EscalationRead {
                         notice_ids,
                         notice_states,
@@ -5401,57 +5449,128 @@ impl FactoryDaemon {
     /// harness, the account) is investigated instead of three separate
     /// respawns.
     pub(super) fn relay_correlated_worker_deaths(&mut self) {
-        // cas-4491f: the relay is written on the store worker; one group is
-        // in flight at a time, so groups are relayed in order.
+        // cas-4491f: the relays are written on the store worker.
         self.drain_relay_jobs();
         self.advance_correlated_worker_deaths();
+        self.sweep_recorded_worker_deaths();
         self.drain_relay_jobs();
     }
 
+    /// cas-26c8 L1: submit every closed group that has no write in flight,
+    /// each under its own key, lone deaths included.
     fn advance_correlated_worker_deaths(&mut self) {
-        if self.relay_jobs.writing("correlated-deaths") {
-            return;
-        }
         let now = chrono::Utc::now();
-        while let Some(group) =
-            closed_death_group(&self.recent_worker_exits, now, WORKER_DEATH_CORRELATION_WINDOW)
+        for group in
+            closed_death_groups(&self.recent_worker_exits, now, WORKER_DEATH_CORRELATION_WINDOW)
         {
-            let span = group.len();
-            if span < 2 {
-                self.recent_worker_exits.drain(..span);
+            let key = death_group_key(&group);
+            if self.relay_jobs.writing(&key) {
                 continue;
             }
             let cas_dir = self.app.cas_dir().to_path_buf();
-            self.relay_jobs
-                .submit_write(&mut self.queue_jobs, "correlated-deaths", None, move || {
-                    let persisted = matches!(
-                        super::lifecycle::enqueue_correlated_worker_deaths_relay(&cas_dir, &group),
-                        super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
-                    );
-                    super::relay_jobs::RelayOutput::DeathsRelayed { group, persisted }
-                });
-            return;
+            let age = now - group[0].at;
+            #[cfg(test)]
+            let relay = self.relay_jobs.death_group_override.unwrap_or(relay_death_group_io);
+            #[cfg(not(test))]
+            let relay = relay_death_group_io;
+            self.relay_jobs.submit_write(&mut self.queue_jobs, &key, None, move || {
+                let done = relay(&cas_dir, &group, age);
+                super::relay_jobs::RelayOutput::DeathsRelayed { group, done }
+            });
         }
     }
 
-    /// A correlated-deaths relay reported (cas-4491f).
-    fn settle_correlated_deaths_relay(&mut self, group: Vec<ObservedWorkerExit>, persisted: bool) {
-        let now = chrono::Utc::now();
-        if !persisted && now - group[0].at < chrono::Duration::minutes(10) {
-            // Keep the group for the next tick; the relay key makes the
-            // retry idempotent. A group that still cannot be relayed after
-            // ten minutes is dropped, not retried forever.
+    /// A death group's relay reported (cas-4491f, cas-26c8).
+    fn settle_correlated_deaths_relay(&mut self, group: Vec<ObservedWorkerExit>, done: bool) {
+        if !done {
+            // Kept for the next tick; its keys make the retry idempotent.
             return;
         }
-        tracing::warn!(
-            target: "cas::coordination",
-            stage = "worker_deaths_correlated",
-            workers = %group.iter().map(|exit| exit.worker.as_str()).collect::<Vec<_>>().join(","),
-            "correlated worker deaths relayed to the supervisor as one incident"
-        );
-        let span = group.len().min(self.recent_worker_exits.len());
-        self.recent_worker_exits.drain(..span);
+        if group.len() >= 2 {
+            tracing::warn!(
+                target: "cas::coordination",
+                stage = "worker_deaths_correlated",
+                workers = %group.iter().map(|exit| exit.worker.as_str()).collect::<Vec<_>>().join(","),
+                "correlated worker deaths relayed to the supervisor as one incident"
+            );
+        }
+        let settled = group
+            .iter()
+            .map(|exit| (exit.worker.clone(), exit.at))
+            .collect::<std::collections::HashSet<_>>();
+        self.recent_worker_exits
+            .retain(|exit| !settled.contains(&(exit.worker.clone(), exit.at)));
         self.advance_correlated_worker_deaths();
+    }
+
+    /// cas-26c8 review M1/H1: after a restart, or a failed write, nothing
+    /// holds a recorded death any more. A relay read job lists this
+    /// session's folded relays and deaths whose prompt never reached the
+    /// queue; deaths this daemon still holds (window open, or group write in
+    /// flight) are skipped when the read reports.
+    fn sweep_recorded_worker_deaths(&mut self) {
+        use super::relay_jobs::Relay;
+        const DEATH_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+        let now = std::time::Instant::now();
+        if self.relay_jobs.reading(Relay::DeathSweep)
+            || self
+                .last_death_sweep
+                .is_some_and(|last| now.saturating_duration_since(last) < DEATH_SWEEP_INTERVAL)
+        {
+            return;
+        }
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        let session = self.session_name.clone();
+        if self.relay_jobs.submit_read(&mut self.queue_jobs, Relay::DeathSweep, move || {
+            read_death_sweep(&cas_dir, &session, chrono::Utc::now())
+        }) {
+            self.last_death_sweep = Some(now);
+        }
+    }
+
+    /// Decide on a death-sweep read (cas-26c8): re-drive each folded relay,
+    /// and inject each per-worker death no live hold covers.
+    fn decide_recorded_worker_deaths(
+        &mut self,
+        basis: u64,
+        folded: Vec<(i64, serde_json::Value)>,
+        deaths: Vec<crate::mcp::tools::service::orphan_recovery::UnstampedWorkerDeath>,
+    ) {
+        use super::relay_jobs::RelayOutput;
+        let held = self
+            .recent_worker_exits
+            .iter()
+            .filter_map(|exit| exit.death.as_ref())
+            .map(|death| {
+                crate::mcp::tools::service::orphan_recovery::death_incident_key(&death.agent)
+            })
+            .collect::<std::collections::HashSet<_>>();
+        for (id, payload) in folded {
+            let cas_dir = self.app.cas_dir().to_path_buf();
+            self.relay_jobs.submit_write(
+                &mut self.queue_jobs,
+                &format!("death-sweep:fold:{id}"),
+                Some(basis),
+                move || {
+                    super::lifecycle::redrive_folded_worker_deaths_relay(&cas_dir, id, &payload);
+                    RelayOutput::DeathSweepWritten
+                },
+            );
+        }
+        for death in deaths.into_iter().filter(|death| !held.contains(&death.incident)) {
+            let cas_dir = self.app.cas_dir().to_path_buf();
+            self.relay_jobs.submit_write(
+                &mut self.queue_jobs,
+                &format!("death-sweep:died:{}", death.notification_id),
+                Some(basis),
+                move || {
+                    crate::mcp::tools::service::orphan_recovery::inject_unstamped_worker_death(
+                        &cas_dir, &death,
+                    );
+                    RelayOutput::DeathSweepWritten
+                },
+            );
+        }
     }
 
     /// cas-0f5b: hold a respawned or recycled worker to the same boot

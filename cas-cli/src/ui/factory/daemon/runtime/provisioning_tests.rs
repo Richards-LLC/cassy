@@ -51,6 +51,7 @@ pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
         last_usage_limit_scan: None,
         open_operator_notices: std::collections::HashMap::new(),
         last_permission_request_scan: None,
+        last_death_sweep: None,
         reported_permission_requests: std::collections::HashSet::new(),
         relay_jobs: Default::default(),
         last_commander_mirror_scan: None,

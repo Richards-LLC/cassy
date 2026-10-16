@@ -318,8 +318,16 @@ pub(super) fn enqueue_folded_worker_deaths_relay(
 /// replay the same idempotent key.
 pub(super) fn redrive_folded_worker_deaths_relay(
     cas_dir: &std::path::Path,
+    notification_id: i64,
     payload: &serde_json::Value,
 ) -> WorkerAttentionRelayOutcome {
+    use cas_store::SupervisorQueueStore;
+    // Re-read on the write lane: a prompt injected since the sweep's read
+    // means there is nothing to re-drive.
+    match crate::store::open_supervisor_queue_store(cas_dir).map(|queue| queue.get(notification_id)) {
+        Ok(Ok(Some(row))) if row.prompt_delivered_at.is_none() => {}
+        _ => return WorkerAttentionRelayOutcome::NotApplicable,
+    }
     let text = |key: &str| payload.get(key).and_then(serde_json::Value::as_str);
     let (Some(worker), Some(detail), Some(occurrence)) =
         (text("worker"), text("detail"), text("occurrence"))
@@ -1666,6 +1674,7 @@ mod worker_attention_tests {
         );
         // pin: review M contract: a held death has its durable row but no prompt yet.
         assert!(prompt_rows().is_empty(), "no prompt until the window closes");
+        daemon.last_death_sweep = None;
         daemon.relay_correlated_worker_deaths();
         let rows = notices();
         let kinds: Vec<&str> = rows.iter().map(|row| row.event_type.as_str()).collect();
@@ -1686,6 +1695,7 @@ mod worker_attention_tests {
         assert!(daemon.recent_worker_exits.is_empty());
 
         daemon.recent_worker_exits = vec![died("codex-d", 0)];
+        daemon.last_death_sweep = None;
         daemon.relay_correlated_worker_deaths();
         let rows = notices();
         let lone: Vec<_> = rows.iter().filter(|row| row.event_type == "worker_died").collect();
@@ -1706,10 +1716,12 @@ mod worker_attention_tests {
         let before = prompt_rows().len();
         let now = chrono::Utc::now();
         daemon.recent_worker_exits = vec![died_at("codex-e", now), died_at("codex-f", now)];
+        daemon.last_death_sweep = None;
         daemon.relay_correlated_worker_deaths();
         // pin: the sweep must skip deaths the live daemon still holds.
         assert_eq!(prompt_rows().len(), before, "held deaths wait for their window");
         daemon.recent_worker_exits.clear(); // the restarted daemon holds nothing
+        daemon.last_death_sweep = None;
         daemon.relay_correlated_worker_deaths();
         let injected = prompt_rows();
         assert_eq!(injected.len(), before + 2, "both deaths still reach the supervisor");
@@ -1719,6 +1731,7 @@ mod worker_attention_tests {
                 "{worker}: {injected:?}"
             );
         }
+        daemon.last_death_sweep = None;
         daemon.relay_correlated_worker_deaths();
         // pin: a second sweep must not inject the same deaths again.
         assert_eq!(prompt_rows().len(), before + 2, "the sweep injects each death once");
@@ -1785,6 +1798,8 @@ mod worker_attention_tests {
             )
             .unwrap();
 
+        daemon.last_death_sweep = None;
+        daemon.last_death_sweep = None;
         daemon.relay_correlated_worker_deaths(); // the restarted daemon holds nothing
         let prompts = crate::store::open_prompt_queue_store(&cas_dir)
             .unwrap()
@@ -1806,6 +1821,7 @@ mod worker_attention_tests {
             !prompts.iter().any(|row| row.prompt.contains("other-w")),
             "another factory's held death is not swept: {prompts:?}"
         );
+        daemon.last_death_sweep = None;
         daemon.relay_correlated_worker_deaths();
         let again = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(20).unwrap();
         // pin: review M1: a second sweep must not re-drive the fold again.
@@ -1838,12 +1854,13 @@ mod worker_attention_tests {
         assert!(prompt_enqueued, "a persisted fold reports its prompt enqueued");
     }
 
-    /// cas-26c8 review L1: a group whose folded relay is stuck stays queued
-    /// without holding back a later lone death.
+    /// cas-26c8 review L1: every closed group is listed on its own, so a group
+    /// whose folded relay is retried never holds back a later lone death.
     #[test]
     fn a_stuck_death_group_does_not_block_later_deaths_cas_26c8() {
         use super::super::queue_and_events::{
-            ObservedWorkerExit, WORKER_DEATH_CORRELATION_WINDOW, drive_death_groups,
+            ObservedWorkerExit, WORKER_DEATH_CORRELATION_WINDOW, closed_death_groups,
+            death_group_key,
         };
         let t0 = chrono::Utc::now() - chrono::Duration::seconds(60);
         let exit = |worker: &str, offset_ms: i64| ObservedWorkerExit {
@@ -1853,16 +1870,16 @@ mod worker_attention_tests {
             death: None,
         };
         let exits = vec![exit("stuck-a", 0), exit("stuck-b", 500), exit("lone-c", 20_000)];
-        let mut relayed = Vec::new();
-        let kept = drive_death_groups(exits, chrono::Utc::now(), WORKER_DEATH_CORRELATION_WINDOW, |group| {
-            relayed.push(group.iter().map(|exit| exit.worker.clone()).collect::<Vec<_>>());
-            group.len() == 1
-        });
-        assert_eq!(relayed, [vec!["stuck-a", "stuck-b"], vec!["lone-c"]]);
-        assert_eq!(
-            kept.iter().map(|exit| exit.worker.as_str()).collect::<Vec<_>>(),
-            ["stuck-a", "stuck-b"],
-            "only the stuck group is kept"
+        let groups = closed_death_groups(&exits, chrono::Utc::now(), WORKER_DEATH_CORRELATION_WINDOW);
+        let names: Vec<Vec<&str>> = groups
+            .iter()
+            .map(|group| group.iter().map(|exit| exit.worker.as_str()).collect())
+            .collect();
+        assert_eq!(names, [vec!["stuck-a", "stuck-b"], vec!["lone-c"]]);
+        assert_ne!(
+            death_group_key(&groups[0]),
+            death_group_key(&groups[1]),
+            "each group has its own write key, so neither waits on the other"
         );
     }
 
@@ -2620,6 +2637,7 @@ impl FactoryDaemon {
             last_usage_limit_scan: None,
             open_operator_notices: std::collections::HashMap::new(),
             last_permission_request_scan: None,
+            last_death_sweep: None,
             reported_permission_requests: std::collections::HashSet::new(),
             relay_jobs: Default::default(),
             last_commander_mirror_scan: None,

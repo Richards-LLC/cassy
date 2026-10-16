@@ -644,29 +644,32 @@ pub(crate) fn live_session_supervisors(agent_store: &dyn AgentStore, factory_ses
 
 /// cas-26c8: a death's durable `worker_died` row whose prompt was never
 /// injected, because the daemon that held it for the correlation window
-/// stopped or restarted, or because an injection failed. Each row recent
-/// enough to matter and not held by the live daemon (`held_incidents`, from
-/// [`death_incident_key`]) is injected now, so a death is never silent.
-pub(crate) fn sweep_unstamped_worker_deaths(
+/// stopped or restarted, or because an injection failed.
+#[derive(Debug, Clone)]
+pub(crate) struct UnstampedWorkerDeath {
+    pub supervisor: String,
+    pub notification_id: i64,
+    pub incident: String,
+    pub payload: serde_json::Value,
+}
+
+/// cas-26c8 (relay read job): this factory session's unstamped `worker_died`
+/// rows recent enough to matter. Review H1: only the session's live
+/// supervisors and rows recorded for this session are read, so factories
+/// sharing one cas.db never see each other's held deaths, and the cost is
+/// bounded by the live supervisors.
+pub(crate) fn list_unstamped_worker_deaths(
     cas_root: &Path,
     agent_store: &dyn AgentStore,
     factory_session: &str,
-    held_incidents: &std::collections::HashSet<String>,
     now: chrono::DateTime<chrono::Utc>,
     max_age: chrono::Duration,
-) -> usize {
-    let (Ok(queue), Ok(prompt_queue)) =
-        (open_supervisor_queue_store(cas_root), open_prompt_queue_store(cas_root))
-    else {
-        return 0;
+) -> Vec<UnstampedWorkerDeath> {
+    let Ok(queue) = open_supervisor_queue_store(cas_root) else {
+        return Vec::new();
     };
-    // cas-26c8 review H1: factories can share one cas.db. Only this
-    // session's live supervisors are swept, so one factory never injects
-    // deaths another factory's daemon is still holding for its window, and
-    // the per-pass cost is bounded by the live supervisors, not history.
-    let supervisors = live_session_supervisors(agent_store, factory_session);
-    let mut injected = 0;
-    for supervisor in supervisors {
+    let mut found = Vec::new();
+    for supervisor in live_session_supervisors(agent_store, factory_session) {
         let Ok(rows) = queue.list_pending_prompt_outbox(&supervisor, "worker_died", 20) else {
             continue;
         };
@@ -678,66 +681,87 @@ pub(crate) fn sweep_unstamped_worker_deaths(
                 .transition_key
                 .as_deref()
                 .and_then(|key| key.strip_suffix(&format!(":{supervisor}")))
+                .map(str::to_string)
             else {
                 continue;
             };
-            if held_incidents.contains(incident) {
-                continue;
-            }
             let Ok(payload) = serde_json::from_str::<serde_json::Value>(&row.payload) else {
                 continue;
             };
-            let text = |key: &str| payload.get(key).and_then(serde_json::Value::as_str);
-            if text("factory_session") != Some(factory_session) {
+            if payload.get("factory_session").and_then(serde_json::Value::as_str)
+                != Some(factory_session)
+            {
                 continue;
             }
-            let list = |key: &str| {
-                payload
-                    .get(key)
-                    .and_then(serde_json::Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|item| item.as_str().map(str::to_string))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            };
-            let (Some(worker_id), Some(worker_name)) = (text("worker_id"), text("worker_name"))
-            else {
-                continue;
-            };
-            let mut agent = Agent::new(worker_id.to_string(), worker_name.to_string());
-            agent.role = AgentRole::Worker;
-            agent.factory_session = text("factory_session").map(str::to_string);
-            let summary = OrphanRecoverySummary {
-                held_task_ids: list("held_tasks"),
-                recovered_task_ids: list("recovered_tasks"),
-            };
-            let exit = crate::prompt_revalidation::WorkerExitCause {
-                exit_code: payload
-                    .get("exit_code")
-                    .and_then(serde_json::Value::as_i64)
-                    .and_then(|code| i32::try_from(code).ok()),
-                exit_signal: text("exit_signal").map(str::to_string),
-                output_tail: text("exit_tail").map(str::to_string),
-            };
-            let has_exit = exit != crate::prompt_revalidation::WorkerExitCause::default();
-            inject_worker_died_prompt(
-                queue.as_ref(),
-                Some(prompt_queue.as_ref()),
-                &supervisor,
-                row.id,
-                &agent,
-                &summary,
-                text("reason").unwrap_or("worker died"),
+            found.push(UnstampedWorkerDeath {
+                supervisor: supervisor.clone(),
+                notification_id: row.id,
                 incident,
-                has_exit.then_some(&exit),
-            );
-            injected += 1;
+                payload,
+            });
         }
     }
-    injected
+    found
+}
+
+/// cas-26c8 (relay write job): inject one unstamped death's prompt. The row
+/// is re-read first: a fold that stamped it in the meantime (both run on the
+/// one write lane, so they never interleave) means nothing is sent.
+pub(crate) fn inject_unstamped_worker_death(cas_root: &Path, death: &UnstampedWorkerDeath) -> bool {
+    let (Ok(queue), Ok(prompt_queue)) =
+        (open_supervisor_queue_store(cas_root), open_prompt_queue_store(cas_root))
+    else {
+        return false;
+    };
+    match queue.get(death.notification_id) {
+        Ok(Some(row)) if row.prompt_delivered_at.is_none() && row.processed_at.is_none() => {}
+        _ => return false,
+    }
+    let payload = &death.payload;
+    let text = |key: &str| payload.get(key).and_then(serde_json::Value::as_str);
+    let list = |key: &str| {
+        payload
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let (Some(worker_id), Some(worker_name)) = (text("worker_id"), text("worker_name")) else {
+        return false;
+    };
+    let mut agent = Agent::new(worker_id.to_string(), worker_name.to_string());
+    agent.role = AgentRole::Worker;
+    agent.factory_session = text("factory_session").map(str::to_string);
+    let summary = OrphanRecoverySummary {
+        held_task_ids: list("held_tasks"),
+        recovered_task_ids: list("recovered_tasks"),
+    };
+    let exit = crate::prompt_revalidation::WorkerExitCause {
+        exit_code: payload
+            .get("exit_code")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok()),
+        exit_signal: text("exit_signal").map(str::to_string),
+        output_tail: text("exit_tail").map(str::to_string),
+    };
+    let has_exit = exit != crate::prompt_revalidation::WorkerExitCause::default();
+    inject_worker_died_prompt(
+        queue.as_ref(),
+        Some(prompt_queue.as_ref()),
+        &death.supervisor,
+        death.notification_id,
+        &agent,
+        &summary,
+        text("reason").unwrap_or("worker died"),
+        &death.incident,
+        has_exit.then_some(&exit),
+    );
+    true
 }
 
 fn worker_died_payload(

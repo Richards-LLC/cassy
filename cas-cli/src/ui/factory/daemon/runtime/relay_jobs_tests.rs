@@ -35,6 +35,39 @@ impl LoopPass {
         }
     }
 
+    /// Count on the lane the caller already entered (an enforced one, say).
+    pub(super) fn counting() -> LoopCount {
+        LoopCount {
+            store: wait_budget::store_access_violations(),
+            lane: lane_guard::thread_violations(),
+            _forbid: wait_budget::forbid_store_access(),
+        }
+    }
+
+    pub(super) fn assert_no_io(&self, what: &str) {
+        assert_eq!(
+            wait_budget::store_access_violations(),
+            self.store,
+            "{what} read the store on the loop: {:?}",
+            wait_budget::last_store_access_violation()
+        );
+        assert_eq!(
+            lane_guard::thread_violations(),
+            self.lane,
+            "{what} ran blocking work on the loop: {:?}",
+            lane_guard::last_thread_violation()
+        );
+    }
+}
+
+/// [`LoopPass`] on a lane the caller entered.
+pub(super) struct LoopCount {
+    store: u64,
+    lane: u64,
+    _forbid: wait_budget::ForbidStoreGuard,
+}
+
+impl LoopCount {
     pub(super) fn assert_no_io(&self, what: &str) {
         assert_eq!(
             wait_budget::store_access_violations(),
@@ -621,6 +654,127 @@ fn c4491f_write_records_do_not_accumulate() {
     relays.take(&mut jobs);
     relays.take(&mut jobs);
     assert_eq!(relays.write_records(), 0, "no read predates any of them");
+}
+
+/// A daemon whose session has metadata on disk (in a temporary HOME), with
+/// epic-focus writes deferred as the daemon loop runs them.
+fn daemon_with_session_metadata(
+    cas_dir: &std::path::Path,
+    session: &str,
+) -> (FactoryDaemon, std::path::PathBuf) {
+    let path = crate::ui::factory::session::metadata_path(session);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let metadata = crate::ui::factory::session::create_metadata(
+        session, 1, "supervisor", &[], None, None, None,
+    );
+    std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+    let mut daemon = super::provisioning_tests::daemon(cas_dir);
+    daemon.app.set_factory_session_name_for_test(session);
+    daemon.app.set_deferred_session_metadata_writes(true);
+    (daemon, path)
+}
+
+fn persisted_epic(path: &std::path::Path) -> Option<String> {
+    let metadata: crate::ui::factory::protocol::SessionMetadata =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    metadata.epic_id
+}
+
+/// cas-5e72: an epic-focus change on the loop writes nothing there; the
+/// session metadata write waits for the store worker.
+#[test]
+fn c5e72_epic_focus_change_writes_nothing_on_the_loop() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = crate::test_support::TestEnvGuard::with_vars(&[("HOME", home.path().to_str().unwrap())]);
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let (mut daemon, path) = daemon_with_session_metadata(&cas_dir, "focus-off-loop");
+    daemon
+        .app
+        .set_session_focus_for_test("cas-e41c", crate::ui::factory::app::EpicFocusSource::SessionDefault);
+    {
+        // Enforced, as C6 runs the daemon's proven-clean steps: a blocking
+        // call here panics.
+        let _lane = super::loop_watchdog::enforce_test_lane(lane_guard::Lane::Control);
+        let pass = LoopPass::counting();
+        let changes = daemon.app.handle_epic_events(&[crate::ui::factory::director::DirectorEvent::EpicStarted {
+            epic_id: "cas-e41c".into(),
+            epic_title: "focused".into(),
+        }]);
+        assert_eq!(changes.len(), 1, "the epic was adopted");
+        pass.assert_no_io("the epic-focus change");
+    }
+    assert_eq!(persisted_epic(&path), None, "nothing written yet");
+    daemon.flush_epic_focus_write(super::store_worker::global());
+    assert!(super::store_worker::global().wait_idle(Duration::from_secs(30)));
+    assert_eq!(persisted_epic(&path).as_deref(), Some("cas-e41c"));
+}
+
+/// cas-5e72: rapid focus changes persist the last one, whether or not the
+/// loop handed off the writes in between.
+#[test]
+fn c5e72_rapid_focus_changes_persist_the_last() {
+    use crate::ui::factory::director::DirectorEvent;
+    let home = tempfile::tempdir().unwrap();
+    let _env = crate::test_support::TestEnvGuard::with_vars(&[("HOME", home.path().to_str().unwrap())]);
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let (mut daemon, path) = daemon_with_session_metadata(&cas_dir, "focus-last-wins");
+    let store_worker = super::store_worker::global();
+    let start = |daemon: &mut FactoryDaemon, epic: &str| {
+        daemon
+            .app
+            .set_session_focus_for_test(epic, crate::ui::factory::app::EpicFocusSource::SessionDefault);
+        daemon.app.handle_epic_events(&[DirectorEvent::EpicStarted {
+            epic_id: epic.into(),
+            epic_title: epic.into(),
+        }]);
+    };
+    start(&mut daemon, "cas-aaa1");
+    daemon.flush_epic_focus_write(store_worker);
+    daemon.app.handle_epic_events(&[DirectorEvent::EpicCompleted { epic_id: "cas-aaa1".into() }]);
+    daemon.flush_epic_focus_write(store_worker);
+    // Two changes before the next hand-off: only the last is written.
+    start(&mut daemon, "cas-bbb2");
+    daemon.app.reset_epic_state();
+    start(&mut daemon, "cas-ccc3");
+    daemon.flush_epic_focus_write(store_worker);
+    assert!(store_worker.wait_idle(Duration::from_secs(30)));
+    assert_eq!(persisted_epic(&path).as_deref(), Some("cas-ccc3"));
+
+    daemon.app.reset_epic_state();
+    daemon.flush_epic_focus_write(store_worker);
+    assert!(store_worker.wait_idle(Duration::from_secs(30)));
+    assert_eq!(persisted_epic(&path), None, "a later clear wins too");
+}
+
+/// cas-5e72: a worker exit is handled inside the daemon's enforced PTY
+/// exchange. Removing the worker from the detector clears its durable hold
+/// on the store worker, never on the lane.
+#[test]
+fn c5e72_removed_worker_hold_clears_off_the_loop() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = crate::test_support::TestEnvGuard::with_vars(&[("HOME", home.path().to_str().unwrap())]);
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let (mut daemon, path) = daemon_with_session_metadata(&cas_dir, "hold-off-loop");
+    crate::ui::factory::persist_session_metadata_worker_hold_at(&path, "gone-worker", true).unwrap();
+    let progress = super::loop_watchdog::LoopProgress::new();
+    {
+        let (attachment, enforced) = super::loop_watchdog::enforced_daemon_step(
+            &progress,
+            super::loop_watchdog::LoopPhase::PtyOutput,
+        );
+        let pass = LoopPass::counting();
+        daemon.app.remove_worker_from_event_detector("gone-worker");
+        pass.assert_no_io("clearing a removed worker's hold");
+        drop(enforced);
+        drop(attachment);
+    }
+    assert!(super::store_worker::global().wait_idle(Duration::from_secs(30)));
+    let metadata: crate::ui::factory::protocol::SessionMetadata =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(metadata.held_workers.is_empty(), "the hold was cleared on the store worker");
 }
 
 /// cas-26c8 review L1 (wiring): a death group whose folded relay keeps

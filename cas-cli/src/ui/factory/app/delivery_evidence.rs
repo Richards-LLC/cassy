@@ -434,8 +434,9 @@ mod tests {
 
     #[test]
     fn cas_f439_contained_deliveries_await_worker_close() {
-        use crate::ui::factory::director::events::supervisor_actionable_state_with_classifiers;
-        use crate::ui::factory::director::{SupervisorActionableState, SupervisorStallTracker};
+        use crate::ui::factory::director::{
+            SupervisorActionableState, SupervisorStallTracker, supervisor_actionable_state_with_classifiers,
+        };
         use crate::mcp::tools::core::task::lifecycle::close_ops::collect_epic_branch_statuses;
 
         let _env = crate::test_support::TestEnvGuard::temp_home();
@@ -469,7 +470,12 @@ mod tests {
             let request = CiStatusRequest::new(repo.into(), &HashMap::from([("cas-a".into(), facts.clone())]), Arc::clone(&ci)).unwrap();
             let git = request.run();
             let evidence = combine(&HashMap::from([("cas-a".into(), facts.clone())]), &git);
-            let mut data = DirectorData::default();
+            let mut data = DirectorData {
+                ready_tasks: Vec::new(), in_progress_tasks: Vec::new(), epic_tasks: Vec::new(),
+                agents: Vec::new(), activity: Vec::new(), agent_id_to_name: HashMap::new(),
+                changes: Vec::new(), git_loaded: false, reminders: Vec::new(),
+                epic_closed_counts: HashMap::new(), start_gated_task_ids: Default::default(),
+            };
             data.in_progress_tasks.push(facts.task.clone());
             let mut epic = facts.task.clone();
             epic.id = "cas-epic".into();

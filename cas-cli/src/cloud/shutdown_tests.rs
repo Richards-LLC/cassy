@@ -58,19 +58,26 @@ async fn cas_4ac8_drain_retries_fallback_and_completed_intent_fences_old_session
     let env = TestEnvGuard::temp_home();
     let root = init_cas_dir(env.home()).unwrap();
     let server = MockServer::start().await;
+    let times = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = times.clone();
     Mock::given(method("POST"))
         .and(http_path("/api/agents/ended/shutdown"))
-        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "invalid"))
+        .respond_with(move |_: &wiremock::Request| {
+            recorded.lock().unwrap().push(Instant::now());
+            ResponseTemplate::new(429).insert_header("Retry-After", "invalid")
+        })
         .up_to_n_times(2)
         .with_priority(1)
         .expect(2)
         .mount(&server)
         .await;
+    let recorded = times.clone();
     Mock::given(method("POST"))
         .and(http_path("/api/agents/ended/shutdown"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({"released_locks":0})),
-        )
+        .respond_with(move |_: &wiremock::Request| {
+            recorded.lock().unwrap().push(Instant::now());
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"released_locks":0}))
+        })
         .expect(1)
         .mount(&server)
         .await;
@@ -94,8 +101,9 @@ async fn cas_4ac8_drain_retries_fallback_and_completed_intent_fences_old_session
     assert!(!is_ended(&root, &old));
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 3);
-    assert!(requests[1].date - requests[0].date >= chrono::Duration::milliseconds(190));
-    assert!(requests[2].date - requests[1].date >= chrono::Duration::milliseconds(390));
+    let recorded = times.lock().unwrap();
+    assert!(recorded[1].duration_since(recorded[0]) >= std::time::Duration::from_millis(200));
+    assert!(recorded[2].duration_since(recorded[1]) >= std::time::Duration::from_millis(400));
 }
 
 #[tokio::test]

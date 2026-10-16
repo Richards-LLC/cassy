@@ -120,7 +120,11 @@ pub(crate) fn health(root: &Path, now: DateTime<Utc>) -> String {
         let mut expired = 0;
         let mut causes = Vec::new();
         for path in paths(root)? {
-            let intent = read(&path)?;
+            let intent = match read(&path) {
+                Ok(intent) => intent,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
             if intent.completed_at.is_some() {
                 continue;
             }
@@ -174,7 +178,13 @@ pub(crate) fn drain(
     let deadline = Instant::now() + rate_limit::CLEANUP_BUDGET;
     let agents = crate::store::open_agent_store(root).map_err(|error| error.to_string())?;
     for file in files {
-        let mut intent = read(&file).map_err(|error| error.to_string())?;
+        let mut intent = match read(&file) {
+            Ok(intent) => intent,
+            Err(error) => {
+                tracing::warn!(path = %file.display(), %error, "unreadable cloud shutdown intent");
+                continue;
+            }
+        };
         if intent.completed_at.is_some() {
             if now >= intent.expires_at {
                 std::fs::remove_file(&file).map_err(|error| error.to_string())?;
@@ -191,7 +201,17 @@ pub(crate) fn drain(
         // Never tear down a row that has been rebound to a newer harness
         // session (clear_context). Check even though normal SessionEnd already
         // guards this before enqueueing.
-        if agents.get(&intent.agent_id).is_ok_and(|agent| {
+        let current = match agents.get(&intent.agent_id) {
+            Ok(agent) => Some(agent),
+            Err(cas_store::StoreError::NotFound(_)) => None,
+            Err(error) => {
+                intent.cause = format!("local session check failed: {error}");
+                intent.next_retry_at = now + chrono::Duration::seconds(30);
+                write(&file, &intent, false).map_err(|error| error.to_string())?;
+                continue;
+            }
+        };
+        if current.is_some_and(|agent| {
             agent
                 .cc_session_id
                 .as_deref()
@@ -214,18 +234,19 @@ pub(crate) fn drain(
                 Err(error) if error.status == Some(404) => intent.completed_at = Some(Utc::now()),
                 Err(error) => {
                     intent.cause = error.cause;
-                    let delay = error
-                        .retry_after
-                        .and_then(|delay| chrono::Duration::from_std(delay).ok())
-                        .unwrap_or_else(|| {
-                            chrono::Duration::seconds(
-                                (30_i64 << intent.attempts.saturating_sub(1).min(4)).min(300),
-                            )
-                        });
-                    intent.next_retry_at = Utc::now()
-                        .checked_add_signed(delay)
-                        .unwrap_or(intent.expires_at)
-                        .min(intent.expires_at);
+                    intent.next_retry_at = match error.retry_after {
+                        Some(delay) => chrono::Duration::from_std(delay)
+                            .ok()
+                            .and_then(|delay| Utc::now().checked_add_signed(delay))
+                            .unwrap_or(intent.expires_at),
+                        None => {
+                            Utc::now()
+                                + chrono::Duration::seconds(
+                                    (30_i64 << intent.attempts.saturating_sub(1).min(4)).min(300),
+                                )
+                        }
+                    }
+                    .min(intent.expires_at);
                 }
             }
         }

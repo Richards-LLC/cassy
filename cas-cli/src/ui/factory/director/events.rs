@@ -328,6 +328,61 @@ pub enum DeliveryHold {
     EvidencePending,
 }
 
+/// Red-first stub (cas-03ff).
+const CAS_03FF_RED_STUB: bool = true;
+
+/// cas-03ff: whether the supervisor has a pending external reminder waiting
+/// on this delivery: `ci_completed` for its tip, or `branch_contained_in`
+/// for its tip or branch. Waiting on CI or on a merge to land is not a stall.
+/// A reminder for some other delivery leaves this one's merge alarm alone.
+pub(crate) fn supervisor_reminder_watches_delivery(
+    data: &DirectorData,
+    supervisor_name: &str,
+    branch: &str,
+    tip: Option<&str>,
+) -> bool {
+    if CAS_03FF_RED_STUB {
+        return false;
+    }
+    let supervisor_ids: HashSet<&str> = data
+        .agents
+        .iter()
+        .filter(|agent| agent.name == supervisor_name)
+        .map(|agent| agent.id.as_str())
+        .collect();
+    let names_delivery = |value: &str| {
+        let value = value.trim().trim_start_matches("origin/");
+        if value == branch.trim_start_matches("origin/") {
+            return true;
+        }
+        let Some(tip) = tip else {
+            return false;
+        };
+        let (value, tip) = (value.to_ascii_lowercase(), tip.to_ascii_lowercase());
+        let hex = |text: &str| text.len() >= 7 && text.chars().all(|c| c.is_ascii_hexdigit());
+        hex(&value) && hex(&tip) && (tip.starts_with(&value) || value.starts_with(&tip))
+    };
+    data.reminders.iter().any(|reminder| {
+        reminder.status == cas_store::ReminderStatus::Pending
+            && (supervisor_ids.contains(reminder.target_id.as_str())
+                || reminder.target_id == supervisor_name)
+            && matches!(
+                reminder.trigger_event.as_deref(),
+                Some("ci_completed" | "branch_contained_in")
+            )
+            && reminder
+                .trigger_filter
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|filter| {
+                    ["sha", "commit", "branch_tip", "branch"]
+                        .iter()
+                        .filter_map(|key| filter.get(*key).and_then(serde_json::Value::as_str))
+                        .any(names_delivery)
+                })
+    })
+}
+
 /// Marker the close gate writes each time a delivery parks for merge.
 const PARKED_FOR_MERGE_MARKER: &str = "Task parked as awaiting_merge";
 /// Prefix the notes tool writes for a blocker note.
@@ -592,6 +647,11 @@ pub(crate) fn supervisor_actionable_state_with_classifiers(
             continue;
         }
         let (branch, tip) = resolve_delivery(task, worker);
+        // cas-03ff: the supervisor is waiting on this delivery's CI or on it
+        // landing, so it is not a stalled merge.
+        if supervisor_reminder_watches_delivery(data, supervisor_name, &branch, tip.as_deref()) {
+            continue;
+        }
         if let Some(target) = merge_target_for_task(data, task)
             && let Some(merged) = classify_merged_close_blocked(
                 task,

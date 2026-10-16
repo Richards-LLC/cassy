@@ -95,6 +95,16 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             use_cases: &["Configure supported Claude launch options"],
         });
     }
+    registry.register(ConfigMeta {
+        key: "factory.claude.worker_mcp", section: "factory",
+        name: "Claude Worker MCP Scope",
+        description: "cas_only uses a private strict CAS-only configuration (default). inherit loads native MCP scopes only when no supervisor-only MCP/environment denials exist; otherwise launch refuses. Supervisors and Codex are unchanged.",
+        value_type: ConfigType::String, default: "cas_only",
+        constraint: Constraint::OneOf(vec!["cas_only".into(), "inherit".into()]),
+        advanced: false, requires_feature: None,
+        keywords: &["factory", "claude", "worker", "mcp", "scope", "inherit"],
+        use_cases: &["Let Claude workers use additional native MCP servers in this project"],
+    });
     // FACTORY SECTION
     // ============================================================
     for (key, name, description) in [

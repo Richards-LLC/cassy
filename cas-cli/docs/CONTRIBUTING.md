@@ -134,7 +134,7 @@ Expired rows keep their history, acknowledgement and `superseded_stale` reason.
 ## Claude factory launch options
 
 Claude agents receive their factory identity as `--name` when the installed
-CLI advertises that exact option. Claude workers use a private, mode-0600 MCP
+CLI advertises that exact option. By default, Claude workers use a private, mode-0600 MCP
 configuration containing only `cas`, together with `--mcp-config` and
 `--strict-mcp-config`. The existing project CAS definition is retained when
 present; otherwise Cassy supplies `cas serve`. Supervisor MCP discovery keeps
@@ -142,19 +142,32 @@ its normal scopes. Native hooks, account selection and Teams settings still
 apply. Project files are left intact, and supervisor-only environment denials
 also apply to the generated CAS definition.
 
-Workers refuse to start if strict MCP flags are unsupported, the project root
+In the default `cas_only` mode, workers refuse to start if strict MCP flags are unsupported, the project root
 is missing, configuration cannot be provisioned, or `supervisor_only_mcp`
 denies `cas`. Upgrade Claude or correct the reported project configuration
 before retrying. Tasks needing other native MCP servers should go through the
-supervisor or the configured Cassy proxy.
+supervisor or the configured Cassy proxy, or use the project opt-out below.
 
-Two optional settings apply to initial, dynamic and recycled Claude agents:
+Claude settings apply to initial, dynamic and recycled Claude agents:
 
 ```toml
 [factory.claude]
+worker_mcp = "cas_only" # Default; choose "inherit" for native MCP discovery.
 remote_control = false # Opt in for the supervisor only; workers stay network-quiet.
 # fallback_model = "sonnet" # Explicit overload fallback for both roles.
 ```
+
+Use `cas config set factory.claude.worker_mcp inherit` to let this project's
+Claude workers load their native project/user MCP scopes. With no configured
+denials, `inherit` emits neither strict/config flags nor a private MCP JSON
+file and does not require strict-MCP CLI support. Restore the default with
+`cas config set factory.claude.worker_mcp cas_only`.
+If `supervisor_only_mcp` or `supervisor_only_env` contains any entries,
+`inherit` refuses before discovery: use `cas_only`, or clear the denial policy.
+Credential grants alone do not prevent inheritance. Supervisors and Codex
+keep their existing MCP behavior under either value; hooks, account selection,
+Teams and worker credential protections still apply. Invalid values are refused
+by both config commands and TOML loading.
 
 Use `cas config set factory.claude.remote_control true` to opt in, and
 `cas config set factory.claude.fallback_model sonnet` to choose a fallback.
@@ -575,11 +588,13 @@ and environment are preserved. Spawn diagnostics record denied names only.
 Configured workers get a private, materialized MCP configuration under
 `<cas_root>/worker-mcp/<name>.json`. Tracked and existing worktree `.mcp.json`
 files stay unchanged, so provisioning keeps the tree clean and cannot commit
-supervisor-only removals into the project. Claude
-uses `--strict-mcp-config` so local and user scopes cannot add servers; allowed
-direct servers must be declared in the project file. Cassy remains available
-even if it was registered only in local scope. Every worker uses the same private
-store path, including shared-cwd workers. Codex disables the named native MCP servers, and
+supervisor-only removals into the project. Claude's default `cas_only` mode
+uses `--strict-mcp-config` with only the project CAS definition (or a generated
+`cas serve` definition), including when CAS was registered only in local scope.
+`factory.claude.worker_mcp = "inherit"` restores native discovery only when the
+MCP/environment denial lists are empty; otherwise it refuses before discovery.
+Private worker configurations use the same store path, including shared-cwd
+workers. Codex disables the named native MCP servers, and
 its Cassy proxy filters those upstreams before startup and reload.
 Codex addresses dotted or otherwise special server names with a quoted key in
 a parent-table override so the name remains literal.

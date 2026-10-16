@@ -168,6 +168,10 @@ impl Config {
                     MemError::Parse(format!("Invalid integer value for factory.target_cache_retention_count: {value}"))
                 })?;
             }
+            "factory.claude.worker_mcp" => {
+                let mode = value.parse().map_err(MemError::Parse)?;
+                self.factory.get_or_insert_with(FactoryConfig::default).claude.worker_mcp = mode;
+            }
             "factory.claude.remote_control" => {
                 let enabled = value.parse().map_err(|_| MemError::Other(format!("Invalid boolean value for {key}: {value}")))?;
                 self.factory.get_or_insert_with(FactoryConfig::default).claude.remote_control = enabled;

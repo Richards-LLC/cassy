@@ -130,6 +130,7 @@ impl Config {
             "factory.target_cache_low_watermark_percent" => Some(factory.target_cache_low_watermark_percent.to_string()),
             "factory.target_cache_min_idle_secs" => Some(factory.target_cache_min_idle_secs.to_string()),
             "factory.target_cache_retention_count" => Some(factory.target_cache_retention_count.to_string()),
+            "factory.claude.worker_mcp" => Some(factory.claude.worker_mcp.as_str().into()),
             "factory.claude.remote_control" => Some(factory.claude.remote_control.to_string()),
             "factory.claude.fallback_model" => Some(factory.claude.fallback_model.clone().unwrap_or_default()),
             "factory.nice_cargo" => Some(factory.nice_cargo.to_string()),

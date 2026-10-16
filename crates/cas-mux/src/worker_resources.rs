@@ -115,6 +115,32 @@ pub fn load_worker_policy(cas_root: Option<&Path>) -> std::io::Result<FactoryWor
         .map_err(|_| std::io::Error::other("invalid supervisor-only MCP/environment lists"))
 }
 
+/// The CLI and all Claude launch paths deserialize the same typed options.
+pub(crate) fn load_claude_config(
+    cas_root: Option<&Path>,
+) -> std::io::Result<cas_types::factory_claude::FactoryClaudeConfig> {
+    let Some(root) = cas_root else {
+        return Ok(Default::default());
+    };
+    let contents = match std::fs::read_to_string(root.join("config.toml")) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error),
+    };
+    #[derive(serde::Deserialize, Default)]
+    #[serde(default)]
+    struct Factory {
+        claude: cas_types::factory_claude::FactoryClaudeConfig,
+    }
+    #[derive(serde::Deserialize)]
+    struct Document {
+        #[serde(default)]
+        factory: Factory,
+    }
+    toml::from_str::<Document>(&contents).map(|document| document.factory.claude)
+        .map_err(|_| std::io::Error::other("invalid [factory.claude] launch configuration; check worker_mcp, remote_control and fallback_model"))
+}
+
 /// Remove supervisor-only definitions before resolving credential references.
 pub(crate) fn filter_proxy_document(document: &mut toml::Value, policy: &FactoryWorkerPolicy) {
     for field in ["servers", "worker_access"] {

@@ -43,6 +43,7 @@ struct FakeState {
     replace_on_release: Option<String>,
     revive_on_lock: Option<String>,
     renew_after_lock_reads: Option<(usize, bool)>,
+    change_after_lock_read: Option<(usize, Option<String>)>,
 }
 
 /// A stateful stand-in for petra-stella-cloud's task-lock routes.
@@ -198,6 +199,20 @@ impl FakeCloud {
                     && at == reads && let Some(lock) = state.locks.get_mut(&key)
                 {
                     if epoch_only { lock.epoch += 1; } else { lock.renewed_at = now; }
+                }
+                if state.change_after_lock_read.as_ref().is_some_and(|(at, _)| *at == reads) {
+                    let (_, winner) = state.change_after_lock_read.take().unwrap();
+                    if let Some(lock) = state.locks.get_mut(&key) {
+                        match winner {
+                            Some(winner) => {
+                                lock.agent_id = winner;
+                                lock.renewed_at = now;
+                                lock.epoch += 1;
+                                lock.claim_reason = None;
+                            }
+                            None => lock.status = "released".into(),
+                        }
+                    }
                 }
                 (200, response)
             },
@@ -1113,7 +1128,9 @@ async fn cas_50713_changed_same_owner_snapshot_is_not_released() {
                 .insert(old.agent_id.clone(), "shutdown".into());
             state.renew_after_lock_reads = Some((1, epoch_only));
         }
-        assert!(start(&new.core, "cas-race", false).await.is_err());
+        // A fresh stale advisory can permit local work; the changed Cloud
+        // snapshot must never be released by this recovery attempt.
+        let _ = start(&new.core, "cas-race", false).await;
         assert_eq!(
             cloud.active_lock("cas-race").unwrap().1.agent_id,
             old.agent_id
@@ -1128,4 +1145,63 @@ async fn cas_50713_changed_same_owner_snapshot_is_not_released() {
                 .any(|r| r.ends_with("/release"))
         );
     }
+}
+
+
+async fn assert_renewal_snapshot_race(mode: &str) {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let dead = machine(&cloud.url, PROJECT, "dead-peer");
+    let worker = machine(&cloud.url, PROJECT, "local-worker");
+    let winner = machine(&cloud.url, PROJECT, "third-live-peer");
+    worker.put_task("cas-renew-race", TaskType::Task);
+    start(&worker.core, "cas-renew-race", false).await.unwrap();
+    cloud.live(&dead, "dead-peer");
+    cloud.live(&winner, "third-live-peer");
+    cloud.give_to("cas-renew-race", &dead.agent_id, None);
+    {
+        let mut state = cloud.state.lock().unwrap();
+        state.requests.clear();
+        state.statuses.insert(dead.agent_id.clone(), "shutdown".into());
+        match mode {
+            "released" => state.change_after_lock_read = Some((1, None)),
+            "reassigned" => state.change_after_lock_read = Some((1, Some(winner.agent_id.clone()))),
+            "epoch" => state.renew_after_lock_reads = Some((1, true)),
+            _ => unreachable!(),
+        }
+    }
+    let report = cas::cloud::peer_claims::renew_agent_claims(&worker.cas_dir, &worker.agent_id);
+    let rows = cas::store::open_prompt_queue_store(&worker.cas_dir).unwrap().peek_all(100).unwrap();
+    assert!(rows.iter().all(|row| !row.prompt.contains("dead-peer")), "{rows:?}");
+    if mode == "reassigned" {
+        assert_eq!(report.conflicts.len(), 1, "{report:?}");
+        assert_eq!(report.conflicts[0].1.agent_id, winner.agent_id);
+        assert_eq!(report.conflicts[0].1.name(), "third-live-peer");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].prompt.contains("third-live-peer"));
+        assert_eq!(cloud.active_lock("cas-renew-race").unwrap().1.agent_id, winner.agent_id);
+    } else {
+        assert!(report.conflicts.is_empty(), "{report:?}");
+        assert_eq!(report.failed, 1, "retry is advisory: {report:?}");
+        assert!(rows.is_empty(), "{rows:?}");
+        if mode == "released" { assert!(cloud.active_lock("cas-renew-race").is_none()); }
+        else { assert_eq!(cloud.active_lock("cas-renew-race").unwrap().1.agent_id, dead.agent_id); }
+    }
+    assert!(!cloud.state.lock().unwrap().requests.iter().any(|r| r.ends_with("/release")));
+}
+
+#[tokio::test]
+async fn cas_50713_renewal_does_not_alarm_after_lock_released_between_reads() {
+    assert_renewal_snapshot_race("released").await;
+}
+
+#[tokio::test]
+async fn cas_50713_renewal_names_actual_peer_after_reassignment_between_reads() {
+    assert_renewal_snapshot_race("reassigned").await;
+}
+
+#[tokio::test]
+async fn cas_50713_renewal_does_not_alarm_after_dead_holder_epoch_changes() {
+    assert_renewal_snapshot_race("epoch").await;
 }

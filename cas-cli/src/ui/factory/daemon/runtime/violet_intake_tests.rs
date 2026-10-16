@@ -2,7 +2,7 @@ use super::*;
 use cas_store::{PromptQueueStore, SqlitePromptQueueStore};
 use std::cell::RefCell;
 
-fn claim_fixture() -> Value {
+pub(super) fn claim_fixture() -> Value {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../../../tests/fixtures/coordination_contract/v1/violet_activity--claim_v2.json"
     ))

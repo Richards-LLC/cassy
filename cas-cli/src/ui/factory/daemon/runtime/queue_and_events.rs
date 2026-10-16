@@ -10017,34 +10017,6 @@ impl FactoryDaemon {
         &mut self,
         events: &[crate::ui::factory::director::DirectorEvent],
     ) {
-        use crate::store::{
-            open_prompt_queue_store, open_reminder_store, open_supervisor_queue_store,
-        };
-
-        let reminder_store = match open_reminder_store(self.app.cas_dir()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::debug!("Failed to open reminder store: {}", e);
-                return;
-            }
-        };
-
-        // Expire stale reminders within a small hot-path budget. Busy is
-        // expected to self-heal on the next tick; other failures are terminal.
-        report_stale_reminder_expiry(cas_store::expire_stale_bounded(
-            self.app.cas_dir(),
-            REMINDER_EXPIRY_BUSY_BUDGET,
-        ));
-
-        // Check time-based reminders
-        let due_reminders = match reminder_store.get_due_time_reminders() {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("Failed to get due reminders: {}", e);
-                Vec::new()
-            }
-        };
-
         // External conditions are polled less often than the two-second
         // refresh, and never on this loop (GH #1208): the scanner fetches
         // origin on its own thread and hands back the conditions it observed
@@ -10059,105 +10031,37 @@ impl FactoryDaemon {
                 (wake.reminder, context)
             })
             .collect();
-
         let ci_wakes = std::mem::take(&mut self.pending_ci_wakes);
-        let any_due = !due_reminders.is_empty()
-            || !events.is_empty()
-            || !external_ready.is_empty()
-            || !ci_wakes.is_empty();
-        let supervisor_queue = any_due
-            .then(|| open_supervisor_queue_store(self.app.cas_dir()).ok())
-            .flatten();
 
-        // Open prompt queue for PTY injection of fired reminders
-        let prompt_queue = any_due
-            .then(|| open_prompt_queue_store(self.app.cas_dir()).ok())
-            .flatten();
-
-        let agent_id_to_name = &self.app.director_data().agent_id_to_name;
-
-        for reminder in &due_reminders {
-            if !reminder_matches_factory_session(
-                reminder.session_id.as_deref(),
-                reminder.cross_session,
-                &self.session_name,
-            ) {
-                continue;
-            }
-            fire_reminder(
-                reminder,
-                &reminder_store,
-                &supervisor_queue,
-                &prompt_queue,
-                &self.session_name,
-                self.app.supervisor_name(),
-                agent_id_to_name,
-                None,
-                self.app.cas_dir(),
-            );
-        }
-
-        for (reminder, context) in &external_ready {
-            fire_reminder(
-                reminder,
-                &reminder_store,
-                &supervisor_queue,
-                &prompt_queue,
-                &self.session_name,
-                self.app.supervisor_name(),
-                agent_id_to_name,
-                Some(context),
-                self.app.cas_dir(),
-            );
-        }
-
-        for wake in &ci_wakes {
-            fire_reminder(
-                &wake.reminder,
-                &reminder_store,
-                &supervisor_queue,
-                &prompt_queue,
-                &self.session_name,
-                self.app.supervisor_name(),
-                agent_id_to_name,
-                Some(&ReminderTriggerContext::ci(wake)),
-                self.app.cas_dir(),
-            );
-        }
-
-        // Check event-based reminders against detected events
-        for event in events {
-            let event_type = event.event_type();
-            let candidates = match reminder_store.get_event_reminders(event_type) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-
-            for reminder in &candidates {
-                // cas-fcd4: only fire reminds registered in this factory session
-                // (shared cas.db otherwise cross-fires concurrent sessions).
-                if !reminder_matches_factory_session(
-                    reminder.session_id.as_deref(),
-                    reminder.cross_session,
-                    &self.session_name,
-                ) {
-                    continue;
-                }
-                if matches_event_filter(reminder, event) {
-                    let context = ReminderTriggerContext::director(event);
-                    fire_reminder(
-                        reminder,
-                        &reminder_store,
-                        &supervisor_queue,
-                        &prompt_queue,
-                        &self.session_name,
-                        self.app.supervisor_name(),
-                        agent_id_to_name,
-                        Some(&context),
-                        self.app.cas_dir(),
-                    );
-                }
-            }
+        // Factory loop v2 (cas-223f): the reminder store work (expiry, the
+        // due read, firing) is a `ReminderScan` job on the write lane, which
+        // runs on the StoreWorker. This loop only hands it the inputs. A pass
+        // carrying events, external observations or CI wakes is critical:
+        // those are edges, consumed once.
+        let carries_edges =
+            !events.is_empty() || !external_ready.is_empty() || !ci_wakes.is_empty();
+        let scan = ReminderScanInput {
+            cas_dir: self.app.cas_dir().to_path_buf(),
+            session_name: self.session_name.clone(),
+            supervisor_name: self.app.supervisor_name().to_string(),
+            agent_id_to_name: self.app.director_data().agent_id_to_name.clone(),
+            events: events.to_vec(),
+            external_ready,
+            ci_wakes,
+        };
+        self.reminder_scan_generation += 1;
+        let submitted = self.queue_jobs.submit_external(
+            super::factory_jobs::reminder_scan_spec(carries_edges, self.reminder_scan_generation),
+            move || {
+                run_reminder_scan(scan);
+                Box::new(super::factory_jobs::FactoryJobOutput::ReminderScan)
+            },
+        );
+        if matches!(
+            submitted,
+            super::jobs::Submitted::Closed | super::jobs::Submitted::LaneMismatch { .. }
+        ) {
+            tracing::warn!(?submitted, "reminder scan refused by the job runtime");
         }
     }
 
@@ -10505,6 +10409,157 @@ fn resolve_reminder_delivery_target(
         return None;
     }
     (agent.status == cas_types::AgentStatus::Shutdown).then(|| supervisor_name.to_string())
+}
+
+/// What one reminder pass needs, captured on the loop (cas-223f).
+struct ReminderScanInput {
+    cas_dir: std::path::PathBuf,
+    session_name: String,
+    supervisor_name: String,
+    agent_id_to_name: std::collections::HashMap<String, String>,
+    events: Vec<crate::ui::factory::director::DirectorEvent>,
+    external_ready: Vec<(cas_store::Reminder, ReminderTriggerContext)>,
+    ci_wakes: Vec<super::ci_watch::CiWake>,
+}
+
+/// One reminder pass (`ReminderScan`): expire stale reminders, fire due time
+/// reminders, the external and CI conditions observed true, and event
+/// reminders matching the tick's director events. Store reads and writes, so
+/// it runs as a job on the write lane, never on the loop.
+fn run_reminder_scan(scan: ReminderScanInput) {
+    use crate::store::{
+        open_prompt_queue_store, open_reminder_store, open_supervisor_queue_store,
+    };
+    let ReminderScanInput {
+        cas_dir,
+        session_name,
+        supervisor_name,
+        agent_id_to_name,
+        events,
+        external_ready,
+        ci_wakes,
+    } = scan;
+
+    let reminder_store = match open_reminder_store(&cas_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("Failed to open reminder store: {}", e);
+            return;
+        }
+    };
+
+    // Expire stale reminders within a small budget. Busy is expected to
+    // self-heal on the next pass; other failures are terminal.
+    report_stale_reminder_expiry(cas_store::expire_stale_bounded(
+        &cas_dir,
+        REMINDER_EXPIRY_BUSY_BUDGET,
+    ));
+
+    // Check time-based reminders
+    let due_reminders = match reminder_store.get_due_time_reminders() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to get due reminders: {}", e);
+            Vec::new()
+        }
+    };
+
+    let any_due = !due_reminders.is_empty()
+        || !events.is_empty()
+        || !external_ready.is_empty()
+        || !ci_wakes.is_empty();
+    let supervisor_queue = any_due
+        .then(|| open_supervisor_queue_store(&cas_dir).ok())
+        .flatten();
+
+    // Open prompt queue for PTY injection of fired reminders
+    let prompt_queue = any_due
+        .then(|| open_prompt_queue_store(&cas_dir).ok())
+        .flatten();
+
+    for reminder in &due_reminders {
+        if !reminder_matches_factory_session(
+            reminder.session_id.as_deref(),
+            reminder.cross_session,
+            &session_name,
+        ) {
+            continue;
+        }
+        fire_reminder(
+            reminder,
+            &reminder_store,
+            &supervisor_queue,
+            &prompt_queue,
+            &session_name,
+            &supervisor_name,
+            &agent_id_to_name,
+            None,
+            &cas_dir,
+        );
+    }
+
+    for (reminder, context) in &external_ready {
+        fire_reminder(
+            reminder,
+            &reminder_store,
+            &supervisor_queue,
+            &prompt_queue,
+            &session_name,
+            &supervisor_name,
+            &agent_id_to_name,
+            Some(context),
+            &cas_dir,
+        );
+    }
+
+    for wake in &ci_wakes {
+        fire_reminder(
+            &wake.reminder,
+            &reminder_store,
+            &supervisor_queue,
+            &prompt_queue,
+            &session_name,
+            &supervisor_name,
+            &agent_id_to_name,
+            Some(&ReminderTriggerContext::ci(wake)),
+            &cas_dir,
+        );
+    }
+
+    // Check event-based reminders against detected events
+    for event in &events {
+        let event_type = event.event_type();
+        let candidates = match reminder_store.get_event_reminders(event_type) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        for reminder in &candidates {
+            // cas-fcd4: only fire reminds registered in this factory session
+            // (shared cas.db otherwise cross-fires concurrent sessions).
+            if !reminder_matches_factory_session(
+                reminder.session_id.as_deref(),
+                reminder.cross_session,
+                &session_name,
+            ) {
+                continue;
+            }
+            if matches_event_filter(reminder, event) {
+                let context = ReminderTriggerContext::director(event);
+                fire_reminder(
+                    reminder,
+                    &reminder_store,
+                    &supervisor_queue,
+                    &prompt_queue,
+                    &session_name,
+                    &supervisor_name,
+                    &agent_id_to_name,
+                    Some(&context),
+                    &cas_dir,
+                );
+            }
+        }
+    }
 }
 
 fn fire_reminder(

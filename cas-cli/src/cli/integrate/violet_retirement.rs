@@ -958,6 +958,17 @@ impl<'a> UpdateMigration<'a> {
 mod tests {
     use super::*;
 
+    fn legacy_token(label: &str) -> String {
+        format!("{}_{label}", violet_compatibility().legacy_token_prefix)
+    }
+
+    fn legacy_env_prefix() -> &'static str {
+        violet_compatibility()
+            .legacy_token_prefix
+            .strip_suffix("SLACK_TOKEN")
+            .unwrap()
+    }
+
     #[test]
     fn cas_678d_update_rewrites_account_profile_credential_references() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -971,8 +982,8 @@ mod tests {
             &path,
             serde_json::json!({
                 "mcpServers": {"violet": {"type": "http", "url": violet_hub_url(),
-                    "headers": {"Authorization": "Bearer ${MECHA_SLACK_TOKEN_CASSY_PROXY}",
-                        "x-vercel-protection-bypass": "${MECHA_VERCEL_BYPASS}"}}},
+                    "headers": {"Authorization": format!("Bearer ${{{}}}", legacy_token("CASSY_PROXY")),
+                        "x-vercel-protection-bypass": format!("${{{}}}", violet_compatibility().legacy_bypass_env)}}},
                 "unrelated": true
             })
             .to_string(),
@@ -1114,7 +1125,7 @@ mod tests {
             .collect::<Vec<_>>()
         {
             if name.to_string_lossy().starts_with("VIOLET_")
-                || name.to_string_lossy().starts_with("MECHA_")
+                || name.to_string_lossy().starts_with(legacy_env_prefix())
             {
                 env.remove(&name);
             }
@@ -1124,15 +1135,15 @@ mod tests {
         env.set("SHELL", "/bin/bash");
         let credentials = home.join("credentials.env");
         std::fs::write(&credentials,
-            "export VIOLET_SLACK_TOKEN_SOUNDWAVE='fixture-token'\nexport MECHA_VERCEL_BYPASS='fixture-bypass'\n").unwrap();
+            format!("export VIOLET_SLACK_TOKEN_SOUNDWAVE='fixture-token'\nexport {}='fixture-bypass'\n", violet_compatibility().legacy_bypass_env)).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         env.set("CAS_CREDENTIALS_FILE", credentials);
-        env.set("MECHA_SLACK_TOKEN_CASSY_PROXY", "");
-        env.set("MECHA_VERCEL_BYPASS", "");
+        env.set(legacy_token("CASSY_PROXY"), "");
+        env.set(&violet_compatibility().legacy_bypass_env, "");
         env.set("VIOLET_VERCEL_BYPASS", "");
         (
             env,
@@ -1150,9 +1161,9 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, serde_json::json!({"unrelated": true,
             "mcpServers": {"violet": {"type": "http", "url": violet_hub_url(),
-                "headers": {"Authorization": "Bearer ${MECHA_SLACK_TOKEN_CASSY_PROXY}",
-                    "x-vercel-protection-bypass": "${MECHA_VERCEL_BYPASS}"}},
-                "custom": {"url": "https://custom.example/mcp", "headers": {"Authorization": "Bearer ${MECHA_CUSTOM}"}}}
+                "headers": {"Authorization": format!("Bearer ${{{}}}", legacy_token("CASSY_PROXY")),
+                    "x-vercel-protection-bypass": format!("${{{}}}", violet_compatibility().legacy_bypass_env)}},
+                "custom": {"url": "https://custom.example/mcp", "headers": {"Authorization": format!("Bearer ${{{}CUSTOM}}", legacy_env_prefix())}}}
         }).to_string()).unwrap();
     }
 
@@ -1182,14 +1193,14 @@ mod tests {
         env.set("CODEX_HOME", codex_profiles[2].parent().unwrap());
         for path in &codex_profiles {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, format!("# keep comment\n[mcp_servers.violet]\nurl = {:?}\nbearer_token_env_var = 'MECHA_SLACK_TOKEN_CASSY_PROXY'\nenv_http_headers = {{ x-vercel-protection-bypass = 'MECHA_VERCEL_BYPASS' }}\n", violet_hub_url())).unwrap();
+            std::fs::write(path, format!("# keep comment\n[mcp_servers.violet]\nurl = {:?}\nbearer_token_env_var = '{}'\nenv_http_headers = {{ x-vercel-protection-bypass = '{}' }}\n", violet_hub_url(), legacy_token("CASSY_PROXY"), violet_compatibility().legacy_bypass_env)).unwrap();
         }
         let report = migrate_installed_hub_with_probe(&probe).unwrap();
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);
         assert_eq!(report.authenticated.len(), 7);
         assert_eq!(probe.calls.borrow().len(), 7);
         assert!(report.credential_warnings.iter().any(|warning| {
-            warning.contains("MECHA_SLACK_TOKEN_CASSY_PROXY →")
+            warning.contains(&format!("{} →", legacy_token("CASSY_PROXY")))
                 && warning.contains("VIOLET_SLACK_TOKEN_SOUNDWAVE")
         }));
         for path in claude_profiles
@@ -1208,7 +1219,7 @@ mod tests {
             );
             assert_eq!(
                 doc["mcpServers"]["custom"]["headers"]["Authorization"],
-                "Bearer ${MECHA_CUSTOM}"
+                format!("Bearer ${{{}CUSTOM}}", legacy_env_prefix())
             );
             assert_eq!(doc["unrelated"], true);
         }
@@ -1244,7 +1255,7 @@ mod tests {
             );
         }
         let credentials = std::fs::read_to_string(home.join("credentials.env")).unwrap();
-        assert!(!credentials.contains("MECHA_"));
+        assert!(!credentials.contains(legacy_env_prefix()));
         assert!(credentials.contains("VIOLET_VERCEL_BYPASS"));
         let again = migrate_installed_hub_with_probe(&probe).unwrap();
         assert_eq!(again.migrated, 0);
@@ -1289,7 +1300,7 @@ mod tests {
             } else {
                 assert!(probe.calls.borrow().is_empty(), "{mode}");
                 assert!(
-                    warning.contains("MECHA_SLACK_TOKEN_CASSY_PROXY"),
+                    warning.contains(&legacy_token("CASSY_PROXY")),
                     "{warning}"
                 );
                 assert!(warning.contains("no request sent"));
@@ -1328,14 +1339,14 @@ mod tests {
         let raw = std::fs::read_to_string(&file).unwrap();
         std::fs::write(
             file,
-            format!("{raw}export MECHA_SLACK_TOKEN_ACCOUNT='fixture-account'\n"),
+            format!("{raw}export {}='fixture-account'\n", legacy_token("ACCOUNT")),
         )
         .unwrap();
         let path = env.home().join(".claude-account/.claude.json");
         stale_claude(&path);
         let raw = std::fs::read_to_string(&path)
             .unwrap()
-            .replace("MECHA_SLACK_TOKEN_CASSY_PROXY", "MECHA_SLACK_TOKEN_ACCOUNT");
+            .replace(&legacy_token("CASSY_PROXY"), &legacy_token("ACCOUNT"));
         std::fs::write(&path, raw).unwrap();
         let report = migrate_installed_hub_with_probe(&probe).unwrap();
         assert!(report.warnings.is_empty());
@@ -1417,7 +1428,7 @@ mod tests {
         let path = env.home().join(".claude-account/.claude.json");
         stale_claude(&path);
         let raw = std::fs::read_to_string(&path).unwrap().replace(
-            "MECHA_SLACK_TOKEN_CASSY_PROXY",
+            &legacy_token("CASSY_PROXY"),
             "VIOLET_SLACK_TOKEN_ACCOUNT",
         );
         std::fs::write(&path, raw).unwrap();
@@ -1462,7 +1473,7 @@ mod tests {
         let path = env.home().join(".claude-account/.claude.json");
         stale_claude(&path);
         let raw = std::fs::read_to_string(&path).unwrap().replace(
-            "MECHA_SLACK_TOKEN_CASSY_PROXY",
+            &legacy_token("CASSY_PROXY"),
             "VIOLET_SLACK_TOKEN_ACCOUNT",
         );
         std::fs::write(&path, raw).unwrap();

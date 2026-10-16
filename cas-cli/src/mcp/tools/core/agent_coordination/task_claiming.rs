@@ -212,6 +212,7 @@ impl CasCore {
         // off the async runtime within one budget.
         let peer_claims = crate::cloud::peer_claims::PeerClaims::for_project(&self.cas_root);
         let peer_budget = crate::cloud::peer_claims::PeerBudget::default();
+        let peer_claims = peer_claims.map(|claims| claims.with_budget(peer_budget));
         let cloud_duration = req.duration_secs.clamp(1, 3600) as u32;
         let claim_kind = if task.task_type == crate::types::TaskType::Epic {
             crate::cloud::peer_claims::ClaimKind::Epic

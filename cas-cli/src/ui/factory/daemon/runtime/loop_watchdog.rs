@@ -445,6 +445,8 @@ pub(crate) struct LoopProgress {
     jobs: Mutex<JobSource>,
     last_pass_ms: AtomicI64,
     passes: AtomicU64,
+    /// Commander (WebSocket) clients connected now; -1 until the loop says.
+    commander_clients: AtomicI64,
     loop_tid: AtomicI64,
     spawn: Mutex<SpawnSnapshot>,
     /// When the running pass began, and the pass durations since the last
@@ -568,6 +570,7 @@ impl LoopProgress {
             jobs: Mutex::new(JobSource::default()),
             last_pass_ms: AtomicI64::new(Utc::now().timestamp_millis()),
             passes: AtomicU64::new(0),
+            commander_clients: AtomicI64::new(-1),
             loop_tid: AtomicI64::new(current_tid()),
             spawn: Mutex::new(SpawnSnapshot::default()),
             pass_started: Mutex::new(None),
@@ -950,6 +953,12 @@ impl LoopProgress {
         }
     }
 
+    /// Record how many Commander clients are connected (GH #1196).
+    pub(crate) fn set_commander_clients(&self, clients: usize) {
+        self.commander_clients
+            .store(i64::try_from(clients).unwrap_or(i64::MAX), Ordering::Relaxed);
+    }
+
     pub(crate) fn record_reset(&self, outcome: String) {
         if let Ok(mut snapshot) = self.spawn.lock() {
             snapshot.last_reset = Some(outcome);
@@ -1029,6 +1038,7 @@ impl LoopProgress {
             frame_bytes_p50: None,
             frame_window_ms: 0,
             frames_per_s: None,
+            commander_clients: u64::try_from(self.commander_clients.load(Ordering::Relaxed)).ok(),
         }
     }
 }

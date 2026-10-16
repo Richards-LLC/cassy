@@ -39,6 +39,12 @@ struct FakeState {
     /// Registered agents: id -> (name, hostname, last heartbeat).
     agents: HashMap<String, (String, String, DateTime<Utc>)>,
     requests: Vec<String>,
+    statuses: HashMap<String, String>,
+    replace_on_release: Option<String>,
+    revive_on_lock: Option<String>,
+    renew_after_lock_reads: Option<(usize, bool)>,
+    change_after_lock_read: Option<(usize, Option<String>)>,
+    return_released_rows: bool,
 }
 
 /// A stateful stand-in for petra-stella-cloud's task-lock routes.
@@ -107,7 +113,7 @@ impl FakeCloud {
                 .iter()
                 .map(|(id, (name, host, seen))| {
                     serde_json::json!({"id": id, "name": name, "agent_type": "primary",
-                        "status": "active", "pid": null, "session_id": null, "machine_id": host,
+                        "status": state.statuses.get(id).map(String::as_str).unwrap_or("active"), "pid": null, "session_id": null, "machine_id": host,
                         "last_heartbeat": seen.to_rfc3339(), "active_tasks": 0,
                         "metadata": {"hostname": host, "canonical_id": PROJECT}})
                 })
@@ -162,6 +168,9 @@ impl FakeCloud {
                 }
             },
             ("POST", "release") => {
+                if let Some(winner) = state.replace_on_release.take()
+                    && let Some(lock) = state.locks.get_mut(&key)
+                { lock.agent_id = winner; lock.renewed_at = now; lock.epoch += 1; }
                 if let Some(lock) = state.locks.get_mut(&key)
                     && lock.status == "active"
                     && lock.agent_id == agent_id
@@ -181,10 +190,34 @@ impl FakeCloud {
                 }
                 _ => (404, serde_json::json!({"error": "No active lock found"})),
             },
-            ("GET", "lock") => (
-                200,
-                serde_json::json!({"lock": active.map(|lock| lock_json(&key, &lock))}),
-            ),
+            ("GET", "lock") => {
+                if let Some(holder) = state.revive_on_lock.take() {
+                    state.statuses.insert(holder, "active".into());
+                }
+                let snapshot = if state.return_released_rows { state.locks.get(&key).cloned() } else { active };
+                let response = serde_json::json!({"lock": snapshot.map(|lock| lock_json(&key, &lock))});
+                let reads = state.requests.iter().filter(|r| r.ends_with("/lock")).count();
+                if let Some((at, epoch_only)) = state.renew_after_lock_reads
+                    && at == reads && let Some(lock) = state.locks.get_mut(&key)
+                {
+                    if epoch_only { lock.epoch += 1; } else { lock.renewed_at = now; }
+                }
+                if state.change_after_lock_read.as_ref().is_some_and(|(at, _)| *at == reads) {
+                    let (_, winner) = state.change_after_lock_read.take().unwrap();
+                    if let Some(lock) = state.locks.get_mut(&key) {
+                        match winner {
+                            Some(winner) => {
+                                lock.agent_id = winner;
+                                lock.renewed_at = now;
+                                lock.epoch += 1;
+                                lock.claim_reason = None;
+                            }
+                            None => lock.status = "released".into(),
+                        }
+                    }
+                }
+                (200, response)
+            },
             _ => (404, serde_json::json!({"error": "not found"})),
         }
     }
@@ -577,9 +610,8 @@ async fn in_progress_elsewhere_names_the_remote_assignee() {
     assert!(started.to_lowercase().contains("another machine"), "{started}");
 }
 
-/// Until the cloud expires claims itself (petra-stella-cloud#150), a claim
-/// whose holder Cassy Cloud does not list as a live agent is stale: the peer
-/// starts with a warning instead of being refused.
+/// A stopped, unregistered holder is recovered after its renewal goes stale;
+/// the replacement holds the cloud claim rather than working local-only.
 #[tokio::test]
 async fn a_claim_whose_holder_is_not_a_live_agent_is_stale() {
     let mut env = TestEnvGuard::temp_home();
@@ -597,9 +629,8 @@ async fn a_claim_whose_holder_is_not_a_live_agent_is_stale() {
     let taken = start(&bravo.core, "cas-p010", false)
         .await
         .expect("a claim nobody keeps alive does not block");
-    assert!(taken.contains("alpha-sup"), "{taken}");
-    assert!(taken.contains("STALE PEER CLAIM"), "{taken}");
-    assert!(taken.contains("not seen alive"), "{taken}");
+    assert!(!taken.contains("STALE PEER CLAIM"), "{taken}");
+    assert_eq!(cloud.active_lock("cas-p010").unwrap().1.agent_id, bravo.agent_id);
 }
 
 /// cas-0078 (e): a holder whose cloud registration failed is not listed, but
@@ -872,4 +903,335 @@ fn contract_parity_claims_fake_matches_production() {
         replay.check(&exchange);
     }
     replay.assert_clean();
+}
+
+#[tokio::test]
+async fn cas_50713_ended_or_stale_holder_is_taken_over_without_claim_lost() {
+    for ended in [true, false] {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        let cloud = FakeCloud::start();
+        let old = machine(&cloud.url, PROJECT, "old-worker");
+        let new = machine(&cloud.url, PROJECT, "replacement");
+        for m in [&old, &new] {
+            m.put_task("cas-stale", TaskType::Task);
+        }
+        cloud.live(&old, "old-worker");
+        start(&old.core, "cas-stale", false).await.unwrap();
+        {
+            let mut state = cloud.state.lock().unwrap();
+            if ended {
+                state
+                    .statuses
+                    .insert(old.agent_id.clone(), "shutdown".into());
+            } else {
+                state.agents.get_mut(&old.agent_id).unwrap().2 =
+                    Utc::now() - Duration::seconds(301);
+            }
+        }
+        if !ended { cloud.stop_renewing("cas-stale"); }
+        let taken = start(&new.core, "cas-stale", false)
+            .await
+            .expect("dead holder must not refuse");
+        assert!(!taken.contains("STALE PEER CLAIM") && !taken.contains("PEER CLAIM OVERRIDE"));
+        assert_eq!(
+            cloud.active_lock("cas-stale").unwrap().1.agent_id,
+            new.agent_id
+        );
+        let report = cas::cloud::peer_claims::renew_agent_claims(&new.cas_dir, &new.agent_id);
+        assert!(report.conflicts.is_empty(), "{report:?}");
+        assert!(
+            !cas::store::open_prompt_queue_store(&new.cas_dir)
+                .unwrap()
+                .peek_all(100)
+                .unwrap()
+                .iter()
+                // pin: this alarm class is the externally observed false-conflict regression.
+                .any(|row| row.prompt.contains("PEER CLAIM LOST"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn cas_50713_renewal_never_announces_a_dead_peer_as_a_live_conflict() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let old = machine(&cloud.url, PROJECT, "dead-peer");
+    let new = machine(&cloud.url, PROJECT, "successor");
+    new.put_task("cas-renew", TaskType::Task);
+    start(&new.core, "cas-renew", false).await.unwrap();
+    cloud.give_to("cas-renew", &old.agent_id, None);
+    cloud.live(&old, "dead-peer");
+    cloud
+        .state
+        .lock()
+        .unwrap()
+        .statuses
+        .insert(old.agent_id.clone(), "shutdown".into());
+    let report = cas::cloud::peer_claims::renew_agent_claims(&new.cas_dir, &new.agent_id);
+    assert!(
+        report.conflicts.is_empty(),
+        "dead claim is not a competitor: {report:?}"
+    );
+    assert_eq!(
+        cloud.active_lock("cas-renew").unwrap().1.agent_id,
+        new.agent_id
+    );
+    assert!(
+        cas::store::open_prompt_queue_store(&new.cas_dir)
+            .unwrap()
+            .peek_all(100)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn cas_50713_successor_focus_moves_the_ended_local_supervisors_claim() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let old = machine(&cloud.url, PROJECT, "predecessor");
+    old.put_task("cas-focus", TaskType::Epic);
+    assert_eq!(
+        cas::cloud::peer_claims::claim_epic_focus(&old.cas_dir, "cas-focus", &old.agent_id),
+        Some(cas::cloud::peer_claims::Acquire::Claimed)
+    );
+    let agents = open_agent_store(&old.cas_dir).unwrap();
+    let mut ended = agents.get(&old.agent_id).unwrap();
+    ended.status = cas::types::AgentStatus::Shutdown;
+    ended.pid = None;
+    ended.last_heartbeat = Utc::now() - Duration::minutes(20);
+    agents.register(&ended).unwrap();
+    old.second_agent("successor");
+    let new_id = format!("successor-session-{}", std::process::id());
+    assert_eq!(
+        cas::cloud::peer_claims::claim_epic_focus(&old.cas_dir, "cas-focus", &new_id),
+        Some(cas::cloud::peer_claims::Acquire::Claimed)
+    );
+    assert_eq!(cloud.active_lock("cas-focus").unwrap().1.agent_id, new_id);
+}
+
+
+#[tokio::test]
+async fn cas_50713_recovery_keeps_a_revived_holder_or_raced_live_winner() {
+    for revived in [true, false] {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        let cloud = FakeCloud::start();
+        let old = machine(&cloud.url, PROJECT, "old-worker");
+        let new = machine(&cloud.url, PROJECT, "replacement");
+        let winner = machine(&cloud.url, PROJECT, "live-winner");
+        for m in [&old, &new] { m.put_task("cas-race", TaskType::Task); }
+        cloud.live(&old, "old-worker");
+        cloud.live(&winner, "live-winner");
+        start(&old.core, "cas-race", false).await.unwrap();
+        {
+            let mut state = cloud.state.lock().unwrap();
+            state.statuses.insert(old.agent_id.clone(), "shutdown".into());
+            if revived { state.revive_on_lock = Some(old.agent_id.clone()); }
+            else { state.replace_on_release = Some(winner.agent_id.clone()); }
+        }
+        let refused = start(&new.core, "cas-race", false).await.expect_err("live ownership wins recovery race");
+        assert!(refused.contains("HELD BY A PEER"), "{refused}");
+        assert_eq!(cloud.active_lock("cas-race").unwrap().1.agent_id,
+            if revived { &old.agent_id } else { &winner.agent_id }.clone());
+        assert_eq!(open_task_store(&new.cas_dir).unwrap().get("cas-race").unwrap().status, TaskStatus::Open);
+    }
+}
+
+#[tokio::test]
+async fn cas_50713_successor_focus_recognizes_an_unregistered_local_predecessor() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let old = machine(&cloud.url, PROJECT, "predecessor");
+    old.put_task("cas-focus", TaskType::Epic);
+    assert_eq!(
+        cas::cloud::peer_claims::claim_epic_focus(&old.cas_dir, "cas-focus", &old.agent_id),
+        Some(cas::cloud::peer_claims::Acquire::Claimed)
+    );
+    let agents = open_agent_store(&old.cas_dir).unwrap();
+    let mut ended = agents.get(&old.agent_id).unwrap();
+    ended.status = cas::types::AgentStatus::Shutdown;
+    ended.pid = None;
+    ended.last_heartbeat = Utc::now() - Duration::minutes(20);
+    agents.unregister(&ended.id).unwrap();
+    old.second_agent("successor");
+    let new_id = format!("successor-session-{}", std::process::id());
+    assert_eq!(
+        cas::cloud::peer_claims::claim_epic_focus(&old.cas_dir, "cas-focus", &new_id),
+        Some(cas::cloud::peer_claims::Acquire::Claimed)
+    );
+    assert_eq!(cloud.active_lock("cas-focus").unwrap().1.agent_id, new_id);
+}
+
+
+
+
+#[tokio::test]
+async fn cas_50713_late_presence_with_fresh_renewal_refuses_and_reports_claim_lost() {
+    for status in ["active", "stale"] {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        let cloud = FakeCloud::start();
+        let old = machine(&cloud.url, PROJECT, "renewing-peer");
+        let new = machine(&cloud.url, PROJECT, "contender");
+        for m in [&old, &new] {
+            m.put_task("cas-busy", TaskType::Task);
+        }
+        new.put_task("cas-lost", TaskType::Task);
+        start(&new.core, "cas-lost", false).await.unwrap();
+        cloud.live(&old, "renewing-peer");
+        start(&old.core, "cas-busy", false).await.unwrap();
+        {
+            let mut state = cloud.state.lock().unwrap();
+            state.statuses.insert(old.agent_id.clone(), status.into());
+            state.agents.get_mut(&old.agent_id).unwrap().2 = Utc::now() - Duration::seconds(301);
+        }
+        assert!(start(&new.core, "cas-busy", false).await.is_err());
+        assert_eq!(
+            cloud.active_lock("cas-busy").unwrap().1.agent_id,
+            old.agent_id
+        );
+        cloud.give_to("cas-lost", &old.agent_id, None);
+        let report = cas::cloud::peer_claims::renew_agent_claims(&new.cas_dir, &new.agent_id);
+        assert_eq!(report.conflicts.len(), 1, "{report:?}");
+        assert!(
+            cas::store::open_prompt_queue_store(&new.cas_dir)
+                .unwrap()
+                .peek_all(100)
+                .unwrap()
+                .iter()
+                // pin: live competing claims must retain this alarm class even when presence is late.
+                .any(|row| row.prompt.contains("PEER CLAIM LOST"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn cas_50713_changed_same_owner_snapshot_is_not_released() {
+    for epoch_only in [true, false] {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        let cloud = FakeCloud::start();
+        let old = machine(&cloud.url, PROJECT, "ended-peer");
+        let new = machine(&cloud.url, PROJECT, "contender");
+        for m in [&old, &new] {
+            m.put_task("cas-race", TaskType::Task);
+        }
+        cloud.live(&old, "ended-peer");
+        start(&old.core, "cas-race", false).await.unwrap();
+        {
+            let mut state = cloud.state.lock().unwrap();
+            state
+                .statuses
+                .insert(old.agent_id.clone(), "shutdown".into());
+            state.renew_after_lock_reads = Some((1, epoch_only));
+        }
+        // A fresh stale advisory can permit local work; the changed Cloud
+        // snapshot must never be released by this recovery attempt.
+        let _ = start(&new.core, "cas-race", false).await;
+        assert_eq!(
+            cloud.active_lock("cas-race").unwrap().1.agent_id,
+            old.agent_id
+        );
+        assert!(
+            !cloud
+                .state
+                .lock()
+                .unwrap()
+                .requests
+                .iter()
+                .any(|r| r.ends_with("/release"))
+        );
+    }
+}
+
+
+async fn assert_renewal_snapshot_race(mode: &str) {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let dead = machine(&cloud.url, PROJECT, "dead-peer");
+    let worker = machine(&cloud.url, PROJECT, "local-worker");
+    let winner = machine(&cloud.url, PROJECT, "third-live-peer");
+    worker.put_task("cas-renew-race", TaskType::Task);
+    start(&worker.core, "cas-renew-race", false).await.unwrap();
+    cloud.live(&dead, "dead-peer");
+    cloud.live(&winner, "third-live-peer");
+    cloud.give_to("cas-renew-race", &dead.agent_id, None);
+    {
+        let mut state = cloud.state.lock().unwrap();
+        state.requests.clear();
+        state.return_released_rows = mode == "released-row";
+        state
+            .statuses
+            .insert(dead.agent_id.clone(), "shutdown".into());
+        match mode {
+            "released" | "released-row" => state.change_after_lock_read = Some((1, None)),
+            "reassigned" => state.change_after_lock_read = Some((1, Some(winner.agent_id.clone()))),
+            "epoch" => state.renew_after_lock_reads = Some((1, true)),
+            _ => unreachable!(),
+        }
+    }
+    let report = cas::cloud::peer_claims::renew_agent_claims(&worker.cas_dir, &worker.agent_id);
+    let rows = cas::store::open_prompt_queue_store(&worker.cas_dir)
+        .unwrap()
+        .peek_all(100)
+        .unwrap();
+    assert!(
+        rows.iter().all(|row| !row.prompt.contains("dead-peer")),
+        "{rows:?}"
+    );
+    if mode == "reassigned" {
+        assert_eq!(report.conflicts.len(), 1, "{report:?}");
+        assert_eq!(report.conflicts[0].1.agent_id, winner.agent_id);
+        assert_eq!(report.conflicts[0].1.name(), "third-live-peer");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].prompt.contains("third-live-peer"));
+        assert_eq!(
+            cloud.active_lock("cas-renew-race").unwrap().1.agent_id,
+            winner.agent_id
+        );
+    } else {
+        assert!(report.conflicts.is_empty(), "{report:?}");
+        assert_eq!(report.failed, 1, "retry is advisory: {report:?}");
+        assert!(rows.is_empty(), "{rows:?}");
+        if mode.starts_with("released") {
+            assert!(cloud.active_lock("cas-renew-race").is_none());
+        } else {
+            assert_eq!(
+                cloud.active_lock("cas-renew-race").unwrap().1.agent_id,
+                dead.agent_id
+            );
+        }
+    }
+    assert!(
+        !cloud
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .any(|r| r.ends_with("/release"))
+    );
+}
+
+#[tokio::test]
+async fn cas_50713_renewal_does_not_alarm_after_lock_released_between_reads() {
+    for mode in ["released", "released-row"] {
+        assert_renewal_snapshot_race(mode).await;
+    }
+}
+
+#[tokio::test]
+async fn cas_50713_renewal_names_actual_peer_after_reassignment_between_reads() {
+    assert_renewal_snapshot_race("reassigned").await;
+}
+
+#[tokio::test]
+async fn cas_50713_renewal_does_not_alarm_after_dead_holder_epoch_changes() {
+    assert_renewal_snapshot_race("epoch").await;
 }

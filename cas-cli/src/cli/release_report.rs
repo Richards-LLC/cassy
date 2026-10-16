@@ -137,10 +137,12 @@ struct ReleaseMetadata {
 struct ReleaseEvidence {
     interventions: Option<u64>,
     tag_published_at: Option<String>,
-    tag_to_published_seconds: Option<i64>,
+    publication_latency_seconds: Option<i64>,
+    publication_start_kind: Option<String>,
     publication_budget_seconds: Option<i64>,
     green_at: Option<String>,
     green_to_published_seconds: Option<i64>,
+    main_to_published_seconds: Option<i64>,
     receipt_path: Option<String>,
     /// cas-a629: the whole wall clock and what cost it.
     request_to_published_seconds: Option<i64>,
@@ -219,16 +221,17 @@ impl ReleaseEvidence {
             .get("INTERVENTIONS")
             .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
             .and_then(|value| value.parse().ok());
-        self.tag_to_published_seconds = values
+        self.publication_latency_seconds = values
             .get("PUBLISH_LATENCY_SECONDS")
             .and_then(|value| value.parse::<i64>().ok())
             .filter(|seconds| *seconds >= 0);
+        self.publication_start_kind = values.get("PUBLISH_START_KIND").cloned();
         self.publication_budget_seconds = values
             .get("BUDGET_SECONDS")
             .and_then(|value| value.parse::<i64>().ok())
             .filter(|budget| *budget >= 0)
             .filter(|budget| {
-                self.tag_to_published_seconds.is_some_and(|seconds| {
+                self.publication_latency_seconds.is_some_and(|seconds| {
                     values.get("WITHIN_BUDGET").map(String::as_str)
                         == Some(if seconds <= *budget { "true" } else { "false" })
                 })
@@ -286,7 +289,7 @@ impl ReleaseEvidence {
     }
 
     fn publication_timing(&self) -> String {
-        let Some(seconds) = self.tag_to_published_seconds else {
+        let Some(seconds) = self.publication_latency_seconds else {
             return "unavailable".to_string();
         };
         let timing = format_duration(seconds);
@@ -302,6 +305,24 @@ impl ReleaseEvidence {
             ),
             None => format!("{timing} — budget unavailable"),
         }
+    }
+
+    fn publication_endpoint(&self) -> Option<(&'static str, &'static str)> {
+        match self.publication_start_kind.as_deref() {
+            Some("main-landed") => Some((
+                "Main to published",
+                "Release PR merge time to publication when merge-queue green evidence is unavailable; measured budget result",
+            )),
+            Some("gate-green") => None,
+            _ => Some((
+                "Tag to published",
+                "First tag workflow to publication; measured budget result",
+            )),
+        }
+    }
+
+    fn has_reportable_publication_timing(&self) -> bool {
+        self.green_to_published_seconds.is_some() || self.main_to_published_seconds.is_some()
     }
 }
 
@@ -931,7 +952,7 @@ fn acquire_sources(
                 .join(", ")
         ));
     }
-    if release_evidence.green_to_published_seconds.is_none() {
+    if !release_evidence.has_reportable_publication_timing() {
         warnings.push(
             "release receipts: green-to-published latency is unavailable under ~/.cas/artifacts/release/"
                 .to_string(),
@@ -1540,8 +1561,14 @@ fn assemble_markdown(
     output.push_str(&format!(
         "| Fix entries | {fix_entries} | Top-level Fixed entries in the CHANGELOG section |\n"
     ));
+    let green_timing =
+        if sources.release_evidence.publication_start_kind.as_deref() == Some("gate-green") {
+            sources.release_evidence.publication_timing()
+        } else {
+            latency
+        };
     output.push_str(&format!(
-        "| Green to published | {latency} | gate.green.epoch to the published receipt, when available |\n"
+        "| Green to published | {green_timing} | merge-queue CI completion to publication, when available |\n"
     ));
     output.push_str(&format!(
         "| Request to published | {} | The release request (or first cut) to publication; receipt REQUEST_TO_PUBLISHED_SECS |\n",
@@ -1555,10 +1582,14 @@ fn assemble_markdown(
             .map(format_duration)
             .unwrap_or_else(|| "unavailable".to_string())
     ));
-    output.push_str(&format!(
-        "| Tag to published | {} | First tag workflow to publication; measured budget result |\n",
-        sources.release_evidence.publication_timing()
-    ));
+    if let Some((publication_endpoint, publication_description)) =
+        sources.release_evidence.publication_endpoint()
+    {
+        output.push_str(&format!(
+            "| {publication_endpoint} | {} | {publication_description} |\n",
+            sources.release_evidence.publication_timing()
+        ));
+    }
     output.push_str(&format!(
         "| Blockers | {} | Each blocked stage, from the block to its next completion; receipt BLOCKER_COSTS |\n",
         sources.release_evidence.blocker_summary()
@@ -2291,7 +2322,14 @@ fn find_release_evidence(tag: &str, release: &Option<ReleaseMetadata>) -> Releas
     let Some(home) = dirs::home_dir() else {
         return ReleaseEvidence::default();
     };
-    let root = home.join(".cas/artifacts/release");
+    find_release_evidence_under(tag, release, &home.join(".cas/artifacts/release"))
+}
+
+fn find_release_evidence_under(
+    tag: &str,
+    release: &Option<ReleaseMetadata>,
+    root: &Path,
+) -> ReleaseEvidence {
     let wanted = tag.to_ascii_lowercase();
     let bare = wanted.trim_start_matches('v');
     let mut files = Vec::new();
@@ -2302,6 +2340,7 @@ fn find_release_evidence(tag: &str, release: &Option<ReleaseMetadata>) -> Releas
         ..ReleaseEvidence::default()
     };
     let mut green_epoch = None;
+    let mut main_landed_epoch = None;
     let mut published_at = release
         .as_ref()
         .and_then(|release| release.published_at.clone());
@@ -2316,7 +2355,16 @@ fn find_release_evidence(tag: &str, release: &Option<ReleaseMetadata>) -> Releas
         if path.file_name().and_then(|name| name.to_str()) == Some("gate.green.epoch") {
             green_epoch = content.trim().parse::<i64>().ok();
         }
+        if path.file_name().and_then(|name| name.to_str()) == Some("main.landed.epoch") {
+            main_landed_epoch = content.trim().parse::<i64>().ok();
+        }
         let values = parse_key_values(&content);
+        if let Some(value) = values.get("GATE_GREEN_EPOCH") {
+            green_epoch = value.parse::<i64>().ok();
+        }
+        if let Some(value) = values.get("MAIN_LANDED_EPOCH") {
+            main_landed_epoch = value.parse::<i64>().ok();
+        }
         if let Some(value) = values.get("PUBLISHED_AT") {
             published_at = Some(value.clone());
         }
@@ -2333,6 +2381,13 @@ fn find_release_evidence(tag: &str, release: &Option<ReleaseMetadata>) -> Releas
             evidence.receipt_path = Some(path.display().to_string());
         }
     }
+    if evidence.publication_start_kind.as_deref() == Some("main-landed") {
+        // In the fallback case, a local release-train gate file is not
+        // merge-queue evidence. Keep this interval explicitly main-based.
+        green_epoch = None;
+    } else if evidence.publication_start_kind.as_deref() != Some("gate-green") {
+        main_landed_epoch = None;
+    }
     evidence.tag_published_at = published_at.clone();
     if let (Some(epoch), Some(published)) = (green_epoch, published_at.as_deref()) {
         if let Ok(published) = DateTime::parse_from_rfc3339(published) {
@@ -2341,6 +2396,14 @@ fn find_release_evidence(tag: &str, release: &Option<ReleaseMetadata>) -> Releas
                 evidence.green_to_published_seconds = Some(seconds);
                 evidence.green_at =
                     DateTime::<Utc>::from_timestamp(epoch, 0).map(|value| value.to_rfc3339());
+            }
+        }
+    }
+    if let (Some(epoch), Some(published)) = (main_landed_epoch, published_at.as_deref()) {
+        if let Ok(published) = DateTime::parse_from_rfc3339(published) {
+            let seconds = published.timestamp() - epoch;
+            if seconds >= 0 {
+                evidence.main_to_published_seconds = Some(seconds);
             }
         }
     }
@@ -2760,6 +2823,60 @@ mod tests {
         assert_eq!(evidence.publication_timing(), "15m 8s — budget unavailable");
         evidence.record_latency(&parse_key_values("PUBLISH_LATENCY_SECONDS=-1\n"));
         assert_eq!(evidence.publication_timing(), "unavailable");
+        evidence.record_latency(&parse_key_values(
+            "PUBLISH_START_KIND=main-landed\nPUBLISH_LATENCY_SECONDS=616\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\n",
+        ));
+        assert_eq!(
+            evidence.publication_endpoint(),
+            Some((
+                "Main to published",
+                "Release PR merge time to publication when merge-queue green evidence is unavailable; measured budget result"
+            ))
+        );
+    }
+
+    #[test]
+    fn main_push_receipts_report_green_or_main_fallback_without_unavailable_warning() {
+        let green_root = tempfile::tempdir().unwrap();
+        let green_dir = green_root.path().join("v3.55.0-latency");
+        fs::create_dir_all(&green_dir).unwrap();
+        fs::write(
+            green_dir.join("release-latency.receipt"),
+            "TAG=v3.55.0\nPUBLISH_START_KIND=gate-green\nPUBLISH_LATENCY_SECONDS=626\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\nGATE_GREEN_EPOCH=1792079228\nMAIN_LANDED_EPOCH=1792079238\nPUBLISHED_AT=2026-10-15T15:57:34Z\n",
+        )
+        .unwrap();
+        let green = find_release_evidence_under("v3.55.0", &None, green_root.path());
+        assert_eq!(green.green_to_published_seconds, Some(626));
+        assert_eq!(green.main_to_published_seconds, Some(616));
+        assert!(green.has_reportable_publication_timing());
+        assert!(green.publication_endpoint().is_none());
+        assert_eq!(
+            green.publication_timing(),
+            "10m 26s — over budget (10m 0s budget)"
+        );
+
+        let fallback_root = tempfile::tempdir().unwrap();
+        let fallback_dir = fallback_root.path().join("v3.55.0-latency");
+        fs::create_dir_all(&fallback_dir).unwrap();
+        fs::write(fallback_dir.join("gate.green.epoch"), "1792079228\n").unwrap();
+        fs::write(fallback_dir.join("main.landed.epoch"), "1792079238\n").unwrap();
+        fs::write(
+            fallback_dir.join("release-latency.receipt"),
+            "TAG=v3.55.0\nPUBLISH_START_KIND=main-landed\nPUBLISH_LATENCY_SECONDS=616\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\nMAIN_LANDED_EPOCH=1792079238\nPUBLISHED_AT=2026-10-15T15:57:34Z\n",
+        )
+        .unwrap();
+        let fallback = find_release_evidence_under("v3.55.0", &None, fallback_root.path());
+        assert_eq!(fallback.green_to_published_seconds, None);
+        assert_eq!(fallback.main_to_published_seconds, Some(616));
+        assert!(fallback.has_reportable_publication_timing());
+        assert_eq!(
+            fallback.publication_endpoint().map(|(label, _)| label),
+            Some("Main to published")
+        );
+        assert_eq!(
+            ReleaseEvidence::default().has_reportable_publication_timing(),
+            false
+        );
     }
 
     #[test]
@@ -2904,6 +3021,34 @@ Dev reply
             "{report}"
         );
         assert!(report.contains("| Cut to published | 60m 0s |"), "{report}");
+        sources.release_evidence.record_latency(&parse_key_values(
+            "PUBLISH_START_KIND=gate-green\nPUBLISH_LATENCY_SECONDS=626\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\n",
+        ));
+        sources.release_evidence.green_to_published_seconds = Some(626);
+        let green_report = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
+        assert!(
+            green_report.contains("| Green to published | 10m 26s — over budget (10m 0s budget) |"),
+            "{green_report}"
+        );
+        assert!(
+            !green_report.contains("| Tag to published |"),
+            "{green_report}"
+        );
+        sources.release_evidence.record_latency(&parse_key_values(
+            "PUBLISH_START_KIND=main-landed\nPUBLISH_LATENCY_SECONDS=616\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\n",
+        ));
+        sources.release_evidence.green_to_published_seconds = None;
+        sources.release_evidence.main_to_published_seconds = Some(616);
+        let main_landed_report = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
+        assert!(
+            main_landed_report.contains("| Green to published | unavailable |"),
+            "{main_landed_report}"
+        );
+        assert!(
+            main_landed_report
+                .contains("| Main to published | 10m 16s — over budget (10m 0s budget) |"),
+            "{main_landed_report}"
+        );
         assert!(
             report.contains("| Blockers | 2 — 38m 20s blocked: gate 10m 0s; pipeline 28m 20s |"),
             "{report}"

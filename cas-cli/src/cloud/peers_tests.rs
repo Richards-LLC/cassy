@@ -268,3 +268,17 @@ fn cas_f707_peer_lines_fit_an_80_column_terminal() {
     assert!(text.contains("name-sup-long [live] on build-host-with-a-long-name, heartbeat 20s ago"));
     assert!(text.contains("    session cassy-swift-gazelle-77 | focus cas-571d"), "{text}");
 }
+
+#[test]
+fn cas_50713_unregistered_local_supervisor_is_not_a_live_cloud_peer() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    agents.register(&Agent::new("ended-local".into(), "predecessor".into())).unwrap();
+    agents.unregister("ended-local").unwrap();
+    let cloud = supervisor("ended-local", REPO, 1);
+    let mut peers = repo_peers(&[cloud], REPO, &[], None, now());
+    assert_eq!(peers.len(), 1, "cloud still has the fresh pre-exit heartbeat");
+    exclude_project_agents(&root, &mut peers).unwrap();
+    assert!(peers.is_empty(), "local SessionEnd receipt outranks stale cloud presence");
+}

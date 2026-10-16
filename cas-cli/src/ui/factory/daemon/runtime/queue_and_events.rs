@@ -6909,8 +6909,7 @@ impl FactoryDaemon {
         &mut self,
         selection: super::prompt_queue_jobs::QueueSelection,
     ) -> anyhow::Result<()> {
-        use cas_store::{EventStore, SqliteEventStore};
-        use cas_types::{Event, EventEntityType, EventType};
+        use cas_store::SqliteEventStore;
 
         super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: roster"));
         let queue = self.queue_jobs.store(self.app.cas_dir())?;

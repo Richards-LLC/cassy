@@ -9176,9 +9176,10 @@ mod tests {
                 InboxHandoffState::HeldTeamsInbox
             );
             if finish == SurfacingSource::HookSurfaced {
-                store
-                    .record_recipient_surfaced(id, "worker-1", finish)
+                let surfaced = store
+                    .surface_unseen_for_recipient_without_transport_delivery("worker-1", None, 10)
                     .unwrap();
+                assert_eq!(surfaced.iter().map(|row| row.id).collect::<Vec<_>>(), vec![id]);
             } else {
                 store.mark_transport_delivered(id).unwrap();
             }

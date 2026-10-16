@@ -747,3 +747,131 @@ fn cas_4fe2_retirement_cap_warns_once_across_both_pools() {
     assert_eq!(report.warnings.len(), 1, "one cap warning per tick: {report:?}");
     assert!(report.errors.is_empty());
 }
+
+#[tokio::test]
+async fn cas_4ac8_ack_retries_rate_limit_without_readmission() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages/ack"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages/ack"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "results":[{"id":"pm-1","status":200}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let endpoint = server.uri();
+    let start = std::time::Instant::now();
+    let result = tokio::task::spawn_blocking(move || {
+        HttpPeerMailbox::new(&endpoint, "test-token")
+            .ack("consumer", &[("pm-1".into(), PeerAckOutcome::Delivered)])
+    })
+    .await
+    .unwrap();
+    assert!(result.is_ok(), "{result:?}");
+    assert!(start.elapsed() >= std::time::Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn cas_4ac8_persistent_ack_rate_limit_is_bounded_and_named_in_mailbox_health() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages/ack"))
+        .respond_with(ResponseTemplate::new(429))
+        .expect(3)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages/claim"))
+        .respond_with(ResponseTemplate::new(429))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let endpoint = server.uri();
+    let error = tokio::task::spawn_blocking(move || {
+        HttpPeerMailbox::new(&endpoint, "test-token")
+            .ack("consumer", &[("pm-1".into(), PeerAckOutcome::Delivered)])
+    })
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(error.contains("rate limited"), "{error}");
+    let machine = Machine::new();
+    machine.register("recipient", "recipient", AgentRole::Supervisor, "factory-a");
+    crate::cloud::set_canonical_id_in_config_toml(&machine.cas, REPO).unwrap();
+    crate::cloud::CloudConfig {
+        endpoint: server.uri(),
+        token: Some("test-token".into()),
+        ..Default::default()
+    }
+    .save_to_cas_dir(&machine.cas)
+    .unwrap();
+    let root = machine.cas.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        PeerMailboxRuntime::start(&root, "factory-a")
+            .unwrap()
+            .tick_blocking()
+    })
+    .await
+    .unwrap();
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|cause| cause.contains("rate limited")),
+        "{:?}",
+        report.errors
+    );
+    assert!(mailbox_status_section(&machine.cas, Some("factory-a")).contains("rate limited"));
+}
+
+#[tokio::test]
+async fn cas_4ac8_retry_after_blocks_later_chunks_ack_and_metadata_requests() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/peer-messages/claim"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "600"))
+        .mount(&server)
+        .await;
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let mailbox = HttpPeerMailbox::new(&endpoint, "test-token");
+        assert!(
+            mailbox
+                .claim(&[REPO.into()], &["one".into()], "consumer")
+                .is_err()
+        );
+        let later = mailbox
+            .claim(&[REPO.into()], &["two".into()], "consumer")
+            .unwrap_err();
+        assert!(later.contains("rate limited"), "{later}");
+        let ack = mailbox
+            .ack("consumer", &[("pm-one".into(), PeerAckOutcome::Delivered)])
+            .unwrap_err();
+        assert!(ack.contains("rate limited"), "{ack}");
+        let status = mailbox.status("pm-one").unwrap_err();
+        assert!(status.contains("rate limited"), "{status}");
+        assert!(mailbox.sender_labels(REPO, &["sender".into()]).is_empty());
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "HTTP escaped shared-client cooldown"
+    );
+}

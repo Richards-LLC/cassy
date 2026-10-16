@@ -131,7 +131,7 @@ pub(crate) fn add_interruption_note(task: &mut crate::types::Task, agent_id: &st
     let note = format!(
         "[{}] ⚠️ INTERRUPTED Agent {} stopped/timed out while task was in progress",
         timestamp,
-        &agent_id[..12.min(agent_id.len())]
+        agent_id.chars().take(12).collect::<String>()
     );
 
     if task.notes.is_empty() {
@@ -190,17 +190,42 @@ pub(crate) fn cleanup_agent_leases(
         return None;
     }
 
+    // Persist before deleting the local identity. Hooks never make cloud calls;
+    // a daemon (including one started by the next session) owns bounded retry.
+    if let Some(coordinator) = crate::cloud::presence::project_coordinator(cas_root)
+        && let Err(error) = crate::cloud::shutdown::enqueue(
+            cas_root,
+            &agent,
+            session_id,
+            &coordinator.cloud_config().endpoint,
+        )
+    {
+        tracing::error!(agent_id = %agent.id, %error, "could not persist cloud shutdown; preserving local identity");
+        return None;
+    }
+
     // Gracefully shutdown the agent and get list of released task IDs
-    let released_task_ids = agent_store.graceful_shutdown(&agent.id).unwrap_or_default();
+    let interrupted_task_ids = agent_store
+        .list_agent_leases(&agent.id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|lease| lease.task_id)
+        .collect::<Vec<_>>();
+    let released_task_ids = agent_store
+        .graceful_shutdown(&agent.id)
+        .unwrap_or_else(|error| {
+            tracing::error!(agent_id = %agent.id, %error, "SessionEnd graceful shutdown failed");
+            interrupted_task_ids
+        });
 
     // Clear working epics for this agent (session is ending)
     let _ = agent_store.clear_working_epics(&agent.id);
 
     // Unregister the agent (delete from database)
-    let _ = agent_store.unregister(&agent.id);
-
-    if released_task_ids.is_empty() {
-        return Some(released_task_ids);
+    let unregister = agent_store.unregister(&agent.id);
+    if let Err(error) = &unregister {
+        tracing::error!(agent_id = %agent.id, %error,
+            "SessionEnd unregister failed; durable cloud cleanup retained");
     }
 
     // Add interruption note to tasks that were in progress (don't reset status)
@@ -216,8 +241,14 @@ pub(crate) fn cleanup_agent_leases(
         }
     }
 
-    eprintln!("cas: Released {} task lease(s)", released_task_ids.len());
-
+    // Preserve interruption evidence even when unregister failed after lease
+    // release. The failed cleanup still returns None for recovery callers.
+    if unregister.is_err() {
+        return None;
+    }
+    if !released_task_ids.is_empty() {
+        eprintln!("cas: Released {} task lease(s)", released_task_ids.len());
+    }
     Some(released_task_ids)
 }
 
@@ -315,7 +346,7 @@ impl ExitBlockers {
                 };
                 lines.push(format!(
                     "  🤖 [{}] {}{}",
-                    &agent.id[..8.min(agent.id.len())],
+                    agent.id.chars().take(8).collect::<String>(),
                     agent.name,
                     claimed_info
                 ));

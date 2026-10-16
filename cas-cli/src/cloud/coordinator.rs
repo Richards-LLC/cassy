@@ -290,7 +290,10 @@ impl CloudCoordinator {
             Some(machine.as_str()),
         );
         if let Some(branch) = branch.map(str::trim).filter(|branch| !branch.is_empty()) {
-            metadata.insert(crate::cloud::peers::META_BRANCH.to_string(), branch.to_string());
+            metadata.insert(
+                crate::cloud::peers::META_BRANCH.to_string(),
+                branch.to_string(),
+            );
         }
         let response = ureq::post(&url)
             .timeout(self.timeout)
@@ -320,7 +323,8 @@ impl CloudCoordinator {
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
                 Err(CasError::Other(format!(
-                    "Failed to register agent ({code}): {body}"
+                    "Failed to register agent {}({code}): {body}",
+                    if code == 429 { "rate limited " } else { "" }
                 )))
             }
             Err(ureq::Error::Transport(e)) => Err(CasError::Other(format!("Network error: {e}"))),
@@ -336,37 +340,40 @@ impl CloudCoordinator {
         self.heartbeat_agent(agent_id)
     }
 
-    /// Shutdown the current agent
+    /// Shutdown the current agent. Idempotent cleanup retries only HTTP 429,
+    /// within five seconds (or the caller's shorter timeout). Run off-loop.
     pub fn shutdown(&self) -> Result<u32, CasError> {
-        let agent_id = self
-            .agent_id
-            .as_ref()
-            .ok_or_else(|| CasError::Other("No agent registered".to_string()))?;
+        self.shutdown_with_retry()
+            .map_err(|error| CasError::Other(error.cause))
+    }
 
+    pub(crate) fn shutdown_with_retry(&self) -> Result<u32, super::rate_limit::Failure> {
+        use super::rate_limit::{self, Failure};
+        let agent_id = self.agent_id.as_ref().ok_or_else(|| Failure {
+            cause: "No agent registered".into(),
+            retry_after: None,
+            status: None,
+        })?;
         let url = format!("{}/api/agents/{}/shutdown", self.config.endpoint, agent_id);
-
-        let response = ureq::post(&url)
-            .timeout(self.timeout)
-            .set("Authorization", &format!("Bearer {}", self.token()))
-            .call();
-
-        match response {
-            Ok(resp) => {
-                #[derive(Deserialize)]
-                struct ShutdownResponse {
-                    released_locks: u32,
-                }
-                let resp: ShutdownResponse = resp
-                    .into_json()
-                    .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?;
-                Ok(resp.released_locks)
-            }
-            Err(ureq::Error::Status(code, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
-                Err(CasError::Other(format!("Shutdown failed ({code}): {body}")))
-            }
-            Err(ureq::Error::Transport(e)) => Err(CasError::Other(format!("Network error: {e}"))),
+        let response = rate_limit::call(self.timeout, |left| {
+            ureq::post(&url)
+                .timeout(left)
+                .set("Authorization", &format!("Bearer {}", self.token()))
+                .call()
+        })
+        .map_err(|error| Failure::from_http("Shutdown", error))?;
+        #[derive(Deserialize)]
+        struct ShutdownResponse {
+            released_locks: u32,
         }
+        response
+            .into_json::<ShutdownResponse>()
+            .map(|response| response.released_locks)
+            .map_err(|error| Failure {
+                cause: format!("Failed to parse shutdown response: {error}"),
+                retry_after: None,
+                status: None,
+            })
     }
 
     /// Claim a task
@@ -455,22 +462,17 @@ impl CloudCoordinator {
             self.config.endpoint, task_id
         );
 
-        let response = ureq::post(&url)
-            .timeout(self.timeout)
-            .set("Authorization", &format!("Bearer {}", self.token()))
-            .set("Content-Type", "application/json")
-            .send_json(self.project_scoped(serde_json::json!({
-                "agent_id": agent_id,
-            })));
-
-        match response {
-            Ok(_) => Ok(()),
-            Err(ureq::Error::Status(code, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
-                Err(CasError::Other(format!("Release failed ({code}): {body}")))
-            }
-            Err(ureq::Error::Transport(e)) => Err(CasError::Other(format!("Network error: {e}"))),
-        }
+        super::rate_limit::call(self.timeout, |left| {
+            ureq::post(&url)
+                .timeout(left)
+                .set("Authorization", &format!("Bearer {}", self.token()))
+                .set("Content-Type", "application/json")
+                .send_json(self.project_scoped(serde_json::json!({ "agent_id": agent_id })))
+        })
+        .map(|_| ())
+        .map_err(|error| {
+            CasError::Other(super::rate_limit::Failure::from_http("Release", error).cause)
+        })
     }
 
     /// Renew a task lease
@@ -633,10 +635,11 @@ impl CloudCoordinator {
     /// Heartbeat a specific agent (cas-e477). Each daemon heartbeats its own
     /// agent, not whichever agent this coordinator registered last.
     pub fn heartbeat_agent(&self, agent_id: &str) -> Result<AgentInfo, CasError> {
-        self.heartbeat_presence(agent_id, None).map_err(|error| match error {
-            HeartbeatError::Failed(error) => error,
-            not_registered => CasError::Other(not_registered.to_string()),
-        })
+        self.heartbeat_presence(agent_id, None)
+            .map_err(|error| match error {
+                HeartbeatError::Failed(error) => error,
+                not_registered => CasError::Other(not_registered.to_string()),
+            })
     }
 
     /// [`Self::heartbeat_agent`] with the refusal that means "register
@@ -690,7 +693,8 @@ impl CloudCoordinator {
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
                 Err(HeartbeatError::Failed(CasError::Other(format!(
-                    "Heartbeat failed ({code}): {body}"
+                    "Heartbeat failed {}({code}): {body}",
+                    if code == 429 { "rate limited " } else { "" }
                 ))))
             }
             Err(ureq::Error::Transport(e)) => Err(HeartbeatError::Failed(CasError::Other(

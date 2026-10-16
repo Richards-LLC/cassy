@@ -1990,6 +1990,15 @@ Each grant admits only its modes; a project root admits all three:
 Every write admitted this way is logged as a `workspace_write_root_used`
 event (tool, path, mode, root, task, agent) in the factory session log. A
 refusal lists the roots in effect.
+Shell writes are checked against their possible effective directories after
+`cd`, including writes in literal nested shell payloads. Earlier simple
+directory bindings are resolved in order; conditional bindings retain their
+possible values, and subshell directory changes stay scoped. Literal shell
+bodies may use status/PID values and read-only substitutions as data; their
+recognized filesystem effects are inspected recursively. Unresolved shell
+programs, executables, directory operands/searches, write targets and excessive
+nesting fail closed. Use explicit directory operands and bounded literal
+payloads so each write can be attributed to a root.
 
 **Operator-only, guardrail-grade (not security-grade).** The operator and the
 agents share a Unix user. The PreToolUse hook is the actual gate against

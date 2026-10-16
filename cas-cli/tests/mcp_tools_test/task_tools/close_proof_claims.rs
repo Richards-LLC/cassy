@@ -14,7 +14,13 @@ async fn close_with_reason(reason: &str, rejected: bool) {
     )
     .unwrap();
     let created = service
-        .cas_task_create(Parameters(simple_task_req("Proof claim boundary")))
+        .cas_task_create(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "title": "Proof claim boundary", "priority": 2,
+                "task_type": "task", "risk": "none"
+            }))
+            .unwrap(),
+        ))
         .await
         .unwrap();
     let id = extract_task_id(&extract_text(created)).unwrap().to_string();

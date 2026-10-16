@@ -1128,11 +1128,7 @@ impl HttpPeerMailbox {
             Ok(response) => response
                 .into_json()
                 .map_err(|error| format!("{what}: unreadable response: {error}")),
-            Err(ureq::Error::Status(code, response)) => Err(format!(
-                "{what} refused ({code}): {}",
-                response.into_string().unwrap_or_default()
-            )),
-            Err(ureq::Error::Transport(error)) => Err(format!("{what}: network error: {error}")),
+            Err(error) => Err(super::rate_limit::Failure::from_http(what, error).cause),
         }
     }
 
@@ -1264,10 +1260,12 @@ impl PeerMailbox for HttpPeerMailbox {
                 .collect();
             let response: AckResponse = Self::read(
                 "peer message ack",
-                self.post(
-                    "/ack",
-                    serde_json::json!({"consumer_id":consumer_id,"acks":items}),
-                ),
+                super::rate_limit::call(MAILBOX_TIMEOUT, |left| {
+                    ureq::post(&self.url("/ack"))
+                        .timeout(left)
+                        .set("Authorization", &format!("Bearer {}", self.token))
+                        .send_json(serde_json::json!({"consumer_id":consumer_id,"acks":items}))
+                }),
             )?;
             if response.results.len() != batch.len() {
                 return Err("peer message ack: incomplete per-item receipt".into());
@@ -1293,6 +1291,7 @@ impl PeerMailbox for HttpPeerMailbox {
                             Err(error)=>errors.push(format!("peer message ack {id} refused (409): {error}")),
                         }
                     }
+                    429 => errors.push(format!("peer message ack {id}: rate limited (429)")),
                     code => errors.push(format!("peer message ack {id} refused ({code})")),
                 }
             }

@@ -4,15 +4,15 @@
 //! the library calls they make.
 
 use super::*;
-use cas_types::Task;
-use std::path::{Path, PathBuf};
+use crate::cloud::peers::{META_BRANCH, META_CANONICAL_ID, META_FACTORY_SESSION, META_FOCUS};
 use crate::cloud::presence::{self, PresenceState};
 use crate::cloud::{CloudConfig, PROJECT_SCOPE_KEY};
-use crate::cloud::peers::{META_BRANCH, META_CANONICAL_ID, META_FACTORY_SESSION, META_FOCUS};
 use crate::store::init_cas_dir;
 use crate::test_support::TestEnvGuard;
+use cas_types::Task;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -64,7 +64,8 @@ impl Respond for FakeCloud {
                 .to_string();
             if sent != format!("Bearer {valid}") {
                 state.rejected_tokens.push(sent);
-                return ResponseTemplate::new(401).set_body_string(r#"{"error":"Invalid API key"}"#);
+                return ResponseTemplate::new(401)
+                    .set_body_string(r#"{"error":"Invalid API key"}"#);
             }
         }
         match (request.method.as_str(), path.as_str()) {
@@ -89,7 +90,8 @@ impl Respond for FakeCloud {
                     "metadata": body["metadata"],
                 });
                 state.agents.insert(id, agent.clone());
-                ResponseTemplate::new(200).set_body_json(json!({"status": "success", "agent": agent}))
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"status": "success", "agent": agent}))
             }
             ("GET", "/api/agents") => {
                 state
@@ -199,7 +201,11 @@ async fn fixture(focus: &str) -> (Fixture, EmbeddedDaemon) {
         None,
     );
     metadata.pinned_epic_id = Some(focus.to_string());
-    std::fs::write(&metadata_path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+    std::fs::write(
+        &metadata_path,
+        serde_json::to_string_pretty(&metadata).unwrap(),
+    )
+    .unwrap();
 
     let daemon = EmbeddedDaemon::new(EmbeddedDaemonConfig {
         cas_root: cas_root.clone(),
@@ -291,13 +297,19 @@ async fn cas_f707_daemon_retries_a_rejected_registration_and_reregisters_after_a
     // A registered agent's tick is a plain heartbeat.
     heartbeat_tick(&daemon).await;
     assert_eq!(fx.cloud.state().registrations.len(), 2);
-    assert_eq!(fx.cloud.state().heartbeats.last(), Some(&(me.to_string(), 200)));
+    assert_eq!(
+        fx.cloud.state().heartbeats.last(),
+        Some(&(me.to_string(), 200))
+    );
 
     // The cloud loses the agent: the heartbeat gets 404 and the daemon
     // registers it again within the same tick.
     fx.cloud.state().agents.clear();
     heartbeat_tick(&daemon).await;
-    assert_eq!(fx.cloud.state().heartbeats.last(), Some(&(me.to_string(), 404)));
+    assert_eq!(
+        fx.cloud.state().heartbeats.last(),
+        Some(&(me.to_string(), 404))
+    );
     assert_eq!(fx.cloud.state().registrations.len(), 3);
     assert_eq!(
         presence::load(&fx.cas_root, me).unwrap().state,
@@ -319,9 +331,16 @@ async fn cas_f707_daemon_retries_a_rejected_registration_and_reregisters_after_a
     // heartbeat re-binds the project and carries the factory session.
     let state = fx.cloud.state();
     for registration in &state.registrations {
-        assert_eq!(registration[PROJECT_SCOPE_KEY], json!(REPO), "{registration}");
+        assert_eq!(
+            registration[PROJECT_SCOPE_KEY],
+            json!(REPO),
+            "{registration}"
+        );
         assert_eq!(registration["metadata"][META_CANONICAL_ID], json!(REPO));
-        assert_eq!(registration["metadata"][META_FACTORY_SESSION], json!(SESSION));
+        assert_eq!(
+            registration["metadata"][META_FACTORY_SESSION],
+            json!(SESSION)
+        );
     }
     assert!(!state.heartbeat_metadata.is_empty());
     for beat in &state.heartbeat_metadata {
@@ -399,12 +418,8 @@ async fn cas_f707_focus_epic_refreshes_the_registered_focus() {
     assert_eq!(pushed.focus.as_deref(), Some("cas-new-epic"));
     // ... and the daemon heartbeat, which catches a focus change made
     // elsewhere (the Commander hub): pin back and tick.
-    crate::ops::fleet::focus_epic(
-        &fx.cas_root,
-        SESSION,
-        crate::ops::fleet::FocusEpic::Clear,
-    )
-    .unwrap();
+    crate::ops::fleet::focus_epic(&fx.cas_root, SESSION, crate::ops::fleet::FocusEpic::Clear)
+        .unwrap();
     heartbeat_tick(&daemon).await;
     let record = presence::load(&fx.cas_root, me).unwrap();
     assert_eq!(record.state, PresenceState::Registered);
@@ -418,12 +433,21 @@ async fn cas_f707_focus_epic_refreshes_the_registered_focus() {
         .collect();
     assert_eq!(
         focuses,
-        vec![Some("cas-old-epic".to_string()), Some("cas-new-epic".to_string())]
+        vec![
+            Some("cas-old-epic".to_string()),
+            Some("cas-new-epic".to_string())
+        ]
     );
     // The heartbeat carried the cleared focus; the cloud merged it.
-    assert_eq!(state.heartbeat_metadata.last().unwrap()[META_FOCUS], json!(""));
+    assert_eq!(
+        state.heartbeat_metadata.last().unwrap()[META_FOCUS],
+        json!("")
+    );
     drop(state);
-    assert_eq!(peer_ids(&fx.peer_root, "someone-else"), vec![(me.to_string(), None)]);
+    assert_eq!(
+        peer_ids(&fx.peer_root, "someone-else"),
+        vec![(me.to_string(), None)]
+    );
 }
 
 /// The real factory sequence (daring-eagle-74's repro at c25f0e3db): `cas
@@ -476,7 +500,10 @@ async fn cas_f707_eager_supervisor_then_session_start_registers_once() {
     // The cloud loses it: the next heartbeat's 404 registers it again.
     fx.cloud.state().agents.clear();
     heartbeat_tick(&daemon).await;
-    assert_eq!(fx.cloud.state().heartbeats.last(), Some(&(me.to_string(), 404)));
+    assert_eq!(
+        fx.cloud.state().heartbeats.last(),
+        Some(&(me.to_string(), 404))
+    );
     assert_eq!(fx.cloud.state().registrations.len(), 2);
     assert_eq!(peer_ids(&fx.peer_root, "someone-else").len(), 1);
 }
@@ -500,12 +527,19 @@ async fn cas_f707_branch_is_registered_and_refreshed_on_the_heartbeat() {
     let record = presence::load(&fx.cas_root, me).unwrap();
     assert_eq!(record.branch.as_deref(), Some("factory/next"));
     let state = fx.cloud.state();
-    assert_eq!(state.registrations.len(), 1, "a branch change rides the heartbeat");
+    assert_eq!(
+        state.registrations.len(),
+        1,
+        "a branch change rides the heartbeat"
+    );
     assert_eq!(
         state.heartbeat_metadata.last().unwrap()[META_BRANCH],
         json!("factory/next")
     );
-    assert_eq!(state.agents[me]["metadata"][META_BRANCH], json!("factory/next"));
+    assert_eq!(
+        state.agents[me]["metadata"][META_BRANCH],
+        json!("factory/next")
+    );
 }
 
 #[tokio::test]
@@ -525,7 +559,10 @@ async fn cas_f707_a_failing_registration_waits_out_its_backoff() {
         "no attempt before the backoff runs out"
     );
     let shown = crate::cloud::peers::peers_section(&fx.cas_root, Some(me));
-    assert!(shown.contains("2 failed attempts, next retry in"), "{shown}");
+    assert!(
+        shown.contains("2 failed attempts, next retry in"),
+        "{shown}"
+    );
 }
 
 /// An explicit `cloud.auto_sync = false` keeps the project's agents out of
@@ -564,7 +601,10 @@ async fn cas_f707_auto_sync_false_opts_out_of_presence_and_says_so() {
     assert!(shown.contains("discovery is one-way"), "{shown}");
     // `cas status` without a known caller says the same.
     let anonymous = crate::cloud::peers::peers_section(&fx.cas_root, None);
-    assert!(anonymous.starts_with("Cloud presence: disabled"), "{anonymous}");
+    assert!(
+        anonymous.starts_with("Cloud presence: disabled"),
+        "{anonymous}"
+    );
 
     // Back on: the default path registers.
     set_auto_sync("true");
@@ -605,11 +645,18 @@ async fn cas_66c7_a_late_login_registers_without_a_restart() {
     let me = "sup-66c7-late";
     session_start(&daemon, me, "late-sup").await;
     heartbeat_tick(&daemon).await;
-    assert!(fx.cloud.state().registrations.is_empty(), "logged out: nothing sent");
+    assert!(
+        fx.cloud.state().registrations.is_empty(),
+        "logged out: nothing sent"
+    );
 
     write_token(&fx.cas_root, Some("synthetic-test-token"));
     heartbeat_tick(&daemon).await;
-    assert_eq!(fx.cloud.state().registrations.len(), 1, "registered within one tick");
+    assert_eq!(
+        fx.cloud.state().registrations.len(),
+        1,
+        "registered within one tick"
+    );
     assert_eq!(
         presence::load(&fx.cas_root, me).unwrap().state,
         PresenceState::Registered
@@ -676,7 +723,10 @@ async fn cas_66c7_cloud_sync_follows_a_late_login_and_a_rotated_token() {
     config.save_to_cas_dir(&cas_root).unwrap();
 
     let daemon = daemon_for(&cas_root);
-    assert!(daemon.trigger_cloud_sync().await.is_err(), "logged out: no syncer");
+    assert!(
+        daemon.trigger_cloud_sync().await.is_err(),
+        "logged out: no syncer"
+    );
 
     let tokens_since = |from: usize| {
         let server = &server;
@@ -703,7 +753,10 @@ async fn cas_66c7_cloud_sync_follows_a_late_login_and_a_rotated_token() {
     daemon.trigger_cloud_sync().await.unwrap();
     let after_login = tokens_since(0).await;
     assert!(!after_login.is_empty(), "the late login syncs");
-    assert!(after_login.iter().all(|t| t == "Bearer first-token"), "{after_login:?}");
+    assert!(
+        after_login.iter().all(|t| t == "Bearer first-token"),
+        "{after_login:?}"
+    );
 
     write_token(&cas_root, Some("rotated-token"));
     daemon.trigger_cloud_sync().await.unwrap();
@@ -712,5 +765,77 @@ async fn cas_66c7_cloud_sync_follows_a_late_login_and_a_rotated_token() {
     assert!(
         after_rotation.iter().all(|t| t == "Bearer rotated-token"),
         "{after_rotation:?}"
+    );
+}
+
+#[tokio::test]
+async fn cas_4ac8_session_end_is_local_and_next_start_drains_after_restart() {
+    use wiremock::matchers::{method, path};
+    let (fx, daemon) = fixture("cas-571d").await;
+    session_start(&daemon, "ending-4ac8", "ending").await;
+    daemon.await_cloud_presence().await;
+    Mock::given(method("POST"))
+        .and(path("/api/agents/ending-4ac8/shutdown"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .expect(1)
+        .mount(&fx._server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/agents/ending-4ac8/shutdown"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"released_locks":0})))
+        .with_priority(2)
+        .expect(1)
+        .mount(&fx._server)
+        .await;
+    let root = fx.cas_root.clone();
+    let start = std::time::Instant::now();
+    tokio::task::spawn_blocking(move || {
+        crate::hooks::handlers::handle_session_end(
+            &crate::hooks::HookInput {
+                session_id: "ending-4ac8".into(),
+                ..Default::default()
+            },
+            Some(&root),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(1),
+        "SessionEnd waited for Cloud"
+    );
+    assert!(
+        fx._server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| !request.url.path().ends_with("/shutdown"))
+    );
+    let pending = crate::cloud::peers::presence_line(&fx.cas_root, Some("ending-4ac8"));
+    assert!(pending.contains("shutdown pending"), "{pending}");
+    drop(daemon);
+    // A fresh daemon/session must recover the file without the ended local row.
+    let restarted = EmbeddedDaemon::new(EmbeddedDaemonConfig {
+        cas_root: fx.cas_root.clone(),
+        index_code: false,
+        ..Default::default()
+    });
+    session_start(&restarted, "successor-4ac8", "successor").await;
+    restarted.await_cloud_presence().await;
+    let health = crate::cloud::peers::presence_line(&fx.cas_root, Some("successor-4ac8"));
+    assert!(!health.contains("shutdown pending"), "{health}");
+    assert_eq!(
+        fx._server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path().ends_with("/shutdown"))
+            .count(),
+        2
     );
 }

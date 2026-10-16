@@ -20,6 +20,7 @@ mod backfill;
 pub mod comments;
 mod config;
 mod coordinator;
+pub(crate) mod rate_limit;
 pub mod peer_claims;
 pub mod epic_split;
 pub mod device;

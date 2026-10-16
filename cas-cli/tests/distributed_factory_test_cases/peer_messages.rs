@@ -1386,7 +1386,7 @@ async fn restart_peer_mail(unregister: bool, legacy: bool, fail_notice: bool) {
             ))
             .respond_with(ResponseTemplate::new(503))
             .up_to_n_times(1)
-            .with_priority(0)
+            .with_priority(1)
             .mount(&server)
             .await;
     }

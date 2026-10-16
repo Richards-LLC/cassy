@@ -3370,6 +3370,9 @@ pub struct SqlitePromptQueueStore {
     conn: Arc<Mutex<Connection>>,
 }
 
+#[path = "violet_admission_store.rs"]
+pub(crate) mod violet_admission;
+
 /// cas-b5e4 (GH #989): directory of per-recipient "new mail" stamps next to
 /// `cas.db`. A hook at every tool boundary compares one small file against
 /// its last check instead of opening the database, so a busy recipient sees a

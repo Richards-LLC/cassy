@@ -46,6 +46,7 @@ pub(crate) mod prompt_queue_jobs;
 pub(crate) mod teams;
 pub(super) mod terminal_exchange;
 pub(crate) mod violet_activity;
+pub(crate) mod violet_intake;
 mod ws_client;
 
 /// cas-ac7e (GH #130): the daemon struct holds outstanding urgent wake probes,

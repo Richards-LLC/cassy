@@ -3495,18 +3495,18 @@ struct ShellLink {
     destination_from_cwd: bool,
 }
 
-/// cas-7d68: every link `ln` (and `cp -s`/`cp -l`) creates in a shell
+/// cas-7d68: every link `ln`, `link` (and `cp -s`/`cp -l`) creates in a shell
 /// command, however wrapped (see [`shell_invocations`]). A link does not
 /// exist when the hook runs, so the caller judges its destination and the
 /// writes made through it, instead of resolving the link on disk.
 fn bash_link_creations(command: &str, cwd: &Path) -> Vec<ShellLink> {
     let mut links = Vec::new();
     for (name, args) in shell_invocations(command) {
-        if name != "ln" && name != "cp" {
+        if !matches!(name.as_str(), "ln" | "link" | "cp") {
             continue;
         }
         let mut symbolic = false;
-        let mut hard = name == "ln";
+        let mut hard = name != "cp";
         let mut relative = false;
         let mut no_target_directory = false;
         let mut target_directory: Option<String> = None;
@@ -7551,12 +7551,26 @@ mod workspace_contract_tests {
             let (decision, reason) = decide("supervisor", command);
             assert_eq!(decision, "deny", "supervisor must be refused `{command}`: {reason}");
         }
+        // A symlink left by an earlier command: `..` after it leaves its real
+        // destination, not its lexical parent. `a/b/l -> <worktree>` makes
+        // `a/b/l/../../config.toml` the project's `.cas/config.toml`.
+        std::fs::create_dir_all(worktree.join("a/b")).unwrap();
+        std::os::unix::fs::symlink(&worktree, worktree.join("a/b/l")).unwrap();
+        for command in [
+            "echo x >> a/b/l/../../config.toml",
+            "echo x > a/b/l/../../operator/write-policy.toml",
+            "link ../../config.toml cfg",
+        ] {
+            let (decision, reason) = decide("worker", command);
+            assert_eq!(decision, "deny", "worker must be refused `{command}`: {reason}");
+        }
         for (role, command) in [
             ("worker", "ln -s src s && echo x > s/new.rs"),
             ("worker", "ln -sf ../src/lib.rs src/alias.rs"),
             ("worker", "ln src/existing.rs src/hard.rs"),
             ("supervisor", "ln -s src s && echo x > s/new.rs"),
             ("supervisor", "cat .cas/config.toml"),
+            ("worker", "ln -s src/existing.rs s.rs && cat s.rs"),
         ] {
             std::fs::write(worktree.join("src/existing.rs"), "x").unwrap();
             let (decision, reason) = decide(role, command);

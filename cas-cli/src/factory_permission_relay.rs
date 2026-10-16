@@ -218,20 +218,21 @@ fn with_locked_inbox<T>(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if !path.exists() {
-        std::fs::write(path, "[]")?;
-    }
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)?;
-    fs2::FileExt::lock_exclusive(&file)
+    // cas-c312: hold the stable inbox lock, and replace the inbox whole so a
+    // lock-free reader never parses a truncated file.
+    let file = crate::ui::factory::daemon::runtime::teams::open_locked_inbox(path)
         .map_err(|error| anyhow::anyhow!("cannot lock {}: {error}", path.display()))?;
     let result = (|| -> anyhow::Result<T> {
-        let mut rows: Vec<Value> =
-            serde_json::from_str(&std::fs::read_to_string(path)?).unwrap_or_default();
+        let mut rows: Vec<Value> = match std::fs::read_to_string(path) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
         let value = operation(&mut rows);
-        std::fs::write(path, serde_json::to_string_pretty(&rows)?)?;
+        crate::ui::factory::daemon::runtime::teams::replace_inbox_file(
+            path,
+            serde_json::to_string_pretty(&rows)?.as_bytes(),
+        )?;
         Ok(value)
     })();
     let _ = fs2::FileExt::unlock(&file);

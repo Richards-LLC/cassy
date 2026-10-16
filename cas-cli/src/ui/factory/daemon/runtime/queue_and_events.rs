@@ -7878,12 +7878,14 @@ impl FactoryDaemon {
                     outcome.map(|outcome| match outcome {
                         cas_mux::InjectOutcome::Delivered => super::delivery::NudgeReport {
                             outcome,
+                            channel: super::delivery::DeliveryChannel::Pty,
                             wake: cas_store::WakeAttempt::Fired,
                             wake_detail: Some("urgent interrupt-and-inject".to_string()),
                         },
                         cas_mux::InjectOutcome::DeferredComposerDirty => {
                             super::delivery::NudgeReport::not_attempted(
                                 outcome,
+                                super::delivery::DeliveryChannel::Pty,
                                 "urgent delivery retained until the operator composer is clean",
                             )
                         }
@@ -8088,6 +8090,10 @@ impl FactoryDaemon {
                 self.queue_jobs
                     .record_outcome(queued.id, &queued.target, inject_generation);
                 if let Ok(ref report) = inject_result {
+                    // A configured Teams inbox may have fallen back to PTY
+                    // on ENOENT. Only an actual Teams copy can be held for a
+                    // tool boundary; never re-stamp a PTY delivery as deferred.
+                    wake_deferred &= report.channel == super::delivery::DeliveryChannel::TeamsInbox;
                     self.queue_jobs.stamp(
                         self.app.cas_dir(),
                         queued.id,
@@ -8431,6 +8437,33 @@ impl FactoryDaemon {
                         %error,
                         "failed to persist deferred Claude inbox handoff"
                     );
+                    // The Teams copy survives, but without this marker a tool
+                    // boundary cannot take the claim. Report the degraded path
+                    // durably, once per row, rather than leaving it only in logs.
+                    let notice = format!(
+                        "Warning: deferred inbox handoff not recorded: notification_id={}; \
+                         target={}. tool-boundary surfacing unavailable; the Teams copy \
+                         waits until the recipient's turn boundary. Inspect with \
+                         coordination action=message_status notification_id={}",
+                        queued.id, queued.target, queued.id,
+                    );
+                    match queue.enqueue_idempotent(
+                        "daemon",
+                        self.app.supervisor_name(),
+                        &notice,
+                        Some(self.session_name.as_str()),
+                        Some("Deferred inbox handoff not recorded"),
+                        None,
+                        &format!("deferred-inbox-stamp-failed:{}", queued.id),
+                        Some(&cas_store::QueueOrigin::Daemon),
+                    ) {
+                        Ok(_) => super::delivery::wake_daemon_after_enqueue(self.app.cas_dir()),
+                        Err(notice_error) => tracing::error!(
+                            prompt_id = queued.id,
+                            %notice_error,
+                            "failed to persist supervisor warning about deferred inbox handoff"
+                        ),
+                    }
                 }
                 self.lifecycle_redelivery_attempts
                     .entry(queued.id)

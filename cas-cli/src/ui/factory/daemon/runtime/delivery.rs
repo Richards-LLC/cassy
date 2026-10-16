@@ -57,6 +57,9 @@ pub(crate) const PTY_DELIVERY_WAKE_DETAIL: &str = "recipient delivered via PTY: 
 pub(crate) struct NudgeReport {
     /// Transport outcome for the primary delivery.
     pub(crate) outcome: InjectOutcome,
+    /// Actual primary transport, including Teams-to-PTY fallback. A PTY
+    /// wake after a Teams write does not change the primary channel.
+    pub(crate) channel: DeliveryChannel,
     /// What the wake nudge did.
     pub(crate) wake: WakeAttempt,
     /// Why a wake failed, or which gate declined it.
@@ -65,9 +68,14 @@ pub(crate) struct NudgeReport {
 
 impl NudgeReport {
     /// A delivery where no wake was attempted, with the reason stated.
-    pub(crate) fn not_attempted(outcome: InjectOutcome, detail: &str) -> Self {
+    pub(crate) fn not_attempted(
+        outcome: InjectOutcome,
+        channel: DeliveryChannel,
+        detail: &str,
+    ) -> Self {
         Self {
             outcome,
+            channel,
             wake: WakeAttempt::NotAttempted,
             wake_detail: Some(detail.to_string()),
         }
@@ -1246,6 +1254,7 @@ impl FactoryDaemon {
         if primary_outcome != InjectOutcome::Delivered {
             return Ok(NudgeReport::not_attempted(
                 primary_outcome,
+                channel,
                 "primary delivery did not complete; no wake attempted",
             ));
         }
@@ -1257,12 +1266,14 @@ impl FactoryDaemon {
             // this row when no turn starts.
             return Ok(NudgeReport::not_attempted(
                 primary_outcome,
+                channel,
                 PTY_DELIVERY_WAKE_DETAIL,
             ));
         }
         if !wake.allowed {
             return Ok(NudgeReport::not_attempted(
                 primary_outcome,
+                channel,
                 // cas-9e81: name the signal that decided. The old fixed
                 // string ("idle gate declined the wake for this pass") was on
                 // 34 of 35 rows during the reported incident and told an
@@ -1298,6 +1309,7 @@ impl FactoryDaemon {
         if !wake.allowed {
             return Ok(NudgeReport::not_attempted(
                 InjectOutcome::Delivered,
+                DeliveryChannel::TeamsInbox,
                 &wake.status_detail(),
             ));
         }
@@ -1396,6 +1408,7 @@ impl FactoryDaemon {
             // Already PTY-delivered by the primary call above.
             return Ok(NudgeReport::not_attempted(
                 InjectOutcome::Delivered,
+                DeliveryChannel::Pty,
                 PTY_DELIVERY_WAKE_DETAIL,
             ));
         }
@@ -1421,6 +1434,7 @@ impl FactoryDaemon {
                 );
                 NudgeReport {
                     outcome: InjectOutcome::Delivered,
+                    channel: DeliveryChannel::TeamsInbox,
                     wake: WakeAttempt::Fired,
                     wake_detail: None,
                 }
@@ -1434,6 +1448,7 @@ impl FactoryDaemon {
                 );
                 NudgeReport {
                     outcome: InjectOutcome::Delivered,
+                    channel: DeliveryChannel::TeamsInbox,
                     wake: WakeAttempt::Failed,
                     wake_detail: Some("operator composer is dirty".to_string()),
                 }
@@ -1449,6 +1464,7 @@ impl FactoryDaemon {
                 );
                 NudgeReport {
                     outcome: InjectOutcome::Delivered,
+                    channel: DeliveryChannel::TeamsInbox,
                     wake: WakeAttempt::Failed,
                     wake_detail: Some(format!("pane inject failed: {e}")),
                 }

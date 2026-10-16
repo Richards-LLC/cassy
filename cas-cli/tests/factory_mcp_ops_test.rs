@@ -8031,6 +8031,50 @@ async fn test_coordination_message_returned_notification_id_drives_status_query(
     );
 }
 
+#[tokio::test]
+async fn cas_1ba0_message_status_distinguishes_held_inbox_from_composer_retry() {
+    let env = FactoryTestEnv::new();
+    let queue = env.prompt_queue();
+    for (deferred, receipt) in [
+        (true, Some(cas_store::SurfacingSource::TransportClaimed)),
+        (false, None),
+        (true, None),
+        (true, Some(cas_store::SurfacingSource::HookSurfaced)),
+    ] {
+        let held_copy = deferred && receipt == Some(cas_store::SurfacingSource::TransportClaimed);
+        let id = queue
+            .enqueue("supervisor", "swift-fox", "decision")
+            .unwrap();
+        queue
+            .record_pending_reason(
+                id,
+                cas_store::PendingReason::GatedNotReady,
+                Some("same detail in both cases"),
+            )
+            .unwrap();
+        if let Some(receipt) = receipt {
+            queue
+                .record_recipient_surfaced(id, "swift-fox", receipt)
+                .unwrap();
+        }
+        if deferred {
+            queue.record_deferred_inbox(id, 123).unwrap();
+        }
+        let mut req = coord_msg("message_status", "swift-fox", "unused", None);
+        req.notification_id = Some(id);
+        let text = get_text(&env.service.coordination(Parameters(req)).await.unwrap());
+        if held_copy {
+            assert!(text.contains("held inbox:"), "{text}");
+            assert!(text.contains("next tool call or turn start"), "{text}");
+            assert!(!text.contains("retry budget"), "{text}");
+        } else {
+            assert!(text.contains("delivery retry:"), "{text}");
+            assert!(text.contains("900s retry budget"), "{text}");
+            assert!(!text.contains("next tool call"), "{text}");
+        }
+    }
+}
+
 /// cas-893c AC2: `message_status` must expose how long a message has been
 /// undelivered rather than only a bare stage string. A freshly enqueued,
 /// never-acked message must report a non-negative `undelivered_after_secs`

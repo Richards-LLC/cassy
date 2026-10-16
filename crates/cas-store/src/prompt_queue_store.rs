@@ -284,13 +284,23 @@ pub(crate) const INBOX_POLL_ORDER_SQL: &str = "ORDER BY (q.processed_at IS NOT N
                                    q.processed_at DESC,
                                    q.id DESC";
 
+/// Current held-inbox evidence, checked in one snapshot. A durable deferral
+/// marker alone is insufficient after surfacing or a completed handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboxHandoffState {
+    HeldTeamsInbox,
+    NotHeld,
+}
+
 /// cas-a1ed: the transport claim a tool boundary may take over. The daemon
 /// stamps `deferred_inbox_at` only after it wrote the Teams copy and left the
 /// row pending because the wake was declined; that handoff will not finish
-/// until the recipient's turn ends. A PTY inject (a Codex or OpenCode
-/// recipient, the Teams ENOENT fallback, any urgent interrupt) never stamps
-/// it, so its claim stays with the transport even while its Delivered stamp
-/// lands late (cas-9568: a tool boundary never replays an injected turn).
+/// until the recipient's turn ends. Every fresh transport reservation
+/// atomically clears a previous deferral. Only an actual TeamsInbox handoff
+/// may stamp it again: the daemon uses the reported primary channel, including
+/// the Teams ENOENT fallback to PTY, rather than the configured channel.
+/// PTY and urgent claims stay with their transport while Delivered lands late
+/// (cas-9568: a tool boundary never replays an injected turn).
 macro_rules! held_teams_claim_sql {
     () => {
         "seen.source = 'transport_claimed'
@@ -2389,6 +2399,9 @@ pub trait PromptQueueStore: Send + Sync {
     /// Return the durable deferred-inbox handoff timestamp and pane baseline.
     fn deferred_inbox_state(&self, prompt_id: i64) -> Result<Option<(DateTime<Utc>, u64)>>;
 
+    /// Check the same active held-Teams claim predicate a tool boundary uses.
+    fn inbox_handoff_state(&self, prompt_id: i64) -> Result<InboxHandoffState>;
+
     /// Count the messages `recipient` has NOT yet seen, without consuming them.
     ///
     /// cas-e728 (GH #105): `worker_status` needs to say whether a quiet worker
@@ -3699,13 +3712,11 @@ impl SqlitePromptQueueStore {
                 tx,
                 &sender,
                 session.as_deref(),
-                &format!(
-                    "{} messages to {targets} were abandoned ({reasons}); ids {ids}",
-                    notices.len()
-                ),
+                &abandonment_batch_notice(&notices, &targets, &reasons),
                 &format!("{} messages to {targets} abandoned", notices.len()),
                 &format!("delivery-abandoned:batch:{ids}"),
                 operator,
+                notices.len() as u64,
             )?;
         }
         Ok(())
@@ -3774,6 +3785,7 @@ impl SqlitePromptQueueStore {
             &format!("Message {message_id} to {recipient} abandoned"),
             &format!("delivery-abandoned:{message_id}"),
             is_operator_target(recipient),
+            1,
         )
     }
 
@@ -3803,6 +3815,7 @@ impl SqlitePromptQueueStore {
         summary: &str,
         dedupe_key: &str,
         operator: bool,
+        message_count: u64,
     ) -> Result<()> {
         let now = Utc::now();
         let window_start = abandonment_window_start(now).to_rfc3339();
@@ -3845,7 +3858,7 @@ impl SqlitePromptQueueStore {
                 "UPDATE prompt_queue
                     SET prompt = ?2, summary = 'Messages abandoned (episode continues)'
                   WHERE id = ?1",
-                params![id, fold_abandonment_line(prompt, notice)],
+                params![id, fold_abandonment_line(prompt, notice, message_count)],
             )?;
             return Ok(());
         }
@@ -3863,11 +3876,7 @@ impl SqlitePromptQueueStore {
             return Ok(());
         } else {
             (
-                format!(
-                    "Update since the last Commander abandonment notice this hour: {notice}\n\
-                     Further Commander abandonments this hour are recorded on each message \
-                     (`message_status`) without another notice."
-                ),
+                abandonment_update_notice(notice),
                 format!("Update: {summary}"),
                 format!(
                     "{update_prefix}{}",
@@ -3905,10 +3914,76 @@ fn abandonment_window_start(now: DateTime<Utc>) -> DateTime<Utc> {
     DateTime::from_timestamp(start, 0).unwrap_or(now)
 }
 
+fn abandonment_update_notice(notice: &str) -> String {
+    format!(
+        "Update since the last Commander abandonment notice this hour: {notice}\n\
+         Further Commander abandonments this hour are recorded on each message \
+         (`message_status`) without another notice."
+    )
+}
+
+/// Keep whole IDs while reserving room for the episode overflow trailer and
+/// the Commander update wrapper. The total still names every abandoned row;
+/// omitted IDs remain available through each original message's status.
+fn abandonment_batch_notice(
+    notices: &[AbandonedSenderNotice],
+    targets: &str,
+    reasons: &str,
+) -> String {
+    let reserve = abandonment_update_notice("").chars().count()
+        + format!("\n+{}{ABANDONMENT_MORE_SUFFIX}", u64::MAX)
+            .chars()
+            .count();
+    let omission = |count| format!(" ({count} ids omitted; see `message_status`)");
+    let header = format!(
+        "{} messages to {targets} were abandoned ({reasons})",
+        notices.len()
+    );
+    // Pathological target/reason lists must not consume the space for even
+    // one complete ID and its omission count. Ordinary headers stay whole.
+    let header_budget = HOOK_SURFACE_BUDGET_CHARS.saturating_sub(
+        HOOK_SURFACE_ROW_OVERHEAD_CHARS
+            + reserve
+            + omission(notices.len()).chars().count()
+            + "; ids ".len()
+            + i64::MIN.to_string().len()
+            + 1,
+    );
+    let mut body = if header.chars().count() > header_budget {
+        let mut short: String = header
+            .chars()
+            .take(header_budget.saturating_sub(1))
+            .collect();
+        short.push('…');
+        short
+    } else {
+        header
+    };
+    body.push_str("; ids ");
+    for (index, notice) in notices.iter().enumerate() {
+        let separator = if index == 0 { "" } else { ", " };
+        let candidate = format!("{body}{separator}{}", notice.prompt_id);
+        let left = notices.len() - index - 1;
+        let suffix = if left == 0 {
+            String::new()
+        } else {
+            omission(left)
+        };
+        if hook_surface_cost(&candidate) + suffix.chars().count() + reserve
+            > HOOK_SURFACE_BUDGET_CHARS
+        {
+            body.push_str(&omission(notices.len() - index));
+            break;
+        }
+        body = candidate;
+    }
+    body
+}
+
 /// GH #1196: fold `notice` into an unread episode `prompt`. Lines are added
 /// while the result, with room for the trailer, still fits a hook surface
 /// ([`fits_hook_surface`]); after that a `+N more` trailer counts the rest.
-fn fold_abandonment_line(prompt: &str, notice: &str) -> String {
+fn fold_abandonment_line(prompt: &str, notice: &str, message_count: u64) -> String {
     let (body, more) = match prompt.rsplit_once('\n') {
         Some((head, last)) if last.starts_with('+') && last.ends_with(ABANDONMENT_MORE_SUFFIX) => (
             head,
@@ -3919,10 +3994,18 @@ fn fold_abandonment_line(prompt: &str, notice: &str) -> String {
         _ => (prompt, 0),
     };
     let with_line = format!("{body}\nAlso: {notice}");
-    if more == 0 && fits_hook_surface(&format!("{with_line}\n+{}{ABANDONMENT_MORE_SUFFIX}", u64::MAX)) {
+    if more == 0
+        && fits_hook_surface(&format!(
+            "{with_line}\n+{}{ABANDONMENT_MORE_SUFFIX}",
+            u64::MAX
+        ))
+    {
         with_line
     } else {
-        format!("{body}\n+{}{ABANDONMENT_MORE_SUFFIX}", more + 1)
+        format!(
+            "{body}\n+{}{ABANDONMENT_MORE_SUFFIX}",
+            more.saturating_add(message_count)
+        )
     }
 }
 
@@ -4301,8 +4384,11 @@ impl SqlitePromptQueueStore {
         if recipient.trim().is_empty() {
             return Err(StoreError::Other("transport claim requires a recipient".into()));
         }
+        // Both public claim APIs use this transaction: no hook can observe
+        // the new reservation with a previous attempt's held-Teams marker.
+        let tx = crate::shared_db::ImmediateTx::new(conn)?;
         let token = transport_claim_token();
-        let changed = conn.execute(
+        let changed = tx.execute(
             "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at, source)
              SELECT id, ?, ?, 'transport_claimed' FROM prompt_queue
              WHERE id = ? AND (target = ? OR target = 'all_workers')
@@ -4315,6 +4401,14 @@ impl SqlitePromptQueueStore {
              WHERE prompt_queue_recipient_seen.source = 'transport_delivered'",
             params![recipient, token.seen_at(), prompt_id, recipient],
         )?;
+        if changed == 1 {
+            tx.execute(
+                "UPDATE prompt_queue SET deferred_inbox_at = NULL, deferred_inbox_bytes = NULL
+                 WHERE id = ?",
+                params![prompt_id],
+            )?;
+        }
+        tx.commit()?;
         Ok((changed == 1).then_some(token))
     }
 }
@@ -4574,6 +4668,27 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             ))
         })?;
         Ok(Some((at, bytes.unwrap_or(0).try_into().unwrap_or(u64::MAX))))
+    }
+
+    fn inbox_handoff_state(&self, prompt_id: i64) -> Result<InboxHandoffState> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let held: bool = conn.query_row(
+            concat!(
+                "SELECT EXISTS(SELECT 1 FROM prompt_queue q
+                 JOIN prompt_queue_recipient_seen seen
+                   ON seen.prompt_id = q.id AND seen.recipient = q.target
+                 WHERE q.id = ? AND q.processed_at IS NULL AND ",
+                held_teams_claim_sql!(),
+                ")"
+            ),
+            params![prompt_id],
+            |row| row.get(0),
+        )?;
+        Ok(if held {
+            InboxHandoffState::HeldTeamsInbox
+        } else {
+            InboxHandoffState::NotHeld
+        })
     }
 
     fn enqueue(&self, source: &str, target: &str, prompt: &str) -> Result<i64> {
@@ -9048,6 +9163,130 @@ mod tests {
         );
     }
 
+    /// A same-name worker can change harness between attempts. A held Claude
+    /// inbox marker must not make the next PTY claim eligible for hook takeover.
+    #[test]
+    fn cas_1ba0_fresh_transport_claim_retires_a_previous_inbox_deferral() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-1ba0";
+        for (token_api, urgent) in [(false, false), (true, false), (true, true)] {
+            let id = if urgent {
+                store.enqueue_urgent(
+                    "supervisor",
+                    "worker-1",
+                    "redirect",
+                    Some(session),
+                    None,
+                    None,
+                    true,
+                )
+            } else {
+                store.enqueue_with_session("supervisor", "worker-1", "decision", session)
+            }
+            .unwrap();
+            assert!(store.claim_recipient_transport(id, "worker-1").unwrap());
+            store.record_deferred_inbox(id, 123).unwrap();
+            assert!(!store.claim_recipient_transport(id, "worker-1").unwrap());
+            assert_eq!(
+                store.deferred_inbox_state(id).unwrap().unwrap().1,
+                123,
+                "a refused reservation must leave a held Teams copy eligible"
+            );
+            store.release_recipient_transport(id, "worker-1").unwrap();
+            if token_api {
+                assert!(
+                    store
+                        .claim_recipient_transport_token(id, "worker-1")
+                        .unwrap()
+                        .is_some()
+                );
+            } else {
+                assert!(store.claim_recipient_transport(id, "worker-1").unwrap());
+            }
+            assert!(
+                store.deferred_inbox_state(id).unwrap().is_none(),
+                "new inject retires the old held copy"
+            );
+            assert!(
+                store
+                    .surface_unseen_for_recipient_without_transport_delivery(
+                        "worker-1",
+                        Some(session),
+                        10
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                store
+                    .surface_unseen_for_recipient_delivered_after(
+                        "worker-1",
+                        Some(session),
+                        10,
+                        Utc::now() - chrono::Duration::minutes(5)
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
+            // A new Teams write may defer again; only that new handoff is eligible.
+            store.record_deferred_inbox(id, 456).unwrap();
+            assert_eq!(store.deferred_inbox_state(id).unwrap().unwrap().1, 456);
+            if urgent {
+                store.mark_transport_delivered(id).unwrap();
+                continue;
+            }
+            assert_eq!(
+                store
+                    .surface_unseen_for_recipient_without_transport_delivery(
+                        "worker-1",
+                        Some(session),
+                        10
+                    )
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn cas_1ba0_typed_handoff_requires_a_current_undelivered_claim() {
+        let (_temp, store) = create_test_store();
+        for finish in [
+            SurfacingSource::HookSurfaced,
+            SurfacingSource::TransportDelivered,
+        ] {
+            let id = store.enqueue("supervisor", "worker-1", "decision").unwrap();
+            store.record_deferred_inbox(id, 123).unwrap();
+            assert_eq!(
+                store.inbox_handoff_state(id).unwrap(),
+                InboxHandoffState::NotHeld
+            );
+            assert!(store.claim_recipient_transport(id, "worker-1").unwrap());
+            store.record_deferred_inbox(id, 456).unwrap();
+            assert_eq!(
+                store.inbox_handoff_state(id).unwrap(),
+                InboxHandoffState::HeldTeamsInbox
+            );
+            if finish == SurfacingSource::HookSurfaced {
+                let surfaced = store
+                    .surface_unseen_for_recipient_without_transport_delivery("worker-1", None, 10)
+                    .unwrap();
+                assert_eq!(surfaced.iter().map(|row| row.id).collect::<Vec<_>>(), vec![id]);
+            } else {
+                store.mark_transport_delivered(id).unwrap();
+            }
+            assert!(
+                store.deferred_inbox_state(id).unwrap().is_some(),
+                "raw durable marker survives"
+            );
+            assert_eq!(
+                store.inbox_handoff_state(id).unwrap(),
+                InboxHandoffState::NotHeld
+            );
+        }
+    }
+
     /// cas-a1ed review H1: a claim whose body is being typed into the pane is
     /// not a held Teams copy. The daemon claims, PTY-injects (a Codex
     /// recipient, or an urgent interrupt to Claude) and stamps Delivered
@@ -13178,6 +13417,71 @@ mod tests {
             rows[0].1
         );
         assert!(also > 0 && also < 59, "{also}");
+    }
+
+    fn cas_1ba0_abandon_batch(store: &SqlitePromptQueueStore, count: usize) -> Vec<i64> {
+        let mut ids = Vec::new();
+        for _ in 0..count {
+            let id = store
+                .enqueue_with_session("supervisor", "worker-1", "old work", "sess")
+                .unwrap();
+            backdate(store, id, 30 * 24 * 60 * 60);
+            ids.push(id);
+        }
+        assert_eq!(store.expire_stale_pending(900).unwrap().len(), count);
+        ids
+    }
+
+    #[test]
+    fn cas_1ba0_abandonment_overflow_counts_messages_in_each_batch() {
+        let (_temp, store) = create_test_store();
+        for index in 0..60 {
+            gh_1196_abandon_one(&store, &format!("worker-{index}"));
+        }
+        let initial = gh_1196_notices(&store)[0].1.clone();
+        let shown = initial.matches("\nAlso: ").count();
+        let mut omitted = 59 - shown;
+        for batch in [7, 11] {
+            cas_1ba0_abandon_batch(&store, batch);
+            omitted += batch;
+            let rows = gh_1196_notices(&store);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].1.lines().last().unwrap(),
+                format!("+{omitted}{ABANDONMENT_MORE_SUFFIX}")
+            );
+            assert!(fits_hook_surface(&rows[0].1));
+        }
+    }
+
+    #[test]
+    fn cas_1ba0_first_abandonment_batch_fits_the_hook_budget() {
+        let (_temp, store) = create_test_store();
+        let ids = cas_1ba0_abandon_batch(&store, 1200);
+        let rows = gh_1196_notices(&store);
+        assert_eq!(rows.len(), 1);
+        assert!(
+            fits_hook_surface(&rows[0].1),
+            "batch notice costs {} chars",
+            hook_surface_cost(&rows[0].1)
+        );
+        assert!(rows[0].1.contains(&format!("{} messages", ids.len())));
+        assert!(rows[0].1.contains("ids omitted"));
+        assert_eq!(
+            store
+                .message_delivery_report(*ids.last().unwrap())
+                .unwrap()
+                .unwrap()
+                .stage,
+            DeliveryStage::Abandoned
+        );
+        let surfaced = store
+            .surface_unseen_for_recipient_without_transport_delivery("supervisor", Some("sess"), 10)
+            .unwrap();
+        assert_eq!(
+            surfaced.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![rows[0].0]
+        );
     }
 
     /// GH #1196 review L5: episodes use fixed clock hours, not a window

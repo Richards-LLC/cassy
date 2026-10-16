@@ -8,6 +8,12 @@ use crate::store::open_agent_store;
 
 /// Run the MCP server with 13 meta-tools (11 Cassy + 2 proxy)
 pub async fn run_server() -> anyhow::Result<()> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    return tokio::select! {
+        result = run_server_impl() => result,
+        () = super::memory::reclaim_when_idle() => unreachable!("allocator maintenance ended"),
+    };
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
     run_server_impl().await
 }
 

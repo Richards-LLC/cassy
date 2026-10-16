@@ -398,7 +398,11 @@ impl CasService {
             .and_then(serde_json::Value::as_str);
         let receipt = super::mutation_receipt::Receipt::new(tool_name, action, task_id);
         let start = std::time::Instant::now();
-        let mut handle = tokio::spawn(super::mutation_receipt::scope(receipt.clone(), future));
+        let mut handle = tokio::spawn(super::mutation_receipt::scope(receipt.clone(), async move {
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            let _memory_call = crate::mcp::server::memory::Call::started();
+            future.await
+        }));
         let deadline = tokio::time::Instant::from_std(start + budget);
         let post_commit_grace = {
             let receipt = receipt.clone();

@@ -7699,7 +7699,7 @@ mod workspace_contract_tests {
             ("B=$PWD/target/debug/cas; $B --version", false),
             ("R='env -i PATH=/usr/bin /bin/true'; $R", false),
             ("kill $(cat target/a.pid) $(cat target/b.pid)", false),
-            ("echo $(cat src/new.rs) touch ../../config.toml", false),
+            ("echo $(cat src/new.rs) touch ../../ordinary-data.txt", false),
             ("echo $(touch ../../config.toml) data", true),
             ("C=touch; $C ../../config.toml", true),
             ("C=touch; sh -c '$C ../../config.toml'", true),

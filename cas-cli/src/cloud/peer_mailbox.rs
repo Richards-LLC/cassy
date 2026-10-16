@@ -1141,6 +1141,21 @@ impl HttpPeerMailbox {
         self.post_with_timeout(suffix, body, MAILBOX_TIMEOUT)
     }
 
+    /// Later chunks and ACKs share the server cooldown. A local refusal
+    /// retains earlier claimed bodies and gives retries the remaining delay.
+    fn cooldown(&self) -> Option<ureq::Error> {
+        let delay = self.retry_after()?;
+        let seconds = delay
+            .as_secs()
+            .saturating_add(u64::from(delay.subsec_nanos() != 0));
+        let response = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: {seconds}\r\nContent-Length: 0\r\n\r\n"
+        )
+        .parse::<ureq::Response>()
+        .expect("static rate-limit response with integer header");
+        Some(ureq::Error::Status(429, response))
+    }
+
     fn observe(
         &self,
         result: Result<ureq::Response, ureq::Error>,
@@ -1164,6 +1179,9 @@ impl HttpPeerMailbox {
         body: serde_json::Value,
         timeout: Duration,
     ) -> Result<ureq::Response, ureq::Error> {
+        if let Some(error) = self.cooldown() {
+            return Err(error);
+        }
         self.observe(
             ureq::post(&self.url(suffix))
                 .timeout(timeout)
@@ -1208,6 +1226,9 @@ impl PeerMailbox for HttpPeerMailbox {
         project_id: &str,
         sender_ids: &[String],
     ) -> std::collections::HashMap<String, String> {
+        if self.retry_after().is_some() {
+            return std::collections::HashMap::new();
+        }
         let response = ureq::get(&format!("{}/api/agents", self.endpoint))
             .timeout(MAILBOX_TIMEOUT)
             .set("Authorization", &format!("Bearer {}", self.token))
@@ -1345,6 +1366,9 @@ impl PeerMailbox for HttpPeerMailbox {
     }
 
     fn status(&self, id: &str) -> Result<PeerMessageStatus, String> {
+        if let Some(error) = self.cooldown() {
+            return Err(super::rate_limit::Failure::from_http("peer message status", error).cause);
+        }
         Self::read(
             "peer message status",
             self.observe(

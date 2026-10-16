@@ -135,7 +135,9 @@ five seconds (or a caller's shorter budget). `Retry-After` seconds and HTTP date
 are respected; absent or invalid values use 200 ms then 400 ms backoff. A delay
 outside the HTTP budget returns a named rate-limit failure. Durable shutdown
 intents and the mailbox poller preserve longer server delays across later passes;
-mailbox health remains current while waiting for that scheduled retry.
+mailbox health remains current while waiting for that scheduled retry. Within a
+mailbox pass, later claim chunks, ACKs and metadata requests share the cooldown;
+already claimed messages remain eligible for local admission and later ACK.
 
 Presence and worker status show pending cleanup and its cause even after the
 agent row is gone. After 24 hours a failed intent expires, remains visible for

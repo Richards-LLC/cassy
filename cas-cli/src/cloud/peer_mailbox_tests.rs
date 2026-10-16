@@ -560,7 +560,7 @@ fn cas_8063_repair_different_factory_lineage_stays_ambiguous() {
 fn cas_8063_repair_retirement_claims_are_recent_and_bounded() {
     let machine = Machine::new();
     let agents = open_agent_store(&machine.cas).unwrap();
-    for index in 0..120 {
+    for index in 0..=120 {
         let mut old = Agent::new(format!("old-{index:03}"), "same".into());
         old.role = AgentRole::Supervisor;
         old.status = AgentStatus::Shutdown;
@@ -587,7 +587,7 @@ fn cas_8063_repair_retirement_claims_are_recent_and_bounded() {
     assert_eq!(claims[0].len(), 101, "100 retirements plus current");
     assert!(claims[0].iter().any(|id| id == "current"));
     assert!(claims[0].iter().any(|id| id == "old-001"), "newest eligible retirement is included");
-    assert!(!claims[0].iter().any(|id| id == "old-119"), "120th retirement is excluded");
+    assert!(!claims[0].iter().any(|id| id == "old-120"), "120th eligible retirement is excluded");
     assert!(!claims[0].iter().any(|id| id == "old-000"), "expired retirement must not be claimed");
 }
 

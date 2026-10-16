@@ -277,7 +277,9 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
     let mut env = cas_8235_fixture();
     let projects = env.home().join("projects");
     let roots: Vec<_> = ["first", "second"].iter().map(|name| {
-        crate::store::init_cas_dir(&projects.join(name)).unwrap()
+        let root = crate::store::init_cas_dir(&projects.join(name)).unwrap();
+        crate::store::open_store(&root).unwrap();
+        root
     }).collect();
     env.set("CAS_PROJECT_ROOTS", &projects);
     env.set("CAS_ROOT", &roots[0]);

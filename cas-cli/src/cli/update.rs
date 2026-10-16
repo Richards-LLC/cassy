@@ -721,6 +721,8 @@ impl RepeatedWarningCollector {
             if normalized.contains("Cassy-managed builtin path(s) are already tracked") {
                 builtin_warning = true;
                 self.record_builtin_paths(project, std::iter::empty::<String>());
+            } else if let Some(warning) = normalized.strip_prefix("warning: Violet ") {
+                self.record(&format!("Violet {warning}"), project);
             } else if normalized.starts_with("Push incomplete") {
                 self.record("Push incomplete; queued rows remain", project);
             } else if let Some(error) = normalized.strip_prefix("remaining error: ") {
@@ -917,6 +919,7 @@ fn strip_repeated_warning_lines(
         if normalized.contains("Cassy-managed builtin path(s) are already tracked")
             || normalized.starts_with("Push incomplete")
             || normalized.starts_with("remaining error: ")
+            || normalized.starts_with("warning: Violet ")
         {
             builtin_warning = normalized.contains("Cassy-managed builtin");
             if preserve_phase_summaries
@@ -2119,7 +2122,7 @@ fn sync_claude_files_into(
         ))?;
         crate::cli::integrate::violet_retirement::repair_proxy_credentials_on_update(Some(
             &cas_root.join("proxy.toml"),
-        ))?;
+        ));
     }
     let project_root = project_root.unwrap_or_else(|| cas_root.parent().unwrap_or(&cas_root));
     let claude_dir = project_root.join(".claude");

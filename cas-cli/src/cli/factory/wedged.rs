@@ -3178,6 +3178,65 @@ mod tests {
         assert_eq!(ev.session_id, "ses");
     }
 
+    /// cas-5a88: a real process at `pid` with a live child, the host state
+    /// that broke `classify_worker_orchestrator_threads_probe_fn` on CI when
+    /// pid 1234 happened to exist there with a descendant.
+    #[cfg(target_os = "linux")]
+    struct HostTreeAtPid(std::process::Child);
+
+    #[cfg(target_os = "linux")]
+    impl HostTreeAtPid {
+        fn spawn() -> Self {
+            let parent = std::process::Command::new("sh")
+                .args(["-c", "sleep 30 & wait"])
+                .spawn()
+                .expect("spawn sh");
+            let pid = parent.id();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !background_processes_for(pid).is_active() && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Self(parent)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for HostTreeAtPid {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("pkill")
+                .args(["-P", &self.0.id().to_string()])
+                .status();
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// cas-5a88: the classifier's verdict for a pid comes from its injected
+    /// probes, never from whatever process tree the host has at that pid.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn classify_worker_ignores_the_host_process_tree_at_its_pid_cas_5a88() {
+        let host = HostTreeAtPid::spawn();
+        let pid = host.0.id();
+        assert!(
+            background_processes_for(pid).is_active(),
+            "fixture: the host has a live child at pid {pid}"
+        );
+        let (state, ev) = classify_worker(
+            Some(pid),
+            None,
+            None,
+            "ses",
+            cas_mux::SupervisorCli::Claude,
+            |_: u32| true,
+            |_: &Path| None::<Duration>,
+            |_: u32| false,
+        );
+        drop(host);
+        assert_eq!(state, WorkerLivenessState::Unverified, "{ev:?}");
+    }
+
     #[test]
     fn classify_worker_no_pid_short_circuits_to_dead() {
         let probe = |_: u32| panic!("probe must not be called when pid is None");

@@ -57,6 +57,59 @@ fn listing_answers_what_is_listening_and_who_started_it() {
     assert!(line.contains("/repo/app"), "the cwd: {line}");
 }
 
+/// cas-5a88: a real process at the record's pid with a live child, the host
+/// state that made the listing test read "live descendants 1" on CI.
+#[cfg(target_os = "linux")]
+struct HostTreeAtPid(std::process::Child);
+
+#[cfg(target_os = "linux")]
+impl HostTreeAtPid {
+    fn spawn() -> Self {
+        let parent = std::process::Command::new("sh")
+            .args(["-c", "sleep 30 & wait"])
+            .spawn()
+            .expect("spawn sh");
+        let mut probe = record("probe", true);
+        probe.pid = parent.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while server_registry::live_descendant_count(&probe) == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Self(parent)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for HostTreeAtPid {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("pkill")
+            .args(["-P", &self.0.id().to_string()])
+            .status();
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// cas-5a88: the rendered descendant count is the caller's, never whatever
+/// the host has at the record's pid.
+#[cfg(target_os = "linux")]
+#[test]
+fn listing_ignores_the_host_process_tree_at_the_record_pid_cas_5a88() {
+    let host = HostTreeAtPid::spawn();
+    let mut adversarial = record("web", true);
+    adversarial.pid = host.0.id();
+    assert!(
+        server_registry::live_descendant_count(&adversarial) > 0,
+        "fixture: the host has a live child at pid {}",
+        adversarial.pid
+    );
+    let line = render_server_line(&adversarial, ServerLiveness::Live, &[5173]);
+    drop(host);
+    assert!(line.contains("live descendants 0"), "{line}");
+}
+
 #[test]
 fn shared_and_private_entries_state_their_teardown_fate() {
     let shared = render_server_line(&record("web", true), ServerLiveness::Live, &[5173]);

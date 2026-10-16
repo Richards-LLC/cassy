@@ -140,16 +140,44 @@ pub(crate) fn health(root: &Path, now: DateTime<Utc>) -> String {
         if pending + expired == 0 {
             return Ok(String::new());
         }
-        Ok(super::presence::wrap_line(&format!(
-            "Cloud presence: shutdown pending {pending}, expired {expired}: {}. Expired cleanup requires operator attention.",
-            causes.join("; ")
-        )))
+        let action = if expired > 0 {
+            "Inspect expired cleanup: ls .cas/cloud_shutdown"
+        } else {
+            "Retry: automatic when a daemon runs, for up to 24h."
+        };
+        let mut out = super::presence::wrap_line(&format!(
+            "Cloud presence: shutdown pending {pending}, expired {expired}."
+        ));
+        out.push_str(&super::presence::wrap_line(action));
+        let causes = causes.join("; ");
+        let excerpt: String = causes.chars().take(140).collect();
+        out.push_str(&super::presence::wrap_line(&format!("Cause: {excerpt}")));
+        Ok(out)
     };
     status().unwrap_or_else(|error| {
         super::presence::wrap_line(&format!(
             "Cloud presence: shutdown health unavailable: {error}"
         ))
     })
+}
+
+/// Registration/heartbeat and shutdown share this nonblocking lease. An
+/// in-flight registration finishes before cleanup, so it cannot resurrect an
+/// agent after shutdown. Hooks do not acquire this network-work lease.
+pub(crate) fn presence_lease(root: &Path) -> Result<Option<File>, String> {
+    std::fs::create_dir_all(root.join(DIR)).map_err(|error| error.to_string())?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join(DIR).join("drain.lock"))
+        .map_err(|error| error.to_string())?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => Ok(Some(lock)),
+        Err(error) if error.kind() == fs2::lock_contended_error().kind() => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// One nonblocking lease per project prevents concurrent daemons from sending
@@ -163,18 +191,9 @@ pub(crate) fn drain(
     if files.is_empty() {
         return Ok(());
     }
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(root.join(DIR).join("drain.lock"))
-        .map_err(|error| error.to_string())?;
-    match lock.try_lock_exclusive() {
-        Ok(()) => {}
-        Err(error) if error.kind() == fs2::lock_contended_error().kind() => return Ok(()),
-        Err(error) => return Err(error.to_string()),
-    }
+    let Some(_lease) = presence_lease(root)? else {
+        return Ok(());
+    };
     let deadline = Instant::now() + rate_limit::CLEANUP_BUDGET;
     let agents = crate::store::open_agent_store(root).map_err(|error| error.to_string())?;
     for file in files {

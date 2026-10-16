@@ -26,7 +26,11 @@ pub(crate) fn call(
 ) -> Result<ureq::Response, ureq::Error> {
     let deadline = Instant::now() + budget.min(CLEANUP_BUDGET);
     for attempt in 0..ATTEMPTS {
-        let response = request(deadline.saturating_duration_since(Instant::now()));
+        let response = request(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_nanos(1)),
+        );
         let Err(ureq::Error::Status(429, ref refused)) = response else {
             return response;
         };

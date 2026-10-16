@@ -243,6 +243,13 @@ pub fn register_now(
     agent: &Agent,
     now: DateTime<Utc>,
 ) -> PresenceRecord {
+    let _lease = match super::shutdown::presence_lease(cas_root) {
+        Ok(Some(lease)) => lease,
+        Ok(None) => return failing(load(cas_root, &agent.id).as_ref(), &agent.id,
+            "cloud presence busy; retry on next heartbeat".into(), now),
+        Err(error) => return failing(load(cas_root, &agent.id).as_ref(), &agent.id,
+            format!("cloud presence lease: {error}"), now),
+    };
     if super::shutdown::is_ended(cas_root, agent) {
         return failing(None, &agent.id, "session ended; cloud shutdown pending or completed".into(), now);
     }
@@ -327,7 +334,16 @@ pub fn tick(
     let focus = current_focus(agent);
     let branch = current_branch(cas_root, agent);
     let metadata = heartbeat_metadata(coordinator, agent, focus.as_deref(), branch.as_deref());
-    match coordinator.heartbeat_presence(&agent.id, Some(&metadata)) {
+    let heartbeat = {
+        let _lease = match super::shutdown::presence_lease(cas_root) {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return TickAction::Waiting,
+            Err(error) => return TickAction::Failed(format!("cloud presence lease: {error}")),
+        };
+        if super::shutdown::is_ended(cas_root, agent) { return TickAction::Waiting; }
+        coordinator.heartbeat_presence(&agent.id, Some(&metadata))
+    };
+    match heartbeat {
         Ok(_) => {
             if record.focus != focus || record.branch != branch {
                 save(

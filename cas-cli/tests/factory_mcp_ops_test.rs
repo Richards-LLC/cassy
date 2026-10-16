@@ -7964,8 +7964,12 @@ async fn test_coordination_message_returned_notification_id_drives_status_query(
 async fn cas_1ba0_message_status_distinguishes_held_inbox_from_composer_retry() {
     let env = FactoryTestEnv::new();
     let queue = env.prompt_queue();
-    for (deferred, receipt) in [(true, Some(cas_store::SurfacingSource::TransportClaimed)),
-        (false, None), (true, None), (true, Some(cas_store::SurfacingSource::HookSurfaced))] {
+    for (deferred, receipt) in [
+        (true, Some(cas_store::SurfacingSource::TransportClaimed)),
+        (false, None),
+        (true, None),
+        (true, Some(cas_store::SurfacingSource::HookSurfaced)),
+    ] {
         let held_copy = deferred && receipt == Some(cas_store::SurfacingSource::TransportClaimed);
         let id = queue
             .enqueue("supervisor", "swift-fox", "decision")
@@ -7978,7 +7982,9 @@ async fn cas_1ba0_message_status_distinguishes_held_inbox_from_composer_retry() 
             )
             .unwrap();
         if let Some(receipt) = receipt {
-            queue.record_recipient_surfaced(id, "swift-fox", receipt).unwrap();
+            queue
+                .record_recipient_surfaced(id, "swift-fox", receipt)
+                .unwrap();
         }
         if deferred {
             queue.record_deferred_inbox(id, 123).unwrap();

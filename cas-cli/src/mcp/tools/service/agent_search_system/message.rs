@@ -3892,7 +3892,13 @@ mod pending_deadline_tests {
     /// now say how much of the budget is left.
     #[test]
     fn a_pending_row_states_how_long_before_it_is_abandoned() {
-        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(60), InboxHandoffState::NotHeld);
+        let line = pending_deadline_narrative(
+            DeliveryStage::Enqueued,
+            None,
+            None,
+            Some(60),
+            InboxHandoffState::NotHeld,
+        );
         assert!(
             line.contains("abandoned as undeliverable in 840s"),
             "{line}"
@@ -3912,7 +3918,9 @@ mod pending_deadline_tests {
             let line = pending_deadline_narrative(
                 DeliveryStage::Gated,
                 Some(cas_store::PendingReason::GatedNotReady),
-                Some("wake deferred — pane busy, tool call in flight, operator composing, or wake slot taken"),
+                Some(
+                    "wake deferred — pane busy, tool call in flight, operator composing, or wake slot taken",
+                ),
                 Some(waited),
                 InboxHandoffState::HeldTeamsInbox,
             );
@@ -3926,7 +3934,13 @@ mod pending_deadline_tests {
 
     #[test]
     fn a_row_past_the_deadline_says_it_is_not_in_flight() {
-        let line = pending_deadline_narrative(DeliveryStage::Enqueued, None, None, Some(1200), InboxHandoffState::NotHeld);
+        let line = pending_deadline_narrative(
+            DeliveryStage::Enqueued,
+            None,
+            None,
+            Some(1200),
+            InboxHandoffState::NotHeld,
+        );
         assert!(line.contains("PAST"), "{line}");
         assert!(line.contains("not still in flight"), "{line}");
     }
@@ -3950,7 +3964,13 @@ mod pending_deadline_tests {
 
     #[test]
     fn an_abandoned_row_without_a_recorded_reason_says_so() {
-        let line = pending_deadline_narrative(DeliveryStage::Abandoned, None, None, None, InboxHandoffState::NotHeld);
+        let line = pending_deadline_narrative(
+            DeliveryStage::Abandoned,
+            None,
+            None,
+            None,
+            InboxHandoffState::NotHeld,
+        );
         assert!(line.contains("no reason was recorded"), "{line}");
     }
 
@@ -3974,10 +3994,18 @@ mod pending_deadline_tests {
     #[test]
     fn a_delivered_row_adds_no_deadline_noise() {
         assert!(
-            pending_deadline_narrative(DeliveryStage::Delivered, None, None, Some(30), InboxHandoffState::NotHeld).is_empty()
+            pending_deadline_narrative(
+                DeliveryStage::Delivered,
+                None,
+                None,
+                Some(30),
+                InboxHandoffState::NotHeld
+            )
+            .is_empty()
         );
     }
 }
+
 
 #[cfg(test)]
 mod cross_session_routing_tests {

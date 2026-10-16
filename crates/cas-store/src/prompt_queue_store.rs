@@ -9159,20 +9159,37 @@ mod tests {
     #[test]
     fn cas_1ba0_typed_handoff_requires_a_current_undelivered_claim() {
         let (_temp, store) = create_test_store();
-        for finish in [SurfacingSource::HookSurfaced, SurfacingSource::TransportDelivered] {
+        for finish in [
+            SurfacingSource::HookSurfaced,
+            SurfacingSource::TransportDelivered,
+        ] {
             let id = store.enqueue("supervisor", "worker-1", "decision").unwrap();
             store.record_deferred_inbox(id, 123).unwrap();
-            assert_eq!(store.inbox_handoff_state(id).unwrap(), InboxHandoffState::NotHeld);
+            assert_eq!(
+                store.inbox_handoff_state(id).unwrap(),
+                InboxHandoffState::NotHeld
+            );
             assert!(store.claim_recipient_transport(id, "worker-1").unwrap());
             store.record_deferred_inbox(id, 456).unwrap();
-            assert_eq!(store.inbox_handoff_state(id).unwrap(), InboxHandoffState::HeldTeamsInbox);
+            assert_eq!(
+                store.inbox_handoff_state(id).unwrap(),
+                InboxHandoffState::HeldTeamsInbox
+            );
             if finish == SurfacingSource::HookSurfaced {
-                store.record_recipient_surfaced(id, "worker-1", finish).unwrap();
+                store
+                    .record_recipient_surfaced(id, "worker-1", finish)
+                    .unwrap();
             } else {
                 store.mark_transport_delivered(id).unwrap();
             }
-            assert!(store.deferred_inbox_state(id).unwrap().is_some(), "raw durable marker survives");
-            assert_eq!(store.inbox_handoff_state(id).unwrap(), InboxHandoffState::NotHeld);
+            assert!(
+                store.deferred_inbox_state(id).unwrap().is_some(),
+                "raw durable marker survives"
+            );
+            assert_eq!(
+                store.inbox_handoff_state(id).unwrap(),
+                InboxHandoffState::NotHeld
+            );
         }
     }
 

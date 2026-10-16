@@ -116,12 +116,32 @@ async fn exercise_held_copy(fail_stamp: bool, missing_team_folder: bool) {
 
     let row = queue.queued_prompt(id).unwrap().unwrap();
     if missing_team_folder {
-        assert!(queue.deferred_inbox_state(id).unwrap().is_none(),
-            "a PTY fallback must never become a held Teams copy in the same attempt");
-        assert!(row.processed_at.is_some(), "successful PTY fallback completes transport");
+        assert!(
+            queue.deferred_inbox_state(id).unwrap().is_none(),
+            "a PTY fallback must never become a held Teams copy in the same attempt"
+        );
+        assert!(
+            row.processed_at.is_some(),
+            "successful PTY fallback completes transport"
+        );
         assert!(!claude_config.join("teams").join(SESSION).exists());
-        assert!(queue.surface_unseen_for_recipient_without_transport_delivery(WORKER, Some(SESSION), 10).unwrap().is_empty());
-        assert!(queue.surface_unseen_for_recipient_delivered_after(WORKER, Some(SESSION), 10, turn_started_at).unwrap().is_empty());
+        assert!(
+            queue
+                .surface_unseen_for_recipient_without_transport_delivery(WORKER, Some(SESSION), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            queue
+                .surface_unseen_for_recipient_delivered_after(
+                    WORKER,
+                    Some(SESSION),
+                    10,
+                    turn_started_at
+                )
+                .unwrap()
+                .is_empty()
+        );
         return;
     }
     assert!(

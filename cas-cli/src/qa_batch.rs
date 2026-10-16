@@ -60,7 +60,7 @@ pub(crate) fn task_context(root: &Path, task: &Task) -> Result<(PathBuf, String)
         .as_deref()
         .map(|id| {
             crate::store::open_worktree_store(root)
-                .and_then(|store| store.get(id))
+                .and_then(|store| Ok(store.get(id)?))
                 .map(|worktree| worktree.parent_branch)
                 .map_err(|e| e.to_string())
         })

@@ -3013,6 +3013,91 @@ mod tests {
         drop(child.take());
     }
 
+    fn c312_manager(root: &std::path::Path) -> TeamsManager {
+        let inboxes_dir = root.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        TeamsManager {
+            team_name: "cas-src-test".to_string(),
+            teams_dir: root.to_path_buf(),
+            inboxes_dir,
+            config: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// cas-c312: CI run 38948837325 read a worker inbox while a job thread
+    /// was writing it and parsed an empty file ("EOF while parsing"). Readers
+    /// take no lock (the harness, `inbox_has_unread_copy`, `unread_alerts`),
+    /// so a write must replace the file whole, never truncate it first.
+    #[test]
+    fn concurrent_inbox_reader_never_sees_an_empty_or_partial_file_cas_c312() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let tmp = tempfile::tempdir().unwrap();
+        let teams = c312_manager(tmp.path());
+        teams.write_to_inbox("worker", "supervisor", "seed", None, None).unwrap();
+        let path = teams.inboxes_dir.join("worker.json");
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        let reader = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                let (mut reads, mut torn) = (0usize, Vec::new());
+                while !done.load(Ordering::Acquire) {
+                    reads += 1;
+                    match std::fs::read_to_string(&path) {
+                        Ok(content) => {
+                            if serde_json::from_str::<Vec<InboxMessage>>(&content).is_err() {
+                                torn.push(content.len());
+                            }
+                        }
+                        Err(error) => torn.push(error.raw_os_error().unwrap_or(-1) as usize),
+                    }
+                }
+                (reads, torn)
+            })
+        };
+        let padding = "x".repeat(2048);
+        for index in 0..300 {
+            teams
+                .write_to_inbox("worker", "supervisor", &format!("message {index} {padding}"), None, None)
+                .unwrap();
+        }
+        done.store(true, Ordering::Release);
+        let (reads, torn) = reader.join().unwrap();
+        assert!(reads > 0, "the reader must have overlapped the writes");
+        assert!(torn.is_empty(), "{} of {reads} reads saw a torn inbox: {torn:?}", torn.len());
+    }
+
+    /// cas-c312: replacing the file swaps its inode, so a writer that waited
+    /// on the old inode's lock must not write alongside one holding the new
+    /// inode's lock. Concurrent writers keep every row.
+    #[test]
+    fn concurrent_inbox_writers_keep_every_row_across_file_replacement_cas_c312() {
+        let tmp = tempfile::tempdir().unwrap();
+        c312_manager(tmp.path())
+            .write_to_inbox("worker", "supervisor", "seed", None, None)
+            .unwrap();
+        let writers: Vec<_> = (0..4)
+            .map(|writer| {
+                let root = tmp.path().to_path_buf();
+                std::thread::spawn(move || {
+                    let teams = c312_manager(&root);
+                    for index in 0..40 {
+                        teams
+                            .write_to_inbox("worker", "supervisor", &format!("writer {writer} row {index}"), None, None)
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let rows: Vec<InboxMessage> = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("inboxes/worker.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1 + 4 * 40, "a concurrent write lost rows");
+    }
+
     /// cas-ceae (GH #124): the write-time dedup guard sees only copies the
     /// harness has NOT taken yet, so it cannot be the storm guard on its own.
     /// This pins the complementary signal the delivery path needs: the exact

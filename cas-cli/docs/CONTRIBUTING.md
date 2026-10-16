@@ -96,6 +96,18 @@ the pushed ref and states that the worker checkout was left untouched.
 Unpushed or mismatched tips retain the dirty-checkout refusal; cleanup requests
 retain the existing protection against deleting uncommitted work.
 
+For Claude supervisors in Teams factories, an authenticated action event whose
+complete framed payload fits the hook budget travels in one PTY turn, with its
+queue id and body inline. No Teams pointer or relay copy is written. A busy
+pane, in-flight tool call or dirty composer holds the event in the durable
+queue for a later wake or the recipient's next hook/poll. Progress FYIs such as
+`task_started` remain quiet and readable at that boundary. The same authenticated
+wake classes still decide which events can start a turn. Worker pointer delivery
+and oversized full-body Teams delivery retain their existing paths. A transport
+write is provisional; only the existing per-recipient rendering/poll receipts
+retire a body from the unread view. Already-held Teams copies retain their
+legacy wake recovery; timed pointer-to-body fallback applies to workers.
+
 Recipient drains revalidate typed lifecycle relays against the task's current
 terminal state before recording surfacing or spending the hook body budget.
 An obsolete relay is retained with `superseded_stale`, its task/status reason

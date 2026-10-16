@@ -372,8 +372,12 @@ struct WakeReadOutcome {
     unknown: WakeInputs,
 }
 
-fn unknown_wake_inputs(recipients: &HashSet<String>, captured_at: Instant) -> WakeInputs {
-    let until = chrono::Utc::now()
+fn unknown_wake_inputs(
+    recipients: &HashSet<String>,
+    captured_at: Instant,
+    now: chrono::DateTime<chrono::Utc>,
+) -> WakeInputs {
+    let until = now
         + chrono::Duration::from_std(super::queue_and_events::CLAUDE_FIRST_PROMPT_GRACE).unwrap();
     WakeInputs {
         agents: vec![],
@@ -416,9 +420,18 @@ pub(crate) struct PromptPreparation {
     fallback: Option<WakeInputs>,
     #[cfg(test)]
     pub(crate) read_delay: Duration,
+    #[cfg(test)]
+    pub(crate) wake_clock: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl PromptPreparation {
+    pub(crate) fn wake_now(&self) -> chrono::DateTime<chrono::Utc> {
+        #[cfg(test)]
+        if let Some(now) = self.wake_clock {
+            return now;
+        }
+        chrono::Utc::now()
+    }
     pub(crate) fn has_pending(&self) -> bool {
         self.pending.is_some()
     }
@@ -562,6 +575,7 @@ impl PromptPreparation {
         #[cfg(test)]
         let read_delay = self.read_delay;
         let job_supervisor = supervisor.clone();
+        let wake_now = self.wake_now();
         let submitted = jobs.submit_external(
             JobSpec {
                 kind: WAKE_GATE_READ,
@@ -581,11 +595,12 @@ impl PromptPreparation {
                     &recipients,
                     &sender_ids,
                     captured_at,
+                    wake_now,
                 );
                 super::delivery::wake_daemon_after_enqueue(&cas_dir);
                 Box::new(WakeReadOutcome {
                     inputs,
-                    unknown: unknown_wake_inputs(&recipients, captured_at),
+                    unknown: unknown_wake_inputs(&recipients, captured_at, wake_now),
                 })
             },
         );
@@ -641,6 +656,7 @@ fn read_wake_inputs(
     recipients: &HashSet<String>,
     sender_ids: &HashSet<String>,
     captured_at: Instant,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<WakeInputs, String> {
     let agents = crate::store::open_agent_store(cas_dir)
         .and_then(|store| Ok(store.list(None)?))
@@ -674,11 +690,10 @@ fn read_wake_inputs(
                     has_transcript: false,
                     active_until: None,
                     first_prompt_until: Some(
-                        chrono::Utc::now()
-                            + chrono::Duration::from_std(
-                                super::queue_and_events::CLAUDE_FIRST_PROMPT_GRACE,
-                            )
-                            .unwrap(),
+                        now + chrono::Duration::from_std(
+                            super::queue_and_events::CLAUDE_FIRST_PROMPT_GRACE,
+                        )
+                        .unwrap(),
                     ),
                     wait: WorkerWaitState {
                         harness_waiting_for_input: false,

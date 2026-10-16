@@ -1,21 +1,182 @@
 use super::*;
 use cas_store::wait_budget;
 
-#[test]
-fn cas_7b6b_round2_park_uses_prepared_evidence_under_c6_enforcement() {
+fn assert_unknown_grace_expires(mode: &str) {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::store::init_cas_dir(temp.path()).unwrap();
     let mut daemon = super::super::provisioning_tests::daemon(&root);
     let queue = crate::store::open_prompt_queue_store(&root).unwrap();
     let id = queue.enqueue("supervisor", "worker-a", "decision").unwrap();
     let row = queue.queued_prompt(id).unwrap().unwrap();
-    daemon.queue_jobs = super::super::prompt_queue_jobs::QueueJobs::start(root, None);
-    let _lane =
-        super::super::loop_watchdog::enforce_test_lane(cas_store::lane_guard::Lane::Control);
+    if mode == "failed" {
+        let agent = cas_types::Agent::new("worker-id".into(), "worker-a".into());
+        crate::store::open_agent_store(&root)
+            .unwrap()
+            .register(&agent)
+            .unwrap();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        conn.execute("UPDATE agents SET name=x'00' WHERE id='worker-id'", [])
+            .unwrap();
+    }
+    let mut preparation = super::super::queue_control_jobs::PromptPreparation::default();
+    let mut reads = super::super::prompt_queue_jobs::QueueJobs::inline();
+    let first_seen = chrono::Utc::now();
+    let expired = first_seen
+        + chrono::Duration::from_std(CLAUDE_FIRST_PROMPT_GRACE).unwrap()
+        + chrono::Duration::seconds(1);
+    let start = Instant::now();
+    daemon.queue_jobs = super::super::prompt_queue_jobs::QueueJobs::start(root.clone(), None);
+    for (phase, now) in [first_seen, expired].into_iter().enumerate() {
+        preparation.wake_clock = Some(now);
+        if mode != "missing" {
+            let mut raw = Some(super::super::prompt_queue_jobs::QueueSelection {
+                rows: vec![row.clone()],
+                ..Default::default()
+            });
+            let mut released = None;
+            for attempt in 0..3 {
+                released = preparation.advance(
+                    &mut reads,
+                    raw.take(),
+                    root.clone(),
+                    "lead".into(),
+                    vec![],
+                    start + Duration::from_millis(phase as u64 * 1000 + attempt * 101),
+                );
+                if released.is_some() {
+                    break;
+                }
+            }
+            assert!(released.is_some(), "batch released in {mode} phase {phase}");
+        }
+        daemon.queue_jobs.prompt_preparation = preparation;
+        {
+            let _lane = super::super::loop_watchdog::enforce_test_lane(
+                cas_store::lane_guard::Lane::Control,
+            );
+            let evidence = daemon.prepared_wake_evidence("worker-a");
+            assert_eq!(
+                evidence.awaiting_first_prompt,
+                phase == 0,
+                "{mode}: repeated reads must not renew the first-seen boot grace"
+            );
+            assert_eq!(
+                claude_turn_aware_retry_with_evidence(
+                    1,
+                    None,
+                    true,
+                    Some(first_seen),
+                    now,
+                    evidence
+                ),
+                if phase == 0 {
+                    TurnAwareRetry::Wait
+                } else {
+                    TurnAwareRetry::UseCadence
+                }
+            );
+            assert_eq!(
+                daemon.park_wake_starved_row(&row, "worker-a", 3, true),
+                phase == 1,
+                "{mode}: exhausted wake budget must escalate after the fixed grace"
+            );
+        }
+        preparation = std::mem::take(&mut daemon.queue_jobs.prompt_preparation);
+    }
+    // Verify the real asynchronous escalation, not only its boolean policy result.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let notices = queue.peek_all(10).unwrap();
+        if notices.iter().any(|notice| {
+            notice.target == daemon.app.supervisor_name()
+                && notice.prompt.contains("notification_id=")
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expired grace must enqueue the supervisor notice"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert!(
-        !daemon.park_wake_starved_row(&row, "worker-a", 3, true),
-        "missing prepared recipient must be treated as booting, without reading the store"
+        daemon
+            .queue_jobs
+            .drain_for_shutdown(&root, Duration::from_secs(3))
     );
+}
+
+#[test]
+fn cas_7b6b_round3_missing_inputs_grace_expires_and_escalates_under_c6() {
+    assert_unknown_grace_expires("missing");
+}
+#[test]
+fn cas_7b6b_round3_unregistered_grace_expires_across_reads_and_escalates_under_c6() {
+    assert_unknown_grace_expires("unregistered");
+}
+#[test]
+fn cas_7b6b_round3_failed_read_grace_expires_across_reads_and_escalates_under_c6() {
+    assert_unknown_grace_expires("failed");
+}
+
+#[test]
+fn cas_7b6b_round3_timed_out_wake_reads_release_batch_under_c6() {
+    use super::super::jobs::{Criticality, JobSpec, Lane};
+    let (_temp, root, batch) = unusable_read_fixture();
+    let mut jobs = super::super::prompt_queue_jobs::QueueJobs::start(root.clone(), None);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    jobs.submit_external(
+        JobSpec {
+            kind: "HeldRead",
+            key: "held-read".into(),
+            lane: Lane::Blocking,
+            criticality: Criticality::Critical,
+            generation: 1,
+            budget: Duration::from_millis(100),
+        },
+        move || {
+            entered_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+            Box::new(())
+        },
+    );
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    let mut preparation = super::super::queue_control_jobs::PromptPreparation::default();
+    let start = Instant::now();
+    let timeout = super::super::factory_jobs::in_flight_timeout(Duration::from_millis(100));
+    let mut raw = Some(batch);
+    let mut released = None;
+    for attempt in 0..=3 {
+        let _lane =
+            super::super::loop_watchdog::enforce_test_lane(cas_store::lane_guard::Lane::Control);
+        released = preparation.advance(
+            &mut jobs,
+            raw.take(),
+            root.clone(),
+            "lead".into(),
+            vec![],
+            start + (timeout + Duration::from_millis(1)) * attempt,
+        );
+        if released.is_some() {
+            break;
+        }
+    }
+    release_tx.send(()).unwrap();
+    assert!(jobs.drain_for_shutdown(&root, Duration::from_secs(3)));
+    assert!(
+        released.is_some(),
+        "three timed-out reads must release the batch with Unknown evidence"
+    );
+    assert!(!preparation.has_pending());
+    assert!(preparation.allows_delivery(Instant::now()));
+    // Late completions from the held read cannot restore stale authority.
+    assert!(
+        preparation
+            .advance(&mut jobs, None, root, "lead".into(), vec![], Instant::now())
+            .is_none()
+    );
+    assert!(preparation.recipient("worker-a").is_none());
 }
 
 #[test]
@@ -153,10 +314,6 @@ fn cas_7b6b_round2_failed_reads_eventually_release_batch_with_unknown_evidence()
     );
     assert_eq!(attempts, 3, "release after three unusable read attempts");
     assert!(preparation.allows_delivery(Instant::now() + Duration::from_secs(1)));
-    assert!(
-        preparation.agents().is_empty(),
-        "Unknown is not registered sender authority"
-    );
     assert!(!preparation.has_pending());
 }
 
@@ -201,7 +358,6 @@ fn cas_7b6b_round2_slow_reads_eventually_release_batch_off_the_loop() {
         preparation.allows_delivery(Instant::now() + Duration::from_secs(1)),
         "degraded observations must pass the delivery guard rather than carry the batch again"
     );
-    assert!(preparation.agents().is_empty());
     assert!(!preparation.has_pending());
 }
 

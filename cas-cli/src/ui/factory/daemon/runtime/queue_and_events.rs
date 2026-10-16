@@ -6715,7 +6715,7 @@ impl FactoryDaemon {
         self.queue_jobs
             .prompt_preparation
             .recipient(pane)
-            .map(|inputs| inputs.wake_evidence(chrono::Utc::now()))
+            .map(|inputs| inputs.wake_evidence(self.queue_jobs.prompt_preparation.wake_now()))
             .unwrap_or(RecipientWakeEvidence {
                 recently_active: false,
                 awaiting_first_prompt: true,

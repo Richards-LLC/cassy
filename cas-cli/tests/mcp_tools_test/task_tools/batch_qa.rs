@@ -11,10 +11,7 @@ use std::process::Command;
 
 #[test]
 fn override_debt_documentation_cas_5129a() {
-    let guide = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../docs/qa/batch-qa.md"
-    ));
+    let guide = include_str!("../../../../docs/qa/batch-qa.md");
     assert!(guide.contains("supervisor_override=true does not clear batch QA debt"));
     assert!(!guide.contains(
         "Normal supervisor override and explicit QA-request authority remain available."
@@ -123,6 +120,11 @@ async fn squash_deferred_delivery_cas_5129a(receipt: bool) {
         TaskStatus::Closed,
         "{unrelated}"
     );
+    assert!(
+        unrelated.contains("no `qa-bundle:` note")
+            || unrelated.contains("INVALID TASK COMMIT RECEIPT"),
+        "unrelated receipt must fail its evidence/receipt gate: {unrelated}"
+    );
 }
 
 #[tokio::test]
@@ -133,6 +135,56 @@ async fn squash_close_with_passed_qa_cas_5129a() {
 #[tokio::test]
 async fn squash_close_with_batch_receipt_cas_5129a() {
     squash_deferred_delivery_cas_5129a(true).await;
+}
+
+#[tokio::test]
+async fn unreviewed_squash_cannot_clear_debt_cas_5129a() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    fx.unmerge();
+    let parked = fx.close("cas-bq01").await;
+    let root = fx.repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::AwaitingMerge,
+        "{parked}"
+    );
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "--squash", &fx.staging]);
+    git(
+        &fx.repo,
+        &[
+            "commit",
+            "-qm",
+            "unrelated squash containing the delivery's files",
+        ],
+    );
+    let squash = git(&fx.repo, &["rev-parse", "HEAD"]);
+    git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
+    let request = serde_json::from_value::<TaskCloseRequest>(serde_json::json!({
+        "id":"cas-bq01", "commit_receipt":squash, "reason":"Unreviewed squash"
+    }))
+    .unwrap();
+    let refused = extract_text(fx.core.cas_task_close(Parameters(request)).await.unwrap());
+    assert!(
+        refused.contains("deferred evidence at its batch park"),
+        "{refused}"
+    );
+    assert_eq!(
+        tasks.get("cas-bq01").unwrap().status,
+        TaskStatus::AwaitingMerge
+    );
+    assert!(
+        cas_store::list_qa_passes(&root, "cas-bq01")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        cas_store::list_qa_batch_receipts(&root, "batch-project")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

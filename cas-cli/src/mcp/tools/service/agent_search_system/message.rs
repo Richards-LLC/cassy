@@ -6726,6 +6726,7 @@ mod cas_89e1_post_merge_message_type_tests {
 #[cfg(test)]
 mod cas_d5ab_send_outcome_tests {
     use super::*;
+    use cas_store::PromptQueueStore as _;
 
     /// The daemon's generic hold stamp (queue_and_events.rs, `wake_deferred`).
     const GENERIC_HOLD: &str =

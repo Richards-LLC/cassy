@@ -333,7 +333,7 @@ async fn ct2_p1_send_returns_named_outcome() {
     ])
     .await;
     factory.tool_call_in_flight();
-    let core = crate::mcp::server::CasCore::with_daemon(factory.cas_dir.clone(), None, None);
+    let core = crate::mcp::CasCore::with_daemon(factory.cas_dir.clone(), None, None);
     core.set_agent_id_for_testing("supervisor-id".into());
     #[cfg(feature = "mcp-proxy")]
     let service = crate::mcp::tools::CasService::new(core, None);

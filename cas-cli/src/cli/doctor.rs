@@ -24,6 +24,7 @@ use crate::ui::theme::{ActiveTheme, Icons};
 
 use crate::cli::Cli;
 
+mod idle_sync;
 mod slack_transport;
 
 #[derive(Args, Debug, Clone)]
@@ -239,7 +240,8 @@ impl CheckGroup {
             | "registered project roots"
             | "host user skills"
             | "host install parity"
-            | "slack transport" => Self::Host,
+            | "slack transport"
+            | idle_sync::HOST_CHECK => Self::Host,
             "user skills" | "scratchpad policy" => Self::Config,
             "legacy search index"
             | "pre-versioned search index"
@@ -254,6 +256,7 @@ impl CheckGroup {
             | "cloud identity metadata"
             | "project aliases"
             | "cloud sync queue"
+            | idle_sync::PROJECT_CHECK
             | "cross-project rows"
             | "foreign knowledge pages"
             | "supervisor relay"
@@ -1014,6 +1017,7 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
         host_hub_service_check(),
         host_hub_transport_check(),
         host_hub_audit_check(),
+        idle_sync::host_check(),
     ];
     // Commander needs a usable provider under the service's environment.
     // Keep one result per CLI so a missing provider is easy to identify. A CLI
@@ -3024,6 +3028,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 cli,
             );
         }
+        checks.extend(idle_sync::project_check(&cas_root));
         checks.push(cloud_queue_check(&cas_root));
         checks.push(cloud_team_only_check(&cas_root));
         checks.extend(sync_warning_checks(&sync_warnings));

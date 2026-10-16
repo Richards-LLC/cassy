@@ -232,6 +232,12 @@ pub struct CloudSyncArgs {
     /// See `cas cloud push --rehome` for details.
     #[arg(long)]
     pub rehome: bool,
+
+    /// Background sync (the hub's idle-store sweep): take this store's
+    /// cloud-sync lease first, and exit 75 without syncing when another
+    /// syncer holds it (cas-f1fb).
+    #[arg(long, hide = true)]
+    pub background: bool,
 }
 
 #[derive(Parser)]
@@ -438,6 +444,20 @@ pub fn execute(cmd: &CloudCommands, cli: &Cli, cas_root: &Path) -> anyhow::Resul
         CloudCommands::Conflicts(args) => execute_conflicts(args, cli, cas_root),
         CloudCommands::Push(args) => execute_push(args, cli, cas_root).map(|_| ()),
         CloudCommands::Pull(args) => execute_pull(args, cli, cas_root).map(|_| ()),
+        CloudCommands::Sync(args) if args.background => {
+            let Some(_lease) = crate::cloud::sync_lease::SyncLease::try_acquire(cas_root)
+                .map_err(|error| {
+                    anyhow::anyhow!("open the cloud sync lease in {}: {error}", cas_root.display())
+                })?
+            else {
+                eprintln!(
+                    "cloud sync skipped: another sync holds {}",
+                    crate::cloud::sync_lease::sync_lease_path(cas_root).display()
+                );
+                std::process::exit(crate::cloud::sync_lease::SYNC_LEASE_BUSY_EXIT);
+            };
+            execute_sync(args, cli, cas_root)
+        }
         CloudCommands::Sync(args) => execute_sync(args, cli, cas_root),
         CloudCommands::Team(cmd) => execute_team(cmd, cli, cas_root),
         CloudCommands::Project(args) => {
@@ -7338,6 +7358,7 @@ pub(crate) fn doctor_purge_foreign(
             dry_run: false,
             full: false,
             rehome: false,
+            background: false,
         },
         cli,
         cas_root,

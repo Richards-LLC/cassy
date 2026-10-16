@@ -206,6 +206,7 @@ pub(crate) struct DeliveryRequest {
     /// The session whose metadata a `SupervisorStalled` event is revalidated
     /// against (cas-3b16: read here, not on the loop).
     session: Option<String>,
+    merge_events: Vec<DirectorEvent>,
 }
 
 /// The idle-worker liveness a delivery read is joined with: agent store,
@@ -245,6 +246,7 @@ pub(crate) struct DeliveryInputs {
     /// The session metadata a `SupervisorStalled` event is revalidated
     /// against, read with the facts.
     pub(super) session: Option<SessionProgressRead>,
+    pub(super) merge_alerts: HashMap<String, super::merge_alert::Ready>,
 }
 
 impl DeliveryInputs {
@@ -259,6 +261,7 @@ impl DeliveryInputs {
             idle_liveness: HashMap::new(),
             facts: None,
             session: None,
+            merge_alerts: HashMap::new(),
         }
     }
 
@@ -285,6 +288,8 @@ impl DeliveryInputs {
 }
 
 impl DeliveryRequest {
+    /// Merge reads run on the external lane because they fetch Git and query CI.
+    pub(crate) fn needs_external_lane(&self) -> bool { !self.merge_events.is_empty() }
     /// Move the idle-worker liveness out of this read, for a job of its own
     /// on the blocking lane. `None` when no `WorkerIdle` event needs it.
     pub(crate) fn take_idle_liveness(&mut self) -> Option<IdleLivenessRequest> {
@@ -328,12 +333,20 @@ impl DeliveryRequest {
             (Some(session), Some(_)) => Some(session_progress_named(session)),
             _ => None,
         };
+        let merge_alerts = data.as_ref().ok().map(|fresh| {
+            let repo = self.cas_dir.parent().unwrap_or(&self.cas_dir);
+            self.merge_events.iter().filter_map(|event| {
+                let ready = super::merge_alert::read(event, fresh, repo)?;
+                Some((ready.evidence.task_id.clone(), ready))
+            }).collect()
+        }).unwrap_or_default();
         DeliveryInputs {
             data,
             blocks_deps,
             idle_liveness,
             facts,
             session,
+            merge_alerts,
         }
     }
 }
@@ -643,6 +656,7 @@ impl FactoryApp {
             idle_workers,
             stall,
             session,
+            merge_events: events.iter().filter(|event| super::merge_alert::task_id(event).is_some()).cloned().collect(),
         }
     }
 

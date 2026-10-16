@@ -1567,7 +1567,7 @@ pub struct DirectorEventDetector {
     /// parked task can easily stay parked for 5+ minutes, and did in the
     /// reported six-stale-alerts session). See
     /// [`Self::merge_alert_should_emit`].
-    merge_alert_last_evidence: HashMap<(String, String), (u32, String)>,
+    merge_alert_last_evidence: HashSet<(String, String, String, String)>,
 }
 
 impl DirectorEventDetector {
@@ -1614,7 +1614,7 @@ impl DirectorEventDetector {
             transcript_in_flight_override: None,
             worker_evidence_override: None,
             held_workers: HashSet::new(),
-            merge_alert_last_evidence: HashMap::new(),
+            merge_alert_last_evidence: HashSet::new(),
         }
     }
 
@@ -1629,16 +1629,12 @@ impl DirectorEventDetector {
         &mut self,
         task_id: &str,
         factory_branch: &str,
-        unmerged_count: u32,
-        epic_sha: &str,
+        branch_tip: &str,
+        ci_state: &str,
     ) -> bool {
-        let key = (task_id.to_string(), factory_branch.to_string());
-        let evidence = (unmerged_count, epic_sha.to_string());
-        if self.merge_alert_last_evidence.get(&key) == Some(&evidence) {
-            return false;
-        }
-        self.merge_alert_last_evidence.insert(key, evidence);
-        true
+        self.merge_alert_last_evidence.insert((
+            task_id.to_string(), factory_branch.to_string(), branch_tip.to_string(), ci_state.to_string(),
+        ))
     }
 
     /// (cas-09d0) Put a worker on hold: suppress `WorkerIdle` for them

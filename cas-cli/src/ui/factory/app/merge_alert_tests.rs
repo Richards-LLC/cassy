@@ -36,11 +36,21 @@ impl Fixture {
         git(repo.path(), &["add", "."]);
         git(repo.path(), &["commit", "-qm", "cas-9efb-test delivery"]);
         git(repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
-        // Git fetches the local bare server, while GitHub identity remains explicit.
-        git(repo.path(), &["config", &format!("url.{}.insteadOf", remote.path().display()), "https://github.com/acme/cas.git"]);
+        // Git fetches a local bare server; GitHub queries retain an explicit origin.
         git(repo.path(), &["remote", "set-url", "origin", "https://github.com/acme/cas.git"]);
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
         env.set("CAS_ROOT", &cas_dir);
+        let old_path = std::env::var_os("PATH").unwrap();
+        let real_git = std::env::split_paths(&old_path).map(|dir| dir.join("git"))
+            .find(|file| file.is_file()).unwrap().canonicalize().unwrap();
+        let bin = cas_dir.join("fixtures-bin");
+        std::fs::create_dir(&bin).unwrap();
+        let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+        crate::test_paths::warm_stub(&bin.join("git"), &format!(
+            "#!/bin/sh\nif [ \"$1\" = fetch ]; then exec {} -c {} \"$@\"; fi\nexec {} \"$@\"\n",
+            quote(&real_git), quote(Path::new(&format!("url.{}.insteadOf=https://github.com/acme/cas.git", remote.path().display()))), quote(&real_git),
+        ));
+        env.set("PATH", std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&old_path))).unwrap());
         let mut task = Task::new("cas-9efb-test".into(), "parked delivery".into());
         task.status = TaskStatus::AwaitingMerge;
         task.assignee = Some("merge-w".into());

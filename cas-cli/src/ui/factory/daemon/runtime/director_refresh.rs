@@ -683,6 +683,7 @@ impl DirectorRefresh {
             return Ok(());
         }
         let mut request: DeliveryRequest = app.delivery_request(&events);
+        let external = request.needs_external_lane();
         // cas-3b16: the liveness scan (agent store, transcripts, `/proc`)
         // runs beside the read on the blocking lane, not on the read lane.
         let liveness = request.take_idle_liveness();
@@ -693,9 +694,7 @@ impl DirectorRefresh {
         self.delivery_events = events.clone();
         let carried = events;
         self.delivery.start(generation);
-        let submitted = jobs.submit_external_read(
-            factory_jobs::delivery_read_spec(generation),
-            move |stores: Option<&DirectorStores>| {
+        let work = move |stores: Option<&DirectorStores>| -> Box<dyn std::any::Any + Send> {
                 hook.run("delivery read");
                 #[cfg(test)]
                 if let Some(reads) = stale_reads {
@@ -707,8 +706,15 @@ impl DirectorRefresh {
                 }
                 let inputs = request.read(stores);
                 Box::new(FactoryJobOutput::Delivery(carried, inputs))
-            },
-        );
+            };
+        let mut spec = factory_jobs::delivery_read_spec(generation);
+        let submitted = if external {
+            spec.lane = super::jobs::Lane::External;
+            spec.budget = factory_jobs::CI_STATUS_BUDGET;
+            jobs.submit_external(spec, move || work(None))
+        } else {
+            jobs.submit_external_read(spec, work)
+        };
         match submitted {
             Submitted::Queued | Submitted::QueuedBehindKey => {
                 if let Some(liveness) = liveness {

@@ -14,7 +14,7 @@ use ratatui::layout::Rect;
 
 use super::director::{
     DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
-    MergeAlertFreshness, PanelAreas, Prompt, SidecarFocus, ViewMode, check_merge_alert_freshness,
+    PanelAreas, Prompt, SidecarFocus, ViewMode,
     generate_prompt_at, revalidate_event_for_delivery_with_context,
     revalidate_event_for_delivery_with_focus, supervisor_actionable_state_with_classifiers,
 };
@@ -35,6 +35,7 @@ pub(crate) mod delivery_evidence;
 mod director_refresh;
 mod imports;
 mod init;
+mod merge_alert;
 #[cfg(test)]
 mod merge_alert_tests;
 mod panels_and_modes;
@@ -1522,6 +1523,7 @@ impl FactoryApp {
             idle_liveness,
             facts,
             session: session_progress,
+            mut merge_alerts,
         } = inputs;
         let session_progress = session_progress.unwrap_or_default();
         // cas-223f review M3: revalidation joins the fresh read's store facts
@@ -1616,8 +1618,6 @@ impl FactoryApp {
         // `repo_root` in `director.rs::load_all_git_changes` (`.cas`'s
         // parent is the main checkout all `factory/*` and `epic/*` branches
         // live in).
-        let repo_root = self.cas_dir.parent().unwrap_or(&self.cas_dir).to_path_buf();
-
         let mut prompts: Vec<Prompt> = Vec::with_capacity(delivery_events.len());
         for event in &delivery_events {
             // cas-d4ae: taskless idle and escalated stall events are factory
@@ -1644,33 +1644,14 @@ impl FactoryApp {
             // `generate_prompt` unaffected, exactly as before this fix.
             // cas-223f: without a fresh read there is nothing to check the
             // alert against; it is delivered as detected.
-            let freshness = if delivery_state_is_authoritative {
-                check_merge_alert_freshness(event, &unfiltered_data, &repo_root)
-            } else {
-                MergeAlertFreshness::NotApplicable
-            };
-            let merge_alert_evidence =
-                match freshness {
-                    MergeAlertFreshness::NotApplicable => None,
-                    // AC1: branch already carries zero unmerged commits vs
-                    // the epic — drop the alert entirely rather than
-                    // instruct a merge that already happened.
-                    MergeAlertFreshness::Stale => continue,
-                    MergeAlertFreshness::Fresh(evidence) => {
-                        // AC3: same (task, branch) pair, same evidence as
-                        // last time — suppress the repeat.
-                        if self.event_detector.merge_alert_should_emit(
-                            &evidence.task_id,
-                            &evidence.factory_branch,
-                            evidence.unmerged_count,
-                            &evidence.epic_sha,
-                        ) {
-                            Some(evidence)
-                        } else {
-                            continue;
-                        }
-                    }
-                };
+            // An actionable merge demand needs completed exact-tip CI and a
+            // successful live-target read. Both were computed on the external
+            // lane, alongside this delivery read, never on the loop.
+            let ready = if let Some(task_id) = merge_alert::task_id(event) {
+                let Some(ready) = merge_alerts.remove(task_id) else { continue; };
+                Some(ready)
+            } else { None };
+            let merge_alert_evidence = ready.as_ref().map(|ready| &ready.evidence);
 
             // cas-dc1b: worker-facing tool names come from the recipient
             // worker's harness, not the session-wide spawn default.
@@ -1686,7 +1667,7 @@ impl FactoryApp {
                 self.supervisor_cli,
                 worker_cli,
                 &gated_task_ids,
-                merge_alert_evidence.as_ref(),
+                merge_alert_evidence,
                 snapshot_at,
             ) {
                 if let DirectorEvent::WorkerIdle { worker, .. } = event {
@@ -1700,6 +1681,20 @@ impl FactoryApp {
                         {
                             continue;
                         }
+                    }
+                }
+                if let Some(ready) = ready {
+                    if !self.event_detector.merge_alert_should_emit(
+                        &ready.evidence.task_id, &ready.evidence.factory_branch,
+                        &ready.tip, ready.ci,
+                    ) { continue; }
+                    if ready.ci == "failure" {
+                        prompt.text = format!(
+                            "CI failed for task {} on {} at {}. Supervisor decision needed: request changes, or explicitly review and override red CI before merging.\n{} unmerged commit(s) vs {} at {}.\nLive task: `task action=show id={}`",
+                            ready.evidence.task_id, ready.evidence.factory_branch, ready.tip,
+                            ready.evidence.unmerged_count, ready.evidence.checked_epic_ref,
+                            ready.evidence.epic_sha, ready.evidence.task_id,
+                        );
                     }
                 }
                 prompts.push(prompt);

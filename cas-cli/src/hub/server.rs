@@ -4311,12 +4311,12 @@ mod catalog_visibility_tests {
         missing.name = "missing".into();
         missing.liveness = super::super::DaemonLiveness::MissingEndpoint;
         let all = vec![live, dead, empty, missing];
-        let visible = supervisor_sessions(all.clone(), false, false);
+        let visible = supervisor_sessions(all.clone(), false);
         assert_eq!(
             visible.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
             vec!["live", "empty"]
         );
-        assert_eq!(supervisor_sessions(all, false, true).len(), 4);
+        assert_eq!(supervisor_sessions(all, true).len(), 4);
     }
 }
 

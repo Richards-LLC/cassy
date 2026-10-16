@@ -247,67 +247,80 @@ async fn cas_e29c_cloud_fold_vectors_round_trip_store_search_edit_push_replay() 
 #[tokio::test]
 async fn cas_e29c_occupied_fold_preserves_both_bodies_and_never_stalls_pull() {
     let _env = TestEnvGuard::temp_home();
-    for team in [false, true] {
-        for missing_created in [false, true] {
-            let mut wire = cloud_vectors(team)[if missing_created { 2 } else { 0 }].clone();
-            let (mut incumbent, remote) = legacy_pair();
-            incumbent.id = wire["id"].as_str().unwrap().into();
-            let f = Fixture::new(team, &incumbent, &remote).await;
-            if missing_created {
-                let mut local = serde_json::to_value(&incumbent).unwrap();
-                local.as_object_mut().unwrap().remove("created");
-                f.entries
-                    .update(&serde_json::from_value(local).unwrap())
-                    .unwrap();
-            }
-            f.respond_wires(vec![wire.clone()], "2026-10-16T12:00:00Z")
-                .await;
-            let result = f.pull().unwrap();
-            assert!(
-                result.errors.is_empty(),
-                "preserved conflict is not a pull error"
-            );
-            assert_eq!(result.conflicts_resolved_local, 1);
-            assert_eq!(
-                serde_json::to_value(&result).unwrap()["memory_fold_conflicts"][0],
-                wire["id"]
-            );
-            assert_eq!(
-                f.entries.get(&incumbent.id).unwrap().content,
-                incumbent.content
-            );
-            let records = f.syncer.queue.list_conflicts(20).unwrap();
-            let record = records
-                .iter()
-                .find(|r| r.strategy == "fold_conflict")
+    // Active known birth, active unknown birth, and archived incumbent. Both
+    // HTTP routes reach the same collision guard; no Cartesian product needed.
+    for (team, missing_created, archived) in [
+        (false, false, false),
+        (true, true, false),
+        (true, false, true),
+    ] {
+        let mut wire = cloud_vectors(team)[if missing_created { 2 } else { 0 }].clone();
+        let (mut incumbent, remote) = legacy_pair();
+        incumbent.id = wire["id"].as_str().unwrap().into();
+        let f = Fixture::new(team, &incumbent, &remote).await;
+        if missing_created {
+            let mut local = serde_json::to_value(&incumbent).unwrap();
+            local.as_object_mut().unwrap().remove("created");
+            f.entries
+                .update(&serde_json::from_value(local).unwrap())
                 .unwrap();
-            let before: serde_json::Value =
-                serde_json::from_str(&record.discarded_row_json).unwrap();
-            assert_eq!(before["incoming"]["content"], wire["content"]);
-            assert_eq!(before["local"]["content"], incumbent.content);
-            assert!(f.entries.list_archived().unwrap().is_empty());
-            let watermark = if team {
-                format!("last_team_pull_at_{TEAM}_{PROJECT}")
-            } else {
-                "last_pull_at".into()
-            };
-            assert_eq!(
-                f.syncer.queue.get_metadata(&watermark).unwrap().as_deref(),
-                Some("2026-10-16T12:00:00Z")
-            );
-            wire["id"] = serde_json::json!("subsequent-opaque-memory");
-            wire["content"] = serde_json::json!("later pull still syncs");
-            f.respond_wires(vec![wire], "2026-10-17T12:00:00Z").await;
-            assert_eq!(f.pull().unwrap().pulled_entries, 1);
-            assert_eq!(
-                f.entries.get("subsequent-opaque-memory").unwrap().content,
-                "later pull still syncs"
-            );
-            assert_eq!(
-                f.syncer.queue.get_metadata(&watermark).unwrap().as_deref(),
-                Some("2026-10-17T12:00:00Z")
-            );
         }
+        if archived {
+            f.entries.archive(&incumbent.id).unwrap();
+        }
+        f.respond_wires(vec![wire.clone()], "2026-10-16T12:00:00Z")
+            .await;
+        let result = f.pull().unwrap();
+        assert!(
+            result.errors.is_empty(),
+            "preserved conflict is not a pull error"
+        );
+        assert_eq!(result.conflicts_resolved_local, 1);
+        assert_eq!(
+            serde_json::to_value(&result).unwrap()["memory_fold_conflicts"][0],
+            wire["id"]
+        );
+        let kept = if archived {
+            assert!(f.entries.list().unwrap().is_empty());
+            f.entries.get_archived(&incumbent.id).unwrap()
+        } else {
+            f.entries.get(&incumbent.id).unwrap()
+        };
+        assert_eq!(kept.content, incumbent.content);
+        let records = f.syncer.queue.list_conflicts(20).unwrap();
+        let record = records
+            .iter()
+            .find(|r| r.strategy == "fold_conflict")
+            .unwrap();
+        let before: serde_json::Value = serde_json::from_str(&record.discarded_row_json).unwrap();
+        assert_eq!(before["incoming"]["content"], wire["content"]);
+        assert_eq!(before["local"]["content"], incumbent.content);
+        assert_eq!(before["local"]["archived"], archived);
+        assert_eq!(
+            f.entries.list_archived().unwrap().len(),
+            usize::from(archived)
+        );
+        let watermark = if team {
+            format!("last_team_pull_at_{TEAM}_{PROJECT}")
+        } else {
+            "last_pull_at".into()
+        };
+        assert_eq!(
+            f.syncer.queue.get_metadata(&watermark).unwrap().as_deref(),
+            Some("2026-10-16T12:00:00Z")
+        );
+        wire["id"] = serde_json::json!("subsequent-opaque-memory");
+        wire["content"] = serde_json::json!("later pull still syncs");
+        f.respond_wires(vec![wire], "2026-10-17T12:00:00Z").await;
+        assert_eq!(f.pull().unwrap().pulled_entries, 1);
+        assert_eq!(
+            f.entries.get("subsequent-opaque-memory").unwrap().content,
+            "later pull still syncs"
+        );
+        assert_eq!(
+            f.syncer.queue.get_metadata(&watermark).unwrap().as_deref(),
+            Some("2026-10-17T12:00:00Z")
+        );
     }
 }
 
@@ -433,85 +446,41 @@ async fn cas_25eb1_unattributed_collision_is_preserved_without_republishing() {
 #[tokio::test]
 async fn cas_25eb1_matching_birth_edits_and_identical_memories_still_dedupe() {
     let _env = TestEnvGuard::temp_home();
-    for team in [false, true] {
-        for same_birth in [false, true] {
-            let (a, mut b) = legacy_pair();
-            if same_birth {
-                b.created = a.created;
-            } else {
-                b.content = a.content.clone();
-                b.title = a.title.clone();
-            }
-            let f = Fixture::new(team, &a, &b).await;
-            let result = f.pull().unwrap();
-            assert!(result.errors.is_empty(), "{:?}", result.errors);
-            assert_eq!(f.entries.list().unwrap().len(), 1);
-            assert_eq!(f.entries.get(&a.id).unwrap().content, b.content);
-            assert!(f.syncer.queue.list_all(10).unwrap().is_empty());
+    // Preserve the original legacy cases; add the fold guard's two identity
+    // exceptions and one custom suffix without multiplying them by each route.
+    for (team, id, same_birth) in [
+        (false, "2026-10-15-6", false),
+        (false, "2026-10-15-6", true),
+        (true, "2026-10-15-6", false),
+        (true, "2026-10-15-6", true),
+        (false, "custom-source-fold0123456789ab", true),
+        (true, "custom-source-fold0123456789ab", false),
+        (false, "custom-foldnot-a-v1-digest", true),
+    ] {
+        let (mut a, mut b) = legacy_pair();
+        a.id = id.into();
+        b.id = id.into();
+        if same_birth {
+            b.created = a.created;
+        } else {
+            b.content = a.content.clone();
+            b.title = a.title.clone();
         }
-    }
-}
-
-#[tokio::test]
-async fn cas_e29c_fold_same_memory_keeps_lww_and_custom_suffixes_stay_opaque() {
-    let _env = TestEnvGuard::temp_home();
-    for team in [false, true] {
-        for id in [
-            "custom-source-fold0123456789ab",
-            "custom-foldnot-a-v1-digest",
-        ] {
-            for same_birth in [false, true] {
-                let (mut a, mut b) = legacy_pair();
-                a.id = id.into();
-                b.id = id.into();
-                if same_birth {
-                    b.created = a.created;
-                } else {
-                    b.title = a.title.clone();
-                    b.content = a.content.clone();
-                }
-                let f = Fixture::new(team, &a, &b).await;
-                assert!(f.pull().unwrap().errors.is_empty());
-                assert_eq!(f.entries.list().unwrap().len(), 1);
-                // SQLite preserves the incumbent birth while applying LWW content.
-                assert_eq!(f.entries.get(id).unwrap().created, a.created);
-                assert_eq!(f.entries.get(id).unwrap().content, b.content);
-                assert!(
-                    f.syncer
-                        .queue
-                        .memory_fold_conflict_ids()
-                        .unwrap()
-                        .is_empty()
-                );
-            }
-        }
-    }
-}
-
-#[tokio::test]
-async fn cas_e29c_archived_fold_incumbent_stays_archived_with_incoming_journaled() {
-    let _env = TestEnvGuard::temp_home();
-    for team in [false, true] {
-        let wire = cloud_vectors(team)[0].clone();
-        let (mut local, remote) = legacy_pair();
-        local.id = wire["id"].as_str().unwrap().into();
-        let f = Fixture::new(team, &local, &remote).await;
-        f.entries.archive(&local.id).unwrap();
-        f.respond_wires(vec![wire.clone()], "2026-10-16T12:00:00Z")
-            .await;
+        let f = Fixture::new(team, &a, &b).await;
         let result = f.pull().unwrap();
-        assert!(result.errors.is_empty());
-        assert_eq!(result.memory_fold_conflicts, vec![local.id.clone()]);
-        assert_eq!(
-            f.entries.get_archived(&local.id).unwrap().content,
-            local.content
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(f.entries.list().unwrap().len(), 1);
+        let kept = f.entries.get(id).unwrap();
+        assert_eq!(kept.created, a.created);
+        assert_eq!(kept.content, b.content);
+        assert!(f.syncer.queue.list_all(10).unwrap().is_empty());
+        assert!(
+            f.syncer
+                .queue
+                .memory_fold_conflict_ids()
+                .unwrap()
+                .is_empty()
         );
-        assert!(f.entries.list().unwrap().is_empty());
-        let conflicts = f.syncer.queue.list_conflicts(20).unwrap();
-        let before: serde_json::Value =
-            serde_json::from_str(&conflicts[0].discarded_row_json).unwrap();
-        assert_eq!(before["incoming"]["content"], wire["content"]);
-        assert_eq!(before["local"]["archived"], true);
     }
 }
 

@@ -166,12 +166,65 @@ struct InboxFileLock<'a> {
 }
 
 impl<'a> InboxFileLock<'a> {
-    fn acquire(file: &'a std::fs::File, path: &'a std::path::Path) -> anyhow::Result<Self> {
-        if let Err(error) = fs2::FileExt::lock_exclusive(file) {
+    /// Releases the lock [`open_locked_inbox`] took on `file` when dropped.
+    fn held(file: &'a std::fs::File, path: &'a std::path::Path) -> Self {
+        Self { file, path }
+    }
+}
+
+/// cas-c312: opens `path` and takes its exclusive lock, on the file that is at
+/// `path` once the lock is held. [`replace_inbox_file`] swaps the file, so a
+/// writer that waited on the old file's lock would otherwise write alongside
+/// one that locked the new file. Callers unlock through [`InboxFileLock`].
+pub(crate) fn open_locked_inbox(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
+    for _ in 0..64 {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
+        if let Err(error) = fs2::FileExt::lock_exclusive(&file) {
             anyhow::bail!("Failed to lock inbox file {:?}: {}", path, error);
         }
-        Ok(Self { file, path })
+        if locked_file_is_current(&file, path) {
+            return Ok(file);
+        }
+        let _ = fs2::FileExt::unlock(&file);
     }
+    anyhow::bail!("inbox file {:?} kept being replaced while locking it", path)
+}
+
+#[cfg(unix)]
+fn locked_file_is_current(file: &std::fs::File, path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), std::fs::metadata(path)) {
+        (Ok(locked), Ok(current)) => locked.dev() == current.dev() && locked.ino() == current.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn locked_file_is_current(_file: &std::fs::File, _path: &std::path::Path) -> bool {
+    true
+}
+
+/// cas-c312: writes an inbox as a whole new file renamed over `path`. Inbox
+/// readers take no lock (the harness, `inbox_has_unread_copy`,
+/// `unread_alerts`); truncating and then writing in place let one parse an
+/// empty file (CI run 38948837325). Hold the lock from
+/// [`open_locked_inbox`] across the read-modify-replace.
+pub(crate) fn replace_inbox_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(dir)?;
+    if let Ok(existing) = std::fs::metadata(path) {
+        file.as_file().set_permissions(existing.permissions())?;
+    }
+    file.write_all(contents)?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 impl Drop for InboxFileLock<'_> {
@@ -319,7 +372,7 @@ impl InboxPruner {
             });
             if messages.len() != before {
                 let json = serde_json::to_string_pretty(&messages)?;
-                std::fs::write(&inbox_path, json)?;
+                replace_inbox_file(&inbox_path, json.as_bytes())?;
             }
             Ok(retracted)
         })
@@ -374,7 +427,7 @@ fn prune_stale_rows_in(
 
         if removed > 0 {
             let json = serde_json::to_string_pretty(&messages)?;
-            std::fs::write(&inbox_path, json)?;
+            replace_inbox_file(&inbox_path, json.as_bytes())?;
         }
 
         Ok(removed)
@@ -575,14 +628,11 @@ fn mark_inbox_rows_inert(path: &std::path::Path, log_message: &'static str) -> u
     };
     // Same exclusive-lock discipline as every other inbox mutation, so a
     // concurrent harness write cannot interleave with this rewrite.
-    let write = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
+    let write = open_locked_inbox(path)
+        .map_err(|e| std::io::Error::other(e.to_string()))
         .and_then(|file| {
-            let _lock =
-                InboxFileLock::acquire(&file, path).map_err(|e| std::io::Error::other(e.to_string()))?;
-            std::fs::write(path, &json)
+            let _lock = InboxFileLock::held(&file, path);
+            replace_inbox_file(path, json.as_bytes())
         });
     match write {
         Ok(()) => {
@@ -1357,11 +1407,8 @@ impl TeamsManager {
         inbox_path: &std::path::Path,
         operation: impl FnOnce() -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(inbox_path)?;
-        let _lock = InboxFileLock::acquire(&file, inbox_path)?;
+        let file = open_locked_inbox(inbox_path)?;
+        let _lock = InboxFileLock::held(&file, inbox_path);
         operation()
     }
 
@@ -1487,7 +1534,7 @@ impl TeamsManager {
                 // avoid a write storm on hot duplicate senders.
                 if retention_pruned {
                     let json = serde_json::to_string_pretty(&messages)?;
-                    std::fs::write(&inbox_path, json)?;
+                    replace_inbox_file(&inbox_path, json.as_bytes())?;
                 }
                 return Ok(());
             }
@@ -1506,7 +1553,7 @@ impl TeamsManager {
 
             // Write back
             let json = serde_json::to_string_pretty(&messages)?;
-            std::fs::write(&inbox_path, json)?;
+            replace_inbox_file(&inbox_path, json.as_bytes())?;
 
             tracing::debug!("Wrote message to inbox: {} -> {}", from, target);
 

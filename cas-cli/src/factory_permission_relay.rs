@@ -221,17 +221,18 @@ fn with_locked_inbox<T>(
     if !path.exists() {
         std::fs::write(path, "[]")?;
     }
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)?;
-    fs2::FileExt::lock_exclusive(&file)
+    // cas-c312: lock the file that is current at `path`, and replace it whole
+    // so a lock-free reader never parses a truncated inbox.
+    let file = crate::ui::factory::daemon::runtime::teams::open_locked_inbox(path)
         .map_err(|error| anyhow::anyhow!("cannot lock {}: {error}", path.display()))?;
     let result = (|| -> anyhow::Result<T> {
         let mut rows: Vec<Value> =
             serde_json::from_str(&std::fs::read_to_string(path)?).unwrap_or_default();
         let value = operation(&mut rows);
-        std::fs::write(path, serde_json::to_string_pretty(&rows)?)?;
+        crate::ui::factory::daemon::runtime::teams::replace_inbox_file(
+            path,
+            serde_json::to_string_pretty(&rows)?.as_bytes(),
+        )?;
         Ok(value)
     })();
     let _ = fs2::FileExt::unlock(&file);

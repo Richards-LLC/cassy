@@ -11,6 +11,16 @@ use tempfile::TempDir;
 #[path = "support/builtin_catalog.rs"]
 mod builtin_catalog;
 
+#[path = "support/worker_sync_isolation.rs"]
+mod worker_sync_isolation;
+
+#[test]
+fn cas_76e4_image_sync_leaves_the_worker_worktree_untouched() {
+    worker_sync_isolation::assert_worker_cases_are_hermetic(&[
+        "cas_image_generate_skill_test::cas_update_syncs_the_skill_to_all_enabled_harnesses",
+    ]);
+}
+
 fn load(relative: &str) -> &'static str {
     builtin_catalog::find_source_path(relative)
 }

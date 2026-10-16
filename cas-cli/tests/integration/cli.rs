@@ -1,6 +1,9 @@
 //! Cli integration suites, linked once.
 //! Run with nextest for one-process-per-test environment/cwd isolation.
 
+#[path = "../../src/test_env_guard.rs"]
+mod test_env_guard;
+
 #[path = "../artifact_publish_test.rs"]
 mod artifact_publish_test;
 #[path = "../bridge_server_sse_test.rs"]

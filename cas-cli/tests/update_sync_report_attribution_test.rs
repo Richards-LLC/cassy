@@ -16,6 +16,19 @@ use assert_cmd::Command;
 use std::path::Path;
 use tempfile::TempDir;
 
+#[path = "support/worker_sync_isolation.rs"]
+mod worker_sync_isolation;
+
+#[test]
+fn cas_76e4_cli_cases_leave_the_worker_worktree_untouched() {
+    worker_sync_isolation::assert_worker_cases_are_hermetic(&[
+        "update_sync_report_attribution_test::sync_attributes_every_claimed_write_to_the_directory_it_landed_in",
+        "update_sync_report_attribution_test::codex_sync_reports_its_own_result_and_is_idempotent",
+        "update_sync_report_attribution_test::unwritable_codex_destination_fails_loudly_instead_of_claiming_success",
+        "viktor_distribution_test::clean_init_and_sync_distribute_viktor_skill_and_status_never_prints_a_key",
+    ]);
+}
+
 fn cas_cmd(root: &Path) -> Command {
     let mut cmd = Command::new(cas::test_paths::cas_binary());
     let home = root.join(".test-home");

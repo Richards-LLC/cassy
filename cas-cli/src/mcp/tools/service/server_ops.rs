@@ -42,6 +42,7 @@ pub(super) fn render_server_line(
     record: &RegisteredServer,
     liveness: ServerLiveness,
     observed_ports: &[u16],
+    live_descendants: usize,
 ) -> String {
     let state = match (record.state, liveness) {
         // The record's own claim is only trusted once reality agrees.
@@ -85,9 +86,10 @@ pub(super) fn render_server_line(
     } else {
         " [private: dies with its worker]"
     };
+    // cas-5a88: the caller observes the process tree, so this stays pure.
     let descendant_count =
         if record.state == ServerState::Running && liveness == ServerLiveness::Live {
-            server_registry::live_descendant_count(record)
+            live_descendants
         } else {
             0
         };
@@ -448,13 +450,17 @@ impl CasService {
             }
             matching += 1;
             if lines.len() < limit {
-                let ports =
-                    if record.state == ServerState::Running && liveness == ServerLiveness::Live {
-                        server_registry::listening_ports(record)
-                    } else {
-                        Vec::new()
-                    };
-                lines.push(render_server_line(record, liveness, &ports));
+                let observed =
+                    record.state == ServerState::Running && liveness == ServerLiveness::Live;
+                let (ports, descendants) = if observed {
+                    (
+                        server_registry::listening_ports(record),
+                        server_registry::live_descendant_count(record),
+                    )
+                } else {
+                    (Vec::new(), 0)
+                };
+                lines.push(render_server_line(record, liveness, &ports, descendants));
             }
         }
 

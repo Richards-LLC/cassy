@@ -94,6 +94,14 @@ pub(crate) enum QueueStamp {
         failed: u32,
         detail: Option<String>,
     },
+    /// cas-d5ab: the recipient worker was seen working (a wake-gate decline
+    /// for a tool call in flight), recorded through cas-7156's per-worker
+    /// activity recorder.
+    WorkerActivity {
+        cas_dir: PathBuf,
+        agent_id: String,
+        reason: String,
+    },
     /// No write: completes after every earlier stamp for the same row and
     /// recipient, and clears the row's in-flight entry.
     Settled,
@@ -113,6 +121,7 @@ impl QueueStamp {
             Self::Suppressed { .. } => "suppressed",
             Self::Abandoned { .. } => "abandoned",
             Self::BroadcastOutcome { .. } => "broadcast_outcome",
+            Self::WorkerActivity { .. } => "worker_activity",
             Self::Settled => "settled",
         }
     }
@@ -147,6 +156,12 @@ impl QueueStamp {
                 failed,
                 detail,
             } => queue.mark_broadcast_outcome(row, *attempted, *succeeded, *failed, detail.as_deref()),
+            Self::WorkerActivity {
+                cas_dir,
+                agent_id,
+                reason,
+            } => cas_factory::director::record_worker_activity(cas_dir, agent_id, "wake_gate", reason)
+                .map_err(|error| cas_store::StoreError::Other(error.to_string())),
             Self::Settled => Ok(()),
         }
     }

@@ -28,6 +28,10 @@ CREATE TABLE IF NOT EXISTS violet_admission_cursors (
     message_ts TEXT NOT NULL,
     PRIMARY KEY(reader_slot_id,workspace_id,channel_id)
 );
+CREATE TRIGGER IF NOT EXISTS violet_admission_identity_immutable
+BEFORE UPDATE OF delivery_id,occurrence_id,reader_slot_id,project_id,target_json,prompt_id
+ON violet_admissions
+BEGIN SELECT RAISE(ABORT, 'Violet admission identity is immutable'); END;
 "#;
 
 #[derive(Debug, Clone)]
@@ -157,9 +161,158 @@ impl SqliteVioletAdmissionStore {
     }
 
     /// Only a committed receipt may authorize an admission acknowledgement.
-    pub fn admit(&self, _input: &VioletAdmissionInput) -> Result<VioletAdmissionReceipt> {
-        Err(StoreError::Other(
-            "v2 durable admission is not implemented".into(),
-        ))
+    pub fn admit(&self, input: &VioletAdmissionInput) -> Result<VioletAdmissionReceipt> {
+        for value in [
+            &input.delivery_id,
+            &input.occurrence_id,
+            &input.reader_slot_id,
+            &input.registration_id,
+            &input.project_id,
+            &input.workspace_id,
+            &input.channel_id,
+            &input.factory_session,
+            &input.recipient,
+            &input.lease_token,
+        ] {
+            if value.trim().is_empty() {
+                return Err(StoreError::Other(
+                    "Violet admission has an empty identity".into(),
+                ));
+            }
+        }
+        if input.delivery_generation < 1 || input.route_generation < 0 {
+            return Err(StoreError::Other(
+                "invalid Violet delivery generation".into(),
+            ));
+        }
+        slack_timestamp_parts(&input.message_ts)?;
+        let receipt = crate::shared_db::with_immediate_write_txn_pooled(&self.queue.conn, |tx| {
+            let existing: Option<(String, i64, String, i64, String, String, String, String)> = tx
+                .query_row(
+                    "SELECT delivery_id,prompt_id,registration_id,delivery_generation,project_id,
+                        target_json,factory_session,recipient FROM violet_admissions
+                 WHERE occurrence_id=?1 AND reader_slot_id=?2",
+                    params![input.occurrence_id, input.reader_slot_id],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                            r.get(7)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((
+                id,
+                prompt_id,
+                registration,
+                generation,
+                project,
+                target,
+                session,
+                recipient,
+            )) = existing
+            {
+                if id != input.delivery_id
+                    || registration != input.registration_id
+                    || generation != input.delivery_generation
+                    || project != input.project_id
+                    || target != input.target_json
+                    || session != input.factory_session
+                    || recipient != input.recipient
+                {
+                    return Err(StoreError::Other(
+                        "conflicting Violet admission identity or registration; authorized rebind required".into()));
+                }
+                tx.execute("UPDATE violet_admissions SET lease_token=?2,ack_pending=1 WHERE delivery_id=?1",
+                    params![id,input.lease_token])?;
+                return Ok(VioletAdmissionReceipt {
+                    delivery_id: id,
+                    prompt_id,
+                    created: false,
+                });
+            }
+            let key =
+                serde_json::to_string(&["violet-v2", &input.occurrence_id, &input.reader_slot_id])
+                    .map_err(|error| StoreError::Other(error.to_string()))?;
+            let source = format!("violet-activity:{}", input.channel_id);
+            tx.execute("INSERT INTO prompt_queue
+                (source,target,prompt,created_at,factory_session,summary,priority,urgent,dedupe_key,origin_kind)
+                VALUES (?1,?2,?3,?4,?5,'Managed Slack occurrence',?6,0,?7,'daemon')",
+                params![source,input.recipient,input.prompt,Utc::now().to_rfc3339(),input.factory_session,
+                    i32::from(NotificationPriority::High),key])?;
+            let prompt_id = tx.last_insert_rowid();
+            tx.execute("INSERT INTO violet_admissions
+                (delivery_id,occurrence_id,reader_slot_id,registration_id,delivery_generation,
+                 route_generation,project_id,target_json,factory_session,recipient,prompt_id,lease_token)
+                VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![input.delivery_id,input.occurrence_id,input.reader_slot_id,input.registration_id,
+                    input.delivery_generation,input.route_generation,input.project_id,input.target_json,
+                    input.factory_session,input.recipient,prompt_id,input.lease_token])?;
+            let cursor: Option<String> = tx
+                .query_row(
+                    "SELECT message_ts FROM violet_admission_cursors
+                WHERE reader_slot_id=?1 AND workspace_id=?2 AND channel_id=?3",
+                    params![input.reader_slot_id, input.workspace_id, input.channel_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let advance = match cursor {
+                None => true,
+                Some(cursor) => slack_timestamp_after(&input.message_ts, &cursor)?,
+            };
+            if advance {
+                tx.execute("INSERT INTO violet_admission_cursors(reader_slot_id,workspace_id,channel_id,message_ts)
+                    VALUES (?1,?2,?3,?4) ON CONFLICT(reader_slot_id,workspace_id,channel_id)
+                    DO UPDATE SET message_ts=excluded.message_ts",
+                    params![input.reader_slot_id,input.workspace_id,input.channel_id,input.message_ts])?;
+            }
+            let _ = capture_message_event(tx, &source, &input.recipient);
+            Ok(VioletAdmissionReceipt {
+                delivery_id: input.delivery_id.clone(),
+                prompt_id,
+                created: true,
+            })
+        })?;
+        if receipt.created {
+            self.queue.signal_inbox(&input.recipient);
+        }
+        Ok(receipt)
     }
+}
+
+fn slack_timestamp_parts(value: &str) -> Result<(&str, &str)> {
+    let Some((seconds, fraction)) = value.split_once('.') else {
+        return Err(StoreError::Other("invalid Slack timestamp".into()));
+    };
+    if seconds.is_empty()
+        || fraction.is_empty()
+        || !seconds
+            .bytes()
+            .chain(fraction.bytes())
+            .all(|b| b.is_ascii_digit())
+    {
+        return Err(StoreError::Other("invalid Slack timestamp".into()));
+    }
+    Ok((seconds.trim_start_matches('0'), fraction))
+}
+
+fn slack_timestamp_after(next: &str, current: &str) -> Result<bool> {
+    let (ns, nf) = slack_timestamp_parts(next)?;
+    let (cs, cf) = slack_timestamp_parts(current)?;
+    let seconds = ns.len().cmp(&cs.len()).then_with(|| ns.cmp(cs));
+    let width = nf.len().max(cf.len());
+    Ok(seconds
+        .then_with(|| {
+            nf.bytes()
+                .chain(std::iter::repeat(b'0'))
+                .take(width)
+                .cmp(cf.bytes().chain(std::iter::repeat(b'0')).take(width))
+        })
+        .is_gt())
 }

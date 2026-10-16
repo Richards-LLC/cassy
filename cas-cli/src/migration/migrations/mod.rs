@@ -254,6 +254,7 @@ mod m275_events_type_created_index;
 mod m276_qa_batch_receipts;
 mod m277_communication_slos;
 mod m278_external_work_request_journal;
+mod m279_violet_reader_admissions;
 pub(crate) use m262_tasks_normalize_proof_targets::normalize_legacy_proof_targets;
 
 /// All migrations in order. IDs must be sequential and never reused.
@@ -545,6 +546,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m276_qa_batch_receipts::MIGRATION,
     m277_communication_slos::MIGRATION,
     m278_external_work_request_journal::MIGRATION,
+    m279_violet_reader_admissions::MIGRATION,
 ];
 
 #[cfg(test)]

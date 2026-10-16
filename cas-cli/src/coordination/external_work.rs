@@ -19,7 +19,8 @@ pub const TOTAL_REMOTE_BUDGET: Duration = Duration::from_secs(8);
 pub const CALL_REMOTE_BUDGET: Duration = Duration::from_secs(5);
 pub const RECONCILE_BATCH_LIMIT: usize = 8;
 
-pub const EXTERNAL_WORK_SCHEMA: &str = r#"
+pub const EXTERNAL_WORK_SCHEMA_STATEMENTS: &[&str] = &[
+    r#"
 CREATE TABLE IF NOT EXISTS external_work_operations (
     request_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -34,9 +35,13 @@ CREATE TABLE IF NOT EXISTS external_work_operations (
     lease_until_ms INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_external_work_due
-    ON external_work_operations(stage, next_retry_ms, lease_until_ms);
+)
+"#,
+    "CREATE INDEX IF NOT EXISTS idx_external_work_due
+     ON external_work_operations(stage, next_retry_ms, lease_until_ms)",
+];
+
+const EXTERNAL_WORK_TRIGGER_SCHEMA: &str = r#"
 CREATE TRIGGER IF NOT EXISTS external_work_request_immutable
 BEFORE UPDATE OF request_id, kind, input_digest, input_json ON external_work_operations
 BEGIN SELECT RAISE(ABORT, 'external work request identity is immutable'); END;
@@ -106,10 +111,13 @@ impl SqliteRequestJournal {
     }
 
     pub fn init(&self) -> Result<(), JournalError> {
-        self.conn
+        let conn = self
+            .conn
             .lock()
-            .map_err(|_| JournalError::Storage("connection lock poisoned".into()))?
-            .execute_batch(EXTERNAL_WORK_SCHEMA)
+            .map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
+        let schema = EXTERNAL_WORK_SCHEMA_STATEMENTS.join(";\n");
+        conn.execute_batch(&schema)
+            .and_then(|()| conn.execute_batch(EXTERNAL_WORK_TRIGGER_SCHEMA))
             .map_err(|error| JournalError::Storage(error.to_string()))
     }
 

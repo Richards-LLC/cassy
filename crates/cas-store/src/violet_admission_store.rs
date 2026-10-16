@@ -473,6 +473,23 @@ mod tests {
     }
 
     #[test]
+    fn cas_c423_store_explicit_ack_is_consumed_on_successor_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let row = input();
+        let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        let first = store.admit(&row).unwrap();
+        let queue = SqlitePromptQueueStore::open(root.path()).unwrap();
+        queue.ack(first.prompt_id).unwrap();
+        let binding = successor(&row);
+        let recovered = store.recover_known(&binding, VioletConsumption::Queued).unwrap();
+        assert_eq!(recovered.admission.prompt_id, first.prompt_id);
+        assert_eq!(recovered.consumption, VioletConsumption::Consumed);
+        assert_eq!(recovered.recovery_prompt_id, None);
+        assert!(queue.peek_unseen_for_recipient(&binding.recipient,
+            Some(&binding.factory_session), 10).unwrap().is_empty());
+    }
+
+    #[test]
     fn cas_c423_store_recovery_notice_and_retirement_roll_back_together() {
         let root = tempfile::tempdir().unwrap();
         let row = input();

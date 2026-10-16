@@ -81,7 +81,9 @@ pub fn execute(args: &AccountsArgs, cli: &Cli) -> Result<()> {
                 }
                 let done = accounts::apply(plan, &home, &stamp)?;
                 if !cli.json {
-                    println!(
+                    print!(
+                        "{}",
+                        crate::cloud::presence::wrap_line(&format!(
                         "[OK] {}: {} file{} merged ({} conflict{} kept side by side), {} link{}, {} dir change{}",
                         plan.provider.name(),
                         done.merged,
@@ -92,6 +94,7 @@ pub fn execute(args: &AccountsArgs, cli: &Cli) -> Result<()> {
                         if done.linked == 1 { "" } else { "s" },
                         done.dir_changes,
                         if done.dir_changes == 1 { "" } else { "s" },
+                    ))
                     );
                     println!("  Backup: {}", done.backup.display());
                     println!("  Undo:   bash {}", done.restore.display());

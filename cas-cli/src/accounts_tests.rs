@@ -121,12 +121,14 @@ fn cas_e1f4_dry_run_lists_planned_links_merges_and_conflicts() {
 
     let text = render_plan(&plan, h);
     // pin: the dry run's verdict and every kind of change.
-    assert!(text.starts_with("[PLAN] claude: 5 account dirs"), "{text}");
-    assert!(text.contains("Retire ~/.claude into the backup (login a@x.com duplicates .claude-a@x.com)"), "{text}");
-    assert!(text.contains("Rename ~/.claude-alt to ~/.claude-b@x.com (unique login)"), "{text}");
+    assert!(text.starts_with("[PLAN] claude: "), "{text}");
+    assert!(text.contains("from 5 account dirs"), "{text}");
+    assert!(text.contains("Retire ~/.claude: login a@x.com duplicates .claude-a@x.com"), "{text}");
+    assert!(text.contains("Rename ~/.claude-alt to ~/.claude-b@x.com: unique login"), "{text}");
     assert!(text.contains("Conflict settings.json from ~/.claude-alt: kept as settings.json.from-claude-alt"), "{text}");
     assert!(text.contains("Merge commands from ~/.claude-a@x.com: 1 file"), "{text}");
-    assert!(text.contains("Link ~/.claude-a@x.com/skills -> base (was link -> "), "{text}");
+    assert!(text.contains("Link ~/.claude-a@x.com: "), "{text}");
+    assert!(text.lines().all(|line| line.chars().count() <= 80), "{text}");
 
     // The dry run wrote nothing.
     assert!(!Provider::Claude.base_dir(h).exists());

@@ -1020,46 +1020,46 @@ pub fn link_new_account(provider: Provider, home: &Path, account: &Path) -> Resu
     Ok(linked)
 }
 
-/// The dry run, for people: what moves, merges, conflicts and links.
+/// The dry run, for people: what moves, merges, conflicts and links, each
+/// line wrapped to 80 columns. `--json` carries every file.
 pub fn render_plan(plan: &Plan, home: &Path) -> String {
+    use crate::cloud::presence::wrap_line;
     let short = |path: &Path| match path.strip_prefix(home) {
         Ok(rest) => format!("~/{}", rest.display()),
         Err(_) => path.display().to_string(),
     };
+    let plural = |count: usize, word: &str| {
+        format!("{count} {word}{}", if count == 1 { "" } else { "s" })
+    };
     let conflicts = plan.conflicts().count();
-    let mut out = format!(
-        "{} {}: {} account dir{}, {} file{} into {}, {} conflict{}, {} link{}, {} dir change{}\n",
+    let mut out = wrap_line(&format!(
+        "{} {}: {}, {}, {}, {}",
         if plan.is_empty() { "[OK]" } else { "[PLAN]" },
         plan.provider.name(),
-        plan.accounts.len(),
-        if plan.accounts.len() == 1 { "" } else { "s" },
-        plan.merges.len() - conflicts,
-        if plan.merges.len() - conflicts == 1 { "" } else { "s" },
+        plural(plan.merges.len() - conflicts, "file"),
+        plural(conflicts, "conflict"),
+        plural(plan.links.len(), "link"),
+        plural(plan.dir_changes.len(), "dir change"),
+    ));
+    out.push_str("  ");
+    out.push_str(&wrap_line(&format!(
+        "base {} from {}",
         short(&plan.base),
-        conflicts,
-        if conflicts == 1 { "" } else { "s" },
-        plan.links.len(),
-        if plan.links.len() == 1 { "" } else { "s" },
-        plan.dir_changes.len(),
-        if plan.dir_changes.len() == 1 { "" } else { "s" },
-    );
+        plural(plan.accounts.len(), "account dir")
+    )));
     if plan.is_empty() {
         out.push_str("  Every account already links its shared items to the base.\n");
     }
     if plan.create_base {
-        out.push_str(&format!("Create {}\n", short(&plan.base)));
+        out.push_str(&wrap_line(&format!("Create {}", short(&plan.base))));
     }
     for change in &plan.dir_changes {
-        match change {
-            DirChange::Retire { label, reason } => {
-                out.push_str(&format!("Retire ~/{label} into the backup ({reason})\n"))
-            }
-            DirChange::Rename { label, to } => {
-                out.push_str(&format!("Rename ~/{label} to ~/{to} (unique login)\n"))
-            }
-        }
+        out.push_str(&wrap_line(&match change {
+            DirChange::Retire { label, reason } => format!("Retire ~/{label}: {reason}"),
+            DirChange::Rename { label, to } => format!("Rename ~/{label} to ~/{to}: unique login"),
+        }));
     }
-    // Merges grouped per account and top-level item, so a projects/ tree
+    // Copies grouped per account and top-level item, so a projects/ tree
     // reads as one line.
     let mut groups: BTreeMap<(String, String), usize> = BTreeMap::new();
     for merge in plan.merges.iter().filter(|merge| merge.kind == MergeKind::Copy) {
@@ -1067,10 +1067,10 @@ pub fn render_plan(plan: &Plan, home: &Path) -> String {
         *groups.entry((merge.account.clone(), item)).or_default() += 1;
     }
     for ((account, item), count) in groups {
-        out.push_str(&format!(
-            "Merge {item} from ~/{account}: {count} file{}\n",
-            if count == 1 { "" } else { "s" }
-        ));
+        out.push_str(&wrap_line(&format!(
+            "Merge {item} from ~/{account}: {}",
+            plural(count, "file")
+        )));
     }
     let count = |kind: MergeKind| plan.merges.iter().filter(|m| m.kind == kind).count();
     let (memory, registries, caches) = (
@@ -1079,39 +1079,40 @@ pub fn render_plan(plan: &Plan, home: &Path) -> String {
         count(MergeKind::Newest),
     );
     if memory > 0 {
-        out.push_str(&format!(
-            "Union {memory} project memory index{} (MEMORY.md), so every account's memories stay listed\n",
+        out.push_str(&wrap_line(&format!(
+            "Union {memory} project memory index{} (MEMORY.md): every account's memories stay listed",
             if memory == 1 { "" } else { "es" }
-        ));
+        )));
     }
     if registries > 0 {
-        out.push_str(&format!(
-            "Union {registries} plugin registr{} (installed and known marketplaces)\n",
+        out.push_str(&wrap_line(&format!(
+            "Union {registries} plugin registr{} (installed and known marketplaces)",
             if registries == 1 { "y" } else { "ies" }
-        ));
+        )));
     }
     if caches > 0 {
-        out.push_str(&format!(
-            "Keep the newest of {caches} regenerable cache file{} (plugin marketplaces, synced skills)\n",
-            if caches == 1 { "" } else { "s" }
-        ));
+        out.push_str(&wrap_line(&format!(
+            "Keep the newest of {} (plugin marketplaces, synced skills)",
+            plural(caches, "regenerable cache file")
+        )));
     }
     // Every conflict a person reviews, listed in full: they are few once
     // caches, memory indexes and registries merge themselves.
     for merge in plan.conflicts() {
-        out.push_str(&format!(
-            "Conflict {} from ~/{}: kept as {}\n",
+        out.push_str(&wrap_line(&format!(
+            "Conflict {} from ~/{}: kept as {}",
             merge.rel, merge.account, merge.to
-        ));
+        )));
     }
+    let mut per_account: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for link in &plan.links {
-        out.push_str(&format!(
-            "Link ~/{}/{} -> base (was {})\n",
-            link.account, link.item, link.was
-        ));
+        per_account.entry(&link.account).or_default().push(&link.item);
+    }
+    for (account, items) in per_account {
+        out.push_str(&wrap_line(&format!("Link ~/{account}: {}", items.join(", "))));
     }
     for note in &plan.notes {
-        out.push_str(&format!("Note: {note}\n"));
+        out.push_str(&wrap_line(&format!("Note: {note}")));
     }
     out
 }

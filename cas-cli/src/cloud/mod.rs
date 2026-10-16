@@ -116,7 +116,8 @@ pub use sync_queue::{
     parse_wire_revision, wire_revision,
 };
 pub(crate) use sync_queue::{
-    TaskSyncFulfillMode, TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload,
+    DependencyEndpointState, TaskSyncFulfillMode, TaskSyncFulfillResult, TaskSyncIntent,
+    TaskSyncPayload,
 };
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,

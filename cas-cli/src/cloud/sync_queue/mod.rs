@@ -27,6 +27,7 @@ mod tests;
 mod types;
 mod unauthored;
 
+pub(crate) use dependency_repair::DependencyEndpointState;
 pub(crate) use task_intents::{
     TaskSyncFulfillMode, TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload,
 };

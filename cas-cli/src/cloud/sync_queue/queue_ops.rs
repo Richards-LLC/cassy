@@ -559,6 +559,49 @@ impl SyncQueue {
         Ok(items)
     }
 
+    /// The next personal rows a push may send, in FIFO order.
+    ///
+    /// Same selection as [`Self::pending_for_entity_type`], except a
+    /// dependency edge whose endpoint task still has a pending row in the same
+    /// scope is left out (cas-9b5d). Such an edge cannot be sent until that
+    /// task is acknowledged; selecting it anyway let a full batch of waiting
+    /// edges at the head of the queue push nothing, so the push stopped every
+    /// round and never reached the endpoint tasks or anything behind them.
+    pub fn pushable_pending_for_entity_type(
+        &self,
+        entity_type: Option<EntityType>,
+        limit: usize,
+        max_retries: i32,
+    ) -> Result<Vec<QueuedSync>, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            r#"
+            SELECT id, entity_type, entity_id, operation, payload, team_id, project_id, created_at, retry_count, last_error, last_outcome, last_reason, failed_client_version
+            FROM sync_queue AS q
+            WHERE retry_count < ?1 AND (team_id IS NULL OR team_id = '')
+              AND entity_type != 'knowledge_page'
+              AND (?3 IS NULL OR entity_type = ?3)
+              AND NOT {waiting}
+            ORDER BY created_at ASC, id ASC
+            LIMIT ?2
+            "#,
+            waiting = super::dependency_repair::EDGE_AWAITS_PENDING_ENDPOINT,
+        ))?;
+
+        let items = stmt
+            .query_map(
+                params![
+                    max_retries,
+                    limit as i64,
+                    entity_type.map(|kind| kind.as_str())
+                ],
+                Self::map_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(items)
+    }
+
     /// Get retained failed personal rows for operator-facing diagnostics.
     pub fn failed_for_entity_type(
         &self,

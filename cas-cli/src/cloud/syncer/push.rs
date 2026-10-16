@@ -60,7 +60,7 @@ impl CloudSyncer {
     /// Describe the exact next queue batch without mutating it.
     pub fn plan_push(&self, scope: PushScope) -> Result<PushPlan, CasError> {
         let batch_limit = self.config.batch_size.max(1);
-        let items = self.queue.pending_for_entity_type(
+        let items = self.queue.pushable_pending_for_entity_type(
             scope.entity_type(),
             batch_limit,
             self.config.max_retries,
@@ -171,16 +171,11 @@ impl CloudSyncer {
                 break;
             }
 
-            let pending = match scope.entity_type() {
-                Some(entity_type) => self.queue.pending_by_type_for_entity(
-                    entity_type,
-                    batch_limit,
-                    self.config.max_retries,
-                )?,
-                None => self
-                    .queue
-                    .pending_by_type(batch_limit, self.config.max_retries)?,
-            };
+            let pending = self.queue.pushable_pending_by_type(
+                scope.entity_type(),
+                batch_limit,
+                self.config.max_retries,
+            )?;
 
             if pending.is_empty() {
                 if !sessions.is_empty() {
@@ -223,6 +218,41 @@ impl CloudSyncer {
         result.remaining_backlog = self.remaining_backlog(scope)?;
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
+    }
+
+    /// Decide whether a queued dependency edge may be sent now (cas-9b5d).
+    /// `false` withholds it: it waits while an endpoint task row is still
+    /// pending, and is parked as `dependency_endpoint_unavailable` when only
+    /// terminally parked endpoint rows remain. The parked edge's diagnostic
+    /// names the endpoint and its reason, so retrying that reason (or a plain
+    /// `cas cloud queue --retry`) releases the endpoint and the edge together.
+    pub(super) fn release_dependency_edge(
+        &self,
+        item: &QueuedSync,
+        from: &str,
+        to: &str,
+        team: &str,
+    ) -> Result<bool, CasError> {
+        match self.queue.dependency_endpoint_state(from, to, team, self.config.max_retries)? {
+            crate::cloud::DependencyEndpointState::Clear => Ok(true),
+            crate::cloud::DependencyEndpointState::Pending => {
+                self.queue
+                    .record_diagnostic(item.id, "waiting for endpoint task acknowledgment")?;
+                Ok(false)
+            }
+            crate::cloud::DependencyEndpointState::Parked { endpoint, reason } => {
+                self.queue.park_intentionally_with_error(
+                    item.id,
+                    "dependency_endpoint_unavailable",
+                    &format!(
+                        "dependency_endpoint_unavailable: endpoint task {endpoint} is parked \
+                         in the outbox ({reason}); retry it to release this edge"
+                    ),
+                    self.config.max_retries,
+                )?;
+                Ok(false)
+            }
+        }
     }
 
     /// Drop queued writes for rows this project did not author, whether they
@@ -613,13 +643,14 @@ impl CloudSyncer {
                             );
                             continue;
                         }
-                        if entity_type == "task_dependencies" {
-                            if let (Some(from),Some(to))=(v.get("from_id").and_then(|v|v.as_str()),v.get("to_id").and_then(|v|v.as_str())) {
-                                if self.queue.dependency_endpoint_queued(from,to,"")? {
-                                    self.queue.record_diagnostic(item.id,"waiting for endpoint task acknowledgment")?;
-                                    continue;
-                                }
-                            }
+                        if entity_type == "task_dependencies"
+                            && let (Some(from), Some(to)) = (
+                                v.get("from_id").and_then(|v| v.as_str()),
+                                v.get("to_id").and_then(|v| v.as_str()),
+                            )
+                            && !self.release_dependency_edge(item, from, to, "")?
+                        {
+                            continue;
                         }
                         upsert_entries.push((*item, self.with_base_revision(item, v)))
                     }

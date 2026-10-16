@@ -195,6 +195,7 @@ use std::collections::HashMap;
 pub(crate) struct RecipientInputs {
     pub latest: crate::mcp::tools::service::harness_observation::HarnessObservations,
     pub tool_call: ToolCallEvidence,
+    pub has_transcript: bool,
     pub wait: WorkerWaitState,
     active_until: Option<chrono::DateTime<chrono::Utc>>,
     first_prompt_until: Option<chrono::DateTime<chrono::Utc>>,
@@ -212,6 +213,9 @@ impl RecipientInputs {
         }
     }
     pub(crate) fn mid_turn(&self) -> Option<bool> {
+        if !self.has_transcript {
+            return None;
+        }
         Some(match (&self.latest.wake, &self.latest.completion) {
             (Some(start), Some(end)) => start.at > end.at,
             (Some(_), None) => true,
@@ -299,12 +303,15 @@ impl PromptPreparation {
                 recipients.insert(row.target.clone());
             }
         }
-        let need_worker_wait = rows.iter().any(|row| {
-            matches!(
-                row.origin,
-                Some(cas_store::QueueOrigin::RegisteredAgent { .. })
-            )
-        });
+        let sender_ids: HashSet<String> = rows
+            .iter()
+            .filter_map(|row| match &row.origin {
+                Some(cas_store::QueueOrigin::RegisteredAgent { agent_id }) => {
+                    Some(agent_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
         self.generation += 1;
         let generation = self.generation;
         let submitted = jobs.submit_external(
@@ -317,7 +324,7 @@ impl PromptPreparation {
                 budget: Duration::from_millis(100),
             },
             move || {
-                let inputs = read_wake_inputs(&cas_dir, &supervisor, &recipients, need_worker_wait);
+                let inputs = read_wake_inputs(&cas_dir, &supervisor, &recipients, &sender_ids);
                 super::delivery::wake_daemon_after_enqueue(&cas_dir);
                 Box::new(inputs)
             },
@@ -370,11 +377,16 @@ fn read_wake_inputs(
     cas_dir: &std::path::Path,
     supervisor: &str,
     recipients: &HashSet<String>,
-    need_worker_wait: bool,
+    sender_ids: &HashSet<String>,
 ) -> Result<WakeInputs, String> {
     let agents = crate::store::open_agent_store(cas_dir)
-        .and_then(|store| store.list(None))
+        .and_then(|store| Ok(store.list(None)?))
         .map_err(|error| error.to_string())?;
+    let need_worker_wait = agents.iter().any(|agent| {
+        sender_ids.contains(&agent.id)
+            && agent.role == cas_types::AgentRole::Supervisor
+            && agent.name.eq_ignore_ascii_case(supervisor)
+    });
     let blocked: HashSet<String> = if need_worker_wait {
         crate::store::open_task_store_cached(cas_dir)
             .ok()
@@ -390,6 +402,20 @@ fn read_wake_inputs(
     let mut observations = HashMap::new();
     for name in recipients {
         let Some(agent) = agents.iter().find(|agent| agent.name == *name) else {
+            observations.insert(
+                name.clone(),
+                RecipientInputs {
+                    latest: Default::default(),
+                    tool_call: ToolCallEvidence::Unknown,
+                    has_transcript: false,
+                    active_until: None,
+                    first_prompt_until: None,
+                    wait: WorkerWaitState {
+                        harness_waiting_for_input: false,
+                        task_blocked: blocked.contains(&name.to_ascii_lowercase()),
+                    },
+                },
+            );
             continue;
         };
         let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(agent);
@@ -440,6 +466,7 @@ fn read_wake_inputs(
             RecipientInputs {
                 latest,
                 tool_call,
+                has_transcript: path.is_some(),
                 active_until,
                 first_prompt_until,
                 wait: WorkerWaitState {

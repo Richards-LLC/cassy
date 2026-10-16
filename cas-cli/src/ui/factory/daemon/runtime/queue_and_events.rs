@@ -7809,6 +7809,11 @@ impl FactoryDaemon {
     /// the next one. On the daemon's lanes the selection lands on a later
     /// call (the job's ready flag wakes the loop); inline it lands at once.
     fn next_queue_selection(&mut self) -> Option<super::prompt_queue_jobs::QueueSelection> {
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        self.queue_jobs.settle_injects(&cas_dir);
+        self.queue_jobs.apply_completions();
+        self.queue_jobs.expire_injects(&cas_dir, Instant::now());
+        self.queue_jobs.expire_claims(&cas_dir, Instant::now());
         let raw = if self.queue_jobs.prompt_preparation.has_pending() { None }
             else { self.next_unprepared_queue_selection() };
         let mut preparation = std::mem::take(&mut self.queue_jobs.prompt_preparation);
@@ -7821,12 +7826,6 @@ impl FactoryDaemon {
 
     fn next_unprepared_queue_selection(&mut self) -> Option<super::prompt_queue_jobs::QueueSelection> {
         let cas_dir = self.app.cas_dir().to_path_buf();
-        // A pass that returned early still owes its settling stamps.
-        self.queue_jobs.settle_injects(&cas_dir);
-        self.queue_jobs.apply_completions();
-        self.queue_jobs.expire_injects(&cas_dir, Instant::now());
-        // cas-786a6: a claim whose row was not delivered in time is released.
-        self.queue_jobs.expire_claims(&cas_dir, Instant::now());
         if let Some(selection) = self.queue_jobs.take_selection() {
             return Some(selection);
         }

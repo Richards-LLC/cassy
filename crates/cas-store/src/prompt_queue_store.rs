@@ -1396,6 +1396,52 @@ const RELAY_SESSION_ENDED_SQL: &str = "NULLIF(factory_session, '') IS NOT NULL
        )";
 
 impl SqlitePromptQueueStore {
+    /// Revalidate terminal-task relays at the final recipient boundary, under
+    /// the same transaction that would otherwise receipt their body. Daemon
+    /// ticks cannot protect a hook/poll that drains first (cas-1485).
+    fn expire_terminal_task_relays_in_tx(
+        tx: &ImmediateTx<'_>,
+        prompts: Vec<QueuedPrompt>,
+    ) -> Result<Vec<QueuedPrompt>> {
+        if !prompts.iter().any(|prompt| prompt.source.starts_with("lifecycle-wake:")) {
+            return Ok(prompts);
+        }
+        let has_tasks: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
+            [], |row| row.get(0),
+        )?;
+        if !has_tasks { return Ok(prompts); }
+        let mut current = Vec::with_capacity(prompts.len());
+        for prompt in prompts {
+            let terminal = if prompt.source.starts_with("lifecycle-wake:") {
+                if let Some(envelope) = cas_types::parse_lifecycle_envelope(&prompt.prompt) {
+                    tx.query_row(
+                        "SELECT status FROM tasks WHERE id = ?1 AND status IN ('closed', 'cancelled')",
+                        params![envelope.task_id], |row| row.get::<_, String>(0),
+                    ).optional()?
+                        .filter(|status| status != &envelope.new_status.to_string())
+                        .map(|status| (envelope.task_id, status))
+                } else { None }
+            } else { None };
+            if let Some((task_id, status)) = terminal {
+                let detail = format!("lifecycle relay for {task_id} superseded by terminal task state {status} at recipient drain");
+                Self::atomic_stage_stamp_in_tx(tx, prompt.id, DeliveryStage::Suppressed,
+                    AtomicStampOpts {
+                        reason: Some(PendingReason::SupersededStale), detail: Some(&detail), set_processed: true,
+                        broadcast_attempted: None, broadcast_succeeded: None, broadcast_failed: None,
+                    })?;
+                tx.execute(
+                    "UPDATE prompt_queue SET acked_via = CASE WHEN acked_at IS NULL THEN 'terminal_task_reconciled' ELSE acked_via END,
+                        acked_at = COALESCE(acked_at, ?1) WHERE id = ?2",
+                    params![Utc::now().to_rfc3339(), prompt.id],
+                )?;
+            } else {
+                current.push(prompt);
+            }
+        }
+        Ok(current)
+    }
+
     /// cas-5871: reconcile terminal relays whose task closed and/or whose
     /// session ended. A read-only existence check comes first, so a status
     /// read with nothing to reconcile never takes the write lock; when there
@@ -8741,6 +8787,7 @@ impl SqlitePromptQueueStore {
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()?
             };
+            let prompts = Self::expire_terminal_task_relays_in_tx(&tx, prompts)?;
             // cas-1f0c: keep only what the caller can render whole; a row
             // that does not fit gets no receipt and stays unread.
             let mut over_budget: Vec<(i64, usize)> = Vec::new();
@@ -8940,8 +8987,42 @@ mod tests {
                 let report = store.message_delivery_report(id).unwrap().unwrap();
                 assert_eq!(report.pending_reason, Some(PendingReason::SupersededStale), "{path}");
                 assert!(report.pending_detail.as_deref().is_some_and(|detail| detail.contains(&task.id)), "{path}");
+                assert!(report.confirmed_at.is_some(), "resolved forensic row must be acknowledged: {path}");
+                assert_eq!(store.recipient_receipt(id, "supervisor").unwrap(),
+                    (path == "poll_repeat").then_some(SurfacingSource::InboxPoll),
+                    "withholding must not fabricate a fresh hook/poll receipt: {path}");
             }
         }
+    }
+
+    #[test]
+    fn cas_1485_current_terminal_reports_and_uncertain_payloads_still_surface() {
+        for (source, current, announced, missing_task, malformed) in [
+            ("lifecycle-wake:17717", TaskStatus::AwaitingMerge, "awaiting_merge", false, false),
+            ("lifecycle-wake:17717", TaskStatus::Closed, "closed", false, false),
+            ("lifecycle-wake:17717", TaskStatus::Closed, "awaiting_merge", true, false),
+            ("lifecycle-wake:17717", TaskStatus::Closed, "awaiting_merge", false, true),
+            ("human", TaskStatus::Closed, "awaiting_merge", false, false),
+        ] {
+            let (temp, store) = create_test_store();
+            let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+            tasks.init().unwrap();
+            let mut task = Task::new("cas-1485-control".into(), "current task".into());
+            task.status = current;
+            tasks.add(&task).unwrap();
+            let id = if missing_task { "cas-1485-missing" } else { &task.id };
+            let occurrence = if malformed { "unknown".into() } else { Utc::now().to_rfc3339() };
+            let body = format!("<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{id}\" new=\"{announced}\" notification_id=\"17717\" occurrence=\"{occurrence}\">body</task-lifecycle>");
+            store.enqueue_with_session(source, "supervisor", &body, "session").unwrap();
+            let rows = store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap();
+            assert_eq!(rows.iter().map(|row| row.prompt.as_str()).collect::<Vec<_>>(), vec![body.as_str()],
+                "only a current task id and stale typed lifecycle envelope may be expired");
+        }
+        let (_temp, store) = create_test_store();
+        let body = format!("<task-lifecycle task_id=\"cas-1485-unknown\" new=\"awaiting_merge\" occurrence=\"{}\">body</task-lifecycle>", Utc::now().to_rfc3339());
+        store.enqueue_with_session("lifecycle-wake:17717", "supervisor", &body, "session").unwrap();
+        assert_eq!(store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().len(), 1,
+            "a queue without task schema has no terminal-state evidence");
     }
 
     #[test]

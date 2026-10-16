@@ -80,6 +80,14 @@ the pushed ref and states that the worker checkout was left untouched.
 Unpushed or mismatched tips retain the dirty-checkout refusal; cleanup requests
 retain the existing protection against deleting uncommitted work.
 
+Recipient drains revalidate typed lifecycle relays against the task's current
+terminal state before recording surfacing or spending the hook body budget.
+An obsolete relay is retained with `superseded_stale`, its task/status reason
+and a terminal-task reconciliation acknowledgement. Hooks, named wakes, inbox
+polls and repeats of earlier polls share this atomic guard; notification ids
+are never interpreted as task ids. Current terminal reports and payloads with
+no positive terminal-task evidence remain eligible.
+
 ## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client

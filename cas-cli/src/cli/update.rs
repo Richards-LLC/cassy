@@ -307,8 +307,14 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     // A sync preview must stop before both filesystem writers and Git repair.
     if args.sync && args.dry_run {
-        if cli.json { println!("{}", serde_json::json!({"managed_files": {"outcome":"planned"}})); }
-        else { println!("Managed files: planned; no changes written"); }
+        if cli.json {
+            println!(
+                "{}",
+                serde_json::json!({"managed_files": {"outcome":"planned"}})
+            );
+        } else {
+            println!("Managed files: planned; no changes written");
+        }
         return Ok(());
     }
 
@@ -2151,7 +2157,10 @@ fn sync_claude_files_into(
         Some(path) => path.to_path_buf(),
         None => {
             // Not initialized, nothing to sync
-            return Ok(crate::cli::project_files::Report { outcome: "skipped", ..Default::default() });
+            return Ok(crate::cli::project_files::Report {
+                outcome: "skipped",
+                ..Default::default()
+            });
         }
     };
 
@@ -2177,13 +2186,14 @@ fn sync_claude_files_into(
     // committed there. The authoring checkout is exempted inside the helper
     // because its rendered files are intentional tracked fixtures.
     let builtin_harnesses = crate::cli::project_files::harnesses(project_root);
-    let reconciliation = match crate::cli::project_files::Reconcile::begin(project_root, &builtin_harnesses)? {
-        Some(plan) if plan.blocked() => {
-            report_managed_files(cli, &plan.report)?;
-            return Ok(plan.report);
-        }
-        plan => plan,
-    };
+    let reconciliation =
+        match crate::cli::project_files::Reconcile::begin(project_root, &builtin_harnesses)? {
+            Some(plan) if plan.blocked() => {
+                report_managed_files(cli, &plan.report)?;
+                return Ok(plan.report);
+            }
+            plan => plan,
+        };
     // A worktree-scoped sync (cas-49c0) leaves host-level installs alone.
     #[cfg(feature = "mcp-proxy")]
     if _refresh_host_integration {
@@ -4262,7 +4272,10 @@ fn write_skill_sync_sentinel(cas_root: &std::path::Path) {
 #[path = "update_tests/tests.rs"]
 mod tests;
 
-fn report_managed_files(cli: &Cli, report: &crate::cli::project_files::Report) -> anyhow::Result<()> {
+fn report_managed_files(
+    cli: &Cli,
+    report: &crate::cli::project_files::Report,
+) -> anyhow::Result<()> {
     if cli.json {
         println!("{}", serde_json::json!({"managed_files": report}));
     } else {

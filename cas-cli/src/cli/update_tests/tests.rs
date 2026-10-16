@@ -2217,7 +2217,10 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
                 execute(&args, &update_test_cli(false), Some(&root))
             });
             result.unwrap();
-            assert!(human.starts_with("Managed files: 1 conflicts preserved;"), "{human}");
+            assert!(
+                human.starts_with("Managed files: 1 conflicts preserved;"),
+                "{human}"
+            );
             assert!(!human.contains("[OK] Syncing"), "{human}");
         }
         assert_eq!(std::fs::read_to_string(&file).unwrap(), conflicted);

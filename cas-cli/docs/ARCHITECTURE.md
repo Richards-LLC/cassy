@@ -246,7 +246,6 @@ outputs, including its Alpha/Beta test vectors. Named `cas_e29c_` tests consume
 those rows through personal and team HTTP pulls, SQLite, Tantivy, editing,
 compressed HTTP pushes and replay. No client alias-fold calculator is added.
 
-
 ## Managed project files
 
 `project_files::ignored_paths` is the ownership inventory shared by init/update,
@@ -267,7 +266,9 @@ and leaves that project's files and index untouched. Ordinary project edits
 outside the owned portions remain in the worktree; selective index blobs are
 rendered from index-side project content so those edits never enter Cassy's
 commit. Existing staged work is preserved: update stages the repair and reports
-that a commit is pending. With no other staged work, it makes one dedicated
+that a commit is pending. Conflicts and pending commits remain warnings in the
+compact multi-project summary, rather than becoming successful skills phases.
+With no other staged work, it makes one dedicated
 `chore(cassy): reconcile managed project files` commit, using a command-scoped
 Cassy author identity. It never pushes. A second update is a no-op.
 

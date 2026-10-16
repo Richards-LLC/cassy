@@ -8,7 +8,7 @@ use std::path::Path;
 
 use crate::config::AutoPromptConfig;
 use crate::git_evidence::{
-    KnownUnmergedCount, fetch_parent_branch_best_effort, known_unmerged_factory_commits,
+    KnownUnmergedCount, BoundedFetch, fetch_parent_branch_result, known_unmerged_factory_commits,
     resolve_ref_commit_sha,
 };
 use crate::ui::factory::director::data::{ActiveLeaseSummary, DirectorData, TaskSummary};
@@ -657,7 +657,7 @@ pub(crate) fn prompt_is_still_deliverable(
     let merge_is_still_required = prompt.retract_task.as_deref().is_none_or(|task_id| {
         !matches!(
             check_merge_alert_freshness_for_task(task_id, data, repo_root),
-            MergeAlertFreshness::Stale
+            MergeAlertFreshness::Stale | MergeAlertFreshness::Unavailable
         )
     });
     let harness_still_waiting = prompt
@@ -807,6 +807,7 @@ fn is_merge_required_idle(task: &ActiveLeaseSummary) -> bool {
 pub struct MergeAlertEvidence {
     pub task_id: String,
     pub factory_branch: String,
+    pub factory_tip: String,
     pub unmerged_count: u32,
     pub epic_sha: String,
     /// Exact local or remote-tracking epic ref used for the count.
@@ -831,6 +832,8 @@ pub enum MergeAlertFreshness {
     /// Confirmed stale: the factory branch already carries zero unmerged
     /// commits vs the epic branch. Drop the alert entirely (AC1).
     Stale,
+    /// The target could not be refreshed; cached refs cannot justify a merge demand.
+    Unavailable,
     /// Confirmed live: evidence to embed in the alert text (AC2).
     Fresh(MergeAlertEvidence),
 }
@@ -925,6 +928,7 @@ fn classify_merge_alert_observations(
     MergeAlertFreshness::Fresh(MergeAlertEvidence {
         task_id: task_id.to_string(),
         factory_branch: factory_branch.to_string(),
+        factory_tip: String::new(),
         unmerged_count,
         epic_sha: short_commit_id(epic_commit),
         checked_epic_ref: chosen.epic_ref.clone(),
@@ -950,16 +954,36 @@ fn fresh_merge_alert_git_evidence(
     factory_branch: &str,
     epic_branch: &str,
 ) -> MergeAlertFreshness {
-    fetch_parent_branch_best_effort(repo_root, epic_branch);
+    let epic_branch = epic_branch.strip_prefix("origin/").unwrap_or(epic_branch);
+    let has_origin = std::process::Command::new("git")
+        .args(["config", "--get", "remote.origin.url"]).current_dir(repo_root)
+        .output().is_ok_and(|output| output.status.success());
+    if has_origin && fetch_parent_branch_result(repo_root, epic_branch) != BoundedFetch::Succeeded {
+        return MergeAlertFreshness::Unavailable;
+    }
 
     // Pin all three movable refs once. Every merge-base/rev-list below uses
     // these immutable IDs, so a concurrent fetch/branch update cannot combine
     // a SHA from one instant with a count from another.
-    let factory_commit = resolve_ref_commit_sha(repo_root, factory_branch);
+    let factory_commit = resolve_ref_commit_sha(repo_root, factory_branch)
+        .or_else(|| resolve_ref_commit_sha(repo_root, &format!("origin/{factory_branch}")));
     let local = observe_merge_ref(repo_root, factory_commit.as_deref(), epic_branch);
     let origin_ref = format!("origin/{epic_branch}");
     let origin = observe_merge_ref(repo_root, factory_commit.as_deref(), &origin_ref);
-    classify_merge_alert_observations(task_id, factory_branch, local, origin)
+    let mut result = classify_merge_alert_observations(task_id, factory_branch, local, origin);
+    if let MergeAlertFreshness::Fresh(evidence) = &mut result {
+        evidence.factory_tip = factory_commit.unwrap_or_default();
+    }
+    result
+}
+
+/// Parked per-task branches survive worker reuse and must win over the worker's lane.
+fn merge_delivery_branch(repo_root: &Path, task_id: &str, worker: &str) -> String {
+    let cas_dir = repo_root.join(".cas");
+    let parked = cas_dir.join("cas.db").is_file().then(|| {
+        crate::store::open_task_store_cached(&cas_dir).ok()?.get(task_id).ok()?.deliverables.parked_branch
+    }).flatten();
+    parked.unwrap_or_else(|| format!("factory/{worker}"))
 }
 
 /// Re-validate a MERGE REQUIRED / AwaitingMerge `WorkerIdle` signal against
@@ -994,7 +1018,7 @@ pub fn check_merge_alert_freshness(
     if staged_integration_batch(repo_root, &task.task_id) {
         return MergeAlertFreshness::Stale;
     }
-    let factory_branch = format!("factory/{worker}");
+    let factory_branch = merge_delivery_branch(repo_root, &task.task_id, worker);
     let (_, epic_branch, _) = resolve_merge_target_for_task(data, &task.task_id);
     let Some(epic_branch) = epic_branch else {
         // No resolvable epic link in this snapshot — can't verify either
@@ -1059,7 +1083,8 @@ pub fn check_merge_alert_freshness_for_task(
     let Some(worker) = task.assignee.clone() else {
         return MergeAlertFreshness::NotApplicable;
     };
-    let factory_branch = format!("factory/{worker}");
+    let worker = data.agent_id_to_name.get(&worker).map(String::as_str).unwrap_or(&worker);
+    let factory_branch = merge_delivery_branch(repo_root, task_id, worker);
     let (_, epic_branch, _) = resolve_merge_target_for_task(data, task_id);
     let Some(epic_branch) = epic_branch else {
         return MergeAlertFreshness::NotApplicable;
@@ -1206,7 +1231,7 @@ fn merge_required_idle_prompt_text(
     worker_prefix: &str,
     evidence: Option<&MergeAlertEvidence>,
 ) -> String {
-    let factory_branch = format!("factory/{worker}");
+    let factory_branch = evidence.map(|e| e.factory_branch.clone()).unwrap_or_else(|| format!("factory/{worker}"));
     let (epic_id, epic_branch, declared_target) =
         resolve_merge_target_for_task(data, &task.task_id);
     let target = epic_branch
@@ -7229,23 +7254,23 @@ mod tests {
             );
 
             assert!(
-                detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", 2, "abc1234"),
+                detector.merge_alert_should_emit("cas-6883t", "tip-a", "success"),
                 "first emission with this evidence must be allowed"
             );
             assert!(
-                !detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", 2, "abc1234"),
+                !detector.merge_alert_should_emit("cas-6883t", "tip-a", "success"),
                 "identical repeat evidence must be suppressed (AC3)"
             );
             assert!(
-                detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", 3, "abc1234"),
-                "changed unmerged count is a real state change and must re-emit"
+                detector.merge_alert_should_emit("cas-6883t", "tip-b", "success"),
+                "changed delivery tip must re-emit"
             );
             assert!(
-                detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", 3, "def5678"),
-                "changed epic SHA is a real state change and must re-emit"
+                detector.merge_alert_should_emit("cas-6883t", "tip-b", "failure"),
+                "changed CI conclusion must re-emit"
             );
             assert!(
-                !detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", 3, "def5678"),
+                !detector.merge_alert_should_emit("cas-6883t", "tip-b", "failure"),
                 "repeat of the new evidence must again be suppressed"
             );
         }

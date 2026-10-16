@@ -198,8 +198,16 @@ pub(crate) fn fetch_parent_branch_best_effort(
     repo_path: &std::path::Path,
     parent_branch: &str,
 ) -> bool {
+    !matches!(fetch_parent_branch_result(repo_path, parent_branch), BoundedFetch::NotStarted(_))
+}
+
+/// Success-bearing variant for callers that must not describe cached refs as live.
+pub(crate) fn fetch_parent_branch_result(
+    repo_path: &std::path::Path,
+    parent_branch: &str,
+) -> BoundedFetch {
     if !is_safe_git_refname(parent_branch) {
-        return false;
+        return BoundedFetch::NotStarted("unsafe branch".into());
     }
 
     // Force-update the exact remote-tracking ref. The leading `+` is
@@ -207,11 +215,7 @@ pub(crate) fn fetch_parent_branch_best_effort(
     // caller needs the authoritative remote state rather than a fetch rejected
     // as non-fast-forward.
     let refspec = format!("+refs/heads/{parent_branch}:refs/remotes/origin/{parent_branch}");
-    // Finished (success or failure) or timed out — the caller doesn't care.
-    !matches!(
-        run_bounded_git_fetch(repo_path, &["fetch", "--quiet", "origin", &refspec]),
-        BoundedFetch::NotStarted(_)
-    )
+    run_bounded_git_fetch(repo_path, &["fetch", "--quiet", "origin", &refspec])
 }
 
 /// How one bounded `git fetch` ended.

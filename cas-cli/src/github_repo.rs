@@ -35,7 +35,9 @@ fn valid_slug(slug: &str) -> bool {
 
 pub(crate) fn origin_slug(cwd: &Path, timeout: Duration) -> Result<Option<String>, String> {
     let mut git = Command::new("git");
-    git.current_dir(cwd).args(["remote", "get-url", "origin"]);
+    // Read the configured identity before Git's url.*.insteadOf transport
+    // rewriting (SSH aliases and local fixture servers are not repository IDs).
+    git.current_dir(cwd).args(["config", "--get", "remote.origin.url"]);
     let output = run_command(&mut git, Deadline::after(timeout), timeout)
         .map_err(|_| "cannot inspect GitHub origin (bounded Git lookup unavailable)".to_string())?;
     if !output.status.success() {

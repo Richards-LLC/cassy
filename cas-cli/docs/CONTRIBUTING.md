@@ -14,6 +14,15 @@ to the operator continue to be recorded. Existing conversation history is retain
 
 ## Coordination messages and reminders
 
+Worker-idle merge notices wait for completed CI on the delivery's exact tip
+and a successful refresh of its integration target. Parked deliveries retry
+each minute, including when the director snapshot is unchanged. Pending CI
+stays silent; ten minutes with no CI answer produces one "CI unknown" decision
+notice. Failed target fetches defer the notice. Each task, delivery tip and CI
+conclusion produces one notice per running factory; unrelated integration
+commits do not create another. A red conclusion asks for a supervisor decision
+instead of instructing an unconditional merge.
+
 Projects that review a batch once on staging can select `qa.mode=batch`.
 Unmerged user-facing deliveries park with evidence deferred and no automatic
 per-task QA pass. A registered supervisor records the shared published ledger

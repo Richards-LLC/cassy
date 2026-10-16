@@ -293,6 +293,36 @@ pub(crate) fn delivery_ci_pending(branch: &str, target: &str, cwd: &Path) -> boo
     )
 }
 
+/// A merge idle relay concerns this exact delivery tip. Missing checks,
+/// lookup errors and any unfinished check all defer it, even if another
+/// check is already red. Do not borrow an older code commit's green result.
+pub(crate) fn delivery_tip_ci_conclusion(sha: &str, cwd: &Path) -> &'static str {
+    delivery_tip_ci_answer(sha, cwd).unwrap_or("unknown")
+}
+
+fn delivery_tip_ci_answer(sha: &str, cwd: &Path) -> Option<&'static str> {
+    let binary = crate::github_repo::gh_binary();
+    let repo = crate::github_repo::resolve_origin(cwd, &binary, BRANCH_CI_LOOKUP_TIMEOUT).ok()?;
+    let output = fetch_branch_ci(sha, cwd, &repo.canonical, &binary);
+    if !output.success { return None; }
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let runs = parsed.get("check_runs")?.as_array()?;
+    if runs.is_empty() { return None; }
+    if runs.iter().any(|run| matches!(run.get("status").and_then(serde_json::Value::as_str),
+        Some("queued" | "in_progress" | "requested" | "waiting" | "pending"))) {
+        return Some("pending");
+    }
+    if runs.iter().any(|run| {
+        run.get("status").and_then(serde_json::Value::as_str) != Some("completed")
+            || run.get("conclusion").and_then(serde_json::Value::as_str).is_none()
+    }) { return None; }
+    match classify_branch_ci_response("", sha, output) {
+        BranchCiState::Green { .. } => Some("success"),
+        BranchCiState::Red { .. } => Some("failure"),
+        _ => None,
+    }
+}
+
 /// Prefer tip CI that contains code checks: a multi-commit push runs CI there.
 /// Otherwise query the latest code commit in merge-base..tip, or Docs Lint at
 /// the tip for a pure docs delivery. Both lookups are bounded and never poll.

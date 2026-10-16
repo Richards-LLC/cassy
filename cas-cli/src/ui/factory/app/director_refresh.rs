@@ -322,6 +322,7 @@ impl FactoryApp {
             self.delivery_repo_root(),
             &self.parked_facts,
             std::sync::Arc::clone(&self.lane_ci_pending),
+            std::sync::Arc::clone(&self.delivery_containment),
         )
     }
 

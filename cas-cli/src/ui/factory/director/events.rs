@@ -66,7 +66,7 @@ impl SupervisorActionableState {
                 )
             }
             Self::MergeCloseBlocked { tasks } => format!(
-                "Drive to the exit: delivery is already merged, but close is blocked; do not merge the factory branch again:\n{}",
+                "Drive to the exit: delivery is already merged; awaiting worker close. Do not merge the factory branch again:\n{}",
                 render_merged_close_blocked(tasks, tool_prefix)
             ),
             Self::MergeQueue {
@@ -78,7 +78,7 @@ impl SupervisorActionableState {
                 }
                 .next_step_text_for(tool_prefix);
                 let merged = format!(
-                    "Delivery already merged but close is blocked; do not merge those factory branches again:\n{}",
+                    "Delivery already merged; awaiting worker close. Do not merge those factory branches again:\n{}",
                     render_merged_close_blocked(merged_close_blocked, tool_prefix)
                 );
                 format!("{unmerged}\n{merged}")
@@ -115,7 +115,7 @@ fn render_merged_close_blocked(tasks: &[MergedCloseBlockedTask], tool_prefix: &s
         .iter()
         .map(|task| {
             format!(
-                "- {}: {} anchor {} is already reachable from {} @ {}. Last close rejection: {}. Suggested close: `{tool_prefix}task action=close id={}` (or supervisor `{tool_prefix}task action=close id={} supervisor_override=true reason=\"merged delivery verified\"`).",
+                "- {}: {} delivery {} is already contained in {} (local/origin; sampled tip {}). Last close rejection: {}. Suggested close: `{tool_prefix}task action=close id={}` (or supervisor `{tool_prefix}task action=close id={} supervisor_override=true reason=\"merged delivery verified\"`).",
                 task.task_id,
                 task.factory_branch,
                 task.anchor,
@@ -135,8 +135,8 @@ fn merged_close_blocked_key(tasks: &[MergedCloseBlockedTask]) -> String {
         .iter()
         .map(|task| {
             format!(
-                "{}:{}:{}:{}",
-                task.task_id, task.anchor, task.target_branch, task.target_tip
+                "{}:{}:{}",
+                task.task_id, task.anchor, task.target_branch
             )
         })
         .collect::<Vec<_>>()
@@ -145,8 +145,8 @@ fn merged_close_blocked_key(tasks: &[MergedCloseBlockedTask]) -> String {
 
 impl SupervisorActionableState {
     /// Stable dedupe key for merged-but-close-blocked relay rows. The key
-    /// intentionally changes only when the task identity/anchor, target ref,
-    /// or target tip changes; a repeated supervisor-stall sample must not
+    /// intentionally changes only when the task identity/anchor or target ref
+    /// changes; unrelated target commits must not
     /// manufacture another close demand for the same merged delivery.
     pub(crate) fn merged_close_blocked_relay_key(&self) -> Option<String> {
         let tasks = match self {
@@ -203,7 +203,7 @@ pub struct SupervisorStallTracker {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_supervisor_activity_at: Option<DateTime<Utc>>,
     /// Stable merged-delivery state most recently delivered. A changed anchor
-    /// or target tip must wake immediately, while an unchanged merged
+    /// may wake after the rate limit, while an unchanged merged
     /// delivery must not refire the same close demand every ten minutes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_merged_close_blocked_key: Option<String>,
@@ -232,7 +232,6 @@ impl SupervisorStallTracker {
             self.actionable_idle_secs = 0;
             self.actionable_idle_started_at = None;
             self.last_wake_at = None;
-            self.last_merged_close_blocked_key = None;
             self.last_supervisor_activity_at = last_supervisor_mcp_call_at;
         }
 
@@ -266,18 +265,12 @@ impl SupervisorStallTracker {
         let merged_state_repeated = merged_key.as_ref().is_some_and(|key| {
             self.last_merged_close_blocked_key.as_ref() == Some(key)
         });
-        let wake = if condition_true
-            && if merged_key.is_some() {
-                !merged_state_repeated
-            } else {
-                refire_due
-            }
-        {
+        let wake = if condition_true && refire_due && !merged_state_repeated {
             self.last_wake_at = Some(now);
             self.last_merged_close_blocked_key = merged_key;
             actionable
         } else {
-            if !condition_true || merged_key.is_none() {
+            if merged_key.is_none() {
                 self.last_merged_close_blocked_key = None;
             }
             None

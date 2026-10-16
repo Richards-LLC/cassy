@@ -925,6 +925,8 @@ pub struct FactoryApp {
     /// cas-207e: lane CI of parked deliveries by (branch, tip). A settled
     /// result is final for its tip; a pending one is re-read after a minute.
     lane_ci_pending: delivery_evidence::LaneCiCache,
+    /// Cached full epic-status containment, keyed by delivery and target tips.
+    delivery_containment: delivery_evidence::DeliveryContainmentCache,
     /// Factory loop v2 (cas-223f): the store half of the supervisor-stall
     /// evidence for the focused epic's parked deliveries, read with each
     /// director snapshot on the read lane.
@@ -1612,6 +1614,7 @@ impl FactoryApp {
                 self.delivery_repo_root(),
                 facts,
                 std::sync::Arc::clone(&self.lane_ci_pending),
+                std::sync::Arc::clone(&self.delivery_containment),
             )
         {
             self.git_evidence = request.run();

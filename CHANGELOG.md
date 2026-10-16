@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.58.0] - 2026-10-16
+
 ### Fixed — busy Claude workers see supervisor messages at their next tool call (#1223, cas-a1ed, cas-1ba0)
 
 - The silence gate now holds only the terminal nudge. A held copy surfaces at

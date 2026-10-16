@@ -463,6 +463,13 @@ export class ConversationView {
   /** Set while this view places focus itself (Load earlier's own recovery). */
   private placingFocus = false;
   private pinPending = false;
+  /**
+   * cas-100f: a render found the thread somewhere it did not see or set while
+   * following its tail, and the pin back waits for the next frame. That
+   * frame's scroll steps run first: a pending scroll event (the reader's)
+   * claims it, while a re-mount's reset (no event) is pinned before paint.
+   */
+  private pinDeferred = false;
   /** The thread's height at the last scroll or resize it saw (cas-16eed). */
   private lastHeight?: number;
   /** The thread's content height at the last scroll it saw (cas-acb4b). */
@@ -523,6 +530,7 @@ export class ConversationView {
       // view. Before this, a reader who scrolled up within the two frames
       // after a pin was ignored and the pending re-pin took them back down,
       // and one whose thread had grown unseen was read as layout and pinned.
+      this.pinDeferred = false;
       const scrollTop = this.element.scrollTop;
       const readerLeftTail = scrollTop < this.scrolledTo - 1 && !shouldFollowTail(this.element);
       if (readerLeftTail) {
@@ -655,7 +663,7 @@ export class ConversationView {
     this.scrolledTo = this.element.scrollTop;
     this.lastContentHeight = this.element.scrollHeight;
     this.notePlace();
-    if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
+    if (this.following && document.getSelection()?.isCollapsed !== false) this.pinUnlessUnseen();
     if (this.loadEarlierFocus && !loadingEarlier) this.restoreLoadEarlierFocus(document);
   }
 
@@ -772,7 +780,7 @@ export class ConversationView {
 
   private restorePlace(): void {
     if (!this.placePending || !this.element.isConnected || this.element.clientHeight === 0) return;
-    if (this.following) { this.placePending = false; this.pin(); return; }
+    if (this.following) { this.placePending = false; this.pinUnlessUnseen(); return; }
     const place = this.place;
     if (!place) { this.placePending = false; return; }
     const node = [...this.msgs.querySelectorAll<HTMLElement>("[data-key]")].find((item) => item.dataset.key === place.key);
@@ -1534,6 +1542,22 @@ export class ConversationView {
     if (this.disposed) return;
     this.following = true;
     this.pin();
+  }
+
+  /**
+   * Pin a thread that is following its tail, unless it sits where this view
+   * did not see it go: a reader's scroll whose event is not dispatched yet,
+   * or a re-mount's reset. Then the next frame decides (cas-100f).
+   */
+  private pinUnlessUnseen(): void {
+    if (this.pinDeferred) return;
+    if (Math.abs(this.element.scrollTop - this.scrolledTo) <= 1) { this.pin(); return; }
+    this.pinDeferred = true;
+    requestAnimationFrame(() => {
+      if (this.disposed || !this.pinDeferred) return;
+      this.pinDeferred = false;
+      if (this.following) this.pin();
+    });
   }
 
   private pin(): void {

@@ -2760,7 +2760,6 @@ impl FactoryDaemon {
         // Refresh intervals
         let mut last_refresh = std::time::Instant::now();
         let mut last_prompt_poll = std::time::Instant::now();
-        let mut last_spawn_poll = std::time::Instant::now();
         // GitHub polling is intentionally decoupled from the two-second UI
         // refresh. The blocking CLI calls run on Tokio's blocking pool and
         // results are handed back to this loop for durable prompt enqueue.
@@ -3003,10 +3002,8 @@ impl FactoryDaemon {
             }
 
             // Poll spawn queue (enqueues requests, doesn't execute them)
-            if last_spawn_poll.elapsed() >= poll_interval {
-                let _ = self.enqueue_spawn_requests();
-                last_spawn_poll = std::time::Instant::now();
-            }
+            // Completion-driven acceptance; the ingress owns the100ms cadence.
+            let _ = self.enqueue_spawn_requests();
 
             // Process pending spawns (non-blocking: git ops run on background thread)
             loop_progress.enter(super::loop_watchdog::LoopPhase::PendingSpawns);

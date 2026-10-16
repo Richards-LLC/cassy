@@ -344,8 +344,8 @@ impl DirectorRefresh {
     /// completions too and takes only external ones.
     fn poll(&mut self, jobs: &mut QueueJobs) {
         jobs.apply_completions();
-        // cas-4491f: the relays' results are theirs.
-        for result in jobs.take_external_completions_where(|kind| !super::relay_jobs::is_relay_kind(kind)) {
+        // Each owner consumes only its own kinds on the shared runtime.
+        for result in jobs.take_external_completions_where(super::factory_jobs::is_factory_kind) {
             self.accept(result);
         }
         self.expire();

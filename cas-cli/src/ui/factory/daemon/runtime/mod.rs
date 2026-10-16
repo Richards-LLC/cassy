@@ -55,3 +55,5 @@ pub(crate) use queue_and_events::{
 
 #[cfg(test)]
 mod supervisor_notice_tests;
+
+pub(crate) mod queue_control_jobs;

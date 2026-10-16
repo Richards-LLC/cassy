@@ -45,7 +45,7 @@ const SPAWN_PROVISION_TIMEOUT: Duration = Duration::from_secs(300);
 /// cas-2702: how often the daemon inspects the queue for rows it never drained.
 const SPAWN_QUEUE_STALL_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 /// cas-2702: age at which an undrained queue row is reported as stalled.
-const SPAWN_QUEUE_STALL_AGE_SECS: i64 = 60;
+pub(super) const SPAWN_QUEUE_STALL_AGE_SECS: i64 = 60;
 /// Stale expiry self-heals on the next 2-second tick, so never spend the
 /// shared store's 5-second busy timeout (plus blocking retries) on this path.
 const REMINDER_EXPIRY_BUSY_BUDGET: Duration = Duration::from_millis(100);
@@ -1028,7 +1028,7 @@ fn enqueue_spawn_cancelled_notice(
     Ok(id)
 }
 
-fn append_spawn_audit(
+pub(super) fn append_spawn_audit(
     cas_dir: &std::path::Path,
     factory_session: &str,
     request_id: Option<i64>,
@@ -9743,6 +9743,7 @@ impl FactoryDaemon {
 
         self.reported_stalled_spawn_requests.clear();
         self.last_spawn_queue_stall_scan = None;
+        self.queue_jobs.spawn_ingress.force_poll();
 
         let (outcome, message) =
             spawn_queue_reset_report(chrono::Utc::now(), &request.requester, &dropped);
@@ -9777,57 +9778,29 @@ impl FactoryDaemon {
     /// this converts spawn requests into individual PendingSpawn items that are
     /// processed one-per-tick in the main loop.
     pub(super) fn enqueue_spawn_requests(&mut self) -> anyhow::Result<()> {
-        // cas-2702 (GH #58): a failure here used to be swallowed by the caller,
-        // so a queue that stopped draining left no trace at all while the
-        // supervisor kept being told "Queued spawn request".
-        let queue = match open_spawn_queue_store(self.app.cas_dir()) {
-            Ok(queue) => queue,
-            Err(e) => {
-                let detail = format!("Could not open the spawn queue store: {e}");
-                tracing::error!(error = %e, "cas-2702: spawn queue unreadable — no requests can drain");
-                append_spawn_audit(
-                    self.app.cas_dir(),
-                    &self.session_name,
-                    None,
-                    None,
-                    "dequeue",
-                    "failed",
-                    &detail,
-                );
-                return Err(e.into());
-            }
+        let now = Instant::now();
+        let scan_stalls = self.last_spawn_queue_stall_scan.is_none_or(|last|
+            now.saturating_duration_since(last) >= SPAWN_QUEUE_STALL_SCAN_INTERVAL);
+        let request = super::queue_control_jobs::SpawnPollRequest {
+            cas_dir: self.app.cas_dir().to_path_buf(),
+            session: self.session_name.clone(),
+            scan_stalls,
+            reported: self.reported_stalled_spawn_requests.clone(),
         };
-        let requests = match queue.poll(&self.session_name, 10) {
-            Ok(requests) => requests,
-            Err(e) => {
-                let detail = format!("Spawn queue poll failed: {e}");
-                tracing::error!(error = %e, "cas-2702: spawn queue poll failed — requests stay queued");
-                append_spawn_audit(
-                    self.app.cas_dir(),
-                    &self.session_name,
-                    None,
-                    None,
-                    "dequeue",
-                    "failed",
-                    &detail,
-                );
-                return Err(e.into());
-            }
-        };
-
-        self.report_stalled_spawn_requests(queue.as_ref());
+        let mut ingress = std::mem::take(&mut self.queue_jobs.spawn_ingress);
+        let submitted = ingress.advance(&mut self.queue_jobs, request, now);
+        let ready = ingress.take_ready();
+        self.queue_jobs.spawn_ingress = ingress;
+        if submitted && scan_stalls { self.last_spawn_queue_stall_scan = Some(now); }
+        let Some(batch) = ready else { return Ok(()); };
+        let batch = batch.map_err(|error| anyhow::anyhow!("{error}"))?;
+        for (id, detail) in batch.stalled {
+            self.reported_stalled_spawn_requests.insert(id);
+            self.app.set_error(detail);
+        }
+        let requests = batch.requests;
 
         for request in requests {
-            let action = request.action.as_str();
-            append_spawn_audit(
-                self.app.cas_dir(),
-                &self.session_name,
-                Some(request.id),
-                None,
-                "dequeue",
-                "accepted",
-                action,
-            );
             match request.action {
                 SpawnAction::Spawn => {
                     let request_id = Some(request.id);

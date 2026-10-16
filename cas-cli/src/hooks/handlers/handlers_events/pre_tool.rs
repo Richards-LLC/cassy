@@ -6173,6 +6173,55 @@ mod workspace_contract_tests {
         }
     }
 
+    /// cas-b7b2 security round 2: xargs supplies arguments the hook cannot
+    /// see, so awk, find and jq are read-only only when invoked directly; the
+    /// xargs unwrapper reads GNU optional-argument long options as flags; a
+    /// bare assignment or an allexport `set` is not read-only; jq takes only
+    /// known flags.
+    #[test]
+    fn cas_b7b2_xargs_cannot_supply_what_the_hook_cannot_see() {
+        for allowed in [
+            "find docs cas-cli/src -name '*.md' | xargs grep -n grant-write",
+            "awk '/grant-write/' docs/operator-policy.md",
+            "jq -r --arg want grant-write '.[] | select(.name == $want)' events.json",
+            "set -euo pipefail; grep -rn grant-write docs",
+            "set -e; grep -rn revoke-write docs",
+        ] {
+            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+        }
+        for command in [
+            // H1: the find expression arrives on stdin.
+            "printf 'x' | xargs find docs",
+            "grep -l grant-write docs/* | xargs find",
+            // H2: replace mode makes the awk program a placeholder.
+            "printf 'x' | xargs -I{} awk {} docs/grant-write.md",
+            "printf 'x' | xargs -i awk {} grant-write.md",
+            // L2: an arg file feeding awk, and awk or jq under any xargs.
+            "xargs -a list.txt awk '/grant-write/'",
+            "xargs -a list.txt awk 'BEGIN{system(\"cas config grant-write\")}'",
+            "find . -name '*.json' | xargs jq . | grep grant-write",
+            // L2: jq with an environment assignment.
+            "AWKPATH=/x jq . f | grep grant-write",
+            // M1: optional-argument long options take no separate value.
+            "printf 'x' | xargs --replace sh grep grant-write",
+            "printf 'x' | xargs --eof sh grep grant-write",
+            "printf 'x' | xargs --max-lines sh grep grant-write",
+            // M2: bare assignments and allexport.
+            "PATH=/tmp/evil; grep grant-write docs",
+            "set -a; grep grant-write docs",
+            "set -o allexport; grep revoke-write docs",
+            "set -ea; grep grant-write docs",
+            // L1: jq takes only known flags.
+            "jq -L /tmp/mods 'import \"x\" as x; .' f | grep grant-write",
+            "jq --rawfile x /etc/shadow -n '$x' | grep grant-write",
+            "jq -f prog.jq f | grep grant-write",
+        ] {
+            let denial = operator_policy_command_denial(command)
+                .unwrap_or_else(|| panic!("{command} must be refused"));
+            assert!(denial.contains("OPERATOR-ONLY"), "{denial}");
+        }
+    }
+
     /// cas-3c26: an agent cannot change the role environment its own commands
     /// run with, so `CAS_AGENT_ROLE` / `CAS_FACTORY_MODE` gates see the truth.
     #[test]

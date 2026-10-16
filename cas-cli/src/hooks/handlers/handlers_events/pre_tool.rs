@@ -6037,52 +6037,78 @@ mod workspace_contract_tests {
 
     /// cas-b7b2: read-only searches that merely mention grant-write are
     /// allowed (cas-1768 QA round 2, Normal F01), while every way of RUNNING a
-    /// policy command through the same tools stays refused: awk `system()` or
-    /// pipes, find `-exec`/`-delete`, an xargs child that is not read-only, a
-    /// gh subcommand that writes, a pipe into a shell, and command or process
-    /// substitution.
+    /// policy command through the same tools stays refused. Security review
+    /// round 1: awk and find are judged by POSITIVE allowlists that fail
+    /// closed, and gh is never admitted (a configured pager, browser or alias
+    /// can run a command from what looks like a read).
     #[test]
     fn cas_b7b2_read_only_searches_pass_and_disguised_invocations_do_not() {
         for allowed in [
-            // The three QA forms.
+            // QA forms 1 and 2.
             "awk '/grant-write/' docs/operator-policy.md",
             "find docs cas-cli/src -name '*.md' | xargs grep -n grant-write",
-            "gh issue view 1182 --repo Richards-LLC/cassy | grep grant-write",
-            // Their neighbours.
-            "awk '/revoke-write/ {print FILENAME\": \"$0}' CHANGELOG.md docs/*.md",
+            // QA form 3, narrowed: gh cannot be proved built-in, so the issue
+            // text is searched from a saved file.
+            "grep -n grant-write artifacts/issue-1182.txt",
+            // Neighbours.
+            "awk -F: -v want=revoke-write '$0 ~ want {print FILENAME, NR}' CHANGELOG.md",
+            "awk -F'\t' '/grant-write/ {print $1}' -",
             "find . -name '*grant-write*' -print",
-            "find . -type f | xargs -0 grep -l revoke-write",
-            "gh pr list --search grant-write --state all",
-            "gh search issues grant-write --repo Richards-LLC/cassy",
-            "gh pr view 1214 --json body | jq -r .body | grep -n grant-write",
+            "find -L docs -type f -iname '*.md' -newer CHANGELOG.md -print0 | xargs -0 grep -l revoke-write",
+            "find . -maxdepth 2 \\( -name '*.md' -o -name '*.rs' \\) -printf '%p\\n' | xargs grep -l grant-write",
             "jq '.grant_write_events' artifacts/report.json | grep grant-write",
         ] {
             assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
         }
         for command in [
+            // gh: never admitted in this path.
+            "gh issue view 1182 --repo Richards-LLC/cassy | grep grant-write",
+            "gh pr list --search grant-write",
+            "gh search issues grant-write",
+            "GH_PAGER=sh gh issue view 1182 | grep grant-write",
+            // awk: unknown or dialect options, program sources, environment.
+            "awk --source 'BEGIN{}' '/grant-write/' f",
+            "gawk --include lib '/grant-write/' f",
+            "gawk -i inplace '/grant-write/' f",
+            "awk -f grant-write.awk f",
+            "awk -e '/grant-write/' f",
+            "mawk -W exec x grant-write",
+            "awk -E x.awk grant-write",
+            "AWKPATH=/tmp awk '/grant-write/' f",
+            "env AWKLIBPATH=/tmp gawk '/grant-write/' f",
+            "awk '@load \"x\"; /grant-write/' f",
+            "awk '@include \"x\"; /grant-write/' f",
+            "awk '/grant-write/' -f x",
+            // awk: program constructs that run, read or write outside input.
             "awk 'BEGIN{system(\"cas config grant-write --task t --path /x\")}'",
-            "awk '/grant-write/ {print | \"sh\"}' docs/x.md",
-            "awk 'BEGIN{\"cas config grant-write --task t\" | getline x}'",
-            "awk '/grant-write/ {print > \"/tmp/run.sh\"}' docs/x.md",
-            "awk -f grant-write.awk docs/x.md",
-            "gawk -i inplace '/grant-write/' docs/x.md",
-            "awk '/grant-write/' docs/x.md | sh",
+            "awk '{c = \"cas config \" \"grant-write\"; print | c}' f",
+            "awk 'BEGIN{\"cas config grant-write\" | getline x}'",
+            "awk '/grant-write/ {print > \"/tmp/run.sh\"}' f",
+            "awk '/grant-write/ {getline line < \"/etc/x\"}' f",
+            "awk '/grant-write/' f | sh",
+            // find: anything outside the positive list.
             "find . -name x -exec cas config grant-write --task t --path /x \\;",
-            "find . -name grant-write -execdir sh -c 'cas config revoke-write --task t' \\;",
+            "find . -name grant-write -execdir sh -c x \\;",
             "find . -name grant-write -delete",
             "find . -name grant-write -ok rm {} \\;",
+            "find . -name grant-write -okdir rm {} \\;",
             "find . -name grant-write -fprint /tmp/out",
+            "find . -name grant-write -fls /tmp/out",
+            "find . -name grant-write -fprintf /tmp/out x",
+            "find -D exec . -name grant-write",
+            "find . -files0-from list -name grant-write",
+            "find . -name grant-write -newer x -o -some-new-action",
+            "POSIXLY_CORRECT=1 find . -name grant-write",
+            // xargs children, shells, substitution.
             "find . -name grant-write | xargs cas config grant-write --task t --path",
             "find . -print0 | xargs -0 sh -c 'cas config grant-write --task t --path \"$1\"' _",
-            "gh issue edit 1182 --body 'cas config grant-write'",
-            "gh api -X POST repos/x/y/issues -f body=grant-write",
-            "gh issue view 1182 | grep grant-write | bash",
+            "find . -name x | xargs env AWKPATH=/tmp awk '/grant-write/'",
             "jq -r '.[\"grant-write\"]' f.json | sh",
+            "AWKPATH=/x jq . f | grep grant-write | bash",
             "grep \"$(cas config grant-write --task t --path /x)\" notes.md",
             "grep `cas config revoke-write --task t` notes.md",
             "cat <(cas config grant-write --task t --path /x)",
             "sed -i 's/x/y/' grant-write.md",
-            "xargs -a list.txt awk 'BEGIN{system(\"cas config grant-write\")}'",
         ] {
             let denial = operator_policy_command_denial(command)
                 .unwrap_or_else(|| panic!("{command} must be refused"));

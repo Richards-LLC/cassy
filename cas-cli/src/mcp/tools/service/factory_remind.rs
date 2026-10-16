@@ -837,6 +837,45 @@ mod tests {
     use super::validate_external_reminder;
 
     #[test]
+    fn cas_3349_validated_aliases_are_parseable() {
+        use crate::ui::factory::daemon::runtime::ci_watch::{
+            ExternalWakeCondition, parse_external_wake_condition,
+        };
+
+        // A malformed preferred key must not hide a usable legacy alias.
+        for invalid in [serde_json::json!(""), serde_json::json!(" \t"),
+            serde_json::json!(null), serde_json::json!(17), serde_json::json!("two refs")]
+        {
+            for commit_key in ["branch_tip", "branch", "sha"] {
+                let filter = serde_json::json!({
+                    "commit": invalid,
+                    commit_key: "abc123",
+                    "target_branch": invalid,
+                    "target": "origin/main",
+                });
+                validate_external_reminder("branch_contained_in", Some(&filter), true, 0)
+                    .expect("valid aliases are accepted at creation");
+                assert_eq!(
+                    parse_external_wake_condition("branch_contained_in", &filter),
+                    Ok(ExternalWakeCondition::BranchContained {
+                        commit: "abc123".into(),
+                        target_branch: "main".into(),
+                    }),
+                    "accepted reminder must be executable: {filter}"
+                );
+            }
+            let filter = serde_json::json!({"commit": invalid, "target_branch": "main"});
+            assert!(validate_external_reminder("branch_contained_in", Some(&filter), true, 0).is_err());
+            assert!(parse_external_wake_condition("branch_contained_in", &filter).is_err());
+        }
+        let filter = serde_json::json!({"commit": "first", "branch_tip": "second", "target_branch": "main", "target": "staging"});
+        assert_eq!(
+            parse_external_wake_condition("branch_contained_in", &filter),
+            Ok(ExternalWakeCondition::BranchContained { commit: "first".into(), target_branch: "main".into() })
+        );
+    }
+
+    #[test]
     fn ended_reminders_say_why_they_will_not_fire() {
         use cas_store::{Reminder, ReminderStatus, ReminderTriggerType};
         let due = chrono::Utc::now();

@@ -246,6 +246,31 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn cas_3349_served_coordination_explains_limits_and_filters() {
+        let tools = crate::mcp::tools::CasService::tool_definitions_for_build();
+        let schema = &tools.iter().find(|tool| tool.name == "coordination").unwrap().input_schema;
+        let description = |field: &str| schema["properties"][field]["description"].as_str().unwrap();
+        // pin: callers discover request limits and examples through the served MCP schema.
+        let message = description("message");
+        let config = crate::config::FactoryConfig::default();
+        for limit in [config.message_max_chars, config.message_max_chars_escalation, config.note_max_chars] {
+            assert!(message.contains(&limit.to_string()), "missing cap {limit}: {message}");
+        }
+        assert!(message.contains("operator") && message.contains("refused"), "{message}");
+        assert!(description("remind_event").contains("cross_session=true"));
+        let filters = description("remind_filter");
+        for example in [r#"{"commit":"<ref>","target_branch":"main"}"#,
+            r#"{"tag":"v1.0.0"}"#, r#"{"sha":"<40-hex>","workflow":"CI"}"#,
+            r#"{"task_id":"cas-1234"}"#]
+        {
+            assert!(filters.contains(example), "missing {example}: {filters}");
+        }
+        assert!(filters.contains("workflow optional"), "{filters}");
+        let ttl = description("remind_ttl_secs");
+        assert!(ttl.contains("default 3600") && ttl.contains("external default 604800") && ttl.contains("0=never"), "{ttl}");
+    }
+
     fn tool_with(schema: Value) -> Tool {
         let Value::Object(schema) = schema else {
             panic!("fixture must be an object");

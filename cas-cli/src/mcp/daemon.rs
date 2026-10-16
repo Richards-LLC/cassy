@@ -445,12 +445,15 @@ impl EmbeddedDaemon {
         }
     }
 
-    /// Set the agent ID for heartbeat tracking, and push its cloud
-    /// registration (cas-f707). This is how the eager MCP registration path
-    /// and PID adoption reach the cloud, not only SessionStart.
+    /// Bootstrap or refresh the MCP identity's heartbeat tracking and presence.
+    /// SessionStart and validated PID adoption can establish a newer owner;
+    /// a surviving old MCP core must not replace that owner after /clear.
     pub async fn set_agent_id(&self, id: String) {
         {
             let mut agent_id = self.agent_id.write().await;
+            if agent_id.as_ref().is_some_and(|current| current != &id) {
+                return;
+            }
             *agent_id = Some(id.clone());
         }
         self.kick_cloud_presence(id).await;
@@ -1983,11 +1986,17 @@ impl EmbeddedDaemon {
             // Send agent heartbeat if registered. A reset/restart may leave an
             // older same-name row behind; move heartbeat ownership to the
             // newest row before liveness checks can reap the old one.
-            if let Some(mut id) = self.agent_id.read().await.clone() {
+            // Drop the read guard before recovery can update ownership.
+            let heartbeat_id = self.agent_id.read().await.clone();
+            if let Some(mut id) = heartbeat_id {
                 if let Ok(agent) = store.get(&id)
                     && let Some(newest) =
                         crate::daemon::newest_agent_for_identity(store.as_ref(), &agent)
                     && newest.id != id
+                    // Reviving an old MCP row refreshes its local heartbeat,
+                    // but does not supersede its ended-incarnation fence.
+                    && !crate::cloud::shutdown::is_ended(&self.config.cas_root, &newest)
+                        .unwrap_or(true)
                 {
                     tracing::info!(
                         worker = %newest.name,

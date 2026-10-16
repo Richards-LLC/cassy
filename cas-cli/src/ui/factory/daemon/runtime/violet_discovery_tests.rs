@@ -48,7 +48,15 @@ impl CloudCoordinationPort for DiscoveryCloud {
     }
 }
 impl ActivityRecoveryPort for DiscoveryCloud {
-    fn recover(&self, _: &OperationContext, _: Option<&str>, _: Duration) -> Result<Value, RemoteError> { Ok(recovery_fixture()) }
+    fn recover(&self, _: &OperationContext, _: Option<&str>, _: Duration) -> Result<Value, RemoteError> {
+        let mut response=recovery_fixture();
+        if !self.posts.lock().unwrap().is_empty() {
+            // Model the real commit-then-timeout: subsequent discovery already
+            // sees the new registration and no longer asks for a rebind.
+            response["admissions"][0]=lookup_fixture()["admission"].clone();
+        }
+        Ok(response)
+    }
     fn delivery(&self, _: &OperationContext, _: &str, _: Duration) -> Result<Value, RemoteError> {
         let mut value = lookup_fixture();
         if self.foreign_target { value["admission"]["target"]["project_id"] = json!("foreign-project"); }
@@ -69,6 +77,8 @@ fn cas_c423_discovery_on_empty_machine_reconciles_same_request_and_restores_once
     let report = recover_page(&cloud,&journal,&store,&destination,&evidence,None,Instant::now()+TOTAL_REMOTE_BUDGET);
     assert_eq!(report.errors.len(),1);
     assert_eq!(report.restored,0);
+    let db=rusqlite::Connection::open(root.path().join("cas.db")).unwrap();
+    db.execute("UPDATE external_work_operations SET next_retry_ms=0",[]).unwrap();
     drop(store); drop(journal);
     let store = SqliteVioletAdmissionStore::open(root.path()).unwrap();
     let journal = SqliteRequestJournal::open(root.path()).unwrap();

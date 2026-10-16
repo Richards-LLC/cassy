@@ -19,7 +19,7 @@ pub(crate) trait ActivityDeliveryPort {
 // Violet performs managed sweep observation after an ordinary read. There is
 // no standalone observe tool and a read receipt is not an observe acknowledgement.
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct ReaderDelivery {
     id: String,
     occurrence_id: String,
@@ -39,7 +39,7 @@ struct LeasedDelivery {
     target: ActivityTarget,
 }
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
 struct ActivityTarget {
     resource_id: String,
     project_id: String,
@@ -48,7 +48,7 @@ struct ActivityTarget {
     permalink: String,
 }
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
 struct SlackThread {
     provider: String,
     workspace_id: String,

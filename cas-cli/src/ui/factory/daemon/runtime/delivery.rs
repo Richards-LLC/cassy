@@ -1088,7 +1088,7 @@ impl FactoryDaemon {
             None,
             None,
             None,
-            Some((notification_id, body)),
+            Some((notification_id, Some(body))),
         )
         .await
         .map(|(outcome, _)| outcome)
@@ -1139,6 +1139,42 @@ impl FactoryDaemon {
         }
     }
 
+    /// Final body handoff, off the control loop. A pointer contains no managed
+    /// envelope and spends nothing. Failed or deferred sends never replenish
+    /// the original permit; recovery reports uncertainty instead of replaying.
+    pub(crate) async fn authorize_managed_body_handoff(
+        &self,
+        target: &str,
+        text: &str,
+        notification_id: Option<i64>,
+    ) -> anyhow::Result<()> {
+        const OPEN: &str = "<cas-violet-activity v=\"2\"";
+        if !text.contains(OPEN) {
+            return Ok(());
+        }
+        let id = notification_id.ok_or_else(|| anyhow::anyhow!("managed body requires its admission id"))?;
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        let session = self.session_name.clone();
+        let supervisor = self.app.supervisor_name().to_string();
+        let target = target.to_string();
+        let text = text.to_string();
+        let allowed = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            let queue = crate::store::open_prompt_queue_store(&cas_dir)?;
+            let Some(row) = queue.queued_prompt(id)? else { return Ok(false); };
+            let same_recipient = row.target == target
+                || (row.target == "supervisor" && target == supervisor)
+                || (row.target == supervisor && target == "supervisor");
+            if !same_recipient || row.factory_session.as_deref() != Some(session.as_str())
+                || !row.prompt.starts_with(OPEN) || !text.contains(&row.prompt)
+            {
+                return Ok(false);
+            }
+            Ok(queue.authorize_body_handoff(id, &row.target, Some(&session))?)
+        }).await??;
+        anyhow::ensure!(allowed, "managed body has no current one-use permit");
+        Ok(())
+    }
+
     async fn deliver_to_worker_via_channel(
         &self,
         target: &str,
@@ -1149,7 +1185,7 @@ impl FactoryDaemon {
         retract_worker: Option<&str>,
         retract_task: Option<&str>,
         retract_epic: Option<&str>,
-        queued: Option<(i64, &str)>,
+        queued: Option<(i64, Option<&str>)>,
     ) -> anyhow::Result<(InjectOutcome, DeliveryChannel)> {
         // Normalise the target into the two name forms the two channels expect:
         //   - `pane_target`  : the real pane id `Mux::inject` routes on
@@ -1187,9 +1223,10 @@ impl FactoryDaemon {
                 }
                 // cas-1f0c: a queued row's body reaches a Claude Teams
                 // recipient through the CAS hook only; its inbox gets a pointer.
-                let inbox_text =
-                    queued.map(|(id, body)| claude_teams_inbox_text(text, body, source, id));
+                let inbox_text = queued.and_then(|(id, body)|
+                    body.map(|body| claude_teams_inbox_text(text, body, source, id)));
                 let inbox_text = inbox_text.as_deref().unwrap_or(text);
+                self.authorize_managed_body_handoff(target, inbox_text, queued.map(|(id, _)| id)).await?;
                 let write = match (retract_worker, retract_task, retract_epic) {
                     (Some(worker), _, _) => teams.write_to_inbox_for_worker_idle(
                         inbox_target,
@@ -1226,6 +1263,7 @@ impl FactoryDaemon {
                             target_agent = %pane_target,
                             "Claude inbox ENOENT; falling back to PTY on the first attempt");
                         self.alert_missing_team_tree(teams);
+                        self.authorize_managed_body_handoff(target, text, queued.map(|(id, _)| id)).await?;
                         let payload = prepare_pty_machine_delivery(
                             self.app.cas_dir(),
                             pane_target,
@@ -1245,6 +1283,7 @@ impl FactoryDaemon {
                 }
             }
             DeliveryChannel::Pty => {
+                self.authorize_managed_body_handoff(target, text, queued.map(|(id, _)| id)).await?;
                 // Frame based on the RECIPIENT's harness, not teams mode: a Codex
                 // recipient always gets the literal `Message from <sender>: ` prefix
                 // its prompt keys on (even codex-only, teams=None); a Claude
@@ -1329,7 +1368,7 @@ impl FactoryDaemon {
                 None,
                 retract_task,
                 None,
-                notification_id.zip(queued_body),
+                notification_id.map(|id| (id, queued_body)),
             )
             .await?;
 
@@ -1377,6 +1416,7 @@ impl FactoryDaemon {
         notification_id: i64,
     ) -> anyhow::Result<NudgeReport> {
         let pane = self.app.supervisor_name();
+        self.authorize_managed_body_handoff(pane, text, Some(notification_id)).await?;
         let payload = prepare_pty_machine_delivery(
             self.app.cas_dir(), pane, self.app.harness_for(pane), source,
             text, Some(notification_id),

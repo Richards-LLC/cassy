@@ -9562,7 +9562,11 @@ impl FactoryDaemon {
                         }
                     };
                     super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: transport"));
-                    let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent {
+                    let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent
+                        && let Err(error) = self.authorize_managed_body_handoff(name, &queued.prompt, Some(queued.id)).await
+                    {
+                        Err(error)
+                    } else if queued.urgent {
                         // cas-ab80: urgent Codex recipients still need the shared
                         // `Message from <sender>:` framing (same contract as
                         // normal `deliver_to_worker`); Claude/Grok stay bare.
@@ -9675,7 +9679,11 @@ impl FactoryDaemon {
                     super::prompt_queue_jobs::Admission::InFlight
                     | super::prompt_queue_jobs::Admission::NotClaimed => continue,
                 };
-                let inject_result: anyhow::Result<super::delivery::NudgeReport> = if queued.urgent {
+                let inject_result: anyhow::Result<super::delivery::NudgeReport> = if queued.urgent
+                    && let Err(error) = self.authorize_managed_body_handoff(&pane_target, &queued.prompt, Some(queued.id)).await
+                {
+                    Err(error)
+                } else if queued.urgent {
                     // Urgent: interrupt-and-redirect by name via the PTY,
                     // bypassing the inbox even in teams mode. An attached
                     // operator draft is a hard boundary (cas-eacc): leave the

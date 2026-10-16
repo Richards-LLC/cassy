@@ -191,6 +191,11 @@ pub(crate) fn file_pointer(work: &PointerWork) -> bool {
     if !work.live.load(Ordering::Acquire) {
         return false;
     }
+    if !queue.authorize_body_handoff(row.id, &row.target, row.factory_session.as_deref())
+        .unwrap_or(false)
+    {
+        return false;
+    }
     match view.as_ref().unwrap_or(&work.primary).write_to_inbox(
         pane,
         &work.source,

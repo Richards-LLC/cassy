@@ -36,14 +36,14 @@ pub(crate) fn configured_scratch_root(cas_dir: &Path) -> Option<PathBuf> {
 
 /// The private Cargo target directory of a worker checkout.
 pub(crate) fn worker_target_dir(worktree: &Path) -> PathBuf {
-    // RED STUB (cas-3f93): resolution not wired yet.
-    let _ = configured_scratch_root;
-    worktree.join("target")
+    let root = cas_types::factory_scratch::managed_worktree_store(worktree)
+        .and_then(configured_scratch_root);
+    cas_types::factory_scratch::worker_target_dir(root.as_deref(), worktree)
 }
 
 /// Where published target baselines (`current` and `snapshots/`) live.
 pub(crate) fn build_cache_dir(cas_dir: &Path) -> PathBuf {
-    cas_dir.join("build-cache") // RED STUB (cas-3f93)
+    cas_types::factory_scratch::build_cache_dir(configured_scratch_root(cas_dir).as_deref(), cas_dir)
 }
 
 /// True when `target` is not the checkout's in-tree `target/`.

@@ -113,9 +113,7 @@ fn worker_scratch_target(cwd: &Path) -> Option<PathBuf> {
 }
 
 fn push_worker_target_env(config: &mut PtyConfig) {
-    // RED STUB (cas-3f93): not wired yet.
-    let _ = worker_scratch_target;
-    if let Some(target) = None::<PathBuf> {
+    if let Some(target) = config.cwd.as_deref().and_then(worker_scratch_target) {
         config.env.retain(|(name, _)| name != "CARGO_TARGET_DIR");
         config
             .env

@@ -61,6 +61,35 @@ async fn signal(root: &Path, name: &str, deadline: tokio::time::Instant) -> anyh
     Ok(())
 }
 
+fn create_live_root(root: &Path) -> anyhow::Result<()> {
+    fs::create_dir(root)?;
+    crate::hub::ensure_private_dir(root)
+}
+
+#[test]
+fn presence_live_root_is_private_and_refuses_reuse() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("cas-e3dd-live-test");
+    create_live_root(&root).unwrap();
+    crate::hub::ensure_private_dir(&root.join("operator-inbox")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [&root, &root.join("operator-inbox")] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+    }
+    fs::write(root.join("sentinel"), "existing enrollment").unwrap();
+    assert!(create_live_root(&root).is_err());
+    assert_eq!(
+        fs::read_to_string(root.join("sentinel")).unwrap(),
+        "existing enrollment"
+    );
+}
+
 async fn lifecycle(root: &Path) -> anyhow::Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(900);
     signal(root, "start", deadline).await?;
@@ -130,8 +159,7 @@ async fn presence_live_disposable_producer() -> anyhow::Result<()> {
                 .is_some_and(|name| name.starts_with("cas-e3dd-live-")),
         "root must be a fresh absolute cas-e3dd-live-* directory"
     );
-    fs::create_dir(&root)?; // refuses an existing enrollment or pre-existing root
-    crate::hub::ensure_private_dir(&root)?;
+    create_live_root(&root)?; // refuses an existing enrollment or pre-existing root
     let authority = AccountAuthority::new(CLOUD, bearer.trim().to_owned());
     let issuer = issuer_keys(Arc::clone(&http), CLOUD);
     let label = format!("cassy-e3dd-test-{}", uuid::Uuid::new_v4());

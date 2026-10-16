@@ -1,9 +1,10 @@
 //! Read-only alarm eligibility, shared by the sender and supervisor alarm lanes.
 //! Acting on work retires its alarm without inventing a per-message read receipt.
 use super::*;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MessageAttention {
+pub(crate) enum MessageAttention {
     Needed,
     Satisfied,
 }
@@ -19,10 +20,25 @@ fn close_instruction_tasks(prompt: &str) -> Vec<String> {
         .collect()
 }
 
-impl FactoryDaemon {
+#[derive(Clone)]
+pub(crate) struct AttentionInputs {
+    pub(crate) cas_dir: std::path::PathBuf,
+    pub(crate) session_name: String,
+    dead_workers: HashSet<String>,
+    workers: Vec<String>,
+}
+impl AttentionInputs {
+    pub(crate) fn from_daemon(daemon: &FactoryDaemon) -> Self {
+        Self {
+            cas_dir: daemon.app.cas_dir().to_path_buf(),
+            session_name: daemon.session_name.clone(),
+            dead_workers: daemon.dead_workers.clone(),
+            workers: daemon.app.worker_names().to_vec(),
+        }
+    }
     /// Snapshot stores once and resolve each recipient transcript once per scan.
     /// All action evidence is bound to the row. Never fetch on the loop.
-    pub(super) fn message_attention_decisions(
+    pub(crate) fn decisions(
         &self,
         queue: &dyn cas_store::PromptQueueStore,
         rows: &[cas_store::QueuedPrompt],
@@ -30,12 +46,12 @@ impl FactoryDaemon {
         if rows.is_empty() {
             return HashMap::new();
         }
-        let agents = open_agent_store(self.app.cas_dir())
+        let agents = open_agent_store(&self.cas_dir)
             .and_then(|store| store.list(None).map_err(crate::error::CasError::from))
             .unwrap_or_default();
         // A bounded snapshot may miss evidence, which conservatively leaves the
         // alarm eligible; missing/unreadable evidence must never silence it.
-        let notes = crate::store::open_event_store(self.app.cas_dir())
+        let notes = crate::store::open_event_store(&self.cas_dir)
             .ok()
             .and_then(|store| {
                 store
@@ -43,18 +59,13 @@ impl FactoryDaemon {
                     .ok()
             })
             .unwrap_or_default();
-        let tasks = crate::store::open_task_store_local(self.app.cas_dir()).ok();
+        let tasks = crate::store::open_task_store_local(&self.cas_dir).ok();
         let mut task_cache = HashMap::<String, Option<cas_types::Task>>::new();
         let mut transcript_cache = HashMap::new();
         let mut merge_cache = HashMap::<String, bool>::new();
         let mut decisions = HashMap::new();
         for row in rows {
-            if worker_recipient_shut_down(
-                &row.target,
-                &self.dead_workers,
-                self.app.worker_names(),
-                &agents,
-            ) {
+            if worker_recipient_shut_down(&row.target, &self.dead_workers, &self.workers, &agents) {
                 decisions.insert(row.id, MessageAttention::Satisfied);
                 continue;
             }
@@ -127,7 +138,7 @@ impl FactoryDaemon {
                         crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&recipient);
                     let path =
                         crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
-                            self.app.cas_dir(),
+                            &self.cas_dir,
                             &recipient,
                         )?;
                     Some((path, cli))
@@ -163,10 +174,8 @@ impl FactoryDaemon {
                         .or_insert_with(|| tasks.as_ref()?.get(id).ok())
                         .as_ref()
                         .is_some_and(|task| {
-                            let ended_after_row = task
-                                .closed_at
-                                .unwrap_or(task.updated_at)
-                                > row.created_at;
+                            let ended_after_row =
+                                task.closed_at.unwrap_or(task.updated_at) > row.created_at;
                             // GH #1196: a cancelled task asks nothing more of
                             // anyone; a closed one must also carry the merge.
                             (task.status == cas_types::TaskStatus::Cancelled && ended_after_row)
@@ -190,7 +199,7 @@ impl FactoryDaemon {
                     let task = task_cache
                         .entry(envelope.task_id.clone())
                         .or_insert_with(|| tasks.as_ref()?.get(&envelope.task_id).ok());
-                    let root = self.app.cas_dir().parent().unwrap_or(self.app.cas_dir());
+                    let root = self.cas_dir.parent().unwrap_or(&self.cas_dir);
                     matches!(
                         crate::prompt_revalidation::queued_merge_request_decision(
                             root,
@@ -211,5 +220,15 @@ impl FactoryDaemon {
             decisions.insert(row.id, MessageAttention::Needed);
         }
         decisions
+    }
+}
+
+impl FactoryDaemon {
+    pub(super) fn message_attention_decisions(
+        &self,
+        queue: &dyn cas_store::PromptQueueStore,
+        rows: &[cas_store::QueuedPrompt],
+    ) -> HashMap<i64, MessageAttention> {
+        AttentionInputs::from_daemon(self).decisions(queue, rows)
     }
 }

@@ -873,6 +873,7 @@ pub(crate) enum Admission {
 pub(crate) struct QueueJobs {
     pub(crate) spawn_ingress: super::queue_control_jobs::SpawnIngress,
     pub(crate) prompt_preparation: super::queue_control_jobs::PromptPreparation,
+    pub(crate) normal_probe_jobs: super::delivery_probe_jobs::NormalProbeJobs,
     exec: Exec,
     next_generation: u64,
     select_in_flight: bool,
@@ -970,6 +971,7 @@ impl QueueJobs {
         Self {
             spawn_ingress: Default::default(),
             prompt_preparation: Default::default(),
+            normal_probe_jobs: Default::default(),
             exec,
             next_generation: 0,
             select_in_flight: false,

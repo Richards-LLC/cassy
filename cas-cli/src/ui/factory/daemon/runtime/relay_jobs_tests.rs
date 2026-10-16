@@ -976,6 +976,20 @@ async fn cas_58a3_worker_exit_writes_nothing_inside_the_enforced_step() {
             launched_wall: std::time::SystemTime::now(),
         },
     );
+    // cas-031e integration: worker-exit cleanup also cancels evidence owned
+    // by that pane, without restoring any inline crash I/O.
+    let probe = super::queue_and_events::NormalDeliveryProbe {
+        pane: "relay-worker".into(),
+        target: "relay-worker".into(),
+        bytes_at_delivery: 0,
+        delivered_at: Instant::now(),
+        delivered_at_utc: chrono::Utc::now(),
+        prompt: "pending delivery".into(),
+        nudge_sent_at: None,
+        next_check_at: None,
+    };
+    let live = daemon.queue_jobs.normal_probe_jobs.track(42, &probe);
+    daemon.normal_delivery_probes.insert(42, probe);
     let progress = super::loop_watchdog::LoopProgress::new();
     {
         let lane = super::loop_watchdog::enforced_daemon_step(
@@ -1004,6 +1018,8 @@ async fn cas_58a3_worker_exit_writes_nothing_inside_the_enforced_step() {
         drop(store_free);
         drop(lane);
     }
+    assert!(!live.load(std::sync::atomic::Ordering::Acquire), "old evidence was cancelled");
+    assert!(!daemon.normal_delivery_probes.contains_key(&42), "old pane probe was removed");
     assert!(!daemon.app.worker_names().iter().any(|name| name == "relay-worker"));
     // The record reports on a drain; its cleanup is submitted by the next
     // relay pass, outside the drained batch, as the loop's tick does.

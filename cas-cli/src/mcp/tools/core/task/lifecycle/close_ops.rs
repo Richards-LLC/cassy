@@ -9,6 +9,7 @@ mod delivery_evolution;
 mod snapshot_approval;
 mod epic_verdict_cache;
 mod receipt_scope;
+mod epic_autoclose;
 // cas-269ab: the Git evidence probes and the epic-measurement deadline live
 // in `crate::git_evidence`; these re-exports keep every existing path valid.
 use crate::git_evidence::measurement as epic_measurement;

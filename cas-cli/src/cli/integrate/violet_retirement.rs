@@ -926,7 +926,14 @@ impl<'a> UpdateMigration<'a> {
         } else {
             name.to_owned()
         };
-        if replacement != name && !self.usable(name) {
+        // This receipt describes the literal name being rewritten. Runtime
+        // alias fallback must not hide an absent original binding from it.
+        if replacement != name
+            && !self
+                .values
+                .get(name)
+                .is_some_and(|value| !value.trim().is_empty())
+        {
             let reason = if self
                 .private_before
                 .get(name)

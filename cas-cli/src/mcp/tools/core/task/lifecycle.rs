@@ -2073,6 +2073,7 @@ impl CasCore {
         // cas-0078: every cloud round trip below runs off the async runtime,
         // all of them within one bounded budget.
         let peer_budget = crate::cloud::peer_claims::PeerBudget::default();
+        let peer_claims = peer_claims.map(|claims| claims.with_budget(peer_budget));
         let local_agents = std::sync::Arc::new(crate::cloud::peer_claims::local_agent_ids(
             agent_store.as_ref(),
         ));
@@ -2134,7 +2135,7 @@ impl CasCore {
                 }
                 Acquire::StalePeer(hold) => {
                     peer_notes.push_str(&format!(
-                        "\n\n⚠️  STALE PEER CLAIM — {}'s claim on {} {} (their machine stopped renewing it). Started here on the local lease. Cassy Cloud still lists them as the holder until it expires the claim (petra-stella-cloud#150).",
+                        "\n\n⚠️  STALE PEER CLAIM — {}'s claim on {} {}; Cloud recovery was not confirmed. Started here on the local lease.",
                         hold.describe(),
                         req.id,
                         hold.stale_reason(chrono::Utc::now()),

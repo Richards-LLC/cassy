@@ -40,9 +40,10 @@ fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
     let mut epic = cas_types::Task::new("cas-unpublished".into(), "Unpublished epic".into());
     epic.task_type = cas_types::TaskType::Epic;
     epic.branch = Some("epic/unpublished".into());
-    epic.deliverables.work_target = crate::mcp::tools::core::task::repo_context::declare_work_target(
-        &root, Some(repo.to_str().unwrap()), Some("main"),
-    ).unwrap();
+    epic.deliverables.work_target = Some(cas_types::WorkTarget {
+        repo_selector: "project:publication-test".into(),
+        target_branch: "main".into(),
+    });
     crate::store::open_task_store(&root).unwrap().add(&epic).unwrap();
     let receipt = focus_epic(&root, "publication-test", FocusEpic::Pin {
         epic_id: &epic.id, delivery_mode: None,

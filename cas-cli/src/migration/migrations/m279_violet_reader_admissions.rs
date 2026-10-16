@@ -19,6 +19,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cas_c423_m279_standalone_runner_reconciles_without_touching_admissions() {
+        let root = tempfile::tempdir().unwrap();
+        use cas_store::PromptQueueStore;
+        let queue = cas_store::SqlitePromptQueueStore::open(root.path()).unwrap();
+        queue.init().unwrap();
+        let id = queue
+            .enqueue_with_session("sender", "recipient", "unread reference", "factory")
+            .unwrap();
+        let conn = rusqlite::Connection::open(root.path().join("cas.db")).unwrap();
+        crate::migration::ensure_migrations_table(&conn).unwrap();
+        assert!(!crate::migration::migration_is_detected(&conn, &MIGRATION));
+        // The real runner applies each up entry with execute, not execute_batch.
+        crate::migration::apply_migration(&conn, &MIGRATION).unwrap();
+        assert!(crate::migration::migration_is_detected(&conn, &MIGRATION));
+        conn.execute("INSERT INTO violet_admissions
+            (delivery_id,occurrence_id,reader_slot_id,registration_id,delivery_generation,
+             route_generation,project_id,target_json,factory_session,recipient,prompt_id,lease_token)
+            VALUES ('delivery','occurrence','reader','registration',1,0,'project','{}','factory','recipient',?1,'lease')",
+            [id]).unwrap();
+        conn.execute_batch("DROP TABLE violet_admission_cursors")
+            .unwrap();
+        crate::migration::reconcile_recorded_migration(&conn, &MIGRATION).unwrap();
+        assert!(crate::migration::migration_is_detected(&conn, &MIGRATION));
+        assert_eq!(
+            conn.query_row(
+                "SELECT prompt_id FROM violet_admissions WHERE delivery_id='delivery'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            id
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM cas_migration_reconciliations WHERE migration_id=279",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        // Invariant triggers are installed only by the store, after migrations.
+        cas_store::SqliteVioletAdmissionStore::open(root.path()).unwrap();
+        assert!(
+            conn.execute("UPDATE violet_admissions SET occurrence_id='other'", [])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn cas_c423_m279_bootstrap_and_reconciliation_keep_queue_evidence() {
         crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
             let project = home.join("project");

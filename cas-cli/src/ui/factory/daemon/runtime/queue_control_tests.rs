@@ -4,7 +4,10 @@ use cas_store::wait_budget;
 fn settle_until(mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !done() {
-        assert!(Instant::now() < deadline, "asynchronous queue operation did not finish");
+        assert!(
+            Instant::now() < deadline,
+            "asynchronous queue operation did not finish"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -16,37 +19,70 @@ fn dequeued_fixture() -> (tempfile::TempDir, FactoryDaemon, i64) {
     let writer = super::super::prompt_queue_jobs::tests::TestWriter::start(false);
     daemon.queue_jobs = super::super::prompt_queue_jobs::tests::jobs_on(&writer);
     let queue = crate::store::open_spawn_queue_store(&root).unwrap();
-    let id = queue.enqueue_spawn(1, &["late-worker".into()], false, None,
-        Some(&daemon.session_name), None).unwrap();
+    let id = queue
+        .enqueue_spawn(
+            1,
+            &["late-worker".into()],
+            false,
+            None,
+            Some(&daemon.session_name),
+            None,
+        )
+        .unwrap();
     daemon.enqueue_spawn_requests().unwrap();
     settle_until(|| !writer.ran().is_empty());
-    assert!(queue.peek(10).unwrap().is_empty(), "fixture must cross the destructive poll");
+    assert!(
+        queue.peek(10).unwrap().is_empty(),
+        "fixture must cross the destructive poll"
+    );
     (temp, daemon, id)
 }
 
 #[test]
 fn cas_7b6b_reset_accounts_for_dequeued_completion_before_control_applies_it() {
     let (_temp, mut daemon, id) = dequeued_fixture();
-    crate::factory_daemon_health::request_reset(daemon.app.cas_dir(),
-        &daemon.session_name, "supervisor").unwrap();
-    let reset = crate::factory_daemon_health::take_reset(daemon.app.cas_dir(),
-        &daemon.session_name).unwrap();
+    crate::factory_daemon_health::request_reset(
+        daemon.app.cas_dir(),
+        &daemon.session_name,
+        "supervisor",
+    )
+    .unwrap();
+    let reset =
+        crate::factory_daemon_health::take_reset(daemon.app.cas_dir(), &daemon.session_name)
+            .unwrap();
     daemon.apply_spawn_queue_reset(&reset);
     daemon.enqueue_spawn_requests().unwrap();
-    assert!(daemon.pending_spawns.is_empty(), "a pre-reset dequeue must not launch after reset");
+    assert!(
+        daemon.pending_spawns.is_empty(),
+        "a pre-reset dequeue must not launch after reset"
+    );
     let queue = crate::store::open_spawn_queue_store(daemon.app.cas_dir()).unwrap();
-    settle_until(|| queue.recent_spawn_lifecycle(&daemon.session_name, 10).unwrap()
-        .iter().any(|row| row.id == id && row.state == cas_store::SpawnLifecycleState::Failed));
+    settle_until(|| {
+        queue
+            .recent_spawn_lifecycle(&daemon.session_name, 10)
+            .unwrap()
+            .iter()
+            .any(|row| row.id == id && row.state == cas_store::SpawnLifecycleState::Failed)
+    });
 }
 
 #[test]
 fn cas_7b6b_shutdown_accounts_for_dequeued_completion_before_draining_results() {
     let (_temp, mut daemon, id) = dequeued_fixture();
-    assert!(daemon.queue_jobs.drain_for_shutdown(daemon.app.cas_dir(), Duration::from_secs(5)));
+    assert!(
+        daemon
+            .queue_jobs
+            .drain_for_shutdown(daemon.app.cas_dir(), Duration::from_secs(5))
+    );
     let queue = crate::store::open_spawn_queue_store(daemon.app.cas_dir()).unwrap();
-    assert!(queue.recent_spawn_lifecycle(&daemon.session_name, 10).unwrap()
-        .iter().any(|row| row.id == id && row.state == cas_store::SpawnLifecycleState::Failed),
-        "shutdown must account for a dequeued row whose completion control did not consume");
+    assert!(
+        queue
+            .recent_spawn_lifecycle(&daemon.session_name, 10)
+            .unwrap()
+            .iter()
+            .any(|row| row.id == id && row.state == cas_store::SpawnLifecycleState::Failed),
+        "shutdown must account for a dequeued row whose completion control did not consume"
+    );
 }
 
 #[test]

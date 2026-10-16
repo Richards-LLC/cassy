@@ -9616,69 +9616,6 @@ impl FactoryDaemon {
         Ok(())
     }
 
-    /// cas-2702 (GH #58): report queue rows that were never dequeued.
-    ///
-    /// Anything still pending well past a poll interval is an anomaly — most
-    /// often a request enqueued against a different factory session name than
-    /// the daemon is running under, which this daemon will never drain. Silent
-    /// accumulation is the worst outcome, so each such row is logged and
-    /// audited once.
-    fn report_stalled_spawn_requests(&mut self, queue: &dyn cas_store::SpawnQueueStore) {
-        let now = Instant::now();
-        if self.last_spawn_queue_stall_scan.is_some_and(|last| {
-            now.saturating_duration_since(last) < SPAWN_QUEUE_STALL_SCAN_INTERVAL
-        }) {
-            return;
-        }
-        self.last_spawn_queue_stall_scan = Some(now);
-
-        let Ok(pending) = queue.peek(50) else {
-            return;
-        };
-        let stalled = stalled_spawn_requests(
-            &pending,
-            chrono::Utc::now(),
-            chrono::Duration::seconds(SPAWN_QUEUE_STALL_AGE_SECS),
-            &self.reported_stalled_spawn_requests,
-        );
-        let reports: Vec<(i64, String)> = stalled
-            .into_iter()
-            .map(|request| {
-                let target = request.factory_session.as_deref().unwrap_or("(unscoped)");
-                (
-                    request.id,
-                    format!(
-                        "Spawn request {} ({}) has been queued since {} without being dequeued. \
-                         It targets factory session '{}' while this daemon is session '{}'. \
-                         No worker will start for it until a daemon for that session drains it.",
-                        request.id,
-                        request.action.as_str(),
-                        request.created_at.to_rfc3339(),
-                        target,
-                        self.session_name,
-                    ),
-                )
-            })
-            .collect();
-
-        for (id, detail) in reports {
-            self.reported_stalled_spawn_requests.insert(id);
-            tracing::warn!(
-                request_id = id,
-                "cas-2702: spawn request stalled in the queue without being dequeued"
-            );
-            append_spawn_audit(
-                self.app.cas_dir(),
-                &self.session_name,
-                Some(id),
-                None,
-                "dequeue",
-                "stalled",
-                &detail,
-            );
-        }
-    }
-
     /// Apply a supervisor's `restart_spawn_queue` request (cas-73b5, GH #970).
     ///
     /// Restarts the daemon's spawn pipeline in place, without touching any
@@ -9753,7 +9690,9 @@ impl FactoryDaemon {
 
         self.reported_stalled_spawn_requests.clear();
         self.last_spawn_queue_stall_scan = None;
-        self.queue_jobs.spawn_ingress.force_poll();
+        let mut ingress = std::mem::take(&mut self.queue_jobs.spawn_ingress);
+        ingress.cancel(&mut self.queue_jobs, "Supervisor spawn-queue restart", false);
+        self.queue_jobs.spawn_ingress = ingress;
 
         let (outcome, message) =
             spawn_queue_reset_report(chrono::Utc::now(), &request.requester, &dropped);
@@ -9794,6 +9733,7 @@ impl FactoryDaemon {
         let request = super::queue_control_jobs::SpawnPollRequest {
             cas_dir: self.app.cas_dir().to_path_buf(),
             session: self.session_name.clone(),
+            supervisor: self.app.supervisor_name().to_string(),
             scan_stalls,
             reported: self.reported_stalled_spawn_requests.clone(),
         };
@@ -9804,9 +9744,8 @@ impl FactoryDaemon {
         if submitted && scan_stalls { self.last_spawn_queue_stall_scan = Some(now); }
         let Some(batch) = ready else { return Ok(()); };
         let batch = batch.map_err(|error| anyhow::anyhow!("{error}"))?;
-        for (id, detail) in batch.stalled {
+        for (id, _) in batch.stalled {
             self.reported_stalled_spawn_requests.insert(id);
-            self.app.set_error(detail);
         }
         let requests = batch.requests;
 

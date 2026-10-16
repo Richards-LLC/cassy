@@ -10,10 +10,11 @@ use super::queue_and_events::append_spawn_audit;
 pub(crate) const SPAWN_QUEUE_POLL: &str = "SpawnQueuePoll";
 pub(crate) const POLL_CADENCE: Duration = Duration::from_millis(100);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SpawnPollRequest {
     pub cas_dir: PathBuf,
     pub session: String,
+    pub supervisor: String,
     pub scan_stalls: bool,
     pub reported: HashSet<i64>,
 }
@@ -24,19 +25,94 @@ pub(crate) struct SpawnBatch {
     pub stalled: Vec<(i64, String)>,
 }
 
+/// A fence for the destructive poll: reset/shutdown either takes the finished
+/// batch or leaves the running job responsible for cancelling it. The mutex
+/// covers only the handoff; no store or filesystem operation runs under it.
+#[derive(Default)]
+struct SpawnHandoff {
+    cancelled: Option<&'static str>,
+    result: Option<Result<SpawnBatch, String>>,
+}
+
 /// Poll is a dequeue mutation, not a replaceable read. Keep one outstanding
-/// command and consume every successful result, even if it arrives late.
+/// command and account for every successful result, even if it arrives late.
 #[derive(Default)]
 pub(crate) struct SpawnIngress {
     generation: u64,
     in_flight: Option<u64>,
     last_submitted: Option<Instant>,
+    handoff: Option<std::sync::Arc<std::sync::Mutex<SpawnHandoff>>>,
+    context: Option<SpawnPollRequest>,
+    stopped: bool,
     ready: VecDeque<Result<SpawnBatch, String>>,
 }
 
 impl SpawnIngress {
-    pub(crate) fn force_poll(&mut self) {
+    pub(crate) fn cancel(&mut self, jobs: &mut QueueJobs, reason: &'static str, stop: bool) {
+        self.stopped = stop;
         self.last_submitted = None;
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        let mut batches: Vec<_> = self.ready.drain(..).collect();
+        if let Some(handoff) = &self.handoff {
+            let mut handoff = handoff.lock().unwrap();
+            handoff.cancelled = Some(reason);
+            batches.extend(handoff.result.take());
+        }
+        if batches.is_empty() {
+            return;
+        }
+        // A completed handoff belongs to control now. Its cancellation writes
+        // still use the existing critical writer lane before shutdown closes it.
+        let submitted = jobs.submit_external(
+            JobSpec {
+                kind: SPAWN_QUEUE_POLL,
+                key: format!("SpawnQueueCancel:{}:{}", context.session, self.generation),
+                lane: Lane::Write,
+                criticality: Criticality::Critical,
+                generation: self.generation,
+                budget: Duration::from_millis(100),
+            },
+            move || {
+                for batch in batches {
+                    account_cancelled_spawn_batch(&context, batch, reason);
+                }
+                Box::new(())
+            },
+        );
+        if !spawn_job_accepted(&submitted) {
+            tracing::error!(
+                ?submitted,
+                reason,
+                "spawn cancellation could not be queued before shutdown"
+            );
+        }
+    }
+
+    fn collect(&mut self, jobs: &mut QueueJobs) {
+        jobs.apply_completions();
+        for result in jobs.take_external_completions_where(|kind| kind == SPAWN_QUEUE_POLL) {
+            if !result.key.starts_with("SpawnQueuePoll:") {
+                continue;
+            }
+            if self.in_flight != Some(result.generation) {
+                continue;
+            }
+            self.in_flight = None;
+            if let Some(result) = self
+                .handoff
+                .as_ref()
+                .and_then(|state| state.lock().unwrap().result.take())
+            {
+                self.ready.push_back(result);
+            } else if !matches!(result.outcome, Ok(ExternalOutcome::Done(_))) {
+                self.ready.push_back(Err(format!(
+                    "critical spawn poll did not complete: {:?}",
+                    result.outcome
+                )));
+            }
+        }
     }
 
     pub(crate) fn advance(
@@ -45,22 +121,9 @@ impl SpawnIngress {
         request: SpawnPollRequest,
         now: Instant,
     ) -> bool {
-        jobs.apply_completions();
-        for result in jobs.take_external_completions_where(|kind| kind == SPAWN_QUEUE_POLL) {
-            // No timeout/resubmission for a mutating poll: it may already
-            // have marked durable rows processed. Reset never invalidates it.
-            self.in_flight = None;
-            let outcome = match result.outcome {
-                Ok(ExternalOutcome::Done(value)) => value
-                    .downcast::<Result<SpawnBatch, String>>()
-                    .map(|value| *value)
-                    .unwrap_or_else(|_| Err("spawn poll returned an invalid result".into())),
-                Ok(ExternalOutcome::Dropped) => Err("critical spawn poll was dropped".into()),
-                Err(error) => Err(format!("spawn poll panicked: {error:?}")),
-            };
-            self.ready.push_back(outcome);
-        }
-        if self.in_flight.is_some()
+        self.collect(jobs);
+        if self.stopped
+            || self.in_flight.is_some()
             || !self.ready.is_empty()
             || self
                 .last_submitted
@@ -70,6 +133,9 @@ impl SpawnIngress {
         }
         self.generation += 1;
         let generation = self.generation;
+        self.context = Some(request.clone());
+        let state = std::sync::Arc::new(std::sync::Mutex::new(SpawnHandoff::default()));
+        self.handoff = Some(state.clone());
         let submitted = jobs.submit_external(
             JobSpec {
                 kind: SPAWN_QUEUE_POLL,
@@ -80,51 +146,98 @@ impl SpawnIngress {
                 budget: Duration::from_millis(100),
             },
             move || {
+                // A queued poll cancelled before execution must leave durable rows
+                // queued. A running poll may have consumed rows and must name them.
+                if state.lock().unwrap().cancelled.is_some() {
+                    return Box::new(());
+                }
                 let result = poll_spawn_queue(&request);
-                if result
-                    .as_ref()
-                    .is_ok_and(|batch| !batch.requests.is_empty() || !batch.stalled.is_empty())
-                {
+                let mut handoff = state.lock().unwrap();
+                if let Some(reason) = handoff.cancelled {
+                    drop(handoff);
+                    account_cancelled_spawn_batch(&request, result, reason);
+                } else {
+                    handoff.result = Some(result);
+                    drop(handoff);
                     super::delivery::wake_daemon_after_enqueue(&request.cas_dir);
                 }
-                Box::new(result)
+                Box::new(())
             },
         );
-        let accepted = matches!(
-            submitted,
-            Submitted::Queued
-                | Submitted::QueuedBehindKey
-                | Submitted::QueuedDroppedOldest { .. }
-                | Submitted::Coalesced { .. }
-        );
+        let accepted = spawn_job_accepted(&submitted);
+        self.last_submitted = Some(now);
         if accepted {
             self.in_flight = Some(generation);
-            self.last_submitted = Some(now);
         } else {
             self.ready
                 .push_back(Err(format!("spawn poll submission refused: {submitted:?}")));
-            self.last_submitted = Some(now);
         }
-        // Inline fixtures also cross this exact completion path.
-        jobs.apply_completions();
-        for result in jobs.take_external_completions_where(|kind| kind == SPAWN_QUEUE_POLL) {
-            self.in_flight = None;
-            let outcome = match result.outcome {
-                Ok(ExternalOutcome::Done(value)) => value
-                    .downcast::<Result<SpawnBatch, String>>()
-                    .map(|value| *value)
-                    .unwrap_or_else(|_| Err("spawn poll returned an invalid result".into())),
-                Ok(ExternalOutcome::Dropped) => Err("critical spawn poll was dropped".into()),
-                Err(error) => Err(format!("spawn poll panicked: {error:?}")),
-            };
-            self.ready.push_back(outcome);
-        }
+        self.collect(jobs);
         accepted
     }
 
     pub(crate) fn take_ready(&mut self) -> Option<Result<SpawnBatch, String>> {
         self.ready.pop_front()
     }
+}
+
+fn spawn_job_accepted(submitted: &Submitted) -> bool {
+    matches!(
+        submitted,
+        Submitted::Queued
+            | Submitted::QueuedBehindKey
+            | Submitted::QueuedDroppedOldest { .. }
+            | Submitted::Coalesced { .. }
+    )
+}
+
+fn account_cancelled_spawn_batch(
+    request: &SpawnPollRequest,
+    batch: Result<SpawnBatch, String>,
+    reason: &str,
+) {
+    let batch = match batch {
+        Ok(batch) => batch,
+        Err(error) => {
+            tracing::warn!(%error, reason, "cancelled spawn poll failed");
+            return;
+        }
+    };
+    if batch.requests.is_empty() {
+        return;
+    }
+    let ids = batch
+        .requests
+        .iter()
+        .map(|row| row.id.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let detail = format!(
+        "{reason}: dropped dequeued spawn requests {ids}; re-issue these requests if still wanted."
+    );
+    for row in batch.requests {
+        append_spawn_audit(
+            &request.cas_dir,
+            &request.session,
+            Some(row.id),
+            None,
+            "dequeue",
+            "cancelled",
+            &detail,
+        );
+    }
+    if let Err(error) = crate::store::open_prompt_queue_store(&request.cas_dir).and_then(|queue| {
+        Ok(queue.enqueue_with_summary(
+            "director",
+            &request.supervisor,
+            &detail,
+            Some(&request.session),
+            Some("Dequeued spawn requests cancelled"),
+        )?)
+    }) {
+        tracing::warn!(%error, %detail, "could not notify supervisor of cancelled spawn poll");
+    }
+    super::delivery::wake_daemon_after_enqueue(&request.cas_dir);
 }
 
 fn poll_spawn_queue(request: &SpawnPollRequest) -> Result<SpawnBatch, String> {
@@ -174,6 +287,7 @@ fn poll_spawn_queue(request: &SpawnPollRequest) -> Result<SpawnBatch, String> {
                 .into_iter().map(|row| {
                     let target = row.factory_session.as_deref().unwrap_or("(unscoped)");
                     let detail = format!("Spawn request {} ({}) has been queued since {} without being dequeued. It targets factory session '{}' while this daemon is session '{}'. No worker will start for it until a daemon for that session drains it.", row.id, row.action.as_str(), row.created_at.to_rfc3339(), target, request.session);
+                    tracing::warn!(request_id = row.id, "cas-2702: spawn request stalled in the queue without being dequeued");
                     append_spawn_audit(&request.cas_dir, &request.session, Some(row.id), None, "dequeue", "stalled", &detail);
                     (row.id, detail)
                 }).collect()

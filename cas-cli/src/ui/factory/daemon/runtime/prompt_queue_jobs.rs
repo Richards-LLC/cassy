@@ -1735,6 +1735,9 @@ impl QueueJobs {
     /// (stamps) to finish. Call before the StoreWorker drains (jobs.rs).
     pub(crate) fn drain_for_shutdown(&mut self, cas_dir: &Path, timeout: Duration) -> bool {
         self.settle_injects(cas_dir);
+        let mut ingress = std::mem::take(&mut self.spawn_ingress);
+        ingress.cancel(self, "Factory shutdown", true);
+        self.spawn_ingress = ingress;
         match std::mem::replace(&mut self.exec, Exec::Inline(VecDeque::new())) {
             Exec::Lanes(runtime) => match Arc::try_unwrap(runtime) {
                 Ok(runtime) => runtime.drain(timeout),

@@ -4,7 +4,8 @@
 assembly-proof.py, check-lane-compile.py, release-gate.sh and release-train.sh
 (with its preflight) all ask this module, so they agree without anything being
 exported by hand. Resolution is deterministic and takes milliseconds, so it
-runs every time and nothing is persisted.
+runs every time and nothing is persisted beyond creating
+<factory.scratch_root>/<project-key>/release-gate when that root is set.
 
 Zig: $ZIG; the checkout's .context/zig/zig; the main checkout's (symlinked in
 with --link-zig); `zig` on PATH. Otherwise the fix is ./scripts/bootstrap-zig.sh.

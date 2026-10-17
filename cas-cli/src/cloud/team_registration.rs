@@ -790,7 +790,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "projects": [{ "id": "883c5896", "canonical_id": PRIMARY, "aliases": [] }]
             })))
-            .expect(1)
+            .expect(1..)
             .mount(&server)
             .await;
         Mock::given(method("POST"))
@@ -829,6 +829,26 @@ mod tests {
                 project_uuid: "883c5896".to_string(),
                 canonical_id: PRIMARY.to_string(),
             }
+        );
+
+        // Read-only verification (task reassignment) cannot adopt, so it
+        // names the same fix instead of a generic "not registered".
+        let endpoint = server.uri();
+        let failure = tokio::task::spawn_blocking(move || {
+            TeamRegistration::new(&endpoint, "token", TEAM, PIN)
+                .with_pinned_canonical_id(Some(PIN))
+                .with_git_remote(Some(PRIMARY))
+                .verify_registered()
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(
+            failure.reason.contains("unregistered_pin_alias")
+                && failure
+                    .reason
+                    .contains(&format!("cas cloud project set {PRIMARY}")),
+            "{failure}"
         );
     }
 

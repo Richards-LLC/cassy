@@ -755,6 +755,16 @@ async fn already_registered_project_is_verified_once_then_cached() {
 
     assert!(first.is_ok(), "first verification must pass: {first:?}");
     assert!(second.is_ok(), "cached verification must pass: {second:?}");
+    assert_eq!(
+        SyncQueue::open(&cas_root)
+            .unwrap()
+            .get_metadata(&format!(
+                "team_project_registered_{TEST_TEAM}_{expected_id}"
+            ))
+            .unwrap(),
+        None,
+        "the v2 confirmation must delete the stale v1 key it replaces"
+    );
 }
 
 /// `cas cloud sync --full` re-verifies rather than trusting the cache — the

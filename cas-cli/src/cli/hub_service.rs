@@ -1056,7 +1056,16 @@ fn uninstall(platform: ServicePlatform, cli: &Cli) -> Result<()> {
                     .status();
                 fs::remove_file(&path).context("remove Cassy launchd agent")?;
             }
-            print_report(cli, report(platform, false, Some(ManagerProbe::Observed(false)), Some(path), None)?)
+            print_report(
+                cli,
+                report(
+                    platform,
+                    false,
+                    Some(ManagerProbe::Observed(false)),
+                    Some(path),
+                    None,
+                )?,
+            )
         }
         ServicePlatform::Systemd => {
             let path = systemd_path()?;
@@ -1069,7 +1078,16 @@ fn uninstall(platform: ServicePlatform, cli: &Cli) -> Result<()> {
                 fs::remove_file(&path).context("remove Cassy systemd unit")?;
                 run_manager("systemctl", ["--user", "daemon-reload"], None)?;
             }
-            print_report(cli, report(platform, false, Some(ManagerProbe::Observed(false)), Some(path), None)?)
+            print_report(
+                cli,
+                report(
+                    platform,
+                    false,
+                    Some(ManagerProbe::Observed(false)),
+                    Some(path),
+                    None,
+                )?,
+            )
         }
         ServicePlatform::ManualLinux => print_report(
             cli,
@@ -1726,9 +1744,22 @@ exit 0
         let paths = HubRuntimePaths::default_for_user().unwrap();
         assert_eq!(inactive_detached_warning(&paths, None).unwrap(), None);
         write_service_file(&systemd_path().unwrap(), LEGACY_SYSTEMD_UNIT).unwrap();
-        assert_eq!(inactive_detached_warning(&paths, None).unwrap(), Some(MANAGER_UNAVAILABLE_WARNING));
-        let cli = Cli { json: false, full: false, verbose: false, command: None };
-        assert!(restart_supervised(&cli, false, 443).unwrap_err().to_string().contains("refusing to launch a detached hub"));
+        assert_eq!(
+            inactive_detached_warning(&paths, None).unwrap(),
+            Some(MANAGER_UNAVAILABLE_WARNING)
+        );
+        let cli = Cli {
+            json: false,
+            full: false,
+            verbose: false,
+            command: None,
+        };
+        assert!(
+            restart_supervised(&cli, false, 443)
+                .unwrap_err()
+                .to_string()
+                .contains("refusing to launch a detached hub")
+        );
     }
 
     #[test]
@@ -1791,6 +1822,27 @@ exit 0
             rewrite_launchd_publication_flags(&disabled, true, 8443).unwrap(),
             enabled
         );
+        let custom = original
+            .replace("<integer>8192</integer>", "<integer>16384</integer>")
+            .replace(
+                &launchd_file_limit_block("HardResourceLimits").replace("8192", "16384"),
+                "",
+            );
+        let repaired = rewrite_launchd_publication_flags(&custom, true, 8443).unwrap();
+        for key in ["SoftResourceLimits", "HardResourceLimits"] {
+            let dict = repaired
+                .split(&format!("<key>{key}</key>"))
+                .nth(1)
+                .unwrap()
+                .split("</dict>")
+                .next()
+                .unwrap();
+            assert!(dict.contains("<integer>16384</integer>"), "{key}: {dict}");
+        }
+        assert_eq!(
+            rewrite_launchd_publication_flags(&repaired, true, 8443).unwrap(),
+            repaired
+        );
     }
 
     #[test]
@@ -1834,6 +1886,35 @@ exit 0
             2,
             "{repaired}"
         );
+        for empty in ["<dict/>", "<dict></dict>", "<dict> </dict>"] {
+            let existing = ["SoftResourceLimits", "HardResourceLimits"]
+                .into_iter()
+                .fold(repaired.clone(), |plist, key| {
+                    plist.replace(
+                        &launchd_file_limit_block(key),
+                        &format!("  <key>{key}</key>\n  {empty}\n"),
+                    )
+                });
+            let fixed = rewrite_launchd_publication_flags(&existing, true, 8443).unwrap();
+            for key in ["SoftResourceLimits", "HardResourceLimits"] {
+                let dict = fixed
+                    .split(&format!("<key>{key}</key>"))
+                    .nth(1)
+                    .unwrap()
+                    .split("</dict>")
+                    .next()
+                    .unwrap();
+                assert!(
+                    dict.contains("<key>NumberOfFiles</key>"),
+                    "{empty}: {key}: {dict}"
+                );
+                assert!(dict.contains("<integer>8192</integer>"), "{dict}");
+            }
+            assert_eq!(
+                rewrite_launchd_publication_flags(&fixed, true, 8443).unwrap(),
+                fixed
+            );
+        }
         assert_eq!(
             rewrite_launchd_publication_flags(&repaired, true, 8443).unwrap(),
             repaired,
@@ -2292,9 +2373,18 @@ exit 0
         assert_eq!(
             service_args(Path::new("/opt/cas/bin/cas"), default_policy, 443),
             vec![
-                "/opt/cas/bin/cas", "hub", "serve", "--bind", "127.0.0.1",
-                "--port", "4173", "--launched-by", "service",
-                "--tailscale-serve", "--tailscale-serve-port", "443"
+                "/opt/cas/bin/cas",
+                "hub",
+                "serve",
+                "--bind",
+                "127.0.0.1",
+                "--port",
+                "4173",
+                "--launched-by",
+                "service",
+                "--tailscale-serve",
+                "--tailscale-serve-port",
+                "443"
             ]
         );
     }

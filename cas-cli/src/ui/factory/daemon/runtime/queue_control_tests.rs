@@ -116,10 +116,8 @@ async fn codex_reminder_and_peer_reply_survive_async_claim_cas_353b() {
                 .any(|part| part == prompt.as_bytes()),
             "{kind}: original body must reach PTY"
         );
-        assert_eq!(
-            daemon.lifecycle_redelivery_counts[&id], 1,
-            "{kind}: actual transport spends one wake"
-        );
+        assert_eq!(bytes.iter().filter(|byte| **byte == b'\r').count(), 1,
+            "{kind}: the original payload has exactly one PTY submit");
         assert!(
             daemon
                 .queue_jobs

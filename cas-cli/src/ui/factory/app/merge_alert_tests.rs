@@ -215,10 +215,31 @@ fn cas_83e1_in_progress_delivery_waits_for_its_pushed_tip_ci() {
     };
     active.task_status = TaskStatus::InProgress;
     active.close_rejected_reason = None;
+    // A real terminal turn in this fixture's own account makes liveness idle.
+    // Without it the generic liveness gate suppresses the relay before CI is read.
+    let account = f.app.cas_dir.join("worker-account");
+    let sessions = account.join("sessions/2026/10/17");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let session = "019f84af-3121-7950-ba14-b01db2dad6c7";
+    let clone = f.repo.path().canonicalize().unwrap();
+    let meta = serde_json::json!({"timestamp":"2026-10-17T19:00:00Z", "type":"session_meta",
+        "payload":{"session_id":session, "cwd":clone, "originator":"codex-tui", "source":"cli"}});
+    let done = serde_json::json!({"timestamp":"2026-10-17T19:00:01Z", "type":"event_msg",
+        "payload":{"type":"task_complete"}});
+    std::fs::write(sessions.join(format!("rollout-2026-10-17T19-00-00-{session}.jsonl")),
+        format!("{meta}\n{done}\n")).unwrap();
+    let agents = crate::store::open_agent_store(&f.app.cas_dir).unwrap();
+    let mut worker = agents.get("merge-w").unwrap();
+    worker.cc_session_id = Some(session.into());
+    worker.metadata.insert("worker_cli".into(), "codex".into());
+    worker.metadata.insert("clone_path".into(), clone.to_str().unwrap().into());
+    worker.metadata.insert("worker_account_dir".into(), account.to_str().unwrap().into());
+    agents.update(&worker).unwrap();
+    std::fs::write(f.app.cas_dir.join("gh-requests"), "").unwrap();
+    assert_eq!(f.relay().len(), 1, "fixture must expose an idle in-progress delivery before CI is pending");
     f.ci(None);
-    for _ in 0..3 {
-        assert!(f.relay().is_empty(), "pending pushed-tip CI must not relay idle repeatedly");
-    }
+    let relays: usize = (0..3).map(|_| f.relay().len()).sum();
+    assert!(relays <= 1, "relay at most once while the pushed tip's CI is pending; got {relays}");
     let tip = git(f.repo.path(), &["rev-parse", "HEAD"]);
     let requests = std::fs::read_to_string(f.app.cas_dir.join("gh-requests")).unwrap();
     assert!(requests.contains(&format!("commits/{tip}/check-runs")), "query the pushed tip: {requests}");

@@ -4,6 +4,7 @@
 use super::*;
 use crate::coordination::external_work::RemoteError;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 const CLAIM: &str = include_str!("../../../../../tests/fixtures/coordination_contract/v1/violet_activity--claim_v2.json");
@@ -29,12 +30,19 @@ fn fixture(doc: &str, case: &str) -> Value {
 struct FixtureCloud {
     claim: Value,
     refuse_dispatch: bool,
+    ack_response: Option<Value>,
+    registration_id: &'static str,
+    claim_calls: AtomicUsize,
     log: Mutex<Vec<String>>,
 }
 
 impl FixtureCloud {
     fn new(claim_case: &str) -> Self {
-        Self { claim: fixture(CLAIM, claim_case), refuse_dispatch: false, log: Mutex::new(Vec::new()) }
+        Self {
+            claim: fixture(CLAIM, claim_case), refuse_dispatch: false,
+            ack_response: None, registration_id: REGISTRATION,
+            claim_calls: AtomicUsize::new(0), log: Mutex::new(Vec::new()),
+        }
     }
     fn push(&self, step: String) {
         self.log.lock().unwrap().push(step);
@@ -47,11 +55,15 @@ impl FixtureCloud {
 impl CloudCoordinationPort for FixtureCloud {
     fn post(&self, path: &str, payload: &Value, _: Duration) -> Result<Value, RemoteError> {
         assert_eq!(payload["schema"], CONTRACT_SCHEMA, "{path}");
-        assert_eq!(payload["actor"]["registration_id"], REGISTRATION, "{path}");
+        assert_eq!(payload["actor"]["registration_id"], self.registration_id, "{path}");
         if path == CLAIM_PATH {
+            self.claim_calls.fetch_add(1, Ordering::Relaxed);
             return Ok(self.claim.clone());
         }
         if path == ACK_PATH {
+            if let Some(response) = &self.ack_response {
+                return Ok(response.clone());
+            }
             let mut results = Vec::new();
             for ack in payload["acks"].as_array().unwrap() {
                 assert_eq!(ack["lease_token"], "0001ea5e-1111-4111-8111-00000001ea5e");
@@ -146,21 +158,80 @@ fn reader_walks_cloud_order_and_types_a_redelivered_id_once() {
 /// A refused write-ahead receipt fences the reader: nothing is typed.
 #[test]
 fn refused_dispatch_uncertain_types_nothing() {
+    for ack_stale in [false, true] {
     let mut cloud = FixtureCloud::new("leases this reader's deliveries");
-    cloud.refuse_dispatch = true;
+    cloud.refuse_dispatch = !ack_stale;
+    if ack_stale {
+        let mut ack = fixture(ACK, "durable admission");
+        ack["results"][0] = ack["results"][3].clone();
+        ack["results"][0]["delivery_id"] = json!(DELIVERY);
+        cloud.ack_response = Some(ack);
+    }
     let mut reader = VioletReader::new("factory-session");
     let ClaimOutcome::Read(report) = tick(&mut reader, &cloud) else { panic!("claim refused") };
     assert_eq!(
         cloud.log(),
-        [format!("ack {DELIVERY} admitted"), format!("receipt {DELIVERY} dispatch_uncertain refused")]
+        if ack_stale { vec![] } else {
+            vec![format!("ack {DELIVERY} admitted"), format!("receipt {DELIVERY} dispatch_uncertain refused")]
+        }
     );
     assert_eq!((report.typed, report.not_typed[0].1.code.as_str()), (0, "stale_generation"));
+    }
     for code in ["violet_unavailable", "violet_refused", "identity_mismatch", "message_missing"] {
         let cloud = FixtureCloud::new("leases this reader's deliveries");
         let mut reader = VioletReader::new("factory-session");
         let ClaimOutcome::Read(report) = reader.tick(&cloud, REGISTRATION, &violet_body(Some(code)), &Typer(&cloud), Utc::now()) else { panic!("claim refused") };
         assert_eq!(cloud.log(), [format!("ack {DELIVERY} admitted")], "{code}: no receipt or typing after failed fetch");
         assert_eq!((report.typed, report.not_typed[0].1.code.as_str()), (0, code));
+    }
+}
+
+#[test]
+fn delivery_routes_to_its_mapped_local_session_cas_c186() {
+    for mapped in [None, Some("mapped-session")] {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let cloud = FixtureCloud::new("leases this reader's deliveries");
+        let mut reader = VioletReader::new("factory-session");
+        if let Some(session) = mapped {
+            reader.bind_session(DELIVERY, session);
+        }
+        let outcome = reader.tick(&cloud, REGISTRATION, &violet_body(None), &PromptQueueTyper(&queue), Utc::now());
+        assert!(matches!(outcome, ClaimOutcome::Read(ReaderReport { typed: 1, .. })));
+        let queued = queue.peek_all(10).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].factory_session.as_deref(), Some(mapped.unwrap_or("factory-session")));
+    }
+}
+
+#[test]
+fn unknown_registration_stops_consumption_until_successor_cas_c186() {
+    for at_ack in [false, true] {
+        let mut cloud = FixtureCloud::new("leases this reader's deliveries");
+        let refusal = json!({"schema": CONTRACT_SCHEMA, "code": "not_found", "reason": "unknown_registration"});
+        if at_ack {
+            cloud.ack_response = Some(refusal);
+        } else {
+            cloud.claim = refusal;
+        }
+        let mut reader = VioletReader::new("factory-session");
+        tick(&mut reader, &cloud);
+        assert_eq!(
+            tick(&mut reader, &cloud),
+            ClaimOutcome::Stopped(NamedRefusal::new("not_found", "unknown_registration")),
+        );
+        assert_eq!(cloud.claim_calls.load(Ordering::Relaxed), 1, "superseded registration stops polling");
+        assert!(cloud.log().is_empty(), "superseded registration types nothing");
+        assert!(reader.managed(), "a superseded registration must not fall back to v1");
+
+        // /clear replaces the registration without restarting the daemon.
+        cloud.claim = fixture(CLAIM, "leases this reader's deliveries");
+        cloud.ack_response = None;
+        cloud.registration_id = "successor-registration";
+        let outcome = reader.tick(&cloud, cloud.registration_id, &violet_body(None), &Typer(&cloud), Utc::now());
+        assert!(matches!(outcome, ClaimOutcome::Read(ReaderReport { typed: 1, .. })));
+        assert_eq!(cloud.claim_calls.load(Ordering::Relaxed), 2);
     }
 }
 

@@ -42,17 +42,14 @@ async fn register_carries_role_repo_and_focus_in_metadata() {
         .and(body_partial_json(json!({
             "metadata": {
                 META_ROLE: "supervisor",
-                META_CANONICAL_ID: REPO,
                 META_FOCUS: "cas-571d",
-                "factory_session": "stable-slot",
             },
-            "factory_id": "stable-slot",
         })))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(json!({"status": "success", "agent": agent_json("sup-1")})),
         )
-        .expect(2)
+        .expect(4)
         .mount(&server)
         .await;
 
@@ -63,11 +60,17 @@ async fn register_carries_role_repo_and_focus_in_metadata() {
         let _env = crate::test_support::TestEnvGuard::with_vars(&[
             ("CAS_FACTORY_ID", "another-factory"),
         ]);
-        for id in ["sup-1", "sup-successor"] {
-            let mut coord = coordinator(&endpoint);
+        for (id, machine, project) in [
+            ("sup-1", "machine-a", REPO),
+            ("sup-successor", "machine-a", REPO),
+            ("other-machine", "machine-b", REPO),
+            ("other-repo", "machine-a", "github.com/acme/other"),
+        ] {
+            let mut coord = coordinator(&endpoint).with_canonical_id(Some(project.into()));
             let mut agent = Agent::new(id.into(), "bright-lark-8".into());
             agent.role = AgentRole::Supervisor;
-            agent.factory_session = Some("stable-slot".into());
+            agent.machine_id = Some(machine.into());
+            agent.factory_session = Some(format!("launch-{id}"));
             coord.register_with_focus(&agent, Some("cas-571d"))?;
         }
         Ok::<_, crate::error::CasError>(())
@@ -76,6 +79,15 @@ async fn register_carries_role_repo_and_focus_in_metadata() {
     .unwrap();
     registered.unwrap();
     server.verify().await;
+    let requests = server.received_requests().await.unwrap();
+    let bodies: Vec<serde_json::Value> = requests.iter().map(|r| r.body_json().unwrap()).collect();
+    assert_eq!(bodies[0]["metadata"][META_CANONICAL_ID], REPO);
+    let slot = &bodies[0]["factory_id"];
+    assert!(slot.as_str().is_some_and(|id| !id.is_empty() && id != "another-factory"));
+    assert_eq!(slot, &bodies[1]["factory_id"], "a full relaunch keeps its Cloud slot");
+    for body in &bodies[2..] {
+        assert_ne!(slot, &body["factory_id"], "machine and project separate default slots");
+    }
 }
 
 #[tokio::test]

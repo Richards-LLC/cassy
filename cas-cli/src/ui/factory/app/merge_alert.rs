@@ -132,6 +132,13 @@ pub(super) fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> O
     else {
         return None;
     };
-    // Never attach another tip's CI if the worker pushed during the probe.
-    (tip == evidence.factory_tip).then_some(Ready { evidence, tip, ci })
+    // Never attach another tip's CI if the worker pushed during either probe.
+    let current = crate::git_evidence::resolve_ref_commit_sha(repo, &evidence.factory_branch)
+        .or_else(|| {
+            crate::git_evidence::resolve_ref_commit_sha(
+                repo,
+                &format!("origin/{}", evidence.factory_branch),
+            )
+        })?;
+    (tip == evidence.factory_tip && tip == current).then_some(Ready { evidence, tip, ci })
 }

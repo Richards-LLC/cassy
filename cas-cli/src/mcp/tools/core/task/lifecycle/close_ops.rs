@@ -6460,31 +6460,32 @@ impl CasCore {
         let Some(recorded) = task.deliverables.factory_branch_anchor.as_deref() else {
             return parking;
         };
-        if !self.tip_is_own_task_lineage(
-            task_store,
-            task,
-            repo_path,
-            measured_branch,
-            recorded,
-            measured_tip,
-        ) {
-            return parking;
-        }
         let Some(tip) = measured_tip
             .and_then(|tip| resolve_branch_sha(repo_path, &format!("{tip}^{{commit}}")))
         else {
             return parking;
         };
-        let foreign_since = self.sibling_lease_boundary(task_store, task);
         let (target, _) = preferred_live_target_ref_for_delivery(repo_path, parent_branch, task.delivery_mode);
-        if !parked_anchor_advance_with_target_is_attributable(
-            repo_path,
-            recorded,
-            &tip,
-            &task.id,
-            foreign_since,
-            &target,
-        ) {
+        let advance = if git_commit_is_ancestor(repo_path, recorded, &tip) {
+            self.tip_is_own_task_lineage(
+                task_store,
+                task,
+                repo_path,
+                measured_branch,
+                recorded,
+                measured_tip,
+            ) && parked_anchor_advance_with_target_is_attributable(
+                repo_path,
+                recorded,
+                &tip,
+                &task.id,
+                self.sibling_lease_boundary(task_store, task),
+                &target,
+            )
+        } else {
+            self.rebased_tip_supersedes_anchor(task_store, task, repo_path, recorded, &tip, &target)
+        };
+        if !advance {
             return parking;
         }
         let mut advanced = task.clone();
@@ -6504,6 +6505,72 @@ impl CasCore {
             parking.updated_at = advanced.updated_at;
         }
         parking
+    }
+
+    /// cas-4171: a rebase is no commit, so the commit-time anchor still names
+    /// the pre-rebase commit, which the rebased tip no longer contains. The
+    /// tip supersedes it when every commit only the anchor has survives in the
+    /// tip as a patch-equivalent, every commit the tip adds over the target
+    /// names this task (a plain lane's next task does not), the tip is not
+    /// already on the target, and no other open task's anchor lies between.
+    fn rebased_tip_supersedes_anchor(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        recorded: &str,
+        tip: &str,
+        target: &str,
+    ) -> bool {
+        if !is_safe_git_refname(recorded)
+            || !is_safe_git_refname(target)
+            || git_commit_is_ancestor(repo_path, tip, target)
+        {
+            return false;
+        }
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        let Some(cherry) = git(&["cherry", tip, recorded]) else {
+            return false;
+        };
+        let mut unique = cherry.lines().filter(|line| !line.trim().is_empty()).peekable();
+        if unique.peek().is_none() || !unique.all(|line| line.starts_with("- ")) {
+            return false;
+        }
+        let Some(base) = git(&["merge-base", target, tip]).map(|base| base.trim().to_string())
+        else {
+            return false;
+        };
+        let Some(log) = git(&["log", "--format=%B%x1e", &format!("{base}..{tip}"), "--"]) else {
+            return false;
+        };
+        let mut messages = log.split('\u{1e}').map(str::trim).filter(|m| !m.is_empty()).peekable();
+        if messages.peek().is_none()
+            || !messages.all(|message| message_references_task(message, &task.id))
+        {
+            return false;
+        }
+        task_store.list(None).is_ok_and(|others| {
+            !others.iter().any(|other| {
+                other.id != task.id
+                    && other.status != TaskStatus::Closed
+                    && other
+                        .deliverables
+                        .factory_branch_anchor
+                        .as_deref()
+                        .is_some_and(|anchor| {
+                            git_commit_is_ancestor(repo_path, anchor, tip)
+                                && !git_commit_is_ancestor(repo_path, anchor, &base)
+                        })
+            })
+        })
     }
 
     pub(crate) fn advance_awaiting_merge_anchor(

@@ -252,8 +252,17 @@ mod internal_llm_tests {
         )
         .expect("codex session start");
         let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
-        let ids: Vec<String> = agents.list(None).expect("agents").into_iter().map(|a| a.id).collect();
-        assert_eq!(ids, ["codex-true-leopard-45-registered"], "no ghost row under the thread id");
+        let ids: Vec<String> = agents
+            .list(None)
+            .expect("agents")
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(
+            ids,
+            ["codex-true-leopard-45-registered"],
+            "no ghost row under the thread id"
+        );
     }
 
     #[test]

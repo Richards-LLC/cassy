@@ -1006,7 +1006,12 @@ fn configure_codex_tool_hooks(codex_dir: &Path, layer: CodexHookLayer) -> anyhow
                 handlers.retain(|handler| !matches!(handler.get("command").and_then(|v| v.as_str()), Some(existing) if existing == command || existing == legacy_command));
             }
         }
-        groups.retain(|group| !group.get("hooks").and_then(|h| h.as_array()).is_some_and(Vec::is_empty));
+        groups.retain(|group| {
+            !group
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .is_some_and(Vec::is_empty)
+        });
         let mut group = serde_json::json!({
             "hooks": [{
                 "type": "command",
@@ -1058,13 +1063,24 @@ mod codex_provision_tests {
             codex_hook_matcher("PreToolUse", CodexHookLayer::Project),
             "^(Bash|apply_patch)$"
         );
-        assert_eq!(codex_hook_matcher("PostToolUse", CodexHookLayer::User), "^Bash$");
+        assert_eq!(
+            codex_hook_matcher("PostToolUse", CodexHookLayer::User),
+            "^Bash$"
+        );
         // cas-d0fe: the user layer also routes Slack/Violet MCP calls through
         // the same policy Claude's PreToolUse matcher covers.
         let user = codex_hook_matcher("PreToolUse", CodexHookLayer::User);
         let re = regex::Regex::new(&user).unwrap();
-        for tool in ["Bash", "apply_patch", "mcp__violet__violet_post", "mcp__cs__artifact"] {
-            assert!(re.is_match(tool), "{tool} must reach the Codex PreToolUse policy");
+        for tool in [
+            "Bash",
+            "apply_patch",
+            "mcp__violet__violet_post",
+            "mcp__cs__artifact",
+        ] {
+            assert!(
+                re.is_match(tool),
+                "{tool} must reach the Codex PreToolUse policy"
+            );
         }
         assert!(!re.is_match("mcp__cs__task"));
     }
@@ -1139,17 +1155,24 @@ mod codex_provision_tests {
             codex_dir.path(),
         )
         .unwrap();
-        let cas_hooks: Vec<_> = readiness.hooks.iter().filter(|hook| hook.cas_owned).collect();
+        let cas_hooks: Vec<_> = readiness
+            .hooks
+            .iter()
+            .filter(|hook| hook.cas_owned)
+            .collect();
         assert_eq!(cas_hooks.len(), 4, "{cas_hooks:?}");
         assert!(
-            cas_hooks.iter().all(|hook| hook.trust == cas_pty::CodexHookTrust::Trusted),
+            cas_hooks
+                .iter()
+                .all(|hook| hook.trust == cas_pty::CodexHookTrust::Trusted),
             "{cas_hooks:?}"
         );
 
         // The project layer (usually tracked) never duplicates them.
         let project = TempDir::new().unwrap();
         configure_codex_mcp_server(project.path()).unwrap();
-        let project_hooks = std::fs::read_to_string(project.path().join(".codex/hooks.json")).unwrap();
+        let project_hooks =
+            std::fs::read_to_string(project.path().join(".codex/hooks.json")).unwrap();
         assert!(!project_hooks.contains("SessionStart") && !project_hooks.contains("\"Stop\""));
     }
 }

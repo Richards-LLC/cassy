@@ -394,7 +394,8 @@ fn cas_pre_tool_handlers(
         })
         .flatten()
         .filter(|handler| {
-            handler.get("command").and_then(serde_json::Value::as_str) == Some(CAS_CODEX_HOOKS[0].command)
+            handler.get("command").and_then(serde_json::Value::as_str)
+                == Some(CAS_CODEX_HOOKS[0].command)
         })
 }
 
@@ -594,7 +595,10 @@ impl CodexLaunchReadiness {
             ));
         }
         for hook in self.hooks.iter().filter(|hook| hook.cas_owned) {
-            if matches!(hook.trust, CodexHookTrust::Untrusted | CodexHookTrust::Modified) {
+            if matches!(
+                hook.trust,
+                CodexHookTrust::Untrusted | CodexHookTrust::Modified
+            ) {
                 reasons.push(format!("CAS hook {} is {:?}", hook.key, hook.trust));
             }
         }
@@ -608,7 +612,10 @@ impl CodexLaunchReadiness {
             .iter()
             .filter(|hook| {
                 !hook.cas_owned
-                    && matches!(hook.trust, CodexHookTrust::Untrusted | CodexHookTrust::Modified)
+                    && matches!(
+                        hook.trust,
+                        CodexHookTrust::Untrusted | CodexHookTrust::Modified
+                    )
             })
             .collect()
     }
@@ -680,7 +687,8 @@ fn hook_file_readiness(
                     "{}:{event_key}:{group_index}:{handler_index}",
                     hooks_path.display()
                 );
-                let hash = codex_command_hook_hash(&event_key, matcher, command, timeout, runs_async);
+                let hash =
+                    codex_command_hook_hash(&event_key, matcher, command, timeout, runs_async);
                 let entry = state.and_then(|state| state.get(&key));
                 let trust = if entry
                     .and_then(|entry| entry.get("enabled"))
@@ -1417,30 +1425,55 @@ mod tests {
                 "event_name": "stop", "matcher": "",
                 "hooks": [{"type": "command", "command": "CAS_HOOK_HARNESS=codex cas hook Stop", "timeout": 60, "async": false}],
             });
-            format!("sha256:{:x}", Sha256::digest(serde_json::to_vec(&identity).unwrap()))
+            format!(
+                "sha256:{:x}",
+                Sha256::digest(serde_json::to_vec(&identity).unwrap())
+            )
         };
         let (config, home, cwd) = readiness_fixture(&dir, &stale);
         let readiness = codex_launch_readiness(&config, &home, &cwd).unwrap();
         let blocking = readiness.blocking();
         assert_eq!(blocking.len(), 1, "{blocking:?}");
-        assert!(blocking[0].contains(":stop:0:0") && blocking[0].contains("Modified"), "{blocking:?}");
+        assert!(
+            blocking[0].contains(":stop:0:0") && blocking[0].contains("Modified"),
+            "{blocking:?}"
+        );
     }
 
     #[test]
     fn launch_readiness_reports_but_never_blocks_on_foreign_hooks_cas_d0fe() {
         let dir = TempDir::new();
-        let stop = codex_command_hook_hash("stop", "", "CAS_HOOK_HARNESS=codex cas hook Stop", 60, false);
+        let stop = codex_command_hook_hash(
+            "stop",
+            "",
+            "CAS_HOOK_HARNESS=codex cas hook Stop",
+            60,
+            false,
+        );
         let (config, home, cwd) = readiness_fixture(&dir, &stop);
         let readiness = codex_launch_readiness(&config, &home, &cwd).unwrap();
-        assert!(readiness.blocking().is_empty(), "{:?}", readiness.blocking());
+        assert!(
+            readiness.blocking().is_empty(),
+            "{:?}",
+            readiness.blocking()
+        );
         // The untrusted operator hook is reported for review; the disabled one
         // is inactive and neither blocks nor needs review.
-        let review: Vec<_> = readiness.foreign_needing_review().iter().map(|h| h.command.clone()).collect();
+        let review: Vec<_> = readiness
+            .foreign_needing_review()
+            .iter()
+            .map(|h| h.command.clone())
+            .collect();
         assert_eq!(review, ["/opt/operator/audit.sh"]);
         assert!(readiness.hooks.iter().any(|h| h.command == "/opt/operator/off.sh" && h.trust == CodexHookTrust::Disabled));
         let config_before = std::fs::read_to_string(&config).unwrap();
         codex_launch_readiness(&config, &home, &cwd).unwrap();
-        assert_eq!(std::fs::read_to_string(&config).unwrap(), config_before, "readiness never writes");
+        // pin: readiness is read-only, so the config bytes must be identical.
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            config_before,
+            "readiness never writes"
+        );
     }
 
     #[test]

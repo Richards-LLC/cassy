@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -658,6 +658,9 @@ pub struct ExternalWorkService {
     pub violet: Arc<dyn VioletThreadResolver>,
     pub context: OperationContext,
     pub total_budget: Duration,
+    /// cas-f869: the invocation clock a reply-intent's claim expiry is judged
+    /// against (tests pin it).
+    pub now: fn() -> DateTime<Utc>,
 }
 
 impl ExternalWorkService {
@@ -673,6 +676,7 @@ impl ExternalWorkService {
             violet,
             context,
             total_budget: TOTAL_REMOTE_BUDGET,
+            now: Utc::now,
         }
     }
 
@@ -686,7 +690,7 @@ impl ExternalWorkService {
             } => {
                 let resource_id = resource_id.clone();
                 let result = self.mutate(command)?;
-                Ok(with_reply_ready(result, &resource_id, expected_generation))
+                Ok(with_reply_ready(result, &resource_id, expected_generation, (self.now)()))
             }
             other => self.mutate(other),
         }
@@ -1236,8 +1240,11 @@ impl ExternalWorkCommand {
 /// intent, taken only from Cloud's receipt and checked against the request.
 /// `receipt.operation_id` is the registration operation, never the post's
 /// `coordination_operation_id`; a receipt that does not match the requested
-/// resource and generation yields a refusal instead of a post block.
-fn with_reply_ready(mut result: Value, resource_id: &str, expected_generation: u64) -> Value {
+/// resource and generation yields a refusal instead of a post block. The
+/// claim's authoritative `expires_at` is checked against `now` on every call,
+/// including a journal replay: an expired, missing or unreadable expiry yields
+/// a refusal with the original receipt kept, never a renew or a reclaim.
+fn with_reply_ready(mut result: Value, resource_id: &str, expected_generation: u64, now: DateTime<Utc>) -> Value {
     if result["code"] != "completed" {
         return result;
     }
@@ -1262,6 +1269,42 @@ fn with_reply_ready(mut result: Value, resource_id: &str, expected_generation: u
             "expected_generation": claim_generation,
         }))
     })();
+    let request_id = result["receipt"]["request_id"].as_str().unwrap_or_default().to_string();
+    let refuse = |result: Value, code: &str, reason: &str, guidance: &str, next: &str| {
+        let mut refused = failure_response(&request_id, code, reason, guidance, next);
+        refused["cloud_response"] = result;
+        refused
+    };
+    if block.is_some() {
+        let expires = receipt["expires_at"]
+            .as_str()
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.with_timezone(&Utc));
+        match expires {
+            None => {
+                return refuse(
+                    result,
+                    "invalid_response",
+                    "claim_expiry_unreadable",
+                    "Cloud's reply-intent receipt has no readable claim expires_at, so there is nothing safe to post. Do not post; check claim_status, then register again.",
+                    "reconcile",
+                );
+            }
+            Some(expires_at) if expires_at <= now => {
+                return refuse(
+                    result,
+                    "rejected",
+                    "claim_expired",
+                    &format!(
+                        "The claim this reply intent was registered under lapsed at {}. Do not post: renew_claim if the thread is still yours (claim_not_active means claim it again explicitly), then register a new reply intent.",
+                        expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                    ),
+                    "renew_or_reclaim",
+                );
+            }
+            Some(_) => {}
+        }
+    }
     match block {
         Some(block) => {
             let claim = json!({
@@ -1277,18 +1320,13 @@ fn with_reply_ready(mut result: Value, resource_id: &str, expected_generation: u
             ));
             result
         }
-        None => {
-            let request_id = result["receipt"]["request_id"].as_str().unwrap_or_default().to_string();
-            let mut refused = failure_response(
-                &request_id,
-                "invalid_response",
-                "reply_intent_receipt_mismatch",
-                "Cloud's reply-intent receipt does not match the requested thread and claim generation, so there is nothing safe to post. Do not post; check claim_status, then register again.",
-                "reconcile",
-            );
-            refused["cloud_response"] = result;
-            refused
-        }
+        None => refuse(
+            result,
+            "invalid_response",
+            "reply_intent_receipt_mismatch",
+            "Cloud's reply-intent receipt does not match the requested thread and claim generation, so there is nothing safe to post. Do not post; check claim_status, then register again.",
+            "reconcile",
+        ),
     }
 }
 
@@ -1876,6 +1914,15 @@ mod tests {
             .clone()
     }
 
+    /// The vendored receipts' claim expires 2026-10-16T14:05:00Z.
+    fn before_expiry() -> DateTime<Utc> {
+        "2026-10-16T14:02:00Z".parse().unwrap()
+    }
+
+    fn at_expiry() -> DateTime<Utc> {
+        "2026-10-16T14:05:00Z".parse().unwrap()
+    }
+
     fn reply_intent(request_id: &str, occurrence_id: Option<&str>) -> ExternalWorkCommand {
         ExternalWorkCommand::ReplyIntent {
             resource_id: RESOURCE_ID.into(),
@@ -1897,7 +1944,8 @@ mod tests {
         let journal = journal();
         let cloud = Arc::new(FakeCloud::new(journal.clone()));
         *cloud.post_result.lock().unwrap() = Ok(case["response"]["payload"].clone());
-        let service = service(cloud.clone(), Arc::new(FakeViolet::ok()), journal);
+        let mut service = service(cloud.clone(), Arc::new(FakeViolet::ok()), journal);
+        service.now = before_expiry;
         let command = || reply_intent(request_id, Some("00000cc2-1111-4111-8111-000000000cc2"));
 
         let first = service.execute(command()).unwrap();
@@ -1920,6 +1968,16 @@ mod tests {
             assert_ne!(result["violet_post"]["coordination_operation_id"], result["receipt"]["operation_id"]);
             assert_eq!(result["claim"]["expires_at"], "2026-10-16T14:05:00.000Z");
         }
+
+        // The same journaled intent replayed once its claim has lapsed: no post
+        // fields, the original receipt kept, and no renew or claim call.
+        service.now = at_expiry;
+        let expired = service.execute(command()).unwrap();
+        assert_eq!((expired["code"].as_str(), expired["reason"].as_str()), (Some("rejected"), Some("claim_expired")));
+        assert_eq!(expired["receipt"]["next_action"], "renew_or_reclaim");
+        assert!(expired.get("violet_post").is_none());
+        assert_eq!(expired["cloud_response"]["receipt"]["reply_intent"]["id"], "00007e91-1111-4111-8111-000000007e91");
+        assert_eq!(cloud.posts.load(Ordering::SeqCst), 1, "no renew, claim or re-registration");
     }
 
     /// cas-f869: occurrence_id is optional, so the wire omits it; a receipt
@@ -1930,7 +1988,9 @@ mod tests {
         let first_journal = journal();
         let cloud = Arc::new(FakeCloud::new(first_journal.clone()));
         *cloud.post_result.lock().unwrap() = Ok(registered.clone());
-        let result = service(cloud.clone(), Arc::new(FakeViolet::ok()), first_journal)
+        let mut first = service(cloud.clone(), Arc::new(FakeViolet::ok()), first_journal);
+        first.now = before_expiry;
+        let result = first
             .execute(reply_intent("00000071-2222-4222-8222-000000000071", None))
             .unwrap();
         assert!(cloud.posted.lock().unwrap()[0].1.get("occurrence_id").is_none());
@@ -1959,6 +2019,20 @@ mod tests {
             assert_eq!(result["code"], "invalid_response", "case {n}");
             assert_eq!(result["reason"], "reply_intent_receipt_mismatch");
             assert!(result.get("violet_post").is_none(), "case {n}: nothing safe to post");
+        }
+
+        // A receipt whose claim expiry is missing or unreadable is refused.
+        for (n, expires_at) in [Value::Null, json!("not-a-time")].into_iter().enumerate() {
+            let journal = journal();
+            let cloud = Arc::new(FakeCloud::new(journal.clone()));
+            *cloud.post_result.lock().unwrap() = Ok(mutate("/receipt/expires_at", expires_at));
+            let mut service = service(cloud, Arc::new(FakeViolet::ok()), journal);
+            service.now = before_expiry;
+            let result = service
+                .execute(reply_intent(&format!("00000074-2222-4222-8222-00000000007{n}"), None))
+                .unwrap();
+            assert_eq!((result["code"].as_str(), result["reason"].as_str()), (Some("invalid_response"), Some("claim_expiry_unreadable")));
+            assert!(result.get("violet_post").is_none());
         }
     }
 

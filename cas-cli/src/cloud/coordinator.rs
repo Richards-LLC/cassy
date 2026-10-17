@@ -59,6 +59,7 @@ pub struct CloudCoordinator {
     /// The machine label registrations publish; `None` means
     /// [`crate::cloud::peers::machine_label`] (cas-c7c7).
     machine_label: Option<String>,
+    factory_slot_id: Option<String>,
 }
 
 /// Response from agent registration
@@ -181,6 +182,7 @@ impl CloudCoordinator {
             agent_id: None,
             canonical_id: None,
             machine_label: None,
+            factory_slot_id: None,
         })
     }
 
@@ -202,6 +204,31 @@ impl CloudCoordinator {
     pub fn with_canonical_id(mut self, canonical_id: Option<String>) -> Self {
         self.canonical_id = canonical_id;
         self
+    }
+
+    pub(crate) fn with_factory_slot_id(mut self, slot_id: Option<String>) -> Self {
+        self.factory_slot_id = slot_id.map(|id| id.trim().to_string()).filter(|id| !id.is_empty());
+        self
+    }
+
+    /// Cloud's slot key must survive a new agent id, /clear and full relaunch.
+    /// Keep local factory_session metadata unchanged: peer/fleet routing uses it.
+    fn factory_id(&self, agent: &Agent) -> Option<String> {
+        let legacy = || std::env::var("CAS_FACTORY_ID").ok().filter(|id| !id.trim().is_empty());
+        if agent.role != crate::types::AgentRole::Supervisor {
+            return legacy();
+        }
+        self.factory_slot_id.clone()
+            .or_else(|| {
+                use sha2::{Digest, Sha256};
+                let machine = agent.machine_id.as_deref().map(str::trim).filter(|id| !id.is_empty())?;
+                let project = self.canonical_id.as_deref()
+                    .and_then(crate::cloud::normalize_project_canonical_id)?;
+                let identity = serde_json::to_vec(&(machine, project, "supervisor")).ok()?;
+                Some(format!("cassy-slot-{}", hex::encode(Sha256::digest(identity))))
+            })
+            .or_else(legacy)
+            .or_else(|| agent.factory_session.clone().filter(|id| !id.trim().is_empty()))
     }
 
     /// Set the request timeout
@@ -286,7 +313,7 @@ impl CloudCoordinator {
     ) -> Result<AgentInfo, CasError> {
         let url = format!("{}/api/agents/register", self.config.endpoint);
 
-        let factory_id = std::env::var("CAS_FACTORY_ID").ok();
+        let factory_id = self.factory_id(agent);
         let machine = self.machine_label();
         let mut metadata = crate::cloud::peers::identity_metadata(
             agent,

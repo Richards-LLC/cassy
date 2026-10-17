@@ -1613,6 +1613,17 @@ impl FactoryApp {
         let delivery_events: Vec<DirectorEvent> = events
             .iter()
             .filter_map(|event| {
+                // cas-c926: a supervisor hold covers every WorkerIdle relay,
+                // not just the detector's idle streak. The merge-alert retry
+                // re-emits a remembered WorkerIdle each minute without that
+                // gate, and revalidation then rebinds it to the worker's live
+                // lease, so a held worker kept getting "pending delivery"
+                // relays until release_worker.
+                if let DirectorEvent::WorkerIdle { worker, .. } = event
+                    && self.event_detector.is_worker_held(worker)
+                {
+                    return None;
+                }
                 // cas-06ca / cas-223f: an unavailable store snapshot is
                 // uncertainty, never positive evidence that an event is
                 // stale. Preserve every event rather than suppressing it
@@ -2990,15 +3001,17 @@ pub(crate) fn queue_supervisor_intro_prompt(
             "startup-envelope:{supervisor_name}:{}:{session_key}:{factory_key}",
             supervisor_cli.backend().name()
         );
+        // cas-cd3f: CAS composed this row, and it must wake the new
+        // supervisor; the daemon stamp is its wake authority.
         let _ = queue.enqueue_idempotent(
-            "cas",
+            crate::ui::factory::daemon::runtime::queue_and_events::SUPERVISOR_STARTUP_SOURCE,
             supervisor_name,
             &prompt,
             factory_session,
             Some("factory supervisor startup envelope"),
             None,
             &dedupe_key,
-            None,
+            Some(&cas_store::QueueOrigin::Daemon),
         );
     }
 }

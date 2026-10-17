@@ -1537,6 +1537,31 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
             args.launched_by,
         ))
     )?;
+    // cas-cb94: launchd hands the hub a soft limit of 256 descriptors; a
+    // request burst exhausted it on prowl and every auth-store read failed.
+    let nofile_limit = match crate::hub::open_files::raise_nofile_limit(
+        crate::hub::open_files::HUB_NOFILE_TARGET,
+    ) {
+        Ok(limit) => {
+            writeln!(
+                startup_log,
+                "{}",
+                hub_log_line(&format!(
+                    "cas hub serve open-file limit {} (was {}, hard {})",
+                    limit.soft, limit.before, limit.hard
+                ))
+            )?;
+            Some(limit.soft)
+        }
+        Err(error) => {
+            writeln!(
+                startup_log,
+                "{}",
+                hub_log_line(&format!("cas hub serve open-file limit unchanged: {error}"))
+            )?;
+            None
+        }
+    };
     startup_log.flush()?;
     let result = serve_foreground_logged(
         args,
@@ -1545,6 +1570,7 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
         addr,
         paths,
         startup_log.try_clone()?,
+        nofile_limit,
     );
     let exit_line = match &result {
         Ok(()) => format!("cas hub serve exited cleanly (pid={})", std::process::id()),
@@ -1565,6 +1591,7 @@ fn serve_foreground_logged(
     addr: SocketAddr,
     paths: HubRuntimePaths,
     mut startup_log: std::fs::File,
+    nofile_limit: Option<u64>,
 ) -> Result<()> {
     let (tailscale_serve, tailscale_port) = resolve_lifecycle_tailscale_request(
         tailscale_serve,
@@ -1620,6 +1647,7 @@ fn serve_foreground_logged(
             tailscale_cli: tailscale_serve.then(|| tailscale_manager.executable_display()),
             tailscale_serve_target: None,
             transport_warning: None,
+            nofile_limit,
         };
         paths.write_process_record(&record)?;
         let mut startup_guard = HubStartupGuard::new(paths.clone(), tailscale_manager.clone());
@@ -2221,6 +2249,7 @@ fn status(cli: &Cli) -> Result<()> {
     // cas-0140: a failing audit writer refuses every audited request and
     // used to be visible only as a log that fell silent.
     let audit = crate::hub::audit_writer_report(paths.root(), chrono::Utc::now());
+    let open_files = crate::hub::open_files::OpenFilesReport::for_process(record.pid, record.nofile_limit);
     if cli.json {
         let runtime_receipt = runtime_receipt(
             &paths, Some(&record), Some(state), &transport, probe_window_started_at,
@@ -2236,6 +2265,7 @@ fn status(cli: &Cli) -> Result<()> {
                 "service_warning": service_warning,
                 "service_status": service_status(service_warning),
                 "audit": audit,
+                "open_files": open_files,
                 "runtime_receipt": runtime_receipt,
             })
         );
@@ -2249,6 +2279,7 @@ fn status(cli: &Cli) -> Result<()> {
         }
         println!("{}", render_transport_status(&transport));
         println!("{}", render_audit_status(&audit));
+        println!("{}", render_open_files_status(&open_files));
     }
     anyhow::ensure!(live, "cas hub is not ready; see status above");
     // cas-621ec: a hub serving outside its installed service has no restart
@@ -2360,6 +2391,15 @@ fn render_audit_status(report: &crate::hub::AuditWriterReport) -> String {
         _ => "OK",
     };
     format!("Audit log: {verdict} - {}", report.message)
+}
+
+fn render_open_files_status(report: &crate::hub::open_files::OpenFilesReport) -> String {
+    let verdict = match report.status {
+        "warning" => "WARN",
+        "ok" => "OK",
+        _ => "UNKNOWN",
+    };
+    format!("Open files: {verdict} - {}", report.message)
 }
 
 /// `--json` severity of the installed-service finding (cas-621ec).
@@ -3258,6 +3298,7 @@ mod tests {
             tailscale_serve_target: tailscale_serve_port
                 .map(|port| format!("http://127.0.0.1:{port}")),
             transport_warning: None,
+            nofile_limit: None,
         }
     }
 

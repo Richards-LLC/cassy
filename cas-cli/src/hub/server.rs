@@ -3991,9 +3991,13 @@ fn authorized<R: SessionReadModel>(
 /// A 401 that says why (cas-d636). An authentication refusal carries its
 /// machine-readable reason, whether a fresh proof can succeed, and the hub's
 /// clock (so a device whose clock drifted can correct its proofs), in the
-/// body and as RFC 9449 `WWW-Authenticate: DPoP error=...`. Any other failure
-/// stays the bare 401.
+/// body and as RFC 9449 `WWW-Authenticate: DPoP error=...`. A failure of the
+/// hub's own auth store is a retryable 503 (cas-cb94). Any other failure stays
+/// the bare 401.
 fn unauthorized_for(error: &anyhow::Error) -> Response {
+    if error.is::<super::AuthStoreUnavailable>() {
+        return auth_store_unavailable(error);
+    }
     let Some(refusal) = error.downcast_ref::<super::AuthRefusal>().copied() else {
         return unauthorized();
     };
@@ -4019,6 +4023,31 @@ fn unauthorized_for(error: &anyhow::Error) -> Response {
         HeaderValue::from_static("WWW-Authenticate, X-Cas-Request-Id"),
     );
     response.headers_mut().insert("x-cas-refusal", HeaderValue::from_static(super::connection_recovery::refusal(refusal.code())));
+    response
+}
+
+/// cas-cb94: the hub could not consult its auth state (EMFILE on prowl), so
+/// the credential was never judged. Retry soon; the pairing is intact.
+fn auth_store_unavailable(error: &anyhow::Error) -> Response {
+    tracing::error!(error = %format!("{error:#}"), "hub auth store unavailable");
+    let code = super::AuthStoreUnavailable::CODE;
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": code,
+            "reason": code,
+            "retryable": true,
+            "server_time": chrono::Utc::now().timestamp(),
+        })),
+    )
+        .into_response();
+    let headers = response.headers_mut();
+    headers.insert("retry-after", HeaderValue::from_static("2"));
+    headers.insert("x-cas-refusal", HeaderValue::from_static(code));
+    headers.insert(
+        "access-control-expose-headers",
+        HeaderValue::from_static("Retry-After, X-Cas-Request-Id"),
+    );
     response
 }
 

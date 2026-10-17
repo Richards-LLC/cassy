@@ -1406,9 +1406,11 @@ describe("a refused DPoP proof is not a lost pairing (cas-d636)", () => {
     await expect(key.supervisor.request("GET", "/v1/machine")).rejects.toMatchObject({ kind: "revoked", message: "this browser's key no longer matches the pairing" });
   });
 
-  it("keeps a legacy hub's bare 401 a lost pairing, after one fresh proof", async () => {
+  // cas-2904: a hub's internal failure also answered a bare 401, and reading
+  // it as "revoked" purged and permanently fenced a live pairing.
+  it("reads a bare 401 as needs pairing, never as a revocation, after one fresh proof", async () => {
     const { supervisor, fetchMock } = await supervisorWith(() => reply(401, { error: "unauthorized" }));
-    await expect(supervisor.request("GET", "/v1/machine")).rejects.toMatchObject({ kind: "revoked" });
+    await expect(supervisor.request("GET", "/v1/machine")).rejects.toMatchObject({ kind: "needs-pairing" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 

@@ -984,18 +984,26 @@ impl CasCore {
             && task.pending_verification
             && proof_dispatch.delivery_transaction_id.is_none()
         {
-            match task_store.get(&req.task_id) {
-                Ok(current) => match crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_approved_verification_close_retry(
-                    &self.cas_root,
-                    &current,
-                    &requested_dispatch_id,
-                ) {
-                    Ok(Some(prompt_id)) => format!("\nClose retry queued for the assigned worker (prompt {prompt_id})."),
-                    Ok(None) => "\nNo live assigned worker was available for a close retry; a supervisor can retry task close.".to_string(),
-                    Err(error) => format!("\nClose retry could not be queued after the verdict was recorded: {error}. Retry task close or notify the worker."),
+            // cas-eda0: a delivery Cassy merged green is closed by Cassy now;
+            // the worker retry remains the fallback when a gate still holds.
+            use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+            let cassy_close = self.close_green_merged_delivery(&req.task_id).await;
+            let worker_retry = match &cassy_close {
+                CassyMergeClose::Closed { .. } | CassyMergeClose::AlreadyClosed => String::new(),
+                CassyMergeClose::NotEligible | CassyMergeClose::Held(_) => match task_store.get(&req.task_id) {
+                    Ok(current) => match crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_approved_verification_close_retry(
+                        &self.cas_root,
+                        &current,
+                        &requested_dispatch_id,
+                    ) {
+                        Ok(Some(prompt_id)) => format!("\nClose retry queued for the assigned worker (prompt {prompt_id})."),
+                        Ok(None) => "\nNo live assigned worker was available for a close retry; a supervisor can retry task close.".to_string(),
+                        Err(error) => format!("\nClose retry could not be queued after the verdict was recorded: {error}. Retry task close or notify the worker."),
+                    },
+                    Err(error) => format!("\nClose retry could not read the task after the verdict was recorded: {error}. Retry task close or notify the worker."),
                 },
-                Err(error) => format!("\nClose retry could not read the task after the verdict was recorded: {error}. Retry task close or notify the worker."),
-            }
+            };
+            format!("{}{worker_retry}", cassy_close.receipt(&req.task_id))
         } else {
             String::new()
         };

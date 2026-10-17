@@ -100,6 +100,8 @@ export class CommanderJournal {
   // Ordered attempts on this tab's wire, never reconstructed from captions.
   private readonly wireClaims = new Map<string, JournalSend[]>();
   private readonly channel: BroadcastChannel | undefined;
+  /** Why the last reconcile could not commit, for the composer (cas-2904). */
+  storageFailure: string | undefined;
   onChange?: () => void;
   constructor(
     private readonly factory: IDBFactory | undefined,
@@ -184,7 +186,8 @@ export class CommanderJournal {
     });
   }
   /** Merge only this tab's changes, never a whole-namespace replacement. */
-  async reconcile(scope: DeliveryScope, before: PendingSend[], after: PendingSend[], fence: CredentialFence): Promise<"kept" | "too-long" | "not-saved"> {
+  async reconcile(scope: DeliveryScope, before: PendingSend[], after: PendingSend[], fence: CredentialFence): Promise<"kept" | "too-long" | "blocked" | "not-saved"> {
+    this.storageFailure = undefined;
     if (!validScope(scope)) return "not-saved";
     if (JSON.stringify(after).length > 64_000 || after.some((send) => !validPendingSend(send))) return "too-long";
     const prior = new Map(before.map((send) => [send.id, send]));
@@ -250,8 +253,32 @@ export class CommanderJournal {
       for (const key of clearedClaims) this.wireClaims.delete(key);
       for (const [key, revision] of committedVersions) this.observed.set(key, revision);
       if (committedVersions.size) this.changed();
-      return rejected ? "not-saved" : "kept";
-    } catch { return "not-saved"; }
+      return rejected ? "blocked" : "kept";
+    } catch (error) {
+      this.storageFailure = error instanceof DOMException ? error.name : error instanceof Error ? error.message : String(error);
+      return "not-saved";
+    }
+  }
+  /**
+   * The hub accepted this exact credential again, so a revocation block on it
+   * is stale (cas-2904: a reasonless 401 once wrote one for a live pairing).
+   * Only a machine still in the catalog with this fence is readmitted, so a
+   * pairing removed from this browser stays fenced.
+   */
+  async readmit(scope: DeliveryScope, fence: CredentialFence): Promise<boolean> {
+    if (!validScope(scope)) return false;
+    const accepted = await this.current(scope);
+    if (!accepted || !sameFence(accepted, fence)) return false;
+    let cleared = false;
+    try {
+      await this.transaction<void>(["blocks"], "readwrite", (tx, done) => {
+        done(undefined);
+        const store = tx.objectStore("blocks"), key = blockKey(scope.hub, fence), get = store.get(key);
+        get.onsuccess = () => { if (get.result) { store.delete(key); cleared = true; } };
+      });
+    } catch { return false; }
+    if (cleared) this.changed();
+    return cleared;
   }
   /** Store a verified wire receipt without retaining the message's private payload. */
   async acknowledge(scope: DeliveryScope, receipt: MessageQueued, fence: CredentialFence): Promise<boolean> {

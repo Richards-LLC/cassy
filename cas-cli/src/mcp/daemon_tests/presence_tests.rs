@@ -348,6 +348,9 @@ async fn cas_f707_daemon_retries_a_rejected_registration_and_reregisters_after_a
 #[tokio::test]
 async fn cas_f707_eager_registration_path_pushes_to_the_cloud() {
     let (fx, daemon) = fixture("cas-571d").await;
+    let mut config = crate::config::Config::load(&fx.cas_root).unwrap();
+    config.set("factory.slot_id", "second-supervisor").unwrap();
+    config.save(&fx.cas_root).unwrap();
     let me = "sup-f707-eager";
     // The eager MCP registration writes the row, then hands the id to the
     // daemon (mcp/server register_agent_with_hints → set_agent_id).
@@ -361,6 +364,7 @@ async fn cas_f707_eager_registration_path_pushes_to_the_cloud() {
     daemon.await_cloud_presence().await;
 
     assert_eq!(fx.cloud.state().registrations.len(), 1);
+    assert_eq!(fx.cloud.state().registrations[0]["factory_id"], "second-supervisor");
     assert_eq!(
         presence::load(&fx.cas_root, me).unwrap().state,
         PresenceState::Registered

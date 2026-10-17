@@ -640,6 +640,19 @@ pub struct TaskDeliverables {
     /// used to be indistinguishable in task status output.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub merge_conflicted: bool,
+
+    /// cas-eda0: the worker's close reason as written when this delivery
+    /// parked for merge. Cassy reuses it verbatim when it closes the task
+    /// itself after the merge, so no worker turn is needed to restate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_close_reason: Option<String>,
+
+    /// cas-eda0: target tip of the `worktree_merge` that landed this parked
+    /// delivery with green CI and no override. Its presence hands the close
+    /// retry to Cassy: an approved verdict closes the task without waking
+    /// the worker. Cleared with the park on reopen or conflict rework.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub green_merge_commit: Option<String>,
 }
 
 /// The object-shaped representation used by current task payloads.
@@ -687,6 +700,10 @@ struct TaskDeliverablesObject {
     handoff_branches: Vec<String>,
     #[serde(default)]
     merge_conflicted: bool,
+    #[serde(default)]
+    parked_close_reason: Option<String>,
+    #[serde(default)]
+    green_merge_commit: Option<String>,
 }
 
 impl From<TaskDeliverablesObject> for TaskDeliverables {
@@ -711,6 +728,8 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             parked_branch: value.parked_branch,
             handoff_branches: value.handoff_branches,
             merge_conflicted: value.merge_conflicted,
+            parked_close_reason: value.parked_close_reason,
+            green_merge_commit: value.green_merge_commit,
         }
     }
 }

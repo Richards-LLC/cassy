@@ -2167,7 +2167,7 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
     let (result, output) =
         capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
     result.unwrap();
-    let receipt: serde_json::Value = serde_json::from_str(output.lines().last().unwrap()).unwrap();
+    let receipt: serde_json::Value = output.lines().last().unwrap().parse().unwrap();
     assert_eq!(receipt["managed_files"]["outcome"], "staged");
     assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
     assert!(
@@ -2217,8 +2217,7 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         let (result, output) =
             capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
         result.unwrap();
-        let receipt: serde_json::Value =
-            serde_json::from_str(output.lines().last().unwrap()).unwrap();
+        let receipt: serde_json::Value = output.lines().last().unwrap().parse().unwrap();
         assert!(
             receipt["managed_files"]["conflicts"]
                 .as_array()
@@ -2241,5 +2240,63 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), conflicted);
         assert_eq!(cas_6718_git(&project, &["ls-files", "--stage"]), index);
         std::fs::write(file, original).unwrap();
+    }
+}
+
+#[test]
+fn cas_9815_update_distinguishes_old_shipped_skill_from_user_delta() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    // Exact flat-source blob dce50663ef7eb3cb5d8c0dd2dc237f741d8c99e8,
+    // also observed read-only in Penguinz after a previous Cassy sync.
+    let old = include_str!("../../../tests/fixtures/managed-files/cas-worker-pre-3.61.md");
+    let path = ".claude/skills/cas-worker/SKILL.md";
+    let current = crate::builtins::BUILTIN_SKILLS
+        .iter()
+        .find(|f| f.path == "skills/cas-worker/SKILL.md")
+        .unwrap()
+        .content;
+    for user_delta in [false, true] {
+        let fixture_home = env.home().join(if user_delta { "edited" } else { "old" });
+        let project = cas_6718_drifted_project(&fixture_home);
+        let root = project.join(".cas");
+        env.set("CAS_ROOT", &root);
+        let file = project.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, current).unwrap();
+        cas_6718_git(&project, &["add", "-f", path]);
+        cas_6718_git(&project, &["commit", "-qm", "tracked managed baseline"]);
+        let working = format!(
+            "{old}{}",
+            if user_delta {
+                "\nProject-specific instruction.\n"
+            } else {
+                ""
+            }
+        );
+        std::fs::write(&file, &working).unwrap();
+        let index = cas_6718_git(&project, &["ls-files", "--stage"]);
+        let mut args = update_test_args();
+        args.sync = true;
+        let (result, output) =
+            capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+        result.unwrap();
+        let receipt: serde_json::Value =
+            serde_json::from_str(output.lines().last().unwrap()).unwrap();
+        let conflicts = receipt["managed_files"]["conflicts"].as_array().unwrap();
+        if user_delta {
+            assert!(conflicts.iter().any(|p| p == path), "{receipt}");
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), working);
+            assert_eq!(cas_6718_git(&project, &["ls-files", "--stage"]), index);
+        } else {
+            assert!(
+                conflicts.is_empty(),
+                "old Cassy output blocked update: {receipt}"
+            );
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), current);
+            assert!(cas_6718_git(&project, &["status", "--porcelain"]).is_empty());
+            assert!(cas_6718_git(&project, &["ls-files", "--", path]).is_empty());
+        }
     }
 }

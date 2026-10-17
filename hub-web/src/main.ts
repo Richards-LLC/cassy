@@ -773,6 +773,9 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // live one is kept for the next reload during an outage.
       cachedCatalogs.delete(machine.id);
       if (!conversationPersistenceBlocked.has(machine.id)) catalogCache.save(machine.id, items);
+      // An authenticated catalog read proves the hub accepts this credential:
+      // a stale revocation block on it stops fencing the journal (cas-2904).
+      readmitCredential(machines.get(machine.id) ?? machine);
       const ttl = freshnessThresholdSecs !== undefined && Number.isFinite(freshnessThresholdSecs) && freshnessThresholdSecs > 0 ? freshnessThresholdSecs * 1000 : Infinity;
       catalogExpiresAt.set(machine.id, Date.now() + ttl);
       window.clearTimeout(catalogExpiryTimers.get(machine.id));
@@ -3179,6 +3182,23 @@ sendJournal.onChange = () => {
   }).catch(() => { /* a later broadcast retries; no storage failure grants dispatch */ });
 };
 
+/** Once per credential per page: the hub accepted it, so a stale block clears (cas-2904). */
+const readmittedCredentials = new Set<string>();
+function readmitCredential(machine: StoredMachine): void {
+  const fence = credentialFence(machine), key = JSON.stringify([machine.id, fence.credentialId, fence.generation]);
+  if (readmittedCredentials.has(key)) return;
+  readmittedCredentials.add(key);
+  void sendJournal.readmit(deliveryScope(machine, "readmit"), fence).then((cleared) => { if (cleared) sendJournal.onChange?.(); });
+}
+
+/** The composer says which refusal it was, never storage for a fence (cas-2904). */
+function journalRefusal(result: "too-long" | "blocked" | "not-saved", machine: StoredMachine): string {
+  if (result === "too-long") return "This message is too long to keep in browser storage. Edit it before sending.";
+  if (result === "blocked") return `${pairingRefusal(machine.label)} This browser stopped keeping its messages when the pairing was refused; re-pair, then send it.`;
+  const reason = sendJournal.storageFailure ? ` (${sendJournal.storageFailure})` : "";
+  return `Browser storage could not keep this message${reason}. It has not been sent; keep this page open and retry.`;
+}
+
 function persistPendingSends(): Promise<void> {
   for (const [key, history] of conversationHistories) {
     if (storedSends.has(key)) continue;
@@ -3206,9 +3226,7 @@ function persistPendingSends(): Promise<void> {
       // A revoked scope is deliberately refused, not a browser storage error.
       if (conversationPersistenceBlocked.has(machine.id)) return;
       if (result === "kept") persistedSends.set(key, after);
-      else if (selectedMachineId === machine.id && selectedSession === session) showComposerStatus(result === "too-long"
-        ? "This message is too long to keep in browser storage. Edit it before sending."
-        : "Browser storage could not keep this message. It has not been sent; keep this page open and retry.", "error");
+      else if (selectedMachineId === machine.id && selectedSession === session) showComposerStatus(journalRefusal(result, machine), "error");
     }).catch(() => { /* the next explicit operation reports storage failure */ });
   }
   return journalWrites;
@@ -3491,7 +3509,7 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
   }
   if (result !== "kept") {
     showComposerStatus(retryOf ? "This message's delivery state could not be confirmed for a retry. Wait for its receipt before retrying."
-      : result === "too-long" ? "This message is too long to keep in browser storage. Edit it before sending." : "Browser storage could not keep this message. It has not been sent; keep this page open and retry.", "error");
+      : journalRefusal(result, machine), "error");
     return;
   }
   if (conversationPersistenceBlocked.has(machine.id)) return;

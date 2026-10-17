@@ -308,6 +308,8 @@ pub(crate) struct QueueSelectRequest {
     pub(crate) limit: usize,
     /// Read the operator replies Commander clients are owed (cas-786a6).
     pub(crate) operator_replies: bool,
+    /// Pending replies still waiting for their monotonic retry deadlines.
+    pub(crate) deferred_operator_replies: HashSet<i64>,
     /// Adopt owner notices first (cas-5c2c): not while shutting down.
     pub(crate) adopt_operator_notices: bool,
 }
@@ -871,6 +873,8 @@ pub(crate) enum Admission {
 
 /// The prompt queue's jobs and the control-side state that orders them.
 pub(crate) struct QueueJobs {
+    /// Commander transport scheduling stays on the existing controller pass.
+    pub(crate) operator_reply_retries: HashMap<i64, super::queue_and_events::OperatorReplyRetry>,
     pub(crate) spawn_ingress: super::queue_control_jobs::SpawnIngress,
     pub(crate) prompt_preparation: super::queue_control_jobs::PromptPreparation,
     pub(crate) normal_probe_jobs: super::delivery_probe_jobs::NormalProbeJobs,
@@ -970,6 +974,7 @@ impl QueueJobs {
 
     fn with_exec(exec: Exec) -> Self {
         Self {
+            operator_reply_retries: HashMap::new(),
             spawn_ingress: Default::default(),
             prompt_preparation: Default::default(),
             normal_probe_jobs: Default::default(),

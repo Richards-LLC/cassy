@@ -1015,6 +1015,11 @@ fn qa_range_paths_ignore_deleted_html_css_and_whitespace_vue_gh_1027_1037() {
     let after = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
     assert!(range_paths(&fx.repo, &before, &after).unwrap().is_empty());
     assert_eq!(range_paths(&fx.repo, &base, &before).unwrap(), vec!["app.vue", "old.css", "old.html"]);
+    // cas-833c: `--name-only` lists top-relative paths, so the per-path probe
+    // must not resolve them against a subdirectory repo argument.
+    let subdir = fx.repo.join("sub");
+    std::fs::create_dir(&subdir).unwrap();
+    assert_eq!(range_paths(&subdir, &base, &before).unwrap(), vec!["app.vue", "old.css", "old.html"]);
 }
 
 #[test]

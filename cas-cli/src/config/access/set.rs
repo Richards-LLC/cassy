@@ -103,6 +103,10 @@ impl Config {
                     .violet_bot_user_ids = (!ids.is_empty()).then_some(ids);
             }
             // Factory build contention
+            "factory.slot_id" => {
+                self.factory.get_or_insert_with(FactoryConfig::default).slot_id =
+                    (!value.trim().is_empty()).then(|| value.trim().to_string());
+            }
             "factory.warn_stale_assignment" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.warn_stale_assignment = value.parse().map_err(|_| {

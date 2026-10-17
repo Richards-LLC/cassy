@@ -1173,7 +1173,7 @@ fn capacity_from_bytes(
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn filesystem_capacity(path: &Path) -> io::Result<(u64, u64)> {
     crate::fs_space::fs_space(path).map(filesystem_capacity_from_space)
 }
@@ -1182,7 +1182,7 @@ fn filesystem_capacity_from_space(space: crate::fs_space::FsSpace) -> (u64, u64)
     (space.total_bytes, space.available_bytes)
 }
 
-#[cfg(not(unix))]
+#[cfg(all(test, not(unix)))]
 fn filesystem_capacity(_path: &Path) -> io::Result<(u64, u64)> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

@@ -664,6 +664,54 @@ async fn personal_push_keeps_itemized_invalid_revision_visible_in_queue_health()
 }
 
 #[tokio::test]
+async fn nul_rejection_preserves_task_payload_and_explains_cloud_blocker() {
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tasks": {"inserted": 0, "updated": 0, "skipped": 1},
+            "rows": [{"entity_type": "tasks", "id": "cas-nul",
+                "outcome": "rejected", "reason": "invalid_json_nul"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n")
+        .unwrap();
+    crate::store::open_store_local(temp.path()).unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    // Actual incident: valid JSON whose decoded task notes contain U+0000.
+    let payload = r#"{"id":"cas-nul","origin_project":"p","notes":"original\u0000text"}"#;
+    queue.enqueue(EntityType::Task, "cas-nul", SyncOperation::Upsert, Some(payload)).unwrap();
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig { endpoint: server.uri(), token: Some("test-token".into()), ..Default::default() },
+        CloudSyncerConfig::default(),
+        "p".into(),
+        temp.path(),
+    );
+    let result = syncer.push_scoped(PushScope::TasksOnly).unwrap();
+    assert_eq!(result.pushed_tasks, 0);
+    assert_eq!(result.remaining_backlog.failed, 1);
+    assert_eq!(result.remaining_backlog.rejected_by_reason.get("invalid_json_nul"), Some(&1));
+    let row = queue.list_all(10).unwrap().pop().unwrap();
+    assert_eq!(row.payload.as_deref(), Some(payload), "original text must survive rejection");
+    let diagnostic = row.last_error.as_deref().unwrap();
+    assert!(diagnostic.contains("PostgreSQL jsonb cannot store U+0000"), "{diagnostic}");
+    assert!(diagnostic.contains("lossless"), "{diagnostic}");
+    assert!(diagnostic.contains("cas cloud queue --retry --retry-reason invalid_json_nul"), "{diagnostic}");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(decode_push_body(&requests[0])["tasks"][0]["notes"], "original\0text");
+    assert!(queue.intentional_park_counts(None, 5).unwrap().is_empty(), "unsupported data stays a failure");
+}
+
+#[tokio::test]
 async fn team_push_serializes_task_dependency_collection() {
     use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation};
     use flate2::read::GzDecoder;

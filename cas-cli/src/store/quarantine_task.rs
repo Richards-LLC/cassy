@@ -134,6 +134,10 @@ impl TaskStore for QuarantineFilteringTaskStore {
         self.inner.update_with_mutation_receipt(task, receipt_id)
     }
 
+    fn record_green_merge(&self, task_id: &str, merge_commit: &str) -> Result<bool> {
+        self.inner.record_green_merge(task_id, merge_commit)
+    }
+
     fn delete(&self, id: &str) -> Result<()> {
         self.inner.delete(id)
     }

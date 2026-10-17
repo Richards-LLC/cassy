@@ -208,6 +208,24 @@ impl CasCore {
             }
         }
 
+        // cas-f146: a supervisor-spawned task-verifier records its verdict on
+        // the supervisor's identity, which must name the exact dispatch. Its
+        // instructions read the id from this line.
+        if let Ok(Some(dispatch)) =
+            cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
+            && matches!(
+                dispatch.state,
+                cas_types::VerificationDispatchState::Pending
+                    | cas_types::VerificationDispatchState::Claimed
+            )
+        {
+            output.push_str(&format!(
+                "\nVerification dispatch: {} (deadline {})\n",
+                dispatch.id,
+                dispatch.deadline_at.to_rfc3339()
+            ));
+        }
+
         // cas-a844: `awaiting_merge` alone reads as "done, just a formality" —
         // whether that's true depends entirely on whether the parked branch
         // can actually merge cleanly. Surface the distinction explicitly so

@@ -51,7 +51,7 @@ pub fn execute(args: &PeersArgs, cli: &super::Cli, cas_root: &Path) -> Result<()
         }
         return Ok(());
     }
-    let report = discover_peer_report(
+    let mut report = discover_peer_report(
         cas_root,
         self_id.as_deref(),
         args.detail,
@@ -67,6 +67,7 @@ pub fn execute(args: &PeersArgs, cli: &super::Cli, cas_root: &Path) -> Result<()
         report.error = Some(error.to_string());
         report
     });
+    report.activation = crate::cloud::activation::observe(cas_root, self_id.as_deref());
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {

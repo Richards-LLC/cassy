@@ -416,6 +416,11 @@ pub trait CloudCoordinationPort: Send + Sync {
         registration_id: &str,
         timeout: Duration,
     ) -> Result<Value, RemoteError>;
+    /// A read-only GET; like `post`, Cloud's refusal bodies come back as values.
+    fn get(&self, path: &str, query: &[(&str, &str)], timeout: Duration) -> Result<Value, RemoteError> {
+        let _ = (path, query, timeout);
+        Err(RemoteError::unavailable("this coordination port has no GET"))
+    }
 }
 
 pub trait VioletThreadResolver: Send + Sync {
@@ -558,13 +563,21 @@ impl CloudCoordinationPort for HttpCloudCoordinationPort {
         registration_id: &str,
         timeout: Duration,
     ) -> Result<Value, RemoteError> {
-        let url = format!("{}/api/coordination/operations/{request_id}", self.endpoint);
-        let response = ureq::get(&url)
+        self.get(
+            &format!("/api/coordination/operations/{request_id}"),
+            &[("registration_id", registration_id)],
+            timeout,
+        )
+    }
+
+    fn get(&self, path: &str, query: &[(&str, &str)], timeout: Duration) -> Result<Value, RemoteError> {
+        let mut request = ureq::get(&format!("{}{}", self.endpoint, path))
             .timeout(timeout)
-            .query("registration_id", registration_id)
-            .set("Authorization", &format!("Bearer {}", self.token))
-            .call();
-        match response {
+            .set("Authorization", &format!("Bearer {}", self.token));
+        for (name, value) in query {
+            request = request.query(name, value);
+        }
+        match request.call() {
             Ok(response) | Err(ureq::Error::Status(_, response)) => Self::decode_response(response),
             Err(ureq::Error::Transport(error)) => {
                 let message = error.to_string();

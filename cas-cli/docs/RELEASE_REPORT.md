@@ -25,6 +25,10 @@ An existing Markdown source is authoritative and is never overwritten during a
 normal rerun. Pass `--refresh-sources` after correcting source evidence to
 regenerate it. `--json` prints a single stable result object containing output
 paths, counts, ordered theme rows, warnings, retrieval time, and release timing.
+Release timing comes from receipts under `~/.cas/artifacts/release/`; a
+standalone `scripts/release-latency-receipt.sh <tag> --run-dir <dir>`
+measurement joins with `--latency-receipt <dir>/release-latency.receipt`, and
+a receipt for another tag is refused.
 
 The source follows the fixed `cas-release-report` skeleton: Change map, Release
 at a glance, What you can do now, Under the hood, Fixes ledger, Install, and

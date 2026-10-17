@@ -9,6 +9,7 @@ ExecStart=/opt/cas/bin/cas hub serve --bind 127.0.0.1 --port 4173 --launched-by 
 Restart=on-failure
 RestartForceExitStatus=SIGHUP SIGINT SIGPIPE
 RestartSec=3
+LimitNOFILE=8192
 StandardOutput=append:%h/.cas/hub/hub.log
 StandardError=append:%h/.cas/hub/hub.log
 

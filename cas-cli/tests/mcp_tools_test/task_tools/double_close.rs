@@ -281,3 +281,66 @@ async fn test_close_on_already_closed_skips_code_review_gate() {
     assert_eq!(after.closed_at, Some(closed_at));
     assert_eq!(after.notes, notes_before);
 }
+
+/// cas-eda0: Cassy's post-merge close can race the worker's own close. Both
+/// pass the early already-closed check; the terminal write is serialized per
+/// task and re-read, so the loser reports the winner's close and writes
+/// nothing. The test holds the terminal lock while the winner closes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_racing_close_reports_the_winner_cas_eda0() {
+    use fs2::FileExt;
+
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
+    let cas_dir = temp.path().join(".cas");
+    let task_store = open_task_store(&cas_dir).unwrap();
+    let id = extract_task_id(&extract_text(
+        core.cas_task_create(Parameters(create_req("racing close", Some("light"))))
+            .await
+            .expect("task_create should succeed"),
+    ))
+    .expect("should have task ID")
+    .to_string();
+    core.cas_task_start(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .expect("task_start should succeed");
+
+    std::fs::create_dir_all(cas_dir.join("locks")).unwrap();
+    let lock = std::fs::File::create(cas_dir.join("locks").join(format!("task-close-{id}.lock")))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let (loser, loser_id) = (core.clone(), id.clone());
+    let racer = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let result = runtime.block_on(loser.cas_task_close(Parameters(TaskCloseRequest {
+            stranded_branch_override: None,
+            id: loser_id,
+            reason: Some("Loser closes second.".to_string()),
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
+            search_manifest: None,
+            commit_receipt: None,
+        })));
+        done_tx.send(extract_text(result.expect("close returns a result"))).unwrap();
+    });
+    assert!(
+        done_rx.recv_timeout(std::time::Duration::from_millis(500)).is_err(),
+        "the terminal close write must wait for the per-task close lock"
+    );
+
+    let mut winner = task_store.get(&id).unwrap();
+    winner.status = TaskStatus::Closed;
+    winner.close_reason = Some("Winner closed first.".to_string());
+    winner.closed_at = Some(chrono::Utc::now());
+    task_store.update(&winner).unwrap();
+    FileExt::unlock(&lock).unwrap();
+
+    let reply = done_rx.recv_timeout(std::time::Duration::from_secs(60)).expect("close finishes");
+    racer.join().unwrap();
+    assert!(reply.starts_with("Already closed:"), "{reply}");
+    let after = task_store.get(&id).unwrap();
+    assert_eq!(after.close_reason.as_deref(), Some("Winner closed first."));
+    assert!(!after.notes.contains("Loser closes second."), "{}", after.notes);
+}

@@ -12,6 +12,12 @@ This key is operator-only and defaults to `true`. It controls automatic
 supervisor reply capture; terminal questions and explicit messages addressed
 to the operator continue to be recorded. Existing conversation history is retained.
 
+Pending Commander replies retry after one second, doubling to a sixty-second
+cap while a paired-device receipt is missing. A valid receipt, a new daemon
+WebSocket connection, or a device's first history-page request resets that retry
+schedule. Each scheduled retry logs its next delay; intervening daemon passes
+neither rebroadcast the reply nor stamp it selected again.
+
 ## Coordination messages and reminders
 
 Worker-idle merge notices wait for completed CI on the delivery's exact tip
@@ -540,6 +546,14 @@ Before claiming a change done, workers must add one pre-close task-note line for
 
 ### Evidence-only task close
 
+Close reasons claiming third-party or future proof must cite a receipt beside
+each claim, or say `deferred to <stage>`. An `art-…` citation must exist in the
+project artifact store; a local receipt path must name an existing file.
+Relative paths resolve from the task's worker checkout, falling back to the
+owning project; `~/` expands to the caller's home. Use a qualified path such as
+`./receipt.log`, and backticks for paths containing spaces. Run IDs and
+`/actions/runs/…` URLs retain their existing citation check without network calls.
+
 Successful QA reports, ledgers and release drafts intentionally retained outside
 integration can close through the MCP task tool with `action=close`,
 `evidence_only=true`, `evidence_only_artifact_path=<existing durable evidence>`,
@@ -870,7 +884,10 @@ input only with `permissionDecision: "allow"`, so the hook emits that for Codex
 (cas-980d). Lock descriptors are close-on-exec so compiler-cache daemons cannot
 retain slots after the runner exits. It checks the existing build guard, and enforces `max_concurrent_builders`
 even across simultaneous launches. A refusal requires retrying later. Run long
-checks in the background with a log. Compile checks execute no tests.
+checks in the background with a log. A backgrounded check or targeted test
+runs as `worker-check --detach` in its own session, since Codex `exec_command`
+kills the shell's process group, including any `&` job, when the shell exits
+(cas-3d04); without a log redirect it is refused. Compile checks execute no tests.
 
 The runner requires a clean committed worktree, forces its private seeded
 `target/`, and records `check: PASS <sha>` with the selected packages. Task close
@@ -934,10 +951,12 @@ against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`
 On Unix, named tests and their guard processes run with private links to resolved
 Rust tools first on PATH. Rustup proxies are resolved to concrete toolchain
 executables, and the selected Cargo invocation uses that private link; this
-prevents rustup from restoring `$CARGO_HOME/bin` when it dispatches. Only PATH
-directories containing `cas`, `codex` or `claude` files are removed. Other entries,
-including local build-tool and Homebrew directories, retain their order so tools
-such as mold, node, protoc and newer Bash remain available. Compile-only checks
+prevents rustup from restoring `$CARGO_HOME/bin` when it dispatches. A PATH
+directory containing `cas`, `codex` or `claude` files is replaced in place by a
+private mirror of its other entries, without those binaries or rustup proxies, so
+neighbours such as Homebrew `git` keep their precedence over `/usr/bin`. Other
+entries, including local build-tool and Homebrew directories, retain their order
+so tools such as mold, node, protoc and newer Bash remain available. Compile-only checks
 retain their ordinary PATH. The runner prints the PATH setup cost for measurement.
 
 Harness fixtures must supply their own fake executables. The shared
@@ -1496,15 +1515,32 @@ after confirming no Cargo process is running and no cache lease is held. It was
 29 GB at discovery; use the inventory receipt for its current byte count.
 Never silently adopt or delete an unknown cache to bypass the liveness check.
 
+`gc_report` includes per-session serve RSS and a summed byte count for registered
+local project sessions. PID start-time fingerprints exclude recycled or foreign
+process records, aliases count once, and read failures are reported unavailable.
+Legacy registrations without a fingerprint are omitted. RSS includes shared
+pages; this is not a host-wide PSS/swap measurement. Linux uses `/proc`, macOS
+uses native `ps` (KiB converted to bytes).
+
 Durable task evidence has a separate cleanup opt-in: `gc_cleanup force=true
-dry_run=false` reaps processes and eligible caches while preserving artifacts.
-Deleting task artifact directories additionally requires `artifacts=true`.
+dry_run=false` reaps processes and eligible caches. It also removes only
+`trace.zip` and `.webm` recordings under the project's artifact namespace when
+the owning task is closed for at least 24 hours. Missing close dates, open tasks,
+unknown task directories and symlinks are preserved; screenshots, ledgers and
+JSON/Markdown receipts stay in place. The cleanup reports files and bytes reclaimed.
+Deleting whole task artifact directories additionally requires `artifacts=true`.
 Only tasks closed at least seven days ago are eligible; missing close dates,
 references from open tasks or tasks updated within seven days (including notes),
 and unavailable reference evidence preserve artifacts. References may name the
 task/path or a published artifact ID or durable URL. Unknown directories and
 ambiguous legacy artifact roots remain review-only. Orphan cleanup reaps a
 private process group or fingerprinted descendants, preserving shared groups.
+
+`cas worktree sweep` fetches origin before judging merge ancestry, prints the
+comparison ref and commit, and preserves worktrees when fetching fails. Repos
+without origin use a verified local default branch. `gc_report` also inventories
+checkouts directly under `.cas/` or `.cas/worktrees/` whose `.git` file points at
+a missing Git directory. Review these for uncommitted work before manual removal.
 
 Lane compile previews carry provenance and a lifetime owner lock.
 Previews are direct children of `.cas/worktrees` so the existing private target
@@ -2110,6 +2146,17 @@ file, the default contract is unchanged. The layers are:
 
 A process that deliberately hides a same-user write from these checks is out
 of reach. A hard boundary needs agents running as a separate Unix user.
+
+## Cloud reader slots
+
+Supervisor registration derives a stable Cloud `factory_id` from the machine id,
+canonical project id and supervisor role, so `/clear` and full relaunches retain
+the reader slot. For a second supervisor on the same repo and machine, set
+`factory.slot_id` to a distinct value and keep it across relaunches. An explicit
+override also lets a successor on another machine address that same slot.
+Without enough identity to derive a slot, registration falls back to
+`CAS_FACTORY_ID`, then the agent's factory session. Local
+`metadata.factory_session` still names the actual launch for fleet routing.
 
 ## Durable task artifacts
 

@@ -84,6 +84,58 @@ const ASSIGNEE_STALE_SECS: i64 = 300;
 /// verifier-written Error verdict during auto-escalation.
 const DISPATCH_SUMMARY_PREFIX: &str = "Dispatch requested";
 
+tokio::task_local! {
+    /// cas-eda0: present while Cassy itself closes a delivery it merged.
+    static CASSY_MERGE_CLOSE: ();
+}
+
+/// cas-eda0: run `close` as Cassy's own post-merge close. Every ordinary
+/// gate still applies; only the supervisor verification skip is withheld.
+pub(crate) async fn as_cassy_merge_close<F: std::future::Future>(close: F) -> F::Output {
+    CASSY_MERGE_CLOSE.scope((), close).await
+}
+
+fn in_cassy_merge_close() -> bool {
+    CASSY_MERGE_CLOSE.try_with(|_| ()).is_ok()
+}
+
+/// Prefix of every close response that found the task already closed.
+pub(crate) const ALREADY_CLOSED_PREFIX: &str = "Already closed:";
+
+fn already_closed_message(task: &Task) -> String {
+    let closed_at = task
+        .closed_at
+        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| "unknown time".to_string());
+    format!(
+        "{ALREADY_CLOSED_PREFIX} {} - {} (closed at {closed_at}). This call did not re-close \
+         the task; closed_at and notes were left unchanged.",
+        task.id, task.title
+    )
+}
+
+/// cas-eda0: cross-process exclusive lock for one task's terminal close
+/// write. Best effort: if the lock cannot be taken the write proceeds as
+/// before, guarded only by the re-read.
+fn terminal_close_lock(cas_root: &std::path::Path, task_id: &str) -> Option<std::fs::File> {
+    use fs2::FileExt;
+    let dir = cas_root.join("locks");
+    std::fs::create_dir_all(&dir).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(format!("task-close-{task_id}.lock")))
+        .ok()?;
+    match file.lock_exclusive() {
+        Ok(()) => Some(file),
+        Err(error) => {
+            tracing::warn!(%task_id, %error, "terminal close lock unavailable");
+            None
+        }
+    }
+}
+
 pub(crate) fn required_verification_type(task_type: TaskType) -> VerificationType {
     if task_type == TaskType::Epic {
         VerificationType::Epic
@@ -6093,10 +6145,17 @@ impl CasCore {
         factory_branch_anchor: Option<String>,
         merge_conflicted: bool,
         measured_branch: Option<String>,
+        close_reason: Option<&str>,
     ) {
         let mut parked = task.clone();
         let now = chrono::Utc::now();
         parked.status = TaskStatus::AwaitingMerge;
+        // cas-eda0: keep the worker's reason as written at park time; Cassy
+        // closes with it after a green merge instead of asking for a re-close.
+        parked.deliverables.parked_close_reason = close_reason
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(str::to_string);
         // cas-a844/cas-7308a: snapshot whether THIS park needs worker merge
         // rework: either a genuine conflict, or a preflight error that means
         // Cassy cannot prove it clean. This only fires once per task (same
@@ -6401,31 +6460,32 @@ impl CasCore {
         let Some(recorded) = task.deliverables.factory_branch_anchor.as_deref() else {
             return parking;
         };
-        if !self.tip_is_own_task_lineage(
-            task_store,
-            task,
-            repo_path,
-            measured_branch,
-            recorded,
-            measured_tip,
-        ) {
-            return parking;
-        }
         let Some(tip) = measured_tip
             .and_then(|tip| resolve_branch_sha(repo_path, &format!("{tip}^{{commit}}")))
         else {
             return parking;
         };
-        let foreign_since = self.sibling_lease_boundary(task_store, task);
         let (target, _) = preferred_live_target_ref_for_delivery(repo_path, parent_branch, task.delivery_mode);
-        if !parked_anchor_advance_with_target_is_attributable(
-            repo_path,
-            recorded,
-            &tip,
-            &task.id,
-            foreign_since,
-            &target,
-        ) {
+        let advance = if git_commit_is_ancestor(repo_path, recorded, &tip) {
+            self.tip_is_own_task_lineage(
+                task_store,
+                task,
+                repo_path,
+                measured_branch,
+                recorded,
+                measured_tip,
+            ) && parked_anchor_advance_with_target_is_attributable(
+                repo_path,
+                recorded,
+                &tip,
+                &task.id,
+                self.sibling_lease_boundary(task_store, task),
+                &target,
+            )
+        } else {
+            self.rebased_tip_supersedes_anchor(task_store, task, repo_path, recorded, &tip, &target)
+        };
+        if !advance {
             return parking;
         }
         let mut advanced = task.clone();
@@ -6445,6 +6505,72 @@ impl CasCore {
             parking.updated_at = advanced.updated_at;
         }
         parking
+    }
+
+    /// cas-4171: a rebase is no commit, so the commit-time anchor still names
+    /// the pre-rebase commit, which the rebased tip no longer contains. The
+    /// tip supersedes it when every commit only the anchor has survives in the
+    /// tip as a patch-equivalent, every commit the tip adds over the target
+    /// names this task (a plain lane's next task does not), the tip is not
+    /// already on the target, and no other open task's anchor lies between.
+    fn rebased_tip_supersedes_anchor(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        recorded: &str,
+        tip: &str,
+        target: &str,
+    ) -> bool {
+        if !is_safe_git_refname(recorded)
+            || !is_safe_git_refname(target)
+            || git_commit_is_ancestor(repo_path, tip, target)
+        {
+            return false;
+        }
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        let Some(cherry) = git(&["cherry", tip, recorded]) else {
+            return false;
+        };
+        let mut unique = cherry.lines().filter(|line| !line.trim().is_empty()).peekable();
+        if unique.peek().is_none() || !unique.all(|line| line.starts_with("- ")) {
+            return false;
+        }
+        let Some(base) = git(&["merge-base", target, tip]).map(|base| base.trim().to_string())
+        else {
+            return false;
+        };
+        let Some(log) = git(&["log", "--format=%B%x1e", &format!("{base}..{tip}"), "--"]) else {
+            return false;
+        };
+        let mut messages = log.split('\u{1e}').map(str::trim).filter(|m| !m.is_empty()).peekable();
+        if messages.peek().is_none()
+            || !messages.all(|message| message_references_task(message, &task.id))
+        {
+            return false;
+        }
+        task_store.list(None).is_ok_and(|others| {
+            !others.iter().any(|other| {
+                other.id != task.id
+                    && other.status != TaskStatus::Closed
+                    && other
+                        .deliverables
+                        .factory_branch_anchor
+                        .as_deref()
+                        .is_some_and(|anchor| {
+                            git_commit_is_ancestor(repo_path, anchor, tip)
+                                && !git_commit_is_ancestor(repo_path, anchor, &base)
+                        })
+            })
+        })
     }
 
     pub(crate) fn advance_awaiting_merge_anchor(
@@ -7012,15 +7138,7 @@ impl CasCore {
         if super::stale_close_guard::is_terminal_closed(task.status)
             || task.status == TaskStatus::Closed
         {
-            let closed_at_msg = task
-                .closed_at
-                .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
-                .unwrap_or_else(|| "unknown time".to_string());
-            return Ok(Self::success(format!(
-                "Already closed: {} - {} (closed at {}). This call did not re-close \
-                 the task; closed_at and notes were left unchanged.",
-                req.id, task.title, closed_at_msg
-            )));
+            return Ok(Self::success(already_closed_message(&task)));
         }
         if task.status == TaskStatus::Cancelled {
             return Ok(Self::tool_error(format!(
@@ -7031,11 +7149,18 @@ impl CasCore {
 
         // GH #1235: a reported/future proof is not completed evidence merely
         // because verification is disabled or another gate approves the task.
-        if req.reason.as_deref().is_some_and(proof_claims::has_unreceipted_claim) {
-            return Ok(Self::tool_error(
-                "PROOF CLAIM RECEIPT REQUIRED\nCite a run id or artifact id beside each third-party or future proof claim.\nIf it has not run, write \"deferred to <stage>\" instead of claiming a pass."
-                    .to_string(),
-            ));
+        if let Some(reason) = req.reason.as_deref() {
+            let receipt_root = self
+                .resolve_worker_worktree_path(&task, None)
+                .ok()
+                .flatten()
+                .or_else(|| resolve_close_gate_repo_root(&self.cas_root).ok())
+                .unwrap_or_else(|| {
+                    self.cas_root.parent().unwrap_or(&self.cas_root).to_path_buf()
+                });
+            if let Err(message) = proof_claims::validate_claims(reason, &self.cas_root, &receipt_root) {
+                return Ok(Self::tool_error(message));
+            }
         }
 
         // cas-099d, recurring after GH #272/#294/#304/#333: close-time
@@ -8159,6 +8284,7 @@ impl CasCore {
                             task.assignee.as_deref().map(|assignee| {
                                 recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(&close_project_root, &task, assignee))
                             }),
+                            req.reason.as_deref(),
                         );
                     } else {
                         // GH #744 / #743: a worker may push again after the
@@ -8303,7 +8429,9 @@ impl CasCore {
             VerificationSkipReason::SupervisorEvidenceOnly
         } else if !close_disposition.requires_delivery_gates() {
             VerificationSkipReason::SupervisorNegativeResult
-        } else if verification_enabled && is_supervisor_from_env() {
+        } else if verification_enabled && is_supervisor_from_env() && !in_cassy_merge_close() {
+            // cas-eda0: Cassy's own post-merge close never takes the
+            // supervisor's orphan/convenience skip; it needs a real verdict.
             if task.task_type == TaskType::Epic && task.epic_verification_owner.is_some() {
                 // The ownership gate above already proved that this caller is
                 // the configured epic verification owner. Epics normally have
@@ -10338,6 +10466,16 @@ impl CasCore {
             }
         }
 
+        // cas-eda0: Cassy's post-merge close and the worker's own close may
+        // race. Serialize the terminal write per task across processes and
+        // re-read under the lock: the loser reports the existing close and
+        // writes, relays and notifies nothing.
+        let _terminal_close_lock = terminal_close_lock(&self.cas_root, &req.id);
+        if let Ok(current) = task_store.get(&req.id)
+            && current.status == TaskStatus::Closed
+        {
+            return Ok(Self::success(already_closed_message(&current)));
+        }
         // cas-ec74: adopt the store-owned stamp so the Closed occurrence below
         // matches the persisted row instead of a second clock read.
         task.updated_at = task_store.update(&task).map_err(|e| McpError {
@@ -10345,6 +10483,7 @@ impl CasCore {
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
+        drop(_terminal_close_lock);
         // cas-b1dd: the Closed write is this request's terminal mutation.
         // Everything below is post-commit work (indexing, reminders, the
         // lifecycle outbox, dependents, leases); the dispatch may answer
@@ -25143,9 +25282,15 @@ mod merge_state_gate_tests {
         core.park_task_awaiting_merge(
             &tasks, &task, "MERGE REQUIRED", "delivery is ready for merge",
             Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
+            Some("PASS delivery-tip: relay fixture"),
         );
         let parked = tasks.get(&task.id).unwrap();
         assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+        assert_eq!(
+            parked.deliverables.parked_close_reason.as_deref(),
+            Some("PASS delivery-tip: relay fixture"),
+            "cas-eda0: the park keeps the worker's close reason for Cassy's own close"
+        );
         let relays = queue.peek("relay-supervisor-id", 10).unwrap();
         assert_eq!(relays.len(), 1, "one park must produce one supervisor relay: {relays:?}");
         let payload: serde_json::Value = serde_json::from_str(&relays[0].payload).unwrap();
@@ -30831,6 +30976,54 @@ esac
             DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
     }
 
+    /// cas-90d8 (cas-07c9 shape): the delivered release-notes draft lands in
+    /// a merge, then `release: vX` renames it to the cut date and rewrites
+    /// only its date line. The delivered lines survive at the new path, so a
+    /// receipt naming the merge must not read as DELIVERY CONTENT DROPPED.
+    #[test]
+    fn renamed_delivery_file_keeps_its_content_cas_90d8() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let draft = "docs/release-notes/2026-10-16-v9.99.0-slack.md";
+        let published = "docs/release-notes/2026-10-17-v9.99.0-slack.md";
+        let body = |date: &str| {
+            format!(
+                "# Cassy v9.99.0\n\nRelease date: {date}\n\n- Close gate measures merge tips.\n- Worker checks reuse seeded targets.\n- Slack threads post in order.\n- Commander shows supervisor updates.\n"
+            )
+        };
+        std::fs::create_dir_all(p.join("docs/release-notes")).unwrap();
+        std::fs::write(p.join(draft), body("2026-10-16")).unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-test1: draft v9.99.0 release notes"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "--no-ff", "factory/worker", "-m", "Merge branch 'factory/worker'"]);
+        let anchor = head_sha(p);
+        git(p, &["mv", draft, published]);
+        std::fs::write(p.join(published), body("2026-10-17")).unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "release: v9.99.0"]);
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(anchor.clone());
+        let outcome = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: Some(&anchor),
+                window: None,
+            },
+        );
+        assert!(
+            !matches!(outcome, MergeStateGateOutcome::Reject(_)),
+            "a renamed delivery whose lines survive must not read as dropped: {outcome:?}"
+        );
+    }
+
     /// GH #1160: the final sync anchor comes after two migration renames and
     /// an intentional revert. The old paths are absent at that anchor, but
     /// attribution still measures their earlier task commits as dropped.
@@ -30941,14 +31134,16 @@ esac
             matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
             "every dropped path needs a covering commit"
         );
+        // cas-90d8: the migration's lines survive both renames, so only the
+        // retired analytics file is dropped and needs the reviewed commit.
         window.supervisor_override_reason = Some(format!(
-            "reviewed-drop: {moved},{renamed},{reverted} -- reviewed migration moves and analytics retirement"
+            "reviewed-drop: {reverted} -- reviewed analytics retirement"
         ));
         let result = outcome(&window);
         assert!(
             matches!(&result, MergeStateGateOutcome::ProceedWithNote(note)
             if note.contains("reviewed delivery content supersession accepted")
-                && note.contains(&moved) && note.contains(&renamed) && note.contains(&reverted)),
+                && note.contains(&reverted)),
             "pre-anchor reviewed supersession must close: {result:?}"
         );
     }

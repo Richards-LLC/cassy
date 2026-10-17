@@ -17,6 +17,9 @@ mkdir -p target
 cargo check -p affected-crate --tests > target/worker-check.log 2>&1 &
 ```
 
+The guard runs a backgrounded check as `worker-check --detach`, which starts
+the runner in its own session and returns, because Codex kills a shell `&` job
+when the call's shell exits. A backgrounded check without a log is refused.
 The shell creates the log before admission checks the commit. Logs inside the
 repository must be Git-ignored, such as `target/worker-check.log`; a bare
 `worker-check.log` is refused. Task artifact directories remain valid outside

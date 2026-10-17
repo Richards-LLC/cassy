@@ -36,7 +36,8 @@ case "$1 $2" in
   "repo view") echo example/repo ;;
   "pr list") [[ -f "$state/pr" ]] && cat "$state/pr" || true ;;
   "pr create") echo 77 >"$state/pr"; echo https://example.test/pull/77 ;;
-  "pr edit"|"pr merge") ;;
+  "pr edit") ;;
+  "pr merge") exit "${FAKE_MERGE_EXIT:-0}" ;;
   "pr checks") cat "${FAKE_PR_CHECKS_JSON:?}" ;;
   "run view") cat "${FAKE_RUN_LOG:-/dev/null}" ;;
   "api graphql") cat "${FAKE_PR_STATE_JSON:?}" ;;
@@ -126,9 +127,13 @@ check '[[ $status -eq 1 && "$out" == *"no release-notes draft: write docs/releas
 check '[[ "$(git -C "$epic" log -1 --format=%s)" == "alpha work" && -z "$(git -C "$epic" status --porcelain)" ]]' 'a refused release changes and commits nothing'
 
 # 3. The release commit, the PR and auto-merge.
-printf '# Slack draft — Cassy v{{VERSION}}\n\nRelease date: 2026-10-01. Version: v{{VERSION}}.\n' >"$tmp/draft.md"
+original_notes=docs/release-notes/2026-10-14-v9.100.0-slack.md
+mkdir -p "$epic/docs/release-notes"
+printf '# Slack draft — Cassy v{{VERSION}}\n\nRelease date: 2026-10-01. Version: v{{VERSION}}.\n' >"$epic/$original_notes"
+git -C "$epic" add "$original_notes"
+git -C "$epic" commit --quiet -m 'release draft'
 : >"$FAKE_GH_LOG"
-run "$epic" --no-watch --notes "$tmp/draft.md" 2>"$tmp/run.err" || { cat "$tmp/run.err"; exit 1; }
+run "$epic" --no-watch --notes "$original_notes" 2>"$tmp/run.err" || { cat "$tmp/run.err"; exit 1; }
 head_files="$(git -C "$epic" show --name-only --format= HEAD | sort | paste -sd' ')"
 check '[[ "$(git -C "$epic" log -1 --format=%s)" == "release: v9.100.0" ]]' 'the release commit is on the epic branch'
 check 'grep -q "^version = \"9.100.0\"" "$epic/cas-cli/Cargo.toml" && grep -q "^version = \"9.100.0\"" "$epic/crates/cas-mcp/Cargo.toml"' 'every release crate is bumped'
@@ -158,10 +163,27 @@ check '[[ $status -eq 5 && "$out" == *"CI is red (Scoped Validation (fast))"* ]]
 check '[[ "$out" == *"Failing tests: cas-mux opencode::tests::projection_config_is_deterministic; release::tests::bumps"* ]]' 'the failing tests are named once, in one message'
 check '! grep -q "^pr merge" "$FAKE_GH_LOG" && grep -q "^run view --job 21 --log-failed" "$FAKE_GH_LOG"' 'a red PR gets no auto-merge'
 
-# 4. Rerunning with nothing changed is a no-op.
-before="$(git -C "$epic" rev-parse HEAD)"
-run "$epic" --no-watch 2>/dev/null
-check '[[ "$(git -C "$epic" rev-parse HEAD)" == "$before" ]]' 'a rerun on a prepared branch adds no commit'
+# 4. cas-3873: after an ejection repair, rerun the same command even on a
+# later day. Both the original (now removed) and renamed notes paths work.
+rerun_after_repair() {
+    local before notes out status
+    echo repaired >"$epic/alpha.txt"
+    git -C "$epic" commit --quiet -am 'repair queue failure'
+    before="$(git -C "$epic" rev-parse HEAD)"
+    for notes in "$original_notes" docs/release-notes/2026-10-15-v9.100.0-slack.md ''; do
+        : >"$FAKE_GH_LOG"
+        out="$(cd "$epic" && RELEASE_DATE=2026-10-16 ./scripts/release.sh --no-watch ${notes:+--notes "$notes"} 2>&1)" || { echo "$out"; return 1; }
+        [[ "$(git -C "$epic" rev-parse HEAD)" == "$before" && -z "$(git -C "$epic" status --porcelain)" ]] || return 1
+        [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/alpha)" == "$before" ]] || return 1
+        grep -q '^pr edit 77 --title Release v9.100.0:' "$FAKE_GH_LOG" &&
+            grep -q '^pr merge 77 --auto --merge' "$FAKE_GH_LOG" &&
+            ! grep -q '^pr create' "$FAKE_GH_LOG" || return 1
+    done
+    status=0
+    out="$(cd "$epic" && FAKE_MERGE_EXIT=42 ./scripts/release.sh --no-watch 2>&1)" || status=$?
+    [[ $status -eq 42 && "$out" == *"error:"* && "$out" == *"42"* && "$out" == *'pr merge'* ]]
+}
+check 'rerun_after_repair' 'a repaired release requeues once with old/new notes paths and reports command failures'
 
 # 5. Another epic's release lands first with the same version: re-bump.
 clone_epic "$tmp/beta" epic/beta beta

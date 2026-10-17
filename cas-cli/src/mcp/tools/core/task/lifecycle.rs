@@ -49,6 +49,7 @@ impl TaskLifecycleGateError {
 
 pub(crate) mod close_ops;
 mod epic_lane;
+pub(crate) mod merge_close;
 #[cfg(test)]
 mod gate_error_tests;
 pub(crate) mod proof_scope;

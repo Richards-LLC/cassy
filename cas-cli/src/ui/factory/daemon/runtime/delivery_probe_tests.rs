@@ -808,6 +808,7 @@ async fn cas_cc89_stopped_worker_does_not_starve_pointer_or_bounce() {
         dead_workers: daemon.dead_workers.clone(),
         limit: 0,
         operator_replies: false,
+        deferred_operator_replies: Default::default(),
         adopt_operator_notices: false,
     };
     let release = hold_lane(&mut daemon, jobs::Lane::Blocking);

@@ -164,6 +164,20 @@ impl TaskStore for MockTaskStore {
         Ok(Some(now))
     }
 
+    fn record_green_merge(&self, task_id: &str, merge_commit: &str) -> Result<bool> {
+        self.check_error()?;
+        let mut tasks = self.tasks.write().unwrap();
+        let task = tasks
+            .get_mut(task_id)
+            .ok_or_else(|| StoreError::NotFound(task_id.to_string()))?;
+        if task.status != TaskStatus::AwaitingMerge || task.deliverables.merge_conflicted {
+            return Ok(false);
+        }
+        task.deliverables.green_merge_commit = Some(merge_commit.to_string());
+        task.updated_at = Utc::now();
+        Ok(true)
+    }
+
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
         self.check_error()?;
         let mut tasks = self.tasks.write().unwrap();

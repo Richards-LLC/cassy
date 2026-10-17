@@ -178,6 +178,14 @@ impl TaskStore for NotifyingTaskStore {
         Ok(persisted_at)
     }
 
+    fn record_green_merge(&self, task_id: &str, merge_commit: &str) -> Result<bool> {
+        let recorded = self.inner.record_green_merge(task_id, merge_commit)?;
+        if recorded {
+            crate::mcp::tools::service::mutation_receipt::task_committed(task_id);
+        }
+        Ok(recorded)
+    }
+
     fn update_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<DateTime<Utc>> {
         let old_status = self.inner.get(&task.id).ok().map(|t| t.status);
         let persisted_at = self.inner.update_with_mutation_receipt(task, receipt_id)?;

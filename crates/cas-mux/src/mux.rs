@@ -28,7 +28,8 @@ pub enum InjectOutcome {
     DeferredComposerDirty,
 }
 
-/// One urgent inject started by [`Mux::begin_interrupt_and_inject`]
+/// One normal or urgent injection started by [`Mux::begin_inject`] or
+/// [`Mux::begin_interrupt_and_inject`]
 /// (factory loop v2 C4a, spec §3.5 and §4.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InjectTicket(u64);
@@ -51,12 +52,12 @@ pub enum InjectStart {
     Deferred,
 }
 
-/// The outcome of a started urgent inject.
+/// The physical outcome of a started normal or urgent inject.
 #[derive(Debug)]
 pub struct InjectCompletion {
     pub ticket: InjectTicket,
     pub pane_id: String,
-    /// `Delivered` once the payload is queued for the pane;
+    /// `Delivered` once the payload and submit CR are physically written;
     /// `DeferredComposerDirty` when an operator started a draft during the
     /// settle (the turn break went out, the payload did not).
     pub result: Result<InjectOutcome>,
@@ -89,11 +90,12 @@ struct PendingInject {
     pane_spawned_at: std::time::Instant,
     /// Set once the payload is queued; reports when it reached the PTY.
     written: Option<(crate::pane::PayloadWrite, std::time::Instant)>,
+    // Log a slow physical write once, without inventing a delivery receipt.
+    write_slow_reported: bool,
 }
 
-/// How long an urgent inject waits for its payload's write receipt before
-/// it reports Delivered on the strength of the queued write. A failed write
-/// inside this window is reported (cas-786a6 review L1).
+/// Existing slow-write reporting window. Crossing it is diagnostic only:
+/// the owner keeps its receipt and claim until physical completion or failure.
 const INJECT_WRITE_REPORT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Operator input most a pane holds while an urgent inject is in progress.
@@ -1144,8 +1146,38 @@ impl Mux {
         Ok(InjectOutcome::Delivered)
     }
 
-    /// Whether an urgent inject is between its turn break and its payload
-    /// on this pane.
+    /// Start a normal durable injection without waiting on a PTY write or
+    /// submit. The same command owner as urgent injects reports completion.
+    pub fn begin_inject(&mut self, pane_id: &str, prompt: &str) -> Result<InjectStart> {
+        let pane = self
+            .panes
+            .get(pane_id)
+            .ok_or_else(|| Error::pane_not_found(pane_id))?;
+        if pane.is_composer_dirty() || self.pane_inject_busy(pane_id) {
+            return Ok(InjectStart::Deferred);
+        }
+        let receipt = pane.inject_prompt_tracked(prompt)?;
+        let now = std::time::Instant::now();
+        self.next_inject_ticket += 1;
+        let ticket = InjectTicket(self.next_inject_ticket);
+        self.pending_injects.push(PendingInject {
+            ticket,
+            pane_id: pane_id.to_string(),
+            prompt: String::new(),
+            floor: std::time::Duration::ZERO,
+            preserve_composer: true,
+            floor_only: true,
+            started: now,
+            last_bytes: pane.bytes_received(),
+            last_change: now,
+            pane_spawned_at: pane.spawned_at(),
+            written: Some((receipt, now)),
+            write_slow_reported: false,
+        });
+        Ok(InjectStart::Started(ticket))
+    }
+
+    /// Whether a command owns this pane through payload and submit completion.
     pub fn inject_pending(&self, pane_id: &str) -> bool {
         self.pending_injects.iter().any(|inject| inject.pane_id == pane_id)
     }
@@ -1237,11 +1269,12 @@ impl Mux {
             last_change: now,
             pane_spawned_at,
             written: None,
+            write_slow_reported: false,
         });
         Ok(InjectStart::Started(ticket))
     }
 
-    /// Advance every pending urgent inject one step: a pane that is ready
+    /// Advance every pending inject one step: a pane that is ready
     /// gets its payload (a non-blocking queued write) and its outcome is
     /// returned; the rest keep waiting. Reads only in-memory pane state,
     /// the output counter the loop's PTY drain keeps current.
@@ -1271,16 +1304,20 @@ impl Mux {
                 Some((receipt, queued_at)) => match receipt.result() {
                     Some(Ok(())) => Some(Ok(InjectOutcome::Delivered)),
                     Some(Err(error)) => Some(Err(Error::pty(format!(
-                        "urgent payload write failed: {error}"
+                        "injected prompt write failed: {error}"
                     )))),
-                    None if now.saturating_duration_since(*queued_at) >= INJECT_WRITE_REPORT_WINDOW => {
+                    None if !inject.write_slow_reported
+                        && now.saturating_duration_since(*queued_at)
+                            >= INJECT_WRITE_REPORT_WINDOW =>
+                    {
                         tracing::warn!(
                             target: "cas::coordination",
                             stage = "urgent_payload_write_slow",
                             target_agent = %pane_id,
-                            "urgent payload still queued for the pane; reporting it delivered"
+                            "injected payload or submit still queued; retaining its in-flight owner"
                         );
-                        Some(Ok(InjectOutcome::Delivered))
+                        inject.write_slow_reported = true;
+                        None
                     }
                     None => None,
                 },
@@ -1303,7 +1340,7 @@ impl Mux {
                         match finished {
                             Some(Ok(())) => Some(Ok(InjectOutcome::Delivered)),
                             Some(Err(error)) => Some(Err(Error::pty(format!(
-                                "urgent payload write failed: {error}"
+                                "injected prompt write failed: {error}"
                             )))),
                             None => None,
                         }

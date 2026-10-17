@@ -130,8 +130,9 @@ fn lifecycle_body(daemon: &FactoryDaemon, status: cas_types::TaskStatus, transit
 
 /// The supervisor PTY received exactly one submitted turn containing `needle`
 /// and no Teams relay was written.
-pub(super) async fn typed_once(root: &tempfile::TempDir, daemon: &FactoryDaemon, needle: &str) -> String {
+pub(super) async fn typed_once(root: &tempfile::TempDir, daemon: &mut FactoryDaemon, needle: &str) -> String {
     tokio::time::sleep(Duration::from_millis(200)).await;
+    daemon.process_prompt_queue().await.unwrap();
     let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
     assert!(typed.contains(needle), "{typed:?}");
     assert_eq!(typed.matches('\r').count(), 1, "one PTY submit: {typed:?}");
@@ -186,7 +187,7 @@ async fn cas_979e_codex_startup_brief_is_typed_once_on_job_lanes() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    typed_once(&root, &daemon, needle).await;
+    typed_once(&root, &mut daemon, needle).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -198,7 +199,7 @@ async fn cas_3f90_bounded_event_has_one_body_turn_and_no_relay_copy() {
     let (root, mut daemon) = fixture().await;
     let id = event(&daemon, BODY);
     daemon.process_prompt_queue().await.unwrap();
-    let typed = typed_once(&root, &daemon, BODY).await;
+    let typed = typed_once(&root, &mut daemon, BODY).await;
     assert!(typed.contains(&format!("[cas #{id} ")), "row identity must survive: {typed:?}");
     let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
     let receipt = || queue.message_delivery_report(id).unwrap().unwrap().recipient_receipt;
@@ -294,7 +295,8 @@ async fn cas_3f90_busy_event_waits_without_a_held_relay_then_wakes_once() {
         .execute("UPDATE prompt_queue SET next_attempt_at = NULL WHERE id = ?1", [id]).unwrap();
     daemon.pane_silent_since.insert(name, Instant::now() - Duration::from_secs(600));
     daemon.process_prompt_queue().await.unwrap();
-    let typed = typed_once(&root, &daemon, &body).await;
+    assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none(), "enqueue alone cannot finish the row");
+    let typed = typed_once(&root, &mut daemon, &body).await;
     assert_eq!(typed.matches(&format!("[cas #{id} ")).count(), 1);
     assert!(typed.starts_with("\x1b[200~"), "Claude receives one explicit paste, including the envelope");
     assert!(typed.ends_with("\x1b[201~\r"));
@@ -361,7 +363,7 @@ async fn cas_3f90_lifecycle_action_has_one_submit_and_no_duplicate_relay() {
     let body = lifecycle_body(&daemon, cas_types::TaskStatus::Blocked, "task_blocked", "in_progress", 124, "Need a decision before proceeding.");
     let id = enqueue(&daemon, "lifecycle-wake:124", &body, cas_store::QueueOrigin::Daemon);
     daemon.process_prompt_queue().await.unwrap();
-    typed_once(&root, &daemon, &body).await;
+    typed_once(&root, &mut daemon, &body).await;
     let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
     assert_eq!(queue.message_delivery_report(id).unwrap().unwrap().wake_attempt, cas_store::WakeAttempt::Fired);
 }
@@ -385,7 +387,7 @@ async fn cas_3f90_quiet_batch_does_not_starve_a_later_action() {
     daemon.process_prompt_queue().await.unwrap();
     nothing_typed_or_relayed(&root, &daemon);
     daemon.process_prompt_queue().await.unwrap();
-    typed_once(&root, &daemon, BODY).await;
+    typed_once(&root, &mut daemon, BODY).await;
     assert!(queue.queued_prompt(action).unwrap().unwrap().processed_at.is_some());
     let quiet = queue.surface_unseen_for_recipient("supervisor", Some(&daemon.session_name), 20).unwrap();
     assert_eq!(quiet.len(), 12, "parking spends no wake budget or read receipt");
@@ -404,6 +406,6 @@ async fn cas_3f90_inline_peer_retains_the_shared_inbox_label() {
     let body = "Please coordinate this delivery with me.";
     enqueue(&daemon, &peer.name, body, cas_store::QueueOrigin::RegisteredAgent { agent_id: peer.id.clone() });
     daemon.process_prompt_queue().await.unwrap();
-    let typed = typed_once(&root, &daemon, body).await;
+    let typed = typed_once(&root, &mut daemon, body).await;
     assert!(typed.contains("[peer supervisor]"), "{typed:?}");
 }

@@ -64,6 +64,11 @@ impl BroadcastTally {
 /// Who owns a started urgent inject.
 #[derive(Debug)]
 pub(crate) enum UrgentInject {
+    /// Normal body-bearing PTY row awaiting payload AND submit receipts.
+    NormalRow {
+        delivery: Box<DirectDelivery>,
+        inline_supervisor: bool,
+    },
     /// A direct urgent queue row; its wake probe opens once it is typed.
     Row {
         delivery: Box<DirectDelivery>,
@@ -98,7 +103,9 @@ impl UrgentInjects {
     pub(crate) fn holds_row(&self, row: i64) -> bool {
         self.broadcasts.contains_key(&row)
             || self.owners.values().any(|owner| match owner {
-                UrgentInject::Row { delivery, .. } => delivery.queued.id == row,
+                UrgentInject::Row { delivery, .. } | UrgentInject::NormalRow { delivery, .. } => {
+                    delivery.queued.id == row
+                }
                 UrgentInject::ContextReset { row: id, .. } => *id == row,
                 UrgentInject::BroadcastMember { row: id, .. } => *id == row,
                 UrgentInject::Operator { .. } => false,
@@ -135,6 +142,23 @@ impl FactoryDaemon {
             let result: anyhow::Result<cas_mux::InjectOutcome> =
                 completion.result.map_err(Into::into);
             match owner {
+                UrgentInject::NormalRow {
+                    delivery,
+                    inline_supervisor,
+                } => {
+                    let report = result.map(|outcome| {
+                        let mut report = NudgeReport::not_attempted(
+                            outcome,
+                            super::delivery::DeliveryChannel::Pty,
+                            super::delivery::PTY_DELIVERY_WAKE_DETAIL,
+                        );
+                        if inline_supervisor && outcome == cas_mux::InjectOutcome::Delivered {
+                            report.wake = cas_store::WakeAttempt::Fired;
+                        }
+                        report
+                    });
+                    self.finish_direct_delivery(*delivery, report);
+                }
                 UrgentInject::Row {
                     mut delivery,
                     bytes_at_inject,

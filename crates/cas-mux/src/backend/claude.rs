@@ -23,7 +23,7 @@ impl Backend for Claude {
             supports_hooks: true,
             supports_subagents: true,
             supports_textbox_submit: true,
-            requires_bracketed_paste_injection: false,
+            requires_bracketed_paste_injection: true,
             tool_prefix: "mcp__cas__",
         }
     }

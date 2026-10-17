@@ -594,6 +594,15 @@ test("HUB-J19 Ask to reply names denial and expiry without granting permission (
 
 test("HUB-J19 unshipped Cloud never offers Ask to reply (cas-874b)", journeyPart, async ({ page, journey }) => {
   const cloud = await replyUpgradeCloud(false);
+  // cas-7f99: legacy introspection without origin must still replay history.
+  const handle = cloud.handle.bind(cloud);
+  cloud.handle = async request => {
+    const result = await handle(request);
+    if (request.path === "/api/operator/grants/me" && result.status === 200) {
+      delete (result.body as { grant: Record<string, unknown> }).grant.origin;
+    }
+    return result;
+  };
   await routeOperatorCloud(page.context(), cloud);
   await journey.stage("The old cloud keeps the honest existing reply guidance and no dead control", async () => {
     await journey.open(); const inbox = await enrollReplyBrowser(page, cloud, "Read only");

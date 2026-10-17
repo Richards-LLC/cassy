@@ -234,10 +234,17 @@ export class OperatorInboxController {
     const response = await this.client.request({ method: "GET", path: "/api/operator/grants/me", auth: "grant" });
     const grant = parseGrant(response.grant);
     if (response.wire_version !== 1 || grant.grantId !== identity.deviceId || grant.accountId !== identity.accountId ||
-      grant.kind !== "device" || grant.origin !== this.options.pageOrigin) throw new OperatorWireError(0, "invalid_response", { field: "grant" }, null);
+      grant.kind !== "device") throw new OperatorWireError(0, "invalid_response", { field: "grant" }, null);
     if (grant.status !== "active") throw new OperatorWireError(401, "grant_revoked", {}, null);
     if (!(Date.parse(grant.expiresAt) > this.now())) throw new OperatorWireError(401, "grant_expired", {}, null);
     if (identity !== this.identity) return;
+    // Older clouds may omit or normalize origin. Keep the enrolled grant for
+    // replay, but do not adopt scopes or offer upgrades from this response.
+    if (grant.origin !== this.options.pageOrigin) {
+      this.replyRequests.clear();
+      if (before !== JSON.stringify(this.replyRequests.snapshot())) await this.changed();
+      return;
+    }
     const changedGrant = JSON.stringify(grant) !== JSON.stringify(identity.grant);
     if (changedGrant) {
       const next = { ...identity, grant };

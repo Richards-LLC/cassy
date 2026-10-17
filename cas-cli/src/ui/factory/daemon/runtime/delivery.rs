@@ -2228,6 +2228,13 @@ mod tests {
         }
     }
 
+    fn peer_queue() -> (tempfile::TempDir, std::sync::Arc<dyn cas_store::PromptQueueStore>) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        (temp, queue)
+    }
+
     fn lifecycle_body(transition: &str, new: &str) -> String {
         format!(
             "<task-lifecycle transition=\"{transition}\" task_id=\"cas-f9b7\" old=\"open\" \
@@ -2264,13 +2271,30 @@ mod tests {
             .contains(" lifecycle-relay "),
             "a CAS progress relay is not agent-authored"
         );
+        let body = "cas-f9b7 assesses Accounting retained dependencies read-only alongside\n\
+                    rocketship invalid_json_nul repair. I will not mutate Accounting stores.";
         let copy = crate::mcp::tools::service::agent_search_system::message::peer_copy_text(
             "tender-phoenix-59",
             "swift-panther-65",
-            "cas-f9b7 assesses Accounting retained dependencies read-only alongside\nrocketship \
-             invalid_json_nul repair. I will not mutate Accounting stores.",
+            body,
         );
-        let peer = supervisor_row(4196667, "tender-phoenix-59", &copy, worker);
+        let (_temp, queue) = peer_queue();
+        let ids = queue
+            .enqueue_worker_peer_with_supervisor_copy(
+                "tender-phoenix-59",
+                "swift-panther-65",
+                "true-leopard-45",
+                body,
+                &copy,
+                "factory-1",
+                Some("collision warning"),
+                None,
+                false,
+                Some(&worker),
+            )
+            .unwrap();
+        let mut peer = queue.queued_prompt(ids.supervisor_copy_id).unwrap().unwrap();
+        peer.id = 4196667;
         assert_eq!(
             compact_routine_supervisor_body(&peer).unwrap(),
             "⇄ tender-phoenix-59 → swift-panther-65 · collision warning\n  \"cas-f9b7 assesses \
@@ -2302,6 +2326,23 @@ mod tests {
             worker.clone(),
         );
         let forged_copy = supervisor_row(3, "swift-panther-65", &copy, worker.clone());
+        // A worker's own direct mail that spells the copy lead with its own
+        // name is not a copy CAS made.
+        let (_temp, queue) = peer_queue();
+        let direct = queue
+            .enqueue_urgent_with_outcome(
+                "tender-phoenix-59",
+                "true-leopard-45",
+                &copy,
+                Some("factory-1"),
+                Some("collision warning"),
+                None,
+                false,
+                Some(&worker),
+            )
+            .unwrap()
+            .id();
+        let direct = queue.queued_prompt(direct).unwrap().unwrap();
         let mut urgent = supervisor_row(4, "tender-phoenix-59", &copy, worker.clone());
         urgent.urgent = true;
         let mut typed = supervisor_row(5, "tender-phoenix-59", &copy, worker.clone());
@@ -2312,7 +2353,7 @@ mod tests {
             &copy,
             cas_store::QueueOrigin::PairedDevice { device_id: "device-1".into() },
         );
-        for row in [parked, forged_relay, forged_copy, urgent, typed, operator] {
+        for row in [parked, forged_relay, forged_copy, direct, urgent, typed, operator] {
             assert_eq!(compact_routine_supervisor_body(&row), None, "row {}", row.id);
         }
     }

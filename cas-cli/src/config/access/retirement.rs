@@ -180,7 +180,7 @@ fn retirement_edit(raw: &str) -> Result<(String, Vec<String>), String> {
             .remove(path.last().unwrap());
     }
     let mut edits = Vec::new();
-    table_edits(doc.as_table(), &[], &targets, &mut edits)?;
+    table_edits(doc.as_table(), &[], &targets, raw, &mut edits)?;
     let mut comments = Vec::new();
     item_comments(doc.as_item(), raw, &mut comments);
     trivia_comments(doc.trailing(), raw, &mut comments);
@@ -240,6 +240,7 @@ fn table_edits(
     table: &Table,
     base: &[String],
     targets: &[Vec<String>],
+    raw: &str,
     edits: &mut Vec<Range<usize>>,
 ) -> Result<(), String> {
     if retired(base, targets) && !table.is_implicit() && !table.is_dotted() {
@@ -256,22 +257,26 @@ fn table_edits(
             .chain(keys.iter().map(|key| key.get().to_owned()))
             .collect();
         if retired(&path, targets) {
-            edits.push(
-                keys[0].span().ok_or("missing retired key span")?.start
-                    ..value.span().ok_or("missing retired value span")?.end,
-            );
+            let span = value.span().ok_or("missing retired value span")?;
+            // Dotted parents share a Key node (and its first spelling's
+            // span). A TOML assignment always starts on the value's first
+            // line, even when the value itself spans several lines.
+            let start = raw[..span.start].rfind('\n').map_or(0, |at| at + 1);
+            let indent = raw[start..span.start].len()
+                - raw[start..span.start].trim_start_matches([' ', '\t']).len();
+            edits.push(start + indent..span.end);
         } else if let Value::InlineTable(inline) = value {
-            inline_edits(inline, &path, targets, edits)?;
+            inline_edits(inline, &path, targets, raw, edits)?;
         }
     }
     for (key, item) in table.iter() {
         let mut path = base.to_vec();
         path.push(key.into());
         match item {
-            Item::Table(child) => table_edits(child, &path, targets, edits)?,
+            Item::Table(child) => table_edits(child, &path, targets, raw, edits)?,
             Item::ArrayOfTables(array) => {
                 for child in array.iter() {
-                    table_edits(child, &path, targets, edits)?;
+                    table_edits(child, &path, targets, raw, edits)?;
                 }
             }
             _ => {}
@@ -284,10 +289,13 @@ fn inline_edits(
     table: &toml_edit::InlineTable,
     base: &[String],
     targets: &[Vec<String>],
+    raw: &str,
     edits: &mut Vec<Range<usize>>,
 ) -> Result<(), String> {
-    let values = table.get_values();
+    let mut values = table.get_values();
+    values.sort_by_key(|(_, value)| value.span().map(|span| span.start));
     let mut spans = Vec::new();
+    let mut start = table.span().ok_or("missing inline table span")?.start + 1;
     for (keys, value) in &values {
         let path: Vec<_> = base
             .iter()
@@ -295,13 +303,15 @@ fn inline_edits(
             .chain(keys.iter().map(|key| key.get().to_owned()))
             .collect();
         let remove = retired(&path, targets);
-        spans.push((
-            keys[0].span().ok_or("missing inline key span")?.start
-                ..value.span().ok_or("missing inline value span")?.end,
-            remove,
-        ));
+        let value_span = value.span().ok_or("missing inline value span")?;
+        // Between parsed values there is only the separator and trivia;
+        // commas or equals signs inside quoted keys are never searched.
+        let gap = &raw[start..value_span.start];
+        let offset = gap.len() - gap.trim_start_matches([',', ' ', '\t', '\r', '\n']).len();
+        spans.push((start + offset..value_span.end, remove));
+        start = value_span.end;
         if !remove && let Value::InlineTable(child) = value {
-            inline_edits(child, &path, targets, edits)?;
+            inline_edits(child, &path, targets, raw, edits)?;
         }
     }
     let mut i = 0;

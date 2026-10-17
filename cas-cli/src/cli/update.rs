@@ -1474,12 +1474,9 @@ fn refresh_all_projects_with_user_refresh(
     live::set_activity("user-level store");
     let mut user_retired_toml = Vec::new();
     let mut user_roots = BTreeSet::new();
-    for root in [
-        user_level_store_root(),
-        crate::config::global_cas_dir(),
-    ]
-    .into_iter()
-    .flatten()
+    for root in [user_level_store_root(), crate::config::global_cas_dir()]
+        .into_iter()
+        .flatten()
     {
         let root = root.canonicalize().unwrap_or(root);
         if user_roots.insert(root.clone()) {
@@ -1670,6 +1667,15 @@ fn finish_project_refresh(
         user_retired_toml,
         skipped_unregistered,
     } = results;
+
+    let mut config_cleanup = findings::ConfigCleanup::default();
+    for maintenance in receipts
+        .iter()
+        .filter_map(|r| r.retired_toml.as_ref())
+        .chain(&user_retired_toml)
+    {
+        config_cleanup.include(maintenance);
+    }
     let failed_count = receipts.iter().filter(|receipt| receipt.failed()).count()
         + usize::from(user_level.failed());
     let mut receipt = with_first_launch_ms(
@@ -1693,6 +1699,9 @@ fn finish_project_refresh(
     if !user_retired_toml.is_empty() {
         receipt["user_level_store"]["retired_toml"] = serde_json::to_value(&user_retired_toml)?;
     }
+    if receipts.iter().any(|r| r.retired_toml.is_some()) || !user_retired_toml.is_empty() {
+        receipt["config_maintenance"] = serde_json::to_value(&config_cleanup)?;
+    }
     if cli.json {
         println!("{receipt}");
     }
@@ -1704,13 +1713,17 @@ fn finish_project_refresh(
         (None, String::new())
     } else {
         (
-            Some(findings::collect(
-                &receipts,
-                &user_level,
-                &skipped_unregistered,
-                hub_restart,
-                hub_transport_error,
-            )),
+            Some({
+                let mut sweep = findings::collect(
+                    &receipts,
+                    &user_level,
+                    &skipped_unregistered,
+                    hub_restart,
+                    hub_transport_error,
+                );
+                sweep.config = config_cleanup;
+                sweep
+            }),
             // A dry run's plan is its result, so it keeps its table.
             if cli.verbose || args.dry_run {
                 render_project_refresh_summary(
@@ -2560,9 +2573,10 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery 
     let mut skipped_by_path = BTreeMap::new();
     for repo in known.into_iter().filter(|repo| repo.healthy) {
         let path = canonical_path(&repo.path);
-        if let Some(skip) =
-            crate::store::known_repos::registry_skip_for_known_roots(&path, &known_roots)
-        {
+        if let Some(skip) = crate::store::known_repos::registry_skip_for_known_roots(
+            &path,
+            &known_roots,
+        ) {
             skipped_by_path.insert(path, skip.reason());
         } else {
             registered.insert(path);
@@ -2618,9 +2632,10 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery 
     {
         let project = canonical_path(project);
         if project.join(".cas/cas.db").is_file() {
-            if let Some(skip) =
-                crate::store::known_repos::registry_skip_for_known_roots(&project, &known_roots)
-            {
+            if let Some(skip) = crate::store::known_repos::registry_skip_for_known_roots(
+                &project,
+                &known_roots,
+            ) {
                 skipped_by_path.insert(project, skip.reason());
             } else {
                 projects.insert(project);
@@ -4263,15 +4278,10 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
     // The hub goes first so it picks up the new binary immediately rather than
     // waiting behind a full refresh. Its verification is drawn from data in
     // the findings; anything else it printed still reaches the operator.
-    let (hub_restart, hub_output) = capture_phase(!cli.json, || {
-        super::hub::restart_stale_hub(current_version, cli)
-    });
+    let (hub_restart, hub_output) =
+        capture_phase(!cli.json, || super::hub::restart_stale_hub(current_version, cli));
     let hub_restart = hub_restart?;
-    print_indented(&binary_phase_remainder(
-        &hub_output,
-        current_version,
-        Some(&hub_restart),
-    ))?;
+    print_indented(&binary_phase_remainder(&hub_output, current_version, Some(&hub_restart)))?;
 
     // These are the phases that must not run in the pre-update image. To the
     // operator they are phase 2 of the update the parent started.

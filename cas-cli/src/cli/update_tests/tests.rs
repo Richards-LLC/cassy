@@ -1276,8 +1276,13 @@ fn post_swap_refresh_failure_without_a_receipt_is_not_reported_as_skipped() {
 
 #[test]
 fn refresh_receipt_names_the_binary_that_ran_it() {
-    let receipt =
-        project_refresh_receipt_json(&[], &ProjectPhase::Ok(String::new()), &[], None, None);
+    let receipt = project_refresh_receipt_json(
+        &[],
+        &ProjectPhase::Ok(String::new()),
+        &[],
+        None,
+        None,
+    );
 
     assert_eq!(
         receipt["refresh_binary_version"],
@@ -1429,7 +1434,13 @@ fn update_receipt_proves_the_hub_version_transition_and_manager() {
         public_url: Some("https://hub.tail.ts.net/".to_owned()),
         ..Default::default()
     };
-    let receipt = combined_update_receipt("3.27.0", true, None, None, Some(&restart));
+    let receipt = combined_update_receipt(
+        "3.27.0",
+        true,
+        None,
+        None,
+        Some(&restart),
+    );
 
     assert_eq!(receipt["hub_restart"]["from_version"], "3.26.0");
     assert_eq!(receipt["hub_restart"]["to_version"], "3.27.0");
@@ -1740,10 +1751,7 @@ fn update_output_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn render_plain_at(
-    width: u16,
-    render: impl FnOnce(&mut Formatter<'_>) -> std::io::Result<()>,
-) -> String {
+fn render_plain_at(width: u16, render: impl FnOnce(&mut Formatter<'_>) -> std::io::Result<()>) -> String {
     let mut bytes = Vec::new();
     {
         let mut fmt = Formatter::new(
@@ -1949,15 +1957,8 @@ fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() 
         "{output}"
     );
     assert!(!output.contains("→ cas cloud queue --retry\n"), "{output}");
-    for raw in [
-        "Checking target-arch",
-        "Managed files: 3 conflicts",
-        "Retained intentionally",
-    ] {
-        assert!(
-            !output.contains(raw),
-            "raw phase output {raw:?} leaked:\n{output}"
-        );
+    for raw in ["Checking target-arch", "Managed files: 3 conflicts", "Retained intentionally"] {
+        assert!(!output.contains(raw), "raw phase output {raw:?} leaked:\n{output}");
     }
     assert!(output.lines().all(|line| line.chars().count() <= 80), "{output}");
 }
@@ -2019,13 +2020,7 @@ fn worker_update_is_scoped_to_its_own_worktree_cas_49c0() {
         WorkerUpdatePlan::SyncWorktree(worktree.to_path_buf()),
         "a worker's --sync writes its own worktree, not the main checkout"
     );
-    for mode in [
-        UpdateMode::AllProjects,
-        UpdateMode::Register,
-        UpdateMode::User,
-        UpdateMode::Full,
-        UpdateMode::SchemaOnly,
-    ] {
+    for mode in [UpdateMode::AllProjects, UpdateMode::Register, UpdateMode::User, UpdateMode::Full, UpdateMode::SchemaOnly] {
         match worker_update_plan(Some("worker"), Some(worktree), mode) {
             WorkerUpdatePlan::Refuse(message) => assert!(
                 message.contains("cas update --sync") && message.contains(&worktree.display().to_string()),
@@ -2087,10 +2082,7 @@ fn skipped_phases_print_no_details_block_snapshot_cas_8030() {
         documents: Vec::new(),
         phase_details: vec![
             (true, "[OK] Migrations current".to_owned()),
-            (
-                false,
-                "[WARN] search index: index busy, retry later".to_owned(),
-            ),
+            (false, "[WARN] search index: index busy, retry later".to_owned()),
         ],
     };
     let receipts = vec![unlinked, warned];
@@ -2154,10 +2146,7 @@ fn dry_run_planned_phases_keep_their_details_block_cas_937a() {
 fn update_names_what_happens_to_running_factories_cas_cef2() {
     assert_eq!(running_factory_update_notice(&[], "9.99.1"), None);
     let notice = running_factory_update_notice(
-        &[
-            ("pinned-session".into(), true),
-            ("older-session".into(), false),
-        ],
+        &[("pinned-session".into(), true), ("older-session".into(), false)],
         "9.99.1",
     )
     .expect("running sessions get a notice");
@@ -2268,22 +2257,10 @@ fn skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b() {
     // complete skills refresh remain real, including the actual lock error.
     for (case, seconds, ps, lsof, expected) in [
         ("recent", 10, "echo sh", "exit 1", "busy"),
-        (
-            "abandoned",
-            172800,
-            "echo sh",
-            "exit 1",
-            "stale (no writer observed)",
-        ),
+        ("abandoned", 172800, "echo sh", "exit 1", "stale (no writer observed)"),
         ("held", 172800, "echo sh", "echo p42", "busy"),
         ("git_running", 172800, "echo git", "exit 1", "busy"),
-        (
-            "uncertain",
-            172800,
-            "echo sh",
-            "echo denied >&2; exit 1",
-            "unknown ownership",
-        ),
+        ("uncertain", 172800, "echo sh", "echo denied >&2; exit 1", "unknown ownership"),
     ] {
         if child_case.as_deref() != Some(case) {
             if child_case.is_some() {
@@ -2298,10 +2275,7 @@ fn skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", test])
                 .env("CAS7C9B_LOCK_CASE", case)
-                .env(
-                    "PATH",
-                    format!("{}:{}", probes.display(), std::env::var("PATH").unwrap()),
-                )
+                .env("PATH", format!("{}:{}", probes.display(), std::env::var("PATH").unwrap()))
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{case}: {}", String::from_utf8_lossy(&output.stderr));
@@ -2314,11 +2288,9 @@ fn skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b() {
         let index = std::fs::read(project.join(".git/index")).unwrap();
         let lock_path = project.join(".git/index.lock");
         let lock = std::fs::File::create(&lock_path).unwrap();
-        lock.set_times(
-            std::fs::FileTimes::new()
-                .set_modified(SystemTime::now() - Duration::from_secs(seconds)),
-        )
-        .unwrap();
+        lock.set_times(std::fs::FileTimes::new().set_modified(
+            SystemTime::now() - Duration::from_secs(seconds),
+        )).unwrap();
         drop(lock);
         let phase = refresh_project_files(&update_test_cli(true), &root, false);
         let ProjectPhase::Failed(finding) = phase else {
@@ -2746,13 +2718,18 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
     let mut args = update_test_args();
     args.all_projects = true;
     args.refresh_receipt = Some(home.join("refresh.json"));
-    let cli = update_test_cli(true);
+    let cli = update_test_cli(false);
     let run = || {
         refresh_all_projects_with_user_refresh(&args, &cli, Some(&root), None, None, None, || {
             refresh_user_level_store_with_builtins(&args, &cli, || Ok(()))
         })
     };
-    run().unwrap();
+    let report = run().unwrap();
+    let sweep = report.sweep.as_ref().unwrap();
+    assert_eq!(sweep.config.repaired, 3);
+    assert_eq!(sweep.config.entries_removed, 15);
+    let rendered = render_plain_at(80, |fmt| findings::print(fmt, sweep).map(|_| ()));
+    assert!(rendered.contains("config  15 retired entries removed in 3 files"));
     let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
     assert_eq!(receipt["projects"].as_array().unwrap().len(), 1);
     for dir in [&root, &host, &global] {
@@ -2762,19 +2739,8 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
         assert!(parsed["factory"].get("merge_sweep_env").is_none());
         assert!(parsed.get("jev").is_none());
         assert!(parsed["code_review"].get("owner").is_none());
-        assert_eq!(
-            parsed["code_review"]["future_owner"].as_str(),
-            Some("keep this too")
-        );
-        for comment in [
-            "operator introduction",
-            "factory header",
-            "retirement rationale",
-            "inline note",
-            "active explicit override",
-            "former environment",
-            "old integration",
-        ] {
+        assert_eq!(parsed["code_review"]["future_owner"].as_str(), Some("keep this too"));
+        for comment in ["operator introduction", "factory header", "retirement rationale", "inline note", "active explicit override", "former environment", "old integration"] {
             assert!(raw.contains(comment), "lost operator comment {comment}");
         }
         let after: crate::config::Config = toml::from_str(&raw).unwrap();
@@ -2786,12 +2752,111 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(backup).unwrap().permissions().mode() & 0o777, 0o600);
     }
-    let original = std::fs::metadata(root.join("config.toml")).unwrap().modified().unwrap();
-    run().unwrap();
-    assert_eq!(std::fs::metadata(root.join("config.toml")).unwrap().modified().unwrap(), original);
+    let original = std::fs::metadata(root.join("config.toml"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let repeat = run().unwrap();
+    assert_eq!(repeat.sweep.as_ref().unwrap().config.repaired, 0);
+    assert_eq!(
+        std::fs::metadata(root.join("config.toml"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        original
+    );
     let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
     assert_eq!(receipt["projects"][0]["retired_toml"]["status"], "unchanged");
     assert!(!project.join(".cas/.cas").exists());
+}
+
+#[test]
+fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let fixture_home = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    let home = fixture_home.path().canonicalize().unwrap();
+    env.set("HOME", &home);
+    env.set_current_dir(&home);
+    env.set("XDG_CONFIG_HOME", home.join(".config"));
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let projects = home.join("projects");
+    let healthy = cas_6718_drifted_project(&projects.join("healthy"));
+    let broken = cas_6718_drifted_project(&projects.join("broken"));
+    let host = crate::store::init_cas_dir(&home).unwrap();
+    let root = healthy.join(".cas");
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_PROJECT_ROOTS", &projects);
+    let invalid = "[factory\nmerge_sweep = true\n";
+    for directory in [&host, &broken.join(".cas")] {
+        std::fs::write(directory.join("config.toml"), invalid).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        // Ambiguous ownership is an inaccessible cleanup target even though
+        // an ordinary config reader can follow it. Never replace its link.
+        let linked = broken.join(".cas/config.toml");
+        std::fs::remove_file(&linked).unwrap();
+        std::os::unix::fs::symlink(host.join("config.toml"), linked).unwrap();
+    }
+    std::fs::write(
+        root.join("config.toml"),
+        "[factory]\nmerge_sweep = true\nstrict_cli = false\n",
+    )
+    .unwrap();
+    let mut args = update_test_args();
+    args.all_projects = true;
+    args.refresh_receipt = Some(home.join("refresh.json"));
+    let result = refresh_all_projects_with_user_refresh(
+        &args,
+        &update_test_cli(false),
+        Some(&root),
+        None,
+        None,
+        None,
+        || ProjectPhase::Failed("builtin repair failed; run `cas update --user`".into()),
+    );
+    assert!(result.is_err());
+    let report = refresh_report(&result).unwrap();
+    assert_eq!(report.failed_projects, 1);
+    assert!(report.user_level_failed);
+    let sweep = report.sweep.as_ref().unwrap();
+    assert_eq!(sweep.config.repaired, 1);
+    assert_eq!(sweep.config.failed, 2);
+    let rendered = render_plain_at(80, |fmt| findings::print(fmt, sweep).map(|_| ()));
+    assert!(rendered.contains("builtin repair failed"));
+    assert!(
+        rendered.contains("cas update --user"),
+        "existing phase remedy lost: {rendered}"
+    );
+    assert!(
+        sweep
+            .findings
+            .iter()
+            .any(|finding| finding.cause.contains("repair config before updating"))
+    );
+    let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+    assert_eq!(receipt["config_maintenance"]["failed"], 2);
+    assert_eq!(receipt["config_maintenance"]["repaired"], 1);
+    for directory in [&host, &broken.join(".cas")] {
+        assert_eq!(
+            std::fs::read_to_string(directory.join("config.toml")).unwrap(),
+            invalid
+        );
+        assert!(!directory.join("config-retirement-backups").exists());
+    }
+    #[cfg(unix)]
+    assert!(
+        std::fs::symlink_metadata(broken.join(".cas/config.toml"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        !std::fs::read_to_string(root.join("config.toml"))
+            .unwrap()
+            .contains("merge_sweep")
+    );
 }
 
 /// Different valid TOML spellings must retire the same ignored values without
@@ -2800,6 +2865,20 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
 fn cas_4585_retirement_preserves_dotted_inline_and_multiline_config() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
+    assert_eq!(
+        crate::config::retire_config(directory.path(), false).status,
+        "missing"
+    );
+    std::fs::write(&path, "[factory]\nstrict_cli = false\n").unwrap();
+    assert_eq!(
+        crate::config::retire_config(directory.path(), false).status,
+        "unchanged"
+    );
+    assert_eq!(
+        std::fs::read_dir(directory.path()).unwrap().count(),
+        1,
+        "a current config must not create locks or backups"
+    );
     for raw in [
         "factory.merge_sweep = [\n 'fixture#secret', # keep array comment\n]\nfactory.merge_sweep_timeout_secs = 17\nfactory.strict_cli = false # keep active comment\ncode_review.owner = 'worker'\ncode_review.future_owner = '#keep'\njev.deep.endpoint = 'fixture#secret'\n",
         "factory = { strict_cli = false, merge_sweep = true, future_policy = 'keep', merge_sweep_env = { TOKEN = 'fixture#secret' }, merge_sweep_timeout_secs = 17 } # keep active comment\ncode_review = { owner = 'worker', future_owner = '#keep' }\njev = { endpoint = 'fixture#secret' } # keep integration comment\n",
@@ -2812,14 +2891,26 @@ fn cas_4585_retirement_preserves_dotted_inline_and_multiline_config() {
         let receipt = crate::config::retire_config(directory.path(), false);
         assert_eq!(receipt.status, "repaired", "{receipt:?}");
         let after = std::fs::read_to_string(&path).unwrap();
-        assert!(!after.contains("fixture#secret"), "retired string leaked into preserved comments");
-        for comment in raw.lines().filter_map(|line| line.find("# keep").map(|at| &line[at..])) {
+        assert!(
+            !after.contains("fixture#secret"),
+            "retired string leaked into preserved comments"
+        );
+        for comment in raw
+            .lines()
+            .filter_map(|line| line.find("# keep").map(|at| &line[at..]))
+        {
             assert!(after.contains(comment), "lost {comment}");
         }
         let current: crate::config::Config = toml::from_str(&after).unwrap();
-        assert_eq!(serde_json::to_value(before).unwrap(), serde_json::to_value(current).unwrap());
+        assert_eq!(
+            serde_json::to_value(before).unwrap(),
+            serde_json::to_value(current).unwrap()
+        );
         let doc: toml::Value = toml::from_str(&after).unwrap();
         assert_eq!(doc["code_review"]["future_owner"].as_str(), Some("#keep"));
-        assert_eq!(crate::config::retire_config(directory.path(), false).status, "unchanged");
+        assert_eq!(
+            crate::config::retire_config(directory.path(), false).status,
+            "unchanged"
+        );
     }
 }

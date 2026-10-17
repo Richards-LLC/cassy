@@ -213,6 +213,27 @@ fn command_from_request(request: &CoordinationRequest) -> Result<ExternalWorkCom
                 .ok_or_else(|| "accept_claim requires expected_generation".to_string())?,
             request_id,
         }),
+        "renew_claim" => Ok(ExternalWorkCommand::RenewClaim {
+            resource_id: required(request.resource_id.as_deref(), "resource_id")?,
+            expected_generation: request
+                .expected_generation
+                .ok_or_else(|| "renew_claim requires expected_generation".to_string())?,
+            request_id,
+        }),
+        // cas-f869 (GH #1272): the result carries the exact violet_post fields.
+        "reply_intent" => Ok(ExternalWorkCommand::ReplyIntent {
+            resource_id: required(request.resource_id.as_deref(), "resource_id")?,
+            expected_generation: request
+                .expected_generation
+                .ok_or_else(|| "reply_intent requires expected_generation".to_string())?,
+            occurrence_id: request
+                .occurrence_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            request_id,
+        }),
         _ => Err(format!(
             "unsupported external-work action {}",
             request.action

@@ -158,6 +158,8 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "release_claim",
     "transfer_claim",
     "accept_claim",
+    "renew_claim",
+    "reply_intent",
 ];
 
 /// Journaled Slack-thread authority is deliberately absent from the
@@ -168,6 +170,8 @@ pub const EXTERNAL_WORK_ACTIONS: &[&str] = &[
     "release_claim",
     "transfer_claim",
     "accept_claim",
+    "renew_claim",
+    "reply_intent",
 ];
 
 /// Every action `CoordinationRequest` deserializes: the `coordination`

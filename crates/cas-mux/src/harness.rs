@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+pub use cas_pty::CapabilityState;
 
 /// Supported interactive harnesses for factory panes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -40,8 +41,10 @@ impl FromStr for SupervisorCli {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HarnessCapabilities {
-    pub supports_hooks: bool,
-    pub supports_subagents: bool,
+    /// Optional feature support without launch context stays unknown. These
+    /// declarations never select independent-review requirements.
+    pub supports_hooks: CapabilityState,
+    pub supports_subagents: CapabilityState,
     /// Whether this harness's turn-cancel (Esc) returns to an input-ready
     /// state promptly enough that a flat post-cancel sleep is safe before
     /// injecting a follow-up prompt. Consumed by
@@ -129,12 +132,12 @@ mod tests {
     fn grok_capabilities_match_claude_tier_with_its_own_tool_prefix() {
         let caps = SupervisorCli::Grok.backend().capabilities();
         assert!(
-            caps.supports_hooks,
+            caps.supports_hooks == CapabilityState::Supported,
             "Grok's SessionStart/PreToolUse/PostToolUse/Stop hooks are fully wired \
              (verified live per EPIC cas-8888)"
         );
         assert!(
-            caps.supports_subagents,
+            caps.supports_subagents == CapabilityState::Supported,
             "Grok supports the same subagent model as Claude"
         );
         assert!(
@@ -184,8 +187,8 @@ mod tests {
     #[test]
     fn opencode_capabilities_match_retained_11823_measurements() {
         let caps = SupervisorCli::OpenCode.backend().capabilities();
-        assert!(caps.supports_hooks);
-        assert!(!caps.supports_subagents);
+        assert_eq!(caps.supports_hooks, CapabilityState::Supported);
+        assert_eq!(caps.supports_subagents, CapabilityState::Unknown);
         assert!(!caps.supports_textbox_submit);
         assert!(!caps.requires_bracketed_paste_injection);
         assert_eq!(
@@ -204,14 +207,16 @@ mod tests {
         // Regression pin: adding Grok must not perturb the existing two.
         let claude = SupervisorCli::Claude.backend().capabilities();
         assert!(
-            claude.supports_hooks && claude.supports_subagents && claude.supports_textbox_submit
+            claude.supports_hooks == CapabilityState::Supported
+                && claude.supports_subagents == CapabilityState::Supported
+                && claude.supports_textbox_submit
         );
         assert_eq!(claude.tool_prefix, "mcp__cas__");
 
         let codex = SupervisorCli::Codex.backend().capabilities();
-        assert!(
-            !codex.supports_hooks && !codex.supports_subagents && !codex.supports_textbox_submit
-        );
+        assert_eq!(codex.supports_hooks, CapabilityState::Unknown);
+        assert_eq!(codex.supports_subagents, CapabilityState::Unknown);
+        assert!(!codex.supports_textbox_submit);
         assert_eq!(codex.tool_prefix, "mcp__cs__");
     }
 

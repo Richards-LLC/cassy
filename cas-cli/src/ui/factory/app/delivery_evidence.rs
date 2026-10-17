@@ -683,7 +683,9 @@ mod tests {
         use crate::ui::factory::director::{
             SupervisorActionableState, supervisor_actionable_state_with_classifiers,
         };
-        use cas_store::{AgentStore, EpicSplit, SplitDirection, SplitState, insert_epic_split};
+        use cas_store::{
+            AgentStore, EpicSplit, SplitDirection, SplitState, decide_epic_split, insert_epic_split,
+        };
         use cas_types::{Agent, AgentRole, TaskStatus, TaskType};
 
         let _env = crate::test_support::TestEnvGuard::temp_home();
@@ -772,8 +774,7 @@ mod tests {
         }
         let request =
             StallEvidenceRequest::new(dir.path().into(), "cas-epic".into(), "here".into(), &data);
-        // Exercise both a fresh read and an unchanged-snapshot read, as the daemon does.
-        for fresh in [Some(&data), None] {
+        let classify = |fresh| {
             let facts = request.facts(fresh, Some(&stores));
             let git = facts
                 .iter()
@@ -790,7 +791,7 @@ mod tests {
                 })
                 .collect();
             let evidence = combine(&facts, &git);
-            let state = supervisor_actionable_state_with_classifiers(
+            supervisor_actionable_state_with_classifiers(
                 &data,
                 Some("cas-epic"),
                 "supervisor",
@@ -800,15 +801,44 @@ mod tests {
                 |task, worker| evidence_delivery(&evidence, task, worker),
                 |_, _, _, _| None,
                 |task, worker| evidence_hold(&evidence, task, worker),
-            );
+            )
+        };
+        // Exercise both a fresh read and an unchanged-snapshot read, as the daemon does.
+        for fresh in [Some(&data), None] {
             assert_eq!(
-                state,
+                classify(fresh),
                 Some(SupervisorActionableState::MergeBranches {
                     branches: vec![("cas-local".into(), "factory/local".into(), "tip".into())],
                 }),
                 "only this factory's delivery belongs in the stall relay"
             );
         }
+        // Re-reading ownership releases a local delivery when the split ends,
+        // even without refreshing the parked-task snapshot.
+        assert!(
+            decide_epic_split(
+                dir.path(),
+                "split-owned",
+                &[SplitState::Accepted],
+                SplitState::Cancelled,
+                None,
+                now,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            classify(None),
+            Some(SupervisorActionableState::MergeBranches {
+                branches: vec![
+                    ("cas-local".into(), "factory/local".into(), "tip".into()),
+                    (
+                        "cas-peer-kept".into(),
+                        "factory/peer-kept".into(),
+                        "tip".into()
+                    ),
+                ],
+            })
+        );
     }
 
     /// Review round 1, M1: the stall check joins store facts (read lane) with

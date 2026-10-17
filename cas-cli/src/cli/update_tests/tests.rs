@@ -1093,18 +1093,37 @@ fn write_stub_binary(path: &Path, body: &str) {
 #[cfg(unix)]
 #[test]
 fn post_swap_refresh_runs_on_the_installed_binary_and_reports_its_version() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
     let installed_binary = temp_dir.path().join("cas-new");
+    let root = installed_binary.with_extension("root");
+    std::fs::create_dir(&root).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set_current_dir(temp_dir.path());
+    std::fs::write(root.join("config.toml"), "[factory]\nmerge_sweep = true\n").unwrap();
+    std::fs::write(installed_binary.with_extension("receipt"), serde_json::json!({
+        "refresh_binary_version": "9.9.9-stub", "projects": [{
+            "store": root, "retired_toml": {
+                "path": root.join("config.toml"), "status": "repaired", "removed": ["factory.merge_sweep"]
+            }
+        }], "user_level_store": {"status":"ok"}, "skipped_unregistered": []
+    }).to_string()).unwrap();
     // The stub stands in for the freshly installed binary: it records its argv
-    // and prints the refresh receipt the real child would print.
+    // and replaces its fixture config before returning a maintenance receipt.
     write_stub_binary(
         &installed_binary,
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n\
-         printf '%s' '{\"refresh_binary_version\":\"9.9.9-stub\",\"projects\":[],\"user_level_store\":{\"status\":\"ok\"},\"skipped_unregistered\":[]}'\n",
+         printf '[factory]\\n' > \"$0.root/config.toml\"\ncat \"$0.receipt\"\n",
     );
 
-    let receipt = run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
-        .expect("the post-swap refresh must run the installed binary");
+    let (receipt, output) = capture_phase(true, || {
+        let cli = crate::cli::try_parse_from_with_wordmark(["cas", "update", "--yes"]).unwrap();
+        let _parent_notices = crate::cli::startup_config_notices(&cli);
+        crate::config::Config::load(&root).unwrap();
+        run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
+            .expect("the post-swap refresh must run the installed binary")
+    });
+    assert!(!output.contains("retired config entries remain ignored"), "parent replayed an entry repaired by its verified child: {output}");
 
     assert_eq!(
         receipt["refresh_binary_version"], "9.9.9-stub",

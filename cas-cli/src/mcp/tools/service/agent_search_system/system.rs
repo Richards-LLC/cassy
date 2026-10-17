@@ -261,26 +261,23 @@ fn resolve_issue_repo(cas_root: &Path) -> Result<String, String> {
     let config = crate::config::Config::load(cas_root)
         .map_err(|error| format!("Failed to load config: {error}"))?;
     let issues = config.issues.as_ref();
-    let component = issues
+    let raw_component = issues
         .and_then(|issues| issues.components.as_ref())
-        .and_then(|components| components.cassy.as_deref())
+        .and_then(|components| components.cassy.as_deref());
+    // Match the effective component shown by config get, including its default.
+    // Only a raw, explicitly blank component opts into the legacy project
+    // override; an absent component must not silently choose that tracker.
+    let legacy_project = raw_component
+        .filter(|repo| repo.trim().is_empty())
+        .and_then(|_| issues.and_then(|issues| issues.repo.as_deref()))
         .map(str::trim)
         .filter(|repo| !repo.is_empty());
-    let project = issues
-        .and_then(|issues| issues.repo.as_deref())
-        .map(str::trim)
-        .filter(|repo| !repo.is_empty());
-    // Only stored overrides participate; the checkout's inferred origin is
-    // project intake context, never an implicit Cassy bug filing target.
-    let (key, repo) = if let Some(repo) = component {
-        ("issues.components.cassy", repo.to_owned())
-    } else if let Some(repo) = project {
-        ("issues.repo", repo.to_owned())
-    } else {
-        (
+    let (key, repo) = match legacy_project {
+        Some(repo) => ("issues.repo", repo.to_owned()),
+        None => (
             "issues.components.cassy",
             config.issue_repo_registry().cassy,
-        )
+        ),
     };
 
     if crate::gh_graphql::split_repo(&repo).is_err() {

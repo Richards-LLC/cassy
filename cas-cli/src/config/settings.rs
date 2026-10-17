@@ -184,10 +184,10 @@ impl IssueRepoRegistry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IssuesConfig {
     /// Explicit project GitHub issue repository in `owner/repo` form. CLI
-    /// reads may infer origin. Cassy-system bug filing uses this stored legacy
-    /// override only when no explicit nonblank Cassy component is configured;
-    /// otherwise it uses that component, or the compiled Cassy default when
-    /// both overrides are absent. Filing never infers the checkout origin.
+    /// reads may infer origin. Cassy-system bug filing uses the effective Cassy
+    /// component (including its compiled default); only a raw explicitly blank
+    /// component opts into this stored legacy override. An absent component
+    /// never does. Filing never infers the checkout origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
 

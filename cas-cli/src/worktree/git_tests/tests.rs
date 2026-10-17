@@ -5,9 +5,16 @@ fn create_test_repo() -> (TempDir, PathBuf) {
     let temp = TempDir::new().unwrap();
     let repo_path = temp.path().to_path_buf();
 
-    // Initialize git repo
+    // Initialize git repo. cas-db28: name the branch, and pin the repo-local
+    // init.defaultBranch that detect_default_branch reads, so fixtures that
+    // check out `master` do not depend on the host's init.defaultBranch.
     Command::new("git")
-        .args(["init"])
+        .args(["init", "-b", "master"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "init.defaultBranch", "master"])
         .current_dir(&repo_path)
         .output()
         .unwrap();

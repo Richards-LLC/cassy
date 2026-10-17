@@ -1870,6 +1870,7 @@ fn h1_runtime_state_is_single_instance_and_round_trips() {
         tailscale_cli: None,
         tailscale_serve_target: None,
         transport_warning: None,
+        nofile_limit: None,
     };
     paths.write_process_record(&record).unwrap();
     assert_eq!(paths.read_process_record().unwrap(), record);
@@ -3567,7 +3568,8 @@ fn cas_d636_a_stale_proof_is_a_retryable_refusal_and_a_fresh_proof_recovers() {
 
 /// cas-d636: the hub's 401 says why, readable cross-origin: the reason,
 /// whether a fresh proof can succeed, the hub's clock, and RFC 9449's
-/// `WWW-Authenticate: DPoP error=...`.
+/// `WWW-Authenticate: DPoP error=...`. cas-cb94: an auth-store failure is a
+/// retryable 503, never a 401.
 #[tokio::test]
 async fn cas_d636_the_401_carries_a_machine_readable_reason_and_the_hub_clock() {
     use chrono::{Duration, Utc};
@@ -3630,6 +3632,27 @@ async fn cas_d636_the_401_carries_a_machine_readable_reason_and_the_hub_clock() 
         .await
         .unwrap();
     assert_eq!(fresh.status(), StatusCode::OK, "the retry with a fresh proof recovers");
+
+    // cas-cb94: prowl's hub ran out of file descriptors and its auth-store IO
+    // failure came back as a bare 401, which Commander read as revoked. A store
+    // failure is a retryable 503 that names itself; the pairing is intact.
+    let store = temp.path().join("hub/auth.json");
+    let aside = temp.path().join("hub/auth.json.aside");
+    std::fs::rename(&store, &aside).unwrap();
+    std::fs::create_dir(&store).unwrap();
+    let unavailable = app
+        .clone()
+        .oneshot(get(sign_dpop(&signing, &credential.credential, "GET", "/v1/machine", Utc::now(), "io"), authorization.clone()))
+        .await
+        .unwrap();
+    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(unavailable.headers()["retry-after"], "2");
+    assert_eq!(unavailable.headers()["access-control-allow-origin"], "https://controller.example");
+    let body: serde_json::Value = serde_json::from_slice(&to_bytes(unavailable.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["reason"], "auth_store_unavailable");
+    assert_eq!(body["retryable"], true);
+    std::fs::remove_dir(&store).unwrap();
+    std::fs::rename(&aside, &store).unwrap();
 
     auth.revoke_device(&credential.device_id, Utc::now()).unwrap();
     let revoked = app

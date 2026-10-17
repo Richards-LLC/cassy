@@ -2116,9 +2116,9 @@ impl CasCore {
             }
         }
 
-        // Holds are active structured state, never inferred from notes. Only
-        // an explicit status=blocked request with no unmet dependency creates
-        // one; dependency changes from this same request are already visible.
+        // Holds are active structured state, never inferred from notes. An
+        // explicit status=blocked request records a hold even if dependencies
+        // also block the task; clearing those dependencies must preserve it.
         if explicit_open_status {
             set_execution_state_patch_field(
                 &mut execution_state_patch,
@@ -2127,43 +2127,25 @@ impl CasCore {
             );
         }
         if explicit_block_status && task.status == TaskStatus::Blocked {
-            let local_blockers = task_store.get_blockers(&req.id).map_err(|error| McpError {
+            let who = self
+                .get_agent_id()
+                .unwrap_or_else(|_| "unknown".to_string());
+            let hold = crate::mcp::tools::core::task::block_hold::explicit(
+                explicit_block_reason.as_deref(),
+                &who,
+            );
+            let value = serde_json::to_value(hold).map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!(
-                    "Could not evaluate blockers before recording task hold: {error}"
+                    "Could not encode structured blocked hold: {error}"
                 )),
                 data: None,
             })?;
-            let external_blockers = cas_store::ExternalTaskDependencyStore::open(&self.cas_root)
-                .and_then(|store| store.list_blocking_for_task(&req.id))
-                .map_err(|error| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!(
-                        "Could not evaluate external blockers before recording task hold: {error}"
-                    )),
-                    data: None,
-                })?;
-            if local_blockers.is_empty() && external_blockers.is_empty() {
-                let who = self
-                    .get_agent_id()
-                    .unwrap_or_else(|_| "unknown".to_string());
-                let hold = crate::mcp::tools::core::task::block_hold::explicit(
-                    explicit_block_reason.as_deref(),
-                    &who,
-                );
-                let value = serde_json::to_value(hold).map_err(|error| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!(
-                        "Could not encode structured blocked hold: {error}"
-                    )),
-                    data: None,
-                })?;
-                set_execution_state_patch_field(
-                    &mut execution_state_patch,
-                    "blocked_hold",
-                    value,
-                );
-            }
+            set_execution_state_patch_field(
+                &mut execution_state_patch,
+                "blocked_hold",
+                value,
+            );
         }
 
         if let Some(patch) = execution_state_patch.as_ref() {

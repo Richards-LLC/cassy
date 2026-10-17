@@ -188,6 +188,7 @@ impl FactoryDaemon {
                     relay_trusted,
                 },
             );
+            self.queue_jobs.operator_reply_retries.clear();
             any_new = true;
         }
         any_new
@@ -349,8 +350,7 @@ impl FactoryDaemon {
 
         match msg {
             ClientMessage::OperatorReplyPersisted { notification_id, device_id } => {
-                let result = crate::store::open_prompt_queue_store(self.app.cas_dir())
-                    .and_then(|queue| queue.record_operator_reply_persisted(notification_id, &self.session_name, &device_id).map_err(Into::into));
+                let result = self.persist_operator_reply_receipt(notification_id, &device_id);
                 if let Err(error) = result {
                     tracing::warn!(notification_id, %error, "ignored invalid Commander device-persisted receipt");
                 }

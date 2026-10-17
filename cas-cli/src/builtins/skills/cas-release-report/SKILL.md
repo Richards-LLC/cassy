@@ -17,6 +17,8 @@ metadata:
    skill's [scripts/render.py](scripts/render.py) and
    [references/template.html](references/template.html); and prints the A4
    `v<version>.pdf`. Read its warnings: missing evidence is named as unavailable.
+   A latency measured with `scripts/release-latency-receipt.sh --run-dir <dir>`
+   joins with `--latency-receipt <dir>/release-latency.receipt`.
 3. Edit the Markdown against the source contract in
    [references/exemplar.md](references/exemplar.md): page one leads with what
    shipped, one dot per CHANGELOG change grouped by product area, with plain

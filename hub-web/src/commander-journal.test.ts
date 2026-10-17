@@ -431,6 +431,16 @@ describe("atomic Commander journal", () => {
     expect(await b.persistReply(scope, reply, fence)).toBe(false);
     expect(await b.read(scope)).toEqual({ sends: [], replies: [], receipts: [] });
   });
+  it("a block on a credential the hub accepts again says so, then clears (cas-2904)", async () => {
+    const { a, b, db } = journals();
+    await a.purge(scope.hub, fence);
+    expect(await b.reconcile(scope, [], [send("b")], fence)).toBe("blocked");
+    const forgotten = new CommanderJournal(db, async () => undefined, () => 1_000, false);
+    expect(await forgotten.readmit(scope, fence)).toBe(false);
+    expect(await b.readmit(scope, fence)).toBe(true);
+    expect(await b.reconcile(scope, [], [send("b")], fence)).toBe("kept");
+    expect(await b.persistReply(scope, reply, fence)).toBe(true);
+  });
   it("device and origin scopes cannot read another installation's words", async () => {
     const { a } = journals();
     await a.reconcile(scope, [], [send("a")], fence);
@@ -452,6 +462,7 @@ describe("atomic Commander journal", () => {
   it("storage failure and oversized content authorize neither send nor application ACK", async () => {
     const a = new CommanderJournal(undefined, async () => fence, () => 1_000, false);
     expect(await a.reconcile(scope, [], [send("a")], fence)).toBe("not-saved");
+    expect(a.storageFailure).toBe("Browser storage is unavailable.");
     expect(await a.dispatch(scope, "a", fence, () => { throw Error("must not write"); })).toBe("not-saved");
     expect(await a.persistReply(scope, reply, fence)).toBe(false);
     const { b } = journals();

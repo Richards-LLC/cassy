@@ -446,15 +446,17 @@ export class InboxView {
       const conversation = thread ? `${thread.machineLabel} · ${codename(thread.session)}` : `${request.hub_id} · ${request.session_id}`;
       const group = el("section", { "aria-label": `${request.device_label} asks to reply` });
       group.append(el("p", {}, `${request.device_label} (${request.origin}) asks to reply to ${conversation}. This allows replies only in this conversation and keeps the browser's messages.`));
+      const actions = el("div", { class: "dialog-actions" });
       for (const [decision, text] of [["approve", "Allow"], ["deny", "Deny"]] as const) {
-        const button = el("button", { type: "button", id: `reply-decision-${request.request_id}-${decision}`, "aria-label": `${text} ${request.device_label} to reply to ${conversation}` }, text);
+        const button = el("button", { type: "button", class: decision === "approve" ? "primary" : "", id: `reply-decision-${request.request_id}-${decision}`, "aria-label": `${text} ${request.device_label} to reply to ${conversation}` }, text);
         button.disabled = this.busy;
         button.onclick = () => void this.act(async () => {
           await this.controller.decideReplyRequest(request.request_id, decision);
           this.status = decision === "approve" ? `Replying allowed for ${request.device_label}.` : `Reply request denied for ${request.device_label}.`;
         }, "The decision could not be confirmed. Refresh and try again.");
-        group.append(button);
+        actions.append(button);
       }
+      group.append(actions);
       section.append(group);
     }
     return section;

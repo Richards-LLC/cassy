@@ -111,6 +111,8 @@ pub struct RepoSweepReport {
     pub repo_root: PathBuf,
     pub worktrees: Vec<WorktreeSweepRecord>,
     pub prune_ran: bool,
+    /// Fetched parent reference and immutable commit used for every decision.
+    pub comparison: Option<(String, String)>,
     /// Fatal errors at repo level (e.g. `.cas/worktrees` unreadable).
     pub repo_error: Option<String>,
 }
@@ -167,6 +169,50 @@ pub fn sweep_one_repo(repo_root: &Path, opts: SweepOptions) -> RepoSweepReport {
         return report;
     }
 
+    // An origin fetch failure must not turn stale tracking refs into a verdict.
+    let has_origin = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if has_origin {
+        match Command::new("git")
+            .args(["fetch", "--quiet", "origin"])
+            .current_dir(repo_root)
+            .output()
+        {
+            Ok(out) if out.status.success() => {}
+            result => {
+                report.repo_error = Some(match result {
+                    Ok(out) => format!(
+                        "origin fetch failed; no worktrees classified: {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ),
+                    Err(error) => format!("origin fetch failed; no worktrees classified: {error}"),
+                });
+                return report;
+            }
+        }
+    }
+    let Some(parent) = resolve_parent_branch(repo_root) else {
+        report.repo_error = Some("cannot resolve comparison ref; no worktrees classified".into());
+        return report;
+    };
+    let commit = Command::new("git")
+        .args(["rev-parse", "--verify", &format!("{parent}^{{commit}}")])
+        .current_dir(repo_root)
+        .output();
+    let commit = match commit {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => {
+            report.repo_error = Some(format!(
+                "cannot resolve {parent} commit; no worktrees classified"
+            ));
+            return report;
+        }
+    };
+    report.comparison = Some((parent, commit.clone()));
+
     let entries = match std::fs::read_dir(&wt_root) {
         Ok(e) => e,
         Err(e) => {
@@ -188,7 +234,7 @@ pub fn sweep_one_repo(repo_root: &Path, opts: SweepOptions) -> RepoSweepReport {
         }
         any_worktrees = true;
 
-        let rec = sweep_one_worktree(repo_root, &path, opts);
+        let rec = sweep_one_worktree(repo_root, &path, opts, &commit);
         report.worktrees.push(rec);
     }
 
@@ -246,6 +292,7 @@ fn sweep_one_worktree(
     repo_root: &Path,
     worktree_path: &Path,
     opts: SweepOptions,
+    parent: &str,
 ) -> WorktreeSweepRecord {
     let mut rec = WorktreeSweepRecord {
         worktree_path: worktree_path.to_path_buf(),
@@ -279,16 +326,7 @@ fn sweep_one_worktree(
             return rec;
         }
     };
-    let parent = match resolve_parent_branch(repo_root) {
-        Some(p) => p,
-        None => {
-            rec.disposition = Disposition::Error {
-                reason: "cannot resolve parent branch (no origin/HEAD or local main/master/develop/trunk) — refusing to classify".into(),
-            };
-            return rec;
-        }
-    };
-    let unmerged = match unmerged_count(worktree_path, &parent) {
+    let unmerged = match unmerged_count(worktree_path, parent) {
         Ok(n) => n,
         Err(e) => {
             rec.disposition = Disposition::Error {
@@ -453,11 +491,29 @@ fn resolve_parent_branch(repo_root: &Path) -> Option<String> {
                 if !b.is_empty() && branch_exists(repo_root, &format!("origin/{b}")) {
                     return Some(format!("origin/{b}"));
                 }
-                if !b.is_empty() && branch_exists(repo_root, b) {
-                    return Some(b.to_string());
-                }
             }
         }
+    }
+    // Remote candidates win even when origin/HEAD has not been initialized.
+    for candidate in [
+        "origin/main",
+        "origin/master",
+        "origin/develop",
+        "origin/trunk",
+    ] {
+        if branch_exists(repo_root, candidate) {
+            return Some(candidate.to_string());
+        }
+    }
+    // Repos without an origin can still sweep locally. An origin with no
+    // recognized parent must fail closed rather than judging against local main.
+    if Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        return None;
     }
     // 2. Local candidates, verified.
     for candidate in ["main", "master", "develop", "trunk"] {

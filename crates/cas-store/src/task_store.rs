@@ -312,6 +312,14 @@ impl SqliteTaskStore {
                 persisted_deliverables.parked_branch = None;
                 persisted_deliverables.merge_conflicted = false;
             }
+            let leaving_park = prev_status.as_deref() == Some("awaiting_merge")
+                && task.status != TaskStatus::Closed;
+            if reopening_terminal || leaving_park {
+                // cas-eda0: both describe one park/merge cycle; a new cycle
+                // must re-park and re-merge before Cassy may close for it.
+                persisted_deliverables.parked_close_reason = None;
+                persisted_deliverables.green_merge_commit = None;
+            }
 
             // Updates preserve the row's provenance. Only creation supplies a
             // default; an unattributed imported task must not become local on
@@ -1151,6 +1159,28 @@ impl TaskStore for SqliteTaskStore {
 
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
         self.append_note_with_mutation_receipt(task_id, formatted_note, "")
+    }
+
+    fn record_green_merge(&self, task_id: &str, merge_commit: &str) -> Result<bool> {
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            let rows = tx.execute(
+                "UPDATE tasks
+                 SET deliverables = json_set(deliverables, '$.green_merge_commit', ?1),
+                     updated_at = ?2
+                 WHERE id = ?3
+                   AND status = ?4
+                   AND json_valid(deliverables)
+                   AND json_type(deliverables) = 'object'
+                   AND COALESCE(json_extract(deliverables, '$.merge_conflicted'), 0) = 0",
+                params![
+                    merge_commit,
+                    Utc::now().to_rfc3339(),
+                    task_id,
+                    TaskStatus::AwaitingMerge.to_string(),
+                ],
+            )?;
+            Ok(rows == 1)
+        })
     }
 
     fn append_note_with_mutation_receipt(

@@ -326,13 +326,48 @@ fn isolated_test_path(
             std::os::unix::fs::symlink(concrete(name, tool)?, bin.path().join(name))?;
         }
     }
-    let retained = std::env::split_paths(&search)
+    // cas-1c4b: hide the host harness binaries, not their directories.
+    // Dropping a whole directory (e.g. /opt/homebrew/bin, which holds codex
+    // and claude) silently swapped in Apple's /usr/bin/git. A directory that
+    // holds a harness binary is replaced in place by a private mirror of its
+    // other entries, minus rustup proxies: dispatching one would prepend
+    // $CARGO_HOME/bin and restore the hidden binaries.
+    const HARNESS: [&str; 3] = ["cas", "codex", "claude"];
+    let rustup_proxy = |path: &Path| {
+        use std::os::unix::fs::MetadataExt;
+        rustup.as_ref().is_some_and(|rustup| {
+            path.metadata().ok().zip(rustup.metadata().ok())
+                .is_some_and(|(tool, rustup)| tool.dev() == rustup.dev() && tool.ino() == rustup.ino())
+        })
+    };
+    let mirrors = bin.path().join("harness-free");
+    let mut retained = Vec::new();
+    for (index, dir) in std::env::split_paths(&search)
         .map(|dir| if dir.is_absolute() { dir } else { cwd.join(dir) })
-        .filter(|dir| !["cas", "codex", "claude"].iter().any(|name| dir.join(name).is_file()))
-        .collect::<Vec<_>>();
+        .enumerate()
+    {
+        if !HARNESS.iter().any(|name| dir.join(name).is_file()) {
+            retained.push(dir);
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mirror = mirrors.join(index.to_string());
+        std::fs::create_dir_all(&mirror)?;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let source = entry.path();
+            if HARNESS.iter().any(|harness| name == *harness) || rustup_proxy(&source) {
+                continue;
+            }
+            std::os::unix::fs::symlink(&source, mirror.join(&name))?;
+        }
+        retained.push(mirror);
+    }
     let path = std::env::join_paths(std::iter::once(bin.path()).chain(retained.iter().map(PathBuf::as_path)))?;
     println!(
-        "Worker test PATH: concrete Rust tools + PATH without host harness directories; setup={:.3}ms",
+        "Worker test PATH: concrete Rust tools + PATH with host harness binaries hidden; setup={:.3}ms",
         started.elapsed().as_secs_f64() * 1000.0
     );
     Ok((bin, path))
@@ -647,6 +682,71 @@ pub(crate) fn execute(cas_root: &Path, args: &[String]) -> Result<()> {
     )
 }
 
+/// Run the capped runner in its own session and return once it has started
+/// (cas-3d04). The worker guard routes a backgrounded `... > log 2>&1 &` here
+/// instead of keeping the shell's `&`: Codex `exec_command` SIGKILLs the
+/// shell's whole process group as soon as the shell exits
+/// (codex-rs/utils/pty `kill_process_group` via `UnifiedExecProcess::drop`),
+/// so a `&` job died before writing a byte and the call still exited 0. A new
+/// session is outside that group. Its stdout and stderr both go to this
+/// process's stdout (the shell's log redirect), never the harness pipe.
+#[cfg(unix)]
+pub(crate) fn execute_detached(cas_root: &Path, args: &[String]) -> Result<()> {
+    if !allowed_args(args) {
+        bail!("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed");
+    }
+    let command = detached_runner_command(&std::env::current_exe()?, cas_root, args);
+    let child = spawn_detached(command).context("starting the detached worker-check runner")?;
+    println!(
+        "worker-check: detached pid {} in its own session; this log receives its output and receipt",
+        child.id()
+    );
+    Ok(())
+}
+
+/// The detached runner, ending its log with `worker-check: EXIT <code>` so a
+/// refused or failed run is distinguishable from one still running (cas-6591).
+#[cfg(unix)]
+fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String]) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", r#""$0" "$@"; echo "worker-check: EXIT $?""#])
+        .arg(executable)
+        .args(["factory", "worker-check", "--cas-root"])
+        .arg(cas_root)
+        .arg("--")
+        .args(args);
+    command
+}
+
+/// Spawn `command` as a new session leader with stdin closed and both output
+/// streams on this process's stdout.
+#[cfg(unix)]
+fn spawn_detached(mut command: Command) -> std::io::Result<std::process::Child> {
+    use std::os::fd::AsFd;
+    use std::os::unix::process::CommandExt;
+    let log = std::io::stdout().as_fd().try_clone_to_owned()?;
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    // SAFETY: setsid is async-signal-safe and touches no parent state.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn execute_detached(_cas_root: &Path, _args: &[String]) -> Result<()> {
+    bail!("worker-check --detach needs a Unix session; run the check in the foreground")
+}
+
 #[cfg(test)]
 fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
     execute_at_with_scope(cas_root, args, cwd, cargo, None)
@@ -898,6 +998,39 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
 mod tests {
     use super::*;
 
+    /// cas-3d04: Codex SIGKILLs the calling shell's process group when an
+    /// exec_command shell exits, so the detached runner must lead its own
+    /// session (and therefore its own process group).
+    #[cfg(unix)]
+    #[test]
+    fn detached_runner_leads_its_own_session_outside_the_callers_group() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5"]);
+        let mut child = spawn_detached(command).unwrap();
+        let pid = child.id() as libc::pid_t;
+        // SAFETY: plain process-id queries on our own live child.
+        let (sid, pgid, caller_pgid) = unsafe { (libc::getsid(pid), libc::getpgid(pid), libc::getpgrp()) };
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(sid, pid, "detached runner must be a session leader");
+        assert_eq!(pgid, pid, "detached runner must lead its own process group");
+        assert_ne!(pgid, caller_pgid, "a kill of the caller's group must not reach it");
+    }
+
+    /// cas-6591: the detached log ends with the runner's exit status, so a
+    /// refused run cannot pass for one still in progress.
+    #[cfg(unix)]
+    #[test]
+    fn detached_runner_log_ends_with_the_runner_exit_code() {
+        // `false` stands in for a runner that refuses: it exits 1.
+        let args = vec!["-p".to_string(), "cas".into(), "--lib".into()];
+        let output = detached_runner_command(Path::new("false"), Path::new("/cas-root"), &args)
+            .output()
+            .unwrap();
+        let log = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(log, "worker-check: EXIT 1\n");
+    }
+
     #[cfg(unix)]
     #[test]
     fn worker_proofs_include_fixed_guards_before_an_unrelated_filter() {
@@ -978,6 +1111,9 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
             for name in ["cas", "codex", "claude"] {
                 fake_cargo(&bin.path().join(name), "exit 0");
             }
+            // cas-1c4b: a tool sharing a directory with the harness binaries
+            // (git beside codex/claude in /opt/homebrew/bin) must stay visible.
+            fake_cargo(&bin.path().join("cas-1c4b-beside-harness-tool"), "exit 0");
             let original = std::env::var_os("PATH").unwrap();
             let path = std::env::join_paths(
                 [bin.path().to_path_buf(), tools.path().to_path_buf()]
@@ -1010,6 +1146,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
     command -v rustc > /dev/null || exit 24
     command -v git > /dev/null || exit 25
     command -v cas-a9fc-downstream-tool > /dev/null || exit 26
+    command -v cas-1c4b-beside-harness-tool > /dev/null || exit 27
     printf '%s\n' "$PATH" > target/selected-path
     printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         );
@@ -1541,14 +1678,16 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
             .and_then(|value| value.as_str())
             .unwrap();
         assert!(rewritten.contains("factory worker-check"));
-        assert!(rewritten.ends_with("> target/worker-check.log 2>&1 &"));
+        // cas-3d04: backgrounded runs detach instead of keeping the shell `&`.
+        assert!(rewritten.contains("--detach --"), "{rewritten}");
+        assert!(rewritten.ends_with("> target/worker-check.log 2>&1"), "{rewritten}");
         let head = fixture_head(&repo);
         // Execute the admitted shell suffix before invoking the real runner
         // boundary. The Cargo stand-in exits zero and compiles nothing.
         let suffix = rewritten.split_once('>').unwrap().1;
         assert!(
             Command::new("sh")
-                .args(["-c", &format!(": >{suffix} wait")])
+                .args(["-c", &format!(": >{suffix}")])
                 .current_dir(&repo)
                 .status()
                 .unwrap()

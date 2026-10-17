@@ -285,16 +285,39 @@ esac
         ),
     );
 
+    // cas-1a83: a standalone `release-latency-receipt.sh --run-dir` receipt
+    // lives in a task artifacts directory, not under ~/.cas/artifacts/release.
+    let run_dir = project.path().join("task-artifacts/cas-fixture");
+    fs::create_dir_all(&run_dir).unwrap();
+    let receipt = run_dir.join("release-latency.receipt");
+    fs::write(
+        &receipt,
+        "TAG=v3.19.0\nPUBLISH_START_KIND=gate-green\nGATE_GREEN_EPOCH=1788972265\n\
+         PUBLISHED_AT=2026-09-09T16:49:25Z\nPUBLISH_LATENCY_SECONDS=300\nBUDGET_SECONDS=600\n\
+         WITHIN_BUDGET=true\n",
+    )
+    .unwrap();
+
     let output = cas_cmd(&project)
         .env("GH_BIN", &fake_gh)
         .env("CAS_RELEASE_REPORT_POLL_SECS", "1")
         .args(["--json", "release", "report", "3.19.0", "--out", "docs/release-reports"])
+        .arg("--latency-receipt")
+        .arg(&receipt)
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
     let result: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(result["green_to_published_seconds"], 300, "{result}");
+    // cas-1a83: Evidence URLs are links in the HTML, not escaped `<…>` text.
+    let html = fs::read_to_string(project.path().join("docs/release-reports/v3.19.0.html")).unwrap();
+    assert!(
+        html.contains(r#"<a href="https://github.com/example/project/pull/901">"#),
+        "the release PR must render as a link"
+    );
+    assert!(!html.contains("&lt;https://"), "an Evidence URL rendered as text");
     assert_eq!(result["issue_count"], 2, "{result}");
     assert_eq!(result["change_count"], 3);
     let source = fs::read_to_string(project.path().join("docs/release-reports/v3.19.0.md")).unwrap();

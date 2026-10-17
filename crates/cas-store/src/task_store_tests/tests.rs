@@ -431,6 +431,8 @@ fn awaiting_merge_conflict_rework_clears_all_parked_merge_state() {
     task.deliverables.factory_branch_anchor = Some("conflicted-sha".to_string());
     task.deliverables.parked_branch = Some("factory/worker".to_string());
     task.deliverables.merge_conflicted = true;
+    task.deliverables.parked_close_reason = Some("PASS conflicted-sha".to_string());
+    task.deliverables.green_merge_commit = Some("merge-sha".to_string());
     store.add(&task).unwrap();
 
     task.status = TaskStatus::InProgress;
@@ -445,6 +447,39 @@ fn awaiting_merge_conflict_rework_clears_all_parked_merge_state() {
     );
     assert!(resumed.deliverables.parked_branch.is_none());
     assert!(!resumed.deliverables.merge_conflicted);
+    // cas-eda0: a reworked delivery must park and merge again before Cassy
+    // may close it with a parked reason.
+    assert!(resumed.deliverables.parked_close_reason.is_none());
+    assert!(resumed.deliverables.green_merge_commit.is_none());
+}
+
+/// cas-eda0: Cassy records a green merge after reading the parked task. A
+/// worker close that lands in between must stay closed: the record is one
+/// conditional field write, never a write-back of the stale row.
+#[test]
+fn green_merge_record_never_reopens_a_task_closed_meanwhile() {
+    let (_temp, store) = create_test_store();
+    let mut task = Task::new(store.generate_id().unwrap(), "Parked delivery".to_string());
+    task.status = TaskStatus::AwaitingMerge;
+    store.add(&task).unwrap();
+
+    let read_by_cassy = store.get(&task.id).unwrap();
+    let mut closed_by_worker = read_by_cassy.clone();
+    closed_by_worker.status = TaskStatus::Closed;
+    store.update(&closed_by_worker).unwrap();
+
+    assert!(!store.record_green_merge(&task.id, "merge-sha").unwrap());
+    let after = store.get(&task.id).unwrap();
+    assert_eq!(after.status, TaskStatus::Closed);
+    assert!(after.deliverables.green_merge_commit.is_none());
+
+    let mut parked = Task::new(store.generate_id().unwrap(), "Still parked".to_string());
+    parked.status = TaskStatus::AwaitingMerge;
+    store.add(&parked).unwrap();
+    assert!(store.record_green_merge(&parked.id, "merge-sha").unwrap());
+    let recorded = store.get(&parked.id).unwrap();
+    assert_eq!(recorded.status, TaskStatus::AwaitingMerge);
+    assert_eq!(recorded.deliverables.green_merge_commit.as_deref(), Some("merge-sha"));
 }
 
 #[test]

@@ -196,6 +196,7 @@ pub(super) fn render(path: &Path, args: &UpdateArgs, cli: &Cli) -> anyhow::Resul
                     receipts,
                     user_level,
                     user_details: fixture.user_output.clone(),
+                    user_retired_toml: Vec::new(),
                     skipped_unregistered,
                 },
                 error,
@@ -224,6 +225,7 @@ fn receipt(project: &ProjectFixture) -> anyhow::Result<ProjectRefreshReceipt> {
     Ok(ProjectRefreshReceipt {
         project: project.project.clone(),
         unregistered: !project.registered,
+        retired_toml: None,
         migration,
         search_index,
         skills,

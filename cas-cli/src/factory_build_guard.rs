@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::config::{BuildGuardConfig, FactoryConfig};
+use crate::factory_target_cache::{FilesystemCapacity, TargetCachePolicy};
 
 /// Linux PSI stall percentages and reclaimable memory; missing probes stay unknown.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -82,9 +83,34 @@ pub(crate) struct BuildGuardSnapshot {
     pub disabled: bool,
     pub pressure: HostPressure,
     pub limits: BuildGuardConfig,
+    pub disk: Option<Result<FilesystemCapacity, String>>,
 }
 
 impl BuildGuardSnapshot {
+    fn with_disk_probe(
+        mut self,
+        cas_root: &Path,
+        config: &FactoryConfig,
+        probe: impl FnOnce(&Path, TargetCachePolicy) -> std::io::Result<FilesystemCapacity>,
+    ) -> Self {
+        let target = cas_types::factory_scratch::parse_scratch_root(config.scratch_root.as_deref())
+            .unwrap_or_else(|| cas_root.to_path_buf());
+        // A scratch root may not have been created when spawn is admitted.
+        let existing = target
+            .ancestors()
+            .find(|path| path.exists())
+            .unwrap_or(&target);
+        self.disk = Some(
+            probe(existing, TargetCachePolicy::from(config)).map_err(|error| {
+                format!(
+                    "disk capacity unavailable for {}: {error}",
+                    existing.display()
+                )
+            }),
+        );
+        self
+    }
+
     fn with_host(mut self, proc_root: &Path, config: &FactoryConfig) -> Self {
         self.load_1m = std::fs::read_to_string(proc_root.join("loadavg"))
             .ok()
@@ -275,6 +301,7 @@ fn evaluate_with_builders(
         disabled: false,
         pressure: HostPressure::default(),
         limits: BuildGuardConfig::default(),
+        disk: None,
     }
 }
 
@@ -429,6 +456,75 @@ fn live_cargo_worker_count(_cas_root: &Path) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cas_94ed_disk_admission_projects_target_growth_on_scratch_volume() {
+        let root = tempfile::tempdir().unwrap();
+        let config = FactoryConfig {
+            scratch_root: Some(root.path().join("future/targets").display().to_string()),
+            ..FactoryConfig::default()
+        };
+        let gib = 1024_u64.pow(3);
+        for (available_gib, refused) in [(40, false), (30, true), (10, true)] {
+            let snapshot = evaluate(32, Some(1.0), 1, 1, 4).with_disk_probe(
+                Path::new("/wrong-repository-volume"),
+                &config,
+                |path, policy| {
+                    assert_eq!(path, root.path(), "probe the actual scratch volume");
+                    crate::factory_target_cache::capacity_status_with(path, policy, |_| {
+                        Ok(crate::fs_space::FsSpace {
+                            total_bytes: 100 * gib,
+                            available_bytes: available_gib * gib,
+                            free_bytes: available_gib * gib,
+                        })
+                    })
+                },
+            );
+            for continuation in [false, true] {
+                let violations = snapshot.admission_violations(continuation);
+                assert_eq!(
+                    violations.iter().any(|v| v.starts_with("disk ")),
+                    refused,
+                    "{available_gib}GiB: {violations:?}"
+                );
+            }
+            if refused {
+                assert!(
+                    snapshot
+                        .refusal_message()
+                        .contains("Waiting for build admission: disk ")
+                );
+            }
+            let no_build = BuildGuardSnapshot {
+                requested_builders: 0,
+                ..snapshot
+            };
+            assert!(
+                no_build.violations().is_empty(),
+                "no-code work consumes no target growth"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cas_94ed_macos_native_host_probes_are_available() {
+        let snapshot =
+            evaluate(32, None, 0, 1, 4).with_host(Path::new("/proc"), &FactoryConfig::default());
+        assert!(
+            snapshot
+                .load_1m
+                .is_some_and(|load| load.is_finite() && load >= 0.0),
+            "{snapshot:?}"
+        );
+        assert!(
+            snapshot
+                .pressure
+                .available_memory_bytes
+                .is_some_and(|bytes| bytes > 0),
+            "{snapshot:?}"
+        );
+    }
 
     fn fake_proc(load: f64, cpu: &str, memory: &str, available_kib: u64) -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();

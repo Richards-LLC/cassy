@@ -175,7 +175,15 @@ pub fn capacity_status(
     repo_root: &Path,
     policy: TargetCachePolicy,
 ) -> io::Result<FilesystemCapacity> {
-    let (total_bytes, available_bytes) = filesystem_capacity(repo_root)?;
+    capacity_status_with(repo_root, policy, crate::fs_space::fs_space)
+}
+
+pub(crate) fn capacity_status_with(
+    root: &Path,
+    policy: TargetCachePolicy,
+    probe: impl FnOnce(&Path) -> io::Result<crate::fs_space::FsSpace>,
+) -> io::Result<FilesystemCapacity> {
+    let (total_bytes, available_bytes) = filesystem_capacity_from_space(probe(root)?);
     Ok(capacity_from_bytes(total_bytes, available_bytes, policy))
 }
 

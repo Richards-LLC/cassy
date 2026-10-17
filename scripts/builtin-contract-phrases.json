@@ -3216,6 +3216,10 @@
         {
           "text": "one full assembly gate run",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "system action=preflight",
+          "reason": "EPIC resumption uses the same active-MCP evidence route as session startup (GH #1253)."
         }
       ],
       "absent": [
@@ -3259,6 +3263,10 @@
           "text": "awaiting review",
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract.",
           "case_sensitive": false
+        },
+        {
+          "text": "If it reports a stale Cassy binary, stop",
+          "reason": "EPIC resumption must not restore the retired blanket rebuild/reconnect rule for unknown source evidence."
         }
       ],
       "any_of": []

@@ -420,6 +420,15 @@ fn record_detected_migration(conn: &Connection, migration: &Migration) -> Result
 
 /// Check migration status for a Cassy directory
 pub fn check_migrations(cas_dir: &Path) -> Result<MigrationStatus> {
+    check_migrations_with_mode(cas_dir, false)
+}
+
+/// Doctor's status view never bootstraps schemas or records detected rows.
+pub fn check_migrations_read_only(cas_dir: &Path) -> Result<MigrationStatus> {
+    check_migrations_with_mode(cas_dir, true)
+}
+
+fn check_migrations_with_mode(cas_dir: &Path, read_only: bool) -> Result<MigrationStatus> {
     let db_path = cas_dir.join("cas.db");
 
     // If database doesn't exist, all migrations are pending
@@ -432,11 +441,17 @@ pub fn check_migrations(cas_dir: &Path) -> Result<MigrationStatus> {
         });
     }
 
-    let conn = Connection::open(&db_path)?;
+    let conn = if read_only {
+        Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?
+    } else {
+        Connection::open(&db_path)?
+    };
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+    if !read_only {
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+    }
 
-    check_migrations_on_connection(&conn)
+    check_migrations_on_connection(&conn, !read_only)
 }
 
 /// Check migration status through an already-open connection.
@@ -444,11 +459,23 @@ pub fn check_migrations(cas_dir: &Path) -> Result<MigrationStatus> {
 /// The migration runner calls this while it owns SQLite's write lock, so a
 /// second process cannot observe a half-bootstrapped ledger and derive a
 /// stale pending list.
-fn check_migrations_on_connection(conn: &Connection) -> Result<MigrationStatus> {
-    // Ensure migrations table exists
-    ensure_migrations_table(&conn)?;
-
-    let initially_applied = get_applied_migrations(&conn)?;
+fn check_migrations_on_connection(
+    conn: &Connection,
+    record_detected: bool,
+) -> Result<MigrationStatus> {
+    if record_detected {
+        ensure_migrations_table(conn)?;
+    }
+    let ledger_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='cas_migrations')",
+        [],
+        |row| row.get(0),
+    )?;
+    let initially_applied = if ledger_exists {
+        get_applied_migrations(conn)?
+    } else {
+        Vec::new()
+    };
     let mut applied_ids: std::collections::HashSet<u32> = initially_applied
         .iter()
         .map(|migration| migration.id)
@@ -476,7 +503,10 @@ fn check_migrations_on_connection(conn: &Connection) -> Result<MigrationStatus> 
         }
 
         if !detection_blocked && migration_is_detected(&conn, migration) {
-            if record_detected_migration(&conn, migration)? {
+            if (record_detected && record_detected_migration(conn, migration)?)
+                || (!record_detected
+                    && (!ledger_exists || ledger_id_holding_name(conn, migration.name).is_none()))
+            {
                 applied_ids.insert(migration.id);
                 continue;
             }
@@ -489,13 +519,24 @@ fn check_migrations_on_connection(conn: &Connection) -> Result<MigrationStatus> 
     // Re-read after prefix detection so callers see the ledger writes made by
     // this check. The reported cursor is the applied registry prefix, not the
     // maximum arbitrary row: stranded higher rows must not hide a lower gap.
-    let applied = get_applied_migrations(&conn)?;
-    let applied_ids: std::collections::HashSet<u32> = applied
+    let applied = if record_detected {
+        get_applied_migrations(conn)?
+    } else {
+        initially_applied
+    };
+    // Read-only prefix detection is a computed view, never a ledger write.
+    // Writable callers still observe any rows recorded since the first read.
+    let candidate_ids = if record_detected {
+        applied.iter().map(|migration| migration.id).collect()
+    } else {
+        applied_ids
+    };
+    let applied_ids: std::collections::HashSet<u32> = candidate_ids
         .iter()
-        .filter_map(|applied| {
+        .filter_map(|id| {
             MIGRATIONS
                 .iter()
-                .find(|migration| migration.id == applied.id)
+                .find(|migration| migration.id == *id)
                 .filter(|migration| migration_is_detected(&conn, migration))
                 .map(|migration| migration.id)
         })
@@ -673,6 +714,9 @@ fn reconcile_recorded_migration(conn: &Connection, migration: &Migration) -> Res
     for sql in migration.up {
         apply_migration_statement(conn, sql)?;
     }
+    if migration.id == 279 {
+        migrations::m279_prompt_queue_health_schema::repair(conn)?;
+    }
 
     if !migration_is_detected(conn, migration) {
         return Err(CasError::MigrationFailed {
@@ -707,6 +751,9 @@ fn apply_migration(conn: &Connection, migration: &Migration) -> Result<()> {
     // distinguish every possible mixed-schema state.
     for sql in migration.up {
         apply_migration_statement(conn, sql)?;
+    }
+    if migration.id == 279 {
+        migrations::m279_prompt_queue_health_schema::repair(conn)?;
     }
 
     if migration.id == 262 {
@@ -901,7 +948,7 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
         // `SqliteSkillStore` / `SqliteAgentStore` constructed.
         ensure_base_schemas(&conn)?;
         bootstrap_migrations_on_connection(&conn)?;
-        check_migrations_on_connection(&conn)
+        check_migrations_on_connection(&conn, true)
     })();
     let status = match status {
         Ok(status) => {

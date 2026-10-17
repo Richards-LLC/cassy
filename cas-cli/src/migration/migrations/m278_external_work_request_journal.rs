@@ -38,7 +38,7 @@ mod tests {
                 .unwrap();
 
             assert_eq!(applied, crate::migration::MIGRATIONS.len() as i64);
-            assert_eq!(latest, MIGRATION.id as i64);
+            assert_eq!(latest, crate::migration::MIGRATIONS.last().unwrap().id as i64);
             assert!(crate::migration::migration_is_detected(&conn, &MIGRATION));
         });
     }

@@ -3,7 +3,7 @@
   "surface": "violet_activity.claim_v2",
   "method": "POST",
   "path": "/api/violet/activity/claim",
-  "spec": "§5 §7 §11",
+  "spec": "\u00a75 \u00a77 \u00a711",
   "cases": [
     {
       "name": "leases this reader's deliveries",
@@ -60,7 +60,8 @@
             "generation": null,
             "expires_at": null,
             "observed_at": "2026-10-16T14:00:00.000Z",
-            "next_action": "admit"
+            "next_action": "admit",
+            "strict_activation": "evidenced"
           }
         }
       }
@@ -92,7 +93,8 @@
             "generation": null,
             "expires_at": null,
             "observed_at": "2026-10-16T14:00:00.000Z",
-            "next_action": "none"
+            "next_action": "none",
+            "strict_activation": "evidenced"
           }
         }
       }
@@ -125,6 +127,38 @@
             "expires_at": null,
             "observed_at": "2026-10-16T14:00:00.000Z",
             "next_action": "link_team_project"
+          }
+        }
+      }
+    },
+    {
+      "name": "managed binding without strict activation evidence",
+      "request": {
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "max": 25,
+          "lease_secs": 60
+        }
+      },
+      "response": {
+        "status": 409,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "strict_activation_required",
+          "guidance": "Every managed binding of this project must have evidenced strict activation before v2 claim; inspect binding activation evidence.",
+          "reason": "binding_unevidenced",
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "retry_later"
           }
         }
       }

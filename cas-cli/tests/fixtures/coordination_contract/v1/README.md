@@ -8,7 +8,8 @@ wakes. Cloud, Violet and Cassy implement and test against the same files.
 ## What is here
 
 Cloud owns 14 files, vendored byte for byte from `Richards-LLC/petra-stella-cloud`
-`tests/contracts/coordination/v1/` at `7f838351a` (petra-stella-cloud#161, PR #164).
+`tests/contracts/coordination/v1/` at `00d0675af` (petra-stella-cloud#161, PR #164; PR #179 added the
+`strict_activation_required` claim refusal).
 Cloud authored them and deployed the routes to production first, as §11
 requires. Per Cloud's recorded decision, Cassy and Violet adopt them as they
 are. [MANIFEST.json](MANIFEST.json) pins each file's sha256, and the Cassy test
@@ -70,6 +71,7 @@ A case may also carry `request_rejected_as: <code>`. A response payload carries
 | `authority_unavailable` | Fail closed for new work, replies and mutations. Keep local evidence |
 | `idempotency_conflict` | The same request id was used with different input. Never retry with a new id |
 | `coordination_scope_required` | The project is not a linked team project. Matching repository text grants nothing |
+| `strict_activation_required` | A managed binding lacks evidenced strict activation. Lease nothing and type nothing; retry after an operator completes activation |
 | `unsupported_version`, `invalid_request`, `not_found` | Fix the request. Authority mutations fail closed |
 
 ## Out of scope

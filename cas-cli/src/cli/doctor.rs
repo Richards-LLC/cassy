@@ -8323,6 +8323,24 @@ mod tests {
             "a row with no cloud verdict is not a rejection: {}",
             check.message
         );
+
+        for (reason, retry_now) in [
+            ("invalid_json_nul", false),
+            ("version_gate", false),
+            ("unknown_server_reason", false),
+            ("timeout", true),
+        ] {
+            conn.execute("UPDATE sync_queue SET last_reason = ?1 WHERE id IN (1, 2)", [reason]).unwrap();
+            let check = cloud_queue_check(&cas_root);
+            assert!(matches!(check.status, CheckStatus::Warning));
+            assert_eq!(
+                check.message.contains("Run `cas cloud queue --retry`, then"),
+                retry_now,
+                "{reason}: blocked-only rejection advice must not prescribe an immediate broad retry: {}", check.message
+            );
+            assert!(check.message.contains(crate::cloud::push_reason_hint(reason)), "{}", check.message);
+            assert!(check.message.contains("cas cloud push"), "other pending work still needs a push: {}", check.message);
+        }
     }
 
     #[test]

@@ -232,6 +232,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         resource_id: None,
         handoff_id: None,
         expected_generation: None,
+        occurrence_id: None,
         to_slot_id: None,
         offer_ttl_secs: None,
         task_id: None,

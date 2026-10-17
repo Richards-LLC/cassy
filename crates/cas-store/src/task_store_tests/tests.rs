@@ -453,6 +453,35 @@ fn awaiting_merge_conflict_rework_clears_all_parked_merge_state() {
     assert!(resumed.deliverables.green_merge_commit.is_none());
 }
 
+/// cas-eda0: Cassy records a green merge after reading the parked task. A
+/// worker close that lands in between must stay closed: the record is one
+/// conditional field write, never a write-back of the stale row.
+#[test]
+fn green_merge_record_never_reopens_a_task_closed_meanwhile() {
+    let (_temp, store) = create_test_store();
+    let mut task = Task::new(store.generate_id().unwrap(), "Parked delivery".to_string());
+    task.status = TaskStatus::AwaitingMerge;
+    store.add(&task).unwrap();
+
+    let read_by_cassy = store.get(&task.id).unwrap();
+    let mut closed_by_worker = read_by_cassy.clone();
+    closed_by_worker.status = TaskStatus::Closed;
+    store.update(&closed_by_worker).unwrap();
+
+    assert!(!store.record_green_merge(&task.id, "merge-sha").unwrap());
+    let after = store.get(&task.id).unwrap();
+    assert_eq!(after.status, TaskStatus::Closed);
+    assert!(after.deliverables.green_merge_commit.is_none());
+
+    let mut parked = Task::new(store.generate_id().unwrap(), "Still parked".to_string());
+    parked.status = TaskStatus::AwaitingMerge;
+    store.add(&parked).unwrap();
+    assert!(store.record_green_merge(&parked.id, "merge-sha").unwrap());
+    let recorded = store.get(&parked.id).unwrap();
+    assert_eq!(recorded.status, TaskStatus::AwaitingMerge);
+    assert_eq!(recorded.deliverables.green_merge_commit.as_deref(), Some("merge-sha"));
+}
+
 #[test]
 fn test_dependencies() {
     let (_temp, store) = create_test_store();

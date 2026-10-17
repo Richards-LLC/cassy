@@ -48,19 +48,18 @@ impl CasCore {
         let Ok(store) = self.open_task_store() else {
             return CassyMergeClose::NotEligible;
         };
-        let Ok(mut task) = store.get(task_id) else {
-            return CassyMergeClose::NotEligible;
-        };
-        if task.status != TaskStatus::AwaitingMerge || task.deliverables.merge_conflicted {
-            return CassyMergeClose::NotEligible;
-        }
-        task.deliverables.green_merge_commit = Some(merge_commit.to_string());
-        if let Err(error) = store.update(&task) {
-            return CassyMergeClose::Held(format!(
+        // One conditional field write, never a read-modify-write of the row:
+        // a worker close landing first must stay closed.
+        match store.record_green_merge(task_id, merge_commit) {
+            Ok(true) => self.close_green_merged_delivery(task_id).await,
+            Ok(false) => match store.get(task_id) {
+                Ok(task) if task.status == TaskStatus::Closed => CassyMergeClose::AlreadyClosed,
+                _ => CassyMergeClose::NotEligible,
+            },
+            Err(error) => CassyMergeClose::Held(format!(
                 "the green merge could not be recorded ({error}); retry task close."
-            ));
+            )),
         }
-        self.close_green_merged_delivery(task_id).await
     }
 
     /// Close a delivery that carries a recorded green merge, with the parked

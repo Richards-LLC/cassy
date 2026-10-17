@@ -377,9 +377,13 @@ pub fn cleanup_selected(
         // the lane, every Cargo lock and any lifetime lease through deletion
         // on macOS too; readable process evidence is still mandatory.
         if record.release_warm_on_pressure && guard.is_none() {
-            match rescanned.snapshot.as_ref().ok_or_else(|| io::Error::other("missing cache snapshot"))
-                .and_then(|snapshot| legacy::acquire(cas_root, &record.worktree, &record.path, snapshot))
-            {
+            match rescanned
+                .snapshot
+                .as_ref()
+                .ok_or_else(|| io::Error::other("missing cache snapshot"))
+                .and_then(|snapshot| {
+                    legacy::acquire(cas_root, &record.worktree, &record.path, snapshot)
+                }) {
                 Ok(held) => guard = Some(held),
                 Err(error) => {
                     record.disposition = CacheDisposition::Indeterminate;
@@ -400,8 +404,8 @@ pub fn cleanup_selected(
         if record.release_warm_on_pressure
             && !legacy::terminal_dead_owner(cas_root, &record.worktree)
             || guard
-            .as_ref()
-            .is_some_and(|guard| !guard.unchanged(&record.path))
+                .as_ref()
+                .is_some_and(|guard| !guard.unchanged(&record.path))
             || guard.is_some()
                 && (!legacy::lane_target(cas_root, &record.worktree, &record.path)
                     || !legacy::registry_allows(cas_root, &record.worktree))
@@ -500,6 +504,7 @@ pub fn cleanup_selected(
     Ok(())
 }
 
+
 fn plan_records(
     records: &mut [TargetCacheRecord],
     capacity: &FilesystemCapacity,
@@ -515,7 +520,9 @@ fn plan_records(
     eligible.sort_by_key(|index| std::cmp::Reverse(records[*index].newest_write_unix_secs));
     let retained: Vec<usize> = eligible
         .iter()
-        .filter(|index| !records[**index].interrupted_cleanup && !records[**index].release_warm_on_pressure)
+        .filter(|index| {
+            !records[**index].interrupted_cleanup && !records[**index].release_warm_on_pressure
+        })
         .take(policy.retention_count)
         .copied()
         .collect();
@@ -546,6 +553,7 @@ fn plan_records(
         bytes_needed = bytes_needed.saturating_sub(records[index].bytes);
     }
 }
+
 
 fn discover_caches(
     repo_root: &Path,
@@ -1384,41 +1392,84 @@ mod tests {
         owner.pid = Some(i32::MAX as u32);
         owner.pid_starttime = Some(1);
         owner.status = cas_types::AgentStatus::Shutdown;
-        owner.metadata.insert("clone_path".into(), worker.display().to_string());
-        crate::store::open_agent_store(&cas).unwrap().register(&owner).unwrap();
+        owner
+            .metadata
+            .insert("clone_path".into(), worker.display().to_string());
+        crate::store::open_agent_store(&cas)
+            .unwrap()
+            .register(&owner)
+            .unwrap();
         let tasks = crate::store::open_task_store(&cas).unwrap();
         let mut task = cas_types::Task::new("cas-dead".into(), "finished lane".into());
         task.assignee = Some(owner.id.clone());
         tasks.add(&task).unwrap();
-        let pressure = TargetCachePolicy { high_watermark_percent: 1, low_watermark_percent: 0, min_idle_secs: 0, retention_count: 1 };
+        let pressure = TargetCachePolicy {
+            high_watermark_percent: 1,
+            low_watermark_percent: 0,
+            min_idle_secs: 0,
+            retention_count: 1,
+        };
         let report = inspect(&cas, pressure, &[], &[], true).unwrap();
-        assert_eq!(report.caches[0].disposition, CacheDisposition::Retained, "nonterminal work keeps its warm reservation");
+        assert_eq!(
+            report.caches[0].disposition,
+            CacheDisposition::Retained,
+            "nonterminal work keeps its warm reservation"
+        );
         task.status = cas_types::TaskStatus::Closed;
         tasks.update(&task).unwrap();
-        let normal = inspect(&cas, TargetCachePolicy { high_watermark_percent: 100, low_watermark_percent: 99, ..pressure }, &[], &[], true).unwrap();
+        let normal = inspect(
+            &cas,
+            TargetCachePolicy {
+                high_watermark_percent: 100,
+                low_watermark_percent: 99,
+                ..pressure
+            },
+            &[],
+            &[],
+            true,
+        )
+        .unwrap();
         assert!(!normal.filesystem.pressure);
         assert_eq!(normal.caches[0].disposition, CacheDisposition::Retained);
         let mut report = inspect(&cas, pressure, &[], &[], true).unwrap();
         assert!(report.filesystem.pressure);
         assert_eq!(report.caches[0].bytes, 11);
-        assert_eq!(report.caches[0].disposition, CacheDisposition::Selected, "terminal-owned dead lane must yield under pressure");
+        assert_eq!(
+            report.caches[0].disposition,
+            CacheDisposition::Selected,
+            "terminal-owned dead lane must yield under pressure"
+        );
         assert_eq!(report.selected_bytes, 11);
         cleanup_selected(&cas, &mut report, pressure, &[]).unwrap();
-        assert!(target.join("debug/output").is_file(), "dry run must preserve bytes");
+        assert!(
+            target.join("debug/output").is_file(),
+            "dry run must preserve bytes"
+        );
         task.status = cas_types::TaskStatus::InProgress;
         tasks.update(&task).unwrap();
         report.dry_run = false;
         cleanup_selected(&cas, &mut report, pressure, &[]).unwrap();
-        assert_ne!(report.caches[0].disposition, CacheDisposition::Reclaimed, "task reopening invalidates pressure exemption");
+        assert_ne!(
+            report.caches[0].disposition,
+            CacheDisposition::Reclaimed,
+            "task reopening invalidates pressure exemption"
+        );
         assert!(target.exists());
         task.status = cas_types::TaskStatus::Closed;
         tasks.update(&task).unwrap();
-        let lock = OpenOptions::new().read(true).write(true)
-            .open(target.join("debug/.cargo-lock")).unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(target.join("debug/.cargo-lock"))
+            .unwrap();
         lock.try_lock_exclusive().unwrap();
         let mut report = inspect(&cas, pressure, &[], &[], false).unwrap();
         cleanup_selected(&cas, &mut report, pressure, &[]).unwrap();
-        assert_ne!(report.caches[0].disposition, CacheDisposition::Reclaimed, "held Cargo lock must protect even a terminal dead lane");
+        assert_ne!(
+            report.caches[0].disposition,
+            CacheDisposition::Reclaimed,
+            "held Cargo lock must protect even a terminal dead lane"
+        );
         assert!(target.exists());
         FileExt::unlock(&lock).unwrap();
         drop(lock);

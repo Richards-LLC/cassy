@@ -7565,7 +7565,9 @@ impl FactoryArtifactInventory {
     /// Sibling project keys (including pre-rename keys), bare task IDs and
     /// shared builds have no project-task deletion authority. Inventory only.
     fn include_review_roots(&mut self) {
-        let Some(base) = self.root.parent() else { return; };
+        let Some(base) = self.root.parent() else {
+            return;
+        };
         let entries = match std::fs::read_dir(base) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
@@ -7574,13 +7576,15 @@ impl FactoryArtifactInventory {
                 return;
             }
         };
-        self.review_roots = entries.filter_map(Result::ok)
+        self.review_roots = entries
+            .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .map(|entry| {
                 let path = entry.path();
                 let usage = artifact_root_usage(&path);
                 (path, usage)
-            }).collect();
+            })
+            .collect();
         self.review_roots.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
@@ -7628,6 +7632,7 @@ impl FactoryArtifactInventory {
         out
     }
 }
+
 
 fn factory_artifact_inventory(
     root: std::path::PathBuf,
@@ -19748,32 +19753,60 @@ mod artifact_project_scope_tests {
                 min_idle_secs: 0,
                 retention_count: 0,
             },
-            &[], &[], true,
-        ).unwrap();
-        let cache = report.caches.iter().find(|cache| cache.path == target.canonicalize().unwrap())
+            &[],
+            &[],
+            true,
+        )
+        .unwrap();
+        let cache = report
+            .caches
+            .iter()
+            .find(|cache| cache.path == target.canonicalize().unwrap())
             .expect("missing-gitdir targets must be measured, even outside worktrees/");
         assert_eq!(cache.bytes, 11);
         assert!(cache.newest_write_unix_secs.is_some());
-        assert_eq!(cache.disposition, crate::factory_target_cache::CacheDisposition::OwnershipUncertain);
-        assert!(cache.reason.contains("review-only") && cache.reason.contains("manual"), "{}", cache.reason);
+        assert_eq!(
+            cache.disposition,
+            crate::factory_target_cache::CacheDisposition::OwnershipUncertain
+        );
+        assert!(
+            cache.reason.contains("review-only") && cache.reason.contains("manual"),
+            "{}",
+            cache.reason
+        );
         assert_eq!(report.selected_bytes, 0);
         assert!(target.join("artifact").is_file());
 
-        let git = std::process::Command::new("git").args(["init", "--quiet"])
-            .arg(temp.path()).output().unwrap();
+        let git = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(temp.path())
+            .output()
+            .unwrap();
         assert!(git.status.success());
         let retired = cas_root.join("merge-sweeps/assembly-target");
         std::fs::create_dir_all(&retired).unwrap();
         std::fs::write(retired.join("artifact"), b"legacy").unwrap();
         let scratch = crate::factory_target_cache::scratch::render(&cas_root, false);
-        let raw = scratch.lines().find_map(|line| line.strip_prefix("RELEASE_SCRATCH_STATUS_JSON="))
+        let raw = scratch
+            .lines()
+            .find_map(|line| line.strip_prefix("RELEASE_SCRATCH_STATUS_JSON="))
             .expect("retired cache remains inventoried");
         let value: serde_json::Value = serde_json::from_str(raw).unwrap();
-        let row = value["caches"].as_array().unwrap().iter()
-            .find(|row| row["path"] == retired.display().to_string()).unwrap();
+        let row = value["caches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["path"] == retired.display().to_string())
+            .unwrap();
         assert_eq!(row["bytes"], 6);
+        assert!(row["newest_write_unix_secs"].as_u64().is_some());
         assert_eq!(row["reclaimable_bytes"], 0);
-        assert!(row["remediation"].as_str().is_some_and(|text| text.contains("--adopt-legacy-cache")), "{row}");
+        assert!(
+            row["remediation"]
+                .as_str()
+                .is_some_and(|text| text.contains("--adopt-legacy-cache")),
+            "{row}"
+        );
         assert!(retired.join("artifact").is_file());
     }
 
@@ -19808,11 +19841,21 @@ mod artifact_project_scope_tests {
         assert!(b_root.join("cas-a4b1/proof.md").is_file());
         assert!(base.join("cas-a4b1/proof.md").is_file());
         let output = report.render();
-        for path in [&b_root, &base.join("cas-a4b1"), &base.join("cas-src-old-key"), &base.join("shared-builds")] {
-            assert!(output.contains(&path.display().to_string()), "unscoped roots must be visible: {output}");
+        for (path, bytes) in [
+            (&b_root, 8),
+            (&base.join("cas-a4b1"), 8),
+            (&base.join("cas-src-old-key"), 7),
+            (&base.join("shared-builds"), 7),
+        ] {
+            let row = output.lines().find(|line| line.contains(&path.display().to_string()))
+                .unwrap_or_else(|| panic!("unscoped roots must be visible: {output}"));
+            assert!(row.contains(&format!("bytes={bytes}")) && row.contains("review-only"), "{row}");
         }
-        assert!(output.contains("bytes=7"), "{output}");
-        assert!(output.contains(&renamed.display().to_string()) && output.contains(&shared.display().to_string()), "regenerable outputs must be flagged: {output}");
+        assert!(
+            output.contains(&renamed.display().to_string())
+                && output.contains(&shared.display().to_string()),
+            "regenerable outputs must be flagged: {output}"
+        );
         assert!(renamed.join("build").is_file());
         assert!(shared.join("build").is_file());
     }

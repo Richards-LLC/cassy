@@ -3459,7 +3459,8 @@ pub struct BuiltinGitignoreReport {
     pub tracked_paths: Vec<String>,
 }
 
-/// Return the exact paths written by the selected builtin catalogs.
+/// Return the exact paths written by the selected builtin catalogs and their
+/// runtime lock files.
 ///
 /// Paths are rooted at the project root (`/.claude/...`, `/.codex/...`, or
 /// `/.grok/...`) and are intentionally file-specific. Configuration files,
@@ -3475,7 +3476,13 @@ pub fn builtin_gitignore_entries(harnesses: &[SupervisorCli]) -> Vec<String> {
                 BUILTIN_SKILLS,
                 Some(BUILTIN_WORKFLOWS),
             ),
-            SupervisorCli::Codex => (".codex", CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS, None),
+            SupervisorCli::Codex => {
+                entries.extend(
+                    ["/.codex/config.toml.cas-lock", "/.codex/hooks.toml.cas-lock"]
+                        .map(str::to_string),
+                );
+                (".codex", CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS, None)
+            }
             SupervisorCli::Grok => (".grok", GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS, None),
             SupervisorCli::OpenCode => (".opencode", NO_AGENTS, opencode_builtin_skills(), None),
         };

@@ -284,16 +284,6 @@ fn parse_delivery(item: &Value) -> Option<ClaimedDelivery> {
 // Daemon glue
 // ---------------------------------------------------------------------------
 
-/// No body: the wake names the target and the supervisor reads it through
-/// `violet_read`, as v1 wakes do. cas-f82cb replaces this with a Violet fetch.
-pub(crate) struct NoBody;
-
-impl BodySource for NoBody {
-    fn fetch_body(&self, _target: &Value) -> Result<String, NamedRefusal> {
-        Ok(String::new())
-    }
-}
-
 /// Types by a Daemon-stamped `<cas-violet-activity>` row in the supervisor's
 /// prompt queue, idempotent on `delivery.id`. Slack text is data inside the
 /// trusted frame, with envelope openers neutralized.
@@ -338,13 +328,16 @@ pub(crate) fn read_managed(
     reader: &Mutex<VioletReader>,
     cloud: &crate::cloud::CloudConfig,
     registration_id: &str,
+    cas_dir: &std::path::Path,
+    factory_session: &str,
     queue: &dyn PromptQueueStore,
     now: DateTime<Utc>,
 ) -> Option<PollReport> {
     let token = cloud.token.as_deref().map(str::trim).filter(|token| !token.is_empty())?;
     let port = HttpCloudCoordinationPort::new(cloud.endpoint.clone(), token);
     let mut reader = reader.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let outcome = reader.tick(&port, registration_id, &NoBody, &PromptQueueTyper(queue), now);
+    let body = super::violet_body::VioletBodySource(|args| super::violet_body::read(cas_dir, registration_id, factory_session, args));
+    let outcome = reader.tick(&port, registration_id, &body, &PromptQueueTyper(queue), now);
     if !reader.managed() {
         return None;
     }

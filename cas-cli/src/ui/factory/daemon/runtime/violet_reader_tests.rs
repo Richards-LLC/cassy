@@ -86,11 +86,27 @@ impl CloudCoordinationPort for FixtureCloud {
     }
 }
 
-struct Body;
-impl BodySource for Body {
-    fn fetch_body(&self, target: &Value) -> Result<String, NamedRefusal> {
-        Ok(format!("body for {}", target["message_ts"].as_str().unwrap()))
-    }
+fn violet_body(refusal: Option<&str>) -> impl BodySource + '_ {
+    super::super::violet_body::VioletBodySource(move |args: Value| {
+        assert_eq!(args, json!({
+            "external_ref": {"workspace_id":"T07ABCDEF", "channel_id":"C08COORD01", "message_ts":"1760616042.000200"},
+            "include_threads":true, "include_files":false, "include_channels":false
+        }));
+        let mut response = json!({"ok":true,"schema_version":1,
+            "identity":{"workspace_id":"T07ABCDEF","channel_id":"C08COORD01","root_thread_ts":"1760616000.123456"},
+            "messages":[{"message_id":"1760616000.123456","text":"unrelated root"},
+                {"message_id":"1760616042.000200","thread_id":"1760616000.123456","text":"body from Violet"}],
+            "thread_roots":[{"message_id":"1760616042.000200","text":"truncated context, never body"}]
+        });
+        match refusal {
+            Some("violet_unavailable") => return Err(NamedRefusal::new("violet_unavailable", "Violet read unavailable")),
+            Some("violet_refused") => response = json!({"ok":false,"code":"not_member"}),
+            Some("identity_mismatch") => response["identity"]["workspace_id"] = json!("TOTHER"),
+            Some("message_missing") => response["messages"] = json!([]),
+            _ => {}
+        }
+        Ok(json!({"structuredContent":response}))
+    })
 }
 
 struct Typer<'a>(&'a FixtureCloud);
@@ -102,7 +118,7 @@ impl SessionTyper for Typer<'_> {
 }
 
 fn tick(reader: &mut VioletReader, cloud: &FixtureCloud) -> ClaimOutcome {
-    reader.tick(cloud, REGISTRATION, &Body, &Typer(cloud), Utc::now())
+    reader.tick(cloud, REGISTRATION, &violet_body(None), &Typer(cloud), Utc::now())
 }
 
 /// Reader order is ack admitted → dispatch_uncertain → type → consumed, and a
@@ -119,7 +135,7 @@ fn reader_walks_cloud_order_and_types_a_redelivered_id_once() {
         [
             format!("ack {DELIVERY} admitted"),
             format!("receipt {DELIVERY} dispatch_uncertain"),
-            format!("typed {DELIVERY} into factory-session: body for 1760616042.000200"),
+            format!("typed {DELIVERY} into factory-session: body from Violet"),
             format!("receipt {DELIVERY} consumed"),
             format!("ack {DELIVERY} admitted"),
         ]
@@ -139,6 +155,13 @@ fn refused_dispatch_uncertain_types_nothing() {
         [format!("ack {DELIVERY} admitted"), format!("receipt {DELIVERY} dispatch_uncertain refused")]
     );
     assert_eq!((report.typed, report.not_typed[0].1.code.as_str()), (0, "stale_generation"));
+    for code in ["violet_unavailable", "violet_refused", "identity_mismatch", "message_missing"] {
+        let cloud = FixtureCloud::new("leases this reader's deliveries");
+        let mut reader = VioletReader::new("factory-session");
+        let ClaimOutcome::Read(report) = reader.tick(&cloud, REGISTRATION, &violet_body(Some(code)), &Typer(&cloud), Utc::now()) else { panic!("claim refused") };
+        assert_eq!(cloud.log(), [format!("ack {DELIVERY} admitted")], "{code}: no receipt or typing after failed fetch");
+        assert_eq!((report.typed, report.not_typed[0].1.code.as_str()), (0, code));
+    }
 }
 
 /// `409 strict_activation_required` is a named refusal on a managed binding;

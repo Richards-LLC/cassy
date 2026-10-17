@@ -31,6 +31,11 @@ pub(super) fn fixture_child(test: &str) -> bool {
 }
 
 pub(super) async fn fixture() -> (tempfile::TempDir, FactoryDaemon) {
+    fixture_for(cas_mux::SupervisorCli::Claude).await
+}
+
+/// [`fixture`] with the supervisor launched under `cli`.
+pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempDir, FactoryDaemon) {
     let root = tempfile::tempdir().unwrap();
     let cas = crate::store::init_cas_dir(root.path()).unwrap();
     let mut daemon = super::provisioning_tests::daemon(&cas);
@@ -71,10 +76,11 @@ pub(super) async fn fixture() -> (tempfile::TempDir, FactoryDaemon) {
             pty,
             24,
             80,
-            cas_mux::SupervisorCli::Claude,
+            cli,
         )
         .unwrap(),
     );
+    daemon.app.set_supervisor_cli_for_test(cli);
     let teams = super::teams::TeamsManager::new(&daemon.session_name);
     teams
         .init_team_config(&[], root.path(), &Default::default(), "single-sup")
@@ -147,6 +153,40 @@ pub(super) fn teams_messages(daemon: &FactoryDaemon) -> Vec<serde_json::Value> {
         .teams_dir()
         .join("inboxes/supervisor.json");
     serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|_| "[]".into())).unwrap()
+}
+
+/// cas-979e: on the daemon's job lanes a fresh claim comes back a pass after
+/// it is submitted. A fresh Codex supervisor's startup brief must be typed on
+/// that pass, not held by the re-nudge cadence its claim-only pass reserved.
+#[tokio::test(flavor = "current_thread")]
+async fn cas_979e_codex_startup_brief_is_typed_once_on_job_lanes() {
+    if !fixture_child("cas_979e_codex_startup_brief_is_typed_once_on_job_lanes") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
+    let cas = daemon.app.cas_dir().to_path_buf();
+    daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(
+        cas.clone(),
+        daemon.app.project_scope(),
+    );
+    daemon.queue_jobs.store(&cas).unwrap();
+    let name = daemon.app.supervisor_name().to_string();
+    // The real launch enqueue (init.rs), as `cas codex` runs it.
+    crate::ui::factory::queue_supervisor_intro_prompt(
+        &cas, &name, cas_mux::SupervisorCli::Codex, &[], None, None,
+    );
+    let needle = "Codex supervisor startup";
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        daemon.app.mux.flush_deferred_injections().await;
+        daemon.process_prompt_queue().await.unwrap();
+        if std::fs::read_to_string(root.path().join("input")).unwrap().contains(needle) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    typed_once(&root, &daemon, needle).await;
 }
 
 #[tokio::test(flavor = "current_thread")]

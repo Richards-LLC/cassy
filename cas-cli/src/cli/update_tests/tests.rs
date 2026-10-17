@@ -2858,6 +2858,9 @@ fn cas_4585_retired_notices_survive_nested_failure_and_other_modes() {
     std::fs::set_permissions(&path, permissions).unwrap();
     let startup =
         crate::cli::try_parse_from_with_wordmark(["cas", "update", "--all-projects"]).unwrap();
+    let projection = tempfile::tempdir().unwrap();
+    std::fs::create_dir(projection.path().join(".cas")).unwrap();
+    std::fs::write(projection.path().join(".cas/config.toml"), original).unwrap();
     let (_, output) = capture_phase(true, || {
         let _outer = crate::cli::startup_config_notices(&startup);
         let _enabled = crate::sentry::is_sentry_enabled();
@@ -2869,6 +2872,9 @@ fn cas_4585_retired_notices_survive_nested_failure_and_other_modes() {
             nested.is_empty(),
             "nested scope drained its caller's notices: {nested}"
         );
+        // The real index-side hook projection must attribute its copied
+        // config to the owning project, never a disposable temp directory.
+        crate::cli::hook::configure_claude_hooks_for_index(projection.path(), &home).unwrap();
         assert_eq!(crate::config::retire_config(&root, false).status, "failed");
         // A refused or failed maintenance does not resolve this file. Scope
         // exit replays it even if the command never reaches a final receipt.
@@ -2880,6 +2886,10 @@ fn cas_4585_retired_notices_survive_nested_failure_and_other_modes() {
             .join(" ")
             .contains("2 retired config entries remain ignored"),
         "{output}"
+    );
+    assert!(
+        !output.contains(&projection.path().display().to_string()),
+        "temporary projection became an operator finding: {output}"
     );
     assert!(!output.contains("ignored and dropped on the next save"));
     assert!(
@@ -2913,7 +2923,17 @@ fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
     let projects = home.join("projects");
     let healthy = cas_6718_drifted_project(&projects.join("healthy"));
     let broken = cas_6718_drifted_project(&projects.join("broken"));
+    let readonly = cas_6718_drifted_project(&projects.join("readonly"));
     let host = crate::store::init_cas_dir(&home).unwrap();
+    let global = crate::config::global_cas_dir().unwrap();
+    std::fs::create_dir_all(&global).unwrap();
+    let retired = "[factory]\nmerge_sweep = true\n[jev]\nendpoint = 'fixture-only'\n[code_review]\nowner = 'worker'\n";
+    std::fs::write(global.join("config.toml"), retired).unwrap();
+    let readonly_config = readonly.join(".cas/config.toml");
+    std::fs::write(&readonly_config, retired).unwrap();
+    let mut permissions = std::fs::metadata(&readonly_config).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&readonly_config, permissions).unwrap();
     let root = healthy.join(".cas");
     env.set("CAS_ROOT", &root);
     env.set("CAS_PROJECT_ROOTS", &projects);
@@ -2937,7 +2957,7 @@ fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
     let mut args = update_test_args();
     args.all_projects = true;
     args.refresh_receipt = Some(home.join("refresh.json"));
-    let result = refresh_all_projects_with_user_refresh(
+    let (result, output) = capture_phase(true, || refresh_all_projects_with_user_refresh(
         &args,
         &update_test_cli(false),
         Some(&root),
@@ -2945,16 +2965,21 @@ fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
         None,
         None,
         || ProjectPhase::Failed("builtin repair failed; run `cas update --user`".into()),
-    );
+    ));
     assert!(result.is_err());
     let report = refresh_report(&result).unwrap();
-    assert_eq!(report.failed_projects, 1);
+    assert_eq!(report.failed_projects, 2);
     assert!(report.user_level_failed);
     let sweep = report.sweep.as_ref().unwrap();
-    assert_eq!(sweep.config.repaired, 1);
-    assert_eq!(sweep.config.failed, 2);
+    assert_eq!(sweep.config.repaired, 2);
+    assert_eq!(sweep.config.failed, 3);
     let rendered = render_plain_at(80, |fmt| findings::print(fmt, sweep).map(|_| ()));
     assert!(rendered.contains("builtin repair failed"));
+    assert!(
+        !output.contains("retired config entries remain ignored"),
+        "receipted config failures must not replay duplicate or projection findings: {output}"
+    );
+    assert_eq!(rendered.matches("config is read-only").count(), 1, "{rendered}");
     assert!(
         rendered.contains("cas update --user"),
         "existing phase remedy lost: {rendered}"
@@ -2966,8 +2991,13 @@ fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
             .any(|finding| finding.cause.contains("repair config before updating"))
     );
     let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
-    assert_eq!(receipt["config_maintenance"]["failed"], 2);
-    assert_eq!(receipt["config_maintenance"]["repaired"], 1);
+    assert_eq!(receipt["config_maintenance"]["failed"], 3);
+    assert_eq!(receipt["config_maintenance"]["repaired"], 2);
+    assert!(
+        !receipt["user_builtins"].as_str().unwrap().contains("retired TOML entries removed"),
+        "another file's successful cleanup leaked into failure prose: {receipt}"
+    );
+    assert_eq!(std::fs::read_to_string(&readonly_config).unwrap(), retired);
     for directory in [&host, &broken.join(".cas")] {
         assert_eq!(
             std::fs::read_to_string(directory.join("config.toml")).unwrap(),

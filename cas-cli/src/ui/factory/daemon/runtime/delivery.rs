@@ -1470,37 +1470,6 @@ impl FactoryDaemon {
         self.pty_nudge(target, source, notification_id).await
     }
 
-    /// GH #1231: a bounded supervisor action is one body-bearing PTY turn.
-    /// The caller owns the authenticated wake decision; no Teams copy exists
-    /// for the harness to render as another turn after this one.
-    pub(crate) async fn deliver_supervisor_event_inline(
-        &self,
-        source: &str,
-        text: &str,
-        notification_id: i64,
-    ) -> anyhow::Result<NudgeReport> {
-        let pane = self.app.supervisor_name();
-        let payload = prepare_pty_machine_delivery(
-            self.app.cas_dir(), pane, self.app.harness_for(pane), source,
-            text, Some(notification_id),
-        );
-        let outcome = self.app.mux.inject(pane, &payload).await?;
-        Ok(NudgeReport {
-            outcome,
-            channel: DeliveryChannel::Pty,
-            wake: if outcome == InjectOutcome::Delivered {
-                WakeAttempt::Fired
-            } else {
-                WakeAttempt::NotAttempted
-            },
-            wake_detail: Some(if outcome == InjectOutcome::Delivered {
-                "bounded supervisor event delivered inline; no Teams relay copy"
-            } else {
-                "inline supervisor event deferred by composer or prior submit"
-            }.into()),
-        })
-    }
-
     /// cas-ef14 (GH #139): the pane-nudge half of
     /// [`Self::deliver_to_worker_with_idle_nudge`], WITHOUT the inbox write.
     ///

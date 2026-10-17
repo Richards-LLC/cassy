@@ -77,9 +77,11 @@ pub struct HarnessCapabilities {
     ///   the model replies.
     ///
     /// Declaring the paste's end removes the ambiguity, which is why this is a
-    /// deterministic fix rather than a longer guess. `false` for Claude and
-    /// Grok: both have a real textbox submit and were never implicated (their
-    /// injection bytes stay byte-for-byte unchanged).
+    /// deterministic fix rather than a longer guess. Claude also requires explicit paste framing (cas-0df9): on macOS a
+    /// large master write splits at 1022 bytes. Its >800-byte paste detector
+    /// can handle the first chunk as a paste and the remainder as ordinary
+    /// keys, losing the envelope. Explicit paste buffers across those reads.
+    /// Grok and OpenCode retain their existing transport contract.
     pub requires_bracketed_paste_injection: bool,
     pub tool_prefix: &'static str,
 }
@@ -215,11 +217,11 @@ mod tests {
         assert_eq!(codex.tool_prefix, "mcp__cs__");
     }
 
-    /// cas-5fff: only Codex needs bracketed-paste framing. Pinned explicitly
+    /// Claude and Codex both require explicit paste framing. Pinned explicitly
     /// because getting this wrong is silent — an unframed Codex injection
     /// still "succeeds" at the PTY layer and simply never starts a turn.
     #[test]
-    fn only_codex_requires_bracketed_paste_injection() {
+    fn claude_and_codex_require_bracketed_paste_injection() {
         assert!(
             SupervisorCli::Codex
                 .backend()
@@ -227,7 +229,7 @@ mod tests {
                 .requires_bracketed_paste_injection
         );
         assert!(
-            !SupervisorCli::Claude
+            SupervisorCli::Claude
                 .backend()
                 .capabilities()
                 .requires_bracketed_paste_injection
@@ -240,34 +242,27 @@ mod tests {
         );
     }
 
-    /// cas-5fff: Codex payloads are wrapped; Claude/Grok stay byte-for-byte
-    /// identical to the pre-fix bytes (AC5 — no behavior change off Codex).
+    /// Claude and Codex payloads share the framing seam used by normal and urgent delivery.
     #[test]
-    fn injection_payload_is_bracketed_only_for_codex() {
+    fn injection_payload_is_bracketed_for_claude_and_codex() {
         let text = "Message from supervisor: re-close cas-ae2f\n\nSecond paragraph.";
 
-        let codex = injection_payload_bytes(SupervisorCli::Codex, text);
-        assert!(
-            codex.starts_with(PASTE_START),
-            "codex payload must open the paste"
-        );
-        assert!(
-            codex.ends_with(PASTE_END),
-            "codex payload must close the paste"
-        );
-        assert_eq!(
-            &codex[PASTE_START.len()..codex.len() - PASTE_END.len()],
-            text.as_bytes(),
-            "the payload between the delimiters must be untouched"
-        );
-
-        for bare in [SupervisorCli::Claude, SupervisorCli::Grok] {
+        for harness in [SupervisorCli::Claude, SupervisorCli::Codex] {
+            let payload = injection_payload_bytes(harness, text);
+            assert!(
+                payload.starts_with(PASTE_START),
+                "{harness:?} opens the paste"
+            );
+            assert!(payload.ends_with(PASTE_END), "{harness:?} closes the paste");
             assert_eq!(
-                injection_payload_bytes(bare, text),
-                text.as_bytes(),
-                "{bare:?} injection bytes must be unchanged by the cas-5fff fix"
+                &payload[PASTE_START.len()..payload.len() - PASTE_END.len()],
+                text.as_bytes()
             );
         }
+        assert_eq!(
+            injection_payload_bytes(SupervisorCli::Grok, text),
+            text.as_bytes()
+        );
     }
 
     /// The delimiters must be the real terminal sequences — a typo here would
@@ -286,7 +281,7 @@ mod tests {
     fn injection_payload_handles_empty_text() {
         let codex = injection_payload_bytes(SupervisorCli::Codex, "");
         assert_eq!(codex.len(), PASTE_START.len() + PASTE_END.len());
-        assert!(injection_payload_bytes(SupervisorCli::Claude, "").is_empty());
+        assert_eq!(injection_payload_bytes(SupervisorCli::Claude, ""), codex);
     }
 
     /// cas-7f6f: Grok cancels with Ctrl+C; Claude/Codex keep Esc.

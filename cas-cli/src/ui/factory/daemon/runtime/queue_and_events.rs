@@ -4774,7 +4774,16 @@ impl FactoryDaemon {
     /// cas-ceae: drop every per-row delivery clock/marker for a row that is no
     /// longer pending. Both maps are keyed by `prompt_queue.id`, so leaving an
     /// entry behind leaks one record per terminalized row.
+    /// Start a row's re-nudge interval at a real (re)delivery. cas-7787:
+    /// only that burns budget; a cooldown tick is policy, not an attempt.
+    fn reserve_renudge_attempt(&mut self, row_id: i64) {
+        self.lifecycle_redelivery_attempts
+            .insert(row_id, std::time::Instant::now());
+        *self.lifecycle_redelivery_counts.entry(row_id).or_insert(0) += 1;
+    }
+
     fn forget_row_delivery_state(&mut self, row_id: i64) {
+        self.queue_jobs.inline_parked.remove(&row_id);
         self.stall_nudge_gate_checks.remove(&row_id);
         self.lifecycle_redelivery_attempts.remove(&row_id);
         self.lifecycle_redelivery_counts.remove(&row_id);
@@ -8333,11 +8342,48 @@ impl FactoryDaemon {
             .insert(target.to_string(), Instant::now());
     }
 
+    /// Re-offer a parked inline row only when the pane becomes input-ready
+    /// or a newer turn completion arrives. No queue/store work is repeated
+    /// on the 100ms busy polls; ParkBusy's existing deadline survives restart.
+    fn retry_ready_inline_rows(&mut self) {
+        let now = chrono::Utc::now();
+        let recheck = chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap();
+        let ready: Vec<_> = self.queue_jobs.inline_parked.iter().filter_map(|(id, (row, declined))| {
+            if now - *declined >= recheck {
+                return Some((*id, row.target.clone(), false)); // durable recheck is due
+            }
+            let pane = if row.target == "supervisor" { self.app.supervisor_name() } else { &row.target };
+            if self.app.mux.pane_inject_busy(pane)
+                || self.app.mux.get(pane).is_none_or(|pane| pane.is_composer_dirty()) {
+                return None;
+            }
+            let state = self.prepared_pane_wake_state(pane);
+            let turn_ended = wake_retry_due_to_turn_end(Some(*declined), self.prepared_turn_completion_after(pane, *declined));
+            let wake = Self::delivery_wake_decision(
+                self.app.director_data(), pane, self.app.supervisor_name(),
+                &self.wake_sender_for(row.origin.as_ref()), &row.source, &row.prompt, state, now,
+            );
+            (turn_ended || wake.allowed).then(|| (*id, row.target.clone(), true))
+        }).collect();
+        for (id, target, reoffer) in ready {
+            self.queue_jobs.inline_parked.remove(&id);
+            if reoffer {
+                self.queue_jobs.stamp(self.app.cas_dir(), id, &target,
+                    super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                        detail: "recipient became input-ready; rechecking parked inline wake".into(),
+                        recheck_at: now,
+                    });
+            }
+        }
+    }
+
     /// Process prompt queue
     pub(super) async fn process_prompt_queue(&mut self) -> anyhow::Result<()> {
         // cas-786a6: urgent injects whose pane has settled type their payload
         // and apply their outcome; none is awaited inline.
         self.advance_urgent_injects().await;
+        self.refresh_pane_quiet_samples();
+        self.retry_ready_inline_rows();
         let Some(selection) = self.next_queue_selection() else {
             return Ok(());
         };
@@ -8357,6 +8403,9 @@ impl FactoryDaemon {
         let cas_dir = self.app.cas_dir().to_path_buf();
         self.queue_jobs.settle_injects(&cas_dir);
         self.queue_jobs.apply_completions();
+        // A live mux command still owns its physical receipt. Only orphaned
+        // commands use the existing missing-outcome timeout/retry path.
+        self.queue_jobs.retain_owned_injects(Instant::now(), |row| self.urgent_injects.holds_row(row));
         self.queue_jobs.expire_injects(&cas_dir, Instant::now());
         self.queue_jobs.expire_claims(&cas_dir, Instant::now());
         let raw = if self.queue_jobs.prompt_preparation.has_pending() {
@@ -9057,6 +9106,8 @@ impl FactoryDaemon {
             // re-nudge cadence gate then actually grants a re-offer, so the
             // line count is O(retries) and not O(poll ticks).
             let mut announce_drain_unsurfaced = false;
+            // cas-979e: a re-nudge Deliver grant, spent at transport admission.
+            let mut renudge_granted = false;
             let pane_target = if target == "supervisor" {
                 self.app.supervisor_name()
             } else {
@@ -9382,15 +9433,15 @@ impl FactoryDaemon {
                         // cas-6e355: inline supervisor rows have not reached
                         // any transport yet. Reserve their cadence only after
                         // the wake gate allows the body-bearing PTY attempt.
+                        // cas-979e: a single-target row's first pass only
+                        // submits its claim; reserving here put the pass that
+                        // injects into Cooldown, every interval, forever.
                         if !inline_supervisor_body || queued.urgent {
-                            self.lifecycle_redelivery_attempts
-                                .insert(queued.id, std::time::Instant::now());
-                            // cas-7787: only a real (re)delivery burns budget —
-                            // a cooldown tick is policy, not a failed attempt.
-                            *self
-                                .lifecycle_redelivery_counts
-                                .entry(queued.id)
-                                .or_insert(0) += 1;
+                            if target == "all_workers" {
+                                self.reserve_renudge_attempt(queued.id);
+                            } else {
+                                renudge_granted = true;
+                            }
                         }
                     }
                     LifecycleRedelivery::Cooldown => {
@@ -9648,10 +9699,6 @@ impl FactoryDaemon {
                 }
             }
 
-            let preview: String = queued.prompt.chars().take(50).collect();
-
-            tracing::info!("Injecting prompt to '{}': {}", target, preview);
-
 
             // cas-ac97 (GH #1153): wall-clock floor for the normal delivery
             // watchdog's transcript evidence, taken before any byte is typed so
@@ -9753,8 +9800,12 @@ impl FactoryDaemon {
                             continue;
                         }
                     };
+                    tracing::info!(message_id = queued.id, "Injecting prompt to '{}': {}", name,
+                        queued.prompt.chars().take(50).collect::<String>());
                     super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: transport"));
-                    let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent {
+                    let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent
+                        || super::delivery::choose_channel(self.app.harness_for(name), self.teams.is_some())
+                            == super::delivery::DeliveryChannel::Pty {
                         // cas-ab80: urgent Codex recipients still need the shared
                         // `Message from <sender>:` framing (same contract as
                         // normal `deliver_to_worker`); Claude/Grok stay bare.
@@ -9768,12 +9819,12 @@ impl FactoryDaemon {
                             Some(queued.id),
                         );
                         let settle = self.urgent_settle_duration(name);
-                        match self
-                            .app
-                            .mux
-                            .begin_interrupt_and_inject(name, &payload, settle, true)
-                            .await
-                        {
+                        let started = if queued.urgent {
+                            self.app.mux.begin_interrupt_and_inject(name, &payload, settle, true).await
+                        } else {
+                            self.app.mux.begin_inject(name, &payload)
+                        };
+                        match started {
                             Ok(cas_mux::InjectStart::Started(ticket)) => {
                                 self.urgent_injects.owners.insert(
                                     ticket,
@@ -9856,6 +9907,94 @@ impl FactoryDaemon {
                     super::prompt_queue_jobs::ClaimStep::HandedOff
                     | super::prompt_queue_jobs::ClaimStep::NotClaimed => continue,
                 };
+                let normal_wake = if !queued.urgent {
+                    let is_supervisor_target = pane_target == self.app.supervisor_name();
+                    // cas-45c4: every recipient's pane is sampled now — the
+                    // worker path needs the same turn evidence the supervisor
+                    // wake introduced (cas-f02b).
+                    let pane_state = self.prepared_pane_wake_state(&pane_target);
+                    // cas-f02b: at most one supervisor wake per drain pass. The
+                    // supervisor is the single convergence point for every
+                    // worker's lifecycle traffic, so an epic drain can park
+                    // several tasks in the same tick; without this the pane
+                    // would take a burst of back-to-back injects. The rows that
+                    // lose the race stay pending and wake on later ticks.
+                    let wake_slot_available = !supervisor_wake_sent;
+                    // cas-9e81: keep the REASON, not just the verdict — it is
+                    // persisted as the row's wake_attempt_detail below.
+                    let wake_decision = if inline_supervisor_body
+                        && (self.app.mux.pane_inject_busy(&pane_target)
+                            || self.app.mux.get(&pane_target).is_some_and(|pane| pane.is_composer_dirty())) {
+                        WakeDecision::deny("inline pane has an active composer or prior inject")
+                    } else if wake_slot_available {
+                        // cas-f84d: a decision from this factory's supervisor
+                        // to a worker parked on it wakes promptly; everything
+                        // else keeps the ordinary policy.
+                        let supervisor_decision = if is_supervisor_target {
+                            None
+                        } else if self_addressed_reminder(&queued) {
+                            // cas-901f: the worker's own fired reminder.
+                            self.queue_jobs
+                                .prompt_preparation
+                                .recipient(&pane_target)
+                                .and_then(|inputs| {
+                                    Self::self_reminder_wake(
+                                        &pane_target,
+                                        self.app.supervisor_name(),
+                                        inputs.wait,
+                                        pane_state,
+                                    )
+                                })
+                        } else {
+                            self.worker_wait_state_for(&wake_sender, &pane_target)
+                                .and_then(|wait| {
+                                    Self::supervisor_decision_wake(
+                                        &pane_target,
+                                        self.app.supervisor_name(),
+                                        &wake_sender,
+                                        wait,
+                                        pane_state,
+                                    )
+                                })
+                        };
+                        supervisor_decision.unwrap_or_else(|| {
+                            Self::delivery_wake_decision(
+                                self.app.director_data(),
+                                &pane_target,
+                                self.app.supervisor_name(),
+                                &wake_sender,
+                                &queued.source,
+                                &queued.prompt,
+                                pane_state,
+                                chrono::Utc::now(),
+                            )
+                        })
+                    } else {
+                        WakeDecision::deny(
+                            "no wake slot left this pass (a supervisor wake already fired)",
+                        )
+                    };
+                    let worker_is_idle = wake_decision.allowed;
+                    Some((is_supervisor_target, pane_state, wake_decision, worker_is_idle))
+                } else { None };
+                if inline_supervisor_body && let Some((_, _, wake_decision, false)) = normal_wake {
+                    // No transport admission, cadence spend or attempt: keep the
+                    // body surfaceable by the next hook and stop 100ms selection.
+                    self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token });
+                    self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::WakeDecline { detail: wake_decision.status_detail() });
+                    self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                            detail: wake_decision.status_detail(),
+                            recheck_at: chrono::Utc::now() + chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap(),
+                        });
+                    self.queue_jobs.inline_parked.insert(queued.id, (queued.clone(), chrono::Utc::now()));
+                    tracing::info!(target: "cas::coordination", stage = "inline_wake_parked",
+                        message_id = queued.id, target_agent = %pane_target, reason = wake_decision.reason,
+                        "inline body parked until recipient turn end or bounded recheck");
+                    continue;
+                }
                 let inject_generation = match self.queue_jobs.admit_claimed(
                     self.app.cas_dir(),
                     queued.id,
@@ -9867,6 +10006,11 @@ impl FactoryDaemon {
                     super::prompt_queue_jobs::Admission::InFlight
                     | super::prompt_queue_jobs::Admission::NotClaimed => continue,
                 };
+                if renudge_granted {
+                    self.reserve_renudge_attempt(queued.id);
+                }
+                tracing::info!(message_id = queued.id, "Injecting prompt to '{}': {}", target,
+                    queued.prompt.chars().take(50).collect::<String>());
                 let inject_result: anyhow::Result<super::delivery::NudgeReport> = if queued.urgent {
                     // Urgent: interrupt-and-redirect by name via the PTY,
                     // bypassing the inbox even in teams mode. An attached
@@ -9955,86 +10099,7 @@ impl FactoryDaemon {
                     // supervisor wake for lifecycle rows that park a worker
                     // behind supervisor action. Everything else addressed to
                     // the supervisor stays inbox-only (cas-dab2).
-                    let is_supervisor_target = pane_target == self.app.supervisor_name();
-                    // cas-45c4: every recipient's pane is sampled now — the
-                    // worker path needs the same turn evidence the supervisor
-                    // wake introduced (cas-f02b).
-                    let pane_state = self.prepared_pane_wake_state(&pane_target);
-                    // cas-f02b: at most one supervisor wake per drain pass. The
-                    // supervisor is the single convergence point for every
-                    // worker's lifecycle traffic, so an epic drain can park
-                    // several tasks in the same tick; without this the pane
-                    // would take a burst of back-to-back injects. The rows that
-                    // lose the race stay pending and wake on later ticks.
-                    let wake_slot_available = !supervisor_wake_sent;
-                    // cas-9e81: keep the REASON, not just the verdict — it is
-                    // persisted as the row's wake_attempt_detail below.
-                    let wake_decision = if wake_slot_available {
-                        // cas-f84d: a decision from this factory's supervisor
-                        // to a worker parked on it wakes promptly; everything
-                        // else keeps the ordinary policy.
-                        let supervisor_decision = if is_supervisor_target {
-                            None
-                        } else if self_addressed_reminder(&queued) {
-                            // cas-901f: the worker's own fired reminder.
-                            self.queue_jobs
-                                .prompt_preparation
-                                .recipient(&pane_target)
-                                .and_then(|inputs| {
-                                    Self::self_reminder_wake(
-                                        &pane_target,
-                                        self.app.supervisor_name(),
-                                        inputs.wait,
-                                        pane_state,
-                                    )
-                                })
-                        } else {
-                            self.worker_wait_state_for(&wake_sender, &pane_target)
-                                .and_then(|wait| {
-                                    Self::supervisor_decision_wake(
-                                        &pane_target,
-                                        self.app.supervisor_name(),
-                                        &wake_sender,
-                                        wait,
-                                        pane_state,
-                                    )
-                                })
-                        };
-                        supervisor_decision.unwrap_or_else(|| {
-                            Self::delivery_wake_decision(
-                                self.app.director_data(),
-                                &pane_target,
-                                self.app.supervisor_name(),
-                                &wake_sender,
-                                &queued.source,
-                                &queued.prompt,
-                                pane_state,
-                                chrono::Utc::now(),
-                            )
-                        })
-                    } else {
-                        WakeDecision::deny(
-                            "no wake slot left this pass (a supervisor wake already fired)",
-                        )
-                    };
-                    let worker_is_idle = wake_decision.allowed;
-                    if inline_supervisor_body && !worker_is_idle {
-                        // A veto holds the row for the hook/poll or next wake.
-                        // No inbox handoff occurred, so release the reservation
-                        // instead of recording a held Teams copy.
-                        self.queue_jobs.release_inject_claim(
-                            self.app.cas_dir(), queued.id, &queued.target,
-                        );
-                        self.queue_jobs.record_outcome(queued.id, &queued.target, inject_generation);
-                        self.queue_jobs.stamp(
-                            self.app.cas_dir(), queued.id, &queued.target,
-                            super::prompt_queue_jobs::QueueStamp::PendingReason {
-                                reason: cas_store::PendingReason::GatedNotReady,
-                                detail: Some(wake_decision.status_detail()),
-                            },
-                        );
-                        continue;
-                    }
+                    let (is_supervisor_target, pane_state, wake_decision, worker_is_idle) = normal_wake.unwrap();
                     if !worker_is_idle {
                         tracing::debug!(
                             target: "cas::coordination",
@@ -10149,16 +10214,37 @@ impl FactoryDaemon {
                     // so it withdraws itself once the merge lands instead of
                     // being read later as an outstanding ask.
                     super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: transport"));
-                    if inline_supervisor_body {
-                        // A busy-pane veto above delivered nothing and must
-                        // not delay this row when the supervisor becomes idle.
-                        // Actual attempts still share the bounded cadence.
-                        self.lifecycle_redelivery_attempts
-                            .insert(queued.id, std::time::Instant::now());
-                        *self.lifecycle_redelivery_counts.entry(queued.id).or_insert(0) += 1;
-                        self.deliver_supervisor_event_inline(
-                            &inbox_source, &prompt_with_instructions, queued.id,
-                        ).await
+                    if inline_supervisor_body || super::delivery::choose_channel(
+                        self.app.harness_for(&pane_target), self.teams.is_some(),
+                    ) == super::delivery::DeliveryChannel::Pty {
+                        let payload = super::delivery::prepare_pty_machine_delivery(
+                            self.app.cas_dir(), &pane_target, self.app.harness_for(&pane_target),
+                            &inbox_source, &prompt_with_instructions, Some(queued.id),
+                        );
+                        match self.app.mux.begin_inject(&pane_target, &payload) {
+                            Ok(cas_mux::InjectStart::Started(ticket)) => {
+                                if inline_supervisor_body {
+                                    self.reserve_renudge_attempt(queued.id);
+                                }
+                                self.urgent_injects.owners.insert(ticket,
+                                    super::inject_commands::UrgentInject::NormalRow {
+                                        inline_supervisor: inline_supervisor_body,
+                                        delivery: Box::new(super::inject_commands::DirectDelivery {
+                                            queued: queued.clone(), pane_target: pane_target.clone(),
+                                            generation: inject_generation, wake_deferred: false,
+                                            prior_copy_unread, nudge_only, urgent_wake_probe_opened: false,
+                                            delivery_started_at_utc,
+                                        }),
+                                    });
+                                continue;
+                            }
+                            Ok(cas_mux::InjectStart::Deferred) => Ok(super::delivery::NudgeReport::not_attempted(
+                                cas_mux::InjectOutcome::DeferredComposerDirty,
+                                super::delivery::DeliveryChannel::Pty,
+                                "PTY body retained until composer and prior submit are ready",
+                            )),
+                            Err(error) => Err(error.into()),
+                        }
                     } else if nudge_only {
                         // cas-ef14 (GH #139): the recipient's harness already
                         // holds this payload — re-writing the inbox is the
@@ -20524,6 +20610,8 @@ mod stall_nudge_rework_tests {
         let queue = open_prompt_queue_store(&cas_dir).unwrap();
         let ordinary = queue.enqueue("supervisor", "worker-a", "ordinary next").unwrap();
         daemon.process_prompt_queue().await.unwrap();
+        assert!(queue.queued_prompt(ordinary).unwrap().unwrap().processed_at.is_none(), "payload enqueue is not Delivered");
+        super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
         assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none());
         let row = queue.queued_prompt(ordinary).unwrap().unwrap();
         assert!(row.processed_at.is_some(), "one unreadable nudge task must not abandon later rows");

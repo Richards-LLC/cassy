@@ -594,12 +594,25 @@ test("HUB-J19 Ask to reply names denial and expiry without granting permission (
 
 test("HUB-J19 unshipped Cloud never offers Ask to reply (cas-874b)", journeyPart, async ({ page, journey }) => {
   const cloud = await replyUpgradeCloud(false);
+  // cas-7f99: legacy introspection without origin must still replay history.
+  const handle = cloud.handle.bind(cloud);
+  cloud.handle = async request => {
+    const result = await handle(request);
+    if (request.path === "/api/operator/grants/me" && result.status === 200) {
+      delete (result.body as { grant: Record<string, unknown> }).grant.origin;
+    }
+    return result;
+  };
   await routeOperatorCloud(page.context(), cloud);
   await journey.stage("The old cloud keeps the honest existing reply guidance and no dead control", async () => {
     await journey.open(); const inbox = await enrollReplyBrowser(page, cloud, "Read only");
     await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
     await expect(inbox.getByRole("button", { name: "Ask to reply", exact: true })).toHaveCount(0);
     await expect(inbox.getByText(/This browser can read this conversation but not reply/)).toBeVisible();
+    await cloud.appendSessionEvent({ hubId: HUB, projectId: PROJECT, sessionId,
+      plaintext: supervisorTurn(799, "New history after grant introspection.", journeyDay(1, 13)) });
+    await expect(inbox.getByText("New history after grant introspection.", { exact: true })).toBeVisible({ timeout: 15_000 });
+    expect(cloud.log.some(r => r.path === "/api/operator/grants/me")).toBe(true);
     expect(cloud.log.some(r => r.path.includes("reply-grant-requests"))).toBe(false);
     await captureReply(page, "F03-unshipped");
   });

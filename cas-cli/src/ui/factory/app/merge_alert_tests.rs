@@ -254,6 +254,8 @@ fn cas_83e1_in_progress_delivery_waits_for_its_pushed_tip_ci() {
     assert!(f.relay().is_empty(), "new pushed tip can wait on its own CI");
     f.ci(Some("success"));
     assert_eq!(f.relay().len(), 1, "settled CI restores the lifecycle alert");
+    std::fs::write(f.app.cas_dir.join("ci.json"), r#"{"check_runs":[]}"#).unwrap();
+    assert_eq!(f.relay().len(), 1, "unknown CI must not hide an idle delivery");
 }
 
 #[test]

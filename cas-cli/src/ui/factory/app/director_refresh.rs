@@ -250,6 +250,8 @@ pub(crate) struct DeliveryInputs {
     /// against, read with the facts.
     pub(super) session: Option<SessionProgressRead>,
     pub(super) merge_alerts: HashMap<String, super::merge_alert::Ready>,
+    /// Worker -> (current task, exact pushed tip) with positively pending CI.
+    pub(super) worker_ci_waits: HashMap<String, (String, String)>,
 }
 
 impl DeliveryInputs {
@@ -265,6 +267,7 @@ impl DeliveryInputs {
             facts: None,
             session: None,
             merge_alerts: HashMap::new(),
+            worker_ci_waits: HashMap::new(),
         }
     }
 
@@ -343,6 +346,12 @@ impl DeliveryRequest {
                 Some((ready.evidence.task_id.clone(), ready))
             }).collect()
         }).unwrap_or_default();
+        let worker_ci_waits = data.as_ref().ok().map(|fresh| {
+            let repo = self.cas_dir.parent().unwrap_or(&self.cas_dir);
+            self.merge_events.iter().filter_map(|event| {
+                super::merge_alert::read_worker_ci_wait(event, fresh, repo)
+            }).collect()
+        }).unwrap_or_default();
         DeliveryInputs {
             data,
             blocks_deps,
@@ -350,6 +359,7 @@ impl DeliveryRequest {
             facts,
             session,
             merge_alerts,
+            worker_ci_waits,
         }
     }
 }
@@ -661,7 +671,7 @@ impl FactoryApp {
             idle_workers,
             stall,
             session,
-            merge_events: events.iter().filter(|event| super::merge_alert::task_id(event).is_some()).cloned().collect(),
+            merge_events: events.iter().filter(|event| super::merge_alert::needs_ci_read(event)).cloned().collect(),
         }
     }
 

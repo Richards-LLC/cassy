@@ -18,7 +18,7 @@ The defaults are:
 [factory]
 target_cache_high_watermark_percent = 85
 target_cache_low_watermark_percent = 75
-target_cache_min_idle_secs = 3600
+target_cache_min_idle_secs = 7200
 target_cache_retention_count = 1
 ```
 
@@ -41,3 +41,19 @@ host directories. Cassy never traverses symlinks and never deletes source, `.git
 or Cassy databases. Before recursive removal it atomically renames the cache to a
 sibling `.cas-target-gc-*` quarantine; an interrupted removal is reported and
 safely resumed by a later GC pass.
+
+Unknown-owner caches remain review-only during ordinary GC. After manual review,
+name one exact absolute inventory path with
+`factory action=gc_cleanup reclaim_unknown_target=/absolute/checkout/target force=true dry_run=false`.
+Supported unknown caches are a missing-gitdir checkout's `target/` and the exact
+retired `.cas/merge-sweeps/assembly-target`; a parent or pattern never authorizes
+reclaim. Omitting either destructive flag previews and prints the refusal reason.
+
+This named operation invokes only the existing target-cache admission and
+quarantine pipeline. It deletes no checkout source or artifact evidence, reaps
+no process, and cannot combine artifact deletion or prompt expiry. Explicit
+consent never changes an unknown cache's ownership. Native process and handle
+checks must establish idle; opaque evidence refuses. A positive configured quiet
+window, same-user files, unchanged identities, and held build/Cargo/lifetime
+locks remain mandatory. Recent writes, symlinks, live users, managed scratch
+owners, or overlapping evidence roots preserve the cache with a reason.

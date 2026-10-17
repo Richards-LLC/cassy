@@ -5985,6 +5985,18 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         "{report_text}"
     );
 
+    // Named cache consent must never enter ordinary GC's evidence-retention
+    // or process-reaping paths, even when the named path is refused.
+    let mut named = factory_req("gc_cleanup");
+    named.force = Some(true);
+    named.dry_run = Some(false);
+    named.reclaim_unknown_target = Some(env.cas_root.join("unknown/target").display().to_string());
+    let refused = env.service.factory_request(Parameters(named)).await.unwrap();
+    assert!(get_text(&refused).contains("Refused"), "{}", get_text(&refused));
+    for name in ["trace.zip", "video.webm", "proof.txt"] {
+        assert!(root.join(&closed_id).join(name).is_file(), "named cache reclaim deleted durable {name}");
+    }
+
     let mut preview = factory_req("gc_cleanup");
     preview.force = Some(true);
     preview.dry_run = Some(false);

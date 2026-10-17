@@ -748,6 +748,12 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub artifacts: Option<bool>,
 
+    /// gc_cleanup only: exact absolute unknown-owner cache path authorized for reclaim.
+    /// Requires force=true, dry_run=false and the configured positive quiet window.
+    #[schemars(description = "gc_cleanup: explicit opt-in naming one exact absolute unknown-owner regenerable target path; never source/evidence. Requires force=true dry_run=false; target_cache_min_idle_secs and all native/lock guards still apply.")]
+    #[serde(default)]
+    pub reclaim_unknown_target: Option<String>,
+
     /// Clear the pinned epic focus for focus_epic
     #[schemars(description = "Clear the pinned epic focus (focus_epic only)")]
     #[serde(default, deserialize_with = "deser::option_bool")]
@@ -1446,6 +1452,12 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub artifacts: Option<bool>,
 
+    /// gc_cleanup only: exact absolute unknown-owner cache path authorized for reclaim.
+    /// Requires force=true, dry_run=false and the configured positive quiet window.
+    #[schemars(description = "gc_cleanup: explicit opt-in naming one exact absolute unknown-owner regenerable target path; never source/evidence. Requires force=true dry_run=false; target_cache_min_idle_secs and all native/lock guards still apply.")]
+    #[serde(default)]
+    pub reclaim_unknown_target: Option<String>,
+
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
@@ -1594,6 +1606,7 @@ impl CoordinationRequest {
             reason: self.reason.clone(),
             dry_run: self.dry_run,
             artifacts: self.artifacts,
+            reclaim_unknown_target: self.reclaim_unknown_target.clone(),
             clear: self.clear,
             branch: self.branch.clone(),
             older_than_secs: self.older_than_secs,

@@ -68,6 +68,7 @@ impl Snapshot {
 pub(super) struct Guard {
     _lane: crate::factory_worker_check::LaneLock,
     locks: Vec<(PathBuf, fs::File)>,
+    external_locks: Vec<(PathBuf, fs::File)>,
     snapshot: Snapshot,
     worktree: PathBuf,
     worktree_identity: (u64, u64),
@@ -84,6 +85,7 @@ impl Guard {
             self.locks
                 .iter()
                 .map(|(_, file)| file.as_raw_fd())
+                .chain(self.external_locks.iter().map(|(_, file)| file.as_raw_fd()))
                 .chain(self.lease.iter().map(owner::Lease::fd))
                 .collect()
         }
@@ -111,6 +113,11 @@ impl Guard {
             if !self.snapshot.unchanged(cache) {
                 return false;
             }
+            if !self.external_locks.iter().all(|(path, file)| {
+                let (Ok(held), Ok(current)) = (file.metadata(), fs::symlink_metadata(path)) else { return false };
+                current.is_file() && !current.file_type().is_symlink()
+                    && held.dev() == current.dev() && held.ino() == current.ino()
+            }) { return false; }
             self.locks.iter().all(|(relative, file)| {
                 let (Ok(held), Ok(current)) =
                     (file.metadata(), fs::symlink_metadata(cache.join(relative)))
@@ -133,7 +140,7 @@ impl Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        for (_, lock) in &self.locks {
+        for (_, lock) in self.locks.iter().chain(&self.external_locks) {
             let _ = FileExt::unlock(lock);
         }
     }
@@ -315,7 +322,7 @@ pub(super) fn acquire(
     cache: &Path,
     snapshot: &Snapshot,
 ) -> io::Result<Guard> {
-    acquire_scanned(cas_root, worktree, cache, snapshot, registry)
+    acquire_scanned(cas_root, worktree, cache, snapshot, registry, false)
 }
 
 #[cfg(test)]
@@ -328,7 +335,15 @@ fn acquire_with(
     let snapshot = scan_cache(worktree, cache, false)?
         .snapshot
         .ok_or_else(|| io::Error::other("unsafe cache snapshot"))?;
-    acquire_scanned(cas_root, worktree, cache, &snapshot, registry)
+    acquire_scanned(cas_root, worktree, cache, &snapshot, registry, false)
+}
+
+/// Same build/Cargo/lease guard, after the caller independently validates
+/// exact operator consent and unknown-cache containment. No adoption occurs.
+pub(super) fn acquire_explicit(
+    cas_root: &Path, worktree: &Path, cache: &Path, snapshot: &Snapshot,
+) -> io::Result<Guard> {
+    acquire_scanned(cas_root, worktree, cache, snapshot, registry, true)
 }
 
 fn acquire_scanned(
@@ -337,8 +352,9 @@ fn acquire_scanned(
     cache: &Path,
     snapshot: &Snapshot,
     registry: impl Fn(&Path, &Path) -> io::Result<bool>,
+    explicit: bool,
 ) -> io::Result<Guard> {
-    if !lane_target(cas_root, worktree, cache) || !snapshot.safe || !registry(cas_root, worktree)? {
+    if (!explicit && !lane_target(cas_root, worktree, cache)) || !snapshot.safe || !registry(cas_root, worktree)? {
         return Err(io::Error::other(
             "legacy lane containment or owner gate refused",
         ));
@@ -357,6 +373,7 @@ fn acquire_scanned(
     let mut guard = Guard {
         _lane: lane,
         locks: Vec::new(),
+        external_locks: Vec::new(),
         snapshot: snapshot.clone(),
         worktree: worktree.to_path_buf(),
         worktree_identity: identity(worktree)?,
@@ -364,6 +381,27 @@ fn acquire_scanned(
         #[cfg(unix)]
         lease,
     };
+    if explicit && cache.file_name().is_some_and(|name| name == "assembly-target") {
+        let path = cache.with_file_name("assembly-target.lock");
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)] {
+            use std::os::unix::fs::{OpenOptionsExt, MetadataExt};
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            if fs::symlink_metadata(&path).is_ok_and(|md| !md.is_file() || md.uid() != unsafe { libc::geteuid() }) {
+                return Err(io::Error::other("unsafe assembly target lease"));
+            }
+        }
+        let file = options.open(&path)?;
+        #[cfg(unix)] {
+            use std::os::unix::fs::MetadataExt;
+            if !file.metadata()?.is_file() || file.metadata()?.uid() != unsafe { libc::geteuid() } {
+                return Err(io::Error::other("assembly target lease belongs to another user"));
+            }
+        }
+        file.try_lock_exclusive().map_err(|error| io::Error::new(error.kind(), format!("assembly target lease {} unavailable: {error}", path.display())))?;
+        guard.external_locks.push((path, file));
+    }
     for relative in &snapshot.locks {
         let path = cache.join(relative);
         let mut options = OpenOptions::new();
@@ -626,6 +664,7 @@ mod tests {
             &target,
             scanned.snapshot.as_ref().unwrap(),
             |_, _| Ok(true),
+            false,
         );
         let unchanged = guard.as_ref().is_ok_and(|guard| guard.unchanged(&target));
         fs::set_permissions(directory, previous).unwrap();

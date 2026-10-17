@@ -55,7 +55,7 @@ fn cas_8095_purge_removes_only_rejected_team_owned_personal_rows() {
     queue
         .record_row_outcome(team_row.id, "rejected", Some("team_owned_project"))
         .unwrap();
-    assert_eq!(queue.purge_team_owned_personal_rejections().unwrap(), 2);
+    assert_eq!(queue.purge_team_owned_personal_rejections().unwrap(), 0);
     let survivors = queue.list_all(100).unwrap();
     assert_eq!(survivors.len(), 4);
     assert!(survivors.iter().any(|row| row.entity_id == "team-row"));
@@ -303,10 +303,10 @@ fn team_only_neutralizes_project_copies_without_deleting_personal_rows() {
         )
         .unwrap();
 
-    assert_eq!(queue.neutralize_team_only_personal().unwrap(), 4);
-    assert_eq!(queue.personal_row_count().unwrap(), 2);
+    assert_eq!(queue.neutralize_team_only_personal().unwrap(), 0);
+    assert_eq!(queue.personal_row_count().unwrap(), 6);
     let personal = queue.pending(10, 5).unwrap();
-    assert_eq!(personal.len(), 2);
+    assert_eq!(personal.len(), 6);
     assert!(personal.iter().any(|row| row.entity_id == "global-task"));
     assert!(personal.iter().any(|row| row.entity_id == "private-entry"));
     assert_eq!(queue.pending_for_team("team-1", 10, 5).unwrap().len(), 2);

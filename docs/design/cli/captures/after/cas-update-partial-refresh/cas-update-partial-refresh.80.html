@@ -15,11 +15,19 @@
                                    .git/index.lock (age 1d)
     <span style="color:#90939f">→</span> recheck writers, remove only this lock, then retry
   <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">rocketship-template    </span> <span style="color:#90939f">cloud </span> push incomplete: 2 rejected by cloud
-                                   (invalid_json_nul ×2)
-    <span style="color:#90939f">→</span> cas cloud queue --retry
+                                   (invalid_json_nul ×2); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#90939f">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
   <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">Richards LLC/Accounting</span> <span style="color:#90939f">cloud </span> push incomplete: 1 rejected by cloud
-                                   (invalid_json_nul ×1)
-    <span style="color:#90939f">→</span> cas cloud queue --retry
+                                   (invalid_json_nul ×1); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#90939f">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
   <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">Petra Stella/Accounting</span> <span style="color:#90939f">skills</span> 3 managed file conflict(s)
     <span style="color:#90939f">→</span> cas update --sync --json
   <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">Documents/Accounting   </span> <span style="color:#90939f">skills</span> 2 managed file conflict(s)
@@ -46,11 +54,19 @@
                                    .git/index.lock (age 1d)
     <span style="color:#50525c">→</span> recheck writers, remove only this lock, then retry
   <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">rocketship-template    </span> <span style="color:#50525c">cloud </span> push incomplete: 2 rejected by cloud
-                                   (invalid_json_nul ×2)
-    <span style="color:#50525c">→</span> cas cloud queue --retry
+                                   (invalid_json_nul ×2); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#50525c">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
   <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">Richards LLC/Accounting</span> <span style="color:#50525c">cloud </span> push incomplete: 1 rejected by cloud
-                                   (invalid_json_nul ×1)
-    <span style="color:#50525c">→</span> cas cloud queue --retry
+                                   (invalid_json_nul ×1); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#50525c">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
   <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">Petra Stella/Accounting</span> <span style="color:#50525c">skills</span> 3 managed file conflict(s)
     <span style="color:#50525c">→</span> cas update --sync --json
   <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">Documents/Accounting   </span> <span style="color:#50525c">skills</span> 2 managed file conflict(s)
@@ -77,11 +93,19 @@
                                    .git/index.lock (age 1d)
     <span style="color:#90939f">→</span> recheck writers, remove only this lock, then retry
   <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">rocketship-template    </span> <span style="color:#90939f">cloud </span> push incomplete: 2 rejected by cloud
-                                   (invalid_json_nul ×2)
-    <span style="color:#90939f">→</span> cas cloud queue --retry
+                                   (invalid_json_nul ×2); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#90939f">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
   <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">Richards LLC/Accounting</span> <span style="color:#90939f">cloud </span> push incomplete: 1 rejected by cloud
-                                   (invalid_json_nul ×1)
-    <span style="color:#90939f">→</span> cas cloud queue --retry
+                                   (invalid_json_nul ×1); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#90939f">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
   <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">Petra Stella/Accounting</span> <span style="color:#90939f">skills</span> 3 managed file conflict(s)
     <span style="color:#90939f">→</span> cas update --sync --json
   <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">Documents/Accounting   </span> <span style="color:#90939f">skills</span> 2 managed file conflict(s)
@@ -108,11 +132,19 @@
                                    .git/index.lock (age 1d)
     <span style="color:#50525c">→</span> recheck writers, remove only this lock, then retry
   <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">rocketship-template    </span> <span style="color:#50525c">cloud </span> push incomplete: 2 rejected by cloud
-                                   (invalid_json_nul ×2)
-    <span style="color:#50525c">→</span> cas cloud queue --retry
+                                   (invalid_json_nul ×2); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#50525c">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
   <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">Richards LLC/Accounting</span> <span style="color:#50525c">cloud </span> push incomplete: 1 rejected by cloud
-                                   (invalid_json_nul ×1)
-    <span style="color:#50525c">→</span> cas cloud queue --retry
+                                   (invalid_json_nul ×1); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#50525c">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
   <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">Petra Stella/Accounting</span> <span style="color:#50525c">skills</span> 3 managed file conflict(s)
     <span style="color:#50525c">→</span> cas update --sync --json
   <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">Documents/Accounting   </span> <span style="color:#50525c">skills</span> 2 managed file conflict(s)

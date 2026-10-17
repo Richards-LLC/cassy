@@ -1,0 +1,42 @@
+✓ [1/2] Cassy binary  3.62.0 is current                                     1.4s
+✗ [2/2] Projects      2 of 12 failed · user-level store failed · 4 warnin…  4.0s
+
+  ✗ gabber-studio           skills git index lock stale (no writer observed):
+                                   .git/index.lock (age 15d)
+    → recheck writers, remove only this lock, then retry
+  ✗ pulse-card              skills git index lock stale (no writer observed):
+                                   .git/index.lock (age 1d)
+    → recheck writers, remove only this lock, then retry
+  ✗ user-level store               database is locked
+    → retry after the holder exits
+  ⚠ rocketship-template     cloud  push incomplete: 2 rejected by cloud
+                                   (invalid_json_nul ×2); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    → Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
+  ⚠ Richards LLC/Accounting cloud  push incomplete: 1 rejected by cloud
+                                   (invalid_json_nul ×1); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    → Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
+  ⚠ Petra Stella/Accounting skills 3 managed file conflict(s)
+    → cas update --sync --json
+  ⚠ Documents/Accounting    skills 2 managed file conflict(s)
+    → cas update --sync --json
+  ⚠ hub                     serve  Tailscale Serve inactive: tailscale is
+                                   stopped; hub remains loopback-only
+    → Check `tailscale status`, then run `cas hub restart`.
+  ℹ ~/scratch/old-clone            not refreshed: not a Git project root
+    → cas known-repos forget <path>
+  ✓ 6 projects current · 3 not cloud-linked
+    cassy, pantheon, prospect_path, Penguinz, ai-toolkit, soundwave-config
+  Cassy 3.62.0 · 12 projects refreshed · 2 failed · 4.0s
+  user-level store failed · 1 skipped
+  cas update --verbose shows every project and phase output
+✗ 2 of 12 projects not fully refreshed
+  the user-level store was not refreshed
+  Cassy 3.62.0 is current

@@ -1,0 +1,167 @@
+{
+ "provenance": "cas-06b0 synthetic: cas-update-partial-refresh.json with the user-level store failing too (QA round 2 F01 mixed case).",
+ "binary": {
+  "current": "3.62.0",
+  "latest": "3.62.0",
+  "target": "x86_64-unknown-linux-gnu",
+  "elapsed_ms": 1400
+ },
+ "hub": {
+  "prior_state": "running",
+  "action": "verified",
+  "verified": true,
+  "service_managed": true,
+  "transport_warning": "Tailscale Serve inactive: tailscale is stopped; hub remains loopback-only",
+  "remedy": "Check `tailscale status`, then run `cas hub restart`.",
+  "stdout": "cas update: hub was running → verified at loopback (Tailscale Serve inactive)\n",
+  "stderr": "cas update: Tailscale Serve inactive: tailscale is stopped; hub remains loopback-only\ncas update: Check `tailscale status`, then run `cas hub restart`.\n"
+ },
+ "refresh_ms": 4000,
+ "user_level": "FAILED: migration: database is locked; retry after the holder exits",
+ "projects": [
+  {
+   "project": "/home/pippenz/Petrastella/cassy",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "ok: membership current",
+   "cloud_sync": "ok: 4 pushed; 12 pulled",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n",
+    "cloud_sync": "[OK] Push complete · 1 batches · 0 pending\nPull complete · nothing newer\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Petrastella/pantheon",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "ok: membership current",
+   "cloud_sync": "ok: up to date",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n",
+    "cloud_sync": "[OK] Push complete · 1 batches · 0 pending\nPull complete · nothing newer\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Petrastella/prospect_path",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "skipped: not cloud-linked",
+   "cloud_sync": "skipped: not cloud-linked",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Petrastella/gabber-studio",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "FAILED: skills: git index lock stale (no writer observed): .git/index.lock (age 15d); recheck writers, remove only this lock, then retry",
+   "membership": "ok: membership current",
+   "cloud_sync": "ok: up to date",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] Updated .gitignore with Cassy-managed builtin paths\n",
+    "cloud_sync": "[OK] Push complete · 1 batches · 0 pending\nPull complete · nothing newer\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Petrastella/pulse-card",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "FAILED: skills: git index lock stale (no writer observed): .git/index.lock (age 1d); recheck writers, remove only this lock, then retry",
+   "membership": "skipped: not cloud-linked",
+   "cloud_sync": "skipped: not cloud-linked",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] Updated .gitignore with Cassy-managed builtin paths\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Petrastella/rocketship-template",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "ok: membership current",
+   "cloud_sync": "warning: 3 pushed; 2 queued",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n",
+    "cloud_sync": "[WARN] Push incomplete · 2 rejected by cloud (invalid_json_nul ×2) · invalid_json_nul: PostgreSQL jsonb cannot store U+0000; payload retained unchanged. Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for lossless roundtrip support, then `cas cloud queue --retry --retry-reason invalid_json_nul` · queued rows remain · run cas cloud queue --retry\nRetained intentionally: retention ×14\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Richards LLC/Accounting",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "ok: membership current",
+   "cloud_sync": "warning: 1 queued",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n",
+    "cloud_sync": "[WARN] Push incomplete · 1 rejected by cloud (invalid_json_nul ×1) · invalid_json_nul: PostgreSQL jsonb cannot store U+0000; payload retained unchanged. Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for lossless roundtrip support, then `cas cloud queue --retry --retry-reason invalid_json_nul` · queued rows remain · run cas cloud queue --retry\nRetained intentionally: retention ×14\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Petra Stella/Accounting",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "warning: 3 managed file conflict(s); run `cas update --sync --json`",
+   "membership": "ok: membership current",
+   "cloud_sync": "ok: up to date",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: 3 conflicts preserved; cas update --sync --json for paths\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Documents/Accounting",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "warning: 2 managed file conflict(s); run `cas update --sync --json`",
+   "membership": "skipped: not cloud-linked",
+   "cloud_sync": "skipped: not cloud-linked",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: 2 conflicts preserved; cas update --sync --json for paths\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Penguinz",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "ok: membership current",
+   "cloud_sync": "ok: up to date",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n",
+    "cloud_sync": "[OK] Push complete · 1 batches · 0 pending\nPull complete · nothing newer\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/ai-toolkit",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "skipped: not cloud-linked",
+   "cloud_sync": "skipped: not cloud-linked",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/soundwave-config",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "skipped: not cloud-linked",
+   "cloud_sync": "skipped: not cloud-linked",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  }
+ ],
+ "skipped_unregistered": [
+  {
+   "project": "/home/pippenz/scratch/old-clone",
+   "reason": "not a Git project root"
+  }
+ ]
+}

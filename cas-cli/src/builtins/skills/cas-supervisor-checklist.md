@@ -9,7 +9,9 @@ metadata:
 
 ## Session Start
 
-0. **Preflight.** Run `cas factory preflight` ([preflight.md](../cas-supervisor/references/preflight.md)). Nonzero exit → fix the finding it names and rerun. If it reports a stale Cassy binary, stop here: **do not kill or restart `cas serve` from this active MCP session** — that stdio process is this session's Cassy-tool connection. Instead, ask the operator to rebuild Cassy and use the harness's MCP reconnect/restart control (or open a fresh supervisor session) to launch the new `cas serve`. Do not use `pkill` or any name-based process kill. Resume only after the Cassy tool list is restored, then rerun this checklist from step 0.
+0. **Preflight.** From a connected CAS MCP session, call `system action=preflight`; otherwise run `cas --json factory preflight`. Follow [preflight.md](../cas-supervisor/references/preflight.md), using `factory_blocked` and the finding codes rather than `binary.state` alone. A healthy MCP connection with `factory_blocked=false` and `binary.source_evidence_missing` can continue startup while gathering source comparison evidence; it does not require a rebuild or reconnect.
+
+   If the findings establish a deployment mismatch, resolve the intended deployment before replacing it: **do not kill or restart `cas serve` from this active MCP session** — that stdio process is this session's Cassy-tool connection. If replacement is needed, ask the operator to install the intended clean build and use the harness's MCP reconnect/restart control (or open a fresh supervisor session). Do not use `pkill` or any name-based process kill. After replacement, confirm the Cassy tool list is restored, then rerun this checklist from step 0.
 
 1. Identify yourself: `coordination action=whoami`
 2. Load EPIC/task context:

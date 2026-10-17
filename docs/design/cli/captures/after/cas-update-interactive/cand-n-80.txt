@@ -1,0 +1,5 @@
+→       [1/2] Cassy binary  checking for a newer release
+  [INFO] Cassy 3.62.0 → 9.9.9 is available
+    Download and install it now? [Y/n] n
+[WARN]  [1/2] Cassy binary  cancelled · 3.62.0 unchanged                   522ms
+[ERROR] update cancelled; Cassy 3.62.0 is unchanged

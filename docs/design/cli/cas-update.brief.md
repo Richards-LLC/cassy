@@ -139,9 +139,15 @@ Open each `.80.html` to read the light and dark palettes side by side, and the `
 as a pipe would. The `before` fixture captures came from `ab3f679af`, the seam commit with the
 pre-change renderer.
 
-The interactive path cannot be replayed, because it prompts. Its captures are **native**: the
-real binary in an 80- or 120-column pty, on a disposable scratch host, against a loopback fake
-release. See [captures/after/cas-update-interactive](captures/after/cas-update-interactive/README.md).
+The interactive path cannot be replayed, because it prompts. Its captures are **native**, taken
+from independent QA round 2 of cas-70a8:
+
+- The supervisor ran the root-built `4cedda1` binary through the reviewer's driver.
+- Factory identity and `CAS_CLONE_PATH` were preserved; each cell records them.
+- Each run used a fresh scratch HOME and cwd, against a loopback fake release.
+
+See [captures/after/cas-update-interactive](captures/after/cas-update-interactive/README.md).
+That round had no up-to-date interactive cell, so the fixture captures stand in for that result.
 
 ## Critique
 
@@ -207,9 +213,10 @@ The committed `after` captures for these three fixtures are these runs:
 - `terminal-qa: PASS cas-update-success · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-6b56/terminal-qa/cas-update-success/report.json`
 - `terminal-qa: PASS cas-update-mixed-failure · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-6b56/terminal-qa/cas-update-mixed-failure/report.json`
 
-The native interactive captures (prompt, accept with a deliberate extraction failure, decline,
-`-y`, up to date, C locale) came from the same binary. Independent QA round 2 of cas-70a8
-approved that build on its own native runs:
+The native interactive captures are the approved cells of independent QA round 2 of cas-70a8.
+They come from the same `4cedda1` binary, run by the supervisor with factory identity preserved,
+and cover accept with a deliberate extraction failure, a slow download, HTTP 500, decline, `-y`,
+pipe, C locale, `NO_COLOR` and colour. Their ledger:
 `/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-70a8/independent-qa/round-2/LEDGER.md`.
 
 | Dimension | Score | Evidence |
@@ -217,7 +224,7 @@ approved that build on its own native runs:
 | Hierarchy | 5 | The binary verdict, then the refresh verdict; the reason-specific NUL remedy; the exit reason names both verdicts |
 | Fit | 4 | Healthy projects on one line, raw output gone, the user store apart from project counts; two Cloud rows differ only by a count |
 | Craft | 4 | Aligned columns; the receipt and exit reason break between fields or clauses, never inside one, and elapsed time is never alone; the interactive prompt and download stay on the phase line |
-| Theme safety | 5 | Four palettes pass; `NO_COLOR` uses brackets and `LC_ALL=C` is ASCII, both in the native interactive runs too |
+| Theme safety | 5 | Four palettes pass; in the native cells `LC_ALL=C` is pure ASCII and `NO_COLOR` draws bracket marks with no colour |
 | Machine contract | 4 | `--json` and counts are unchanged; a full update still prints two documents (pre-existing) |
 
 Scored by happy-tiger-95 on 2026-10-17; floor holds.

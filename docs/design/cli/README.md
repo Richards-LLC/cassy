@@ -54,5 +54,6 @@ commit before the re-render. The two `cas update` sets replay recorded updates w
 hidden `--render-fixture` flag, which reads no store and changes nothing; their `before`
 captures come from `ab3f679af`, the seam commit that still carried the old renderer.
 Rerun them whenever update output changes, and before each release. The interactive set is
-native (a real pty, a scratch host and a loopback fake release), because a prompting path
-cannot be replayed; its README names the binary and driver.
+native, because a prompting path cannot be replayed. These are the approved cells of an
+independent QA run that the supervisor executed with factory identity preserved; its README
+names the binary, the driver and the environment each cell recorded.

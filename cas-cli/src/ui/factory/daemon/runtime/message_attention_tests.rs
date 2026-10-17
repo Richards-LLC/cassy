@@ -804,7 +804,7 @@ fn handed_off_row(f: &Fixture, source: &str, target: &str) -> i64 {
     let id = f.aged(
         source,
         target,
-        "Review passed; wait for CI and merge notification",
+        "cas-0cdaa: Review passed; wait for CI and merge notification",
     );
     assert!(f.queue.claim_recipient_transport(id, target).unwrap());
     f.queue.mark_transport_delivered(id).unwrap();
@@ -988,5 +988,66 @@ fn cas_0cdaa_real_task_claim_and_release_retire_watchdog_alarms() {
             f.scan().is_empty(),
             "real recipient task transition satisfies the alarm; release={release}"
         );
+    }
+}
+
+#[test]
+fn cas_6d5c_task_lifecycle_retires_only_the_related_workers_alarms() {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+        LifecycleTransition, emit_task_lifecycle_transition,
+    };
+    let _env = env();
+    for (transition, status) in [
+        (LifecycleTransition::Started, TaskStatus::InProgress),
+        (LifecycleTransition::AwaitingMerge, TaskStatus::AwaitingMerge),
+        (LifecycleTransition::Closed, TaskStatus::Closed),
+    ] {
+        let mut f = Fixture::new();
+        let acted = handed_off_row(&f, "supervisor", "worker");
+        let unrelated = handed_off_row(&f, "supervisor", "worker");
+        rusqlite::Connection::open(f.cas_dir.join("cas.db"))
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET prompt='Continue cas-0cdaa-other' WHERE id=?",
+                [unrelated],
+            )
+            .unwrap();
+        let tasks = crate::store::open_task_store_local(&f.cas_dir).unwrap();
+        let mut task = Task::new("cas-0cdaa".into(), "Message decision work".into());
+        tasks.add(&task).unwrap();
+        task.status = status;
+        tasks.update(&task).unwrap();
+        let agents = open_agent_store(&f.cas_dir).unwrap();
+        emit_task_lifecycle_transition(
+            crate::store::open_supervisor_queue_store(&f.cas_dir).unwrap().as_ref(),
+            Some(f.queue.as_ref()),
+            agents.as_ref(),
+            &task.id,
+            &task.title,
+            TaskStatus::Open,
+            status,
+            "worker",
+            None,
+            transition,
+            "lifecycle-after-handoff",
+        )
+        .unwrap();
+        let context = message_attention::AttentionInputs::from_daemon(&f.daemon);
+        let bounces = super::super::poison_sweep_jobs::read_bounces(
+            &context, &HashMap::new(), cas_mux::SupervisorCli::Codex,
+        );
+        assert!(!bounces.iter().any(|row| row.row.id == acted),
+            "{transition:?}: recipient lifecycle must retire the delivery-stalled alarm");
+        assert!(bounces.iter().any(|row| row.row.id == unrelated),
+            "unrelated work, including a task-id prefix, must still alert");
+        let idle = super::super::delivery_probe_jobs::read_idle_unread(&context, SUPERVISOR);
+        assert!(!idle.iter().any(|row| row.row.id == acted));
+        assert!(idle.iter().any(|row| row.row.id == unrelated));
+        assert!(f.queue.enqueue_delivery_stalled_bounce(
+            acted, SESSION, "stale scan", "stale alarm",
+        ).unwrap().is_none(), "atomic bounce write must recheck the lifecycle");
+        assert!(!f.scan().is_empty(), "genuinely unread unrelated task still alerts");
+        assert!(f.queue.message_delivery_report(acted).unwrap().unwrap().confirmed_at.is_none(),
+            "alarm suppression must not manufacture a message read receipt");
     }
 }

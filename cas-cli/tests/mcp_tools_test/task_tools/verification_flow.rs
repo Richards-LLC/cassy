@@ -1080,6 +1080,34 @@ async fn test_close_retry_keeps_live_dispatch_for_original_supervisor_verdict() 
     drop(conn);
 
     let supervisor = registered_supervisor(&cas_dir, "live-retry-supervisor").await;
+    // cas-f146: a factory supervisor's task-verifier runs on the supervisor's
+    // MCP identity, so its verdict is supervisor-direct and must name the
+    // dispatch. It follows its own instructions: read the id from task show.
+    let verifier_body = cas::builtins::BUILTIN_AGENTS
+        .iter()
+        .find(|agent| agent.path == "agents/task-verifier.md")
+        .expect("task-verifier builtin")
+        .content;
+    assert!(
+        verifier_body.contains("`dispatch_id` set to the id on the `Verification dispatch:` line"),
+        "{verifier_body}"
+    );
+    let shown = extract_text(
+        supervisor
+            .cas_task_show(Parameters(TaskShowRequest {
+                id: task_id.clone(),
+                with_deps: false,
+            }))
+            .await
+            .expect("task show"),
+    );
+    let shown_dispatch = shown
+        .lines()
+        .find_map(|line| line.strip_prefix("Verification dispatch: "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("task show must name the pending dispatch: {shown}"))
+        .to_string();
+    assert_eq!(shown_dispatch, first_dispatch.id);
     supervisor
         .cas_verification_add(Parameters(VerificationAddRequest {
             task_id: task_id.clone(),
@@ -1091,7 +1119,7 @@ async fn test_close_retry_keeps_live_dispatch_for_original_supervisor_verdict() 
             duration_ms: Some(1),
             verification_type: None,
             verifier_capability: None,
-            dispatch_id: Some(first_dispatch.id.clone()),
+            dispatch_id: Some(shown_dispatch),
         }))
         .await
         .expect("supervisor verdict on the original dispatch");

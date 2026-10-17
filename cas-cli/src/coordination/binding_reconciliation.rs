@@ -63,7 +63,7 @@ impl ReconciliationRequest {
             status == expected_status && response.code == code && response.next_action == action,
             "HTTP status, code, reason and next action disagree",
         )?;
-        response.validate_scope(self)?;
+        response.validate_payload(self)?;
         if response.code == ReconciliationCode::Completed {
             response.validate_completion()?;
         } else {
@@ -306,7 +306,7 @@ where
 }
 
 impl ReconciliationResponse {
-    fn validate_scope(&self, target: &ReconciliationRequest) -> Result<(), WireError> {
+    fn validate_payload(&self, target: &ReconciliationRequest) -> Result<(), WireError> {
         if let Some(scope) = &self.scope {
             ensure(
                 scope.team_id == target.team_id
@@ -351,6 +351,27 @@ impl ReconciliationResponse {
         }
         if let Some(id) = &self.activation_id {
             ensure(uuid(id), "invalid activation identity")?;
+            // Unlike registration-scoped GET, this response pins the invocation's
+            // receipt even if a competing attempt finishes before evidence is read.
+            let latest = self
+                .latest_attempt
+                .as_ref()
+                .ok_or(WireError("attempt has no receipt"))?;
+            let settled = self
+                .settled
+                .as_ref()
+                .ok_or(WireError("attempt has no settlement"))?;
+            ensure(id == &latest.id, "attempt identity disagrees with receipt")?;
+            ensure(
+                latest.quiescence.attested_v1_consumers.is_empty(),
+                "ordinary invocation cannot exempt consumers",
+            )?;
+            ensure(
+                settled.migrated == latest.settled.migrated_v1_rows
+                    && settled.retired == latest.settled.retired_v1_rows
+                    && settled.invalidated_leases == latest.settled.invalidated_v1_leases,
+                "attempt settlement disagrees with receipt",
+            )?;
         }
         if let Some(settled) = &self.settled {
             safe_numbers(&[
@@ -413,6 +434,7 @@ impl ReconciliationResponse {
     fn validate_completion(&self) -> Result<(), WireError> {
         ensure(
             self.strict_activation == Some(StrictActivation::Evidenced)
+                && self.activation_id.is_some()
                 && self.next_action == NextAction::None
                 && self.blockers.is_none()
                 && self.retry_after_secs.is_none(),
@@ -430,10 +452,6 @@ impl ReconciliationResponse {
             .latest_attempt
             .as_ref()
             .ok_or(WireError("completion has no attempted receipt"))?;
-        let settled = self
-            .settled
-            .as_ref()
-            .ok_or(WireError("completion has no settlement"))?;
         ensure(
             binding.mode == BindingMode::Managed
                 && binding.verified
@@ -450,21 +468,8 @@ impl ReconciliationResponse {
                 && latest.fence_generation == binding.fence_generation,
             "receipt does not prove the current fence",
         )?;
-        ensure(
-            self.activation_id.as_ref() == Some(&latest.id),
-            "attempt identity disagrees with receipt",
-        )?;
-        ensure(
-            fence.quiescence.attested_v1_consumers.is_empty()
-                && latest.quiescence.attested_v1_consumers.is_empty(),
-            "ordinary repair cannot exempt consumers",
-        )?;
-        ensure(
-            settled.migrated == latest.settled.migrated_v1_rows
-                && settled.retired == latest.settled.retired_v1_rows
-                && settled.invalidated_leases == latest.settled.invalidated_v1_leases,
-            "attempt settlement disagrees with receipt",
-        )?;
+        // A historical ADMIN fence may retain its original attested labels.
+        // New ordinary attempts were checked above; never rewrite old evidence.
         match self.reason {
             ReconciliationReason::Activated => ensure(
                 latest == fence,

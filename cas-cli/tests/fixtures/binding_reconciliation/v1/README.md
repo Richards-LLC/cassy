@@ -11,6 +11,14 @@ by active legacy readers and leases. The parser tests also derive a repeat
 attempt, an unknown mutation outcome and a pre-authorization refusal through the
 same public wire parser.
 
+Cloud9864/spec-b489 clarification (supervisor receipt4197864): nonnull
+activation_id pins latest_attempt to this invocation, even under concurrent
+requests. Its settlement and completed reason follow that immutable receipt.
+An already-managed retry preserves its original fence receipt, including any
+historical ADMIN attestations; only the new ordinary invocation must attest no
+consumers. Cloud's published addendum and shared concurrency/ADMIN fixtures
+remain a separate compatibility proof prerequisite.
+
 The request target must already contain a Cloud-resolved canonical project.
 The parser preserves exact identities, takes enrolled workspace only from the
 Cloud response, and requires it to agree with the binding. Even an evidenced

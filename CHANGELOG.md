@@ -16,6 +16,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   worker is told once. Red-CI override merges, rejected verdicts and QA-held
   deliveries still wait, and a worker close racing Cassy's reports the first.
 
+### Fixed
+
+- Supervisor Cloud reader slots now survive `/clear` and full relaunches on the
+  same machine and repo. `factory.slot_id` selects a separate slot or preserves
+  one across machines; superseded registrations stop consuming deliveries.
+
 ## [3.61.0] - 2026-10-17
 
 ### Added

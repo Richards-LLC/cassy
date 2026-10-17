@@ -137,10 +137,12 @@ fn tick(reader: &mut VioletReader, cloud: &FixtureCloud) -> ClaimOutcome {
 /// delivery Cloud hands out again is typed once by this process.
 #[test]
 fn reader_walks_cloud_order_and_types_a_redelivered_id_once() {
-    let cloud = FixtureCloud::new("leases this reader's deliveries");
+    let mut cloud = FixtureCloud::new("leases this reader's deliveries");
     let mut reader = VioletReader::new("factory-session");
-    for _ in 0..2 {
-        assert!(matches!(tick(&mut reader, &cloud), ClaimOutcome::Read(_)));
+    for registration in [REGISTRATION, "successor-registration"] {
+        cloud.registration_id = registration;
+        let outcome = reader.tick(&cloud, registration, &Body, &Typer(&cloud), Utc::now());
+        assert!(matches!(outcome, ClaimOutcome::Read(_)));
     }
     assert_eq!(
         cloud.log(),
@@ -159,23 +161,24 @@ fn reader_walks_cloud_order_and_types_a_redelivered_id_once() {
 #[test]
 fn refused_dispatch_uncertain_types_nothing() {
     for ack_stale in [false, true] {
-    let mut cloud = FixtureCloud::new("leases this reader's deliveries");
-    cloud.refuse_dispatch = !ack_stale;
-    if ack_stale {
-        let mut ack = fixture(ACK, "durable admission");
-        ack["results"][0] = ack["results"][3].clone();
-        ack["results"][0]["delivery_id"] = json!(DELIVERY);
-        cloud.ack_response = Some(ack);
-    }
-    let mut reader = VioletReader::new("factory-session");
-    let ClaimOutcome::Read(report) = tick(&mut reader, &cloud) else { panic!("claim refused") };
-    assert_eq!(
-        cloud.log(),
-        if ack_stale { vec![] } else {
-            vec![format!("ack {DELIVERY} admitted"), format!("receipt {DELIVERY} dispatch_uncertain refused")]
+        let mut cloud = FixtureCloud::new("leases this reader's deliveries");
+        cloud.refuse_dispatch = !ack_stale;
+        if ack_stale {
+            let mut ack = fixture(ACK, "durable admission");
+            ack["results"][0] = ack["results"][3].clone();
+            ack["results"][0]["delivery_id"] = json!(DELIVERY);
+            cloud.ack_response = Some(ack);
         }
-    );
-    assert_eq!((report.typed, report.not_typed[0].1.code.as_str()), (0, "stale_generation"));
+        let mut reader = VioletReader::new("factory-session");
+        let ClaimOutcome::Read(report) = tick(&mut reader, &cloud) else { panic!("claim refused") };
+        assert_eq!(
+            cloud.log(),
+            if ack_stale { vec![] } else {
+                vec![format!("ack {DELIVERY} admitted"), format!("receipt {DELIVERY} dispatch_uncertain refused")]
+            }
+        );
+        assert_eq!((report.typed, report.not_typed[0].1.code.as_str()), (0, "stale_generation"));
+        assert!(reader.stopped.is_none(), "a stale delivery generation does not revoke the registration");
     }
     for code in ["violet_unavailable", "violet_refused", "identity_mismatch", "message_missing"] {
         let cloud = FixtureCloud::new("leases this reader's deliveries");

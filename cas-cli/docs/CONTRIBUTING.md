@@ -865,6 +865,63 @@ shipped commands live in `docs/design/cli/`.
 
 Dev dependencies include: `insta` (snapshot testing), `wiremock` (HTTP mocking), `rstest` (parametrized tests), `proptest` (property-based), `criterion` (benchmarks), `cas-tui-test` (TUI testing).
 
+## Git hook authority and checkout moves
+
+`cas doctor` reports an effective configured `core.hooksPath` whose directory
+is missing. Git resolves the path from the checkout root, including relative
+paths and worktree overrides. When doctor runs in a worker sharing the main
+checkout's store, it reports the main checkout and active worker separately.
+This finding is read-only, including under `--fix`; a stale host-registry entry
+is a separate diagnostic.
+
+Before repairing a moved checkout, run these **in each affected checkout**:
+
+```bash
+git config --show-origin --show-scope --get core.hooksPath
+git rev-parse --path-format=absolute --git-path hooks
+```
+
+Review the old configuration and any existing hook files, and save a backup
+before changing authority. Never unset `core.hooksPath` to make a warning go
+away, or point the main checkout at a worker's `hooks-cas-guard` directory.
+Dependency-generated hooks such as `.husky/_` belong to that project's setup;
+doctor does not install dependencies or disable them.
+
+For this repository's **main checkout**, an operator outside a factory session
+can run `bash scripts/install-git-hooks.sh` after reviewing the source. It uses
+the committed executable `.githooks/pre-push` and existing
+`scripts/fast-rows-pre-push.sh`. It refuses factory identities, linked worktrees,
+uncommitted/missing source and existing executable hook authority. A reviewed
+repair of an existing authority requires preserving/backing it up separately;
+the installer never overwrites it. Repeating the same owned installation is
+safe. With `extensions.worktreeConfig` enabled it writes the main checkout's
+`--worktree` override, preserving the shared setting and worker overrides.
+There is no repository pre-commit or Clippy policy installed by this script.
+
+The main pre-push delegate enforces the existing no-build fast rows for pushes
+to `factory/*`; other refs pass through. Receipts live under
+`<git-common-dir>/cas/fast-rows/<tip>.pass`. Only an exact-tip PASS is reusable;
+a failing row or missing tool refuses the push. This source is not a worker
+ownership guard.
+
+**Workers need their own private guards.** Factory spawn and reuse call
+`TeamsManager::install_worker_pre_commit_hook`, which installs the commit guard
+and refreshes an older push guard in `<worker-git-dir>/hooks-cas-guard`, retaining
+its existing project-hook chain and `--worktree` scope. Installing a new Cassy
+binary alone does not refresh already running workers. The supervisor must
+coordinate a safe spawn/reuse after the new runtime is active, then inspect the
+effective worker pre-push hook for delegation and prove a rejected push against
+a disposable remote. Existing 3.62 private guards may still enforce ownership
+while lacking the fast-row delegate; inspect them rather than assuming absence.
+Do not copy those guards into the main checkout. A hook-install warning during
+spawn/reuse means enforcement is not proven.
+
+At park, `receipt_scope::park_refusal` reads the exact-tip fast-row receipt and
+passing capped test receipts for every changed Rust crate. Missing fast rows
+produce `FAST ROWS REQUIRED`; missing crate tests produce `FOCUSED PROOF
+REQUIRED`. Park executes neither checks nor tests. Hook restoration does not
+waive these refusals or the merge queue's final-tree proof.
+
 ## Build, assembly and CI policy
 
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.

@@ -74,11 +74,7 @@ impl SyncingEntryStore {
         };
 
         // Personal enqueue is best-effort (historical behaviour).
-        if self.team_only && eligible_for_team_entry(entry) {
-            let _ = self
-                .queue
-                .drop_personal_queued_push_for(EntityType::Entry, &entry.id);
-        } else {
+        if !(self.team_only && eligible_for_team_entry(entry)) {
             let _ = self.queue.enqueue(
                 EntityType::Entry,
                 &entry.id,
@@ -106,11 +102,7 @@ impl SyncingEntryStore {
     }
 
     fn queue_delete(&self, id: &str, team_eligible: bool) {
-        if self.team_only && team_eligible {
-            let _ = self
-                .queue
-                .drop_personal_queued_push_for(EntityType::Entry, id);
-        } else {
+        if !(self.team_only && team_eligible) {
             let _ = self
                 .queue
                 .enqueue(EntityType::Entry, id, SyncOperation::Delete, None);

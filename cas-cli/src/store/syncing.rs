@@ -145,9 +145,7 @@ impl SyncingRuleStore {
             Err(_) => return,
         };
 
-        if self.team_only && eligible_for_team_rule(rule) {
-            let _ = queue.drop_personal_queued_push_for(EntityType::Rule, &rule.id);
-        } else {
+        if !(self.team_only && eligible_for_team_rule(rule)) {
             let _ = queue.enqueue(
                 EntityType::Rule,
                 &rule.id,
@@ -173,9 +171,7 @@ impl SyncingRuleStore {
         let Some(queue) = &self.cloud_queue else {
             return;
         };
-        if self.team_only && team_eligible {
-            let _ = queue.drop_personal_queued_push_for(EntityType::Rule, id);
-        } else {
+        if !(self.team_only && team_eligible) {
             let _ = queue.enqueue(EntityType::Rule, id, SyncOperation::Delete, None);
         }
 

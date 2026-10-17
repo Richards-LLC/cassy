@@ -1080,7 +1080,7 @@ pub fn push_reason_hint(reason: &str) -> &'static str {
         "dependency_endpoint_unavailable" | "dependency_endpoint_deleted" | "dependency_endpoint_moved" | "dependency_endpoint_foreign" => "retained locally: an endpoint is deleted, unavailable, moved or foreign; repair endpoint ownership before requeueing",
         "orphan_dependency" => "endpoint tasks are absent in this cloud project; pull repairs eligible local endpoints before retrying the edge",
         "team_owned_project" => {
-            "this project belongs to a team; configure its active team, run `cas config set cloud.team_only true`, then `cas cloud queue --purge-team-owned` and `cas cloud sync`"
+            "team ownership is policy, not proof of an equivalent remote copy; retain unproven personal rows; preview `cas cloud queue --purge-team-owned --dry-run`; cleanup requires --ids and matching team delivery proof"
         }
         "project_mismatch" => {
             "the cloud project identity conflicts; inspect `cas cloud projects`, then pin with `cas cloud project set <registered-canonical-id>` or have the cloud owner register the remote alias, run `cas cloud project --adopt-aliases` to merge server aliases without dropping local entries, `cas cloud queue --retry --retry-reason project_mismatch`, and `cas cloud push`"

@@ -22,12 +22,33 @@ fn git(repo: &Path, args: &[&str]) {
 
 fn cas(home: &Path) -> assert_cmd::Command {
     let mut command = assert_cmd::Command::new(cas::test_paths::cas_binary());
+    for (name, _) in
+        std::env::vars_os().filter(|(name, _)| name.to_string_lossy().starts_with("CAS_"))
+    {
+        command.env_remove(name);
+    }
     command
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null");
     command
+}
+
+fn json_output(home: &Path, args: &[&str]) -> serde_json::Value {
+    let output = cas(home)
+        .args(args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap_or_else(|error| {
+        panic!(
+            "{args:?} must emit one JSON document: {error}; stdout={}",
+            String::from_utf8_lossy(&output)
+        )
+    })
 }
 
 #[test]
@@ -54,6 +75,18 @@ fn explicit_binding_cli_recovers_two_live_clones_across_restart() {
         .args(["known-repos", "list"])
         .assert()
         .success();
+    // pin: field names and empty collections are the public CLI JSON contract.
+    for (command, empty) in [
+        ("list", serde_json::json!({"repos": [], "binding_count": 0})),
+        ("status", serde_json::json!({"bindings": []})),
+    ] {
+        for args in [
+            vec!["known-repos", command, "--json"],
+            vec!["--json", "known-repos", command],
+        ] {
+            assert_eq!(json_output(&home_path, &args), empty);
+        }
+    }
     let store = SqliteKnownRepoStore::open(&home_path.join(".cas")).unwrap();
     store.upsert(&clone_a).unwrap();
     store.upsert(&clone_b).unwrap();
@@ -80,6 +113,36 @@ fn explicit_binding_cli_recovers_two_live_clones_across_restart() {
             "[valid] remote:github.com/org/shared",
         ))
         .stdout(predicate::str::contains(clone_b.to_str().unwrap()));
+
+    for args in [
+        ["known-repos", "list", "--json"],
+        ["--json", "known-repos", "list"],
+    ] {
+        let report = json_output(&home_path, &args);
+        assert_eq!(report["binding_count"], 1);
+        let repos = report["repos"].as_array().unwrap();
+        assert_eq!(repos.len(), 2);
+        for path in [&clone_a, &clone_b] {
+            let row = repos
+                .iter()
+                .find(|row| row["path"] == path.to_str().unwrap())
+                .unwrap();
+            assert_eq!(row["healthy"], true);
+            assert_eq!(row["touch_count"], 1);
+        }
+    }
+    // pin: the status document preserves the selector/root and validated state.
+    let expected = serde_json::json!({"bindings": [{
+        "selector": "remote:github.com/org/shared",
+        "repo_root": clone_b,
+        "state": "valid",
+    }]});
+    for args in [
+        ["known-repos", "status", "--json"],
+        ["--json", "known-repos", "status"],
+    ] {
+        assert_eq!(json_output(&home_path, &args), expected);
+    }
 
     // A different clone cannot silently replace the operator's live choice.
     cas(&home_path)

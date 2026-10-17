@@ -174,17 +174,27 @@ fn parked_deliveries(data: &DirectorData, epic_id: &str) -> Vec<ParkedDelivery> 
 pub(crate) struct StallEvidenceRequest {
     cas_dir: PathBuf,
     epic_id: String,
+    session: String,
+    supervisor: String,
     /// The parked deliveries in the loop's current snapshot, for a job that
     /// reads no new snapshot (the database is unchanged).
     parked: Vec<ParkedDelivery>,
 }
 
 impl StallEvidenceRequest {
-    pub(crate) fn new(cas_dir: PathBuf, epic_id: String, current: &DirectorData) -> Self {
+    pub(crate) fn new(
+        cas_dir: PathBuf,
+        epic_id: String,
+        session: String,
+        supervisor: String,
+        current: &DirectorData,
+    ) -> Self {
         let parked = parked_deliveries(current, &epic_id);
         Self {
             cas_dir,
             epic_id,
+            session,
+            supervisor,
             parked,
         }
     }
@@ -621,6 +631,84 @@ mod tests {
             anchor: Some("abc123".into()),
             close_rejection: "MERGE REQUIRED".into(),
             record: None,
+        }
+    }
+
+    #[test]
+    fn cas_7809_stall_only_names_this_factorys_deliveries() {
+        use cas_store::{AgentStore, EpicSplit, SplitDirection, SplitState, insert_epic_split};
+        use cas_types::{Agent, AgentRole, TaskStatus, TaskType};
+        use crate::ui::factory::director::{
+            SupervisorActionableState, supervisor_actionable_state_with_classifiers,
+        };
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::TempDir::new().unwrap();
+        let stores = DirectorStores::open(dir.path()).unwrap();
+        let now = Utc::now();
+        let machine = Agent::get_or_generate_machine_id();
+        for (name, session, host, role) in [
+            ("supervisor", "here", machine.as_str(), AgentRole::Supervisor),
+            ("local", "here", machine.as_str(), AgentRole::Worker),
+            // A split must win even if an old local worker registration remains.
+            ("peer-kept", "here", machine.as_str(), AgentRole::Worker),
+            ("other-session", "elsewhere", machine.as_str(), AgentRole::Worker),
+            ("other-machine", "here", "peer-host", AgentRole::Worker),
+        ] {
+            let mut agent = Agent::new_with_role(format!("id-{name}"), name.into(), role);
+            agent.factory_session = Some(session.into());
+            agent.machine_id = Some(host.into());
+            stores.agent_store.register(&agent).unwrap();
+        }
+        insert_epic_split(dir.path(), &EpicSplit {
+            id: "split-owned".into(), epic_id: "cas-epic".into(),
+            local_agent_id: "id-supervisor".into(), peer_agent_id: "peer-supervisor".into(),
+            peer_name: "peer".into(), peer_machine: "peer-host".into(),
+            direction: SplitDirection::Outgoing, mine: vec!["cas-local".into()],
+            theirs: vec!["cas-peer-kept".into()], state: SplitState::Accepted,
+            reason: None, message_id: None, expires_at: now, created_at: now,
+            decided_at: Some(now),
+        }).unwrap();
+        let mut data = DirectorData {
+            ready_tasks: Vec::new(), in_progress_tasks: Vec::new(), epic_tasks: Vec::new(),
+            agents: Vec::new(), activity: Vec::new(), agent_id_to_name: HashMap::new(),
+            changes: Vec::new(), git_loaded: false, reminders: Vec::new(),
+            epic_closed_counts: HashMap::new(), start_gated_task_ids: Default::default(),
+        };
+        let mut epic = parked("cas-epic", "local", None).task;
+        epic.task_type = TaskType::Epic;
+        epic.status = TaskStatus::InProgress;
+        epic.epic = None;
+        data.epic_tasks.push(epic);
+        for worker in ["local", "peer-kept", "other-session", "other-machine", "unregistered"] {
+            let mut task = parked(&format!("cas-{worker}"), worker, None).task;
+            // Exercise both canonical agent ids and the legacy display-name form.
+            if worker == "local" {
+                task.assignee = Some("id-local".into());
+                data.agent_id_to_name.insert("id-local".into(), "local".into());
+            }
+            data.in_progress_tasks.push(task);
+        }
+        let request = StallEvidenceRequest::new(
+            dir.path().into(), "cas-epic".into(), "here".into(), "supervisor".into(), &data,
+        );
+        // Exercise both a fresh read and an unchanged-snapshot read, as the daemon does.
+        for fresh in [Some(&data), None] {
+            let facts = request.facts(fresh, Some(&stores));
+            let git = facts.iter().map(|(id, fact)| (id.clone(), GitEvidence {
+                inputs: fact.inputs(), delivery: (format!("factory/{}", fact.worker), Some("tip".into())),
+                ci_pending: false, merged_close_blocked: None,
+            })).collect();
+            let evidence = combine(&facts, &git);
+            let state = supervisor_actionable_state_with_classifiers(
+                &data, Some("cas-epic"), "supervisor", &Default::default(), now, 600,
+                |task, worker| evidence_delivery(&evidence, task, worker),
+                |_, _, _, _| None,
+                |task, worker| evidence_hold(&evidence, task, worker),
+            );
+            assert_eq!(state, Some(SupervisorActionableState::MergeBranches {
+                branches: vec![("cas-local".into(), "factory/local".into(), "tip".into())],
+            }), "only this factory's delivery belongs in the stall relay");
         }
     }
 

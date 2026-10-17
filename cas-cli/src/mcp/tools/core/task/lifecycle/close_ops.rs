@@ -30987,14 +30987,16 @@ esac
             matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
             "every dropped path needs a covering commit"
         );
+        // cas-90d8: the migration's lines survive both renames, so only the
+        // retired analytics file is dropped and needs the reviewed commit.
         window.supervisor_override_reason = Some(format!(
-            "reviewed-drop: {moved},{renamed},{reverted} -- reviewed migration moves and analytics retirement"
+            "reviewed-drop: {reverted} -- reviewed analytics retirement"
         ));
         let result = outcome(&window);
         assert!(
             matches!(&result, MergeStateGateOutcome::ProceedWithNote(note)
             if note.contains("reviewed delivery content supersession accepted")
-                && note.contains(&moved) && note.contains(&renamed) && note.contains(&reverted)),
+                && note.contains(&reverted)),
             "pre-anchor reviewed supersession must close: {result:?}"
         );
     }

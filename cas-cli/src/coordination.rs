@@ -1,5 +1,6 @@
 //! Durable, fail-closed authority operations for external Slack threads.
 
+pub mod binding_reconciliation;
 pub mod external_work;
 
 #[cfg(test)]

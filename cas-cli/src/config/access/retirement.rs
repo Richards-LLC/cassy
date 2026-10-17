@@ -46,6 +46,7 @@ pub(crate) fn retire_config(root: &Path, dry_run: bool) -> ConfigRetirement {
             receipt.removed = removed;
             return Ok(());
         }
+        ensure_writable(&receipt.path)?;
         let _lock =
             lock_project_config(root).map_err(|e| format!("cannot lock config ({})", e.kind()))?;
         let before = read_config(&receipt.path)?.ok_or("config disappeared while locking")?;
@@ -53,6 +54,7 @@ pub(crate) fn retire_config(root: &Path, dry_run: bool) -> ConfigRetirement {
         if removed.is_empty() {
             return Ok(());
         }
+        ensure_writable(&receipt.path)?;
         let backup = backup_config(root, before.as_bytes())
             .map_err(|e| format!("cannot preserve config before-copy ({})", e.kind()))?;
         receipt.backup = Some(backup);
@@ -79,9 +81,6 @@ fn read_config(path: &Path) -> Result<Option<String>, String> {
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err("config is not a regular owned file".into());
     }
-    if metadata.permissions().readonly() {
-        return Err("config is read-only; restore owner write permission before cleanup".into());
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -92,6 +91,17 @@ fn read_config(path: &Path) -> Result<Option<String>, String> {
     fs::read_to_string(path)
         .map(Some)
         .map_err(|e| format!("cannot read config ({})", e.kind()))
+}
+
+// Reading and planning never require write permission. Check only when an
+// actual retirement remains, both before lock creation and after the re-read.
+fn ensure_writable(path: &Path) -> Result<(), String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|e| format!("cannot inspect config ({})", e.kind()))?;
+    if metadata.permissions().readonly() {
+        return Err("config is read-only; restore owner write permission before cleanup".into());
+    }
+    Ok(())
 }
 
 fn backup_config(root: &Path, before: &[u8]) -> std::io::Result<PathBuf> {

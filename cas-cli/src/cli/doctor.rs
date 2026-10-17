@@ -237,6 +237,7 @@ impl CheckGroup {
             "host"
             | "user-level store"
             | "known repos"
+            | "canonical id collision"
             | "host proxy"
             | "hub service"
             | "hub transport"
@@ -257,7 +258,6 @@ impl CheckGroup {
             | "code index copies"
             | "code history index" => Self::Indexes,
             "canonical id"
-            | "canonical id collision"
             | "cloud identity metadata"
             | "project aliases"
             | "cloud sync queue"
@@ -1062,6 +1062,7 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
     checks.push(host_proxy_check());
     #[cfg(not(feature = "mcp-proxy"))]
     checks.push(Check::new("host proxy", CheckStatus::Ok, "proxy integration unavailable in this build"));
+    checks.extend(canonical_id_collision_checks(current, collect_local_root_identities));
     checks.extend(registered_project_root_checks(current.unwrap_or_else(|| Path::new(""))));
     checks.push(scratchpad_policy_check());
     checks.push(slack_transport::check());
@@ -2964,13 +2965,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // instructions that no test in this repo can reach.
     recorder.mark("user skills", &checks);
 
-    // Check 14: cloud canonical id — which bucket this project syncs into,
-    // and whether any other known local project lands in the same bucket
-    // (cas-f699 / GH #134).
-    checks.extend(canonical_id_checks(
-        &cas_root,
-        collect_local_root_identities(),
-    ));
+    // Project identity stays local; host-wide collisions belong to doctor --host.
+    checks.extend(canonical_id_checks(&cas_root));
     if args.fix {
         if let Some(check) = canonical_alias_fix(&cas_root, args, cli) {
             checks.push(check);
@@ -4250,12 +4246,6 @@ fn registered_project_root_checks(current_project_root: &Path) -> Vec<Check> {
     checks
 }
 
-/// Build the canonical-id doctor rows. Pure given the resolved root list, so
-/// the collision warning is testable without touching the host registry.
-///
-/// `known_roots` carries the registry read outcome, not just its rows: an
-/// `Err` becomes a Warning row naming the failure, so a skipped collision
-/// check can never masquerade as a clean one.
 /// A moved origin is diagnostic, never an automatic remote rewrite.
 fn github_origin_check(project: &Path) -> Option<Check> {
     let timeout = Duration::from_secs(2);
@@ -4291,10 +4281,7 @@ fn github_origin_check(project: &Path) -> Option<Check> {
     )
 }
 
-fn canonical_id_checks(
-    cas_root: &Path,
-    known_roots: Result<Vec<crate::cloud::LocalRootIdentity>, String>,
-) -> Vec<Check> {
+fn canonical_id_checks(cas_root: &Path) -> Vec<Check> {
     let mut checks = Vec::new();
 
     let Some((canonical_id, source)) = crate::cloud::resolve_canonical_id_with_source(cas_root)
@@ -4322,42 +4309,72 @@ fn canonical_id_checks(
         message,
     });
 
-    let known_roots = match known_roots {
+    checks
+}
+
+/// Registry identity findings are host-scoped, including the read itself.
+/// Pins record local intent, not verified alias bindings or equal store data.
+/// No server confirmation is available here: a shared explicit pin stays an
+/// unknown identity-review warning, never a confirmed-fold informational row.
+fn canonical_id_collision_checks(
+    current_project: Option<&Path>,
+    known_roots: impl FnOnce() -> Result<Vec<crate::cloud::LocalRootIdentity>, String>,
+) -> Vec<Check> {
+    if current_project.is_some() {
+        return Vec::new();
+    }
+    let known_roots = match known_roots() {
         Ok(roots) => roots,
-        Err(e) => {
-            checks.push(Check {
-                name: "canonical id collision".to_string(),
-                status: CheckStatus::Warning,
-                message: format!(
-                    "Could not read the known-repos registry: {e} — canonical-id collision \
-                     check SKIPPED. This is not a clean result: other local projects may share \
-                     bucket `{canonical_id}` and go unreported. Run `cas known-repos list` to \
-                     confirm the registry is readable."
+        Err(error) => {
+            return vec![Check::new(
+                "canonical id collision",
+                CheckStatus::Warning,
+                format!(
+                    "Could not read the host known-repos registry: {error} — canonical-id \
+                     collision check SKIPPED. This is not a clean result: local projects may \
+                     share a cloud bucket and go unreported. Run `cas known-repos list` \
+                     to confirm the registry is readable."
                 ),
-            });
-            return checks;
+            )];
         }
     };
-
+    let mut checks = Vec::new();
     for collision in crate::cloud::detect_canonical_id_collisions(&known_roots) {
         let roots = collision
             .roots
             .iter()
-            .map(|p| p.display().to_string())
+            .map(|path| path.display().to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        checks.push(Check {
-            name: "canonical id collision".to_string(),
-            status: CheckStatus::Warning,
-            message: format!(
-                "DIFFERENT repositories share cloud bucket `{}`: {roots}. Every sync merges \
-                 them into each other. Give each one its own id with `cas cloud project set \
-                 <unique-id>` (run it inside each project).",
-                collision.canonical_id
-            ),
-        });
+        let unpinned = collision
+            .roots
+            .iter()
+            .filter(|root| {
+                crate::cloud::canonical_id_from_config_toml(&root.join(".cas"))
+                    .as_deref() != Some(collision.canonical_id.as_str())
+            })
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        let message = if unpinned.is_empty() {
+            format!(
+                "Shared explicit cloud pin `{}` across different repository identities: \
+                 {roots}. Identity review required: alias binding is unverified; matching \
+                 pins and local aliases do not prove equivalence. Inspect `cas cloud projects` \
+                 and ask the cloud owner to confirm these identities before changing any pin.",
+                collision.canonical_id,
+            )
+        } else {
+            format!(
+                "Different repository identities share cloud bucket `{}`: {roots}. Inspect \
+                 `cas cloud projects` and confirm which roots are unrelated. Only for \
+                 unrelated unpinned roots, run `cas cloud project set <unique-id>` inside: {}. \
+                 Keep deliberate pins unchanged pending identity confirmation.",
+                collision.canonical_id,
+                unpinned.join(", "),
+            )
+        };
+        checks.push(Check::new("canonical id collision", CheckStatus::Warning, message));
     }
-
     checks
 }
 
@@ -9078,7 +9095,7 @@ mod tests {
         let cas_root = temp.path().join("gabber-studio/.cas");
         fs::create_dir_all(&cas_root).unwrap();
 
-        let checks = canonical_id_checks(&cas_root, Ok(Vec::new()));
+        let checks = canonical_id_checks(&cas_root);
         let msg = messages(&checks, "canonical id").join("");
         assert!(msg.contains("gabber-studio"), "got: {msg}");
         assert!(msg.contains("folder name"), "got: {msg}");
@@ -9327,30 +9344,60 @@ mod tests {
     #[test]
     fn canonical_id_check_warns_loudly_on_a_shared_bucket() {
         let temp = TempDir::new().unwrap();
-        let cas_root = temp.path().join("accounting/.cas");
-        fs::create_dir_all(&cas_root).unwrap();
-
-        let known = vec![
+        let mut known = vec![
             crate::cloud::LocalRootIdentity {
-                project_root: "/home/u/client-one/accounting".into(),
+                project_root: temp.path().join("client-one/accounting"),
                 canonical_id: "accounting".to_string(),
                 git_remote: Some("github.com/client-one/accounting".to_string()),
             },
             crate::cloud::LocalRootIdentity {
-                project_root: "/home/u/client-two/accounting".into(),
+                project_root: temp.path().join("client-two/accounting"),
                 canonical_id: "accounting".to_string(),
                 git_remote: Some("gitlab.com/client-two/accounting".to_string()),
             },
         ];
-        let checks = canonical_id_checks(&cas_root, Ok(known));
+        for root in &known {
+            let cas = root.project_root.join(".cas");
+            fs::create_dir_all(&cas).unwrap();
+            fs::write(cas.join("config.toml"), "[project]\ncanonical_id = \"accounting\"\n").unwrap();
+        }
+        let checks = canonical_id_collision_checks(None, || Ok(known.clone()));
         let collision = checks
             .iter()
             .find(|c| c.name == "canonical id collision")
-            .expect("collision row must be present");
+            .expect("shared explicit pins still require identity review");
         assert!(matches!(collision.status, CheckStatus::Warning));
-        assert!(collision.message.contains("client-one/accounting"));
-        assert!(collision.message.contains("client-two/accounting"));
-        assert!(collision.message.contains("cas cloud project set"));
+        assert!(collision.message.contains("unverified"), "{}", collision.message);
+        assert!(!collision.message.contains("cas cloud project set"), "{}", collision.message);
+        assert_eq!(checks.len(), 1);
+        assert!(matches!(collision.group(), CheckGroup::Host));
+
+        // A fallback root must not authorize splitting the explicitly pinned one.
+        fs::remove_file(known[1].project_root.join(".cas/config.toml")).unwrap();
+        known[1].git_remote = None;
+        let mixed = canonical_id_collision_checks(None, || Ok(known.clone()));
+        assert_eq!(mixed.len(), 1);
+        let remedy = mixed[0].message.split("inside: ").nth(1).unwrap();
+        assert!(remedy.contains(&known[1].project_root.display().to_string()));
+        assert!(!remedy.contains(&known[0].project_root.display().to_string()));
+
+        fs::remove_file(known[0].project_root.join(".cas/config.toml")).unwrap();
+        known[0].git_remote = None;
+        let fallback = canonical_id_collision_checks(None, || Ok(known.clone()));
+        assert_eq!(fallback.len(), 1);
+        assert!(matches!(fallback[0].status, CheckStatus::Warning));
+        assert!(fallback[0].message.contains("cas cloud project set <unique-id>"));
+        for root in &known {
+            assert!(fallback[0].message.contains(&root.project_root.display().to_string()));
+        }
+    }
+
+    #[test]
+    fn project_doctor_does_not_scan_host_canonical_id_collisions() {
+        let checks = canonical_id_collision_checks(Some(Path::new("project")), || {
+            panic!("a project report must not read host collision identities")
+        });
+        assert!(checks.is_empty());
     }
 
     #[test]
@@ -9363,7 +9410,7 @@ mod tests {
         let cas_root = temp.path().join("some-project/.cas");
         fs::create_dir_all(&cas_root).unwrap();
 
-        let checks = canonical_id_checks(&cas_root, Err("disk I/O error".to_string()));
+        let checks = canonical_id_collision_checks(None, || Err("disk I/O error".to_string()));
         let row = checks
             .iter()
             .find(|c| c.name == "canonical id collision")
@@ -9373,7 +9420,7 @@ mod tests {
         assert!(row.message.contains("SKIPPED"), "{}", row.message);
         // The bucket row is still reported — the skip is scoped to the
         // collision check, not the whole diagnostic.
-        assert_eq!(messages(&checks, "canonical id").len(), 1);
+        assert_eq!(messages(&canonical_id_checks(&cas_root), "canonical id").len(), 1);
     }
 
     #[test]
@@ -9422,7 +9469,7 @@ mod tests {
                 .unwrap();
         }
 
-        let checks = canonical_id_checks(&cas_root, Ok(Vec::new()));
+        let checks = canonical_id_checks(&cas_root);
         let msg = messages(&checks, "canonical id").join("");
         assert!(msg.contains("github.com/acme/renamed"), "got: {msg}");
         assert!(

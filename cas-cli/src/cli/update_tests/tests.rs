@@ -693,6 +693,33 @@ fn capture_phase_collects_both_stdout_and_stderr() {
     assert!(output.contains("captured stderr"), "output was: {output:?}");
 }
 
+/// cas-be05 review: `--json` never runs a phase it cannot capture, because
+/// that phase's documents would reach stdout beside the one receipt.
+#[cfg(unix)]
+#[test]
+fn json_phase_is_not_run_when_its_output_cannot_be_captured_cas_be05() {
+    let _output_lock = update_output_lock();
+    let mut ran = false;
+    let ((phase, output, documents), stdout) = capture_phase(true, || {
+        capture_phase_documents_with(
+            &update_test_cli(true),
+            || Err(std::io::Error::other("descriptor limit")),
+            || {
+                ran = true;
+                println!("{{\"leaked\":true}}");
+                ProjectPhase::Ok("ran uncaptured".to_owned())
+            },
+        )
+    });
+    assert!(!ran, "an uncapturable --json phase must not run");
+    assert!(
+        matches!(&phase, ProjectPhase::Failed(detail) if detail.contains("not run") && detail.contains("descriptor limit")),
+        "{phase:?}"
+    );
+    assert!(output.is_empty() && documents.is_empty());
+    assert!(stdout.trim().is_empty(), "nothing reaches stdout: {stdout:?}");
+}
+
 /// Create a directory that looks exactly like an initialized Cassy project:
 /// a `.cas/` directory holding a `cas.db` file.
 fn make_project(root: &Path) {

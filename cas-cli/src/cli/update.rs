@@ -1197,14 +1197,43 @@ fn capture_phase<T>(enabled: bool, operation: impl FnOnce() -> T) -> (T, String)
 /// that is a JSON object is a document the phase printed, nested into the
 /// one final receipt; every other line is a diagnostic and goes to stderr,
 /// so none is lost and none reaches stdout. Human mode keeps the text.
-fn capture_phase_documents<T>(
+fn capture_phase_documents<T: UncapturedPhase>(
     cli: &Cli,
     operation: impl FnOnce() -> T,
 ) -> (T, String, Vec<serde_json::Value>) {
-    let (value, output) = capture_phase(true, operation);
+    capture_phase_documents_with(cli, PhaseCapture::new, operation)
+}
+
+/// [`capture_phase_documents`] with the capture's constructor as a seam.
+///
+/// Human output stays best effort: without a capture the phase still runs
+/// and prints directly, as it always has. `--json` is strict: a phase whose
+/// output cannot be captured is never run, because its documents would
+/// reach stdout beside the one receipt. It reports itself failed instead.
+fn capture_phase_documents_with<T: UncapturedPhase>(
+    cli: &Cli,
+    open: impl FnOnce() -> io::Result<PhaseCapture>,
+    operation: impl FnOnce() -> T,
+) -> (T, String, Vec<serde_json::Value>) {
     if !cli.json {
+        let (value, output) = capture_phase(true, operation);
         return (value, output, Vec::new());
     }
+    let mut capture = match open() {
+        Ok(capture) => capture,
+        Err(error) => {
+            return (
+                T::uncaptured(format!(
+                    "not run: --json could not capture this phase's output ({error})"
+                )),
+                String::new(),
+                Vec::new(),
+            );
+        }
+    };
+    let value = operation();
+    let output = capture.finish();
+    drop(capture);
     let (documents, diagnostics) = split_phase_documents(&output);
     if !diagnostics.is_empty() {
         let mut err = io::stderr();
@@ -1212,6 +1241,42 @@ fn capture_phase_documents<T>(
         let _ = err.flush();
     }
     (value, String::new(), documents)
+}
+
+/// A phase result standing for a phase `--json` refused to run uncaptured.
+trait UncapturedPhase {
+    fn uncaptured(reason: String) -> Self;
+}
+
+impl UncapturedPhase for ProjectPhase {
+    fn uncaptured(reason: String) -> Self {
+        ProjectPhase::Failed(reason)
+    }
+}
+
+impl UncapturedPhase for (ProjectPhase, Vec<SyncSummary>) {
+    fn uncaptured(reason: String) -> Self {
+        (ProjectPhase::Failed(reason), Vec::new())
+    }
+}
+
+/// The stdout/stderr capture a `--json` phase runs inside.
+#[cfg(unix)]
+type PhaseCapture = OutputCapture;
+
+/// No fd capture off unix: `--json` phases report themselves not run.
+#[cfg(not(unix))]
+struct PhaseCapture;
+
+#[cfg(not(unix))]
+impl PhaseCapture {
+    fn new() -> io::Result<Self> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "stdout capture needs unix"))
+    }
+
+    fn finish(&mut self) -> String {
+        String::new()
+    }
 }
 
 /// JSON-object lines, in order, and everything else.

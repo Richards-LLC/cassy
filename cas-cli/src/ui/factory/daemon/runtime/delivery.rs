@@ -447,8 +447,9 @@ pub(crate) fn attribute_for_pty(source: &str, text: &str) -> String {
     format!("Message from {source}: {text}")
 }
 
-/// cas-8cbe: the characters of a routine row's own text a compact card quotes.
-const ROUTINE_EXCERPT_CHARS: usize = 96;
+/// cas-8cbe: the widest card line, so an 80-column pane (Codex keeps two
+/// columns of gutter) never wraps one.
+const ROUTINE_CARD_COLUMNS: usize = 76;
 
 /// cas-8cbe: a compact card replacing the body of a routine row typed into a
 /// supervisor's pane, or `None` to type the body whole.
@@ -462,21 +463,23 @@ const ROUTINE_EXCERPT_CHARS: usize = 96;
 /// message (a registered agent's row whose CAS-built lead names that same
 /// sender). Operator, peer-supervisor, urgent, typed (`kind`) and waking rows
 /// never match, and an unparseable row stays whole. The card keeps the ids and
-/// the command that reads the row in full, which `inbox_poll` serves whatever
-/// the row's transport receipt says.
+/// ends with the command that reads the row in full, which `inbox_poll` serves
+/// whatever the row's transport receipt says.
 pub(crate) fn compact_routine_supervisor_body(queued: &cas_store::QueuedPrompt) -> Option<String> {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_SOURCE_PREFIX;
     if queued.urgent || queued.kind.is_some() || queued.operator.is_some() {
         return None;
     }
-    let id = queued.id;
+    let read = |what: &str| {
+        format!("  no action · {what}: inbox_poll notification_id={}", queued.id)
+    };
     let card = match queued.origin.as_ref()? {
         cas_store::QueueOrigin::Daemon if queued.source.starts_with(LIFECYCLE_SOURCE_PREFIX) => {
             let (task_id, verb, actor, headline) = routine_lifecycle_parts(&queued.prompt)?;
             format!(
-                "◦ {task_id} {verb} by {actor} · {}\n  Progress relay, no action. Full event: \
-                 inbox_poll notification_id={id}",
-                excerpt(headline)
+                "◦ {task_id} {verb} by {actor}\n  {}\n{}",
+                excerpt(headline, ROUTINE_CARD_COLUMNS - 2),
+                read("full event")
             )
         }
         cas_store::QueueOrigin::RegisteredAgent { .. } => {
@@ -487,17 +490,19 @@ pub(crate) fn compact_routine_supervisor_body(queued: &cas_store::QueuedPrompt) 
             if from != queued.source {
                 return None;
             }
+            let head = format!("⇄ {from} → {to}");
+            let room = ROUTINE_CARD_COLUMNS.saturating_sub(head.chars().count() + 3);
             let summary = queued
                 .summary
                 .as_deref()
-                .map(str::trim)
+                .map(|summary| excerpt(summary, room))
                 .filter(|summary| !summary.is_empty())
-                .map(|summary| format!("{}: ", excerpt(summary)))
+                .map(|summary| format!(" · {summary}"))
                 .unwrap_or_default();
             format!(
-                "⇄ {from} → {to} · {summary}\"{}\"\n  Peer copy; {to} has it, no action. Full \
-                 text: inbox_poll notification_id={id}",
-                excerpt(body)
+                "{head}{summary}\n  \"{}\"\n{}",
+                excerpt(body, ROUTINE_CARD_COLUMNS - 4),
+                read("full text")
             )
         }
         _ => return None,
@@ -530,15 +535,16 @@ fn routine_lifecycle_parts(prompt: &str) -> Option<(String, &'static str, &str, 
     Some((envelope.task_id, verb, actor, headline))
 }
 
-/// One line of `text`: whitespace collapsed, cut at a word with `…`.
-fn excerpt(text: &str) -> String {
+/// One line of `text` in at most `max` characters: whitespace collapsed, cut
+/// at a word with `…`.
+fn excerpt(text: &str, max: usize) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= ROUTINE_EXCERPT_CHARS {
+    if flat.chars().count() <= max {
         return flat;
     }
-    let cut: String = flat.chars().take(ROUTINE_EXCERPT_CHARS).collect();
+    let cut: String = flat.chars().take(max.saturating_sub(1)).collect();
     let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
-    format!("{}…", cut.trim_end_matches([',', ';', ':', '.']))
+    format!("{}…", cut.trim_end_matches([',', ';', ':', '.', ' ']))
 }
 
 /// The one line typed into a Claude+teams recipient's pane to WAKE it — never
@@ -2247,9 +2253,9 @@ mod tests {
         );
         assert_eq!(
             compact_routine_supervisor_body(&started).unwrap(),
-            "◦ cas-f9b7 started by tender-phoenix-59 · Cloud sync: queue rows parked as rejected \
-             \"invalid_json_nul\" (rocketship-template, Richards…\n  Progress relay, no action. \
-             Full event: inbox_poll notification_id=4196665"
+            "◦ cas-f9b7 started by tender-phoenix-59\n  Cloud sync: queue rows parked as rejected \
+             \"invalid_json_nul\"…\n  no action · full event: inbox_poll \
+             notification_id=4196665"
         );
         assert!(
             crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(
@@ -2267,10 +2273,9 @@ mod tests {
         let peer = supervisor_row(4196667, "tender-phoenix-59", &copy, worker);
         assert_eq!(
             compact_routine_supervisor_body(&peer).unwrap(),
-            "⇄ tender-phoenix-59 → swift-panther-65 · collision warning: \"cas-f9b7 assesses \
-             Accounting retained dependencies read-only alongside rocketship…\"\n  Peer copy; \
-             swift-panther-65 has it, no action. Full text: inbox_poll \
-             notification_id=4196667"
+            "⇄ tender-phoenix-59 → swift-panther-65 · collision warning\n  \"cas-f9b7 assesses \
+             Accounting retained dependencies read-only alongside…\"\n  no action · full text: \
+             inbox_poll notification_id=4196667"
         );
     }
 

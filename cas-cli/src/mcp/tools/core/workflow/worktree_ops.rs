@@ -3643,7 +3643,10 @@ impl CasCore {
 
         // Inspect the delivery range before Git changes the target. Never poll
         // for unfinished CI or let a docs-only tip mask earlier code.
-        let branch_ci_lookup = lookup_branch_ci(&worktree.branch, &worktree.parent_branch, &cwd);
+        let ci_source = remote_source.as_ref()
+            .map(|source| source.anchor.as_str())
+            .unwrap_or(worktree.branch.as_str());
+        let branch_ci_lookup = lookup_branch_ci(ci_source, &worktree.parent_branch, &cwd);
         let ci_prefix = describe_branch_ci_lookup(&worktree.branch, &branch_ci_lookup);
         let branch_ci_state = branch_ci_lookup.state;
         // cas-fd0a: CI state alone admits the merge; the daemon's red-epic
@@ -3738,7 +3741,9 @@ impl CasCore {
         };
         let observed_source_tip = transactional_delivery
             .is_none()
-            .then(|| manager.git().resolve_commit(&worktree.branch))
+            .then(|| remote_source.as_ref()
+                .map(|source| source.anchor.clone())
+                .or_else(|| manager.git().resolve_commit(&worktree.branch)))
             .flatten();
 
         // Carries the target-sync line from inside the merge branch out to the

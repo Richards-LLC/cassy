@@ -5951,12 +5951,13 @@ impl CasService {
                     self_id.as_deref(),
                 ));
             }
-            let report = crate::cloud::peers_detail::discover_peer_report(
+            let mut report = crate::cloud::peers_detail::discover_peer_report(
                 &cas_root,
                 self_id.as_deref(),
                 req.detail.unwrap_or(false),
                 req.peer.as_deref(),
             )?;
+            report.activation = crate::cloud::activation::observe(&cas_root, self_id.as_deref());
             if req.json.unwrap_or(false) {
                 serde_json::to_string_pretty(&report)
                     .map_err(|error| crate::error::CasError::Other(error.to_string()))

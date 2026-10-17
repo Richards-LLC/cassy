@@ -169,6 +169,7 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
         limitations: Vec::new(),
         observed_at: Utc::now(),
         cloud_presence: None,
+        activation: None,
         cloud_presence_message: String::new(),
         mailbox_status: String::new(),
         epic_splits: Vec::new(),
@@ -258,6 +259,7 @@ fn cas_559c_missing_account_identity_never_means_zero_claims() {
         limitations: Vec::new(),
         observed_at: Utc::now(),
         cloud_presence: None,
+        activation: None,
         cloud_presence_message: String::new(),
         mailbox_status: String::new(),
         epic_splits: Vec::new(),
@@ -361,6 +363,7 @@ fn cas_a81c_claim_copy_uses_scoped_plain_ids_owner_names_and_missing_title_reaso
         limitations: Vec::new(),
         observed_at: Utc::now(),
         cloud_presence: None,
+        activation: None,
         cloud_presence_message: String::new(),
         mailbox_status: String::new(),
         epic_splits: Vec::new(),
@@ -728,7 +731,8 @@ async fn cas_cd42_unavailable_cloud_sections_keep_observation_time_and_no_regist
         }
         .save_to_cas_dir(&root)
         .unwrap();
-        let report = discover_peer_report(&root, Some("viewer"), true, None).unwrap();
+        let mut report = discover_peer_report(&root, Some("viewer"), true, None).unwrap();
+        report.activation = super::super::activation::observe(&root, Some("viewer"));
         assert!(
             crate::store::open_agent_store(&root)
                 .unwrap()

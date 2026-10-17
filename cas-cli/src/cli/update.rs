@@ -343,7 +343,8 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         WorkerUpdatePlan::Unrestricted => {}
         WorkerUpdatePlan::Refuse(message) => anyhow::bail!(message),
         WorkerUpdatePlan::SyncWorktree(worktree) => {
-            return sync_claude_files_into(cli, cas_root, Some(&worktree)).map(|_| ());
+            return sync_claude_files_into(cli, cas_root, Some(&worktree))
+                .and_then(check_managed_commit);
         }
     }
 
@@ -380,7 +381,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     // Handle sync-only mode (just sync .claude/.codex files)
     if args.sync {
-        return sync_claude_files(cli, cas_root).map(|_| ());
+        return sync_claude_files(cli, cas_root).and_then(check_managed_commit);
     }
 
     // Handle schema-only mode
@@ -2046,6 +2047,14 @@ fn run_project_phase(
     }
 }
 
+// Deliberate staging remains inspectable; an attempted commit failure is an error.
+fn check_managed_commit(report: crate::cli::project_files::Report) -> anyhow::Result<()> {
+    if let Some(error) = report.commit_error {
+        anyhow::bail!(error);
+    }
+    Ok(())
+}
+
 // Preserve the managed-file verdict through the compact sweep. In particular,
 // a skipped writer must never become an OK skills phase with its warning hidden.
 fn refresh_project_files(cli: &Cli, cas_root: &Path, dry_run: bool) -> ProjectPhase {
@@ -2054,6 +2063,9 @@ fn refresh_project_files(cli: &Cli, cas_root: &Path, dry_run: bool) -> ProjectPh
     }
     match sync_claude_files(cli, Some(cas_root)) {
         Err(error) => ProjectPhase::Failed(format!("skills: {error:#}")),
+        Ok(report) if report.commit_error.is_some() => {
+            ProjectPhase::Failed(report.commit_error.unwrap())
+        }
         Ok(report) if !report.conflicts.is_empty() => ProjectPhase::Warning(format!(
             "{} managed file conflict(s); run `cas update --sync --json`",
             report.conflicts.len()
@@ -4916,7 +4928,9 @@ fn report_managed_files(
     if cli.json {
         println!("{}", serde_json::json!({"managed_files": report}));
     } else {
-        let message = if !report.conflicts.is_empty() {
+        let message = if let Some(error) = &report.commit_error {
+            error.clone()
+        } else if !report.conflicts.is_empty() {
             format!(
                 "Managed files: {} conflicts preserved; cas update --sync --json for paths",
                 report.conflicts.len()

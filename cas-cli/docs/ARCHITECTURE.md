@@ -280,6 +280,18 @@ With no other staged work, it makes one dedicated
 `chore(cassy): reconcile managed project files` commit, using a command-scoped
 Cassy author identity. It never pushes. A second update is a no-op.
 
+Normal Git hooks remain authoritative. An attempted managed commit that fails
+returns `outcome: "commit_failed"` and an additive `commit_error` containing Git's
+reason, the active pre-commit hook path when present, and an inspection step.
+It is separate from file-body `conflicts`; successful receipts retain their
+existing shape. The repair remains staged for review. Both supervisor and worker
+`--sync` return an error, and the project sweep reports a failed phase,
+`refresh_status: "refresh_failed"` and a nonzero exit. A supervisor encountering
+a legacy worker guard on the main checkout must review and restore its intended
+hook scope before committing the staged repair; update never bypasses or rewrites
+the guard. Pre-existing user staging still prevents any automatic commit and
+remains a distinct pending-commit warning.
+
 The default update and `--all-projects` share the project refresh loop; `--sync`
 uses the same file repair. The sweep excludes non-Git roots as well as the
 existing temporary/worktree discovery exclusions. Doctor reports one

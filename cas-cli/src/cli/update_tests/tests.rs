@@ -520,6 +520,7 @@ fn project_table_plain_uses_phase_glyphs_and_compact_project_names() {
         membership: ProjectPhase::Ok("2 memberships".to_owned()),
         cloud: ProjectPhase::Failed("timeout".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: Vec::new(),
     }];
 
@@ -551,6 +552,7 @@ fn project_table_phase_headers_are_not_truncated_at_supported_widths() {
         membership: ProjectPhase::Ok("up to date".to_owned()),
         cloud: ProjectPhase::Ok("up to date".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: Vec::new(),
     }];
 
@@ -585,6 +587,7 @@ fn non_ok_phase_details_include_phase_summary_when_capture_is_empty() {
         membership: ProjectPhase::Ok("up to date".to_owned()),
         cloud: ProjectPhase::Warning("12 queued".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: vec![
             (true, String::new()),
             (true, String::new()),
@@ -614,6 +617,7 @@ fn cloud_warning_summary_stays_under_the_non_ok_project_row() {
         membership: ProjectPhase::Ok("up to date".to_owned()),
         cloud: ProjectPhase::Warning("4 queued".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: vec![
             (true, String::new()),
             (true, String::new()),
@@ -1256,6 +1260,7 @@ fn refresh_receipt_records_partial_failure_before_refresh_returns_error() {
         membership: ProjectPhase::Ok("membership".to_owned()),
         cloud: ProjectPhase::Failed("cloud sync: project registration missing".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: Vec::new(),
     }];
     let receipt = project_refresh_receipt_json(
@@ -1980,6 +1985,7 @@ fn skipped_phases_print_no_details_block_snapshot_cas_8030() {
         membership: ProjectPhase::Skipped("not cloud-linked".to_owned()),
         cloud: ProjectPhase::Skipped("not cloud-linked".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: vec![
             (true, "[OK] Migrations current".to_owned()),
             (false, "[SKIP] membership: not cloud-linked".to_owned()),
@@ -1995,6 +2001,7 @@ fn skipped_phases_print_no_details_block_snapshot_cas_8030() {
         membership: ProjectPhase::Ok("2 memberships".to_owned()),
         cloud: ProjectPhase::Ok("synced".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: vec![
             (true, "[OK] Migrations current".to_owned()),
             (false, "[WARN] search index: index busy, retry later".to_owned()),
@@ -2036,6 +2043,7 @@ fn dry_run_planned_phases_keep_their_details_block_cas_937a() {
         membership: ProjectPhase::Skipped("dry run".to_owned()),
         cloud: ProjectPhase::Skipped("dry run".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: vec![(
             false,
             "[DRY RUN] migration: would apply 2 migrations\n".to_owned(),

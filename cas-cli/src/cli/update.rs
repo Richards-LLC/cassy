@@ -356,7 +356,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // successful ordinary `cas update` performs below.
     if args.all_projects {
         let mut steps = UpdateStepTracker::new(1, !cli.json);
-        run_refresh_phase(&mut steps, cli, || {
+        run_refresh_phase(&mut steps, cli, true, || {
             refresh_all_projects(args, cli, cas_root, None, None, None)
         })?;
         return Ok(());
@@ -499,23 +499,31 @@ fn run_full_update(
         return Ok(());
     }
 
+    let hub_proof = hub_restart.clone();
+    let transport_error = hub_restart.transport_error.clone();
+    let refreshed = refresh_after_hub_restart(hub_restart, |error| {
+        run_refresh_phase(&mut steps, cli, false, || refresh(error, &hub_proof))
+    });
+    // cas-be05: one document. The binary's receipt carries the refresh it
+    // led to, as the post-swap path above already does (cas-91ba).
     if cli.json {
+        let refresh = match &refreshed {
+            Ok((report, _)) => report.json_receipt.as_ref(),
+            Err(error) => error
+                .downcast_ref::<RefreshFailed>()
+                .and_then(|failed| failed.0.json_receipt.as_ref()),
+        };
         println!(
             "{}",
             combined_update_receipt(
                 &outcome.version,
                 outcome.updated,
-                None,
-                hub_restart.transport_error.as_deref(),
-                Some(&hub_restart),
+                refresh,
+                transport_error.as_deref(),
+                Some(&hub_proof),
             )
         );
     }
-
-    let hub_proof = hub_restart.clone();
-    let refreshed = refresh_after_hub_restart(hub_restart, |error| {
-        run_refresh_phase(&mut steps, cli, || refresh(error, &hub_proof))
-    });
     if let Err(error) = refreshed {
         // Name the binary's state beside the refresh failure, so a current
         // binary never reads as a failed update.
@@ -746,6 +754,8 @@ struct ProjectRefreshReceipt {
     cloud: ProjectPhase,
     details: String,
     phase_details: Vec<(bool, String)>,
+    /// `--json`: the documents each phase printed, nested into the receipt.
+    documents: Vec<(&'static str, Vec<serde_json::Value>)>,
 }
 
 impl ProjectRefreshReceipt {
@@ -787,6 +797,8 @@ struct RefreshReport {
     sweep: Option<findings::SweepFindings>,
     /// The per-project table and phase output, for `--verbose`.
     verbose_summary: String,
+    /// `--json`: the refresh receipt, printed once by the caller (cas-be05).
+    json_receipt: Option<serde_json::Value>,
 }
 
 impl std::fmt::Debug for RefreshReport {
@@ -1181,6 +1193,44 @@ fn capture_phase<T>(enabled: bool, operation: impl FnOnce() -> T) -> (T, String)
     (operation(), String::new())
 }
 
+/// One phase's output, split for `--json` (cas-be05): every captured line
+/// that is a JSON object is a document the phase printed, nested into the
+/// one final receipt; every other line is a diagnostic and goes to stderr,
+/// so none is lost and none reaches stdout. Human mode keeps the text.
+fn capture_phase_documents<T>(
+    cli: &Cli,
+    operation: impl FnOnce() -> T,
+) -> (T, String, Vec<serde_json::Value>) {
+    let (value, output) = capture_phase(true, operation);
+    if !cli.json {
+        return (value, output, Vec::new());
+    }
+    let (documents, diagnostics) = split_phase_documents(&output);
+    if !diagnostics.is_empty() {
+        let mut err = io::stderr();
+        let _ = err.write_all(diagnostics.as_bytes());
+        let _ = err.flush();
+    }
+    (value, String::new(), documents)
+}
+
+/// JSON-object lines, in order, and everything else.
+fn split_phase_documents(output: &str) -> (Vec<serde_json::Value>, String) {
+    let mut documents = Vec::new();
+    let mut rest = String::new();
+    for line in output.lines() {
+        match serde_json::from_str::<serde_json::Value>(line.trim()) {
+            Ok(value @ serde_json::Value::Object(_)) => documents.push(value),
+            _ if line.trim().is_empty() => {}
+            _ => {
+                rest.push_str(line);
+                rest.push('\n');
+            }
+        }
+    }
+    (documents, rest)
+}
+
 #[cfg(unix)]
 struct OutputCapture {
     stdout_backup: RawFd,
@@ -1291,7 +1341,7 @@ fn refresh_all_projects_with_user_refresh(
     // Account registrations must converge before project proxies choose their
     // bearer. Keep this phase advisory and run it once for the whole update.
     live::set_activity("user-level store");
-    let (user_level, user_details) = capture_phase(!cli.json, user_refresh);
+    let (user_level, user_details, user_documents) = capture_phase_documents(cli, user_refresh);
 
     let names = findings::display_names(discovery.projects.iter().map(PathBuf::as_path));
     for (index, project) in discovery.projects.iter().enumerate() {
@@ -1304,16 +1354,18 @@ fn refresh_all_projects_with_user_refresh(
         let project = project.clone();
         let cas_root = project.join(".cas");
         let mut details = String::new();
+        let mut documents: Vec<(&'static str, Vec<serde_json::Value>)> = Vec::new();
 
         // Run each phase independently. A malformed database must be visible
         // in the receipt, but must not leave another project stale.
-        let (migration, output) = capture_phase(!cli.json, || {
+        let (migration, output, docs) = capture_phase_documents(cli, || {
             let phase = run_project_phase("migration", args.dry_run, || {
                 run_schema_migrations(args, cli, Some(&cas_root))
             });
             name_store_lock_holders(phase, &cas_root)
         });
         details.push_str(&output);
+        documents.push(("migration", docs));
         let mut phase_details = vec![(migration.is_ok(), output)];
 
         // cas-91a3 / cas-3af4: every later phase reads this project's store
@@ -1334,25 +1386,29 @@ fn refresh_all_projects_with_user_refresh(
             }
             (skipped(), skipped(), skipped(), skipped())
         } else {
-            let (search_index, output) = capture_phase(!cli.json, || {
+            let (search_index, output, docs) = capture_phase_documents(cli, || {
                 repair_project_search_index(&cas_root, args.dry_run, cli)
             });
             details.push_str(&output);
+            documents.push(("search_index", docs));
             phase_details.push((search_index.is_ok(), output));
-            let (skills, output) = capture_phase(!cli.json, || {
+            let (skills, output, docs) = capture_phase_documents(cli, || {
                 refresh_project_files(cli, &cas_root, args.dry_run)
             });
             details.push_str(&output);
+            documents.push(("skills", docs));
             phase_details.push((skills.is_ok(), output));
-            let (membership, output) = capture_phase(!cli.json, || {
+            let (membership, output, docs) = capture_phase_documents(cli, || {
                 refresh_project_membership(&cas_root, args.dry_run)
             });
             details.push_str(&output);
+            documents.push(("membership", docs));
             phase_details.push((membership.is_ok(), output));
-            let ((cloud, _summaries), output) = capture_phase(!cli.json, || {
+            let ((cloud, _summaries), output, docs) = capture_phase_documents(cli, || {
                 sync_project_cloud(&cas_root, args.dry_run, cli)
             });
             details.push_str(&output);
+            documents.push(("cloud_sync", docs));
             phase_details.push((cloud.is_ok(), output));
             (search_index, skills, membership, cloud)
         };
@@ -1375,6 +1431,7 @@ fn refresh_all_projects_with_user_refresh(
             cloud,
             details,
             phase_details,
+            documents,
         });
     }
 
@@ -1385,6 +1442,7 @@ fn refresh_all_projects_with_user_refresh(
             receipts,
             user_level,
             user_details,
+            user_documents,
             skipped_unregistered: discovery.skipped_unregistered,
         },
         hub_transport_error,
@@ -1399,6 +1457,8 @@ struct RefreshResults {
     receipts: Vec<ProjectRefreshReceipt>,
     user_level: ProjectPhase,
     user_details: String,
+    /// `--json`: what the user-level phase printed, nested into the receipt.
+    user_documents: Vec<serde_json::Value>,
     skipped_unregistered: Vec<SkippedProject>,
 }
 
@@ -1417,27 +1477,12 @@ fn finish_project_refresh(
         receipts,
         user_level,
         user_details,
+        user_documents,
         skipped_unregistered,
     } = results;
-    if cli.json {
-        println!(
-            "{}",
-            with_first_launch_ms(
-                project_refresh_receipt_json(
-                    &receipts,
-                    &user_level,
-                    &skipped_unregistered,
-                    hub_transport_error,
-                    hub_restart,
-                ),
-                first_launch_ms,
-            )
-        );
-    }
-
     let failed_count = receipts.iter().filter(|receipt| receipt.failed()).count()
         + usize::from(user_level.failed());
-    let receipt = with_first_launch_ms(
+    let mut receipt = with_first_launch_ms(
         project_refresh_receipt_json(
             &receipts,
             &user_level,
@@ -1447,6 +1492,14 @@ fn finish_project_refresh(
         ),
         first_launch_ms,
     );
+    // cas-be05: what the user-level phase printed, by kind.
+    if !user_documents.is_empty() {
+        let (migration, builtins): (Vec<_>, Vec<_>) = user_documents
+            .into_iter()
+            .partition(|document| document.get("schema_status").is_some());
+        receipt["user_level_store"]["phase_documents"] =
+            serde_json::json!({ "migration": migration, "builtins": builtins });
+    }
     if let Some(path) = &args.refresh_receipt {
         write_refresh_receipt(path, &receipt)?;
     }
@@ -1477,6 +1530,7 @@ fn finish_project_refresh(
         )
     };
     let report = RefreshReport {
+        json_receipt: cli.json.then(|| receipt.clone()),
         project_count: receipts.len(),
         failed_count,
         failed_projects: receipts.iter().filter(|receipt| receipt.failed()).count(),
@@ -1590,6 +1644,7 @@ fn refresh_phase_result(result: &anyhow::Result<RefreshReport>) -> live::PhaseRe
 fn run_refresh_phase(
     steps: &mut UpdateStepTracker,
     cli: &Cli,
+    print_json: bool,
     refresh: impl FnOnce() -> anyhow::Result<RefreshReport>,
 ) -> anyhow::Result<RefreshReport> {
     let result = steps.phase(
@@ -1600,12 +1655,15 @@ fn run_refresh_phase(
         refresh_phase_result,
         |_, output| output.to_owned(),
     );
-    if !cli.json
-        && let Some(report) = refresh_report(&result)
-    {
-        let mut out = io::stdout();
-        let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-        print_sweep(&mut fmt, report, cli.verbose)?;
+    if let Some(report) = refresh_report(&result) {
+        if !cli.json {
+            let mut out = io::stdout();
+            let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+            print_sweep(&mut fmt, report, cli.verbose)?;
+        } else if print_json && let Some(receipt) = &report.json_receipt {
+            // cas-be05: the one document `--json` prints, failed or not.
+            println!("{receipt}");
+        }
     }
     result
 }
@@ -2084,6 +2142,19 @@ fn project_refresh_receipt_json(
                 "membership": receipt.membership.summary(),
                 "cloud_sync": receipt.cloud.summary(),
             })
+        })
+        .zip(receipts)
+        .map(|(mut project, receipt)| {
+            // cas-be05: under --json, what each phase printed, by phase.
+            if receipt.documents.iter().any(|(_, documents)| !documents.is_empty()) {
+                project["phase_documents"] = receipt
+                    .documents
+                    .iter()
+                    .map(|(phase, documents)| ((*phase).to_owned(), serde_json::json!(documents)))
+                    .collect::<serde_json::Map<_, _>>()
+                    .into();
+            }
+            project
         })
         .collect::<Vec<_>>();
     let mut receipt = serde_json::json!({
@@ -3972,7 +4043,7 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
     let mut steps = UpdateStepTracker::resuming(1, 2, !cli.json);
     let hub_proof = hub_restart.clone();
     refresh_after_hub_restart(hub_restart, |error| {
-        run_refresh_phase(&mut steps, cli, || {
+        run_refresh_phase(&mut steps, cli, true, || {
             refresh_all_projects(
                 args,
                 cli,

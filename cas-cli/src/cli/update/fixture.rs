@@ -205,6 +205,7 @@ pub(super) fn render(path: &Path, args: &UpdateArgs, cli: &Cli) -> anyhow::Resul
                     receipts,
                     user_level,
                     user_details: fixture.user_output.clone(),
+                    user_documents: Vec::new(),
                     skipped_unregistered,
                 },
                 error,
@@ -240,6 +241,7 @@ fn receipt(project: &ProjectFixture) -> anyhow::Result<ProjectRefreshReceipt> {
         cloud,
         details,
         phase_details,
+        documents: Vec::new(),
     })
 }
 

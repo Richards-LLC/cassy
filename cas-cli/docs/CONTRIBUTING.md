@@ -1485,14 +1485,24 @@ after confirming no Cargo process is running and no cache lease is held. It was
 Never silently adopt or delete an unknown cache to bypass the liveness check.
 
 Durable task evidence has a separate cleanup opt-in: `gc_cleanup force=true
-dry_run=false` reaps processes and eligible caches while preserving artifacts.
-Deleting task artifact directories additionally requires `artifacts=true`.
+dry_run=false` reaps processes and eligible caches. It also removes only
+`trace.zip` and `.webm` recordings under the project's artifact namespace when
+the owning task is closed for at least 24 hours. Missing close dates, open tasks,
+unknown task directories and symlinks are preserved; screenshots, ledgers and
+JSON/Markdown receipts stay in place. The cleanup reports files and bytes reclaimed.
+Deleting whole task artifact directories additionally requires `artifacts=true`.
 Only tasks closed at least seven days ago are eligible; missing close dates,
 references from open tasks or tasks updated within seven days (including notes),
 and unavailable reference evidence preserve artifacts. References may name the
 task/path or a published artifact ID or durable URL. Unknown directories and
 ambiguous legacy artifact roots remain review-only. Orphan cleanup reaps a
 private process group or fingerprinted descendants, preserving shared groups.
+
+`cas worktree sweep` fetches origin before judging merge ancestry, prints the
+comparison ref and commit, and preserves worktrees when fetching fails. Repos
+without origin use a verified local default branch. `gc_report` also inventories
+checkouts directly under `.cas/` or `.cas/worktrees/` whose `.git` file points at
+a missing Git directory. Review these for uncommitted work before manual removal.
 
 Lane compile previews carry provenance and a lifetime owner lock.
 Previews are direct children of `.cas/worktrees` so the existing private target

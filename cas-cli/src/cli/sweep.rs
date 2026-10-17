@@ -110,6 +110,9 @@ fn print_repo(report: &RepoSweepReport, _opts: SweepOptions) {
         println!("  ! {err}");
         return;
     }
+    if let Some((reference, commit)) = &report.comparison {
+        println!("  Compared with {reference} ({commit})");
+    }
     if report.worktrees.is_empty() {
         println!("  (no factory worktrees)");
         return;

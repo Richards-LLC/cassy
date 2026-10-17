@@ -30837,24 +30837,24 @@ esac
     fn renamed_delivery_file_keeps_its_content_cas_90d8() {
         let dir = init_factory_repo("worker");
         let p = dir.path();
-        let draft = "docs/release-notes/2026-10-16-v3.61.0-slack.md";
-        let published = "docs/release-notes/2026-10-17-v3.61.0-slack.md";
+        let draft = "docs/release-notes/2026-10-16-v9.99.0-slack.md";
+        let published = "docs/release-notes/2026-10-17-v9.99.0-slack.md";
         let body = |date: &str| {
             format!(
-                "# Cassy v3.61.0\n\nRelease date: {date}\n\n- Close gate measures merge tips.\n- Worker checks reuse seeded targets.\n- Slack threads post in order.\n- Commander shows supervisor updates.\n"
+                "# Cassy v9.99.0\n\nRelease date: {date}\n\n- Close gate measures merge tips.\n- Worker checks reuse seeded targets.\n- Slack threads post in order.\n- Commander shows supervisor updates.\n"
             )
         };
         std::fs::create_dir_all(p.join("docs/release-notes")).unwrap();
         std::fs::write(p.join(draft), body("2026-10-16")).unwrap();
         git(p, &["add", "."]);
-        git(p, &["commit", "-qm", "cas-test1: draft v3.61.0 release notes"]);
+        git(p, &["commit", "-qm", "cas-test1: draft v9.99.0 release notes"]);
         git(p, &["checkout", "-q", "main"]);
         git(p, &["merge", "--no-ff", "factory/worker", "-m", "Merge branch 'factory/worker'"]);
         let anchor = head_sha(p);
         git(p, &["mv", draft, published]);
         std::fs::write(p.join(published), body("2026-10-17")).unwrap();
         git(p, &["add", "."]);
-        git(p, &["commit", "-qm", "release: v3.61.0"]);
+        git(p, &["commit", "-qm", "release: v9.99.0"]);
 
         let mut task = worker_task("worker");
         task.status = TaskStatus::AwaitingMerge;

@@ -81,7 +81,9 @@ impl CloudCoordinationPort for FixtureCloud {
                 assert_eq!(ack["lease_token"], "0001ea5e-1111-4111-8111-00000001ea5e");
                 assert_eq!(ack["delivery_generation"], 1);
                 self.push(format!("ack {} {}", ack["delivery_id"].as_str().unwrap(), ack["outcome"].as_str().unwrap()));
-                results.push(fixture(ACK, "durable admission")["results"][0].clone());
+                let mut result = fixture(ACK, "durable admission")["results"][0].clone();
+                result["delivery_id"] = ack["delivery_id"].clone(); // cas-b94d: multi-delivery claims
+                results.push(result);
             }
             let mut response = fixture(ACK, "durable admission");
             response["results"] = Value::Array(results);

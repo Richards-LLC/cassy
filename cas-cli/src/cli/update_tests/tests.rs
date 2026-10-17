@@ -732,10 +732,7 @@ fn make_project(root: &Path) {
     std::fs::write(cas_root.join("cas.db"), b"").expect("create fixture store");
     std::fs::write(
         cas_root.join("config.toml"),
-        format!(
-            "[project]\ncanonical_id = {:?}\n",
-            root.file_name().unwrap().to_string_lossy()
-        ),
+        format!("[project]\ncanonical_id = {:?}\n", root.file_name().unwrap().to_string_lossy()),
     )
     .expect("pin fixture identity");
 }
@@ -960,23 +957,17 @@ fn refresh_receipt_names_each_skipped_project_and_why_it_was_not_refreshed() {
         &ProjectPhase::Ok("up to date".to_string()),
         &[SkippedProject {
             project: PathBuf::from("/tmp/container-copy"),
-            reason: "its .cas has no [project] canonical_id pin and no git origin remote"
-                .to_string(),
+            reason: "its .cas has no [project] canonical_id pin and no git origin remote".to_string(),
         }],
         None,
         None,
     );
 
-    assert_eq!(
-        receipt["skipped_unregistered"][0]["project"],
-        "/tmp/container-copy"
-    );
-    assert!(
-        receipt["skipped_unregistered"][0]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("no git origin remote")
-    );
+    assert_eq!(receipt["skipped_unregistered"][0]["project"], "/tmp/container-copy");
+    assert!(receipt["skipped_unregistered"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("no git origin remote"));
 }
 
 #[test]
@@ -1447,10 +1438,7 @@ fn update_receipt_proves_the_hub_version_transition_and_manager() {
     assert_eq!(receipt["hub_restart"]["action"], "restarted");
     assert_eq!(receipt["hub_restart"]["verified"], true);
     assert_eq!(receipt["hub_restart"]["transport_verified"], true);
-    assert_eq!(
-        receipt["hub_restart"]["public_url"],
-        "https://hub.tail.ts.net/"
-    );
+    assert_eq!(receipt["hub_restart"]["public_url"], "https://hub.tail.ts.net/");
 }
 
 #[test]
@@ -1470,10 +1458,7 @@ fn failed_serve_publication_still_refreshes_projects_and_reports_update_error() 
     )
     .expect("a transport warning must not prevent refresh");
 
-    assert!(
-        refreshed,
-        "project refresh must continue after Serve failure"
-    );
+    assert!(refreshed, "project refresh must continue after Serve failure");
     let receipt = combined_update_receipt(
         "3.15.2",
         false,
@@ -1513,10 +1498,7 @@ fn failed_serve_publication_still_refreshes_projects_and_reports_update_error() 
     };
     let banner = render_plain_at(160, |fmt| print_sweep(fmt, &report, false));
     assert!(banner.contains("[ERROR] hub"), "{banner}");
-    assert!(
-        banner.contains("cas hub restart --tailscale-serve"),
-        "{banner}"
-    );
+    assert!(banner.contains("cas hub restart --tailscale-serve"), "{banner}");
 }
 
 #[cfg(unix)]
@@ -1533,10 +1515,7 @@ fn post_swap_refresh_rejects_a_child_reporting_a_different_version() {
     let error = run_post_swap_refresh(&installed_binary, "3.15.0", "3.15.2", true)
         .expect_err("a refresh performed by the wrong version must not read as converged");
     let message = format!("{error:#}");
-    assert!(
-        message.contains("3.15.1") && message.contains("3.15.2"),
-        "{message}"
-    );
+    assert!(message.contains("3.15.1") && message.contains("3.15.2"), "{message}");
     assert!(message.contains("cas update"), "{message}");
 }
 
@@ -1563,10 +1542,7 @@ fn reported_version_is_the_semver_not_the_build_date() {
         parse_reported_version("cas 2.27.0 (9b52e17-dirty 2026-07-16)\n").as_deref(),
         Some("2.27.0")
     );
-    assert_eq!(
-        parse_reported_version("cas 3.15.5\n").as_deref(),
-        Some("3.15.5")
-    );
+    assert_eq!(parse_reported_version("cas 3.15.5\n").as_deref(), Some("3.15.5"));
     assert_eq!(parse_reported_version("v3.15.5").as_deref(), Some("3.15.5"));
     assert_eq!(
         parse_reported_version("cas 9.99.0-rc.1 (a94b6ac 2026-09-04)").as_deref(),
@@ -1603,10 +1579,7 @@ fn post_swap_refresh_accepts_the_real_version_line_and_still_rejects_a_stale_bin
     let error = run_post_swap_refresh(&stale_binary, "3.15.4", "3.15.5", false)
         .expect_err("a refresh performed by the wrong version must not read as converged");
     let message = format!("{error:#}");
-    assert!(
-        message.contains("3.15.4") && message.contains("3.15.5"),
-        "{message}"
-    );
+    assert!(message.contains("3.15.4") && message.contains("3.15.5"), "{message}");
 }
 
 #[test]
@@ -1803,14 +1776,8 @@ fn check_report_leads_with_the_verdict_and_names_one_remedy() {
         clean.starts_with("[OK] up to date · Cassy 3.17.2 · schema v254\n"),
         "{clean}"
     );
-    assert!(
-        clean.contains("Binary    3.17.2 installed · 3.17.2 latest"),
-        "{clean}"
-    );
-    assert!(
-        clean.contains("Schema    v254 applied · v254 latest"),
-        "{clean}"
-    );
+    assert!(clean.contains("Binary    3.17.2 installed · 3.17.2 latest"), "{clean}");
+    assert!(clean.contains("Schema    v254 applied · v254 latest"), "{clean}");
     assert!(!clean.contains("→"), "nothing to do, no remedy: {clean}");
 
     let pending = render_plain_at(80, |fmt| {
@@ -1825,14 +1792,13 @@ fn check_report_leads_with_the_verdict_and_names_one_remedy() {
         )
     });
     assert!(
-        pending.starts_with("[WARN] update available · 3.17.2 → 9.99.7 · 2 migrations pending\n"),
+        pending.starts_with(
+            "[WARN] update available · 3.17.2 → 9.99.7 · 2 migrations pending\n"
+        ),
         "{pending}"
     );
     assert!(pending.contains("  → cas update\n"), "{pending}");
-    assert!(
-        pending.contains("cas update --dry-run previews the 2 pending"),
-        "{pending}"
-    );
+    assert!(pending.contains("cas update --dry-run previews the 2 pending"), "{pending}");
 
     let uninitialized = render_plain_at(80, |fmt| {
         render_check_report(
@@ -1845,15 +1811,8 @@ fn check_report_leads_with_the_verdict_and_names_one_remedy() {
             },
         )
     });
-    assert!(
-        uninitialized.contains("no Cassy store in this directory"),
-        "{uninitialized}"
-    );
-    for line in clean
-        .lines()
-        .chain(pending.lines())
-        .chain(uninitialized.lines())
-    {
+    assert!(uninitialized.contains("no Cassy store in this directory"), "{uninitialized}");
+    for line in clean.lines().chain(pending.lines()).chain(uninitialized.lines()) {
         assert!(line.chars().count() <= 80, "overflow: {line:?}");
     }
 }
@@ -1868,10 +1827,7 @@ fn refresh_phase_result_counts_projects_and_receipt_keeps_count_grammar() {
         ..Default::default()
     };
     let clean = refresh_phase_result(&Ok(report));
-    assert_eq!(
-        (clean.verdict, clean.text.as_str()),
-        (Verdict::Ok, "all 2 refreshed")
-    );
+    assert_eq!((clean.verdict, clean.text.as_str()), (Verdict::Ok, "all 2 refreshed"));
 
     // cas-0aa5 QA F02: a failed user-level store is host state, never one
     // of the projects in "N of M".
@@ -1984,13 +1940,7 @@ fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() 
         results[1].starts_with("[ERROR] [2/2] Projects 2 of 12 failed · 4 warnings · 1 skipped"),
         "{output}"
     );
-    assert_eq!(
-        output
-            .matches("recheck writers, remove only this lock")
-            .count(),
-        2,
-        "{output}"
-    );
+    assert_eq!(output.matches("recheck writers, remove only this lock").count(), 2, "{output}");
     // cas-0aa5 QA F01: the reason-specific next step (cas-7c6b) is the
     // remedy, never the blanket retry it overrides.
     assert!(
@@ -2009,10 +1959,7 @@ fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() 
             "raw phase output {raw:?} leaked:\n{output}"
         );
     }
-    assert!(
-        output.lines().all(|line| line.chars().count() <= 80),
-        "{output}"
-    );
+    assert!(output.lines().all(|line| line.chars().count() <= 80), "{output}");
 }
 
 #[test]
@@ -2081,8 +2028,7 @@ fn worker_update_is_scoped_to_its_own_worktree_cas_49c0() {
     ] {
         match worker_update_plan(Some("worker"), Some(worktree), mode) {
             WorkerUpdatePlan::Refuse(message) => assert!(
-                message.contains("cas update --sync")
-                    && message.contains(&worktree.display().to_string()),
+                message.contains("cas update --sync") && message.contains(&worktree.display().to_string()),
                 "{mode:?}: {message}"
             ),
             other => panic!("{mode:?} must be refused for a worker: {other:?}"),
@@ -2090,10 +2036,7 @@ fn worker_update_is_scoped_to_its_own_worktree_cas_49c0() {
     }
     // Read-only and post-swap runs stay available.
     for mode in [UpdateMode::Check, UpdateMode::PostSwap] {
-        assert_eq!(
-            worker_update_plan(Some("worker"), Some(worktree), mode),
-            WorkerUpdatePlan::Unrestricted
-        );
+        assert_eq!(worker_update_plan(Some("worker"), Some(worktree), mode), WorkerUpdatePlan::Unrestricted);
     }
     // A worker with no bound worktree cannot be scoped: refuse --sync too.
     assert!(matches!(
@@ -2103,10 +2046,7 @@ fn worker_update_is_scoped_to_its_own_worktree_cas_49c0() {
     // The supervisor and an operator shell are unaffected.
     for role in [None, Some("supervisor"), Some("")] {
         for mode in [UpdateMode::Sync, UpdateMode::AllProjects, UpdateMode::Full] {
-            assert_eq!(
-                worker_update_plan(role, Some(worktree), mode),
-                WorkerUpdatePlan::Unrestricted
-            );
+            assert_eq!(worker_update_plan(role, Some(worktree), mode), WorkerUpdatePlan::Unrestricted);
         }
     }
 }
@@ -2204,9 +2144,7 @@ fn dry_run_planned_phases_keep_their_details_block_cas_937a() {
         false,
     );
     assert!(
-        compact.contains(
-            "  projects/first details:\n    [DRY RUN] migration: would apply 2 migrations"
-        ),
+        compact.contains("  projects/first details:\n    [DRY RUN] migration: would apply 2 migrations"),
         "a dry run says so in the compact view:\n{compact}"
     );
 }
@@ -2223,22 +2161,10 @@ fn update_names_what_happens_to_running_factories_cas_cef2() {
         "9.99.1",
     )
     .expect("running sessions get a notice");
-    assert!(
-        notice.contains("2 running factory session(s) keep their current build"),
-        "{notice}"
-    );
-    assert!(
-        notice.contains("pinned-session keep spawning workers"),
-        "{notice}"
-    );
-    assert!(
-        notice.contains("older-session started before build pinning and cannot spawn"),
-        "{notice}"
-    );
-    assert!(
-        notice.contains("9.99.1") && notice.contains("cas factory kill <session>"),
-        "{notice}"
-    );
+    assert!(notice.contains("2 running factory session(s) keep their current build"), "{notice}");
+    assert!(notice.contains("pinned-session keep spawning workers"), "{notice}");
+    assert!(notice.contains("older-session started before build pinning and cannot spawn"), "{notice}");
+    assert!(notice.contains("9.99.1") && notice.contains("cas factory kill <session>"), "{notice}");
 }
 
 // One real Git repo carries the seven downstream drift shapes from cas-6718.
@@ -2378,11 +2304,7 @@ fn skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b() {
                 )
                 .output()
                 .unwrap();
-            assert!(
-                output.status.success(),
-                "{case}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            assert!(output.status.success(), "{case}: {}", String::from_utf8_lossy(&output.stderr));
             crate::test_child::assert_passed(&String::from_utf8_lossy(&output.stdout), test);
             continue;
         }
@@ -2402,18 +2324,9 @@ fn skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b() {
         let ProjectPhase::Failed(finding) = phase else {
             panic!("{case}: locked skills refresh must fail: {phase:?}");
         };
-        assert!(
-            finding.contains(&format!("git index lock {expected}")),
-            "{case}: {finding}"
-        );
-        assert!(
-            finding.contains(".git/index.lock") && finding.contains("age "),
-            "{finding}"
-        );
-        assert!(
-            finding.contains("retry") && !finding.contains("Another git process"),
-            "{finding}"
-        );
+        assert!(finding.contains(&format!("git index lock {expected}")), "{case}: {finding}");
+        assert!(finding.contains(".git/index.lock") && finding.contains("age "), "{finding}");
+        assert!(finding.contains("retry") && !finding.contains("Another git process"), "{finding}");
         assert_eq!(finding.contains("remove"), case == "abandoned", "{finding}");
         assert!(lock_path.exists(), "update must never remove the lock");
         assert_eq!(std::fs::read(project.join(".git/index")).unwrap(), index);
@@ -2845,10 +2758,7 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
     for dir in [&root, &host, &global] {
         let raw = std::fs::read_to_string(dir.join("config.toml")).unwrap();
         let parsed: toml::Value = toml::from_str(&raw).unwrap();
-        assert!(
-            parsed["factory"].get("merge_sweep").is_none(),
-            "update must retire the ignored sweep key"
-        );
+        assert!(parsed["factory"].get("merge_sweep").is_none(), "update must retire the ignored sweep key");
         assert!(parsed["factory"].get("merge_sweep_env").is_none());
         assert!(parsed.get("jev").is_none());
         assert!(parsed["code_review"].get("owner").is_none());
@@ -2868,39 +2778,18 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
             assert!(raw.contains(comment), "lost operator comment {comment}");
         }
         let after: crate::config::Config = toml::from_str(&raw).unwrap();
-        assert_eq!(
-            serde_json::to_value(&before).unwrap(),
-            serde_json::to_value(after).unwrap()
-        );
+        assert_eq!(serde_json::to_value(&before).unwrap(), serde_json::to_value(after).unwrap());
     }
-    let backup = receipt["projects"][0]["retired_toml"]["backup"]
-        .as_str()
-        .unwrap();
+    let backup = receipt["projects"][0]["retired_toml"]["backup"].as_str().unwrap();
     assert_eq!(std::fs::read_to_string(backup).unwrap(), legacy);
-    #[cfg(unix)]
-    {
+    #[cfg(unix)] {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(backup).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        assert_eq!(std::fs::metadata(backup).unwrap().permissions().mode() & 0o777, 0o600);
     }
-    let original = std::fs::metadata(root.join("config.toml"))
-        .unwrap()
-        .modified()
-        .unwrap();
+    let original = std::fs::metadata(root.join("config.toml")).unwrap().modified().unwrap();
     run().unwrap();
-    assert_eq!(
-        std::fs::metadata(root.join("config.toml"))
-            .unwrap()
-            .modified()
-            .unwrap(),
-        original
-    );
+    assert_eq!(std::fs::metadata(root.join("config.toml")).unwrap().modified().unwrap(), original);
     let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
-    assert_eq!(
-        receipt["projects"][0]["retired_toml"]["status"],
-        "unchanged"
-    );
+    assert_eq!(receipt["projects"][0]["retired_toml"]["status"], "unchanged");
     assert!(!project.join(".cas/.cas").exists());
 }

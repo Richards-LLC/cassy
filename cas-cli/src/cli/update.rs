@@ -110,9 +110,7 @@ fn report_builtin_sync(
             fmt.success(&format!("{location}: built-ins up to date"))?;
         }
         for file in &result.pruned_files {
-            fmt.write_raw(&format!(
-                "    - {location}/{file} (no longer shipped; removed)"
-            ))?;
+            fmt.write_raw(&format!("    - {location}/{file} (no longer shipped; removed)"))?;
             fmt.newline()?;
         }
 
@@ -564,14 +562,8 @@ fn run_full_update(
     if hub_proof.action == "failed" {
         anyhow::bail!(
             "hub recovery failed after one retry: {}; {}",
-            hub_proof
-                .failure
-                .as_deref()
-                .unwrap_or("unknown verification error"),
-            hub_proof
-                .remedy
-                .as_deref()
-                .unwrap_or("Run `cas hub restart --force`."),
+            hub_proof.failure.as_deref().unwrap_or("unknown verification error"),
+            hub_proof.remedy.as_deref().unwrap_or("Run `cas hub restart --force`."),
         );
     }
 
@@ -630,9 +622,7 @@ fn combined_update_receipt(
         "binary_updated": updated,
         "version": version,
     });
-    if let (Some(target), Some(refresh)) =
-        (receipt.as_object_mut(), refresh.and_then(|r| r.as_object()))
-    {
+    if let (Some(target), Some(refresh)) = (receipt.as_object_mut(), refresh.and_then(|r| r.as_object())) {
         for (key, value) in refresh {
             target.insert(key.clone(), value.clone());
         }
@@ -1486,7 +1476,7 @@ fn refresh_all_projects_with_user_refresh(
     let mut user_roots = BTreeSet::new();
     for root in [
         user_level_store_root(),
-        crate::config::global_cas_dir().ok(),
+        crate::config::global_cas_dir(),
     ]
     .into_iter()
     .flatten()
@@ -1801,9 +1791,7 @@ fn binary_exit_reason(failed: &RefreshFailed, version: &str, updated: bool) -> S
 fn refresh_report(result: &anyhow::Result<RefreshReport>) -> Option<&RefreshReport> {
     match result {
         Ok(report) => Some(report),
-        Err(error) => error
-            .downcast_ref::<RefreshFailed>()
-            .map(|failed| &failed.0),
+        Err(error) => error.downcast_ref::<RefreshFailed>().map(|failed| &failed.0),
     }
 }
 
@@ -1832,11 +1820,7 @@ fn refresh_phase_result(result: &anyhow::Result<RefreshReport>) -> live::PhaseRe
         text.push_str(&format!(
             " · {} {}",
             report.warned_count,
-            if report.warned_count == 1 {
-                "warning"
-            } else {
-                "warnings"
-            }
+            if report.warned_count == 1 { "warning" } else { "warnings" }
         ));
     }
     if report.skipped_unregistered > 0 {
@@ -1896,11 +1880,7 @@ fn print_sweep(fmt: &mut Formatter<'_>, report: &RefreshReport, verbose: bool) -
         fmt.receipt(&line)?;
     }
     if !verbose
-        && (shortened
-            || report
-                .sweep
-                .as_ref()
-                .is_some_and(|sweep| !sweep.findings.is_empty()))
+        && (shortened || report.sweep.as_ref().is_some_and(|sweep| !sweep.findings.is_empty()))
     {
         fmt.write_raw("  ")?;
         fmt.receipt("cas update --verbose shows every project and phase output")?;
@@ -2495,7 +2475,7 @@ fn render_project_refresh_summary(
     // The user-level store is host state, so it gets a named line of its own
     // rather than a project row it would otherwise be miscounted in.
     let _ = writeln!(
-        out,
+            out,
         "  [{}] user-level store: {}",
         user_level.status_label().trim_matches(['[', ']']),
         user_level.detail()
@@ -2665,8 +2645,7 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery 
     let mut keep = BTreeSet::new();
     for project in preferred {
         if crate::store::known_repos::project_inode_key(&project)
-            .is_some_and(|inode| !seen_inodes.insert(inode))
-        {
+            .is_some_and(|inode| !seen_inodes.insert(inode)) {
             unregistered.remove(&project);
             skipped_by_path.insert(project, "duplicate project directory".to_string());
         } else {
@@ -3764,11 +3743,7 @@ fn render_check_report(fmt: &mut Formatter<'_>, view: &CheckView<'_>) -> io::Res
             Verdict::Warning,
             format!(
                 "{pending} {} pending",
-                if pending == 1 {
-                    "migration"
-                } else {
-                    "migrations"
-                }
+                if pending == 1 { "migration" } else { "migrations" }
             ),
             format!(
                 "Cassy {} {dot} schema v{applied} {arrow} v{latest}",
@@ -4317,14 +4292,8 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
     if hub_proof.action == "failed" {
         anyhow::bail!(
             "hub recovery failed after one retry: {}; {}",
-            hub_proof
-                .failure
-                .as_deref()
-                .unwrap_or("unknown verification error"),
-            hub_proof
-                .remedy
-                .as_deref()
-                .unwrap_or("Run `cas hub restart --force`."),
+            hub_proof.failure.as_deref().unwrap_or("unknown verification error"),
+            hub_proof.remedy.as_deref().unwrap_or("Run `cas hub restart --force`."),
         );
     }
     Ok(())
@@ -4684,10 +4653,7 @@ fn refresh_failed_without_receipt(
 /// `<binary> --version` reduced to the bare semver, or None when it cannot be
 /// asked.
 fn reported_binary_version(binary: &Path) -> Option<String> {
-    let output = std::process::Command::new(binary)
-        .arg("--version")
-        .output()
-        .ok()?;
+    let output = std::process::Command::new(binary).arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -4886,11 +4852,7 @@ impl UpdateStepTracker {
             true,
             f,
             |result| live::PhaseResult {
-                verdict: if result.is_ok() {
-                    Verdict::Ok
-                } else {
-                    Verdict::Error
-                },
+                verdict: if result.is_ok() { Verdict::Ok } else { Verdict::Error },
                 text: if result.is_ok() { "done" } else { "failed" }.to_owned(),
             },
             |_, output| output.to_owned(),
@@ -4922,15 +4884,18 @@ impl UpdateStepTracker {
             print_phase_line(None, &counter, label, doing, None)?;
         }
         let (value, output) = if capture {
-            let live_line = animate.then(terminal_handle).flatten().map(|terminal| {
-                live::LiveLine::start(
-                    terminal,
-                    mode,
-                    counter.clone(),
-                    label.to_owned(),
-                    doing.to_owned(),
-                )
-            });
+            let live_line = animate
+                .then(terminal_handle)
+                .flatten()
+                .map(|terminal| {
+                    live::LiveLine::start(
+                        terminal,
+                        mode,
+                        counter.clone(),
+                        label.to_owned(),
+                        doing.to_owned(),
+                    )
+                });
             let (value, output) = capture_phase(true, f);
             if let Some(line) = live_line {
                 line.finish();

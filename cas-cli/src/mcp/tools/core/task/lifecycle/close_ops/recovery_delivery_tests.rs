@@ -457,6 +457,8 @@ async fn recovery_request_changes_start_close_binds_final_tip_cas_c6e1() {
 async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture_with_surface(&mut env, "note.txt", false);
+    let branch = crate::factory_isolation::worker_task_branch(WORKER, TASK);
+    git(&f.worker_path, &["checkout", "-q", "-b", &branch]);
     let cas_dir = f.dir.path().join(".cas");
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = tasks.get(TASK).unwrap();
@@ -486,7 +488,7 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
     let mut corrected = tasks.get(TASK).unwrap();
     assert_eq!(corrected.status, TaskStatus::InProgress);
     corrected.deliverables.factory_branch_anchor = Some(f.final_tip.clone());
-    corrected.deliverables.parked_branch = Some(BRANCH.into());
+    corrected.deliverables.parked_branch = Some(branch.clone());
     tasks.update(&corrected).unwrap();
     f.core
         .cas_task_release(Parameters(crate::mcp::tools::TaskReleaseRequest {
@@ -513,7 +515,7 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
         f.dir.path(),
         &[
             "update-ref",
-            &format!("refs/remotes/origin/{BRANCH}"),
+            &format!("refs/remotes/origin/{branch}"),
             &final_tip,
         ],
     );
@@ -534,7 +536,10 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
     let parked = tasks.get(TASK).unwrap();
     assert!(output.contains("MERGE REQUIRED"), "{output}");
     assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
-    assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
+    assert_eq!(
+        parked.deliverables.parked_branch.as_deref(),
+        Some(branch.as_str())
+    );
     assert_eq!(
         parked.deliverables.factory_branch_anchor.as_deref(),
         Some(final_tip.as_str())
@@ -547,7 +552,7 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
             "merge",
             "-q",
             "--no-ff",
-            BRANCH,
+            &branch,
             "-m",
             "integrate corrected delivery",
         ],
@@ -556,6 +561,28 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
         f.dir.path(),
         &["update-ref", "refs/remotes/origin/main", "main"],
     );
+    let mut user_facing = tasks.get(TASK).unwrap();
+    user_facing.demo_statement = "Read the corrected status".into();
+    tasks.update(&user_facing).unwrap();
+    let qa_output = text(
+        f.core
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: TASK.into(),
+                reason: Some("Delivery integrated; review still required".into()),
+                commit_receipt: Some(final_tip.clone()),
+                supervisor_override: None,
+                stranded_branch_override: None,
+                legacy_bypass_code_review: None,
+                search_manifest: None,
+            }))
+            .await
+            .unwrap(),
+    );
+    assert!(qa_output.contains("INDEPENDENT QA REQUIRED"), "{qa_output}");
+    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
+    let mut task = tasks.get(TASK).unwrap();
+    task.demo_statement.clear();
+    tasks.update(&task).unwrap();
     let output = text(
         f.core
             .cas_task_close(Parameters(TaskCloseRequest {

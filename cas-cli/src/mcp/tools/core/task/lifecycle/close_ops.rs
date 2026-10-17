@@ -6421,13 +6421,21 @@ impl CasCore {
         recorded: &str,
         tip: Option<&str>,
     ) -> bool {
-        let (Some(branch), Some(tip), Some(assignee)) =
-            (measured_branch, tip, task.assignee.as_deref())
-        else {
+        let (Some(branch), Some(tip)) = (measured_branch, tip) else {
             return false;
         };
         let branch = branch.strip_prefix("origin/").unwrap_or(branch);
-        if branch != crate::factory_isolation::worker_task_branch(assignee, &task.id) {
+        let own_task_branch = match task.assignee.as_deref() {
+            Some(assignee) => branch == crate::factory_isolation::worker_task_branch(assignee, &task.id),
+            // A released per-task branch still identifies the task. Keep the
+            // recorded-branch and per-task-shape checks: a plain shared lane
+            // must never advance its prior task's anchor to later work.
+            None => task_delivery_branch_candidates(task).iter().any(|known| known == branch)
+                && branch.strip_prefix("factory/")
+                    .and_then(|name| name.strip_suffix(&format!("-{}", task.id)))
+                    .is_some_and(|holder| !holder.is_empty()),
+        };
+        if !own_task_branch {
             return false;
         }
         let Ok(others) = task_store.list(None) else {

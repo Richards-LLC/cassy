@@ -1369,7 +1369,9 @@ fn refresh_all_projects_with_user_refresh(
     }
     let (mut user_level, user_details) = capture_phase(!cli.json, user_refresh);
     for maintenance in &user_retired_toml {
-        user_level = with_config_retirement(user_level, maintenance);
+        let label = dirs::home_dir().and_then(|home| maintenance.path.strip_prefix(home).ok().map(|path| format!("~/{}", path.display())))
+            .unwrap_or_else(|| maintenance.path.display().to_string());
+        user_level = with_config_retirement(user_level, maintenance, &label);
     }
 
     let names = findings::display_names(discovery.projects.iter().map(PathBuf::as_path));
@@ -1438,7 +1440,7 @@ fn refresh_all_projects_with_user_refresh(
             phase_details.push((cloud.is_ok(), output));
             (search_index, skills, membership, cloud)
         };
-        let skills = with_config_retirement(skills, &retired_toml);
+        let skills = with_config_retirement(skills, &retired_toml, ".cas/config.toml");
 
         // Registration is what makes discovery converge: a project the scan had
         // to find this time is in the registry for every later run, and for
@@ -1484,6 +1486,7 @@ fn refresh_all_projects_with_user_refresh(
 fn with_config_retirement(
     phase: ProjectPhase,
     maintenance: &crate::config::ConfigRetirement,
+    label: &str,
 ) -> ProjectPhase {
     let detail = match maintenance.status {
         "repaired" => format!("{} retired TOML entries removed", maintenance.removed.len()),
@@ -1492,10 +1495,8 @@ fn with_config_retirement(
             maintenance.removed.len()
         ),
         "failed" => format!(
-            "config {}: {}; check `{}` and rerun `cas update`",
-            maintenance.path.display(),
+            "{label}: {}; check `{label}` and rerun `cas update`",
             maintenance.error.as_deref().unwrap_or("cleanup failed"),
-            maintenance.path.display()
         ),
         _ => return phase,
     };

@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- **Merged deliveries close themselves** — Was: after a supervisor merged a
+  parked delivery, its worker had to close it again, and again after an
+  approved verdict. → Now: a delivery merged with green CI is closed by Cassy
+  with the worker's parked close reason once verification approves, and the
+  worker is told once. Red-CI override merges, rejected verdicts and QA-held
+  deliveries still wait, and a worker close racing Cassy's reports the first.
+
 ## [3.61.0] - 2026-10-17
 
 ### Added

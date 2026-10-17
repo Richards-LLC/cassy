@@ -2451,13 +2451,14 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
     env.set("XDG_CONFIG_HOME", host.path().join(".config"));
     env.set("CAS_CREDENTIALS_FILE", host.path().join("credentials.env"));
     #[cfg(unix)]
-    for mode in ["all-projects", "sync"] {
+    for mode in ["all-projects", "sync", "worker-sync"] {
         use std::os::unix::fs::PermissionsExt;
         let fixture_home = host.path().join(mode);
         let project = cas_6718_drifted_project(&fixture_home);
         let root = project.join(".cas");
         env.set("CAS_ROOT", &root);
         env.set("CAS_CLONE_PATH", &project);
+        env.set("CAS_AGENT_ROLE", if mode == "worker-sync" { "worker" } else { "supervisor" });
         env.set("CAS_PROJECT_ROOTS", &fixture_home);
         env.set_current_dir(&project);
         cas_6718_git(&project, &["branch", "-M", "main"]);
@@ -2476,7 +2477,7 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         let config_before = std::fs::read(project.join(".git/config")).unwrap();
         let mut args = update_test_args();
         args.all_projects = mode == "all-projects";
-        args.sync = mode == "sync";
+        args.sync = mode != "all-projects";
         let (result, output) =
             capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
         assert!(

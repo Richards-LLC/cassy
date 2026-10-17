@@ -199,6 +199,65 @@ fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
     );
 }
 
+/// A worker waiting on its own pushed CI is not stalled, even if repeated
+/// idle episodes arrive while the task is still in progress.
+#[test]
+fn cas_83e1_in_progress_delivery_waits_for_its_pushed_tip_ci() {
+    let mut f = Fixture::new();
+    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+    let mut task = store.get("cas-9efb-test").unwrap();
+    task.status = TaskStatus::InProgress;
+    store.update(&task).unwrap();
+    assert!(crate::store::open_agent_store(&f.app.cas_dir).unwrap()
+        .try_claim(&task.id, "merge-w", 600, None).unwrap().is_success());
+    let DirectorEvent::WorkerIdle { active_task: Some(active), .. } = &mut f.event else {
+        panic!("fixture must carry the active delivery");
+    };
+    active.task_status = TaskStatus::InProgress;
+    active.close_rejected_reason = None;
+    // A real terminal turn in this fixture's own account makes liveness idle.
+    // Without it the generic liveness gate suppresses the relay before CI is read.
+    let account = f.app.cas_dir.join("worker-account");
+    let sessions = account.join("sessions/2026/10/17");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let session = "019f84af-3121-7950-ba14-b01db2dad6c7";
+    let clone = f.repo.path().canonicalize().unwrap();
+    let meta = serde_json::json!({"timestamp":"2026-10-17T19:00:00Z", "type":"session_meta",
+        "payload":{"session_id":session, "cwd":clone, "originator":"codex-tui", "source":"cli"}});
+    let done = serde_json::json!({"timestamp":"2026-10-17T19:00:01Z", "type":"event_msg",
+        "payload":{"type":"task_complete"}});
+    std::fs::write(sessions.join(format!("rollout-2026-10-17T19-00-00-{session}.jsonl")),
+        format!("{meta}\n{done}\n")).unwrap();
+    let agents = crate::store::open_agent_store(&f.app.cas_dir).unwrap();
+    let mut worker = agents.get("merge-w").unwrap();
+    worker.cc_session_id = Some(session.into());
+    worker.metadata.insert("worker_cli".into(), "codex".into());
+    worker.metadata.insert("clone_path".into(), clone.to_str().unwrap().into());
+    worker.metadata.insert("worker_account_dir".into(), account.to_str().unwrap().into());
+    agents.update(&worker).unwrap();
+    std::fs::write(f.app.cas_dir.join("gh-requests"), "").unwrap();
+    assert_eq!(f.relay().len(), 1, "fixture must expose an idle in-progress delivery before CI is pending");
+    f.ci(None);
+    let relays: usize = (0..3).map(|_| f.relay().len()).sum();
+    assert!(relays <= 1, "relay at most once while the pushed tip's CI is pending; got {relays}");
+    let tip = git(f.repo.path(), &["rev-parse", "HEAD"]);
+    let requests = std::fs::read_to_string(f.app.cas_dir.join("gh-requests")).unwrap();
+    assert!(requests.contains(&format!("commits/{tip}/check-runs")), "query the pushed tip: {requests}");
+    assert!(f.app.delivery_request(std::slice::from_ref(&f.event)).needs_external_lane(),
+        "Git and CI reads must stay off the control/read lanes");
+
+    // A local commit with no pushed CI is not covered by the old tip's run.
+    std::fs::write(f.repo.path().join("delivery.rs"), "// unpushed follow-up\n").unwrap();
+    git(f.repo.path(), &["commit", "-qam", "unpushed follow-up"]);
+    assert_eq!(f.relay().len(), 1, "old CI must not hide unpushed work");
+    git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+    assert!(f.relay().is_empty(), "new pushed tip can wait on its own CI");
+    f.ci(Some("success"));
+    assert_eq!(f.relay().len(), 1, "settled CI restores the lifecycle alert");
+    std::fs::write(f.app.cas_dir.join("ci.json"), r#"{"check_runs":[]}"#).unwrap();
+    assert_eq!(f.relay().len(), 1, "unknown CI must not hide an idle delivery");
+}
+
 #[test]
 fn cas_9efb_live_target_suppresses_relay_with_origin_prefixed_target() {
     let mut f = Fixture::new();

@@ -447,7 +447,7 @@ test("HUB-J19 terminal question and supervisor answer survive cloud replay on tw
   });
 });
 
-// cas-874b: proposed Cloud #174. No production advertisement means no control.
+// Cloud #174/PR #181: the shipped capability enables this flow; absent support offers no control.
 async function replyUpgradeCloud(enabled = true) {
   const cloud = operatorCloudDouble();
   cloud.replyGrants.enabled = enabled;

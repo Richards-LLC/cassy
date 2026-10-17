@@ -705,6 +705,7 @@ async fn nul_rejection_preserves_task_payload_and_explains_cloud_blocker() {
     let diagnostic = row.last_error.as_deref().unwrap();
     assert!(diagnostic.contains("PostgreSQL jsonb cannot store U+0000"), "{diagnostic}");
     assert!(diagnostic.contains("lossless"), "{diagnostic}");
+    assert!(diagnostic.contains("petra-stella-cloud/issues/184"), "{diagnostic}");
     assert!(diagnostic.contains("cas cloud queue --retry --retry-reason invalid_json_nul"), "{diagnostic}");
     let requests = server.received_requests().await.unwrap();
     assert_eq!(decode_push_body(&requests[0])["tasks"][0]["notes"], "original\0text");
@@ -3046,6 +3047,7 @@ fn every_push_reason_has_its_own_remediation() {
         "duplicate_of_other_project",
         "scope_mismatch",
         "revision_conflict",
+        "invalid_json_nul",
         "version_gate",
         "sync_limit_exceeded",
     ] {

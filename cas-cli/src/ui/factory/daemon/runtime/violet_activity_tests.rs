@@ -1845,7 +1845,7 @@ async fn cas_9021_drain_waits_for_tick_and_nested_sweep_apply_without_resuming()
     std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id = {PROJECT:?}\n")).unwrap();
     let team = uuid::Uuid::new_v4().to_string();
     crate::cloud::CloudConfig { team_id: Some(team.clone()), ..Default::default() }.save_to_cas_dir(root).unwrap();
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let server = std::sync::Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
     crate::cloud::CloudConfig { endpoint: format!("http://{}", server.server_addr()), token: Some("fixture-token".into()), ..Default::default() }.save_user().unwrap();
     let now = Utc::now();
     let seconds = (now - t0()).num_seconds();
@@ -1860,7 +1860,8 @@ async fn cas_9021_drain_waits_for_tick_and_nested_sweep_apply_without_resuming()
     let request = PauseRequest { operation_id: uuid::Uuid::new_v4(), nonce: uuid::Uuid::new_v4(), canonical_cas_dir: identity.canonical_cas_dir.clone(), factory_session: "provision-test".into(), scope: IntakeScope { team_id: team, canonical_project_id: PROJECT.into(), channel_id: "C1".into() }, expected_generation: 0 };
     let ticking = runtime.clone();
     daemon.binding_intake.tick = Some(tokio::task::spawn_blocking(move || ticking.tick_blocking()));
-    let http_request = tokio::task::spawn_blocking(move || server.recv_timeout(Duration::from_secs(5)).unwrap().expect("owned claim in flight")).await.unwrap();
+    let accepting = std::sync::Arc::clone(&server);
+    let http_request = tokio::task::spawn_blocking(move || accepting.recv_timeout(Duration::from_secs(5)).unwrap().expect("owned claim in flight")).await.unwrap();
     assert_eq!(http_request.url(), "/api/violet/activity/claim");
     let (read_done, read_wait) = tokio::sync::oneshot::channel();
     let sweeping = runtime.clone();
@@ -1870,6 +1871,9 @@ async fn cas_9021_drain_waits_for_tick_and_nested_sweep_apply_without_resuming()
     }));
     let mut local = std::os::unix::net::UnixStream::connect(root.join("gui.sock")).unwrap();
     local.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    // The provisioning fixture does not run daemon initialization. Match the
+    // production listener contract before entering its nonblocking accept loop.
+    daemon.gui_listener.set_nonblocking(true).unwrap();
     assert!(daemon.accept_gui_clients());
     let capabilities = match receive(&mut local) { DaemonMessage::Welcome { capabilities, .. } => capabilities, other => panic!("{other:?}") };
     assert!(capabilities.contains(&ProtocolCapability::BindingIntakeControlV1));

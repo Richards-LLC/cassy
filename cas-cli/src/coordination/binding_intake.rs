@@ -16,7 +16,7 @@ pub struct IntakeScope {
 }
 
 impl IntakeScope {
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if Uuid::parse_str(&self.team_id).is_err()
             || self.canonical_project_id.trim().is_empty()
             || self.canonical_project_id.len() > 256
@@ -101,7 +101,15 @@ impl IntakeJournal {
         state.generation = state.generation.checked_add(1).ok_or("intake generation exhausted")?;
         let pause = PauseRecord { operation_id, scope, generation: state.generation };
         state.pauses.push(pause.clone());
-        // RED: persistence is deliberately absent until the real-path control proves it.
+        let mut temporary = tempfile::NamedTempFile::new_in(&self.directory).map_err(|e| e.to_string())?;
+        serde_json::to_writer(&mut temporary, &state).map_err(|e| e.to_string())?;
+        temporary.flush().map_err(|e| e.to_string())?;
+        temporary.as_file().sync_all().map_err(|e| e.to_string())?;
+        temporary.persist(self.path()).map_err(|e| e.to_string())?;
+        // Persist the rename and newly created journal ancestors before ACK.
+        for directory in [Some(self.directory.as_path()), self.directory.parent(), self.directory.parent().and_then(Path::parent)] .into_iter().flatten() {
+            File::open(directory).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+        }
         Ok(pause)
     }
 }

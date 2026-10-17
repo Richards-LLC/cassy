@@ -24,6 +24,8 @@ pub const COMMANDER_EARLIER_SESSIONS_LIMIT: usize = 30;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProtocolCapability {
+    /// Local framed Unix GUI control only; never advertised by WS/relay.
+    BindingIntakeControlV1,
     TargetedInterrupt,
     AttributedSendMessage,
     /// A pane can be initialized from terminal state instead of a raw-byte tail.

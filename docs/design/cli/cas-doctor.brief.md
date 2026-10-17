@@ -162,8 +162,9 @@ silent when doctor owns the report.
 
 ## Effective Git hook path (cas-edb0)
 
-The Config row `Git hooks path` names the checkout, configured value and missing
-resolved directory. Its remedy starts with the read-only
+The Config row `Git hooks path` leads with `Hooks directory is missing` before
+the resolved directory, configured value and checkout, so long paths cannot hide
+the cause under the default three-line limit. Its remedy starts with the read-only
 `git config --show-origin --show-scope --get core.hooksPath`, then asks for
 restoration with the project's documented installer after reviewing authority.
 The main checkout and active same-repository worktree remain separate rows when

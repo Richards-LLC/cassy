@@ -94,12 +94,12 @@ fn check(project: &Path) -> Option<Check> {
                 ),
             ));
         }
-        Ok(_) => "is not a directory",
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "directory is missing",
-        Err(_) => "directory could not be inspected",
+        Ok(_) => "Hooks path is not a directory",
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "Hooks directory is missing",
+        Err(_) => "Hooks directory could not be inspected",
     };
     Some(warning(format!(
-        "checkout {root}: core.hooksPath={configured}: {status} at {resolved}. Run `git config --show-origin --show-scope --get core.hooksPath` in that checkout, then restore the intended hooks with the project's documented installer; factory workers need their own guards refreshed through spawn/reuse. Review authority before changing config"
+        "{status} at {resolved}; core.hooksPath={configured}; checkout {root}. Run `git config --show-origin --show-scope --get core.hooksPath` in that checkout, then restore the intended hooks with the project's documented installer; factory workers need their own guards refreshed through spawn/reuse. Review authority before changing config"
     )))
 }
 
@@ -153,6 +153,13 @@ mod tests {
             let json = super::super::serialize_checks(&[row], &[]);
             assert_eq!(json[0]["group"], "config");
             assert_eq!(json[0]["status"], "warning");
+            // pin: default doctor clips at three lines; the cause must lead even when paths are long.
+            assert!(
+                json[0]["message"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Hooks directory is missing")
+            );
             assert!(
                 json[0]["message"]
                     .as_str()

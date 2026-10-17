@@ -4774,6 +4774,14 @@ impl FactoryDaemon {
     /// cas-ceae: drop every per-row delivery clock/marker for a row that is no
     /// longer pending. Both maps are keyed by `prompt_queue.id`, so leaving an
     /// entry behind leaks one record per terminalized row.
+    /// Start a row's re-nudge interval at a real (re)delivery. cas-7787:
+    /// only that burns budget; a cooldown tick is policy, not an attempt.
+    fn reserve_renudge_attempt(&mut self, row_id: i64) {
+        self.lifecycle_redelivery_attempts
+            .insert(row_id, std::time::Instant::now());
+        *self.lifecycle_redelivery_counts.entry(row_id).or_insert(0) += 1;
+    }
+
     fn forget_row_delivery_state(&mut self, row_id: i64) {
         self.stall_nudge_gate_checks.remove(&row_id);
         self.lifecycle_redelivery_attempts.remove(&row_id);
@@ -9057,6 +9065,8 @@ impl FactoryDaemon {
             // re-nudge cadence gate then actually grants a re-offer, so the
             // line count is O(retries) and not O(poll ticks).
             let mut announce_drain_unsurfaced = false;
+            // cas-979e: a re-nudge Deliver grant, spent at transport admission.
+            let mut renudge_granted = false;
             let pane_target = if target == "supervisor" {
                 self.app.supervisor_name()
             } else {
@@ -9382,15 +9392,15 @@ impl FactoryDaemon {
                         // cas-6e355: inline supervisor rows have not reached
                         // any transport yet. Reserve their cadence only after
                         // the wake gate allows the body-bearing PTY attempt.
+                        // cas-979e: a single-target row's first pass only
+                        // submits its claim; reserving here put the pass that
+                        // injects into Cooldown, every interval, forever.
                         if !inline_supervisor_body || queued.urgent {
-                            self.lifecycle_redelivery_attempts
-                                .insert(queued.id, std::time::Instant::now());
-                            // cas-7787: only a real (re)delivery burns budget —
-                            // a cooldown tick is policy, not a failed attempt.
-                            *self
-                                .lifecycle_redelivery_counts
-                                .entry(queued.id)
-                                .or_insert(0) += 1;
+                            if target == "all_workers" {
+                                self.reserve_renudge_attempt(queued.id);
+                            } else {
+                                renudge_granted = true;
+                            }
                         }
                     }
                     LifecycleRedelivery::Cooldown => {
@@ -9867,6 +9877,9 @@ impl FactoryDaemon {
                     super::prompt_queue_jobs::Admission::InFlight
                     | super::prompt_queue_jobs::Admission::NotClaimed => continue,
                 };
+                if renudge_granted {
+                    self.reserve_renudge_attempt(queued.id);
+                }
                 let inject_result: anyhow::Result<super::delivery::NudgeReport> = if queued.urgent {
                     // Urgent: interrupt-and-redirect by name via the PTY,
                     // bypassing the inbox even in teams mode. An attached
@@ -10153,9 +10166,7 @@ impl FactoryDaemon {
                         // A busy-pane veto above delivered nothing and must
                         // not delay this row when the supervisor becomes idle.
                         // Actual attempts still share the bounded cadence.
-                        self.lifecycle_redelivery_attempts
-                            .insert(queued.id, std::time::Instant::now());
-                        *self.lifecycle_redelivery_counts.entry(queued.id).or_insert(0) += 1;
+                        self.reserve_renudge_attempt(queued.id);
                         self.deliver_supervisor_event_inline(
                             &inbox_source, &prompt_with_instructions, queued.id,
                         ).await

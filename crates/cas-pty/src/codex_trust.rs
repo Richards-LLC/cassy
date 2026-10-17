@@ -443,18 +443,21 @@ fn ensure_main_hooks_current(main: &Path, main_hooks: &Path, own: &Path) -> io::
                 .collect(),
         )
     };
-    let current = has_cas_tool_hooks(main_hooks)?
-        .then(|| hashes(main_hooks))
-        .flatten();
-    if current.is_some() && current == hashes(own) {
+    // A main checkout without CAS handlers has no CAS body to be stale; the
+    // user-level CAS hooks still guard the worker.
+    if !has_cas_tool_hooks(main_hooks)? {
+        return Ok(());
+    }
+    let main_hashes = hashes(main_hooks);
+    if main_hashes.is_some() && main_hashes == hashes(own) {
         return Ok(());
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "codex_main_checkout_hooks_stale: {} does not carry the current CAS hooks in {}, and \
+            "codex_main_checkout_hooks_stale: {} carries CAS hooks that differ from {}, and \
              Codex loads the main checkout's file for a linked worktree, so the worker would run \
-             stale or no guards. Update the main checkout (`git -C {} pull`, or `git -C {} \
+             stale guards. Update the main checkout (`git -C {} pull`, or `git -C {} \
              checkout .codex/hooks.json`), then respawn.",
             main_hooks.display(),
             own.display(),

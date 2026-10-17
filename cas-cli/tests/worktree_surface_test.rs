@@ -1955,6 +1955,75 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
 }
 
 #[tokio::test]
+async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
+    let mut env = test_env();
+    for exact_sha in [false, true] {
+        let repo = GitRepo::new();
+        let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+        run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
+        let origin = "https://github.com/org/peer-delivery.git";
+        run_git(&["remote", "add", "origin", origin], &repo.root);
+        run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()), origin], &repo.root);
+        run_git(&["branch", "epic/peer"], &repo.root);
+        run_git(&["push", "origin", "main", "epic/peer"], &repo.root);
+        let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
+        disable_system_a(&cas_root);
+        let peer = remote.path().join("peer");
+        run_git(&["clone", repo.root.to_str().unwrap(), peer.to_str().unwrap()], &repo.root);
+        run_git(&["config", "user.email", "peer@example.test"], &peer);
+        run_git(&["config", "user.name", "Peer"], &peer);
+        run_git(&["remote", "set-url", "origin", remote.path().to_str().unwrap()], &peer);
+        run_git(&["switch", "-c", "factory/peer-worker"], &peer);
+        std::fs::write(peer.join("delivery.rs"), "pub fn delivered() {}\n").unwrap();
+        run_git(&["add", "delivery.rs"], &peer);
+        run_git(&["commit", "-m", "peer delivery"], &peer);
+        let anchor = git_stdout(&peer, &["rev-parse", "HEAD"]);
+        run_git(&["push", "origin", "factory/peer-worker"], &peer);
+        // Neither a local source ref nor a worker checkout exists on the receiver.
+        assert!(!cas_root.join("worktrees/peer-worker").exists());
+        let tasks = open_task_store(&cas_root).unwrap();
+        let mut task = Task::new("cas-peer-delivery".into(), "Peer delivery".into());
+        task.assignee = Some("peer-worker".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        task.deliverables.parked_branch = Some("factory/peer-worker".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "remote:github.com/org/peer-delivery".into(),
+            target_branch: "epic/peer".into(),
+        });
+        tasks.add(&task).unwrap();
+        let mut supervisor = Agent::new("receiving-supervisor".into(), "receiver".into());
+        supervisor.role = AgentRole::Supervisor;
+        open_agent_store(&cas_root).unwrap().register(&supervisor).unwrap();
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id.clone());
+        let svc = CasService::new(core, None);
+        env.set_current_dir(&repo.root);
+        let mut request = coord_req("worktree_merge");
+        request.id = Some(if exact_sha { anchor.clone() } else { "factory/peer-worker".into() });
+        request.task_id = Some(task.id.clone());
+        request.cleanup = Some(false);
+        let before = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
+        env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::ci_concluded(remote.path(), "failure"));
+        let refused = svc.coordination(Parameters(request.clone())).await.expect_err("normal CI must refuse remote-only code");
+        assert!(refused.message.contains("CI RED"), "{}", refused.message);
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/peer"]), before);
+        env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
+        let merged = svc.coordination(Parameters(request)).await.expect("merge remote delivery through normal handler");
+        let text = get_text(&merged);
+        assert!(text.contains("Merged worktree"), "{text}");
+        let target = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
+        assert_eq!(target, git_stdout(&repo.root, &["rev-parse", "origin/epic/peer"]));
+        assert_eq!(target, git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/peer"]));
+        run_git(&["merge-base", "--is-ancestor", &anchor, "epic/peer"], &repo.root);
+        let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+        let recorded: String = conn.query_row("SELECT source_commit_sha FROM observed_delivery_merges WHERE task_id=?1", [&task.id], |row| row.get(0)).unwrap();
+        assert_eq!(recorded, anchor);
+        assert!(open_agent_store(&cas_root).unwrap().list(None).unwrap().iter().all(|agent| agent.name != "peer-worker"));
+    }
+}
+
+#[tokio::test]
 async fn cas_cfd1_merges_pushed_parked_ref_without_touching_reused_dirty_worker() {
     let repo = GitRepo::new();
     let mut env = test_env();

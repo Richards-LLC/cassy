@@ -31,6 +31,7 @@ async function storage(page) {
     db.close();
     return {
       deviceId: identity?.deviceId ?? null,
+      grantGeneration: identity?.grant.generation ?? null,
       identityCount: identities.length,
       epochs: epochs.map((x) => x.epoch),
       events: events.map((x) => ({ eventId: x.eventId, hubId: x.hubId, epoch: x.keyEpoch, verification: x.verification, acked: x.acked })),
@@ -40,9 +41,9 @@ async function storage(page) {
   });
 }
 
-test("cas-2077 deployed Cloud: stopped hub replay, one offline admission, revoke and rotated epoch", async ({ browser, page, context }) => {
+test("cas-2077 deployed Cloud: reply upgrade, stopped hub replay, one offline admission, revoke and rotated epoch", async ({ browser, page, context }) => {
   await mkdir(qa, { recursive: true });
-  const secrets = [], receipt = { head_sha: head, cloud: CLOUD_ORIGIN, candidate_origin: COMMANDER_ORIGIN, asset_routing: "local committed dist only; Cloud API never intercepted", clock: "real wall time", status: "NOT VERIFIED", cells: [] };
+  const secrets = [], receipt = { head_sha: head, cloud: CLOUD_ORIGIN, candidate_origin: COMMANDER_ORIGIN, asset_routing: "local committed dist only; Cloud API never intercepted", clock: "real wall time", status: "NOT VERIFIED", cells: [], reply_upgrade: [] };
   let other;
   const capture = async (reader, cell, expected) => {
     await reader.screenshot({ path: join(qa, `${cell}.png`) });
@@ -63,6 +64,9 @@ test("cas-2077 deployed Cloud: stopped hub replay, one offline admission, revoke
           }
         };
         collect(value);
+        const path = new URL(response.url()).pathname;
+        if (path === "/api/operator/grants/me") receipt.reply_upgrade.push({ path, status: response.status(), features: value.features, grant_id: value.grant?.grant_id, generation: value.grant?.grant_generation, origin: value.grant?.origin ?? null });
+        else if (path.startsWith("/api/operator/reply-grant-requests")) receipt.reply_upgrade.push({ path, method: response.request().method(), status: response.status(), request: value.request });
       } catch {}
     });
   };
@@ -72,7 +76,7 @@ test("cas-2077 deployed Cloud: stopped hub replay, one offline admission, revoke
     try { await route.fulfill({ contentType: ({ ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml" })[extname(target)] ?? "application/octet-stream", body: await readFile(target) }); }
     catch { await route.fulfill({ status: 404, body: "" }); }
   });
-  const enroll = async (reader, suffix, reply) => {
+  const enroll = async (reader, suffix, reply, manage = false) => {
     observe(reader);
     await reader.goto(`${COMMANDER_ORIGIN}/commander/`);
     await reader.getByRole("button", { name: "Operator inbox", exact: true }).click();
@@ -81,7 +85,7 @@ test("cas-2077 deployed Cloud: stopped hub replay, one offline admission, revoke
     await inbox.getByLabel("Name this browser").press("Enter");
     await expect(inbox.getByLabel("Sign-in code")).toHaveText(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
     const code = (await inbox.getByLabel("Sign-in code").textContent()).trim(); secrets.push(code);
-    await native("/approve", { code, reply });
+    await native("/approve", { code, reply, manage });
     await expect(inbox.getByRole("button", { name: "Sign out of the inbox", exact: true })).toBeVisible();
     await expect.poll(async () => (await storage(reader)).deviceId).not.toBe(null);
     return inbox;
@@ -91,7 +95,7 @@ test("cas-2077 deployed Cloud: stopped hub replay, one offline admission, revoke
     Object.assign(receipt, await native("/prepare"));
     const messages = ["Release started.", "Cloud contract ready.", "Ready for your go."].map((x) => `${receipt.label}: ${x}`);
     await routeAssets(context); await page.setViewportSize({ width: 1280, height: 800 });
-    const desk = await enroll(page, "desk", false);
+    const desk = await enroll(page, "desk", false, true);
     receipt.older_device_id = (await storage(page)).deviceId;
     for (const message of messages) await native("/queue", { message });
     await openThread(desk);
@@ -105,11 +109,28 @@ test("cas-2077 deployed Cloud: stopped hub replay, one offline admission, revoke
     await context.setOffline(true);
     other = await browser.newContext({ viewport: { width: 390, height: 844 } });
     await routeAssets(other);
-    const phone = await other.newPage(), mobile = await enroll(phone, "phone", true);
+    const phone = await other.newPage(), mobile = await enroll(phone, "phone", false);
     receipt.new_device_id = (await storage(phone)).deviceId;
     await openThread(mobile);
     for (const message of messages) { await expect(mobile.getByText(message, { exact: true })).toBeVisible(); await expect(mobile.getByText(message, { exact: true })).toHaveCount(1); }
     await capture(phone, "M01", "A new phone recovers retained supervisor messages while the hub and older browser are off.");
+
+    const beforeUpgrade = await storage(phone);
+    await expect(mobile.getByRole("button", { name: "Queue reply", exact: true })).toHaveCount(0);
+    await mobile.getByRole("button", { name: "Ask to reply", exact: true }).press("Enter");
+    await expect(mobile.getByText("Waiting for the account owner to allow replies. Your messages stay here.", { exact: true })).toBeVisible();
+    await capture(phone, "A01", "The read-only phone asks without signing out; pending grants no reply permission.");
+    await context.setOffline(false);
+    await page.reload(); await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
+    await desk.getByRole("region", { name: "Reply requests", exact: true }).getByRole("button", { name: new RegExp(`^Allow ${receipt.label}-phone`) }).press("Enter");
+    await expect(desk.getByText(`Replying allowed for ${receipt.label}-phone.`, { exact: true })).toBeVisible();
+    await expect(mobile.getByRole("button", { name: "Queue reply", exact: true })).toBeVisible();
+    const afterUpgrade = await storage(phone);
+    expect(afterUpgrade.deviceId).toBe(beforeUpgrade.deviceId);
+    expect(BigInt(afterUpgrade.grantGeneration)).toBe(BigInt(beforeUpgrade.grantGeneration) + 1n);
+    expect(afterUpgrade.epochs).toEqual(beforeUpgrade.epochs);
+    for (const message of messages) await expect(mobile.getByText(message, { exact: true })).toHaveCount(1);
+    await capture(page, "A02", "The independent owner allows the same device and one generation increment; retained keys and history survive.");
 
     const reply = `${receipt.label}: Go. Cut the release.`;
     await mobile.getByLabel(/Reply — .* gets it when it’s back/).fill(reply);

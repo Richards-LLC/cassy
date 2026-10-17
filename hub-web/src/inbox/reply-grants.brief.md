@@ -20,7 +20,7 @@ Approval changes the same Cloud device grant; the conversation and its stored me
 
 ## Deliberately omitted
 
-No local hub pairing privilege, automatic owner approval, broad command scope, new sign-in or delivery guarantee. The feature is dormant until Cloud advertises reply-grant-upgrade-v1. Proposal: petra-stella-cloud#174; production activation awaits an agreed/shipped contract.
+No local hub pairing privilege, automatic owner approval, broad command scope, new sign-in or delivery guarantee. Cloud shipped reply-grant-upgrade-v1 in petra-stella-cloud PR #181 for #174. Its advertisement enables the existing client automatically; absent or incompatible support still offers no dead control.
 
 ## Components and state
 

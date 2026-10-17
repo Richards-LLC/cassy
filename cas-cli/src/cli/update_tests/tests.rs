@@ -2259,7 +2259,8 @@ fn cas_9815_update_distinguishes_old_shipped_skill_from_user_delta() {
         .unwrap()
         .content;
     for user_delta in [false, true] {
-        let project = cas_6718_drifted_project(env.home());
+        let fixture_home = env.home().join(if user_delta { "edited" } else { "old" });
+        let project = cas_6718_drifted_project(&fixture_home);
         let root = project.join(".cas");
         env.set("CAS_ROOT", &root);
         let file = project.join(path);
@@ -2267,7 +2268,14 @@ fn cas_9815_update_distinguishes_old_shipped_skill_from_user_delta() {
         std::fs::write(&file, current).unwrap();
         cas_6718_git(&project, &["add", "-f", path]);
         cas_6718_git(&project, &["commit", "-qm", "tracked managed baseline"]);
-        let working = format!("{old}{}", if user_delta { "\nProject-specific instruction.\n" } else { "" });
+        let working = format!(
+            "{old}{}",
+            if user_delta {
+                "\nProject-specific instruction.\n"
+            } else {
+                ""
+            }
+        );
         std::fs::write(&file, &working).unwrap();
         let index = cas_6718_git(&project, &["ls-files", "--stage"]);
         let mut args = update_test_args();
@@ -2283,11 +2291,13 @@ fn cas_9815_update_distinguishes_old_shipped_skill_from_user_delta() {
             assert_eq!(std::fs::read_to_string(&file).unwrap(), working);
             assert_eq!(cas_6718_git(&project, &["ls-files", "--stage"]), index);
         } else {
-            assert!(conflicts.is_empty(), "old Cassy output blocked update: {receipt}");
+            assert!(
+                conflicts.is_empty(),
+                "old Cassy output blocked update: {receipt}"
+            );
             assert_eq!(std::fs::read_to_string(&file).unwrap(), current);
             assert!(cas_6718_git(&project, &["status", "--porcelain"]).is_empty());
             assert!(cas_6718_git(&project, &["ls-files", "--", path]).is_empty());
         }
-        std::fs::remove_dir_all(&project).unwrap();
     }
 }

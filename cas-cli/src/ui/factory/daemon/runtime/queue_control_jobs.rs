@@ -595,7 +595,7 @@ impl PromptPreparation {
                                 && agent.name.eq_ignore_ascii_case(&supervisor)
                         })
                     }
-                    _ => false,
+                    _ => super::queue_and_events::self_addressed_reminder(row),
                 });
                 if !inputs.unknown_fallback
                     && now.saturating_duration_since(inputs.captured_at) < POLL_CADENCE
@@ -641,6 +641,11 @@ impl PromptPreparation {
                 _ => None,
             })
             .collect();
+        // cas-901f: a worker's fired self-reminder wakes on the same
+        // waiting-for-input evidence as a supervisor decision.
+        let self_reminder = rows
+            .iter()
+            .any(super::queue_and_events::self_addressed_reminder);
         self.generation += 1;
         let generation = self.generation;
         #[cfg(test)]
@@ -665,6 +670,7 @@ impl PromptPreparation {
                     &job_supervisor,
                     &recipients,
                     &sender_ids,
+                    self_reminder,
                     captured_at,
                     wake_now,
                 );
@@ -727,13 +733,14 @@ fn read_wake_inputs(
     supervisor: &str,
     recipients: &HashSet<String>,
     sender_ids: &HashSet<String>,
+    self_reminder: bool,
     captured_at: Instant,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<WakeInputs, String> {
     let agents = crate::store::open_agent_store(cas_dir)
         .and_then(|store| Ok(store.list(None)?))
         .map_err(|error| error.to_string())?;
-    let need_worker_wait = agents.iter().any(|agent| {
+    let need_worker_wait = self_reminder || agents.iter().any(|agent| {
         sender_ids.contains(&agent.id)
             && agent.role == cas_types::AgentRole::Supervisor
             && agent.name.eq_ignore_ascii_case(supervisor)

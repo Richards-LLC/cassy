@@ -11,7 +11,7 @@ mod message_attention_tests;
 
 /// The daemon's own reminder to its owner is not an inter-agent relay.
 /// Caller-written reminder text cannot use this exception.
-fn self_addressed_reminder(row: &cas_store::QueuedPrompt) -> bool {
+pub(super) fn self_addressed_reminder(row: &cas_store::QueuedPrompt) -> bool {
     row.origin == Some(cas_store::QueueOrigin::Daemon)
         && row.source.eq_ignore_ascii_case(&row.target)
         && cas_store::parse_reminder_delivery_id(&row.prompt).is_some()
@@ -7007,11 +7007,8 @@ impl FactoryDaemon {
         if !name.eq_ignore_ascii_case(supervisor_name) {
             return None;
         }
-        if let Some(reason) = pane.pane_typing_veto() {
-            return Some(WakeDecision::deny(reason));
-        }
-        if pane.tool_call == ToolCallEvidence::InFlight {
-            return Some(WakeDecision::deny("recipient has a tool call in flight"));
+        if let Some(veto) = Self::parked_worker_veto(pane) {
+            return Some(veto);
         }
         if wait.harness_waiting_for_input {
             return Some(WakeDecision::allow(
@@ -7022,6 +7019,35 @@ impl FactoryDaemon {
             Some(reason) => WakeDecision::deny(reason),
             None => WakeDecision::allow("supervisor decision to a worker holding a blocked task"),
         })
+    }
+
+    /// cas-901f: a reminder the daemon fired for a worker is that worker's
+    /// own request to be woken. Once its harness waits for input, pane
+    /// silence is not required: a parked harness repaints its pane, and the
+    /// 45-second silence bar kept these wakes declined until an unrelated
+    /// turn surfaced the row. `None` keeps the ordinary policy.
+    pub fn self_reminder_wake(
+        pane_target: &str,
+        supervisor_name: &str,
+        wait: WorkerWaitState,
+        pane: PaneWakeState,
+    ) -> Option<WakeDecision> {
+        if pane_target == supervisor_name || !wait.harness_waiting_for_input {
+            return None;
+        }
+        Some(Self::parked_worker_veto(pane).unwrap_or_else(|| {
+            WakeDecision::allow("fired self-reminder to a worker whose turn has ended (waiting for input)")
+        }))
+    }
+
+    /// The hard vetoes for waking a parked worker: an operator draft, a pane
+    /// not ready for injection, or a tool call the submit CR would answer.
+    fn parked_worker_veto(pane: PaneWakeState) -> Option<WakeDecision> {
+        if let Some(reason) = pane.pane_typing_veto() {
+            return Some(WakeDecision::deny(reason));
+        }
+        (pane.tool_call == ToolCallEvidence::InFlight)
+            .then(|| WakeDecision::deny("recipient has a tool call in flight"))
     }
 
     /// The durable wait evidence for [`Self::supervisor_decision_wake`], read
@@ -9774,6 +9800,19 @@ impl FactoryDaemon {
                         // else keeps the ordinary policy.
                         let supervisor_decision = if is_supervisor_target {
                             None
+                        } else if self_addressed_reminder(&queued) {
+                            // cas-901f: the worker's own fired reminder.
+                            self.queue_jobs
+                                .prompt_preparation
+                                .recipient(&pane_target)
+                                .and_then(|inputs| {
+                                    Self::self_reminder_wake(
+                                        &pane_target,
+                                        self.app.supervisor_name(),
+                                        inputs.wait,
+                                        pane_state,
+                                    )
+                                })
                         } else {
                             self.worker_wait_state_for(&wake_sender, &pane_target)
                                 .and_then(|wait| {
@@ -18449,6 +18488,23 @@ mod supervisor_decision_wake_tests {
                 "{sender:?} falls back to the ordinary policy, which declines"
             );
         }
+    }
+
+    /// cas-901f: a reminder the daemon fired for a worker reaches it once its
+    /// turn has ended, though its harness keeps repainting the pane.
+    #[test]
+    fn cas_901f_fired_self_reminder_wakes_a_worker_whose_turn_has_ended() {
+        let pane = repainting_pane(ToolCallEvidence::Idle);
+        assert!(!ordinary_policy(&WakeSender::Daemon, pane).allowed, "the live decline");
+        let decision = FactoryDaemon::self_reminder_wake(WORKER, SUPERVISOR, WAITING, pane)
+            .expect("a worker waiting for input is in the class");
+        assert!(decision.allowed, "{}", decision.reason);
+        // A worker mid-turn, the supervisor pane and a pending tool call keep
+        // their existing protection.
+        assert_eq!(FactoryDaemon::self_reminder_wake(WORKER, SUPERVISOR, RUNNING, pane), None);
+        assert_eq!(FactoryDaemon::self_reminder_wake(SUPERVISOR, SUPERVISOR, WAITING, pane), None);
+        let in_flight = repainting_pane(ToolCallEvidence::InFlight);
+        assert!(!FactoryDaemon::self_reminder_wake(WORKER, SUPERVISOR, WAITING, in_flight).unwrap().allowed);
     }
 }
 

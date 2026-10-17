@@ -624,3 +624,38 @@ fn managed_wake_invalid_future_and_fresh_age_policy_cas_8875() {
         }
     }
 }
+
+/// cas-6ace: every claim the managed reader makes leaves a bounded receipt —
+/// an empty claim and a refusal alike — readable through `cas doctor`'s line,
+/// with counts and codes but no message text, guidance or token.
+#[test]
+fn managed_claims_leave_bounded_receipts_without_bodies() {
+    let temp = tempfile::tempdir().unwrap();
+    let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+    queue.init().unwrap();
+    let reader = Mutex::new(VioletReader::new("factory-session"));
+    let at = |secs| DateTime::parse_from_rfc3339("2026-10-17T18:00:00Z").unwrap().with_timezone(&Utc)
+        + chrono::Duration::seconds(secs);
+    let tick_on = |case: &str, secs| {
+        let cloud = FixtureCloud::new(case);
+        let (body, typer) = (violet_body(None), PromptQueueTyper(&queue));
+        let quarantine = FileQuarantine(temp.path().join("violet/quarantine.jsonl"));
+        let io = ReaderIo { body: &body, typer: &typer, quarantine: &quarantine };
+        read_managed_on(&reader, &cloud, REGISTRATION, temp.path(), &io, at(secs))
+    };
+    for n in 0..CLAIM_RECEIPTS_KEPT as i64 {
+        tick_on("nothing pending", n);
+    }
+    assert_eq!(tick_on("without strict activation evidence", 100).unwrap().errors.len(), 1);
+    let (healthy, line) = claim_receipts_summary(temp.path(), at(130)).expect("receipts are readable");
+    assert!(!healthy, "the newest claim was refused: {line}");
+    assert!(line.starts_with("last claim 30s ago: strict_activation_required"), "{line}");
+    assert!(line.contains("18:00:19Z completed claimed=0"), "an empty claim is a receipt: {line}");
+    assert!(line.contains(REGISTRATION) && line.contains(CLAIM_PATH), "{line}");
+    for secret in ["binding_unevidenced", "Every managed binding", "No deliveries pending", "Bearer"] {
+        assert!(!line.contains(secret), "{secret} leaked: {line}");
+    }
+    let kept: Vec<Value> = serde_json::from_slice(&std::fs::read(claim_receipts_path(temp.path())).unwrap()).unwrap();
+    assert_eq!(kept.len(), CLAIM_RECEIPTS_KEPT, "the oldest receipt rotates out");
+    assert_eq!(kept[0]["at"], "2026-10-17T18:00:01Z");
+}

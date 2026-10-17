@@ -156,22 +156,22 @@ fn all_projects_refreshes_nested_projects_and_the_user_level_store() {
     let output = String::from_utf8_lossy(&update.get_output().stdout);
 
     assert!(
-        output.contains("workspace/inner"),
+        output.lines().any(|line| line.contains("workspace, inner")),
         "a project nested under another project must be refreshed:\n{output}"
     );
     assert!(
         output.contains(&format!(
-            "Cassy {} · 2 projects refreshed · 0 failed · 1 unregistered store(s) not refreshed",
+            "Cassy {} · 2 projects refreshed · 0 failed · 1 skipped",
             env!("CARGO_PKG_VERSION")
         )),
         "banner must count the skipped store:\n{output}"
     );
     assert!(
-        output.contains("not refreshed (skipped_unregistered): 1"),
+        output.contains("storeless") && output.contains("not refreshed: "),
         "the storeless directory must be named:\n{output}"
     );
     assert!(
-        output.contains("user-level store:"),
+        output.contains("user-level store current"),
         "the user-level store needs its own reported phase:\n{output}"
     );
 
@@ -286,8 +286,8 @@ fn all_projects_repairs_stray_search_roots_and_reports_clean_projects() {
         .success();
     let output = String::from_utf8_lossy(&update.get_output().stdout);
     assert!(
-        output.contains("projects/clean") && output.contains("projects/stranded"),
-        "project table rows missing from output:\n{output}"
+        output.contains("clean") && output.contains("stranded"),
+        "both projects must be reported:\n{output}"
     );
     assert!(
         !output.contains("[OK] search index:"),
@@ -344,8 +344,10 @@ fn all_projects_warns_on_a_held_legacy_lock_but_still_succeeds() {
         .success();
     let output = String::from_utf8_lossy(&update.get_output().stdout);
     assert!(
-        output.contains("[WARN] search index: busy"),
-        "busy repair receipt missing from output:\n{output}"
+        output
+            .lines()
+            .any(|line| line.contains("[WARN]") && line.contains("index") && line.contains("busy")),
+        "busy repair finding missing from output:\n{output}"
     );
     let banner = format!(
         "Cassy {} · 1 projects refreshed · 0 failed",

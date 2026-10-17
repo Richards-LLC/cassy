@@ -1,0 +1,8 @@
+✓ [1/2] Cassy binary  3.62.0 is current                                     1.4s
+✓ [2/2] Projects      all 12 refreshed                                      4.0s
+
+  ✓ all 12 projects current · 5 not cloud-linked
+    cassy, pantheon, prospect_path, gabber-studio, pulse-card, rocketship-templ…
+  ✓ user-level store current
+  Cassy 3.62.0 · 12 projects refreshed · 0 failed · 4.0s
+  cas update --verbose shows every project and phase output

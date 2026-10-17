@@ -9,6 +9,8 @@ and a before/after capture set under `captures/`.
 | `cas doctor` | [cas-doctor.brief.md](cas-doctor.brief.md) | [captures/before/cas-doctor](captures/before/cas-doctor/report.md) | [captures/after/cas-doctor](captures/after/cas-doctor/report.md) |
 | `cas known-repos prune-missing` | [cas-known-repos.brief.md](cas-known-repos.brief.md) | — | [captures/after/cas-known-repos/report.md](captures/after/cas-known-repos/report.md) |
 | `cas update --check` | [cas-update.brief.md](cas-update.brief.md) | [captures/before/cas-update-check](captures/before/cas-update-check/report.md) | [captures/after/cas-update-check](captures/after/cas-update-check/report.md) |
+| `cas update` (partial refresh) | [cas-update.brief.md](cas-update.brief.md) | [captures/before/cas-update-partial-refresh](captures/before/cas-update-partial-refresh/report.md) | [captures/after/cas-update-partial-refresh](captures/after/cas-update-partial-refresh/report.md) |
+| `cas update` (all current) | [cas-update.brief.md](cas-update.brief.md) | [captures/before/cas-update-success](captures/before/cas-update-success/report.md) | [captures/after/cas-update-success](captures/after/cas-update-success/report.md) |
 | `cas artifact list` | [cas-artifact.brief.md](cas-artifact.brief.md) | — | [captures/after/cas-artifact-list](captures/after/cas-artifact-list/report.md) |
 | `cas artifact show` | [cas-artifact.brief.md](cas-artifact.brief.md) | — | [captures/after/cas-artifact-show](captures/after/cas-artifact-show/report.md) |
 | `cas factory status` | [cas-factory-status.brief.md](cas-factory-status.brief.md) | [captures/before/cas-factory-status](captures/before/cas-factory-status/report.md) | [captures/after/cas-factory-status](captures/after/cas-factory-status/report.md) |
@@ -29,6 +31,11 @@ node scripts/terminal-qa.mjs --label cas-doctor --escape-flag --verbose --json-f
   --out docs/design/cli/captures/after/cas-doctor -- cas doctor
 node scripts/terminal-qa.mjs --label cas-update-check --json-flag --json \
   --out docs/design/cli/captures/after/cas-update-check -- cas update --check
+for f in partial-refresh success; do
+  node scripts/terminal-qa.mjs --label cas-update-$f --escape-flag --verbose \
+    --out docs/design/cli/captures/after/cas-update-$f -- \
+    cas update -y --render-fixture docs/design/cli/fixtures/cas-update-$f.json
+done
 node scripts/terminal-qa.mjs --label cas-factory-status --json-flag --json \
   --out docs/design/cli/captures/after/cas-factory-status -- cas factory status
 node scripts/terminal-qa.mjs --label cas-artifact-list --json-flag --json \
@@ -41,4 +48,7 @@ node scripts/terminal-qa.mjs --label cas-error-renderer \
 ```
 
 The `before` set was produced the same way from the binary built at `eda3dfd1`, the last
-commit before the re-render.
+commit before the re-render. The two `cas update` sets replay recorded updates with the
+hidden `--render-fixture` flag, which reads no store and changes nothing; their `before`
+captures come from `ab3f679af`, the seam commit that still carried the old renderer.
+Rerun them whenever update output changes, and before each release.

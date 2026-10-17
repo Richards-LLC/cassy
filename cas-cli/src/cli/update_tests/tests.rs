@@ -8,7 +8,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use crate::cli::Cli;
-use crate::ui::components::{Formatter, OutputMode};
+use crate::ui::components::{Formatter, OutputMode, Verdict};
 
 #[cfg(feature = "mcp-proxy")]
 fn cas_8235_fixture() -> crate::test_support::TestEnvGuard {
@@ -894,23 +894,22 @@ fn update_banner_reports_projects_failures_and_skipped_unregistered_stores() {
         failed_count: 1,
         skipped_unregistered: 2,
         elapsed: std::time::Duration::from_secs(3),
+        ..Default::default()
     });
 
     assert!(banner.contains("29 projects refreshed"), "banner: {banner}");
     assert!(banner.contains("1 failed"), "banner: {banner}");
-    assert!(
-        banner.contains("2 unregistered store(s) not refreshed"),
-        "banner: {banner}"
-    );
+    assert!(banner.contains("2 skipped"), "banner: {banner}");
 
     let clean = update_banner_text(&RefreshReport {
         project_count: 29,
         failed_count: 0,
         skipped_unregistered: 0,
         elapsed: std::time::Duration::from_secs(3),
+        ..Default::default()
     });
     assert!(
-        !clean.contains("unregistered"),
+        !clean.contains("skipped"),
         "a clean run stays quiet: {clean}"
     );
 }
@@ -1031,6 +1030,7 @@ fn post_swap_mode_is_a_terminal_update_path() {
         post_swap: true,
         from: Some("3.7.7".to_owned()),
         refresh_receipt: None,
+        render_fixture: None,
     };
     let cli = Cli {
         json: true,
@@ -1443,11 +1443,21 @@ fn failed_serve_publication_still_refreshes_projects_and_reports_update_error() 
         failed_count: 0,
         skipped_unregistered: 0,
         elapsed: std::time::Duration::from_millis(5),
+        ..Default::default()
     };
-    let banner = render_plain_at(160, |fmt| {
-        print_update_banner_with_formatter(fmt, &report, Some(transport_error))
-    });
-    assert!(banner.contains("[ERROR] hub transport"), "{banner}");
+    let sweep = crate::cli::update::findings::collect(
+        &[],
+        &ProjectPhase::Ok("up to date".to_owned()),
+        &[],
+        None,
+        Some(transport_error),
+    );
+    let report = RefreshReport {
+        sweep: Some(sweep),
+        ..report
+    };
+    let banner = render_plain_at(160, |fmt| print_sweep(fmt, &report, false));
+    assert!(banner.contains("[ERROR] hub"), "{banner}");
     assert!(banner.contains("cas hub restart --tailscale-serve"), "{banner}");
 }
 
@@ -1567,6 +1577,7 @@ fn update_test_args() -> UpdateArgs {
         post_swap: false,
         from: None,
         refresh_receipt: None,
+        render_fixture: None,
     }
 }
 
@@ -1750,35 +1761,104 @@ fn check_report_leads_with_the_verdict_and_names_one_remedy() {
     }
 }
 
-/// cas-4df0: the refresh banner is a verdict line whose detail keeps the
-/// exact count grammar that scripts and the integration tests grep for.
+/// cas-4df0 / cas-0aa5: the sweep's phase line names converged and failed
+/// projects, and its receipt keeps the count grammar scripts grep for.
 #[test]
-fn refresh_banner_is_a_verdict_line_with_the_count_grammar_as_detail() {
+fn refresh_phase_result_counts_projects_and_receipt_keeps_count_grammar() {
     let report = RefreshReport {
         project_count: 2,
-        failed_count: 0,
-        skipped_unregistered: 0,
         elapsed: std::time::Duration::from_millis(1200),
+        ..Default::default()
     };
-    let banner = render_plain_at(80, |fmt| print_update_banner_with_formatter(fmt, &report, None));
-    assert!(
-        banner.starts_with(&format!(
-            "[OK] complete · Cassy {} · 2 projects refreshed · 0 failed",
-            env!("CARGO_PKG_VERSION")
-        )),
-        "{banner}"
-    );
+    let clean = refresh_phase_result(&Ok(report));
+    assert_eq!((clean.verdict, clean.text.as_str()), (Verdict::Ok, "all 2 refreshed"));
 
+    // cas-0aa5 QA F02: a failed user-level store is host state, never one
+    // of the projects in "N of M".
     let failed = RefreshReport {
         project_count: 3,
-        failed_count: 1,
+        failed_count: 2,
+        failed_projects: 1,
+        user_level_failed: true,
+        warned_count: 1,
         skipped_unregistered: 2,
         elapsed: std::time::Duration::from_secs(4),
+        ..Default::default()
     };
-    let banner =
-        render_plain_at(80, |fmt| print_update_banner_with_formatter(fmt, &failed, None));
-    assert!(banner.starts_with("[ERROR] 1 project failed · "), "{banner}");
-    assert!(banner.contains("2 unregistered store(s) not refreshed"), "{banner}");
+    let receipt = update_banner_text(&failed);
+    let error: anyhow::Error = RefreshFailed(failed).into();
+    assert_eq!(
+        error.to_string(),
+        "1 of 3 projects not fully refreshed; the user-level store was not refreshed"
+    );
+    let failed = refresh_phase_result(&Err(error));
+    assert_eq!(failed.verdict, Verdict::Error);
+    assert_eq!(
+        failed.text,
+        "1 of 3 failed · user-level store failed · 1 warning · 2 skipped"
+    );
+    assert!(receipt.contains("2 failed · 2 skipped"), "{receipt}");
+}
+
+/// cas-0aa5: the operator's 3.62 `cas update -y` transcript, replayed from
+/// its reconstructed fixture through the real phases and renderer. The
+/// binary verdict and the refresh verdict are the first two results; each
+/// failure is one finding with one remedy; raw phase output stays out.
+#[cfg(unix)]
+#[test]
+fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() {
+    let _output_lock = update_output_lock();
+    let mut fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../docs/design/cli/fixtures/cas-update-partial-refresh.json"
+    )))
+    .unwrap();
+    fixture["refresh_ms"] = 0.into();
+    fixture["binary"]["elapsed_ms"] = 0.into();
+    fixture["binary"]["current"] = "9.99.1".into();
+    fixture["binary"]["latest"] = "9.99.1".into();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fixture.json");
+    std::fs::write(&path, fixture.to_string()).unwrap();
+    let mut args = update_test_args();
+    args.version = None;
+    args.yes = true;
+
+    let (result, output) = capture_phase(true, || {
+        crate::cli::update::fixture::render(&path, &args, &update_test_cli(false))
+    });
+
+    let error = result.expect_err("a partial refresh must still exit nonzero");
+    assert_eq!(
+        error.to_string(),
+        "2 of 12 projects not fully refreshed; Cassy 9.99.1 is current"
+    );
+    let results = output
+        .lines()
+        .filter(|line| line.starts_with('['))
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>();
+    assert!(
+        results[0].starts_with("[OK] [1/2] Cassy binary 9.99.1 is current"),
+        "{output}"
+    );
+    assert!(
+        results[1].starts_with("[ERROR] [2/2] Projects 2 of 12 failed · 4 warnings · 1 skipped"),
+        "{output}"
+    );
+    assert_eq!(output.matches("recheck writers, remove only this lock").count(), 2, "{output}");
+    // cas-0aa5 QA F01: the reason-specific next step (cas-7c6b) is the
+    // remedy, never the blanket retry it overrides.
+    assert!(
+        output.contains("→ Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184")
+            && output.contains("`cas cloud queue --retry --retry-reason invalid_json_nul`"),
+        "{output}"
+    );
+    assert!(!output.contains("→ cas cloud queue --retry\n"), "{output}");
+    for raw in ["Checking target-arch", "Managed files: 3 conflicts", "Retained intentionally"] {
+        assert!(!output.contains(raw), "raw phase output {raw:?} leaked:\n{output}");
+    }
+    assert!(output.lines().all(|line| line.chars().count() <= 80), "{output}");
 }
 
 #[test]

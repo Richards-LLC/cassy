@@ -38,6 +38,9 @@ use crate::ui::components::table::Column as TableColumn;
 use crate::ui::components::{Border, Formatter, OutputMode, Renderable, Table, Verdict, Width};
 use crate::ui::theme::{ActiveTheme, Icons};
 
+mod findings;
+mod fixture;
+mod live;
 mod preview;
 
 fn report_modified_builtin_references(
@@ -212,6 +215,11 @@ pub struct UpdateArgs {
     /// File where a post-swap refresh writes its machine-readable receipt.
     #[arg(long = "refresh-receipt", hide = true, requires = "post_swap")]
     pub refresh_receipt: Option<PathBuf>,
+
+    /// Replay a recorded update fixture through the human renderer, for
+    /// terminal review captures. Reads no store and changes nothing.
+    #[arg(long = "render-fixture", hide = true, value_name = "JSON")]
+    pub render_fixture: Option<PathBuf>,
 }
 
 /// cas-49c0: which `cas update` mode a run asked for, for the worker scope.
@@ -305,6 +313,11 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         return execute_post_swap(args, cli, current_version);
     }
 
+    // A review replay touches no store, binary or hub, so it runs anywhere.
+    if let Some(fixture) = &args.render_fixture {
+        return fixture::render(fixture, args, cli);
+    }
+
     // A sync preview must stop before both filesystem writers and Git repair.
     if args.sync && args.dry_run {
         if cli.json {
@@ -343,14 +356,9 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // successful ordinary `cas update` performs below.
     if args.all_projects {
         let mut steps = UpdateStepTracker::new(1, !cli.json);
-        let report = steps.run("Refreshing all local Cassy projects", || {
+        run_refresh_phase(&mut steps, cli, || {
             refresh_all_projects(args, cli, cas_root, None, None, None)
         })?;
-        if !cli.json {
-            let mut out = io::stdout();
-            let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-            print_update_banner_with_formatter(&mut fmt, &report, None)?;
-        }
         return Ok(());
     }
 
@@ -403,18 +411,74 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     }
 
     // Full update: binary + every local project's migration/sync/cloud state.
+    run_full_update(
+        cli,
+        update_interactivity(args, cli, io::stdin().is_terminal()).show_output,
+        || perform_update(args, current_version, cli),
+        |pending| finish_post_swap(pending, current_version),
+        |version| super::hub::restart_stale_hub(version, cli),
+        |error, hub| refresh_all_projects(args, cli, cas_root, error, Some(hub), None),
+    )
+}
+
+/// The full update after its seams: the binary phase, the post-swap child,
+/// the hub and the project refresh. `--render-fixture` replays recorded data
+/// through the same path, so a review capture shows what an operator sees.
+fn run_full_update(
+    cli: &Cli,
+    interactive: bool,
+    binary: impl FnOnce() -> anyhow::Result<BinaryUpdateOutcome>,
+    post_swap: impl FnOnce(&PendingPostSwap) -> anyhow::Result<()>,
+    hub: impl Fn(&str) -> anyhow::Result<super::hub::HubRestartOutcome>,
+    refresh: impl FnOnce(Option<&str>, &super::hub::HubRestartOutcome) -> anyhow::Result<RefreshReport>,
+) -> anyhow::Result<()> {
     let mut steps = UpdateStepTracker::new(2, !cli.json);
-    let (outcome, hub_restart) = steps.run("Updating Cassy binary", || {
-        let outcome = perform_update(args, current_version, cli)?;
-        let hub_restart = super::hub::restart_stale_hub(&outcome.version, cli)?;
-        Ok((outcome, hub_restart))
-    })?;
-    if !cli.json {
-        let mut out = io::stdout();
-        let theme = ActiveTheme::default();
-        let mut fmt = Formatter::stdout(&mut out, theme);
-        fmt.newline()?;
+    // A confirmation prompt needs the terminal, so only a run that cannot
+    // prompt holds the phase's output behind its line.
+    let (outcome, hub_restart) = steps.phase(
+        "Cassy binary",
+        "checking for a newer release",
+        !interactive,
+        || {
+            let outcome = binary()?;
+            // After a swap the hub follows the installed binary's refresh,
+            // as it always has (cas-91ba).
+            let hub_restart = match outcome.pending_post_swap {
+                Some(_) => None,
+                None => Some(hub(&outcome.version)?),
+            };
+            Ok((outcome, hub_restart))
+        },
+        |result| match result {
+            Ok((outcome, _)) if outcome.updated => live::PhaseResult {
+                verdict: Verdict::Ok,
+                text: format!("updated to {}", outcome.version),
+            },
+            Ok((outcome, _)) => live::PhaseResult {
+                verdict: Verdict::Ok,
+                text: format!("{} is current", outcome.version),
+            },
+            Err(_) => live::PhaseResult {
+                verdict: Verdict::Error,
+                text: "update failed".to_owned(),
+            },
+        },
+        |result, output| match result {
+            Ok((outcome, hub_restart)) => {
+                binary_phase_remainder(output, &outcome.version, hub_restart.as_ref())
+            }
+            Err(_) => output.to_owned(),
+        },
+    )?;
+
+    // cas-91ba: after a swap the installed binary runs the remaining phases
+    // itself, on this terminal, as phase 2 of this run.
+    if let Some(pending) = &outcome.pending_post_swap {
+        post_swap(pending)?;
+        hub(&outcome.version)?;
+        return Ok(());
     }
+    let hub_restart = hub_restart.unwrap_or_default();
 
     // cas-91ba: after a swap the installed binary has already run the
     // post-install phases. Re-running them here would replay the pre-update
@@ -449,18 +513,20 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     }
 
     let hub_proof = hub_restart.clone();
-    let (report, hub_transport_error) = refresh_after_hub_restart(hub_restart, |error| {
-        steps.run("Refreshing all local Cassy projects", || {
-            refresh_all_projects(args, cli, cas_root, error, Some(&hub_proof), None)
-        })
-    })?;
-
-    if !cli.json {
-        let mut out = io::stdout();
-        let theme = ActiveTheme::default();
-        let mut fmt = Formatter::stdout(&mut out, theme);
-        fmt.newline()?;
-        print_update_banner_with_formatter(&mut fmt, &report, hub_transport_error.as_deref())?;
+    let refreshed = refresh_after_hub_restart(hub_restart, |error| {
+        run_refresh_phase(&mut steps, cli, || refresh(error, &hub_proof))
+    });
+    if let Err(error) = refreshed {
+        // Name the binary's state beside the refresh failure, so a current
+        // binary never reads as a failed update.
+        return Err(match error.downcast_ref::<RefreshFailed>() {
+            Some(failed) => anyhow::anyhow!(
+                "{failed}; Cassy {} is {}",
+                outcome.version,
+                if outcome.updated { "installed" } else { "current" }
+            ),
+            None => error,
+        });
     }
 
     if hub_proof.action == "failed" {
@@ -472,6 +538,37 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     }
 
     Ok(())
+}
+
+/// What the binary phase printed that its result line and the findings do
+/// not already say: the version verdict and the hub's verification and
+/// Serve warning are drawn from data, so their printed copies are dropped.
+fn binary_phase_remainder(
+    output: &str,
+    version: &str,
+    hub: Option<&super::hub::HubRestartOutcome>,
+) -> String {
+    let said = |line: &str| {
+        let line = line.trim();
+        let bare = line
+            .trim_start_matches("[OK]")
+            .trim_start_matches(Icons::CHECK)
+            .trim_start();
+        bare == format!("Already up to date ({version})")
+            || bare == format!("Successfully updated to {version}")
+            || line.starts_with("cas update: hub was ")
+            || hub.is_some_and(|hub| {
+                [hub.transport_warning.as_deref(), hub.remedy.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|text| line == format!("cas update: {text}"))
+            })
+    };
+    output
+        .lines()
+        .filter(|line| !said(line))
+        .map(|line| format!("{line}\n"))
+        .collect()
 }
 
 /// One receipt for the whole `cas update` run (cas-91ba).
@@ -656,6 +753,18 @@ struct ProjectRefreshReceipt {
 }
 
 impl ProjectRefreshReceipt {
+    fn warned(&self) -> bool {
+        [
+            &self.migration,
+            &self.search_index,
+            &self.skills,
+            &self.membership,
+            &self.cloud,
+        ]
+        .into_iter()
+        .any(|phase| matches!(phase, ProjectPhase::Warning(_)))
+    }
+
     fn failed(&self) -> bool {
         [&self.migration, &self.skills, &self.membership, &self.cloud]
             .into_iter()
@@ -663,13 +772,37 @@ impl ProjectRefreshReceipt {
     }
 }
 
+#[derive(Default)]
 struct RefreshReport {
     project_count: usize,
+    /// Failed projects plus a failed user-level store: the receipt's count.
     failed_count: usize,
+    /// Failed projects only, the numerator of "N of M projects".
+    failed_projects: usize,
+    /// The user-level store failed; it is host state, never a project.
+    user_level_failed: bool,
+    /// Projects with a warned phase and none failed.
+    warned_count: usize,
     /// Scan or registry roots excluded from refresh. Counted in the banner so
     /// a refresh cannot claim a clean sweep while leaving stores untouched.
     skipped_unregistered: usize,
     elapsed: Duration,
+    /// What the sweep found, for the human result; `None` under `--json`.
+    sweep: Option<findings::SweepFindings>,
+    /// The per-project table and phase output, for `--verbose`.
+    verbose_summary: String,
+}
+
+impl std::fmt::Debug for RefreshReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RefreshReport")
+            .field("project_count", &self.project_count)
+            .field("failed_count", &self.failed_count)
+            .field("warned_count", &self.warned_count)
+            .field("skipped_unregistered", &self.skipped_unregistered)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A scan candidate which was deliberately excluded from the refresh. Keep
@@ -1000,10 +1133,7 @@ fn render_project_phase_details(
 
 fn update_banner_text(report: &RefreshReport) -> String {
     let skipped = if report.skipped_unregistered > 0 {
-        format!(
-            " · {} unregistered store(s) not refreshed",
-            report.skipped_unregistered
-        )
+        format!(" · {} skipped", report.skipped_unregistered)
     } else {
         String::new()
     };
@@ -1014,37 +1144,6 @@ fn update_banner_text(report: &RefreshReport) -> String {
         report.failed_count,
         format_elapsed(report.elapsed)
     )
-}
-
-/// The receipt of a refresh as a verdict line: the mark and word say whether
-/// anything needs a hand, the detail keeps the counts scripts grep for.
-fn print_update_banner_with_formatter(
-    fmt: &mut Formatter<'_>,
-    report: &RefreshReport,
-    hub_transport_error: Option<&str>,
-) -> io::Result<()> {
-    let (verdict, word) = if report.failed_count > 0 {
-        (
-            Verdict::Error,
-            format!(
-                "{} {} failed",
-                report.failed_count,
-                if report.failed_count == 1 { "project" } else { "projects" }
-            ),
-        )
-    } else if report.skipped_unregistered > 0 {
-        (
-            Verdict::Warning,
-            format!("{} not refreshed", report.skipped_unregistered),
-        )
-    } else {
-        (Verdict::Ok, "complete".to_string())
-    };
-    fmt.verdict(verdict, &word, &update_banner_text(report))?;
-    if let Some(error) = hub_transport_error {
-        fmt.verdict(Verdict::Error, "hub transport", error)?;
-    }
-    Ok(())
 }
 
 fn capture_phase<T>(enabled: bool, operation: impl FnOnce() -> T) -> (T, String) {
@@ -1173,9 +1272,17 @@ fn refresh_all_projects_with_user_refresh(
 
     // Account registrations must converge before project proxies choose their
     // bearer. Keep this phase advisory and run it once for the whole update.
+    live::set_activity("user-level store");
     let (user_level, user_details) = capture_phase(!cli.json, user_refresh);
 
-    for project in &discovery.projects {
+    let names = findings::display_names(discovery.projects.iter().map(PathBuf::as_path));
+    for (index, project) in discovery.projects.iter().enumerate() {
+        live::set_activity(format!(
+            "{} of {} · {}",
+            index + 1,
+            discovery.projects.len(),
+            names[index]
+        ));
         let project = project.clone();
         let cas_root = project.join(".cas");
         let mut details = String::new();
@@ -1253,16 +1360,62 @@ fn refresh_all_projects_with_user_refresh(
         });
     }
 
-    print_project_refresh_summary(
-        &receipts,
-        &user_level,
-        &user_details,
-        &discovery.skipped_unregistered,
+    finish_project_refresh(
+        args,
         cli,
+        RefreshResults {
+            receipts,
+            user_level,
+            user_details,
+            skipped_unregistered: discovery.skipped_unregistered,
+        },
         hub_transport_error,
         hub_restart,
         first_launch_ms,
-    );
+        started_at,
+    )
+}
+
+/// Everything one sweep learned, before any of it is printed.
+struct RefreshResults {
+    receipts: Vec<ProjectRefreshReceipt>,
+    user_level: ProjectPhase,
+    user_details: String,
+    skipped_unregistered: Vec<SkippedProject>,
+}
+
+/// Report a finished sweep: the summary (or the JSON receipt), the receipt
+/// file, and the exit verdict. Shared by the real sweep and the review replay.
+fn finish_project_refresh(
+    args: &UpdateArgs,
+    cli: &Cli,
+    results: RefreshResults,
+    hub_transport_error: Option<&str>,
+    hub_restart: Option<&super::hub::HubRestartOutcome>,
+    first_launch_ms: Option<u64>,
+    started_at: Instant,
+) -> anyhow::Result<RefreshReport> {
+    let RefreshResults {
+        receipts,
+        user_level,
+        user_details,
+        skipped_unregistered,
+    } = results;
+    if cli.json {
+        println!(
+            "{}",
+            with_first_launch_ms(
+                project_refresh_receipt_json(
+                    &receipts,
+                    &user_level,
+                    &skipped_unregistered,
+                    hub_transport_error,
+                    hub_restart,
+                ),
+                first_launch_ms,
+            )
+        );
+    }
 
     let failed_count = receipts.iter().filter(|receipt| receipt.failed()).count()
         + usize::from(user_level.failed());
@@ -1270,7 +1423,7 @@ fn refresh_all_projects_with_user_refresh(
         project_refresh_receipt_json(
             &receipts,
             &user_level,
-            &discovery.skipped_unregistered,
+            &skipped_unregistered,
             hub_transport_error,
             hub_restart,
         ),
@@ -1279,17 +1432,183 @@ fn refresh_all_projects_with_user_refresh(
     if let Some(path) = &args.refresh_receipt {
         write_refresh_receipt(path, &receipt)?;
     }
-    if failed_count > 0 {
-        anyhow::bail!(
-            "one or more projects were not fully refreshed; see the per-project phase summary above"
-        );
-    }
-    Ok(RefreshReport {
+    // The human result is drawn after the phase line, so it is kept as data.
+    let (sweep, verbose_summary) = if cli.json {
+        (None, String::new())
+    } else {
+        (
+            Some(findings::collect(
+                &receipts,
+                &user_level,
+                &skipped_unregistered,
+                hub_restart,
+                hub_transport_error,
+            )),
+            // A dry run's plan is its result, so it keeps its table.
+            if cli.verbose || args.dry_run {
+                render_project_refresh_summary(
+                    &receipts,
+                    &user_level,
+                    &user_details,
+                    &skipped_unregistered,
+                    cli.verbose,
+                )
+            } else {
+                String::new()
+            },
+        )
+    };
+    let report = RefreshReport {
         project_count: receipts.len(),
         failed_count,
-        skipped_unregistered: discovery.skipped_unregistered.len(),
+        failed_projects: receipts.iter().filter(|receipt| receipt.failed()).count(),
+        user_level_failed: user_level.failed(),
+        warned_count: receipts
+            .iter()
+            .filter(|receipt| !receipt.failed() && receipt.warned())
+            .count(),
+        skipped_unregistered: skipped_unregistered.len(),
         elapsed: started_at.elapsed(),
-    })
+        sweep,
+        verbose_summary,
+    };
+    if failed_count > 0 {
+        return Err(RefreshFailed(report).into());
+    }
+    Ok(report)
+}
+
+/// A sweep that left projects behind. It carries the whole report, so the
+/// phase line and findings can still be drawn before the command fails.
+#[derive(Debug)]
+struct RefreshFailed(RefreshReport);
+
+impl std::fmt::Display for RefreshFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let report = &self.0;
+        let projects = (report.failed_projects > 0).then(|| {
+            format!(
+                "{} of {} projects not fully refreshed",
+                report.failed_projects, report.project_count
+            )
+        });
+        let user = report
+            .user_level_failed
+            .then(|| "the user-level store was not refreshed".to_owned());
+        let parts = projects.into_iter().chain(user).collect::<Vec<_>>();
+        write!(formatter, "{}", parts.join("; "))
+    }
+}
+
+impl std::error::Error for RefreshFailed {}
+
+/// The report behind a refresh result, whether or not it failed.
+fn refresh_report(result: &anyhow::Result<RefreshReport>) -> Option<&RefreshReport> {
+    match result {
+        Ok(report) => Some(report),
+        Err(error) => error.downcast_ref::<RefreshFailed>().map(|failed| &failed.0),
+    }
+}
+
+/// The phase line's result for a sweep: how many projects converged.
+fn refresh_phase_result(result: &anyhow::Result<RefreshReport>) -> live::PhaseResult {
+    let Some(report) = refresh_report(result) else {
+        return live::PhaseResult {
+            verdict: Verdict::Error,
+            text: "did not finish".to_owned(),
+        };
+    };
+    let total = report.project_count;
+    let mut text = if report.failed_projects > 0 {
+        format!("{} of {total} failed", report.failed_projects)
+    } else if report.user_level_failed {
+        "user-level store failed".to_owned()
+    } else if total == 1 {
+        "1 project refreshed".to_owned()
+    } else {
+        format!("all {total} refreshed")
+    };
+    if report.failed_projects > 0 && report.user_level_failed {
+        text.push_str(" · user-level store failed");
+    }
+    if report.warned_count > 0 {
+        text.push_str(&format!(
+            " · {} {}",
+            report.warned_count,
+            if report.warned_count == 1 { "warning" } else { "warnings" }
+        ));
+    }
+    if report.skipped_unregistered > 0 {
+        text.push_str(&format!(" · {} skipped", report.skipped_unregistered));
+    }
+    let verdict = if report.failed_count > 0 {
+        Verdict::Error
+    } else if report.warned_count > 0 || report.skipped_unregistered > 0 {
+        Verdict::Warning
+    } else {
+        Verdict::Ok
+    };
+    live::PhaseResult { verdict, text }
+}
+
+/// Run the sweep as one phase line, then draw what it found.
+fn run_refresh_phase(
+    steps: &mut UpdateStepTracker,
+    cli: &Cli,
+    refresh: impl FnOnce() -> anyhow::Result<RefreshReport>,
+) -> anyhow::Result<RefreshReport> {
+    let result = steps.phase(
+        "Projects",
+        "finding projects",
+        true,
+        refresh,
+        refresh_phase_result,
+        |_, output| output.to_owned(),
+    );
+    if !cli.json
+        && let Some(report) = refresh_report(&result)
+    {
+        let mut out = io::stdout();
+        let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+        print_sweep(&mut fmt, report, cli.verbose)?;
+    }
+    result
+}
+
+/// The findings, then one muted receipt with the count grammar scripts grep.
+fn print_sweep(fmt: &mut Formatter<'_>, report: &RefreshReport, verbose: bool) -> io::Result<()> {
+    fmt.newline()?;
+    if !report.verbose_summary.is_empty() {
+        fmt.write_raw(&report.verbose_summary)?;
+        fmt.newline()?;
+    }
+    let shortened = match &report.sweep {
+        Some(sweep) => findings::print(fmt, sweep)?,
+        None => false,
+    };
+    // The receipt wraps between its fields, never inside one.
+    let width = usize::from(fmt.width()).clamp(40, 100) - 2;
+    let mut line = String::new();
+    for field in update_banner_text(report).split(" · ") {
+        if !line.is_empty() && line.chars().count() + 3 + field.chars().count() > width {
+            fmt.write_raw("  ")?;
+            fmt.receipt(&line)?;
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push_str(" · ");
+        }
+        line.push_str(field);
+    }
+    fmt.write_raw("  ")?;
+    fmt.receipt(&line)?;
+    if !verbose
+        && (shortened || report.sweep.as_ref().is_some_and(|sweep| !sweep.findings.is_empty()))
+    {
+        fmt.write_raw("  ")?;
+        fmt.receipt("cas update --verbose shows every project and phase output")?;
+    }
+    Ok(())
 }
 
 /// Refresh the user-level store (`~/.cas`) as its own phase.
@@ -1778,43 +2097,6 @@ fn write_refresh_receipt(path: &Path, receipt: &serde_json::Value) -> anyhow::Re
     std::fs::write(path, bytes)
         .with_context(|| format!("could not write refresh receipt {}", path.display()))?;
     Ok(())
-}
-
-fn print_project_refresh_summary(
-    receipts: &[ProjectRefreshReceipt],
-    user_level: &ProjectPhase,
-    user_details: &str,
-    skipped_unregistered: &[SkippedProject],
-    cli: &Cli,
-    hub_transport_error: Option<&str>,
-    hub_restart: Option<&super::hub::HubRestartOutcome>,
-    first_launch_ms: Option<u64>,
-) {
-    if cli.json {
-        let receipt = with_first_launch_ms(
-            project_refresh_receipt_json(
-                receipts,
-                user_level,
-                skipped_unregistered,
-                hub_transport_error,
-                hub_restart,
-            ),
-            first_launch_ms,
-        );
-        println!("{}", receipt);
-        return;
-    }
-
-    print!(
-        "{}",
-        render_project_refresh_summary(
-            receipts,
-            user_level,
-            user_details,
-            skipped_unregistered,
-            cli.verbose,
-        )
-    );
 }
 
 /// The compact (non-JSON) refresh summary: the project table, a details
@@ -3385,6 +3667,7 @@ fn perform_update(
                 version: current_version.to_owned(),
                 updated: false,
                 post_install_refresh: None,
+                pending_post_swap: None,
             });
         }
 
@@ -3407,7 +3690,17 @@ fn perform_update(
     // migration repair — must run in the installed binary, so the remaining
     // phases are delegated to it and its receipt is the authoritative one.
     let mut post_install_refresh = None;
-    if matches!(&status, Status::Updated(_)) {
+    let mut pending_post_swap = None;
+    if matches!(&status, Status::Updated(_)) && !cli.json {
+        // cas-0aa5: the child draws its own phase on this terminal, so it
+        // runs after the binary phase has drawn its result line.
+        pending_post_swap = Some(PendingPostSwap {
+            installed_binary: installed_binary.clone(),
+            installed_version: match &status {
+                Status::UpToDate(v) | Status::Updated(v) => v.trim_start_matches('v').to_owned(),
+            },
+        });
+    } else if matches!(&status, Status::Updated(_)) {
         let installed_version = match &status {
             Status::UpToDate(v) | Status::Updated(v) => v.trim_start_matches('v').to_owned(),
         };
@@ -3444,52 +3737,49 @@ fn perform_update(
             version: version.trim_start_matches('v').to_owned(),
             updated,
             post_install_refresh,
+            pending_post_swap: None,
         });
     }
 
+    let (updated, version) = match &status {
+        Status::UpToDate(v) => (false, v.trim_start_matches('v').to_owned()),
+        Status::Updated(v) => (true, v.trim_start_matches('v').to_owned()),
+    };
+    print_binary_status(updated, &version, &running_factory_sessions())?;
+    Ok(BinaryUpdateOutcome {
+        version,
+        updated,
+        post_install_refresh,
+        pending_post_swap,
+    })
+}
+
+/// The human result of the binary phase. Shared with `--render-fixture`.
+fn print_binary_status(
+    updated: bool,
+    version: &str,
+    factory_sessions: &[(String, bool)],
+) -> io::Result<()> {
     let mut out = io::stdout();
     let theme = ActiveTheme::default();
     let mut fmt = Formatter::stdout(&mut out, theme);
-
-    let binary_was_updated = matches!(status, Status::Updated(_));
-    let installed_version = match status {
-        Status::UpToDate(v) => {
-            fmt.newline()?;
-            fmt.write_raw("  ")?;
-            fmt.success(&format!(
-                "Already up to date ({})",
-                v.trim_start_matches('v')
-            ))?;
-            v.trim_start_matches('v').to_owned()
-        }
-        Status::Updated(v) => {
-            fmt.newline()?;
-            fmt.write_raw("  ")?;
-            fmt.success(&format!(
-                "Successfully updated to {}",
-                v.trim_start_matches('v')
-            ))?;
-            fmt.newline()?;
-            fmt.write_raw("  Run ")?;
-            fmt.write_accent("cas changelog")?;
-            fmt.write_raw(" to see what's new")?;
-            fmt.newline()?;
-            if let Some(notice) =
-                running_factory_update_notice(&running_factory_sessions(), v.trim_start_matches('v'))
-            {
-                fmt.write_raw("  ")?;
-                fmt.warning(&notice)?;
-                fmt.newline()?;
-            }
-            v.trim_start_matches('v').to_owned()
-        }
-    };
-
-    Ok(BinaryUpdateOutcome {
-        version: installed_version,
-        updated: binary_was_updated,
-        post_install_refresh,
-    })
+    fmt.newline()?;
+    fmt.write_raw("  ")?;
+    if !updated {
+        return fmt.success(&format!("Already up to date ({version})"));
+    }
+    fmt.success(&format!("Successfully updated to {version}"))?;
+    fmt.newline()?;
+    fmt.write_raw("  Run ")?;
+    fmt.write_accent("cas changelog")?;
+    fmt.write_raw(" to see what's new")?;
+    fmt.newline()?;
+    if let Some(notice) = running_factory_update_notice(factory_sessions, version) {
+        fmt.write_raw("  ")?;
+        fmt.warning(&notice)?;
+        fmt.newline()?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -3505,10 +3795,13 @@ fn update_interactivity(
     stdin_is_terminal: bool,
 ) -> UpdateInteractivity {
     let silent = cli.json || !stdin_is_terminal;
+    let no_confirm = args.yes || silent;
+    // cas-0aa5: a run that cannot prompt draws its own phase line, so the
+    // release check's chatter would only interleave with it.
     UpdateInteractivity {
-        no_confirm: args.yes || silent,
-        show_output: !silent,
-        show_download_progress: !silent,
+        no_confirm,
+        show_output: !no_confirm,
+        show_download_progress: !no_confirm,
     }
 }
 
@@ -3570,6 +3863,27 @@ struct BinaryUpdateOutcome {
     /// `--json` it holds that child's receipt; otherwise `Null`, because the
     /// child printed its own human output.
     post_install_refresh: Option<serde_json::Value>,
+    /// Human mode: the swap happened and the installed binary still has to
+    /// run the remaining phases on this terminal, after the binary phase line.
+    pending_post_swap: Option<PendingPostSwap>,
+}
+
+/// The installed binary that must run the post-swap phases.
+struct PendingPostSwap {
+    installed_binary: PathBuf,
+    installed_version: String,
+}
+
+/// Run the post-swap phases in the installed binary, which renders them as
+/// phase 2 of this update on the inherited terminal.
+fn finish_post_swap(pending: &PendingPostSwap, current_version: &str) -> anyhow::Result<()> {
+    run_post_swap_refresh(
+        &pending.installed_binary,
+        current_version,
+        &pending.installed_version,
+        false,
+    )
+    .map(|_| ())
 }
 
 /// A post-swap child started, but its refresh did not complete successfully.
@@ -3611,26 +3925,29 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
         .ok_or_else(|| anyhow::anyhow!("post-swap mode requires --from"))?;
     remove_quarantine_if_present(&std::env::current_exe()?)?;
     // The hub goes first so it picks up the new binary immediately rather than
-    // waiting behind a full refresh.
-    let hub_restart = super::hub::restart_stale_hub(current_version, cli)?;
+    // waiting behind a full refresh. Its verification is drawn from data in
+    // the findings; anything else it printed still reaches the operator.
+    let (hub_restart, hub_output) =
+        capture_phase(!cli.json, || super::hub::restart_stale_hub(current_version, cli));
+    let hub_restart = hub_restart?;
+    print_indented(&binary_phase_remainder(&hub_output, current_version, Some(&hub_restart)))?;
 
-    // These are the phases that must not run in the pre-update image.
+    // These are the phases that must not run in the pre-update image. To the
+    // operator they are phase 2 of the update the parent started.
+    let mut steps = UpdateStepTracker::resuming(1, 2, !cli.json);
     let hub_proof = hub_restart.clone();
-    let (report, hub_transport_error) = refresh_after_hub_restart(hub_restart, |error| {
-        refresh_all_projects(
-            args,
-            cli,
-            None,
-            error,
-            Some(&hub_proof),
-            Some(first_launch_ms),
-        )
+    refresh_after_hub_restart(hub_restart, |error| {
+        run_refresh_phase(&mut steps, cli, || {
+            refresh_all_projects(
+                args,
+                cli,
+                None,
+                error,
+                Some(&hub_proof),
+                Some(first_launch_ms),
+            )
+        })
     })?;
-    if !cli.json {
-        let mut out = io::stdout();
-        let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-        print_update_banner_with_formatter(&mut fmt, &report, hub_transport_error.as_deref())?;
-    }
     if hub_proof.action == "failed" {
         anyhow::bail!(
             "hub recovery failed after one retry: {}; {}",
@@ -4156,6 +4473,8 @@ fn is_newer(new: &str, current: &str) -> bool {
     }
 }
 
+/// Numbered phases of one `cas update` run, each drawn as one phase line
+/// (cas-0aa5; see `update/live.rs`).
 struct UpdateStepTracker {
     total: usize,
     current: usize,
@@ -4171,69 +4490,128 @@ impl UpdateStepTracker {
         }
     }
 
+    /// Continue a run another process started: the post-swap child is the
+    /// second phase of its parent's update.
+    fn resuming(done: usize, total: usize, enabled: bool) -> Self {
+        Self {
+            total,
+            current: done,
+            enabled,
+        }
+    }
+
+    /// A phase whose result is simply "done": its own output follows its line.
     fn run<T, F>(&mut self, label: &str, f: F) -> anyhow::Result<T>
     where
         F: FnOnce() -> anyhow::Result<T>,
     {
-        let step_num = self.current + 1;
-        let started_at = Instant::now();
-        let mut styled = false;
-
-        if self.enabled {
-            let mut out = io::stdout();
-            let theme = ActiveTheme::default();
-            let mut fmt = Formatter::stdout(&mut out, theme);
-            fmt.write_accent("\u{2192} ")?;
-            fmt.write_raw(&format!("[{}/{}] ", step_num, self.total))?;
-            fmt.write_bold(label)?;
-            styled = fmt.is_styled();
-            if !styled {
-                fmt.newline()?;
-            } else {
-                fmt.flush()?;
-            }
-        }
-
-        match f() {
-            Ok(value) => {
-                if self.enabled {
-                    let mut out = io::stdout();
-                    let theme = ActiveTheme::default();
-                    let mut fmt = Formatter::stdout(&mut out, theme);
-                    if styled {
-                        fmt.write_raw(" ")?;
-                        fmt.success(&format_elapsed(started_at.elapsed()))?;
-                    } else {
-                        fmt.write_raw("  ")?;
-                        fmt.success(&format!(
-                            "{label} ({})",
-                            format_elapsed(started_at.elapsed())
-                        ))?;
-                    }
-                }
-                self.current += 1;
-                Ok(value)
-            }
-            Err(err) => {
-                if self.enabled {
-                    let mut out = io::stdout();
-                    let theme = ActiveTheme::default();
-                    let mut fmt = Formatter::stdout(&mut out, theme);
-                    if styled {
-                        fmt.write_raw(" ")?;
-                        fmt.error(&format_elapsed(started_at.elapsed()))?;
-                    } else {
-                        fmt.write_raw("  ")?;
-                        fmt.error(&format!(
-                            "{label} ({})",
-                            format_elapsed(started_at.elapsed())
-                        ))?;
-                    }
-                }
-                Err(err)
-            }
-        }
+        self.phase(
+            label,
+            "working",
+            true,
+            f,
+            |result| live::PhaseResult {
+                verdict: if result.is_ok() { Verdict::Ok } else { Verdict::Error },
+                text: if result.is_ok() { "done" } else { "failed" }.to_owned(),
+            },
+            |_, output| output.to_owned(),
+        )
     }
+
+    /// Run one phase on its line. With `capture`, everything the phase prints
+    /// is held until its result is drawn, then `keep` chooses what still adds
+    /// to that result. Without it (an interactive prompt needs the terminal)
+    /// the phase prints freely between its start and result lines.
+    fn phase<T>(
+        &mut self,
+        label: &str,
+        doing: &str,
+        capture: bool,
+        f: impl FnOnce() -> anyhow::Result<T>,
+        result: impl FnOnce(&anyhow::Result<T>) -> live::PhaseResult,
+        keep: impl FnOnce(&anyhow::Result<T>, &str) -> String,
+    ) -> anyhow::Result<T> {
+        self.current += 1;
+        if !self.enabled {
+            return f();
+        }
+        let counter = format!("[{}/{}]", self.current, self.total);
+        let started_at = Instant::now();
+        let mode = OutputMode::detect();
+        let animate = capture && live::can_animate();
+        if !animate {
+            print_phase_line(None, &counter, label, doing, None)?;
+        }
+        let (value, output) = if capture {
+            let live_line = animate
+                .then(terminal_handle)
+                .flatten()
+                .map(|terminal| {
+                    live::LiveLine::start(
+                        terminal,
+                        mode,
+                        counter.clone(),
+                        label.to_owned(),
+                        doing.to_owned(),
+                    )
+                });
+            let (value, output) = capture_phase(true, f);
+            if let Some(line) = live_line {
+                line.finish();
+            }
+            (value, output)
+        } else {
+            (f(), String::new())
+        };
+        let shown = result(&value);
+        print_phase_line(
+            Some(shown.verdict),
+            &counter,
+            label,
+            &shown.text,
+            Some(started_at.elapsed()),
+        )?;
+        let kept = keep(&value, &output);
+        print_indented(&kept)?;
+        value
+    }
+}
+
+/// The real terminal, held open while the phase's own stdout is captured.
+fn terminal_handle() -> Option<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::FromRawFd;
+        let fd = unsafe { libc::dup(libc::STDOUT_FILENO) };
+        (fd >= 0).then(|| unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+fn print_phase_line(
+    mark: Option<Verdict>,
+    counter: &str,
+    label: &str,
+    text: &str,
+    elapsed: Option<Duration>,
+) -> io::Result<()> {
+    let mut out = io::stdout();
+    let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+    live::render_line(&mut fmt, mark, None, counter, label, text, elapsed)?;
+    fmt.newline()?;
+    fmt.flush()
+}
+
+/// Output a phase printed that its result line does not already say.
+fn print_indented(output: &str) -> io::Result<()> {
+    let mut out = io::stdout();
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        writeln!(out, "  {}", line.trim_end())?;
+    }
+    out.flush()
 }
 
 fn format_elapsed(duration: Duration) -> String {

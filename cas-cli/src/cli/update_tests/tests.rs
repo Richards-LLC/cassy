@@ -2053,6 +2053,70 @@ fn cas_6718_drifted_project(home: &Path) -> PathBuf {
     project
 }
 
+#[cfg(unix)]
+#[test]
+fn skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, SystemTime};
+
+    let child_case = std::env::var("CAS7C9B_LOCK_CASE").ok();
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let probes = env.home().join("probes");
+    std::fs::create_dir(&probes).unwrap();
+    // Control only the external process-inspection boundary. Git and the
+    // complete skills refresh remain real, including the actual lock error.
+    for (case, seconds, ps, lsof, expected) in [
+        ("recent", 10, "echo sh", "exit 1", "busy"),
+        ("abandoned", 172800, "echo sh", "exit 1", "stale (no writer observed)"),
+        ("held", 172800, "echo sh", "echo p42", "busy"),
+        ("git_running", 172800, "echo git", "exit 1", "busy"),
+        ("uncertain", 172800, "echo sh", "echo denied >&2; exit 1", "unknown ownership"),
+    ] {
+        if child_case.as_deref() != Some(case) {
+            if child_case.is_some() {
+                continue;
+            }
+            for (name, body) in [("ps", ps), ("lsof", lsof)] {
+                let path = probes.join(name);
+                std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let test = "cli::update::tests::skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b";
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test])
+                .env("CAS7C9B_LOCK_CASE", case)
+                .env("PATH", format!("{}:{}", probes.display(), std::env::var("PATH").unwrap()))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{case}: {}", String::from_utf8_lossy(&output.stderr));
+            crate::test_child::assert_passed(&String::from_utf8_lossy(&output.stdout), test);
+            continue;
+        }
+        let project = cas_6718_drifted_project(&env.home().join(case));
+        let root = project.join(".cas");
+        env.set("CAS_ROOT", &root);
+        let index = std::fs::read(project.join(".git/index")).unwrap();
+        let lock_path = project.join(".git/index.lock");
+        let lock = std::fs::File::create(&lock_path).unwrap();
+        lock.set_times(std::fs::FileTimes::new().set_modified(
+            SystemTime::now() - Duration::from_secs(seconds),
+        )).unwrap();
+        drop(lock);
+        let phase = refresh_project_files(&update_test_cli(true), &root, false);
+        let ProjectPhase::Failed(finding) = phase else {
+            panic!("{case}: locked skills refresh must fail: {phase:?}");
+        };
+        assert!(finding.contains(&format!("git index lock {expected}")), "{case}: {finding}");
+        assert!(finding.contains(".git/index.lock") && finding.contains("age "), "{finding}");
+        assert!(finding.contains("retry") && !finding.contains("Another git process"), "{finding}");
+        assert_eq!(finding.contains("remove"), case == "abandoned", "{finding}");
+        assert!(lock_path.exists(), "update must never remove the lock");
+        assert_eq!(std::fs::read(project.join(".git/index")).unwrap(), index);
+    }
+}
+
 #[test]
 fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();

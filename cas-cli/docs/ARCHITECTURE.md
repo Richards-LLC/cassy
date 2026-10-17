@@ -268,6 +268,14 @@ rendered from index-side project content so those edits never enter Cassy's
 commit. Existing staged work is preserved: update stages the repair and reports
 that a commit is pending. Conflicts and pending commits remain warnings in the
 compact multi-project summary, rather than becoming successful skills phases.
+Git index lock failures name the resolved lock path (relative to the project
+when possible), its age and a busy, stale or unknown ownership finding. Only a
+lock at least one hour old, with no Git process or open holder observed by
+successful bounded `ps`/`lsof` probes, is called stale. Unavailable or uncertain
+probes remain unknown; unrelated Git processes conservatively count as busy.
+Update never removes a lock. Recheck writers before manually removing the exact
+stale lock and retrying; recent/live locks require waiting, unknown ownership
+requires inspection.
 With no other staged work, it makes one dedicated
 `chore(cassy): reconcile managed project files` commit, using a command-scoped
 Cassy author identity. It never pushes. A second update is a no-op.

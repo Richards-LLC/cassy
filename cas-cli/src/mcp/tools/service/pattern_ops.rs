@@ -26,15 +26,11 @@ impl CasService {
             payload.insert("propagation_tags".to_string(), serde_json::json!(tag_list));
         }
 
-        let resp = self.pattern_api_call(
+        let pattern = self.pattern_api_call(
             "POST",
             "/api/patterns",
             Some(serde_json::Value::Object(payload)),
         )?;
-
-        let pattern = resp
-            .get("pattern")
-            .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "Missing pattern in response"))?;
 
         Ok(Self::success(format!(
             "Created pattern: {}\n\n{}",
@@ -42,7 +38,7 @@ impl CasService {
                 .get("id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown"),
-            format_pattern(pattern),
+            format_pattern(&pattern),
         )))
     }
 
@@ -719,6 +715,9 @@ impl CasService {
             };
 
             match response {
+                Ok(resp) if method == "POST" && path == "/api/patterns" => {
+                    decode_pattern_create_response(resp)
+                }
                 Ok(resp) => resp.into_json::<serde_json::Value>().map_err(|e| {
                     Self::error(
                         ErrorCode::INTERNAL_ERROR,
@@ -749,6 +748,47 @@ impl CasService {
             }
         }
     }
+}
+
+/// Cloud returns the persisted row directly. A successful HTTP write whose
+/// result cannot be decoded is not evidence that the mutation failed.
+fn decode_pattern_create_response(response: ureq::Response) -> Result<serde_json::Value, McpError> {
+    let status = response.status();
+    let reference = response
+        .header("x-request-id")
+        .or_else(|| response.header("x-vercel-id"))
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| id.chars().take(200).collect::<String>())
+        .unwrap_or_else(|| format!("local-{}", uuid::Uuid::new_v4()));
+    let uncertain = |reason: &str| {
+        let mut error = CasService::error(
+            ErrorCode::INTERNAL_ERROR,
+            format!(
+                "Pattern create outcome uncertain: Cloud returned HTTP {status}, but {reason}. \
+                 The pattern may already exist. Do not retry create. Reconcile with \
+                 pattern action=list and match the original request before creating again. \
+                 Reconciliation reference: {reference}",
+            ),
+        );
+        error.data = Some(serde_json::json!({
+            "outcome": "uncertain",
+            "http_status": status,
+            "reconciliation_id": reference,
+            "retry_safe": false,
+        }));
+        error
+    };
+    let pattern: serde_json::Value = response
+        .into_json()
+        .map_err(|_| uncertain("the response is not valid JSON"))?;
+    if pattern
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|id| id.trim().is_empty())
+    {
+        return Err(uncertain("the response has no pattern ID"));
+    }
+    Ok(pattern)
 }
 
 // ============================================================================

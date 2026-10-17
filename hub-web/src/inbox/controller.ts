@@ -19,7 +19,9 @@ import { IssuerKeys } from "./issuer";
 import { parsePresenceSnapshot, type PresenceSnapshot } from "./presence";
 import { replayRound, ReplayPageError, type MachineDirectory, type ReplayContext } from "./replay";
 import type { InboxEvent, InboxIdentity, InboxStore, PendingEnrollment, QueuedCommand } from "./store";
-import { OperatorClient, OperatorWireError, record, type Fetcher } from "./wire";
+import { OperatorClient, OperatorWireError, record, parseGrant, type Fetcher } from "./wire";
+
+import { ReplyGrantRequests, type ReplyGrantsSnapshot, type ReplyTarget } from "./reply-grants";
 
 export type InboxState =
   | { kind: "signed_out" }
@@ -47,6 +49,7 @@ export interface InboxSnapshot {
   expiredThrough: string | null;
   presence?: PresenceSnapshot | null;
   presenceError?: string | null;
+  replyGrants?: ReplyGrantsSnapshot;
 }
 
 export interface ControllerOptions {
@@ -68,6 +71,8 @@ export class OperatorInboxController {
   readonly issuer: IssuerKeys;
   private identity: InboxIdentity | null = null;
   private pending: PendingEnrollment | null = null;
+  private readonly replyRequests: ReplyGrantRequests;
+  private replyRefresh: Promise<void> | null = null;
   private state: InboxState = { kind: "signed_out" };
   private machinesCache: { at: number; machines: InboxMachine[] } | null = null;
   private generationWarning: string | null = null;
@@ -81,6 +86,7 @@ export class OperatorInboxController {
 
   constructor(private readonly options: ControllerOptions) {
     this.client = new OperatorClient({ origin: options.origin, fetch: options.fetch, now: options.now });
+    this.replyRequests = new ReplyGrantRequests(this.client);
     this.issuer = new IssuerKeys(async () => {
       const response = await (options.fetch ?? globalThis.fetch)(`${this.client.origin}/api/operator/jwks`, { credentials: "omit" });
       if (!response.ok) throw new Error(`jwks ${response.status}`);
@@ -134,6 +140,7 @@ export class OperatorInboxController {
       expiredThrough: cursor?.acceptedExpiredThrough ?? null,
       presence: this.presenceSnapshot,
       presenceError: this.presenceError,
+      replyGrants: this.replyRequests.snapshot(),
     };
   }
 
@@ -201,6 +208,7 @@ export class OperatorInboxController {
   private async forget(next: InboxState): Promise<void> {
     if (this.identity) await this.options.store.wipe(this.identity.accountId);
     this.identity = null;
+    this.replyRequests.clear();
     this.client.credential = null;
     this.machinesCache = null;
     this.presenceSnapshot = null;
@@ -208,6 +216,52 @@ export class OperatorInboxController {
     this.presenceFetchedAt = -Infinity;
     this.monitoringDecisions.clear();
     this.state = next;
+    await this.changed();
+  }
+
+  /** Cloud #174: introspection is the existing route that accepts a stale gen.
+   * Persist a same-principal grant before using its new scopes or signing gen. */
+  async refreshReplyGrants(): Promise<void> {
+    if (this.replyRefresh) return this.replyRefresh;
+    this.replyRefresh = this.refreshReplyGrantsOnce();
+    try { await this.replyRefresh; } finally { this.replyRefresh = null; }
+  }
+
+  private async refreshReplyGrantsOnce(): Promise<void> {
+    const identity = this.identity;
+    if (!identity) return;
+    const before = JSON.stringify(this.replyRequests.snapshot());
+    const response = await this.client.request({ method: "GET", path: "/api/operator/grants/me", auth: "grant" });
+    const grant = parseGrant(response.grant);
+    if (response.wire_version !== 1 || grant.grantId !== identity.deviceId || grant.accountId !== identity.accountId ||
+      grant.kind !== "device" || grant.origin !== this.options.pageOrigin) throw new OperatorWireError(0, "invalid_response", { field: "grant" }, null);
+    if (grant.status !== "active") throw new OperatorWireError(401, "grant_revoked", {}, null);
+    if (!(Date.parse(grant.expiresAt) > this.now())) throw new OperatorWireError(401, "grant_expired", {}, null);
+    if (identity !== this.identity) return;
+    const changedGrant = JSON.stringify(grant) !== JSON.stringify(identity.grant);
+    if (changedGrant) {
+      const next = { ...identity, grant };
+      await this.options.store.saveIdentity(next);
+      if (identity !== this.identity) return;
+      this.identity = next;
+      this.client.credential = { key: next.signingKey, grantId: grant.grantId, generation: grant.generation };
+    }
+    this.replyRequests.configure(response.features, grant.capabilities.includes("account:manage"), identity.deviceId);
+    await this.replyRequests.refresh(identity.deviceId);
+    if (changedGrant || before !== JSON.stringify(this.replyRequests.snapshot())) await this.changed();
+  }
+
+  async askToReply(target: ReplyTarget) {
+    if (!this.identity) throw new Error("not signed in to the operator inbox");
+    const receipt = await this.replyRequests.ask(target, this.identity.grant.generation);
+    await this.changed();
+    return receipt;
+  }
+
+  async decideReplyRequest(id: string, decision: "approve" | "deny"): Promise<void> {
+    const request = this.replyRequests.requests.find(r => r.request_id === id);
+    if (!request || !this.replyRequests.owner) throw new Error("Only the account owner can decide this request.");
+    await this.replyRequests.decide(request, decision);
     await this.changed();
   }
 
@@ -336,13 +390,16 @@ export class OperatorInboxController {
    * round in ms. Errors map to state, never to an empty "caught up".
    */
   async runOnce(): Promise<number> {
-    const identity = this.identity;
-    if (!identity) return 30_000;
+    const before = this.identity;
+    if (!before) return 30_000;
     // Presence is a separate cloud resource: a feed outage must not prevent
     // the phone seeing machine status or a device revocation.
     await this.refreshPresence();
-    if (this.identity !== identity) return 30_000;
+    if (this.identity !== before) return 30_000;
     try {
+      await this.refreshReplyGrants();
+      const identity = this.identity;
+      if (!identity) return 30_000;
       const outcome = await this.withReplayLock(() => replayRound(this.context(identity)));
       if (this.identity !== identity) return 30_000;
       if (outcome?.kind === "generation_changed") {

@@ -94,6 +94,8 @@ export class InboxView {
   private polling = false;
   private busy = false;
   private status = "";
+  private statusError = false;
+  private readonly replyDrafts = new Map<string, string>();
 
   constructor(private readonly controller: OperatorInboxController, private readonly deps: InboxViewDeps) {
     this.dialog = el("dialog", { id: "operator-inbox-dialog", "aria-labelledby": "operator-inbox-title", class: "operator-inbox" });
@@ -116,6 +118,9 @@ export class InboxView {
       this.snapshot = await this.controller.snapshot();
       this.render();
     }).catch(() => undefined);
+    if (this.controller.current().kind === "ready" && this.controller.refreshReplyGrants) {
+      void this.controller.refreshReplyGrants().catch(() => undefined);
+    }
     this.pollIfWaiting();
   }
 
@@ -146,10 +151,12 @@ export class InboxView {
     if (this.busy) return;
     this.busy = true;
     this.status = "";
+    this.statusError = false;
     this.render();
     try {
       await work();
     } catch (error) {
+      this.statusError = true;
       this.status = `${failure} ${error instanceof Error && "reason" in error ? `(${String((error as { reason: unknown }).reason)})` : ""}`.trim();
     } finally {
       this.busy = false;
@@ -160,8 +167,9 @@ export class InboxView {
   }
 
   render(): void {
-    const focused = document.activeElement instanceof HTMLElement && document.activeElement.closest(".machine-presence")
-      ? document.activeElement.id : null;
+    const focusedId = this.dialog.contains(document.activeElement) ? document.activeElement?.id : null;
+    const focusedText = document.activeElement instanceof HTMLTextAreaElement ? document.activeElement : null;
+    const selection = focusedText ? [focusedText.selectionStart, focusedText.selectionEnd] as const : null;
     const expanded = new Set(Array.from(this.dialog.querySelectorAll<HTMLDetailsElement>(".machine-presence details[open]")).map((node) => node.id));
     const state = this.controller.current();
     const body = el("section", { class: "operator-inbox-body" });
@@ -178,11 +186,22 @@ export class InboxView {
       warning.append(" ", dismiss);
       body.append(warning);
     }
+    if (state.kind === "ready") {
+      const requests = this.ownerReplyRequestsMarkup();
+      if (requests) body.append(requests);
+    }
     body.append(this.stateMarkup(state));
-    if (this.status) body.append(el("p", { class: "operator-inbox-status", role: "alert" }, this.status));
+    if (this.status) body.append(el("p", { class: "operator-inbox-status", role: this.statusError ? "alert" : "status" }, this.status));
+    if (state.kind !== "ready") this.replyDrafts.clear();
     this.dialog.replaceChildren(body);
     for (const details of this.dialog.querySelectorAll<HTMLDetailsElement>(".machine-presence details")) details.open = expanded.has(details.id);
-    if (focused) document.getElementById(focused)?.focus();
+    if (focusedId) {
+      const next = this.dialog.ownerDocument.getElementById(focusedId);
+      if (next && this.dialog.contains(next)) {
+        next.focus();
+        if (selection && next instanceof HTMLTextAreaElement) next.setSelectionRange(...selection);
+      }
+    }
   }
 
   private stateMarkup(state: InboxState): HTMLElement {
@@ -414,6 +433,33 @@ export class InboxView {
     return section;
   }
 
+  private ownerReplyRequestsMarkup(): HTMLElement | null {
+    const state = this.snapshot?.replyGrants;
+    if (!state?.supported || !state.owner) return null;
+    const pending = state.requests.filter(r => r.status === "pending");
+    if (!pending.length) return null;
+    const section = el("section", { "aria-label": "Reply requests" });
+    section.append(el("h3", {}, "Reply requests"));
+    const threads = this.snapshot ? inboxThreadList(this.snapshot) : [];
+    for (const request of pending) {
+      const thread = threads.find(t => t.hubId === request.hub_id && t.projectId === request.project_id && t.sessionId === request.session_id);
+      const conversation = thread ? `${thread.machineLabel} · ${codename(thread.session)}` : `${request.hub_id} · ${request.session_id}`;
+      const group = el("section", { "aria-label": `${request.device_label} asks to reply` });
+      group.append(el("p", {}, `${request.device_label} (${request.origin}) asks to reply to ${conversation}. This allows replies only in this conversation and keeps the browser's messages.`));
+      for (const [decision, text] of [["approve", "Allow"], ["deny", "Deny"]] as const) {
+        const button = el("button", { type: "button", id: `reply-decision-${request.request_id}-${decision}`, "aria-label": `${text} ${request.device_label} to reply to ${conversation}` }, text);
+        button.disabled = this.busy;
+        button.onclick = () => void this.act(async () => {
+          await this.controller.decideReplyRequest(request.request_id, decision);
+          this.status = decision === "approve" ? `Replying allowed for ${request.device_label}.` : `Reply request denied for ${request.device_label}.`;
+        }, "The decision could not be confirmed. Refresh and try again.");
+        group.append(button);
+      }
+      section.append(group);
+    }
+    return section;
+  }
+
   private composerMarkup(thread: Thread): HTMLElement {
     const form = el("form", { class: "operator-inbox-composer" });
     const machine = this.snapshot?.machines.find((entry) => entry.hubId === thread.hubId && entry.status === "active");
@@ -431,10 +477,29 @@ export class InboxView {
         // grant's reply access is fixed when it is approved; asking for it in
         // place needs Cassy Cloud to upgrade a grant, which it cannot yet.
         : "This browser can read this conversation but not reply. To reply from it, sign out of the inbox, sign in again and allow replies when you approve it. Signing out removes the messages kept in this browser."));
+      const upgrades = this.snapshot?.replyGrants;
+      if (machine && upgrades?.supported) {
+        form.replaceChildren(el("p", {}, "This browser can read this conversation but not reply."));
+        const request = [...upgrades.requests].reverse().find(r => r.device_id === upgrades.deviceId && r.hub_id === thread.hubId && r.project_id === thread.projectId && r.session_id === thread.sessionId);
+        const copy = request?.status === "pending" ? "Waiting for the account owner to allow replies. Your messages stay here."
+          : request?.status === "denied" ? "The owner denied this reply request. This browser is still read-only."
+          : request?.status === "expired" ? "This reply request expired. This browser is still read-only."
+          : request?.status === "approved" ? "Reply permission is being refreshed. Your messages stay here." : "Ask the account owner to allow replies without signing out.";
+        form.append(el("p", { role: "status" }, copy));
+        if (request?.status !== "pending" && request?.status !== "approved") {
+          const ask = el("button", { type: "button", id: "operator-inbox-ask-reply" }, this.busy ? "Asking…" : "Ask to reply");
+          ask.disabled = this.busy;
+          ask.onclick = () => void this.act(() => this.controller.askToReply({ hubId: thread.hubId, projectId: thread.projectId, sessionId: thread.sessionId }), "The request could not be confirmed. Try again.");
+          form.append(ask);
+        }
+      }
       return form;
     }
     const label = el("label", { for: "operator-inbox-reply" }, `Reply — ${machine.label ?? "the machine"} gets it when it’s back`);
     const text = el("textarea", { id: "operator-inbox-reply", rows: "3", maxlength: "8000" });
+    const draftKey = JSON.stringify([thread.hubId, thread.projectId, thread.sessionId]);
+    text.value = this.replyDrafts.get(draftKey) ?? "";
+    text.oninput = () => this.replyDrafts.set(draftKey, text.value);
     const send = el("button", { type: "submit", class: "primary", id: "operator-inbox-send" }, this.busy ? "Queuing…" : "Queue reply");
     form.append(label, text, send);
     form.onsubmit = (event) => {
@@ -446,6 +511,7 @@ export class InboxView {
           { machineId: machine.machineId, hubId: thread.hubId, projectId: thread.projectId, sessionId: thread.sessionId, sessionName: thread.session },
           body,
         );
+        this.replyDrafts.delete(draftKey);
         text.value = "";
       }, "The reply was not queued.");
     };

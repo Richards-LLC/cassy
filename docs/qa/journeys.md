@@ -600,7 +600,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` at 390×844 on a browser profile with no paired machine and no inbox sign-in, while soundwave (enrolled in the account's operator inbox) is off; a second desktop profile joins later
 - **Goal:** I sign in with my account alone, read the supervisor's messages from the last weeks, and leave a reply that waits for soundwave until it is back and receives it
-- **Touches:** `hub-web/src/inbox/*`, `hub-web/src/conversation-shell.ts`, `hub-web/test/operator-cloud-double.ts`
+- **Touches:** `hub-web/src/inbox/*`, `hub-web/src/conversation-shell.ts`, `hub-web/test/operator-cloud-double.ts`, `hub-web/test/reply-grant-double.ts`
 - **Suite:** `hub-web/e2e/journeys/operator-inbox.journey.ts`, with the cloud answered by `hub-web/e2e/journeys/operator-cloud-route.ts`
 - **Gaps:** the cloud is a protocol double (PoP, enrollment check, epoch wraps, coverage, ACKs, commands), so the deployed-cloud two-profile journey of cas-9b7d S5 is the acceptance gate; soundwave's reservation and admission are modeled by the double, and proven by the hub's Rust tests (`operator_inbox::commands`)
 
@@ -624,6 +624,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - An account reset warns once and continues on the new inbox.
 - Expired history shows "Older history has expired. Messages are kept for 90 days." instead of an empty success.
 - Machine-alert part (cas-e3dd): an account-management phone explicitly enables monitoring; reporting age and Hub/Serve/Factory observations stay separate from watchdog health. Both independent profiles persist one signed outage and the matching recovered notice, including reload; notices never become conversation bubbles. The phone can disable monitoring with the machine unreachable, while a read-only device cannot change it. Phone/desktop light/dark and forced-colors, more-contrast and reduced-motion captures are serial. These are protocol-double choreography checks; the deployed-cloud two-device outage/recovery remains the acceptance gate.
+
+- Reply-upgrade parts (cas-874b, proposed petra-stella-cloud#174): only an explicitly advertised `reply-grant-upgrade-v1` offers Ask to reply in the read-only inbox conversation. An independently enrolled account-management owner approves/denies the exact conversation; approval upgrades the same device and permits one queued reply without enrollment, signing out or losing history. Denied/expired requests remain read-only across reload. This is a protocol-double proposal; production activation requires Cloud agreement and deployment.
 
 ### HUB-J20 · Grant a task write access outside its worktree from my phone
 

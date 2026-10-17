@@ -34,7 +34,7 @@ fn grammar() -> &'static Grammar {
             execution: re(r"\b(run|execute[ds]?|prove[ds]?|validate[ds]?|verify|check|test)\b"),
             // Plain run/CI numbers need enough digits to distinguish them
             // from test counts. Published artifact IDs are opaque hex IDs.
-            receipt: re(r"\b(?:run|ci)\s*[:=#]?\s+[1-9][0-9]{5,}\b|\brun[ _-]?id\s*[:=#]?\s*[1-9][0-9]*\b|\brun\s*[:=#]\s*[1-9][0-9]*\b|/actions/runs/[1-9][0-9]*\b|\bart-[a-f0-9]{8,}\b"),
+            receipt: re(r"(?i)\b(?:run|ci)\s*[:=#]?\s+[1-9][0-9]{5,}\b|\brun[ _-]?id\s*[:=#]?\s*[1-9][0-9]*\b|\brun\s*[:=#]\s*[1-9][0-9]*\b|/actions/runs/[1-9][0-9]*\b|\bart-[a-f0-9]{8,}\b"),
             receipt_heading: re(r"^[\s(`*]*(?:receipt|evidence|proof:|run\b|run[_-]?id\b|ci\b|artifact\b|art-[a-f0-9])"),
             negated: re(r"\b(?:(?:will|shall)\s+not|not|never|hasn't|haven't|didn't|isn't)\s+(?:yet\s+)?(?:pass(?:ed|ing)?|green|verified|validated|run|complete[ds]?)\b"),
         }
@@ -90,10 +90,10 @@ pub(super) fn validate_claims(
                 .receipt
                 .find_iter(cited)
                 .map(|m| m.as_str())
-                .filter(|id| id.starts_with("art-"))
+                .filter(|id| id.to_ascii_lowercase().starts_with("art-"))
             {
                 let found = cas_store::SqliteArtifactStore::open(cas_root)
-                    .and_then(|store| store.get(id))
+                    .and_then(|store| store.get(&id.to_ascii_lowercase()))
                     .map_err(|error| receipt_error(id, &error.to_string()))?;
                 if found.is_none() {
                     return Err(receipt_error(id, "no artifact record in this project"));
@@ -132,7 +132,7 @@ fn local_paths(clause: &str) -> Vec<&str> {
         for token in tokens {
             let path = super::strip_path_punctuation(token);
             if !path.contains("://")
-                && !path.starts_with("/actions/runs/")
+                && !path.to_ascii_lowercase().starts_with("/actions/runs/")
                 && (path.starts_with('/')
                     || path.starts_with("~/")
                     || path.starts_with("./")

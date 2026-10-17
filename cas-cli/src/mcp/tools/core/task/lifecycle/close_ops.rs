@@ -7032,9 +7032,14 @@ impl CasCore {
         // GH #1235: a reported/future proof is not completed evidence merely
         // because verification is disabled or another gate approves the task.
         if let Some(reason) = req.reason.as_deref() {
-            let receipt_root = self.resolve_worker_worktree_path(&task, None).ok().flatten()
+            let receipt_root = self
+                .resolve_worker_worktree_path(&task, None)
+                .ok()
+                .flatten()
                 .or_else(|| resolve_close_gate_repo_root(&self.cas_root).ok())
-                .unwrap_or_else(|| self.cas_root.parent().unwrap_or(&self.cas_root).to_path_buf());
+                .unwrap_or_else(|| {
+                    self.cas_root.parent().unwrap_or(&self.cas_root).to_path_buf()
+                });
             if let Err(message) = proof_claims::validate_claims(reason, &self.cas_root, &receipt_root) {
                 return Ok(Self::tool_error(message));
             }

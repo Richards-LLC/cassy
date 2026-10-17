@@ -2990,15 +2990,17 @@ pub(crate) fn queue_supervisor_intro_prompt(
             "startup-envelope:{supervisor_name}:{}:{session_key}:{factory_key}",
             supervisor_cli.backend().name()
         );
+        // cas-cd3f: CAS composed this row, and it must wake the new
+        // supervisor; the daemon stamp is its wake authority.
         let _ = queue.enqueue_idempotent(
-            "cas",
+            crate::ui::factory::daemon::runtime::queue_and_events::SUPERVISOR_STARTUP_SOURCE,
             supervisor_name,
             &prompt,
             factory_session,
             Some("factory supervisor startup envelope"),
             None,
             &dedupe_key,
-            None,
+            Some(&cas_store::QueueOrigin::Daemon),
         );
     }
 }

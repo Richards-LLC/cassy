@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.61.0] - 2026-10-17
+
 ### Added
 
 - **Supervisors across projects** — Was: a supervisor could message only

@@ -67,7 +67,7 @@ pub enum ExternalWorkCommands {
         #[arg(long)]
         request_id: Option<String>,
     },
-    /// Register a reply intent under the current claim; prints the exact violet_post fields.
+    /// Register a reply intent and print its violet_post fields.
     ReplyIntent {
         #[arg(long)]
         resource_id: String,

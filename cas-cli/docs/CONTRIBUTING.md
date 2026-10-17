@@ -1461,6 +1461,14 @@ without walking every artifact again. Output includes per-target `scan_ms` (JSON
 previews and interrupted quarantines keep conservative opaque-process handling;
 legacy targets are never adopted into the lifetime-owner registry.
 
+Under filesystem pressure, a registered dead worker with nonempty, entirely
+terminal task ownership loses its warm-cache reservation. Cleanup rechecks that
+ownership and holds the lane, Cargo and lifetime locks; recent writes, live
+users and uncertain evidence still preserve the cache. Missing-gitdir checkouts
+are measured with newest-write timestamps and manual-review guidance, but are
+never adopted or selected automatically.
+
+
 Assembly and release scratch uses an owner record, PID start-time identity and
 an inherited lifetime flock. TERM, INT and HUP stop and reap child groups before
 cleanup; the parent allows 20 seconds for a nested guard's 5-second escalation.
@@ -1528,6 +1536,11 @@ dry_run=false` reaps processes and eligible caches. It also removes only
 the owning task is closed for at least 24 hours. Missing close dates, open tasks,
 unknown task directories and symlinks are preserved; screenshots, ledgers and
 JSON/Markdown receipts stay in place. The cleanup reports files and bytes reclaimed.
+The report also measures sibling artifact namespaces, including renamed project
+keys, legacy bare task directories and shared builds, and flags `DerivedData`
+and `target` build outputs stored as evidence. These sibling roots remain
+review-only even when artifact deletion is enabled for the current project.
+
 Deleting whole task artifact directories additionally requires `artifacts=true`.
 Only tasks closed at least seven days ago are eligible; missing close dates,
 references from open tasks or tasks updated within seven days (including notes),

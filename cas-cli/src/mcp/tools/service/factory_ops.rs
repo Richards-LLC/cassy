@@ -1,3 +1,4 @@
+use crate::factory_target_cache::missing_gitdir_checkouts;
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::mcp::tools::service::imports::*;
 use crate::opencode_preflight::{
@@ -6491,12 +6492,13 @@ impl CasService {
             .into_iter()
             .map(|task| task.id)
             .collect();
-        let artifact_report = factory_artifact_inventory(
+        let mut artifact_report = factory_artifact_inventory(
             crate::config::project_factory_artifacts_root(&self.inner.cas_root, &crate::config::resolved_factory_artifacts_root(
                 config.factory().artifacts_root.as_deref(),
             )),
             &closed_task_ids,
         );
+        artifact_report.include_review_roots();
         let target_cache_report = {
             let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
             let live_roots = live_target_cache_worktrees(agent_store.as_ref(), &self.inner.cas_root);
@@ -7292,6 +7294,7 @@ impl CasService {
             ),
             Err(error) => {
                 let mut inventory = factory_artifact_inventory(artifact_root, &closed_task_ids);
+                inventory.include_review_roots();
                 inventory.error = Some(format!(
                     "retention/reference evidence unavailable; preserved all artifacts: {error}"
                 ));
@@ -7523,9 +7526,64 @@ struct FactoryArtifactInventory {
     error: Option<String>,
     removed: usize,
     dry_run: bool,
+    review_roots: Vec<(std::path::PathBuf, ArtifactRootUsage)>,
+}
+
+#[derive(Default)]
+struct ArtifactRootUsage {
+    bytes: u64,
+    regenerable: Vec<std::path::PathBuf>,
+    error: Option<String>,
+}
+
+fn artifact_root_usage(root: &std::path::Path) -> ArtifactRootUsage {
+    let mut usage = ArtifactRootUsage::default();
+    for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                usage.error = Some(error.to_string());
+                continue;
+            }
+        };
+        if entry.file_type().is_file() {
+            match entry.metadata() {
+                Ok(metadata) => usage.bytes = usage.bytes.saturating_add(metadata.len()),
+                Err(error) => usage.error = Some(error.to_string()),
+            }
+        } else if entry.file_type().is_dir()
+            && (entry.file_name() == "DerivedData" || entry.file_name() == "target")
+        {
+            usage.regenerable.push(entry.path().to_path_buf());
+        }
+    }
+    usage.regenerable.sort();
+    usage
 }
 
 impl FactoryArtifactInventory {
+    /// Sibling project keys (including pre-rename keys), bare task IDs and
+    /// shared builds have no project-task deletion authority. Inventory only.
+    fn include_review_roots(&mut self) {
+        let Some(base) = self.root.parent() else { return; };
+        let entries = match std::fs::read_dir(base) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                self.error = Some(format!("artifact root inventory unavailable: {error}"));
+                return;
+            }
+        };
+        self.review_roots = entries.filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| {
+                let path = entry.path();
+                let usage = artifact_root_usage(&path);
+                (path, usage)
+            }).collect();
+        self.review_roots.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
     fn render(&self) -> String {
         let mut out = format!(
             "\nDurable task artifacts: root={} closed-task candidates={} stray inventory={} mode={}\n",
@@ -7546,6 +7604,15 @@ impl FactoryArtifactInventory {
                 "  - review-only stray artifact: {}\n",
                 path.display()
             ));
+        }
+        for (root, usage) in &self.review_roots {
+            out.push_str(&format!("  - artifact root inventory: {} bytes={} review-only; sibling/legacy roots are never deletion candidates\n", root.display(), usage.bytes));
+            for path in &usage.regenerable {
+                out.push_str(&format!("    regenerable build output stored as evidence: {} (manual review; preserved)\n", path.display()));
+            }
+            if let Some(error) = &usage.error {
+                out.push_str(&format!("    partial byte inventory: {error}\n"));
+            }
         }
         out.push_str("  Retention: at least 7 days since close; open tasks and tasks updated in the last 7 days preserve referenced evidence.\n");
         if let Some(error) = &self.error {
@@ -7690,44 +7757,6 @@ fn factory_trace_cleanup(
     Ok(removed)
 }
 
-/// Older factory checkouts can sit directly under .cas as well as worktrees/.
-/// A deleted Git common directory makes them invisible to `git worktree list`.
-/// Inventory only: missing Git metadata does not prove the checkout has no WIP.
-fn missing_gitdir_checkouts(
-    cas_root: &std::path::Path,
-) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
-    let mut found = Vec::new();
-    for root in [cas_root.to_path_buf(), cas_root.join("worktrees")] {
-        let Ok(entries) = std::fs::read_dir(root) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                continue;
-            }
-            let checkout = entry.path();
-            let marker = checkout.join(".git");
-            if !std::fs::symlink_metadata(&marker).is_ok_and(|md| md.is_file()) {
-                continue;
-            }
-            let Ok(contents) = std::fs::read_to_string(marker) else {
-                continue;
-            };
-            let Some(target) = contents.trim().strip_prefix("gitdir: ") else {
-                continue;
-            };
-            if target.is_empty() {
-                continue;
-            }
-            let target = checkout.join(target);
-            if matches!(target.try_exists(), Ok(false)) {
-                found.push((checkout, target));
-            }
-        }
-    }
-    found.sort();
-    found
-}
 fn factory_artifact_cleanup(
     root: &std::path::Path,
     closed_task_ids: &std::collections::BTreeSet<String>,
@@ -7735,6 +7764,7 @@ fn factory_artifact_cleanup(
     eligible: &std::collections::BTreeSet<String>,
 ) -> FactoryArtifactInventory {
     let mut inventory = factory_artifact_inventory(root.to_path_buf(), closed_task_ids);
+    inventory.include_review_roots();
     inventory.dry_run = !authorized;
     if authorized {
         for path in &inventory.closed {
@@ -19720,7 +19750,7 @@ mod artifact_project_scope_tests {
             },
             &[], &[], true,
         ).unwrap();
-        let cache = report.caches.iter().find(|cache| cache.path == target)
+        let cache = report.caches.iter().find(|cache| cache.path == target.canonicalize().unwrap())
             .expect("missing-gitdir targets must be measured, even outside worktrees/");
         assert_eq!(cache.bytes, 11);
         assert!(cache.newest_write_unix_secs.is_some());
@@ -19729,6 +19759,9 @@ mod artifact_project_scope_tests {
         assert_eq!(report.selected_bytes, 0);
         assert!(target.join("artifact").is_file());
 
+        let git = std::process::Command::new("git").args(["init", "--quiet"])
+            .arg(temp.path()).output().unwrap();
+        assert!(git.status.success());
         let retired = cas_root.join("merge-sweeps/assembly-target");
         std::fs::create_dir_all(&retired).unwrap();
         std::fs::write(retired.join("artifact"), b"legacy").unwrap();

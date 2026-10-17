@@ -93,6 +93,8 @@ pub struct TargetCacheRecord {
     #[serde(skip)]
     ownership: CacheOwnership,
     #[serde(skip)]
+    release_warm_on_pressure: bool,
+    #[serde(skip)]
     git_admin_dir: Option<PathBuf>,
     #[serde(skip)]
     git_branch: Option<String>,
@@ -209,6 +211,11 @@ pub fn inspect(
             .map(|age| age.as_secs());
         let (disposition, reason) = if let Some(reason) = cache.unsafe_reason {
             (CacheDisposition::UnsafePath, reason)
+        } else if cache.ownership == CacheOwnership::Unknown {
+            (
+                CacheDisposition::OwnershipUncertain,
+                "missing Git admin metadata; review-only. Remediation: manual review of checkout WIP and process/open-handle use, then repair Git metadata or remove only the verified idle regenerable target in a quiet window; GC will not adopt this path".into(),
+            )
         } else if let Err((disposition, reason)) = cache_admission(
             cas_root,
             &cache.worktree,
@@ -241,6 +248,10 @@ pub fn inspect(
                 },
             )
         };
+        let release_warm_on_pressure = capacity.pressure
+            && disposition == CacheDisposition::Eligible
+            && legacy::lane_target(cas_root, &cache.worktree, &cache.path)
+            && legacy::terminal_dead_owner(cas_root, &cache.worktree);
         records.push(TargetCacheRecord {
             path: cache.path,
             worktree: cache.worktree,
@@ -250,6 +261,7 @@ pub fn inspect(
             disposition,
             reason,
             interrupted_cleanup: cache.interrupted_cleanup,
+            release_warm_on_pressure,
             ownership: cache.ownership,
             git_admin_dir: cache.git_admin_dir,
             git_branch: cache.git_branch,
@@ -325,10 +337,13 @@ pub fn cleanup_selected(
         .iter_mut()
         .filter(|record| record.disposition == CacheDisposition::Selected)
     {
-        if !ownership_is_current(cas_root, record) {
+        if !ownership_is_current(cas_root, record)
+            || record.release_warm_on_pressure
+                && !legacy::terminal_dead_owner(cas_root, &record.worktree)
+        {
             record.disposition = CacheDisposition::OwnershipChanged;
             record.reason =
-                "Git worktree ownership changed after report; refusing destructive cleanup"
+                "cache ownership or terminal-task evidence changed after report; refusing destructive cleanup"
                     .to_string();
             continue;
         }
@@ -343,7 +358,7 @@ pub fn cleanup_selected(
             record.reason = reason;
             continue;
         }
-        let guard = match cache_admission(
+        let mut guard = match cache_admission(
             cas_root,
             &rescanned.worktree,
             &rescanned.path,
@@ -358,6 +373,21 @@ pub fn cleanup_selected(
                 continue;
             }
         };
+        // Pressure may revoke a terminal dead lane's warm reservation. Keep
+        // the lane, every Cargo lock and any lifetime lease through deletion
+        // on macOS too; readable process evidence is still mandatory.
+        if record.release_warm_on_pressure && guard.is_none() {
+            match rescanned.snapshot.as_ref().ok_or_else(|| io::Error::other("missing cache snapshot"))
+                .and_then(|snapshot| legacy::acquire(cas_root, &record.worktree, &record.path, snapshot))
+            {
+                Ok(held) => guard = Some(held),
+                Err(error) => {
+                    record.disposition = CacheDisposition::Indeterminate;
+                    record.reason = format!("terminal lane pressure guard refused: {error}");
+                    continue;
+                }
+            }
+        }
         if rescanned
             .newest_write
             .is_some_and(|modified| modified > cutoff)
@@ -367,7 +397,9 @@ pub fn cleanup_selected(
             continue;
         }
 
-        if guard
+        if record.release_warm_on_pressure
+            && !legacy::terminal_dead_owner(cas_root, &record.worktree)
+            || guard
             .as_ref()
             .is_some_and(|guard| !guard.unchanged(&record.path))
             || guard.is_some()
@@ -483,7 +515,7 @@ fn plan_records(
     eligible.sort_by_key(|index| std::cmp::Reverse(records[*index].newest_write_unix_secs));
     let retained: Vec<usize> = eligible
         .iter()
-        .filter(|index| !records[**index].interrupted_cleanup)
+        .filter(|index| !records[**index].interrupted_cleanup && !records[**index].release_warm_on_pressure)
         .take(policy.retention_count)
         .copied()
         .collect();
@@ -506,7 +538,11 @@ fn plan_records(
             continue;
         }
         records[index].disposition = CacheDisposition::Selected;
-        records[index].reason = "selected oldest-first to reach the low watermark".to_string();
+        records[index].reason = if records[index].release_warm_on_pressure {
+            "selected terminal-owned dead lane under pressure; warm reservation released; cleanup revalidates owner, tasks and locks".into()
+        } else {
+            "selected oldest-first to reach the low watermark".into()
+        };
         bytes_needed = bytes_needed.saturating_sub(records[index].bytes);
     }
 }
@@ -557,6 +593,11 @@ fn discover_caches(
             CacheOwnership::GitConventionOnly
         };
         insert_root(&mut roots, worktree.path, ownership);
+    }
+    // A missing admin directory removes Git's ownership authority, even if
+    // a stale registry/config row still lists this checkout. Measure it only.
+    for (checkout, _) in missing_gitdir_checkouts(cas_root) {
+        roots.insert(checkout, CacheOwnership::Unknown);
     }
     let mut roots: Vec<_> = roots.into_iter().collect();
     roots.sort_by(|left, right| left.0.cmp(&right.0));
@@ -653,6 +694,45 @@ fn list_validated_git_worktrees(repo_root: &Path) -> Vec<GitWorktreeCandidate> {
             })
         })
         .collect()
+}
+
+/// Older factory checkouts can sit directly under .cas as well as worktrees/.
+/// A deleted Git common directory makes them invisible to `git worktree list`.
+/// Inventory only: missing Git metadata does not prove the checkout has no WIP.
+pub(crate) fn missing_gitdir_checkouts(
+    cas_root: &std::path::Path,
+) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+    let mut found = Vec::new();
+    for root in [cas_root.to_path_buf(), cas_root.join("worktrees")] {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let checkout = entry.path();
+            let marker = checkout.join(".git");
+            if !std::fs::symlink_metadata(&marker).is_ok_and(|md| md.is_file()) {
+                continue;
+            }
+            let Ok(contents) = std::fs::read_to_string(marker) else {
+                continue;
+            };
+            let Some(target) = contents.trim().strip_prefix("gitdir: ") else {
+                continue;
+            };
+            if target.is_empty() {
+                continue;
+            }
+            let target = checkout.join(target);
+            if matches!(target.try_exists(), Ok(false)) {
+                found.push((checkout, target));
+            }
+        }
+    }
+    found.sort();
+    found
 }
 
 fn git_common_dir(repo_root: &Path) -> Option<PathBuf> {
@@ -1233,6 +1313,7 @@ mod tests {
             reason: String::new(),
             interrupted_cleanup: false,
             ownership: CacheOwnership::Durable,
+            release_warm_on_pressure: false,
             git_admin_dir: None,
             git_branch: None,
             git_commit: None,
@@ -1330,6 +1411,21 @@ mod tests {
         cleanup_selected(&cas, &mut report, pressure, &[]).unwrap();
         assert_ne!(report.caches[0].disposition, CacheDisposition::Reclaimed, "task reopening invalidates pressure exemption");
         assert!(target.exists());
+        task.status = cas_types::TaskStatus::Closed;
+        tasks.update(&task).unwrap();
+        let lock = OpenOptions::new().read(true).write(true)
+            .open(target.join("debug/.cargo-lock")).unwrap();
+        lock.try_lock_exclusive().unwrap();
+        let mut report = inspect(&cas, pressure, &[], &[], false).unwrap();
+        cleanup_selected(&cas, &mut report, pressure, &[]).unwrap();
+        assert_ne!(report.caches[0].disposition, CacheDisposition::Reclaimed, "held Cargo lock must protect even a terminal dead lane");
+        assert!(target.exists());
+        FileExt::unlock(&lock).unwrap();
+        drop(lock);
+        let mut report = inspect(&cas, pressure, &[], &[], false).unwrap();
+        cleanup_selected(&cas, &mut report, pressure, &[]).unwrap();
+        assert_eq!(report.caches[0].disposition, CacheDisposition::Reclaimed);
+        assert!(!target.exists());
     }
 
     #[test]

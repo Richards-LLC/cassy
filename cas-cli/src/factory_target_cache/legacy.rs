@@ -227,6 +227,37 @@ fn registry(cas_root: &Path, worktree: &Path) -> io::Result<bool> {
     }))
 }
 
+/// Warm-cache pressure exemptions require positive ownership and terminal
+/// work, unlike ordinary idle eligibility which also permits unknown/gone owners.
+pub(super) fn terminal_dead_owner(cas_root: &Path, worktree: &Path) -> bool {
+    let evidence = || -> io::Result<bool> {
+        let agents = crate::store::open_agent_store(cas_root)
+            .map_err(io::Error::other)?.list(None).map_err(io::Error::other)?;
+        let owners: Vec<_> = agents.iter().filter(|agent| {
+            agent.metadata.get("clone_path")
+                .and_then(|path| Path::new(path).canonicalize().ok())
+                .is_some_and(|path| path == worktree)
+        }).collect();
+        if owners.is_empty() || owners.iter().any(|owner| {
+            owner.pid.is_none() || registered_live(owner)
+                || crate::mcp::tools::service::agent_liveness::agent_process_is_alive_with(
+                    owner, crate::mcp::daemon::pid_alive, crate::mcp::daemon::pid_matches_fingerprint,
+                )
+        }) {
+            return Ok(false);
+        }
+        let tasks = crate::store::open_task_store(cas_root)
+            .map_err(io::Error::other)?.list(None).map_err(io::Error::other)?;
+        Ok(owners.iter().all(|owner| {
+            let mut owned = tasks.iter().filter(|task| {
+                task.assignee.as_deref().is_some_and(|name| name == owner.id || name == owner.name)
+            }).peekable();
+            owned.peek().is_some() && owned.all(|task| task.is_terminal())
+        }))
+    };
+    evidence().unwrap_or(false)
+}
+
 pub(super) fn owner_gate(
     cas_root: &Path,
     worktree: &Path,

@@ -521,34 +521,62 @@ fn real_queue_gets_no_prompt_and_file_quarantine_is_durable_and_idempotent_cas_b
 /// Re-observing the source does not make an old delivery or recovery fresh.
 #[test]
 fn managed_wake_reports_source_age_and_preserves_dedupe_cas_8875() {
-    let now = DateTime::parse_from_rfc3339("2026-10-17T12:00:00Z").unwrap().with_timezone(&Utc);
+    let now = DateTime::parse_from_rfc3339("2026-10-17T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
     let old = format!("{}.000000", (now - chrono::Duration::days(5)).timestamp());
     let temp = tempfile::tempdir().unwrap();
     let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
     queue.init().unwrap();
     let delivery = ClaimedDelivery {
-        id: DELIVERY.to_owned(), delivery_generation: 1, lease_token: "fixture-lease".into(),
+        id: DELIVERY.to_owned(),
+        delivery_generation: 1,
+        lease_token: "fixture-lease".into(),
         target: json!({"external_ref":{"channel_id":"C_FIXTURE", "root_ts":old}, "message_ts":old}),
     };
-    for (kind, key) in [("delivery", "violet-delivery"), ("recovery_notice", "violet-recovery")] {
+    for (kind, key) in [
+        ("delivery", "violet-delivery"),
+        ("recovery_notice", "violet-recovery"),
+    ] {
         let typer = PromptQueueTyper(&queue);
-        typer.enqueue_at("fixture-session", &delivery, kind, "", key, now).unwrap();
-        typer.enqueue_at("fixture-session", &delivery, kind, "", key, now + chrono::Duration::minutes(3)).unwrap();
+        typer
+            .enqueue_at("fixture-session", &delivery, kind, "", key, now)
+            .unwrap();
+        typer
+            .enqueue_at(
+                "fixture-session",
+                &delivery,
+                kind,
+                "",
+                key,
+                now + chrono::Duration::minutes(3),
+            )
+            .unwrap();
     }
     let rows = queue.peek_all(10).unwrap();
-    assert_eq!(rows.len(), 2, "the original delivery/recovery keys still dedupe re-observation");
+    assert_eq!(
+        rows.len(),
+        2,
+        "the original delivery/recovery keys still dedupe re-observation"
+    );
     for row in rows {
         // pin: source age is trusted agent-facing wake metadata, in seconds.
         assert!(row.prompt.contains("age_secs=432000"), "{}", row.prompt);
         // pin: the original source occurrence/thread identity must survive formatting.
-        assert!(row.prompt.contains(&format!("message_ts={old} thread_ts={old}")), "source identity is unchanged");
+        assert!(
+            row.prompt
+                .contains(&format!("message_ts={old} thread_ts={old}")),
+            "source identity is unchanged"
+        );
         assert_eq!(row.factory_session.as_deref(), Some("fixture-session"));
     }
 }
 
 #[test]
 fn managed_wake_invalid_future_and_fresh_age_policy_cas_8875() {
-    let now = DateTime::parse_from_rfc3339("2026-10-17T12:00:00Z").unwrap().with_timezone(&Utc);
+    let now = DateTime::parse_from_rfc3339("2026-10-17T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
     let fresh = format!("{}.000000", now.timestamp());
     let future = format!("{}.000001", now.timestamp());
     let invalid_fraction = format!("{}.000000invalid", now.timestamp());
@@ -564,19 +592,36 @@ fn managed_wake_invalid_future_and_fresh_age_policy_cas_8875() {
         let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
         let delivery = ClaimedDelivery {
-            id: DELIVERY.to_owned(), delivery_generation: 1, lease_token: "fixture-lease".into(),
+            id: DELIVERY.to_owned(),
+            delivery_generation: 1,
+            lease_token: "fixture-lease".into(),
             target: json!({"external_ref":{"channel_id":"C_FIXTURE", "root_ts":fresh}, "message_ts":source}),
         };
-        let result = PromptQueueTyper(&queue).enqueue_at("fixture-session", &delivery, "delivery", "", "violet-delivery", now);
+        let result = PromptQueueTyper(&queue).enqueue_at(
+            "fixture-session",
+            &delivery,
+            "delivery",
+            "",
+            "violet-delivery",
+            now,
+        );
         let rows = queue.peek_all(10).unwrap();
         if let Some(age) = expected {
             result.unwrap();
             assert_eq!(rows.len(), 1);
             // pin: unknown source age must differ textually from a legitimate fresh zero.
-            assert!(rows[0].prompt.contains(age), "source={source:?}: {}", rows[0].prompt);
+            assert!(
+                rows[0].prompt.contains(age),
+                "source={source:?}: {}",
+                rows[0].prompt
+            );
         } else {
             assert_eq!(result.unwrap_err().code, "invalid_target");
-            assert!(rows.is_empty(), "missing source identity is refused, never displayed as fresh");
+            assert!(
+                rows.is_empty(),
+                "missing source identity is refused, never displayed as fresh"
+            );
         }
     }
 }
+

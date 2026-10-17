@@ -33,7 +33,7 @@ use cas_store::{NotificationPriority, PromptQueueStore, QueueOrigin};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-use super::violet_activity::{PollReport, VIOLET_ACTIVITY_ENVELOPE_CLOSE, WakeItem, violet_activity_envelope};
+use super::violet_activity::{PollReport, VIOLET_ACTIVITY_ENVELOPE_CLOSE, WakeItem, managed_violet_activity_envelope, slack_ts_instant};
 use crate::coordination::external_work::{
     CALL_REMOTE_BUDGET, CONTRACT_SCHEMA, CloudCoordinationPort, HttpCloudCoordinationPort, RemoteError,
 };
@@ -644,12 +644,38 @@ const RECOVERY_NOTICE: &str = "Recovery notice: an earlier supervisor session ma
      this message before it stopped, so it is not re-sent. Read the thread before replying, and never \
      reply twice.\n";
 
+/// Source age in complete seconds, independent of observation/delivery delay.
+/// Accept nonnegative Unix seconds with an optional 1–6 digit Slack fraction.
+/// Invalid or future sources are unknown (not clamped to a fresh zero). Missing
+/// identity is still refused by enqueue_at before formatting. Keep the shared
+/// legacy parser unchanged; validate here so it cannot silently truncate an
+/// invalid suffix or a sub-microsecond future timestamp into apparent freshness.
+fn managed_message_age_secs(message_ts: &str, now: DateTime<Utc>) -> Option<i64> {
+    let (seconds, fraction) = message_ts
+        .split_once('.')
+        .map_or((message_ts, None), |(seconds, fraction)| {
+            (seconds, Some(fraction))
+        });
+    if seconds.is_empty() || !seconds.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if fraction.is_some_and(|fraction| {
+        fraction.is_empty()
+            || fraction.len() > 6
+            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    }) {
+        return None;
+    }
+    let source = slack_ts_instant(message_ts)?;
+    (source <= now).then(|| (now - source).num_seconds())
+}
+
 impl PromptQueueTyper<'_> {
     fn enqueue(&self, session: &str, delivery: &ClaimedDelivery, kind: &str, text: &str, key: &str) -> Result<(), NamedRefusal> {
         self.enqueue_at(session, delivery, kind, text, key, Utc::now())
     }
 
-    fn enqueue_at(&self, session: &str, delivery: &ClaimedDelivery, kind: &str, text: &str, key: &str, _now: DateTime<Utc>) -> Result<(), NamedRefusal> {
+    fn enqueue_at(&self, session: &str, delivery: &ClaimedDelivery, kind: &str, text: &str, key: &str, now: DateTime<Utc>) -> Result<(), NamedRefusal> {
         let target = &delivery.target;
         let field = |value: &Value| value.as_str().filter(|text| !text.is_empty()).map(str::to_string);
         let (Some(channel), Some(thread_ts), Some(message_ts)) = (
@@ -659,8 +685,11 @@ impl PromptQueueTyper<'_> {
         ) else {
             return Err(NamedRefusal::new("invalid_target", "claim target lacks channel, thread or message"));
         };
-        let item = WakeItem { message_ts, thread_ts, user: String::new(), age_secs: 0, human_mentions: Vec::new() };
-        let mut prompt = violet_activity_envelope(&channel, &channel, kind, &[item]);
+        let source_age = managed_message_age_secs(&message_ts, now);
+        // The managed formatter uses source_age, including explicit unknown;
+        // the legacy numeric carrier is unchanged for its other producers.
+        let item = WakeItem { message_ts, thread_ts, user: String::new(), age_secs: source_age.unwrap_or_default(), human_mentions: Vec::new() };
+        let mut prompt = managed_violet_activity_envelope(&channel, &channel, kind, &item, source_age);
         prompt.insert_str(prompt.len() - VIOLET_ACTIVITY_ENVELOPE_CLOSE.len(), text);
         self.0
             .enqueue_idempotent(

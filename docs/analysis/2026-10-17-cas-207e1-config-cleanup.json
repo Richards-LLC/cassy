@@ -1,0 +1,268 @@
+{
+  "task": "cas-207e1",
+  "kind": "machine-readable operational receipt",
+  "scope": "Host Cassy config; global Cassy config; every initial and final registered project; user/project proxy TOML; Cassy-owned Codex sections including account aliases. Package manifests and unrelated third-party harness settings excluded.",
+  "verified_at_utc": "2026-10-17T15:36:05.407924+00:00",
+  "runtime": "cas 3.62.0 (74ae311 2026-10-17)",
+  "schema_source_commit": "74ae31197470f1a8674f4f8afa8d60bad69d2451",
+  "result": {
+    "retired_keys_removed": 10,
+    "files_edited": 5,
+    "retirement_warning_files_before": 4,
+    "retirement_warning_files_after": 0,
+    "supported_effective_exports_equal": "37/37 surviving distinct configs",
+    "adjacent_proxy_loads": "6/6 exit 0; no network connections",
+    "all_other_values_and_lines_preserved": true,
+    "explicit_defaults_preserved": true,
+    "registered_roots_initial": 62,
+    "registered_roots_final": 59,
+    "unique_configs_initial": 40,
+    "unique_configs_final": 37,
+    "config_inode_aliases": 1,
+    "user_codex_account_aliases": 2,
+    "unique_cassy_keys_initial": 173,
+    "classifications": {
+      "active_supported_preserved": 163,
+      "retired_removed": 4,
+      "legacy_supported_preserved": 6
+    },
+    "unknown_cassy_keys": 0,
+    "inaccessible_existing_paths": []
+  },
+  "edited_files": [
+    {
+      "path": "/home/pippenz/Petrastella/gabber-studio/.cas/config.toml",
+      "removed_keys": [
+        "factory.merge_sweep",
+        "factory.merge_sweep_timeout_secs",
+        "factory.merge_sweep_quiet_secs"
+      ],
+      "before_source_lines": [
+        87,
+        88,
+        89
+      ],
+      "backup": "/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-207e1/backups/4-config.toml",
+      "backup_mode": "0600",
+      "before_export_exit": 0,
+      "after_export_exit": 0,
+      "supported_effective_values_equal": true
+    },
+    {
+      "path": "/home/pippenz/Petrastella/pulse-card/.cas/config.toml",
+      "removed_keys": [
+        "factory.merge_sweep",
+        "factory.merge_sweep_timeout_secs"
+      ],
+      "before_source_lines": [
+        190,
+        191
+      ],
+      "backup": "/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-207e1/backups/9-config.toml",
+      "backup_mode": "0600",
+      "before_export_exit": 0,
+      "after_export_exit": 0,
+      "supported_effective_values_equal": true
+    },
+    {
+      "path": "/home/pippenz/Documents/Accounting/.cas/config.toml",
+      "removed_keys": [
+        "factory.merge_sweep",
+        "factory.merge_sweep_timeout_secs"
+      ],
+      "before_source_lines": [
+        9,
+        10
+      ],
+      "backup": "/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-207e1/backups/14-config.toml",
+      "backup_mode": "0600",
+      "before_export_exit": 0,
+      "after_export_exit": 0,
+      "supported_effective_values_equal": true
+    },
+    {
+      "path": "/home/pippenz/Petrastella/pixel-hive/.cas/config.toml",
+      "removed_keys": [
+        "factory.merge_sweep",
+        "factory.merge_sweep_timeout_secs"
+      ],
+      "before_source_lines": [
+        185,
+        186
+      ],
+      "backup": "/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-207e1/backups/15-config.toml",
+      "backup_mode": "0600",
+      "before_export_exit": 0,
+      "after_export_exit": 0,
+      "supported_effective_values_equal": true
+    },
+    {
+      "path": "/home/pippenz/Petrastella/rocketship-template/.cas/config.toml",
+      "removed_keys": [
+        "code_review.owner"
+      ],
+      "before_source_lines": [
+        2
+      ],
+      "backup": "/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-207e1/backups/63-config.toml",
+      "backup_mode": "0600",
+      "before_export_exit": 0,
+      "after_export_exit": 0,
+      "supported_effective_values_equal": true
+    }
+  ],
+  "provenance": {
+    "factory_sweep_retirement": {
+      "refs": [
+        "cas-cli/src/config/settings.rs:889-927",
+        "cas-cli/src/config/access/io.rs:277-291",
+        "cas-cli/src/config/mod_tests.rs:1304-1328"
+      ],
+      "reader_search": "git grep merge_sweep/release_gate_home_dir/retired_jev origin/main -- cas-cli/src crates; only ignored-field declarations, warning emission, defaults and retirement tests for sweep keys; no operational sweep reader."
+    },
+    "code_review.owner": {
+      "removed_by": "849a49f38bce84d108a55ade0e76104aae527b30",
+      "refs": [
+        "cas-cli/src/config/mod_tests.rs:890-901"
+      ],
+      "reader_search": "git grep code_review origin/main -- cas-cli/src crates; Config field and close-dispatch setting removed; get/set/list explicitly reject it; other code_review names are MCP prompt or deprecated request aliases."
+    },
+    "schema_acceptance": "Installed cas config export --format json preserves all nonretired explicit values. Empty project.aliases omitted because Vec::is_empty, not retirement. Full per-key classification and source references in published inventory.",
+    "global_scopes": [
+      "cas-cli/src/config/access/global.rs:3-20: ~/.config/cas telemetry",
+      "cas-cli/src/config/access/io.rs:294-315: ~/.cas staging inheritance only"
+    ],
+    "proxy": [
+      "crates/cas-mcp-proxy/src/config.rs:59-94",
+      "crates/cas-mcp-proxy/src/config.rs:260-339",
+      "crates/cas-mcp-proxy/src/config.rs:380-461"
+    ],
+    "codex": [
+      "cas-cli/src/cli/hook/config_gen.rs:746-813",
+      "cas-cli/src/cli/hook_tests/tests.rs:453-484",
+      "crates/cas-pty/src/pty.rs:1985-2078"
+    ]
+  },
+  "keep_review": [
+    {
+      "keys": [
+        "hooks.capture_enabled",
+        "hooks.capture_tools",
+        "hooks.inject_context",
+        "hooks.generate_summaries",
+        "hooks.token_budget",
+        "hooks.minimal_start"
+      ],
+      "action": "keep",
+      "reason": "Marked legacy, still accepted and consumed. Not retired.",
+      "reader_refs": [
+        "cas-cli/src/hooks/handlers/handlers_middle/post_tool.rs:127-136",
+        "cas-cli/src/hooks/handlers/handlers_middle/session_stop/stop_flow.rs:159",
+        "cas-cli/src/config/access/hooks_traits.rs:5-38",
+        "crates/cas-core/src/hooks/context/build_start.rs:195-215"
+      ]
+    },
+    {
+      "keys": [
+        "project.aliases"
+      ],
+      "action": "keep including empty arrays",
+      "reason": "Typed current identity-cache field; serialization omission is not evidence of retirement.",
+      "reader_refs": [
+        "cas-cli/src/config/settings.rs:254-260"
+      ]
+    },
+    {
+      "keys": [
+        "factory.* at host scope",
+        "mcp_servers.cs.*",
+        "mcp_servers.violet.*"
+      ],
+      "action": "keep",
+      "reason": "Host config fields are preserved explicitly; project inheritance is staging-only. Harness/environment/credential settings are not proven retired; active cs generation remains current; no global Codex model/TUI/auth changes."
+    }
+  ],
+  "coverage_exceptions": {
+    "global_config_missing": "/home/pippenz/.config/cas/config.toml",
+    "missing_registered_roots": [
+      "/home/pippenz/Petrastella/cassy/.cas/worktrees/happy-panther-1/cas-cli/.tmpSameY7",
+      "/mnt/rewind/cas/scratch/cas-42ce/proj",
+      "/home/pippenz/Petrastella/cas-src",
+      "/tmp/.tmpIhQQ49",
+      "/tmp/.tmpJETpqr",
+      "/tmp/.tmpGsaXVI",
+      "/tmp/.tmpqnKziH",
+      "/tmp/.tmp8Jui2Q",
+      "/tmp/.tmp83R9Hf",
+      "/tmp/.tmpobav3s",
+      "/tmp/.tmpEPlfT5",
+      "/tmp/.tmpgxxOaM",
+      "/tmp/.tmp0Sp2zH",
+      "/tmp/.tmpv9NeaX",
+      "/tmp/.tmpiEeJAG",
+      "/tmp/.tmpRxP5GV",
+      "/tmp/.tmpvEmI1a",
+      "/tmp/.tmpfKv3Vq",
+      "/tmp/.tmpU6OdoJ",
+      "/tmp/.tmpLsk4iw"
+    ],
+    "existing_registered_roots_without_config": [
+      "/home/pippenz/Petrastella/petra_stella_tools/project-management/docs",
+      "/home/pippenz/Petrastella/gabber-docs"
+    ],
+    "accounting_children_retired_by_owner": [
+      "/home/pippenz/Documents/Petra Stella/Accounting/Roark Realty/2022",
+      "/home/pippenz/Petra Stella/Accounting/Roark Realty/2022",
+      "/home/pippenz/Richards LLC/Accounting/Roark Realty/2022"
+    ],
+    "historical_fixture_roots": "Registered qa-factory and cas-979e scratch roots inspected as-is; no initialization or cleanup."
+  },
+  "safety": {
+    "backup_directories": "0700 outside project roots; backups and full effective captures 0600; never published",
+    "editing": "Only proven retired standalone scalar lines (and the sole empty code_review header) removed under existing Cassy sidecar flock, same-directory fsync and atomic replace. Original permissions preserved. All other bytes retained.",
+    "supported_cli_limitation": "config reset rejects retired keys; normal typed save drops comments/unknowns. Surgical editing avoids unrelated serialization; actual installed load/export proves schema and effective-value equality.",
+    "accounting": {
+      "coordination_receipt": "4196757 from swift-panther-65 authorized edits after preservation proof",
+      "roots": [
+        {
+          "path": "/home/pippenz/Documents/Accounting",
+          "cas_directories": [
+            ".cas"
+          ]
+        },
+        {
+          "path": "/home/pippenz/Richards LLC/Accounting",
+          "cas_directories": [
+            ".cas"
+          ]
+        },
+        {
+          "path": "/home/pippenz/Petra Stella/Accounting",
+          "cas_directories": [
+            ".cas"
+          ]
+        },
+        {
+          "path": "/home/pippenz/Documents/Petra Stella/Accounting",
+          "cas_directories": [
+            ".cas"
+          ]
+        }
+      ],
+      "archive_alias_same_inode": true,
+      "placeholder_config_and_db_still_absent": true
+    },
+    "no_broad_update_sync_init_or_harness_repins": true,
+    "no_rust_or_browser_changes_or_builds": true,
+    "no_generator_defect_found": true
+  },
+  "proof": {
+    "command": "python3 /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-207e1/verify.py",
+    "exit": 0,
+    "rung": "3: installed binary and real live configs",
+    "qa_ledger": "/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-207e1/LEDGER.md",
+    "verification": "/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-207e1/verification.json",
+    "source_change": "Only this redacted machine receipt is committed; live .cas config edits are outside the source checkout."
+  },
+  "published_inventory_artifact": "art-0c4b5fe4"
+}

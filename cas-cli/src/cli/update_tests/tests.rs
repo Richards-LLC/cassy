@@ -2801,6 +2801,14 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
         .unwrap()
         .modified()
         .unwrap();
+    // Current read-only configs need no write eligibility, including during
+    // a real native repeat across project, host and global stores.
+    for dir in [&root, &host, &global] {
+        let path = dir.join("config.toml");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+    }
     let repeat = run().unwrap();
     assert_eq!(repeat.sweep.as_ref().unwrap().config.repaired, 0);
     assert_eq!(
@@ -2816,6 +2824,21 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
         "unchanged"
     );
     assert!(!project.join(".cas/.cas").exists());
+
+    // Planning a retired read-only config must also leave it untouched and
+    // create neither a config lock nor a before-copy directory.
+    let preview = home.join("readonly-preview");
+    std::fs::create_dir(&preview).unwrap();
+    let path = preview.join("config.toml");
+    std::fs::write(&path, legacy).unwrap();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(crate::config::retire_config(&preview, true).status, "planned");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    assert_eq!(std::fs::read_dir(&preview).unwrap().count(), 1);
 }
 
 #[test]

@@ -2059,12 +2059,12 @@ fn skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b() {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, SystemTime};
 
+    let child_case = std::env::var("CAS7C9B_LOCK_CASE").ok();
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     env.remove("CAS_AGENT_ROLE");
     env.remove("CAS_SKIP_FACTORY_TOOLING");
     let probes = env.home().join("probes");
     std::fs::create_dir(&probes).unwrap();
-    env.set("PATH", format!("{}:{}", probes.display(), std::env::var("PATH").unwrap()));
     // Control only the external process-inspection boundary. Git and the
     // complete skills refresh remain real, including the actual lock error.
     for (case, seconds, ps, lsof, expected) in [
@@ -2074,10 +2074,25 @@ fn skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b() {
         ("git_running", 172800, "echo git", "exit 1", "busy"),
         ("uncertain", 172800, "echo sh", "echo denied >&2; exit 1", "unknown ownership"),
     ] {
-        for (name, body) in [("ps", ps), ("lsof", lsof)] {
-            let path = probes.join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if child_case.as_deref() != Some(case) {
+            if child_case.is_some() {
+                continue;
+            }
+            for (name, body) in [("ps", ps), ("lsof", lsof)] {
+                let path = probes.join(name);
+                std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let test = "cli::update::tests::skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b";
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test])
+                .env("CAS7C9B_LOCK_CASE", case)
+                .env("PATH", format!("{}:{}", probes.display(), std::env::var("PATH").unwrap()))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{case}: {}", String::from_utf8_lossy(&output.stderr));
+            crate::test_child::assert_passed(&String::from_utf8_lossy(&output.stdout), test);
+            continue;
         }
         let project = cas_6718_drifted_project(&env.home().join(case));
         let root = project.join(".cas");

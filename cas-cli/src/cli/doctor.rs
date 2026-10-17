@@ -6426,6 +6426,9 @@ mod tests {
             INSERT INTO prompt_queue VALUES
               (91,'supervisor','worker','retained message','2026-01-01',NULL,
                'legacy-session','retained summary','2026-01-02','inferred_from_reply');
+        INSERT INTO prompt_queue VALUES
+          (92,'supervisor','worker','legacy processed','2026-07-21T12:00:00Z',
+           '2026-07-21T12:00:01Z','legacy-session',NULL,NULL,NULL);
             CREATE INDEX legacy_queue_source ON prompt_queue(source);
             CREATE TRIGGER legacy_queue_preserve BEFORE DELETE ON prompt_queue
               BEGIN SELECT RAISE(IGNORE); END;",
@@ -6530,6 +6533,22 @@ mod tests {
                 .applied_count,
             0
         );
+        // Explicit schema repair must not consume runtime's legacy delivery
+        // compatibility sentinel. Later mark_processed calls remain distinct.
+        let queue = crate::store::SqlitePromptQueueStore::open(&root).unwrap();
+        let later = queue.enqueue("supervisor", "worker", "post-repair drain").unwrap();
+        queue.mark_processed(later).unwrap();
+        queue.init().unwrap();
+        let legacy = queue.message_delivery_report(92).unwrap().unwrap();
+        assert_eq!(legacy.stage, cas_store::DeliveryStage::Delivered,
+            "migration before runtime init must retain legacy delivery compatibility");
+        assert_eq!(legacy.delivered_at.unwrap().to_rfc3339(), "2026-07-21T12:00:01+00:00");
+        assert!(legacy.confirmed_at.is_none());
+        assert_eq!(queue.message_delivery_report(later).unwrap().unwrap().stage,
+            cas_store::DeliveryStage::Enqueued, "new mark_processed is not transport evidence");
+        queue.init().unwrap();
+        assert!(queue.message_delivery_report(later).unwrap().unwrap().delivered_at.is_none());
+
         // A previously recorded repair is replayable, and failure to record
         // its receipt rolls back the DDL in the same owned transaction.
         conn.execute_batch(

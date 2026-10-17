@@ -169,7 +169,9 @@ cas violet read   --channel <name> --since <RFC3339> | --thread <message_id> | -
   thread go inline up to 1048576 bytes; above that every file is uploaded
   first and its reply carries the external metadata. A failure keeps
   `posted[]`, `failed_index` and `resume_safe`; follow the ordered-thread rules
-  above.
+  above. Each reply's files come back under `posted[i].files`; a thread
+  receipt has no top-level `files`. The run succeeds only when every
+  `--reply-file` is listed there with a `file_id` and `state: attached`.
 - **read**: `violet_read` with `include_channels: false`. A channel read
   requires `--since`. Downloaded file bytes are dropped from the output
   (`content_omitted: true`); sizes and hashes stay.
@@ -193,6 +195,8 @@ non-zero, and the hub's own codes (`not_member`, `file_too_large`,
 | `publication_blocked` | the post shares a file while its epic's verification is open ([publication](publication.md)) |
 | `violet_upload_failed` | the direct upload was refused; nothing was shared |
 | `violet_post_failed` | the hub refused without a code of its own |
+| `thread_files_unconfirmed` | the thread posted, but its receipt lists fewer attached files on a reply than were sent; read the thread, and rerun only with the same `--idempotency-key` |
+| `uploaded_not_attached` | the thread posted, but the hub uploaded a reply's files without attaching them (`state: uploaded`); read the thread before posting again |
 
 An error that lists `uploads_begun` means Slack allocated those uploads: check
 the channel before posting again. `cas doctor` shows readiness on its Violet

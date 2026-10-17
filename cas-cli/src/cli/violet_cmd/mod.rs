@@ -606,7 +606,63 @@ pub fn post_thread(
         "idempotency_key": idempotency_key,
         "replies": entries,
     });
-    call_ok(hub, "violet_post", args).map_err(|error| with_begun(error, &begun))
+    let receipt = call_ok(hub, "violet_post", args).map_err(|error| with_begun(error, &begun))?;
+    confirm_reply_files(receipt, channel, replies)
+}
+
+/// GH #1251: a reply sent with files is confirmed only when its receipt,
+/// `posted[i].files`, lists that many files, each with a `file_id` and
+/// `state: attached`. Anything less fails the run with a named code. The
+/// error keeps the hub's receipt, so the posted message ids and any returned
+/// file ids are printed, and it never retries.
+fn confirm_reply_files(receipt: Value, channel: &str, replies: &[ReplyPlan]) -> Result<Value, VioletError> {
+    let posted = |position: usize| {
+        receipt["posted"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|item| item["index"].as_u64() == Some(position as u64))
+    };
+    for (index, reply) in replies.iter().enumerate().filter(|(_, reply)| !reply.files.is_empty()) {
+        let position = index + 1;
+        let item = posted(position);
+        let files: Vec<&Value> = item
+            .and_then(|item| item["files"].as_array())
+            .into_iter()
+            .flatten()
+            .filter(|file| file["file_id"].as_str().is_some_and(|id| !id.is_empty()))
+            .collect();
+        let in_state = |state: &str| files.iter().filter(|file| file["state"] == state).count();
+        let (sent, attached, uploaded) = (reply.files.len(), in_state("attached"), in_state("uploaded"));
+        if attached == sent {
+            continue;
+        }
+        let (code, what) = if uploaded > 0 && attached + uploaded >= sent {
+            ("uploaded_not_attached", format!("the hub uploaded {uploaded} of them without attaching them to the reply"))
+        } else {
+            ("thread_files_unconfirmed", format!("the hub's receipt confirms {attached} attached"))
+        };
+        let root = posted(0).and_then(|item| item["message_id"].as_str()).unwrap_or("unknown");
+        let reply_id = item.and_then(|item| item["message_id"].as_str()).unwrap_or("unknown");
+        let mut error = VioletError::local(
+            code,
+            format!(
+                "reply {position} was sent {sent} file{}, but {what}. The thread is posted (root {root}, reply \
+                 {reply_id}): read it with `cas violet read --channel {channel} --thread {root}` before posting \
+                 anything. Rerunning with the same --idempotency-key replays this receipt and never reposts; do not \
+                 repost under a new key.",
+                if sent == 1 { "" } else { "s" }
+            ),
+        );
+        let mut envelope = receipt.clone();
+        envelope["ok"] = json!(false);
+        envelope["failed_index"] = json!(position);
+        envelope["resume_safe"] = json!(false);
+        envelope["error"] = json!({"code": code, "message": error.message, "retryable": false});
+        error.envelope = Some(envelope);
+        return Err(error);
+    }
+    Ok(receipt)
 }
 
 // ---------------------------------------------------------------------------
@@ -832,11 +888,23 @@ fn render_partial_thread(out: &mut dyn Write, envelope: &Value) {
         .and_then(Value::as_u64)
         .map_or_else(|| "?".to_string(), |index| index.to_string());
     let resume_safe = envelope.get("resume_safe").and_then(Value::as_bool) == Some(true);
-    let _ = writeln!(
-        out,
-        "[FAILED] thread to {} stopped at index {failed}; resume_safe {resume_safe}",
-        channel_label(envelope)
+    let unconfirmed = matches!(
+        str_at(envelope, "/error/code"),
+        Some("thread_files_unconfirmed" | "uploaded_not_attached")
     );
+    if unconfirmed {
+        let _ = writeln!(
+            out,
+            "[FAILED] thread to {} posted, but the files of reply {failed} are not confirmed attached",
+            channel_label(envelope)
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "[FAILED] thread to {} stopped at index {failed}; resume_safe {resume_safe}",
+            channel_label(envelope)
+        );
+    }
     posted_lines(out, envelope);
     let hint = if resume_safe {
         "retry the identical command with the same --idempotency-key"

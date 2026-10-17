@@ -13515,6 +13515,40 @@ mod tests {
         assert!(SurfacingSource::ObservedWake.is_surfaced());
     }
 
+    /// cas-8cbe: `inbox_poll notification_id=N` is the read-in-full escape a
+    /// compacted supervisor card names, so the named read serves the row
+    /// after the automatic-surfacing stale TTL and after an explicit ack.
+    #[test]
+    fn named_read_serves_a_retained_row_past_the_stale_ttl_and_after_ack() {
+        let (_temp, store) = create_test_store();
+        let aged = store
+            .enqueue_with_session("worker-a", "sup", "aged body", "factory-a")
+            .unwrap();
+        let acked = store
+            .enqueue_with_session("worker-a", "sup", "acked body", "factory-a")
+            .unwrap();
+        store.ack(acked).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            let two_days_ago = (Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                params![two_days_ago, aged],
+            )
+            .unwrap();
+        }
+        assert!(
+            store.poll_unseen_for_recipient("sup", Some("factory-a"), 10).unwrap().is_empty(),
+            "an unnamed poll still skips both"
+        );
+        let read = store
+            .poll_named_for_recipient("sup", Some("factory-a"), &[aged, acked])
+            .unwrap();
+        let mut ids = read.iter().map(|row| row.id).collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![aged, acked]);
+    }
+
     /// Communication contract v2, P1.3 (cas-f7b0): a row that reached the
     /// surfaced rung is never relabelled abandoned when its recipient leaves.
     /// It settles as delivered and its sender gets no notice.

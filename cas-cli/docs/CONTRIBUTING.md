@@ -870,7 +870,10 @@ input only with `permissionDecision: "allow"`, so the hook emits that for Codex
 (cas-980d). Lock descriptors are close-on-exec so compiler-cache daemons cannot
 retain slots after the runner exits. It checks the existing build guard, and enforces `max_concurrent_builders`
 even across simultaneous launches. A refusal requires retrying later. Run long
-checks in the background with a log. Compile checks execute no tests.
+checks in the background with a log. A backgrounded check or targeted test
+runs as `worker-check --detach` in its own session, since Codex `exec_command`
+kills the shell's process group, including any `&` job, when the shell exits
+(cas-3d04); without a log redirect it is refused. Compile checks execute no tests.
 
 The runner requires a clean committed worktree, forces its private seeded
 `target/`, and records `check: PASS <sha>` with the selected packages. Task close

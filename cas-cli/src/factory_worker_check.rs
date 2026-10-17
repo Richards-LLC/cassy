@@ -647,6 +647,61 @@ pub(crate) fn execute(cas_root: &Path, args: &[String]) -> Result<()> {
     )
 }
 
+/// Run the capped runner in its own session and return once it has started
+/// (cas-3d04). The worker guard routes a backgrounded `... > log 2>&1 &` here
+/// instead of keeping the shell's `&`: Codex `exec_command` SIGKILLs the
+/// shell's whole process group as soon as the shell exits
+/// (codex-rs/utils/pty `kill_process_group` via `UnifiedExecProcess::drop`),
+/// so a `&` job died before writing a byte and the call still exited 0. A new
+/// session is outside that group. Its stdout and stderr both go to this
+/// process's stdout (the shell's log redirect), never the harness pipe.
+#[cfg(unix)]
+pub(crate) fn execute_detached(cas_root: &Path, args: &[String]) -> Result<()> {
+    if targeted_test(args).is_none() && check_packages(args).is_none() {
+        bail!("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed");
+    }
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .args(["factory", "worker-check", "--cas-root"])
+        .arg(cas_root)
+        .arg("--")
+        .args(args);
+    let child = spawn_detached(command).context("starting the detached worker-check runner")?;
+    println!(
+        "worker-check: detached pid {} in its own session; this log receives its output and receipt",
+        child.id()
+    );
+    Ok(())
+}
+
+/// Spawn `command` as a new session leader with stdin closed and both output
+/// streams on this process's stdout.
+#[cfg(unix)]
+fn spawn_detached(mut command: Command) -> std::io::Result<std::process::Child> {
+    use std::os::fd::AsFd;
+    use std::os::unix::process::CommandExt;
+    let log = std::io::stdout().as_fd().try_clone_to_owned()?;
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    // SAFETY: setsid is async-signal-safe and touches no parent state.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn execute_detached(_cas_root: &Path, _args: &[String]) -> Result<()> {
+    bail!("worker-check --detach needs a Unix session; run the check in the foreground")
+}
+
 #[cfg(test)]
 fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
     execute_at_with_scope(cas_root, args, cwd, cargo, None)
@@ -897,6 +952,25 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-3d04: Codex SIGKILLs the calling shell's process group when an
+    /// exec_command shell exits, so the detached runner must lead its own
+    /// session (and therefore its own process group).
+    #[cfg(unix)]
+    #[test]
+    fn detached_runner_leads_its_own_session_outside_the_callers_group() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5"]);
+        let mut child = spawn_detached(command).unwrap();
+        let pid = child.id() as libc::pid_t;
+        // SAFETY: plain process-id queries on our own live child.
+        let (sid, pgid, caller_pgid) = unsafe { (libc::getsid(pid), libc::getpgid(pid), libc::getpgrp()) };
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(sid, pid, "detached runner must be a session leader");
+        assert_eq!(pgid, pid, "detached runner must lead its own process group");
+        assert_ne!(pgid, caller_pgid, "a kill of the caller's group must not reach it");
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1541,14 +1615,16 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
             .and_then(|value| value.as_str())
             .unwrap();
         assert!(rewritten.contains("factory worker-check"));
-        assert!(rewritten.ends_with("> target/worker-check.log 2>&1 &"));
+        // cas-3d04: backgrounded runs detach instead of keeping the shell `&`.
+        assert!(rewritten.contains("--detach --"), "{rewritten}");
+        assert!(rewritten.ends_with("> target/worker-check.log 2>&1"), "{rewritten}");
         let head = fixture_head(&repo);
         // Execute the admitted shell suffix before invoking the real runner
         // boundary. The Cargo stand-in exits zero and compiles nothing.
         let suffix = rewritten.split_once('>').unwrap().1;
         assert!(
             Command::new("sh")
-                .args(["-c", &format!(": >{suffix} wait")])
+                .args(["-c", &format!(": >{suffix}")])
                 .current_dir(&repo)
                 .status()
                 .unwrap()

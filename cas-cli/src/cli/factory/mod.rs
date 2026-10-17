@@ -734,6 +734,9 @@ pub enum FactoryCommands {
     WorkerCheck {
         #[arg(long)]
         cas_root: std::path::PathBuf,
+        /// Start the runner in its own session and return (backgrounded calls).
+        #[arg(long)]
+        detach: bool,
         #[arg(last = true, required = true)]
         cargo_args: Vec<String>,
     },
@@ -1148,6 +1151,12 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             }
             FactoryCommands::WorkerCheck {
                 cas_root,
+                detach: true,
+                cargo_args,
+            } => crate::factory_worker_check::execute_detached(cas_root, cargo_args),
+            FactoryCommands::WorkerCheck {
+                cas_root,
+                detach: false,
                 cargo_args,
             } => crate::factory_worker_check::execute(cas_root, cargo_args),
             FactoryCommands::Doctor => doctor::execute(args, cli, cas_root),

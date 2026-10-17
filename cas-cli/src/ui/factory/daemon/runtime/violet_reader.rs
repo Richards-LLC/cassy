@@ -181,6 +181,8 @@ pub(crate) struct ReaderReport {
     pub held: usize,
     /// `(delivery id, why it was not typed)`.
     pub not_typed: Vec<(String, NamedRefusal)>,
+    /// cas-6ace: the highest `delivery_generation` this claim leased.
+    pub generation: Option<u64>,
 }
 
 /// What walking one delivery did.
@@ -320,7 +322,11 @@ impl VioletReader {
         self.managed = true;
         let deliveries: Vec<ClaimedDelivery> =
             claim["deliveries"].as_array().into_iter().flatten().filter_map(parse_delivery).collect();
-        let mut report = ReaderReport { claimed: deliveries.len(), ..ReaderReport::default() };
+        let mut report = ReaderReport {
+            claimed: deliveries.len(),
+            generation: deliveries.iter().map(|d| d.delivery_generation).max(),
+            ..ReaderReport::default()
+        };
         // cas-b94d: without the bindings' activation the reader cannot tell
         // history from a fresh ask, so it admits nothing this tick: leases go
         // back to Cloud unread and the recovery listing waits.
@@ -801,11 +807,16 @@ fn read_managed_on(
     io: &ReaderIo<'_>,
     now: DateTime<Utc>,
 ) -> Option<PollReport> {
-    let _ = cas_dir;
     let mut reader = reader.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let outcome = reader.tick(port, registration_id, io, now);
     if !reader.managed() {
         return None;
+    }
+    if let Some(receipt) = ClaimReceipt::of(registration_id, &outcome, now)
+        && let Err(error) = receipt.append(cas_dir)
+    {
+        // The receipt only observes the tick; losing one never changes it.
+        tracing::debug!(%error, "cas-6ace: Violet claim receipt not written");
     }
     let mut report = PollReport::default();
     match outcome {
@@ -823,15 +834,113 @@ fn read_managed_on(
 
 /// cas-6ace: claim receipts kept, newest last.
 const CLAIM_RECEIPTS_KEPT: usize = 20;
+/// cas-6ace: receipts named in the doctor line, newest first.
+const CLAIM_RECEIPTS_SHOWN: usize = 5;
 
 fn claim_receipts_path(cas_dir: &std::path::Path) -> std::path::PathBuf {
     cas_dir.join("violet").join("claim-receipts.json")
 }
 
-/// cas-6ace: the doctor line for the last claim receipts.
+/// cas-6ace: one managed claim, as `cas doctor` shows it. Codes and counts
+/// only: never a message body, Cloud's guidance or reason text, a header or a
+/// token. The coordination port does not expose the HTTP status, so Cloud's
+/// `code` stands for it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ClaimReceipt {
+    at: DateTime<Utc>,
+    registration_id: String,
+    path: String,
+    code: String,
+    claimed: usize,
+    typed: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    not_typed: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<u64>,
+}
+
+impl ClaimReceipt {
+    /// `None` when the tick sent no claim (a stopped reader).
+    fn of(registration_id: &str, outcome: &ClaimOutcome, at: DateTime<Utc>) -> Option<Self> {
+        let (code, read) = match outcome {
+            ClaimOutcome::Read(read) => ("completed", Some(read)),
+            ClaimOutcome::Unmanaged => ("coordination_scope_required", None),
+            ClaimOutcome::Refused(why) => (why.code.as_str(), None),
+            ClaimOutcome::Stopped(_) => return None,
+        };
+        Some(Self {
+            at,
+            registration_id: registration_id.to_string(),
+            path: CLAIM_PATH.to_string(),
+            code: code.to_string(),
+            claimed: read.map_or(0, |read| read.claimed),
+            typed: read.map_or(0, |read| read.typed),
+            not_typed: read.map_or_else(Vec::new, |read| read.not_typed.iter().map(|(_, why)| why.code.clone()).collect()),
+            generation: read.and_then(|read| read.generation),
+        })
+    }
+
+    /// Append, keep the newest [`CLAIM_RECEIPTS_KEPT`], and replace the file
+    /// atomically. An unreadable old file starts a fresh list.
+    fn append(self, cas_dir: &std::path::Path) -> std::io::Result<()> {
+        let path = claim_receipts_path(cas_dir);
+        let mut kept = read_claim_receipts(&path).unwrap_or_default();
+        kept.push(self);
+        let excess = kept.len().saturating_sub(CLAIM_RECEIPTS_KEPT);
+        kept.drain(..excess);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::write(&tmp, serde_json::to_vec(&kept).map_err(std::io::Error::other)?)?;
+        std::fs::rename(&tmp, &path)
+    }
+}
+
+fn read_claim_receipts(path: &std::path::Path) -> Option<Vec<ClaimReceipt>> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// cas-6ace: the doctor line for the last claim receipts, and whether the
+/// newest claim completed with every delivery typed. `None` before the
+/// managed reader has written one.
 pub(crate) fn claim_receipts_summary(cas_dir: &std::path::Path, now: DateTime<Utc>) -> Option<(bool, String)> {
-    let _ = (cas_dir, now);
-    None
+    let path = claim_receipts_path(cas_dir);
+    let kept = read_claim_receipts(&path)?;
+    let last = kept.last()?;
+    let recent: Vec<String> = kept
+        .iter()
+        .rev()
+        .take(CLAIM_RECEIPTS_SHOWN)
+        .map(|receipt| {
+            let mut line = format!(
+                "{} {} claimed={} typed={}",
+                receipt.at.format("%H:%M:%SZ"),
+                receipt.code,
+                receipt.claimed,
+                receipt.typed
+            );
+            if let Some(generation) = receipt.generation {
+                line.push_str(&format!(" gen={generation}"));
+            }
+            if !receipt.not_typed.is_empty() {
+                line.push_str(&format!(" not_typed={}", receipt.not_typed.join(",")));
+            }
+            line
+        })
+        .collect();
+    Some((
+        last.code == "completed" && last.not_typed.is_empty(),
+        format!(
+            "last claim {}s ago: {} · recent: {} · registration {} · {} · {}",
+            (now - last.at).num_seconds().max(0),
+            last.code,
+            recent.join("; "),
+            last.registration_id,
+            last.path,
+            path.display()
+        ),
+    ))
 }
 
 #[cfg(test)]

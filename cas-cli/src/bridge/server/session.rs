@@ -90,6 +90,11 @@ pub(crate) fn task_summary_json(
     }
 }
 
+/// The task store a status read uses.
+fn status_task_store(cas_root: &std::path::Path) -> Option<std::sync::Arc<dyn cas_store::TaskStore>> {
+    crate::store::open_task_store(cas_root).ok()
+}
+
 pub(crate) fn build_status_json(
     session: &crate::ui::factory::SessionInfo,
     cas_root: &std::path::Path,
@@ -130,7 +135,7 @@ pub(crate) fn build_status_json(
         })
         .collect();
 
-    let task_store = crate::store::open_task_store(cas_root).ok();
+    let task_store = status_task_store(cas_root);
     let to_task = |t: cas_factory::TaskSummary| task_summary_json(t, task_store.as_deref());
 
     let queue = open_prompt_queue_store(cas_root)?;
@@ -229,5 +234,9 @@ mod focused_epic_tests {
         )
         .unwrap();
         assert_eq!(status_json()["focused_epic"], "cas-epic-9b08");
+
+        // cas-cb94: every status read shares the project's one task store.
+        let first = status_task_store(&cas_root).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &status_task_store(&cas_root).unwrap()));
     }
 }

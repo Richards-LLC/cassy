@@ -1484,6 +1484,13 @@ after confirming no Cargo process is running and no cache lease is held. It was
 29 GB at discovery; use the inventory receipt for its current byte count.
 Never silently adopt or delete an unknown cache to bypass the liveness check.
 
+`gc_report` includes per-session serve RSS and a summed byte count for registered
+local project sessions. PID start-time fingerprints exclude recycled or foreign
+process records, aliases count once, and read failures are reported unavailable.
+Legacy registrations without a fingerprint are omitted. RSS includes shared
+pages; this is not a host-wide PSS/swap measurement. Linux uses `/proc`, macOS
+uses native `ps` (KiB converted to bytes).
+
 Durable task evidence has a separate cleanup opt-in: `gc_cleanup force=true
 dry_run=false` reaps processes and eligible caches. It also removes only
 `trace.zip` and `.webm` recordings under the project's artifact namespace when

@@ -5782,6 +5782,69 @@ async fn test_gc_report_empty() {
         text.contains("Orphan worker process groups: 0"),
         "Should expose the process-group GC surface: {text}"
     );
+    assert!(
+        text.contains("Serve memory (registered project sessions)"),
+        "{text}"
+    );
+    assert!(text.contains("processes=0 rss_bytes=0"), "{text}");
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let pid = std::process::id();
+        let start = cas::test_paths::pid_starttime(pid).expect("real process fingerprint");
+        for (id, fingerprint) in [
+            ("live", start),
+            ("alias", start),
+            ("recycled", start + 1),
+            ("foreign", start),
+        ] {
+            let mut agent = Agent::new(id.into(), id.into());
+            agent.pid = Some(pid);
+            agent.pid_starttime = Some(fingerprint);
+            if id == "foreign" {
+                agent.machine_id = Some("different-machine".into());
+            }
+
+            agent.cc_session_id = Some(
+                if id == "recycled" || id == "foreign" {
+                    "recycled-session"
+                } else {
+                    "serve-session"
+                }
+                .into(),
+            );
+            env.agent_store().register(&agent).unwrap();
+        }
+        let report = env
+            .service
+            .factory_request(Parameters(factory_req("gc_report")))
+            .await
+            .unwrap();
+        let text = get_text(&report);
+        assert!(text.contains("processes=1 rss_bytes="), "{text}");
+        assert_eq!(
+            text.matches("session=serve-session").count(),
+            1,
+            "one process must not be counted twice: {text}"
+        );
+        assert!(
+            !text.contains("session=recycled-session"),
+            "recycled PID must not be attributed: {text}"
+        );
+        let row = text
+            .lines()
+            .find(|line| line.contains("session=serve-session"))
+            .unwrap();
+        let rss: u64 = row
+            .split("rss_bytes=")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(rss > 0, "actual process RSS must be measured: {row}");
+    }
 }
 
 #[tokio::test]

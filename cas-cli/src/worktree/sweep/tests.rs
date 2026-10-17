@@ -368,18 +368,13 @@ fn unknown_parent_branch_produces_error_not_silent_delete() {
     // Without a resolvable parent branch, sweep MUST refuse to classify
     // and MUST NOT remove the worktree (committed work would be lost).
     let report = sweep_one_repo(&repo, SweepOptions::default());
-    assert_eq!(report.worktrees.len(), 1);
-    match &report.worktrees[0].disposition {
-        Disposition::Error { reason } => {
-            assert!(
-                reason.contains("parent branch"),
-                "expected parent-branch error, got {reason}"
-            );
-        }
-        other => panic!(
-            "expected Error(parent branch), got {other:?} — worktree with committed work was classified as something else"
-        ),
-    }
+    assert!(report.worktrees.is_empty(), "no worktree may be classified");
+    assert!(
+        report
+            .repo_error
+            .as_deref()
+            .is_some_and(|error| error.contains("comparison ref"))
+    );
     assert!(
         wt.exists(),
         "worktree with committed work must NOT be removed"

@@ -2581,9 +2581,10 @@ fn has_recorded_code_delivery(task: &Task) -> bool {
 }
 
 /// Releasing a lease retires its assignee, not its recorded delivery.
+/// A legacy worktree_id alone only locates the checkout for dirty-work and
+/// methodology checks; it does not identify a recorded factory delivery.
 fn has_delivery_to_measure(task: &Task) -> bool {
     task.assignee.is_some()
-        || task.worktree_id.is_some()
         || has_recorded_code_delivery(task)
         || task.deliverables.parked_branch.is_some()
         || !task.deliverables.handoff_branches.is_empty()

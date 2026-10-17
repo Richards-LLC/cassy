@@ -431,6 +431,8 @@ fn awaiting_merge_conflict_rework_clears_all_parked_merge_state() {
     task.deliverables.factory_branch_anchor = Some("conflicted-sha".to_string());
     task.deliverables.parked_branch = Some("factory/worker".to_string());
     task.deliverables.merge_conflicted = true;
+    task.deliverables.parked_close_reason = Some("PASS conflicted-sha".to_string());
+    task.deliverables.green_merge_commit = Some("merge-sha".to_string());
     store.add(&task).unwrap();
 
     task.status = TaskStatus::InProgress;
@@ -445,6 +447,10 @@ fn awaiting_merge_conflict_rework_clears_all_parked_merge_state() {
     );
     assert!(resumed.deliverables.parked_branch.is_none());
     assert!(!resumed.deliverables.merge_conflicted);
+    // cas-eda0: a reworked delivery must park and merge again before Cassy
+    // may close it with a parked reason.
+    assert!(resumed.deliverables.parked_close_reason.is_none());
+    assert!(resumed.deliverables.green_merge_commit.is_none());
 }
 
 #[test]

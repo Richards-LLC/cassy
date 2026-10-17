@@ -30,7 +30,13 @@ fn completed_requires_matching_original_fence_evidence() {
     repeat["latest_attempt"]["id"] = repeat["activation_id"].clone();
     repeat["latest_attempt"]["outcome"] = json!("already_managed");
     repeat["latest_attempt"]["prior_mode"] = json!("managed");
+    repeat["latest_attempt"]["settled"] =
+        json!({"migrated_v1_rows": 0, "retired_v1_rows": 0, "invalidated_v1_leases": 0});
+    repeat["settled"] = json!({"migrated": 0, "retired": 0, "invalidated_leases": 0});
+    // Managed repeats settle strays without repeating the original quiet gate.
+    repeat["latest_attempt"]["quiescence"]["blocking_v1_consumers"] = json!(["peer:recent-poll"]);
     let repeated = parse(&repeat, 200).expect("repeat retains independent original evidence");
+    assert_eq!(repeated.settled.as_ref().unwrap().migrated, 0);
     assert_ne!(
         repeated.activation_id.as_ref(),
         repeated.fence_receipt.as_ref().map(|r| &r.id)
@@ -38,6 +44,7 @@ fn completed_requires_matching_original_fence_evidence() {
     assert_eq!(first.fence_receipt, repeated.fence_receipt);
 
     for (pointer, replacement) in [
+        ("/schema", json!("cassy.binding-reconciliation/v2")),
         ("/scope/team_id", json!("foreign-team")),
         ("/binding/project_id", json!("github.com/foreign/project")),
         ("/binding/workspace_id", json!("T9999999999")),
@@ -48,6 +55,12 @@ fn completed_requires_matching_original_fence_evidence() {
         ("/strict_activation", json!("unevidenced")),
         ("/fence_receipt", Value::Null),
         ("/fence_receipt/outcome", json!("already_managed")),
+        ("/fence_receipt/prior_mode", json!("managed")),
+        ("/fence_receipt/quiescence/blocking_v1_leases", json!(1)),
+        (
+            "/fence_receipt/quiescence/blocking_v1_consumers",
+            json!(["peer:old-reader"]),
+        ),
         ("/fence_receipt/fence_generation", json!(8)),
         (
             "/binding/fence_generation",

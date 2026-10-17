@@ -27,6 +27,18 @@ impl ReconciliationRequest {
         canonical_project_id: &str,
         channel_id: &str,
     ) -> Result<Self, WireError> {
+        ensure(
+            bounded_text(team_id, 256),
+            "team identity is empty, overlong or contains NUL",
+        )?;
+        ensure(
+            bounded_text(canonical_project_id, 512),
+            "canonical project identity is empty, overlong or contains NUL",
+        )?;
+        ensure(
+            slack_id(channel_id, b"CG"),
+            "channel must be a supported public/private Slack channel",
+        )?;
         Ok(Self {
             schema: SCHEMA,
             team_id: team_id.into(),
@@ -46,12 +58,17 @@ impl ReconciliationRequest {
         let response: ReconciliationResponse = serde_json::from_slice(body)
             .map_err(|_| WireError("response does not match the strict versioned shape"))?;
         ensure(response.schema == SCHEMA, "unsupported response schema")?;
+        let (expected_status, code, action) = response.reason.contract();
         ensure(
-            status == 200 && response.code == ReconciliationCode::Completed,
-            "unsupported status or refusal",
+            status == expected_status && response.code == code && response.next_action == action,
+            "HTTP status, code, reason and next action disagree",
         )?;
         response.validate_scope(self)?;
-        response.validate_completion()?;
+        if response.code == ReconciliationCode::Completed {
+            response.validate_completion()?;
+        } else {
+            response.validate_refusal()?;
+        }
         Ok(response)
     }
 }
@@ -74,6 +91,66 @@ pub enum ReconciliationCode {
     BindingUnevidenced,
     RateLimited,
     AuthorityUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationReason {
+    Activated,
+    AlreadyManaged,
+    MalformedRequest,
+    PayloadTooLarge,
+    UnsupportedSchema,
+    InvalidCredential,
+    WriteRequired,
+    MembershipRevoked,
+    UnlinkedProject,
+    BindingScopeConflict,
+    MappingProjectMismatch,
+    ChannelUnmapped,
+    WorkspaceMismatch,
+    NotMember,
+    LegacyIntakeActive,
+    BindingUnevidenced,
+    CallerRateLimited,
+    AuthorityUnconfigured,
+    ProofUnavailable,
+    ProofInvalid,
+    AuthorizationChanged,
+    /// A mutation may have committed. Retain the pause and retry the identical
+    /// tuple; neither a timer nor a negative GET proves that no effect happened.
+    ActivationOutcomeUnknown,
+}
+
+impl ReconciliationReason {
+    fn contract(self) -> (u16, ReconciliationCode, NextAction) {
+        use NextAction as A;
+        use ReconciliationCode as C;
+        match self {
+            Self::Activated | Self::AlreadyManaged => (200, C::Completed, A::None),
+            Self::MalformedRequest => (400, C::InvalidRequest, A::FixRequest),
+            Self::PayloadTooLarge => (413, C::InvalidRequest, A::FixRequest),
+            Self::UnsupportedSchema => (400, C::UnsupportedVersion, A::UpgradeClient),
+            Self::InvalidCredential => (401, C::Unauthorized, A::Authenticate),
+            Self::WriteRequired => (403, C::Forbidden, A::Authenticate),
+            Self::MembershipRevoked => (403, C::Forbidden, A::RestoreMembership),
+            Self::UnlinkedProject => (404, C::UnknownProject, A::LinkTeamProject),
+            Self::BindingScopeConflict => (409, C::BindingConflict, A::ExplicitRelink),
+            Self::MappingProjectMismatch => (409, C::MappingConflict, A::ExplicitRelink),
+            Self::ChannelUnmapped => (409, C::MappingNotFound, A::OperatorRepair),
+            Self::WorkspaceMismatch => (409, C::InstallationMismatch, A::OperatorRepair),
+            Self::NotMember => (409, C::ChannelUnavailable, A::InviteViolet),
+            Self::LegacyIntakeActive => (409, C::LegacyIntakeActive, A::StopLegacyIntake),
+            Self::BindingUnevidenced => (409, C::BindingUnevidenced, A::OperatorRepair),
+            Self::CallerRateLimited => (429, C::RateLimited, A::RetryLater),
+            Self::AuthorityUnconfigured | Self::ProofInvalid => {
+                (503, C::AuthorityUnavailable, A::OperatorRepair)
+            }
+            Self::ProofUnavailable
+            | Self::AuthorizationChanged
+            | Self::ActivationOutcomeUnknown => (503, C::AuthorityUnavailable, A::RetryLater),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,7 +274,7 @@ pub struct Blockers {
 pub struct ReconciliationResponse {
     pub schema: String,
     pub code: ReconciliationCode,
-    pub reason: String,
+    pub reason: ReconciliationReason,
     pub guidance: String,
     #[serde(deserialize_with = "required_nullable")]
     pub scope: Option<BindingScope>,
@@ -282,6 +359,54 @@ impl ReconciliationResponse {
                 settled.invalidated_leases,
             ])?;
         }
+        if let Some(retry) = self.retry_after_secs {
+            safe_numbers(&[retry])?;
+        }
+        if let Some(blockers) = &self.blockers {
+            safe_numbers(&[
+                blockers.unexpired_v1_leases,
+                blockers.live_v1_consumers_count,
+            ])?;
+            let shown = blockers.live_v1_consumers.len() as u64;
+            ensure(
+                shown <= 1000
+                    && shown <= blockers.live_v1_consumers_count
+                    && blockers.consumers_truncated == (shown < blockers.live_v1_consumers_count)
+                    && blockers
+                        .live_v1_consumers
+                        .iter()
+                        .all(|label| bounded_text(label, 200)),
+                "blocker labels or truncation count are inconsistent",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_refusal(&self) -> Result<(), WireError> {
+        if self.reason == ReconciliationReason::LegacyIntakeActive {
+            let binding = self
+                .binding
+                .as_ref()
+                .ok_or(WireError("legacy refusal has no binding"))?;
+            let latest = self
+                .latest_attempt
+                .as_ref()
+                .ok_or(WireError("legacy refusal has no attempted receipt"))?;
+            ensure(
+                self.blockers.is_some()
+                    && self.activation_id.as_ref() == Some(&latest.id)
+                    && latest.outcome == ActivationOutcome::Refused
+                    && latest.fence_generation == binding.fence_generation
+                    && binding.mode != BindingMode::Managed,
+                "legacy refusal lacks matching attempt and blockers",
+            )?;
+        }
+        if self.reason == ReconciliationReason::CallerRateLimited {
+            ensure(
+                self.retry_after_secs.is_some(),
+                "rate limit has no retry hint",
+            )?;
+        }
         Ok(())
     }
 
@@ -318,6 +443,9 @@ impl ReconciliationResponse {
         )?;
         ensure(
             fence.outcome == ActivationOutcome::Activated
+                && fence.prior_mode != BindingMode::Managed
+                && fence.quiescence.blocking_v1_leases == 0
+                && fence.quiescence.blocking_v1_consumers.is_empty()
                 && fence.fence_generation == binding.fence_generation
                 && latest.fence_generation == binding.fence_generation,
             "receipt does not prove the current fence",
@@ -337,12 +465,12 @@ impl ReconciliationResponse {
                 && settled.invalidated_leases == latest.settled.invalidated_v1_leases,
             "attempt settlement disagrees with receipt",
         )?;
-        match self.reason.as_str() {
-            "activated" => ensure(
+        match self.reason {
+            ReconciliationReason::Activated => ensure(
                 latest == fence,
                 "new activation does not identify its original fence",
             ),
-            "already_managed" => ensure(
+            ReconciliationReason::AlreadyManaged => ensure(
                 latest.outcome == ActivationOutcome::AlreadyManaged
                     && latest.prior_mode == BindingMode::Managed,
                 "repeat does not identify a managed attempt",

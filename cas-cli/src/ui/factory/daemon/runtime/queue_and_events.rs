@@ -9,6 +9,10 @@ use message_attention::MessageAttention;
 #[path = "message_attention_tests.rs"]
 mod message_attention_tests;
 
+/// cas-cd3f: the source CAS stamps on the startup brief it queues for a
+/// freshly launched supervisor. Read only on a Daemon-stamped row.
+pub(crate) const SUPERVISOR_STARTUP_SOURCE: &str = "cas-startup";
+
 /// The daemon's own reminder to its owner is not an inter-agent relay.
 /// Caller-written reminder text cannot use this exception.
 pub(super) fn self_addressed_reminder(row: &cas_store::QueuedPrompt) -> bool {
@@ -2066,6 +2070,9 @@ pub enum SupervisorWakeClass {
     /// with the daemon's origin. Daemon-stamped only: the same words from any
     /// other sender, or quoted inside another row, carry no wake authority.
     Reminder,
+    /// cas-cd3f: the startup brief CAS queues when it launches a supervisor,
+    /// which must begin that session's first turn. Daemon-stamped only.
+    Startup,
 }
 
 impl SupervisorWakeClass {
@@ -6589,6 +6596,9 @@ impl FactoryDaemon {
                 if cas_store::parse_reminder_delivery_id(prompt).is_some() {
                     return Some(SupervisorWakeClass::Reminder);
                 }
+                if source == SUPERVISOR_STARTUP_SOURCE {
+                    return Some(SupervisorWakeClass::Startup);
+                }
                 (is_lifecycle_wake_source(source)
                     && crate::prompt_revalidation::is_supervisor_wake_envelope(prompt))
                 .then_some(SupervisorWakeClass::Lifecycle)
@@ -6802,6 +6812,9 @@ impl FactoryDaemon {
         // From here the row IS a wake signal from an established sender, so
         // every remaining refusal is policy or pane state — the class an
         // operator should actually look at.
+        if class == SupervisorWakeClass::Startup {
+            return Self::startup_brief_wake(pane);
+        }
         if let Some(reason) = pane.veto_for_idle_recipient() {
             return WakeDecision::deny(reason);
         }
@@ -6845,6 +6858,7 @@ impl FactoryDaemon {
             SupervisorWakeClass::Reminder => {
                 "supervisor pane is quiet and the row is a reminder the daemon fired"
             }
+            SupervisorWakeClass::Startup => "startup brief for a newly launched supervisor",
         })
     }
 
@@ -7038,6 +7052,25 @@ impl FactoryDaemon {
         Some(Self::parked_worker_veto(pane).unwrap_or_else(|| {
             WakeDecision::allow("fired self-reminder to a worker whose turn has ended (waiting for input)")
         }))
+    }
+
+    /// cas-cd3f: the startup brief begins a supervisor's first turn. A
+    /// just-launched harness has a fresh heartbeat and repaints while it
+    /// loads, so the quiet-pane bar would hold the brief until the operator
+    /// typed. Until a transcript exists there is no turn to protect; after the
+    /// operator has taken one, the brief waits for the ordinary short settle.
+    /// The typing, readiness and tool-call vetoes stay.
+    fn startup_brief_wake(pane: PaneWakeState) -> WakeDecision {
+        if let Some(veto) = Self::parked_worker_veto(pane) {
+            return veto;
+        }
+        if pane.tool_call == ToolCallEvidence::Unknown {
+            return WakeDecision::allow("startup brief to a supervisor that has not taken a turn");
+        }
+        match pane.silence_veto(SILENCE_FOR_IDLE_RECIPIENT_WAKE) {
+            Some(reason) => WakeDecision::deny(reason),
+            None => WakeDecision::allow("startup brief to a supervisor whose pane has settled"),
+        }
     }
 
     /// The hard vetoes for waking a parked worker: an operator draft, a pane
@@ -18505,6 +18538,35 @@ mod supervisor_decision_wake_tests {
         assert_eq!(FactoryDaemon::self_reminder_wake(SUPERVISOR, SUPERVISOR, WAITING, pane), None);
         let in_flight = repainting_pane(ToolCallEvidence::InFlight);
         assert!(!FactoryDaemon::self_reminder_wake(WORKER, SUPERVISOR, WAITING, in_flight).unwrap().allowed);
+    }
+
+    /// cas-cd3f: the startup brief a `cas claude` launch queues wakes the new
+    /// supervisor, whose harness has not taken a turn, a fresh heartbeat and
+    /// a repainting pane notwithstanding. Drives the real enqueue.
+    #[test]
+    fn cas_cd3f_startup_brief_wakes_a_freshly_launched_supervisor() {
+        use crate::store::detect::open_prompt_queue_store;
+        let tmp = tempfile::tempdir().unwrap();
+        crate::ui::factory::queue_supervisor_intro_prompt(
+            tmp.path(), SUPERVISOR, cas_mux::SupervisorCli::Claude, &[], None, None,
+        );
+        let queue = open_prompt_queue_store(tmp.path()).unwrap();
+        let row = queue.peek_for_targets(&[SUPERVISOR], None, 10).unwrap().remove(0);
+        let sender = FactoryDaemon::wake_sender_from_origin(row.origin.as_ref(), None);
+        let decide = |pane| {
+            FactoryDaemon::supervisor_wake_decision(
+                &data(), SUPERVISOR, SUPERVISOR, &sender, &row.source, &row.prompt, pane,
+                chrono::Utc::now(),
+            )
+        };
+        let fresh = repainting_pane(ToolCallEvidence::Unknown);
+        let decision = decide(fresh);
+        assert!(decision.allowed, "{}", decision.reason);
+        // An operator draft, a pane not yet ready and a tool call in flight
+        // still hold it.
+        assert!(!decide(PaneWakeState { composer_dirty: true, ..fresh }).allowed);
+        assert!(!decide(PaneWakeState { ready_for_injection: false, ..fresh }).allowed);
+        assert!(!decide(repainting_pane(ToolCallEvidence::InFlight)).allowed);
     }
 }
 

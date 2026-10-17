@@ -1092,7 +1092,10 @@ fn post_swap_refresh_runs_on_the_installed_binary_and_reports_its_version() {
         run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
             .expect("the post-swap refresh must run the installed binary")
     });
-    assert!(!output.contains("retired config entries remain ignored"), "parent replayed an entry repaired by its verified child: {output}");
+    assert!(
+        !output.contains("retired config entries remain ignored"),
+        "parent replayed an entry repaired by its verified child: {output}"
+    );
 
     assert_eq!(
         receipt["refresh_binary_version"], "9.9.9-stub",

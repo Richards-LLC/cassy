@@ -423,6 +423,10 @@ const RECOVERY_NOTICE: &str = "Recovery notice: an earlier supervisor session ma
 
 impl PromptQueueTyper<'_> {
     fn enqueue(&self, session: &str, delivery: &ClaimedDelivery, kind: &str, text: &str, key: &str) -> Result<(), NamedRefusal> {
+        self.enqueue_at(session, delivery, kind, text, key, Utc::now())
+    }
+
+    fn enqueue_at(&self, session: &str, delivery: &ClaimedDelivery, kind: &str, text: &str, key: &str, _now: DateTime<Utc>) -> Result<(), NamedRefusal> {
         let target = &delivery.target;
         let field = |value: &Value| value.as_str().filter(|text| !text.is_empty()).map(str::to_string);
         let (Some(channel), Some(thread_ts), Some(message_ts)) = (

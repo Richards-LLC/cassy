@@ -1842,6 +1842,27 @@ exit 0
             repaired,
             "a current plist must not count as stale"
         );
+        // plutil and PlistBuddy save tab-indented plists, as on prowl.
+        let tabbed = ["SoftResourceLimits", "HardResourceLimits"]
+            .into_iter()
+            .fold(
+                launchd_plist(
+                    Path::new("/opt/cas/bin/cas"),
+                    Path::new("/Users/test/.cas/hub/hub.log"),
+                    true,
+                    8443,
+                ),
+                |plist, limits| plist.replace(&launchd_file_limit_block(limits), ""),
+            )
+            .replace("\n    ", "\n\t\t")
+            .replace("\n  ", "\n\t");
+        assert!(!tabbed.contains("NumberOfFiles") && !tabbed.contains("\n  <key>"));
+        let repaired = rewrite_launchd_publication_flags(&tabbed, true, 8443).unwrap();
+        assert_eq!(
+            repaired.matches("<key>NumberOfFiles</key>").count(),
+            2,
+            "{repaired}"
+        );
     }
 
     #[test]

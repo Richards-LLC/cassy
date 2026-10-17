@@ -18450,6 +18450,23 @@ mod supervisor_decision_wake_tests {
             );
         }
     }
+
+    /// cas-901f: a reminder the daemon fired for a worker reaches it once its
+    /// turn has ended, though its harness keeps repainting the pane.
+    #[test]
+    fn cas_901f_fired_self_reminder_wakes_a_worker_whose_turn_has_ended() {
+        let pane = repainting_pane(ToolCallEvidence::Idle);
+        assert!(!ordinary_policy(&WakeSender::Daemon, pane).allowed, "the live decline");
+        let decision = FactoryDaemon::self_reminder_wake(WORKER, SUPERVISOR, WAITING, pane)
+            .expect("a worker waiting for input is in the class");
+        assert!(decision.allowed, "{}", decision.reason);
+        // A worker mid-turn, the supervisor pane and a pending tool call keep
+        // their existing protection.
+        assert_eq!(FactoryDaemon::self_reminder_wake(WORKER, SUPERVISOR, RUNNING, pane), None);
+        assert_eq!(FactoryDaemon::self_reminder_wake(SUPERVISOR, SUPERVISOR, WAITING, pane), None);
+        let in_flight = repainting_pane(ToolCallEvidence::InFlight);
+        assert!(!FactoryDaemon::self_reminder_wake(WORKER, SUPERVISOR, WAITING, in_flight).unwrap().allowed);
+    }
 }
 
 /// cas-913c: notification 3539008. The supervisor's message reached

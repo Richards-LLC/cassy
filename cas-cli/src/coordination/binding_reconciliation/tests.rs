@@ -43,6 +43,27 @@ fn completed_requires_matching_original_fence_evidence() {
     );
     assert_eq!(first.fence_receipt, repeated.fence_receipt);
 
+    // Cloud9864/spec-b489 clarification: preserve historical ADMIN evidence;
+    // only this invocation's ordinary receipt is forbidden to attest readers.
+    let mut admin_repeat = repeat.clone();
+    admin_repeat["fence_receipt"]["quiescence"]["attested_v1_consumers"] =
+        json!(["historical-admin-reader"]);
+    let preserved = parse(&admin_repeat, 200).expect("ordinary repeat preserves ADMIN original");
+    assert_eq!(
+        preserved
+            .fence_receipt
+            .unwrap()
+            .quiescence
+            .attested_v1_consumers,
+        ["historical-admin-reader"]
+    );
+    admin_repeat["latest_attempt"]["quiescence"]["attested_v1_consumers"] =
+        json!(["forged-current-exemption"]);
+    assert!(
+        parse(&admin_repeat, 200).is_err(),
+        "ordinary current attempt cannot attest readers"
+    );
+
     for (pointer, replacement) in [
         ("/schema", json!("cassy.binding-reconciliation/v2")),
         ("/scope/team_id", json!("foreign-team")),
@@ -225,6 +246,10 @@ fn refusals_preserve_blockers_and_keep_unknown_attempts_unresolved() {
         ("/blockers/live_v1_consumers_count", json!(0)),
         ("/blockers/consumers_truncated", json!(true)),
         ("/latest_attempt/outcome", json!("activated")),
+        (
+            "/latest_attempt/quiescence/attested_v1_consumers",
+            json!(["forged-current-exemption"]),
+        ),
     ] {
         let mut corrupted = refusal.clone();
         *corrupted.pointer_mut(pointer).unwrap() = replacement;

@@ -4345,10 +4345,10 @@ mod tests {
                     if control == "unset" || (control == "removed" && [0, 2].contains(&index)) {
                         assert!(forwarded.is_none(), "{control}: {key} was rehydrated");
                     } else {
-                        let parsed: toml::Value = forwarded
-                            .unwrap_or_else(|| panic!("{control}: missing {key}"))
-                            .parse()
-                            .unwrap();
+                        let parsed: toml::Value = toml::from_str(
+                            forwarded.unwrap_or_else(|| panic!("{control}: missing {key}")),
+                        )
+                        .unwrap();
                         let expected = if index == 2 { explicit } else { &values[index] };
                         assert_eq!(
                             parsed["mcp_servers"]["cs"]["env"][key].as_str(),

@@ -613,6 +613,7 @@ impl FactoryApp {
         Some(StallEvidenceRequest::new(
             self.cas_dir.clone(),
             epic_id,
+            self.factory_session.clone()?,
             &self.unfiltered_director_data,
         ))
     }

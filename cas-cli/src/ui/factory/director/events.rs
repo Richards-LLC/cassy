@@ -304,6 +304,9 @@ impl SupervisorStallTracker {
 /// ten minutes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryHold {
+    /// The split gives this task to a peer, or its worker is not registered
+    /// in this factory session on this machine (cas-7809).
+    OutsideFactory,
     /// A blocker note was added after the delivery last parked.
     BlockerNote,
     /// An independent QA pass is pending or claimed for the delivery.

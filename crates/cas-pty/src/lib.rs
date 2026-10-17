@@ -58,9 +58,10 @@ pub use claude_trust::{
 };
 pub use codex_trust::{
     CODEX_HOOK_REVIEW_FAILURE, CODEX_HOOK_REVIEW_MARKER, CODEX_PRE_TOOL_TIMEOUT_SECS,
-    CODEX_TRUST_TIMEOUT_HINT, CodexTrustOutcome, codex_home, codex_project_hooks_paths,
+    CODEX_TRUST_TIMEOUT_HINT, CodexTrustOutcome, codex_home,
     ensure_cas_hooks_trusted, ensure_cas_hooks_trusted_in, ensure_project_trusted,
-    ensure_project_trusted_in, prepare_cas_tool_hooks_in, update_codex_config_locked,
+    ensure_project_trusted_in, prepare_cas_tool_hooks_in, prepare_codex_project_hooks_in,
+    update_codex_config_locked,
 };
 
 pub use conformance::{

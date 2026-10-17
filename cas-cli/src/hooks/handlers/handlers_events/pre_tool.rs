@@ -51,6 +51,15 @@ pub fn handle_pre_tool_use(
                 "WORKER CHECK BACKGROUND: a backgrounded check needs a log, or its output and receipt line are lost. Use `... > target/worker-check.log 2>&1 &` (create target/ first) or your task artifacts directory.",
             ));
         }
+        // The shell opens this log before the runner starts. Preserve every
+        // attempt's refusal/receipt even when the caller retries with `>`.
+        let suffix = if suffix.trim_start().starts_with('>')
+            && !suffix.trim_start().starts_with(">>")
+        {
+            suffix.replacen('>', ">>", 1)
+        } else {
+            suffix
+        };
         let executable = std::env::current_exe()?;
         let rewritten = format!(
             "{} factory worker-check --cas-root {}{} -- {}{}",

@@ -176,6 +176,7 @@ fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
             "cargo check -p cas --lib",
             "cargo check -p cas -p cas-pty --lib",
             "cargo check --lib -p cas > target/worker-check.log 2>&1 &",
+            "cargo check --lib -p cas >> target/worker-check.log 2>&1 &",
             "cargo check -p cas --tests",
             "cargo check -p cas -p cas-pty --tests",
             "cargo check --tests -p cas > target/worker-check.log 2>&1 &",
@@ -194,12 +195,12 @@ fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
                 "{rewritten}"
             );
             let args = command.strip_prefix("cargo check ").unwrap();
-            let args = args.strip_suffix(" &").unwrap_or(args);
+            let args = args.split('>').next().unwrap().trim_end();
             assert!(rewritten.contains(&format!("-- {args}")), "{rewritten}");
             if command.ends_with('&') {
                 // cas-3d04: detached runner, never a shell `&` job.
                 assert!(rewritten.contains("--detach --"), "{rewritten}");
-                assert!(rewritten.ends_with("> target/worker-check.log 2>&1"), "{rewritten}");
+                assert!(rewritten.ends_with(">> target/worker-check.log 2>&1"), "{rewritten}");
             }
             // cas-980d: Codex applies updatedInput only with an allow
             // decision; without it Codex runs the original command.
@@ -261,8 +262,11 @@ fn targeted_nextest_rewrite_preserves_filter_literals_and_workspace_guard() {
                 "{rewritten}"
             );
             let expected = command.strip_prefix("cargo ").unwrap();
+            // pin: Filter literals survive unchanged while retry logs append.
+            let expected = expected.strip_suffix(" &").unwrap_or(expected)
+                .replace(" > target/tests.log", " >> target/tests.log");
             assert!(
-                rewritten.contains(expected.strip_suffix(" &").unwrap_or(expected)),
+                rewritten.contains(&expected),
                 "{rewritten}"
             );
         }
@@ -571,7 +575,7 @@ fn codex_nested_exec_command_check_runs_through_the_capped_runner_cas_980d() {
             !runs.trim_end().ends_with('&') && runs.contains("--detach --"),
             "Codex kills a shell `&` job with its caller; `{runs}` would exit 0 without running"
         );
-        assert!(runs.ends_with("> target/worker-check.log 2>&1"), "{runs}");
+        assert!(runs.ends_with(">> target/worker-check.log 2>&1"), "{runs}");
     }
     // Without a log the detached output and receipt would be lost: refuse.
     let command = "cargo check -p cas --tests &";

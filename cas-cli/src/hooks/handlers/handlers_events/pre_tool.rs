@@ -36,11 +36,27 @@ pub fn handle_pre_tool_use(
         if let Some(reason) = worker_check_log_denial(input, &suffix) {
             return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
         }
+        // cas-3d04: a shell `&` job dies with its caller under Codex, whose
+        // exec_command SIGKILLs the shell's process group on exit. Run the
+        // runner in the foreground with `--detach` instead; it starts the
+        // check in its own session and returns. The log redirect stays on
+        // the shell so the workspace guard still sees the write.
+        let (detach, suffix) = match suffix.trim_end().strip_suffix('&') {
+            Some(redirect) => (true, redirect.trim_end().to_string()),
+            None => (false, suffix),
+        };
+        if detach && !suffix.contains('>') {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                "WORKER CHECK BACKGROUND: a backgrounded check needs a log, or its output and receipt line are lost. Use `... > target/worker-check.log 2>&1 &` (create target/ first) or your task artifacts directory.",
+            ));
+        }
         let executable = std::env::current_exe()?;
         let rewritten = format!(
-            "{} factory worker-check --cas-root {} -- {}{}",
+            "{} factory worker-check --cas-root {}{} -- {}{}",
             shell_quote_path(&executable),
             shell_quote_path(root),
+            if detach { " --detach" } else { "" },
             args.iter()
                 .map(|arg| if arg.trim_start().starts_with("test(") {
                     format!("'{arg}'")

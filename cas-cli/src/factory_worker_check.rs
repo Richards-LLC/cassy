@@ -647,6 +647,53 @@ pub(crate) fn execute(cas_root: &Path, args: &[String]) -> Result<()> {
     )
 }
 
+/// Run the capped runner in its own session and return once it has started
+/// (cas-3d04). The worker guard routes a backgrounded `... > log 2>&1 &` here
+/// instead of keeping the shell's `&`: Codex `exec_command` SIGKILLs the
+/// shell's whole process group as soon as the shell exits
+/// (codex-rs/utils/pty `kill_process_group` via `UnifiedExecProcess::drop`),
+/// so a `&` job died before writing a byte and the call still exited 0. A new
+/// session is outside that group. Its stdout and stderr both go to this
+/// process's stdout (the shell's log redirect), never the harness pipe.
+#[cfg(unix)]
+pub(crate) fn execute_detached(cas_root: &Path, args: &[String]) -> Result<()> {
+    use std::os::fd::AsFd;
+    use std::os::unix::process::CommandExt;
+    if targeted_test(args).is_none() && check_packages(args).is_none() {
+        bail!("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed");
+    }
+    let log = std::io::stdout().as_fd().try_clone_to_owned()?;
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .args(["factory", "worker-check", "--cas-root"])
+        .arg(cas_root)
+        .arg("--")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    // SAFETY: setsid is async-signal-safe and touches no parent state.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn().context("starting the detached worker-check runner")?;
+    println!(
+        "worker-check: detached pid {} in its own session; this log receives its output and receipt",
+        child.id()
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn execute_detached(_cas_root: &Path, _args: &[String]) -> Result<()> {
+    bail!("worker-check --detach needs a Unix session; run the check in the foreground")
+}
+
 #[cfg(test)]
 fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
     execute_at_with_scope(cas_root, args, cwd, cargo, None)

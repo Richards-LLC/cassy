@@ -196,7 +196,9 @@ fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
             let args = command.strip_prefix("cargo check ").unwrap();
             assert!(rewritten.contains(&format!("-- {args}")), "{rewritten}");
             if command.ends_with('&') {
-                assert!(rewritten.ends_with("2>&1 &"));
+                // cas-3d04: detached runner, never a shell `&` job.
+                assert!(rewritten.contains("--detach --"), "{rewritten}");
+                assert!(rewritten.ends_with("> target/worker-check.log 2>&1"), "{rewritten}");
             }
             // cas-980d: Codex applies updatedInput only with an allow
             // decision; without it Codex runs the original command.
@@ -546,11 +548,33 @@ fn codex_nested_exec_command_check_runs_through_the_capped_runner_cas_980d() {
                 "{dispatch}: Codex would run `{runs}` for `{command}`, not the capped runner: {stdout}"
             );
             assert!(runs.contains("-- -p cas --tests"), "{runs}");
-            if command.ends_with('&') {
-                assert!(runs.ends_with("> target/worker-check.log 2>&1 &"), "{runs}");
-            }
         }
     }
+
+    // cas-3d04: Codex exec_command SIGKILLs the shell's process group when the
+    // shell exits (codex-rs/utils/pty kill_process_group, via
+    // UnifiedExecProcess::drop). Observed with codex-cli 0.162.1: a `&` job
+    // left a 0-byte log after 8s and the call exited 0; a new session
+    // survived. A backgrounded capped run must therefore leave no shell `&`
+    // job: the runner detaches itself into its own session, writing the log.
+    for command in [
+        "cargo check -p cas --tests > target/worker-check.log 2>&1 &",
+        "cargo nextest run -p cas --lib -E 'test(one)' > target/worker-check.log 2>&1 &",
+    ] {
+        let out = handle_pre_tool_use(&codex_payload("call_bg", command), Some(&root)).unwrap();
+        let stdout = serde_json::to_value(&out).unwrap();
+        let runs = codex_effective_command(&stdout, command).expect("backgrounded run is allowed");
+        assert!(runs.contains("factory worker-check --cas-root"), "{runs}");
+        assert!(
+            !runs.trim_end().ends_with('&') && runs.contains("--detach --"),
+            "Codex kills a shell `&` job with its caller; `{runs}` would exit 0 without running"
+        );
+        assert!(runs.ends_with("> target/worker-check.log 2>&1"), "{runs}");
+    }
+    // Without a log the detached output and receipt would be lost: refuse.
+    let command = "cargo check -p cas --tests &";
+    let out = handle_pre_tool_use(&codex_payload("call_bg_nolog", command), Some(&root)).unwrap();
+    assert!(deny_reason(&out).is_some_and(|reason| reason.contains("WORKER CHECK BACKGROUND")), "{out:?}");
 
     // A guard that denies the rewritten command still blocks it in Codex.
     let command = "cargo check -p cas --tests > /tmp/worker-check.log 2>&1 &";

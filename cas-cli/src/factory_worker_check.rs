@@ -326,13 +326,48 @@ fn isolated_test_path(
             std::os::unix::fs::symlink(concrete(name, tool)?, bin.path().join(name))?;
         }
     }
-    let retained = std::env::split_paths(&search)
+    // cas-1c4b: hide the host harness binaries, not their directories.
+    // Dropping a whole directory (e.g. /opt/homebrew/bin, which holds codex
+    // and claude) silently swapped in Apple's /usr/bin/git. A directory that
+    // holds a harness binary is replaced in place by a private mirror of its
+    // other entries, minus rustup proxies: dispatching one would prepend
+    // $CARGO_HOME/bin and restore the hidden binaries.
+    const HARNESS: [&str; 3] = ["cas", "codex", "claude"];
+    let rustup_proxy = |path: &Path| {
+        use std::os::unix::fs::MetadataExt;
+        rustup.as_ref().is_some_and(|rustup| {
+            path.metadata().ok().zip(rustup.metadata().ok())
+                .is_some_and(|(tool, rustup)| tool.dev() == rustup.dev() && tool.ino() == rustup.ino())
+        })
+    };
+    let mirrors = bin.path().join("harness-free");
+    let mut retained = Vec::new();
+    for (index, dir) in std::env::split_paths(&search)
         .map(|dir| if dir.is_absolute() { dir } else { cwd.join(dir) })
-        .filter(|dir| !["cas", "codex", "claude"].iter().any(|name| dir.join(name).is_file()))
-        .collect::<Vec<_>>();
+        .enumerate()
+    {
+        if !HARNESS.iter().any(|name| dir.join(name).is_file()) {
+            retained.push(dir);
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mirror = mirrors.join(index.to_string());
+        std::fs::create_dir_all(&mirror)?;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let source = entry.path();
+            if HARNESS.iter().any(|harness| name == *harness) || rustup_proxy(&source) {
+                continue;
+            }
+            std::os::unix::fs::symlink(&source, mirror.join(&name))?;
+        }
+        retained.push(mirror);
+    }
     let path = std::env::join_paths(std::iter::once(bin.path()).chain(retained.iter().map(PathBuf::as_path)))?;
     println!(
-        "Worker test PATH: concrete Rust tools + PATH without host harness directories; setup={:.3}ms",
+        "Worker test PATH: concrete Rust tools + PATH with host harness binaries hidden; setup={:.3}ms",
         started.elapsed().as_secs_f64() * 1000.0
     );
     Ok((bin, path))
@@ -1052,6 +1087,9 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
             for name in ["cas", "codex", "claude"] {
                 fake_cargo(&bin.path().join(name), "exit 0");
             }
+            // cas-1c4b: a tool sharing a directory with the harness binaries
+            // (git beside codex/claude in /opt/homebrew/bin) must stay visible.
+            fake_cargo(&bin.path().join("cas-1c4b-beside-harness-tool"), "exit 0");
             let original = std::env::var_os("PATH").unwrap();
             let path = std::env::join_paths(
                 [bin.path().to_path_buf(), tools.path().to_path_buf()]
@@ -1084,6 +1122,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
     command -v rustc > /dev/null || exit 24
     command -v git > /dev/null || exit 25
     command -v cas-a9fc-downstream-tool > /dev/null || exit 26
+    command -v cas-1c4b-beside-harness-tool > /dev/null || exit 27
     printf '%s\n' "$PATH" > target/selected-path
     printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         );

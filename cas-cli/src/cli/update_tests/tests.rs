@@ -514,6 +514,7 @@ fn project_table_plain_uses_phase_glyphs_and_compact_project_names() {
     let receipts = vec![ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Warning("busy".to_owned()),
         skills: ProjectPhase::Skipped("not installed".to_owned()),
@@ -545,6 +546,7 @@ fn project_table_phase_headers_are_not_truncated_at_supported_widths() {
             "/home/alice/projects/a-project-with-a-deliberately-long-name/another-project",
         ),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Ok("up to date".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -579,6 +581,7 @@ fn non_ok_phase_details_include_phase_summary_when_capture_is_empty() {
     let receipt = ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Ok("up to date".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -608,6 +611,7 @@ fn cloud_warning_summary_stays_under_the_non_ok_project_row() {
     let receipt = ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Ok("up to date".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -1058,18 +1062,40 @@ fn write_stub_binary(path: &Path, body: &str) {
 #[cfg(unix)]
 #[test]
 fn post_swap_refresh_runs_on_the_installed_binary_and_reports_its_version() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
     let installed_binary = temp_dir.path().join("cas-new");
+    let root = installed_binary.with_extension("root");
+    std::fs::create_dir(&root).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set_current_dir(temp_dir.path());
+    std::fs::write(root.join("config.toml"), "[factory]\nmerge_sweep = true\n").unwrap();
+    std::fs::write(installed_binary.with_extension("receipt"), serde_json::json!({
+        "refresh_binary_version": "9.9.9-stub", "projects": [{
+            "store": root, "retired_toml": {
+                "path": root.join("config.toml"), "status": "repaired", "removed": ["factory.merge_sweep"]
+            }
+        }], "user_level_store": {"status":"ok"}, "skipped_unregistered": []
+    }).to_string()).unwrap();
     // The stub stands in for the freshly installed binary: it records its argv
-    // and prints the refresh receipt the real child would print.
+    // and replaces its fixture config before returning a maintenance receipt.
     write_stub_binary(
         &installed_binary,
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n\
-         printf '%s' '{\"refresh_binary_version\":\"9.9.9-stub\",\"projects\":[],\"user_level_store\":{\"status\":\"ok\"},\"skipped_unregistered\":[]}'\n",
+         printf '[factory]\\n' > \"$0.root/config.toml\"\ncat \"$0.receipt\"\n",
     );
 
-    let receipt = run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
-        .expect("the post-swap refresh must run the installed binary");
+    let (receipt, output) = capture_phase(true, || {
+        let cli = crate::cli::try_parse_from_with_wordmark(["cas", "update", "--yes"]).unwrap();
+        let _parent_notices = crate::cli::startup_config_notices(&cli);
+        crate::config::Config::load(&root).unwrap();
+        run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
+            .expect("the post-swap refresh must run the installed binary")
+    });
+    assert!(
+        !output.contains("retired config entries remain ignored"),
+        "parent replayed an entry repaired by its verified child: {output}"
+    );
 
     assert_eq!(
         receipt["refresh_binary_version"], "9.9.9-stub",
@@ -1125,15 +1151,43 @@ fn post_swap_refresh_spawn_failure_has_a_distinct_receipt_status() {
 #[cfg(unix)]
 #[test]
 fn post_swap_refresh_failure_preserves_the_child_receipt_and_failed_project() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
+    let root = temp_dir.path().join(".cas");
+    std::fs::create_dir(&root).unwrap();
+    let original = "[factory]\nmerge_sweep = true\n";
+    std::fs::write(root.join("config.toml"), original).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set_current_dir(temp_dir.path());
     let installed_binary = temp_dir.path().join("cas-failed-refresh");
+    std::fs::write(installed_binary.with_extension("receipt"), serde_json::to_vec(&serde_json::json!({
+        "refresh_binary_version": "9.9.9-stub",
+        "projects": [{"project": "/tmp/failed-project", "cloud_sync": "FAILED: cloud sync: registration missing"}],
+        "user_level_store": {"status": "FAILED: config is read-only; run cas update", "retired_toml": [{
+            "path": root.join("config.toml"), "status": "failed", "error": "config is read-only"
+        }]},
+        "skipped_unregistered": []
+    })).unwrap()).unwrap();
     write_stub_binary(
         &installed_binary,
-        "#!/bin/sh\nprintf '%s' '{\"refresh_binary_version\":\"9.9.9-stub\",\"projects\":[{\"project\":\"/tmp/failed-project\",\"cloud_sync\":\"FAILED: cloud sync: registration missing\"}],\"user_level_store\":{\"status\":\"ok\"},\"skipped_unregistered\":[]}'\nprintf '%s' 'cloud refresh failed' >&2\nexit 1\n",
+        "#!/bin/sh\ncat \"$0.receipt\"\nprintf '%s' 'cloud refresh failed' >&2\nexit 1\n",
     );
 
-    let error = run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
-        .expect_err("a failed child refresh must remain an error");
+    let (result, output) = capture_phase(true, || {
+        let cli = crate::cli::try_parse_from_with_wordmark(["cas", "update"]).unwrap();
+        let _scope = crate::cli::startup_config_notices(&cli);
+        crate::config::Config::load(&root).unwrap();
+        run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
+    });
+    assert!(
+        !output.contains("remain ignored"),
+        "failed child receipt was reported twice: {output}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("config.toml")).unwrap(),
+        original
+    );
+    let error = result.expect_err("a failed child refresh must remain an error");
     let failure = error
         .downcast_ref::<PostSwapRefreshFailure>()
         .expect("a child refresh failure should preserve structured failure data");
@@ -1250,6 +1304,7 @@ fn refresh_receipt_records_partial_failure_before_refresh_returns_error() {
     let receipts = vec![ProjectRefreshReceipt {
         project: PathBuf::from("/tmp/failed-project"),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Ok("migration".to_owned()),
         search_index: ProjectPhase::Ok("no stray root".to_owned()),
         skills: ProjectPhase::Ok("skills".to_owned()),
@@ -2005,6 +2060,7 @@ fn skipped_phases_print_no_details_block_snapshot_cas_8030() {
     let unlinked = ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/notes"),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Ok("up to date".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -2020,6 +2076,7 @@ fn skipped_phases_print_no_details_block_snapshot_cas_8030() {
     let warned = ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Warning("index busy".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -2061,6 +2118,7 @@ fn dry_run_planned_phases_keep_their_details_block_cas_937a() {
     let planned = ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/first"),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Planned("would apply 2 migrations".to_owned()),
         search_index: ProjectPhase::Skipped("dry run".to_owned()),
         skills: ProjectPhase::Skipped("dry run".to_owned()),
@@ -2615,5 +2673,396 @@ fn cas_9815_update_distinguishes_old_shipped_skill_from_user_delta() {
             assert!(cas_6718_git(&project, &["status", "--porcelain"]).is_empty());
             assert!(cas_6718_git(&project, &["ls-files", "--", path]).is_empty());
         }
+    }
+}
+
+/// cas-4585: exercise the native update sweep with physical cwd, HOME and
+/// registry confined to the fixture. Git, SQLite and managed-file refresh
+/// remain real; only the unrelated user builtin/network phase is inert.
+#[test]
+fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    // Host-wide discovery excludes /tmp, so use its existing sanctioned
+    // fixture parent rather than weakening project eligibility.
+    let fixture_home = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    let home = fixture_home.path().canonicalize().unwrap();
+    env.set("HOME", &home);
+    env.set_current_dir(&home);
+    env.set("XDG_CONFIG_HOME", home.join(".config"));
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let projects = home.join("projects");
+    let project = cas_6718_drifted_project(&projects);
+    let root = project.join(".cas");
+    let host = crate::store::init_cas_dir(&home).unwrap();
+    let global = crate::config::global_cas_dir().unwrap();
+    std::fs::create_dir_all(&global).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set_current_dir(&project);
+    env.set("CAS_PROJECT_ROOTS", &projects);
+    let legacy = concat!(
+        "# operator introduction\n",
+        "[factory] # factory header\n",
+        "# preserve retirement rationale\n",
+        "merge_sweep = true # preserve inline note\n",
+        "merge_sweep_timeout_secs = 17\n",
+        "strict_cli = false # active explicit override\n",
+        "future_policy = 'keep me'\n",
+        "[factory.merge_sweep_env] # former environment\n",
+        "TOKEN = 'fixture-only-token'\n",
+        "[code_review]\nowner = 'worker'\nfuture_owner = 'keep this too'\n",
+        "[jev] # old integration\nendpoint = 'fixture-only-endpoint'\n",
+        "[project]\ncanonical_id = 'retirement-fixture'\n",
+    );
+    for dir in [&root, &host, &global] {
+        std::fs::write(dir.join("config.toml"), legacy).unwrap();
+    }
+    let before: crate::config::Config = toml::from_str(legacy).unwrap();
+    let mut args = update_test_args();
+    args.all_projects = true;
+    args.refresh_receipt = Some(home.join("refresh.json"));
+    let cli = update_test_cli(false);
+    let run = || {
+        let (result, output) = capture_phase(true, || {
+            let startup =
+                crate::cli::try_parse_from_with_wordmark(["cas", "update", "--all-projects"])
+                    .unwrap();
+            let _notices = crate::cli::startup_config_notices(&startup);
+            // The real binary first reads config to decide crash-reporting
+            // policy, then startup logging, then project discovery.
+            let _enabled = crate::sentry::is_sentry_enabled();
+            crate::config::Config::load(&root).unwrap();
+            refresh_all_projects_with_user_refresh(
+                &args,
+                &cli,
+                Some(&root),
+                None,
+                None,
+                None,
+                || refresh_user_level_store_with_builtins(&args, &cli, || Ok(())),
+            )
+        });
+        #[cfg(unix)]
+        assert!(
+            !output.contains("ignored and dropped on the next save")
+                && !output.contains("[jev] config section is retired"),
+            "raw startup notice escaped structured maintenance: {output}"
+        );
+        result
+    };
+    let report = run().unwrap();
+    let sweep = report.sweep.as_ref().unwrap();
+    assert_eq!(sweep.config.repaired, 3);
+    assert_eq!(sweep.config.entries_removed, 15);
+    let rendered = render_plain_at(80, |fmt| findings::print(fmt, sweep).map(|_| ()));
+    assert!(rendered.contains("15 retired entries removed in 3 files"), "{rendered}");
+    let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+    assert_eq!(receipt["projects"].as_array().unwrap().len(), 1);
+    for dir in [&root, &host, &global] {
+        let raw = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let parsed: toml::Value = toml::from_str(&raw).unwrap();
+        assert!(parsed["factory"].get("merge_sweep").is_none(), "update must retire the ignored sweep key");
+        assert!(parsed["factory"].get("merge_sweep_env").is_none());
+        assert!(parsed.get("jev").is_none());
+        assert!(parsed["code_review"].get("owner").is_none());
+        assert_eq!(parsed["code_review"]["future_owner"].as_str(), Some("keep this too"));
+        for comment in ["operator introduction", "factory header", "retirement rationale", "inline note", "active explicit override", "former environment", "old integration"] {
+            assert!(raw.contains(comment), "lost operator comment {comment}");
+        }
+        let after: crate::config::Config = toml::from_str(&raw).unwrap();
+        assert_eq!(serde_json::to_value(&before).unwrap(), serde_json::to_value(after).unwrap());
+    }
+    let backup = receipt["projects"][0]["retired_toml"]["backup"].as_str().unwrap();
+    assert_eq!(std::fs::read_to_string(backup).unwrap(), legacy);
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(backup).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    let original = std::fs::metadata(root.join("config.toml"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    // Current read-only configs need no write eligibility, including during
+    // a real native repeat across project, host and global stores.
+    for dir in [&root, &host, &global] {
+        let path = dir.join("config.toml");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+    }
+    let repeat = run().unwrap();
+    assert_eq!(repeat.sweep.as_ref().unwrap().config.repaired, 0);
+    assert_eq!(
+        std::fs::metadata(root.join("config.toml"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        original
+    );
+    let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        receipt["projects"][0]["retired_toml"]["status"],
+        "unchanged"
+    );
+    assert!(!project.join(".cas/.cas").exists());
+
+    // Planning a retired read-only config must also leave it untouched and
+    // create neither a config lock nor a before-copy directory.
+    let preview = home.join("readonly-preview");
+    std::fs::create_dir(&preview).unwrap();
+    let path = preview.join("config.toml");
+    std::fs::write(&path, legacy).unwrap();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(crate::config::retire_config(&preview, true).status, "planned");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    assert_eq!(std::fs::read_dir(&preview).unwrap().count(), 1);
+}
+
+#[test]
+#[cfg(unix)]
+fn cas_4585_retired_notices_survive_nested_failure_and_other_modes() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.set_current_dir(&home);
+    let root = home.join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    env.set("CAS_ROOT", &root);
+    let path = root.join("config.toml");
+    let original = "[factory]\nmerge_sweep = true\n[jev]\nendpoint = 'fixture-only'\n";
+    std::fs::write(&path, original).unwrap();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    let startup =
+        crate::cli::try_parse_from_with_wordmark(["cas", "update", "--all-projects"]).unwrap();
+    let projection = tempfile::tempdir().unwrap();
+    std::fs::create_dir(projection.path().join(".cas")).unwrap();
+    std::fs::write(projection.path().join(".cas/config.toml"), original).unwrap();
+    let (_, output) = capture_phase(true, || {
+        let _outer = crate::cli::startup_config_notices(&startup);
+        let _enabled = crate::sentry::is_sentry_enabled();
+        let (_, nested) = capture_phase(true, || {
+            let _inner = crate::cli::startup_config_notices(&startup);
+            crate::config::Config::load(&root).unwrap();
+        });
+        assert!(
+            nested.is_empty(),
+            "nested scope drained its caller's notices: {nested}"
+        );
+        // The real index-side hook projection must attribute its copied
+        // config to the owning project, never a disposable temp directory.
+        crate::cli::hook::configure_claude_hooks_for_index(projection.path(), &home).unwrap();
+        assert_eq!(crate::config::retire_config(&root, false).status, "failed");
+        // A refused or failed maintenance does not resolve this file. Scope
+        // exit replays it even if the command never reaches a final receipt.
+    });
+    assert!(
+        output
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("retired config settings remain ignored"),
+        "{output}"
+    );
+    assert!(
+        !output.contains(&projection.path().display().to_string()),
+        "temporary projection became an operator finding: {output}"
+    );
+    assert!(!output.contains("ignored and dropped on the next save"));
+    assert!(
+        output.lines().all(|line| line.chars().count() <= 80),
+        "{output}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    // --check is not native maintenance: its ordinary config diagnostic is
+    // neither hidden nor consumed by the earlier updater scope.
+    let check = crate::cli::try_parse_from_with_wordmark(["cas", "update", "--check"]).unwrap();
+    let (_, ordinary) = capture_phase(true, || {
+        let _scope = crate::cli::startup_config_notices(&check);
+        crate::config::Config::load(&root).unwrap();
+    });
+    assert!(
+        ordinary.contains("ignored and dropped on the next save"),
+        "{ordinary}"
+    );
+}
+
+#[test]
+fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let fixture_home = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    let home = fixture_home.path().canonicalize().unwrap();
+    env.set("HOME", &home);
+    env.set_current_dir(&home);
+    env.set("XDG_CONFIG_HOME", home.join(".config"));
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let projects = home.join("projects");
+    let healthy = cas_6718_drifted_project(&projects.join("healthy"));
+    let broken = cas_6718_drifted_project(&projects.join("broken"));
+    let readonly = cas_6718_drifted_project(&projects.join("readonly"));
+    let host = crate::store::init_cas_dir(&home).unwrap();
+    let global = crate::config::global_cas_dir().unwrap();
+    std::fs::create_dir_all(&global).unwrap();
+    let retired = "[factory]\nmerge_sweep = true\n[jev]\nendpoint = 'fixture-only'\n[code_review]\nowner = 'worker'\n";
+    std::fs::write(global.join("config.toml"), retired).unwrap();
+    let readonly_config = readonly.join(".cas/config.toml");
+    std::fs::write(&readonly_config, retired).unwrap();
+    let mut permissions = std::fs::metadata(&readonly_config).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&readonly_config, permissions).unwrap();
+    let root = healthy.join(".cas");
+    env.set("CAS_ROOT", &root);
+    env.set_current_dir(&healthy);
+    env.set("CAS_PROJECT_ROOTS", &projects);
+    let invalid = "[factory\nmerge_sweep = true\n";
+    for directory in [&host, &broken.join(".cas")] {
+        std::fs::write(directory.join("config.toml"), invalid).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        // Ambiguous ownership is an inaccessible cleanup target even though
+        // an ordinary config reader can follow it. Never replace its link.
+        let linked = broken.join(".cas/config.toml");
+        std::fs::remove_file(&linked).unwrap();
+        std::os::unix::fs::symlink(host.join("config.toml"), linked).unwrap();
+    }
+    std::fs::write(
+        root.join("config.toml"),
+        "[factory]\nmerge_sweep = true\nstrict_cli = false\n",
+    )
+    .unwrap();
+    let mut args = update_test_args();
+    args.all_projects = true;
+    args.refresh_receipt = Some(home.join("refresh.json"));
+    let (result, output) = capture_phase(true, || {
+        refresh_all_projects_with_user_refresh(
+            &args,
+            &update_test_cli(false),
+            Some(&root),
+            None,
+            None,
+            None,
+            || ProjectPhase::Failed("builtin repair failed; run `cas update --user`".into()),
+        )
+    });
+    assert!(result.is_err());
+    let report = refresh_report(&result).unwrap();
+    assert_eq!(report.failed_projects, 2);
+    assert!(report.user_level_failed);
+    let sweep = report.sweep.as_ref().unwrap();
+    assert_eq!(sweep.config.repaired, 2);
+    assert_eq!(sweep.config.failed, 3);
+    let rendered = render_plain_at(80, |fmt| findings::print(fmt, sweep).map(|_| ()));
+    assert!(rendered.contains("builtin repair failed"));
+    assert!(
+        !output.contains("retired config entries remain ignored")
+            && !output.contains("retired config settings remain ignored"),
+        "receipted config failures must not replay duplicate or projection findings: {output}"
+    );
+    assert_eq!(
+        rendered.matches("config is read-only").count(),
+        1,
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("cas update --user"),
+        "existing phase remedy lost: {rendered}"
+    );
+    assert!(
+        sweep
+            .findings
+            .iter()
+            .any(|finding| finding.cause.contains("repair config before updating"))
+    );
+    let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+    assert_eq!(receipt["config_maintenance"]["failed"], 3);
+    assert_eq!(receipt["config_maintenance"]["repaired"], 2);
+    assert!(
+        !receipt["user_builtins"]
+            .as_str()
+            .unwrap()
+            .contains("retired TOML entries removed"),
+        "another file's successful cleanup leaked into failure prose: {receipt}"
+    );
+    assert_eq!(std::fs::read_to_string(&readonly_config).unwrap(), retired);
+    for directory in [&host, &broken.join(".cas")] {
+        assert_eq!(
+            std::fs::read_to_string(directory.join("config.toml")).unwrap(),
+            invalid
+        );
+        assert!(!directory.join("config-retirement-backups").exists());
+    }
+    #[cfg(unix)]
+    assert!(
+        std::fs::symlink_metadata(broken.join(".cas/config.toml"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        !std::fs::read_to_string(root.join("config.toml"))
+            .unwrap()
+            .contains("merge_sweep")
+    );
+}
+
+/// Different valid TOML spellings must retire the same ignored values without
+/// treating a '#' inside a secret as a comment to preserve.
+#[test]
+fn cas_4585_retirement_preserves_dotted_inline_and_multiline_config() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    assert_eq!(
+        crate::config::retire_config(directory.path(), false).status,
+        "missing"
+    );
+    std::fs::write(&path, "[factory]\nstrict_cli = false\n").unwrap();
+    assert_eq!(
+        crate::config::retire_config(directory.path(), false).status,
+        "unchanged"
+    );
+    assert_eq!(
+        std::fs::read_dir(directory.path()).unwrap().count(),
+        1,
+        "a current config must not create locks or backups"
+    );
+    for raw in [
+        "factory.merge_sweep = [\n 'fixture#secret', # keep array comment\n]\nfactory.merge_sweep_timeout_secs = 17\nfactory.strict_cli = false # keep active comment\ncode_review.owner = 'worker'\ncode_review.future_owner = '#keep'\njev.deep.endpoint = 'fixture#secret'\n",
+        "factory = { strict_cli = false, merge_sweep = true, future_policy = 'keep', merge_sweep_env = { TOKEN = 'fixture#secret' }, merge_sweep_timeout_secs = 17 } # keep active comment\ncode_review = { owner = 'worker', future_owner = '#keep' }\njev = { endpoint = 'fixture#secret' } # keep integration comment\n",
+    ] {
+        std::fs::write(&path, raw).unwrap();
+        let before: crate::config::Config = toml::from_str(raw).unwrap();
+        let plan = crate::config::retire_config(directory.path(), true);
+        assert_eq!(plan.status, "planned", "{plan:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        let receipt = crate::config::retire_config(directory.path(), false);
+        assert_eq!(receipt.status, "repaired", "{receipt:?}");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !after.contains("fixture#secret"),
+            "retired string leaked into preserved comments"
+        );
+        for comment in raw
+            .lines()
+            .filter_map(|line| line.find("# keep").map(|at| &line[at..]))
+        {
+            assert!(after.contains(comment), "lost {comment}");
+        }
+        let current: crate::config::Config = toml::from_str(&after).unwrap();
+        assert_eq!(
+            serde_json::to_value(before).unwrap(),
+            serde_json::to_value(current).unwrap()
+        );
+        let doc: toml::Value = toml::from_str(&after).unwrap();
+        assert_eq!(doc["code_review"]["future_owner"].as_str(), Some("#keep"));
+        assert_eq!(
+            crate::config::retire_config(directory.path(), false).status,
+            "unchanged"
+        );
     }
 }

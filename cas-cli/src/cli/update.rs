@@ -422,6 +422,63 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     )
 }
 
+/// Called with the parsed command before Sentry/logging read configuration.
+/// No writes occur here: the native sweep owns both repair and its receipt.
+pub fn startup_config_notices(cli: &Cli) -> impl Drop + use<> {
+    struct Scope {
+        _notices: Option<crate::config::RetiredNoticeScope>,
+    }
+    impl Drop for Scope {
+        fn drop(&mut self) {}
+    }
+    let native = matches!(&cli.command, Some(crate::cli::Commands::Update(args))
+        if args.post_swap || (args.render_fixture.is_none() && !(args.sync && args.dry_run)
+            && matches!(UpdateMode::of(args), UpdateMode::Full | UpdateMode::AllProjects)));
+    Scope {
+        _notices: native.then(|| {
+            crate::config::RetiredNoticeScope::begin(replay_retired_config_notices, cli.verbose)
+        }),
+    }
+}
+
+fn replay_retired_config_notices(notices: Vec<crate::config::RetiredConfigNotice>, verbose: bool) {
+    let findings = notices
+        .iter()
+        .map(|notice| findings::Finding {
+            verdict: Verdict::Warning,
+            who: vec![notice.path.display().to_string()],
+            phase: "config",
+            // This is an unresolved read, not a maintenance inventory.
+            // Only the retirement receipt can count all supported entries.
+            cause: "retired config settings remain ignored".into(),
+            remedy: Some("check the config.toml above; rerun `cas update`".into()),
+        })
+        .collect();
+    let sweep = findings::SweepFindings {
+        findings,
+        healthy: Vec::new(),
+        unlinked: 0,
+        user_level_current: false,
+        project_count: 0,
+        config: findings::ConfigCleanup::default(),
+    };
+    let mut stderr = io::stderr();
+    let mut fmt = Formatter::stdout(&mut stderr, ActiveTheme::default());
+    if let Ok(shortened) = findings::print(&mut fmt, &sweep) {
+        if verbose {
+            for notice in notices {
+                let _ = fmt.write_raw(&format!(
+                    "  config: {}\n  retired: {}\n",
+                    notice.path.display(),
+                    notice.keys.into_iter().collect::<Vec<_>>().join(", ")
+                ));
+            }
+        } else if shortened {
+            let _ = fmt.receipt("cas update --verbose shows full config paths");
+        }
+    }
+}
+
 /// The full update after its seams: the binary phase, the post-swap child,
 /// the hub and the project refresh. `--render-fixture` replays recorded data
 /// through the same path, so a review capture shows what an operator sees.
@@ -768,6 +825,7 @@ struct ProjectRefreshReceipt {
     /// exactly like any other project, then registered so the next run finds
     /// it without scanning.
     unregistered: bool,
+    retired_toml: Option<crate::config::ConfigRetirement>,
     migration: ProjectPhase,
     search_index: ProjectPhase,
     skills: ProjectPhase,
@@ -1339,6 +1397,8 @@ fn refresh_all_projects_with_user_refresh(
     first_launch_ms: Option<u64>,
     user_refresh: impl FnOnce() -> ProjectPhase,
 ) -> anyhow::Result<RefreshReport> {
+    let _notices =
+        crate::config::RetiredNoticeScope::begin(replay_retired_config_notices, cli.verbose);
     let started_at = Instant::now();
     let mut discovery = discover_local_projects(current_cas_root);
     for project in std::mem::take(&mut discovery.projects) {
@@ -1356,7 +1416,34 @@ fn refresh_all_projects_with_user_refresh(
     // Account registrations must converge before project proxies choose their
     // bearer. Keep this phase advisory and run it once for the whole update.
     live::set_activity("user-level store");
-    let (user_level, user_details) = capture_phase(!cli.json, user_refresh);
+    let mut user_retired_toml = Vec::new();
+    let mut user_roots = BTreeSet::new();
+    for root in [user_level_store_root(), crate::config::global_cas_dir()]
+        .into_iter()
+        .flatten()
+    {
+        let root = root.canonicalize().unwrap_or(root);
+        if user_roots.insert(root.clone()) {
+            user_retired_toml.push(crate::config::retire_config(&root, args.dry_run));
+        }
+    }
+    let (mut user_level, user_details) = capture_phase(!cli.json, user_refresh);
+    for maintenance in &user_retired_toml {
+        let label = dirs::home_dir()
+            .and_then(|home| {
+                maintenance
+                    .path
+                    .strip_prefix(home)
+                    .ok()
+                    .map(|path| format!("~/{}", path.display()))
+            })
+            .unwrap_or_else(|| maintenance.path.display().to_string());
+        user_level = with_config_retirement(user_level, maintenance, &label);
+        // Failure is represented too: its cause/remedy is now in the phase.
+        if let Some(root) = maintenance.path.parent() {
+            crate::config::represented_retired_config(root);
+        }
+    }
 
     let names = findings::display_names(discovery.projects.iter().map(PathBuf::as_path));
     for (index, project) in discovery.projects.iter().enumerate() {
@@ -1369,6 +1456,9 @@ fn refresh_all_projects_with_user_refresh(
         let project = project.clone();
         let cas_root = project.join(".cas");
         let mut details = String::new();
+        // Remove ignored TOML before migrations and managed-file readers load
+        // config. Ownership/discovery is unchanged; never initialize a store.
+        let retired_toml = crate::config::retire_config(&cas_root, args.dry_run);
 
         // Run each phase independently. A malformed database must be visible
         // in the receipt, but must not leave another project stale.
@@ -1421,6 +1511,8 @@ fn refresh_all_projects_with_user_refresh(
             phase_details.push((cloud.is_ok(), output));
             (search_index, skills, membership, cloud)
         };
+        let skills = with_config_retirement(skills, &retired_toml, ".cas/config.toml");
+        crate::config::represented_retired_config(&cas_root);
 
         // Registration is what makes discovery converge: a project the scan had
         // to find this time is in the registry for every later run, and for
@@ -1433,6 +1525,7 @@ fn refresh_all_projects_with_user_refresh(
         receipts.push(ProjectRefreshReceipt {
             project,
             unregistered,
+            retired_toml: Some(retired_toml),
             migration,
             search_index,
             skills,
@@ -1450,6 +1543,7 @@ fn refresh_all_projects_with_user_refresh(
             receipts,
             user_level,
             user_details,
+            user_retired_toml,
             skipped_unregistered: discovery.skipped_unregistered,
         },
         hub_transport_error,
@@ -1459,11 +1553,48 @@ fn refresh_all_projects_with_user_refresh(
     )
 }
 
+/// Keep an existing phase failure and its remedy when maintenance also fails.
+/// Successful repair counts belong to the aggregate receipt, not another
+/// file's failure prose. Keep unrelated failures and their remedies.
+fn with_config_retirement(
+    phase: ProjectPhase,
+    maintenance: &crate::config::ConfigRetirement,
+    label: &str,
+) -> ProjectPhase {
+    let detail = match maintenance.status {
+        "planned" if !phase.failed() => format!(
+            "{} retired TOML entries would be removed",
+            maintenance.removed.len()
+        ),
+        "failed" => format!(
+            "{label}: {}; check `{label}` and rerun `cas update`",
+            maintenance.error.as_deref().unwrap_or("cleanup failed"),
+        ),
+        _ => return phase,
+    };
+    let detail = if maintenance.status == "failed" && phase.is_ok() {
+        detail
+    } else {
+        format!("{}; {detail}", phase.detail())
+    };
+    if phase.failed() || maintenance.status == "failed" {
+        ProjectPhase::Failed(detail)
+    } else {
+        match phase {
+            ProjectPhase::Warning(_) => ProjectPhase::Warning(detail),
+            ProjectPhase::Skipped(_) => ProjectPhase::Skipped(detail),
+            ProjectPhase::Planned(_) => ProjectPhase::Planned(detail),
+            _ => ProjectPhase::Ok(detail),
+        }
+    }
+}
+
 /// Everything one sweep learned, before any of it is printed.
 struct RefreshResults {
     receipts: Vec<ProjectRefreshReceipt>,
     user_level: ProjectPhase,
     user_details: String,
+    user_retired_toml: Vec<crate::config::ConfigRetirement>,
     skipped_unregistered: Vec<SkippedProject>,
 }
 
@@ -1482,27 +1613,22 @@ fn finish_project_refresh(
         receipts,
         user_level,
         user_details,
+        user_retired_toml,
         skipped_unregistered,
     } = results;
-    if cli.json {
-        println!(
-            "{}",
-            with_first_launch_ms(
-                project_refresh_receipt_json(
-                    &receipts,
-                    &user_level,
-                    &skipped_unregistered,
-                    hub_transport_error,
-                    hub_restart,
-                ),
-                first_launch_ms,
-            )
-        );
+
+    let mut config_cleanup = findings::ConfigCleanup::default();
+    for maintenance in receipts
+        .iter()
+        .filter_map(|r| r.retired_toml.as_ref())
+        .chain(&user_retired_toml)
+    {
+        config_cleanup.include(maintenance);
     }
 
     let failed_count = receipts.iter().filter(|receipt| receipt.failed()).count()
         + usize::from(user_level.failed());
-    let receipt = with_first_launch_ms(
+    let mut receipt = with_first_launch_ms(
         project_refresh_receipt_json(
             &receipts,
             &user_level,
@@ -1512,6 +1638,15 @@ fn finish_project_refresh(
         ),
         first_launch_ms,
     );
+    if !user_retired_toml.is_empty() {
+        receipt["user_level_store"]["retired_toml"] = serde_json::to_value(&user_retired_toml)?;
+    }
+    if receipts.iter().any(|r| r.retired_toml.is_some()) || !user_retired_toml.is_empty() {
+        receipt["config_maintenance"] = serde_json::to_value(&config_cleanup)?;
+    }
+    if cli.json {
+        println!("{receipt}");
+    }
     if let Some(path) = &args.refresh_receipt {
         write_refresh_receipt(path, &receipt)?;
     }
@@ -1520,13 +1655,17 @@ fn finish_project_refresh(
         (None, String::new())
     } else {
         (
-            Some(findings::collect(
-                &receipts,
-                &user_level,
-                &skipped_unregistered,
-                hub_restart,
-                hub_transport_error,
-            )),
+            Some({
+                let mut sweep = findings::collect(
+                    &receipts,
+                    &user_level,
+                    &skipped_unregistered,
+                    hub_restart,
+                    hub_transport_error,
+                );
+                sweep.config = config_cleanup;
+                sweep
+            }),
             // A dry run's plan is its result, so it keeps its table.
             if cli.verbose || args.dry_run {
                 render_project_refresh_summary(
@@ -2138,7 +2277,7 @@ fn project_refresh_receipt_json(
     let projects = receipts
         .iter()
         .map(|receipt| {
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "project": receipt.project,
                 "store": receipt.project.join(".cas"),
                 "registered": !receipt.unregistered,
@@ -2147,7 +2286,11 @@ fn project_refresh_receipt_json(
                 "skills": receipt.skills.summary(),
                 "membership": receipt.membership.summary(),
                 "cloud_sync": receipt.cloud.summary(),
-            })
+            });
+            if let Some(maintenance) = &receipt.retired_toml {
+                value["retired_toml"] = serde_json::json!(maintenance);
+            }
+            value
         })
         .collect::<Vec<_>>();
     let mut receipt = serde_json::json!({
@@ -4173,13 +4316,7 @@ fn run_post_swap_refresh(
                 )
                 .into());
             };
-            verify_refresh_binary_version(
-                child_receipt
-                    .get("refresh_binary_version")
-                    .and_then(|v| v.as_str()),
-                installed_version,
-                installed_binary,
-            )?;
+            verify_child_refresh_receipt(&child_receipt, installed_version, installed_binary)?;
             let message =
                 post_swap_refresh_failed_hint(installed_version, status, "", Some(&child_receipt));
             return Err(PostSwapRefreshFailure::new(
@@ -4191,13 +4328,7 @@ fn run_post_swap_refresh(
         // The child inherited stdio, so use its side-channel receipt when
         // available; retain the version probe for older installed children.
         if let Some(child_receipt) = read_refresh_receipt(&receipt_path) {
-            verify_refresh_binary_version(
-                child_receipt
-                    .get("refresh_binary_version")
-                    .and_then(|v| v.as_str()),
-                installed_version,
-                installed_binary,
-            )?;
+            verify_child_refresh_receipt(&child_receipt, installed_version, installed_binary)?;
         } else {
             verify_refresh_binary_version(
                 reported_binary_version(installed_binary).as_deref(),
@@ -4237,13 +4368,7 @@ fn run_post_swap_refresh(
             )
             .into());
         };
-        verify_refresh_binary_version(
-            child_receipt
-                .get("refresh_binary_version")
-                .and_then(|v| v.as_str()),
-            installed_version,
-            installed_binary,
-        )?;
+        verify_child_refresh_receipt(&child_receipt, installed_version, installed_binary)?;
         let message = post_swap_refresh_failed_hint(
             installed_version,
             output.status,
@@ -4269,13 +4394,7 @@ fn run_post_swap_refresh(
                 stdout.trim()
             )
         })?;
-    verify_refresh_binary_version(
-        receipt
-            .get("refresh_binary_version")
-            .and_then(|v| v.as_str()),
-        installed_version,
-        installed_binary,
-    )?;
+    verify_child_refresh_receipt(&receipt, installed_version, installed_binary)?;
     Ok(receipt)
 }
 
@@ -4495,6 +4614,55 @@ fn post_swap_rerun_hint(installed_version: &str, installed_binary: &Path) -> Str
          (the installed binary at {} could not perform the post-install phases)",
         installed_binary.display()
     )
+}
+
+/// The parent's startup reads precede the child process's repair. Resolve
+/// only maintenance paths the verified child actually represented, including
+/// reported failures. Absent/unverified receipts leave notices for final replay.
+fn verify_child_refresh_receipt(
+    receipt: &serde_json::Value,
+    installed_version: &str,
+    installed_binary: &Path,
+) -> anyhow::Result<()> {
+    verify_refresh_binary_version(
+        receipt
+            .get("refresh_binary_version")
+            .and_then(|v| v.as_str()),
+        installed_version,
+        installed_binary,
+    )?;
+    let projects = receipt
+        .get("projects")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|project| project.get("retired_toml"));
+    let user = receipt
+        .pointer("/user_level_store/retired_toml")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten();
+    for maintenance in projects.chain(user) {
+        let represented = match maintenance.get("status").and_then(|v| v.as_str()) {
+            Some("repaired" | "unchanged" | "missing" | "planned") => true,
+            Some("failed") => maintenance.get("error").and_then(|v| v.as_str()).is_some(),
+            _ => false,
+        };
+        if !represented {
+            continue;
+        }
+        if let Some(path) = maintenance
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(Path::new)
+            && path.is_absolute()
+            && path.file_name() == Some(std::ffi::OsStr::new("config.toml"))
+            && let Some(root) = path.parent()
+        {
+            crate::config::represented_retired_config(root);
+        }
+    }
+    Ok(())
 }
 
 /// The child must be the binary we just installed. A version it does not

@@ -149,6 +149,22 @@ from independent QA round 2 of cas-70a8:
 See [captures/after/cas-update-interactive](captures/after/cas-update-interactive/README.md).
 That round had no up-to-date interactive cell, so the fixture captures stand in for that result.
 
+## Automatic config maintenance (cas-4585)
+
+| Field | Sentence |
+| --- | --- |
+| First two lines | Existing binary/project verdicts retain their grammar; configuration failures count as a failed refresh and carry the actual file cause. |
+| Scannable | One success row after healthy projects says `config  N retired entries removed in M files`, including host files without counting them as projects. |
+| Readable | Each failed cleanup retains the existing phase failure and remedy, followed by its config path, safe cause, and a check-and-rerun remedy. |
+| Machine output | Existing refresh documents and fields remain; `projects[].retired_toml`, `user_level_store.retired_toml[]`, and `config_maintenance` add statuses, counts, retired key names and restricted backup paths without values. |
+| Omitted | Unchanged/missing files add no human row, successful cleanup never creates a warning, and before-copy contents and retired secret values are never printed. |
+
+The success row uses the existing semantic mark and text wrapper. The banner,
+phase counter, timings and exit-reason grammar remain with their existing owners.
+Backups are private durable TOML copies, not published evidence. Invalid files
+remain intact; other projects continue. A dry run describes the retirement and
+creates no config lock, backup or replacement.
+
 ## Critique
 
 Before (build `eda3dfd1`): `terminal-qa: FAIL cas-update-check · 12 runs · 33 fail · 0 warn` — 32 contrast, 1 unicode-without-fallback.

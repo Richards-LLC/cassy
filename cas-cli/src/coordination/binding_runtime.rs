@@ -3,11 +3,8 @@
 use super::binding_intake::{IntakeScope, PauseRecord};
 use crate::ui::factory::daemon::runtime::violet_intake::{PauseRequest, RuntimeIdentity};
 use crate::ui::factory::{
-    protocol::{
-        ClientMessage, DaemonMessage, MAX_MESSAGE_SIZE, ProtocolCapability, SessionMetadata,
-        encode_message,
-    },
-    session::{gui_socket_path, sessions_dir},
+    ClientMessage, DaemonMessage, MAX_MESSAGE_SIZE, ProtocolCapability, SessionMetadata,
+    encode_message, gui_socket_path, sessions_dir,
 };
 use std::{
     fs,

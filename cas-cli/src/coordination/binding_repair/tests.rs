@@ -26,7 +26,7 @@ fn scope() -> IntakeScope {
 }
 fn runtime(root: &Path, capability: bool) -> std::thread::JoinHandle<()> {
     use crate::ui::factory::daemon::runtime::violet_intake::*;
-    use crate::ui::factory::{protocol::*, session::*};
+    use crate::ui::factory::*;
     let name = "binding-fixture";
     let mut metadata = create_metadata(
         name,
@@ -102,7 +102,7 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
         assert_eq!(get.method().as_str(), "GET");
         assert_eq!(get.url(), format!("/api/teams/{}/projects", target.team_id));
         get.respond(tiny_http::Response::from_string(
-            serde_json::json!({"projects":[{"id":"project-id","canonical_id":PROJECT}]})
+            serde_json::json!({"projects":[{"id":"project-id","canonical_id":PROJECT,"name":"fixture","contributor_count":0,"memory_count":0}]})
                 .to_string(),
         ))
         .unwrap();
@@ -177,11 +177,11 @@ fn cas_9021_old_or_unknown_actual_runtime_preflight_sends_zero_post() {
     gui.join().unwrap();
     assert!(matches!(old.outcome, RepairOutcome::Blocked));
     assert!(old.error.unwrap().contains("lacks"));
-    let metadata_path = crate::ui::factory::session::metadata_path("binding-fixture");
-    let mut metadata: crate::ui::factory::protocol::SessionMetadata =
+    let metadata_path = crate::ui::factory::metadata_path("binding-fixture");
+    let mut metadata: crate::ui::factory::SessionMetadata =
         serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
     metadata.daemon_build_hash = None;
-    crate::ui::factory::session::SessionManager::new()
+    crate::ui::factory::SessionManager::new()
         .save_metadata(&metadata)
         .unwrap();
     let unknown = client.repair(&root, &scope).unwrap();

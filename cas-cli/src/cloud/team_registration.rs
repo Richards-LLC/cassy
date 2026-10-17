@@ -38,7 +38,10 @@
 use std::fmt;
 use std::time::Duration;
 
-use crate::cloud::{CloudSyncer, TeamProjectsResponse, canonical_project_id_with_pin};
+use crate::cloud::project_aliases::fetch_project_alias_record;
+use crate::cloud::{
+    CloudSyncer, TeamProjectsResponse, canonical_project_id, canonical_project_id_with_pin,
+};
 
 /// Timeout for both the lookup and the registration request. Matches the
 /// 30 s used by the other interactive team endpoints in `cli/cloud.rs`.
@@ -82,6 +85,20 @@ impl RegistrationOutcome {
             _ => None,
         }
     }
+}
+
+/// How the team project list answered for one identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Listed {
+    /// The server lists the identity itself, or records it as an alias of
+    /// a listed project, so team sync under that identity works.
+    Registered(String),
+    /// The server lists this checkout's project under a different primary
+    /// and has no alias for the local pin. The client must adopt the primary.
+    UnderPrimary {
+        project_uuid: String,
+        canonical_id: String,
+    },
 }
 
 /// A registration attempt that did not end with the server listing the
@@ -269,7 +286,7 @@ impl<'a> TeamRegistration<'a> {
     /// read-only path so an invalid destination is rejected before the local
     /// task or its sync queue changes.
     pub fn verify_registered(&self) -> Result<(), RegistrationFailure> {
-        if self.lookup(self.canonical_id)?.is_some() {
+        if let Some(Listed::Registered(_)) = self.lookup(self.canonical_id)? {
             return Ok(());
         }
 
@@ -300,23 +317,50 @@ impl<'a> TeamRegistration<'a> {
     /// registration write is not treated as proof on its own.
     pub fn ensure(&self) -> Result<RegistrationOutcome, RegistrationFailure> {
         let canonical_id = self.wire_canonical_id();
-        if let Some(project_uuid) = self.lookup(&canonical_id)? {
-            return Ok(RegistrationOutcome::AlreadyRegistered { project_uuid });
+        match self.lookup(&canonical_id)? {
+            Some(Listed::Registered(project_uuid)) => {
+                return Ok(RegistrationOutcome::AlreadyRegistered { project_uuid });
+            }
+            Some(Listed::UnderPrimary {
+                project_uuid,
+                canonical_id,
+            }) => {
+                return Ok(RegistrationOutcome::AdoptedExisting {
+                    project_uuid,
+                    canonical_id,
+                });
+            }
+            None => {}
         }
 
         let (register_status, resolved_id) = self.register()?;
-        let expected_id = resolved_id
-            .as_deref()
-            .and_then(|id| canonical_project_id_with_pin(id, self.pinned_canonical_id))
-            .unwrap_or_else(|| canonical_id.clone());
+        // A resolved id that differs from a bare pin only by host and owner
+        // goes through the same alias confirmation as the first lookup;
+        // folding it onto the pin would claim an alias the server lacks.
+        let expected_id = match resolved_id.as_deref().and_then(canonical_project_id) {
+            Some(id)
+                if canonical_project_id_with_pin(&id, self.pinned_canonical_id).as_deref()
+                    != Some(canonical_id.as_str()) =>
+            {
+                id
+            }
+            _ => canonical_id.clone(),
+        };
 
         match self.lookup(&expected_id)? {
-            Some(project_uuid) if expected_id == canonical_id => {
+            Some(Listed::Registered(project_uuid)) if expected_id == canonical_id => {
                 Ok(RegistrationOutcome::Registered { project_uuid })
             }
-            Some(project_uuid) => Ok(RegistrationOutcome::AdoptedExisting {
+            Some(Listed::Registered(project_uuid)) => Ok(RegistrationOutcome::AdoptedExisting {
                 project_uuid,
                 canonical_id: expected_id.to_string(),
+            }),
+            Some(Listed::UnderPrimary {
+                project_uuid,
+                canonical_id,
+            }) => Ok(RegistrationOutcome::AdoptedExisting {
+                project_uuid,
+                canonical_id,
             }),
             None => Err(RegistrationFailure {
                 reason: if expected_id == canonical_id {
@@ -354,9 +398,11 @@ impl<'a> TeamRegistration<'a> {
         }
     }
 
-    /// `GET /api/teams/{teamId}/projects` → the project UUID when the team
-    /// already knows `canonical_id`.
-    fn lookup(&self, canonical_id: &str) -> Result<Option<String>, RegistrationFailure> {
+    /// `GET /api/teams/{teamId}/projects` → how the team lists `canonical_id`.
+    /// Only an exact listing or a server-recorded alias counts as registered;
+    /// a bare pin matching a listed remote's repository name is confirmed
+    /// against the account's alias record before anything is claimed.
+    fn lookup(&self, canonical_id: &str) -> Result<Option<Listed>, RegistrationFailure> {
         let url = self.projects_url();
         let response = ureq::get(&url)
             .set("Authorization", &format!("Bearer {}", self.token))
@@ -419,16 +465,115 @@ impl<'a> TeamRegistration<'a> {
                 interaction: format!("GET {url} -> 200 {}", body_excerpt(&body)),
             })?;
 
-        let expected = canonical_project_id_with_pin(canonical_id, self.pinned_canonical_id)
-            .unwrap_or_else(|| canonical_id.to_string());
-        Ok(parsed
+        let expected =
+            canonical_project_id(canonical_id).unwrap_or_else(|| canonical_id.trim().to_string());
+        if let Some(project) = parsed
+            .projects
+            .iter()
+            .find(|p| canonical_project_id(&p.canonical_id).as_deref() == Some(expected.as_str()))
+        {
+            return Ok(Some(Listed::Registered(project.id.clone())));
+        }
+
+        // Only an explicit bare pin may stand for a remote-shaped primary.
+        if self
+            .pinned_canonical_id
+            .and_then(canonical_project_id)
+            .as_deref()
+            != Some(expected.as_str())
+        {
+            return Ok(None);
+        }
+        let candidates: Vec<(String, String)> = parsed
             .projects
             .into_iter()
-            .find(|p| {
-                canonical_project_id_with_pin(&p.canonical_id, self.pinned_canonical_id)
-                    .is_some_and(|id| id == expected)
+            .filter_map(|p| {
+                let primary = canonical_project_id(&p.canonical_id)?;
+                (canonical_project_id_with_pin(&primary, Some(expected.as_str())).as_deref()
+                    == Some(expected.as_str()))
+                .then_some((p.id, primary))
             })
-            .map(|p| p.id))
+            .collect();
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        self.confirm_pin_identity(&expected, &candidates).map(Some)
+    }
+
+    /// Decide what a bare pin means when the team lists only remote-shaped
+    /// projects with the same repository name. The server's alias record keeps
+    /// the legacy pin; this checkout's own git remote adopts the primary;
+    /// anything else fails closed, because pulls under an unregistered pin
+    /// return project_not_found.
+    fn confirm_pin_identity(
+        &self,
+        pin: &str,
+        candidates: &[(String, String)],
+    ) -> Result<Listed, RegistrationFailure> {
+        let primaries = candidates
+            .iter()
+            .map(|(_, primary)| primary.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let account_url = format!("{}/api/account/projects", self.endpoint);
+        let record = fetch_project_alias_record(self.endpoint, self.token, pin, self.timeout)
+            .map_err(|error| RegistrationFailure {
+                reason: format!(
+                    "Could not confirm whether pinned project id '{pin}' is a registered alias \
+                     of team project {primaries} on {}: {error}. Registration is not claimed \
+                     until the server's alias record is read.",
+                    self.endpoint
+                ),
+                interaction: format!("GET {account_url} -> {error}"),
+            })?;
+
+        if let Some(record) = &record
+            && let Some((project_uuid, _)) = candidates
+                .iter()
+                .find(|(_, primary)| *primary == record.canonical_id)
+        {
+            return Ok(Listed::Registered(project_uuid.clone()));
+        }
+
+        let remote = self.git_remote.and_then(canonical_project_id);
+        if let Some((project_uuid, primary)) = candidates
+            .iter()
+            .find(|(_, primary)| remote.as_deref() == Some(primary.as_str()))
+        {
+            return Ok(Listed::UnderPrimary {
+                project_uuid: project_uuid.clone(),
+                canonical_id: primary.clone(),
+            });
+        }
+
+        let fix = match candidates {
+            [(_, primary)] => format!("`cas cloud project set {primary}`"),
+            _ => "`cas cloud project set <primary>` with this repository's primary".to_string(),
+        };
+        Err(RegistrationFailure {
+            reason: format!(
+                "Pinned project id '{pin}' is not registered with team {} on {} \
+                 (unregistered_pin_alias): the team lists {primaries}, whose server aliases do \
+                 not include '{pin}', so team pulls under '{pin}' would fail with \
+                 project_not_found. If this checkout is that repository, pin its cloud primary \
+                 with {fix}; otherwise ask the cloud owner to register '{pin}' as an alias.",
+                self.team_id, self.endpoint
+            ),
+            interaction: format!(
+                "GET {} -> 200 lists {primaries} but not \"{pin}\"; GET {account_url} -> {}; \
+                 git remote: {}",
+                self.projects_url(),
+                match &record {
+                    Some(record) => format!(
+                        "\"{pin}\" belongs to \"{}\" (aliases: [{}])",
+                        record.canonical_id,
+                        record.aliases.join(", ")
+                    ),
+                    None => format!("no project lists \"{pin}\" as primary or alias"),
+                },
+                remote.as_deref().unwrap_or("<absent>"),
+            ),
+        })
     }
 
     /// `POST /api/teams/{teamId}/sync/push` with no rows — the server's

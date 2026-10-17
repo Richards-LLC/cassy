@@ -4442,9 +4442,11 @@ fn execute_team_only_pull_with_output(
 
 /// Metadata key recording a confirmed project↔team registration, so the
 /// steady-state sync pays no extra round-trip. Scoped by team AND canonical
-/// id: re-homing the project or switching teams must re-verify.
+/// id: re-homing the project or switching teams must re-verify. `v2` retires
+/// confirmations cached before a bare pin had to be a server-recorded alias
+/// (cas-e3d9); those may name a bucket the cloud does not have.
 fn team_registration_metadata_key(team_id: &str, canonical_id: &str) -> String {
-    format!("team_project_registered_{team_id}_{canonical_id}")
+    format!("team_project_registered_v2_{team_id}_{canonical_id}")
 }
 
 /// Ensure this project is registered with the active team before the sync

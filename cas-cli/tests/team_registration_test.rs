@@ -270,7 +270,7 @@ async fn sync_fails_loud_when_server_never_registers_the_project() {
     assert_eq!(
         queue
             .get_metadata(&format!(
-                "team_project_registered_{TEST_TEAM}_{expected_id}"
+                "team_project_registered_v2_{TEST_TEAM}_{expected_id}"
             ))
             .unwrap(),
         None,
@@ -330,7 +330,7 @@ async fn registration_creates_the_project_when_the_team_does_not_know_it() {
     assert!(
         queue
             .get_metadata(&format!(
-                "team_project_registered_{TEST_TEAM}_{expected_id}"
+                "team_project_registered_v2_{TEST_TEAM}_{expected_id}"
             ))
             .unwrap()
             .is_some(),
@@ -390,8 +390,10 @@ async fn registration_adopts_the_server_resolved_existing_bucket() {
 }
 
 /// A previously registered project may be returned in its git-remote spelling
-/// while this checkout has the server's short slug pinned. Registration must
-/// recognize the existing row without issuing a duplicate registration push.
+/// while this checkout has the server's short slug pinned. When the server's
+/// alias record lists that slug, registration keeps the legacy pin without
+/// issuing a duplicate registration push (cas-e3d9: leaf name alone is not
+/// enough).
 #[tokio::test]
 async fn alias_registration_project_list_remote_alias_is_owned() {
     let server = MockServer::start().await;
@@ -400,6 +402,18 @@ async fn alias_registration_project_list_remote_alias_is_owned() {
         .respond_with(ResponseTemplate::new(200).set_body_json(project_list_body(
             "https://GitHub.com/Richards-LLC/gabber-studio.git/",
         )))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/account/projects"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "projects": [{
+                "id": "project-uuid-1",
+                "canonical_id": "github.com/richards-llc/gabber-studio",
+                "aliases": ["gabber-studio"],
+            }]
+        })))
         .expect(1)
         .mount(&server)
         .await;
@@ -422,6 +436,7 @@ async fn alias_registration_project_list_remote_alias_is_owned() {
 
     assert_eq!(outcome.project_uuid(), "project-uuid-1");
     assert!(!outcome.newly_registered());
+    assert_eq!(outcome.adopted_canonical_id(), None);
 }
 
 /// GH #717/#740: a registration conflict must preserve both project
@@ -647,7 +662,7 @@ async fn sync_adopts_resolved_id_before_its_team_push_and_pull() {
     assert!(
         queue
             .get_metadata(&format!(
-                "team_project_registered_{TEST_TEAM}_{resolved_id}"
+                "team_project_registered_v2_{TEST_TEAM}_{resolved_id}"
             ))
             .unwrap()
             .is_some(),
@@ -718,6 +733,15 @@ async fn already_registered_project_is_verified_once_then_cached() {
     let config = make_cloud_config(server.uri());
     config.save_to_cas_dir(&cas_root).unwrap();
     let _env = ScopedEnv::cas_root(&cas_root);
+    // A confirmation cached before cas-e3d9 may claim an unregistered bare
+    // pin, so it must not stand in for the first verification.
+    SyncQueue::open(&cas_root)
+        .unwrap()
+        .set_metadata(
+            &format!("team_project_registered_{TEST_TEAM}_{expected_id}"),
+            "2026-10-16T00:00:00Z",
+        )
+        .unwrap();
 
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
@@ -945,7 +969,7 @@ async fn sync_adopts_the_resolvable_team_without_any_manual_team_command() {
     assert!(
         queue
             .get_metadata(&format!(
-                "team_project_registered_{TEST_TEAM}_{expected_id}"
+                "team_project_registered_v2_{TEST_TEAM}_{expected_id}"
             ))
             .unwrap()
             .is_some(),

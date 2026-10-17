@@ -1264,12 +1264,13 @@ fn with_reply_ready(mut result: Value, resource_id: &str, expected_generation: u
     })();
     match block {
         Some(block) => {
-            result["violet_post"] = block;
-            result["claim"] = json!({
+            let claim = json!({
                 "resource_id": resource_id,
                 "generation": receipt["generation"],
                 "expires_at": receipt["expires_at"],
             });
+            result["violet_post"] = block;
+            result["claim"] = claim;
             result["guidance"] = json!(format!(
                 "{} Post with violet_post using the violet_post fields here plus your text and one new request_id (reuse that request_id only to retry the same reply). Never use receipt.operation_id as coordination_operation_id; on outcome_unknown reconcile, never post again.",
                 result["guidance"].as_str().unwrap_or("Reply intent registered.")
@@ -1926,10 +1927,10 @@ mod tests {
     #[test]
     fn reply_intent_without_occurrence_and_mismatched_receipts_cas_f869() {
         let registered = case_response("reply_intents", "registered");
-        let journal = journal();
-        let cloud = Arc::new(FakeCloud::new(journal.clone()));
+        let first_journal = journal();
+        let cloud = Arc::new(FakeCloud::new(first_journal.clone()));
         *cloud.post_result.lock().unwrap() = Ok(registered.clone());
-        let result = service(cloud.clone(), Arc::new(FakeViolet::ok()), journal)
+        let result = service(cloud.clone(), Arc::new(FakeViolet::ok()), first_journal)
             .execute(reply_intent("00000071-2222-4222-8222-000000000071", None))
             .unwrap();
         assert!(cloud.posted.lock().unwrap()[0].1.get("occurrence_id").is_none());

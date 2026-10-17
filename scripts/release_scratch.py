@@ -12,7 +12,9 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -151,6 +153,24 @@ def size(path):
     return sum(_file_size(Path(parent) / name)
                for parent, dirs, files in os.walk(path, followlinks=False)
                for name in files)
+
+
+def cache_usage(path):
+    """Measure the legacy inventory and newest write without following links."""
+    used, newest = 0, path.stat().st_mtime
+    for parent, dirs, files in os.walk(path, followlinks=False):
+        for name in [*dirs, *files]:
+            item = Path(parent) / name
+            try:
+                metadata = item.stat(follow_symlinks=False)
+                if stat.S_ISLNK(metadata.st_mode):
+                    continue
+                newest = max(newest, metadata.st_mtime)
+                if stat.S_ISREG(metadata.st_mode):
+                    used += metadata.st_size
+            except FileNotFoundError:
+                continue
+    return used, int(newest)
 
 
 def worktrees(repo):
@@ -763,7 +783,9 @@ class BoundedCache:
             return row
         if self.path.stat().st_uid != os.getuid():
             raise ValueError("assembly target belongs to another user")
-        row["bytes"] = row["retained_bytes"] = size(self.path)
+        used, newest = cache_usage(self.path)
+        row["bytes"] = row["retained_bytes"] = used
+        row["newest_write_unix_secs"] = newest
         if self.repo and any(contains(self.path.resolve(), tree) for tree in worktrees(self.repo)):
             raise ValueError("assembly target contains a registered worktree")
         owner = read_owner(self.path)
@@ -780,6 +802,13 @@ class BoundedCache:
             raise ValueError("cache owner references an unexpected lease")
         if not owner:
             row["reason"] = "legacy cache retained: no CAS owner record; explicit quiet-window adoption required"
+            row["remediation"] = (
+                "Review-only: verify no Cargo users, open handles, or held lease in a quiet window; "
+                "explicit adoption rechecks liveness and size/age policy: "
+                + shlex.join(["python3", str(Path(self.repo or ".") / "scripts/release_scratch.py"),
+                              "--repo", str(self.repo or "."), "--cache", str(self.path),
+                              "--adopt-legacy-cache", "clean"])
+            )
             self.events.append(row)
             return row
         if owner_live(owner) and not (self.managed and owner["pid"] == os.getpid()):

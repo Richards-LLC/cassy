@@ -434,22 +434,24 @@ fn ensure_main_hooks_current(main: &Path, main_hooks: &Path, own: &Path) -> io::
     if !has_cas_tool_hooks(own)? {
         return Ok(());
     }
-    let hashes = |path: &Path| -> Option<Vec<String>> {
-        Some(
-            cas_hook_trust_entries(path)
-                .ok()?
-                .into_iter()
-                .map(|entry| entry.hash)
-                .collect(),
-        )
+    let hashes = |path: &Path| -> io::Result<Vec<String>> {
+        Ok(cas_hook_trust_entries(path)
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("codex_hooks_invalid: {}: {error}", path.display()),
+                )
+            })?
+            .into_iter()
+            .map(|entry| entry.hash)
+            .collect())
     };
     // A main checkout without CAS handlers has no CAS body to be stale; the
     // user-level CAS hooks still guard the worker.
     if !has_cas_tool_hooks(main_hooks)? {
         return Ok(());
     }
-    let main_hashes = hashes(main_hooks);
-    if main_hashes.is_some() && main_hashes == hashes(own) {
+    if hashes(main_hooks)? == hashes(own)? {
         return Ok(());
     }
     Err(io::Error::new(
@@ -482,7 +484,7 @@ fn ensure_main_hooks_current(main: &Path, main_hooks: &Path, own: &Path) -> io::
 /// stale one fails the spawn. Only the worktree copy gets the budget upgrade.
 pub fn prepare_codex_project_hooks_in(config: &Path, cwd: &Path) -> io::Result<()> {
     let own = cwd.join(".codex/hooks.json");
-    prepare_cas_tool_hooks(config, &own, true)?;
+    // Compare the generated copies before upgrading the worker's local budget.
     if let Some(main) = linked_worktree_main_checkout(cwd) {
         let main_hooks = main.join(".codex/hooks.json");
         if main_hooks != own {
@@ -490,6 +492,7 @@ pub fn prepare_codex_project_hooks_in(config: &Path, cwd: &Path) -> io::Result<(
             prepare_cas_tool_hooks(config, &main_hooks, false)?;
         }
     }
+    prepare_cas_tool_hooks(config, &own, true)?;
     Ok(())
 }
 

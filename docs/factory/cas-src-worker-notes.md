@@ -10,6 +10,13 @@ code fences carry a `text` language.
 
 **Do not assume a rejected tool call left the disk untouched.** On 2026-08-06 (cas-f102) an `Edit` returned REJECTED and the write landed on disk anyway. Nothing unreviewed shipped only because that worker ran `git status` unprompted, saw the divergence, and reverted. A tool result reports what the harness intended; `git status` reports what is true. When they disagree, believe git.
 
+## For `cas-worker/references/close-gate.md` and `cas-qa-craft` — binary for real-build rows
+
+Do not compile `cas` for a QA or flow-walk row; the hook refuses it. Ask the
+supervisor for the exact-tip candidate, or use a matching release archive or
+installed release. The three sources and their receipts are in
+[cas-src supervisor notes](cas-src-factory-notes.md#for-cas-supervisorreferencesepic-flow-walkmd-and-cas-qa-craft--exact-tip-binaries).
+
 ## From `cas-worker/references/close-gate.md` — Rust blast radius table
 
 The shipped table now names library and shared crates generically. The cas-src

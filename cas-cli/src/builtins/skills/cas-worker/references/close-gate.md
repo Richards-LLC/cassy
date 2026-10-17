@@ -60,7 +60,9 @@ Never set `status=closed` or invent a verification record to bypass close.
 ## Conditional evidence
 
 - Demo, configured user-facing path or catalog journey: use `cas-qa-craft`
-  before parking; cite its commit-bound bundle or real-build ledger. Terminal
+  before parking; cite its commit-bound bundle or real-build ledger. A
+  binary-driven ledger runs the supervisor's exact-tip candidate, never a
+  compile of your own (cas-qa-craft's evidence-ledger names the sources). Terminal
   paths also need `cas-cli-craft`'s `terminal-qa: PASS` receipt. Docs/test/CI-only
   deliveries do not trigger visual QA.
 - Risk: read task `risk` and `proof_targets`. Name the supervisor's

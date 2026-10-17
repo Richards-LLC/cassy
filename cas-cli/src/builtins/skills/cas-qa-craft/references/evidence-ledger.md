@@ -21,6 +21,21 @@ sweep). A weaker label than the cell requires is `NOT EXERCISED`, never `PASS`;
 capture and a short observed result. Telemetry rows use the saved sweep stdout
 as their evidence path and include all six parsed fields in `observed`.
 
+A `real-build` row that drives a compiled binary needs a binary of the build
+revision, and the header names it: path, `--version` output and SHA-256. Three
+sources qualify:
+
+- an exact-revision build by someone the project's build policy allows to
+  compile; in a factory that is the supervisor or operator, who places it at
+  `<artifacts_root>/<project-key>/<task-id>/candidate/`;
+- a CI release archive whose recorded commit or tree equals the revision;
+- the installed release, once the revision is published and `--version` names it.
+
+When the build guard refuses you a compile, do not work around it: ask the
+supervisor for a candidate, and leave the binary cells `NOT EXERCISED` until it
+arrives. An installed release whose version names another revision proves
+nothing about this one.
+
 After the rows, include these sections:
 
 ```markdown

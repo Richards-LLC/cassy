@@ -19,7 +19,11 @@ Check out the reviewed tip in your own worktree with
 `git switch --detach <bound_head>`. Build with the project's real build and
 serve it through `cas-servers`. For hub-web, run `npm run build`, then serve
 `hub-web/dist`. A build or serve failure is a **Blocking** finding. Record the
-command, the URL, and `npx playwright --version` in the ledger header.
+command, the URL, and `npx playwright --version` in the ledger header. Where
+the build guard refuses you a compile (a factory agent cannot build Rust), run
+the binary the supervisor provides for `<bound_head>` instead, named as
+[evidence-ledger](evidence-ledger.md) requires. A missing binary is not the
+delivery's defect: ask the supervisor for one and mark its cells `NOT EXERCISED`.
 
 ## 2. Review the worker's affected-journey evidence
 

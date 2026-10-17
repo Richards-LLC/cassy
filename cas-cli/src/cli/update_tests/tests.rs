@@ -2054,6 +2054,28 @@ fn cas_6718_drifted_project(home: &Path) -> PathBuf {
 }
 
 #[test]
+fn skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let project = cas_6718_drifted_project(env.home());
+    let root = project.join(".cas");
+    env.set("CAS_ROOT", &root);
+    let index = std::fs::read(project.join(".git/index")).unwrap();
+    let lock_path = project.join(".git/index.lock");
+    let _writer = std::fs::File::create(&lock_path).unwrap();
+    let phase = refresh_project_files(&update_test_cli(true), &root, false);
+    let ProjectPhase::Failed(finding) = phase else {
+        panic!("locked skills refresh must fail: {phase:?}");
+    };
+    assert!(finding.contains("git index lock busy"), "{finding}");
+    assert!(finding.contains(".git/index.lock") && finding.contains("age "), "{finding}");
+    assert!(finding.contains("retry") && !finding.contains("Another git process"), "{finding}");
+    assert!(lock_path.exists(), "update must never remove the lock");
+    assert_eq!(std::fs::read(project.join(".git/index")).unwrap(), index);
+}
+
+#[test]
 fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     env.remove("CAS_AGENT_ROLE");

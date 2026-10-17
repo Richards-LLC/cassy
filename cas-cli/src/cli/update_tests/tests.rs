@@ -2124,6 +2124,21 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     execute(&args, &update_test_cli(true), Some(&root)).unwrap();
     assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), first);
     assert!(cas_6718_git(&project, &["status", "--porcelain"]).is_empty());
+
+    // Permission membership is unchanged when project tooling reorders the allow list.
+    let settings = project.join(".claude/settings.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    value["permissions"]["allow"]
+        .as_array_mut()
+        .unwrap()
+        .rotate_left(1);
+    std::fs::write(settings, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    assert_eq!(
+        crate::cli::project_files::drift(&project, &harnesses).unwrap(),
+        0,
+        "doctor must compare permission membership, not array order"
+    );
 }
 
 #[test]

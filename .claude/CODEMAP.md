@@ -57,9 +57,9 @@ The CLI crate wires command surfaces to shared stores and service crates.
 - `cas-cli/src/{backlog_hygiene.rs,factory_scratch.rs,factory_build_guard.rs}` - stale-backlog detectors, `factory.scratch_root` resolution, and pressure-aware build admission.
 - `cas-cli/src/cli/{factory,integrate,config}/` - factory operations, integrations, and operator/runtime configuration.
 - `cas-cli/src/config/` - access controls, metadata registry, operator policy, and seeded settings.
-- `cas-cli/src/cloud/{peers_detail_work,peers_session_start,peer_merge,rate_limit,shutdown}.rs` - peer details, SessionStart peer block, about-to-merge notes and overlap warnings, rate limiting, shutdown.
+- `cas-cli/src/cloud/{peers_detail_work,peers_session_start,peer_merge,rate_limit,shutdown}.rs` - peer details, SessionStart peer block, about-to-merge notes and overlap warnings, rate limiting, shutdown; `activation.rs` reads Cloud's Slack-thread binding status.
 - `cas-cli/src/cloud/{sync_lease.rs,sync_queue/,syncer/}` - store sync exclusion, queued push/pull, team/project sync; `syncer/entry_identity.rs` holds memory ids and Cloud rekey rule v1.
-- `cas-cli/src/hub/` and `cas-cli/src/hub/idle_sync.rs` - Commander pairing, operator inbox (`operator_inbox/presence.rs` machine presence), idle-store sync, and fleet runtime.
+- `cas-cli/src/hub/` and `cas-cli/src/hub/idle_sync.rs` - Commander pairing, operator inbox (`operator_inbox/presence.rs` machine presence), idle-store sync, and fleet runtime; `open_files.rs` raises and reports the hub's open-file limit.
 - `cas-cli/src/daemon/` and `history/` - background maintenance and Git history search.
 - `cas-cli/src/worktree/` and `cas-cli/src/worktree/git/epic_branch.rs` - worktree lifecycle and safe epic-branch setup.
 - `cas-cli/src/hybrid_search/` - lexical, semantic, and code-search composition.
@@ -86,7 +86,7 @@ The CLI crate wires command surfaces to shared stores and service crates.
 - `cas-cli/src/ui/factory/daemon/runtime/` - daemon runtime modules and background job dispatch.
 - `cas-cli/src/ui/factory/daemon/runtime/{delivery_probe_jobs,external_wake,factory_jobs,inject_commands,message_attention,poison_sweep_jobs,prompt_queue_jobs,queue_control_jobs,relay_jobs,render_scheduler}.rs` - probes, wakes, queue work, notices, and rendering.
 - `cas-cli/src/ui/factory/daemon/runtime/merge_queue_ejection.rs` - merge-queue ejection behavior and adjacent tests.
-- `cas-cli/src/ui/factory/daemon/runtime/{violet_activity,external_work_reconcile_jobs}.rs` - Slack activity claims, typed worker wake, and claim-journal reconciliation.
+- `cas-cli/src/ui/factory/daemon/runtime/{violet_activity,external_work_reconcile_jobs}.rs` - Slack activity claims, typed worker wake, and claim-journal reconciliation; `violet_reader.rs` (v2 claim → ack → receipt → consumed) and `violet_body.rs` (body fetch through Violet) deliver Slack threads.
 - `cas-cli/src/ui/factory/daemon/runtime/fixtures/` - recorded CI and merge-queue inputs for runtime tests.
 - `cas-cli/src/ui/factory/server_registry/` and `{boot,client,protocol,session}.rs` - registered servers, startup, transport, and session state.
 - `crates/cas-factory/src/` - provider/lane routing, task specs, probes, directors, configuration, and sessions.
@@ -97,7 +97,7 @@ The CLI crate wires command surfaces to shared stores and service crates.
 - `cas-cli/src/mcp/tools/core/` - task, memory, knowledge, artifacts, search, rules, skills, workflow, and coordination handlers.
 - `cas-cli/src/mcp/tools/core/task/` - task queries, notes, proposals, dependencies, lifecycle, and close gates.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - evidence-only, loaded-proof, proof-claim citation (`proof_claims.rs`), delivery, snapshot, and epic close/autoclose checks; `task/block_hold.rs` holds structured task holds.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs` - epic target resolution and lane evidence.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs` - epic target resolution and lane evidence; `merge_close.rs` closes a parked delivery merged with green CI.
 - `cas-cli/src/mcp/tools/service/` - factory/reminder ops, liveness, external verification, external-work claims, servers, and tool schemas.
 - `cas-cli/src/mcp/tools/service/agent_search_system/` - context/code/history search, messaging, and supervisor queue operations.
 - `cas-cli/src/mcp/tools/types/` - shared request and response schemas for MCP actions.

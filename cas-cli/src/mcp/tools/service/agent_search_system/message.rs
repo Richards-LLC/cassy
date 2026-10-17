@@ -578,6 +578,15 @@ fn recipient_had_delivery(report: Option<&cas_store::MessageDeliveryReport>) -> 
 /// Inbox polling is a delivery surface, not an authority to discard a relay.
 /// A failed task read is uncertainty, so only a freshly-read task whose
 /// lifecycle occurrence is positively stale may be withheld.
+/// Whether inbox_poll withholds `row` as a stale lifecycle relay.
+pub(crate) fn withhold_lifecycle_at_inbox_pop(
+    row: &cas_store::QueuedPrompt,
+    _named: bool,
+    task: Option<&cas_types::Task>,
+) -> bool {
+    lifecycle_relay_is_stale_at_inbox_pop(&row.prompt, task)
+}
+
 pub(crate) fn lifecycle_relay_is_stale_at_inbox_pop(
     prompt: &str,
     task: Option<&cas_types::Task>,
@@ -4374,6 +4383,7 @@ mod inbox_poll_identity_tests {
     use super::{
         enrich_report_from_harness_artifact, interrupt_unconfirmed_message,
         lifecycle_relay_is_stale_at_inbox_pop, recipient_transport_warning,
+        withhold_lifecycle_at_inbox_pop,
         extract_pull_request_number, resolve_inbox_recipient,
     };
     use cas_store::DeliveryStage;
@@ -4530,6 +4540,42 @@ mod inbox_poll_identity_tests {
         );
         assert_eq!(extract_pull_request_number("PR #933 merged"), Some(933));
         assert_eq!(extract_pull_request_number("no pull request here"), None);
+    }
+
+    /// cas-8cbe: a compacted progress relay's card names `inbox_poll
+    /// notification_id=N`; that named read shows the event even after the
+    /// task moved on. A parked relay that went stale stays withheld.
+    #[test]
+    fn a_named_progress_relay_is_shown_after_its_task_moves_on() {
+        let relay = |source: &str, transition: &str, new: &str| cas_store::QueuedPrompt {
+            id: 7,
+            source: source.to_string(),
+            target: "supervisor".to_string(),
+            prompt: format!(
+                "<task-lifecycle transition=\"{transition}\" task_id=\"cas-f9b7\" old=\"open\" \
+                 new=\"{new}\" actor=\"w\" notification_id=\"1\" \
+                 occurrence=\"2026-10-17T15:17:19Z\">\nTask cas-f9b7 — t\n</task-lifecycle>"
+            ),
+            created_at: chrono::Utc::now(),
+            processed_at: None,
+            factory_session: None,
+            summary: None,
+            priority: cas_store::NotificationPriority::Normal,
+            acked_at: None,
+            urgent: false,
+            origin: Some(cas_store::QueueOrigin::Daemon),
+            operator: None,
+            recipient_device_id: None,
+            kind: None,
+            attachments: Vec::new(),
+        };
+        let mut task = cas_types::Task::new("cas-f9b7".into(), "t".into());
+        task.status = cas_types::TaskStatus::Closed;
+        let started = relay("lifecycle:1", "task_started", "in_progress");
+        let parked = relay("lifecycle-wake:2", "task_awaiting_merge", "awaiting_merge");
+        assert!(withhold_lifecycle_at_inbox_pop(&started, false, Some(&task)));
+        assert!(!withhold_lifecycle_at_inbox_pop(&started, true, Some(&task)));
+        assert!(withhold_lifecycle_at_inbox_pop(&parked, true, Some(&task)));
     }
 
     #[test]

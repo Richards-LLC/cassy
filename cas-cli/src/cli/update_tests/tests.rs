@@ -2167,7 +2167,7 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
     let (result, output) =
         capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
     result.unwrap();
-    let receipt: serde_json::Value = serde_json::from_str(output.lines().last().unwrap()).unwrap();
+    let receipt: serde_json::Value = output.lines().last().unwrap().parse().unwrap();
     assert_eq!(receipt["managed_files"]["outcome"], "staged");
     assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
     assert!(
@@ -2217,8 +2217,7 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         let (result, output) =
             capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
         result.unwrap();
-        let receipt: serde_json::Value =
-            serde_json::from_str(output.lines().last().unwrap()).unwrap();
+        let receipt: serde_json::Value = output.lines().last().unwrap().parse().unwrap();
         assert!(
             receipt["managed_files"]["conflicts"]
                 .as_array()

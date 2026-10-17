@@ -2168,7 +2168,33 @@ fn prompt_queue_read_failure(error: &str) -> &'static str {
 }
 
 fn schema_check(cas_root: &Path) -> Check {
-    match check_migrations(cas_root) {
+    let shape = rusqlite::Connection::open_with_flags(
+        cas_root.join("cas.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| e.to_string())
+    .and_then(|conn| cas_store::missing_prompt_queue_columns(&conn).map_err(|e| e.to_string()));
+    match shape {
+        Ok(missing) if !missing.is_empty() => {
+            return Check {
+                name: "schema".into(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "prompt_queue is missing columns: {}; Run `cas update --schema-only`, then `cas doctor`",
+                    missing.join(", ")
+                ),
+            };
+        }
+        Err(error) => {
+            return Check {
+                name: "schema".into(),
+                status: CheckStatus::Warning,
+                message: format!("UNKNOWN prompt_queue schema: {error}"),
+            };
+        }
+        Ok(_) => {}
+    }
+    match crate::migration::check_migrations_read_only(cas_root) {
         Ok(status) => {
             if status.has_pending() {
                 Check {
@@ -2188,13 +2214,11 @@ fn schema_check(cas_root: &Path) -> Check {
                 }
             }
         }
-        Err(e) => {
-            Check {
-                name: "schema".to_string(),
-                status: CheckStatus::Error,
-                message: format!("Cannot check migrations: {e}"),
-            }
-        }
+        Err(e) => Check {
+            name: "schema".to_string(),
+            status: CheckStatus::Error,
+            message: format!("Cannot check migrations: {e}"),
+        },
     }
 }
 
@@ -6334,6 +6358,9 @@ mod tests {
                 .map(|table| (table.name, table.columns, table.row_count))
                 .collect::<Vec<_>>()
         };
+        crate::migration::run_migrations(&root, false).unwrap();
+        assert!(!crate::migration::detector::table_exists(&conn,"prompt_queue"));
+        assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
         let before = schema();
         let counts_before = counts();
         let cli = Cli::parse_from(["cas", "--json", "doctor"]);
@@ -6390,31 +6417,52 @@ mod tests {
         let db = root.join("cas.db");
         // A complete numbered ledger must not conceal an old lazy queue.
         let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.execute_batch("CREATE TABLE prompt_queue (
-            id INTEGER PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,
-            prompt TEXT NOT NULL, created_at TEXT NOT NULL, processed_at TEXT,
-            factory_session TEXT, summary TEXT, acked_at TEXT, acked_via TEXT
-        );
-        INSERT INTO prompt_queue VALUES
-          (91,'supervisor','worker','retained message','2026-01-01',NULL,
-           'legacy-session','retained summary','2026-01-02','inferred_from_reply');
-        CREATE INDEX legacy_queue_source ON prompt_queue(source);
-        CREATE TRIGGER legacy_queue_preserve BEFORE DELETE ON prompt_queue
-          BEGIN SELECT RAISE(IGNORE); END;")
-            .unwrap();
-        let before = get_schema_summary(&root).unwrap().tables.into_iter()
-            .map(|t| (t.name,t.columns,t.row_count)).collect::<Vec<_>>();
+        conn.execute_batch(
+            "CREATE TABLE prompt_queue (
+                id INTEGER PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,
+                prompt TEXT NOT NULL, created_at TEXT NOT NULL, processed_at TEXT,
+                factory_session TEXT, summary TEXT, acked_at TEXT, acked_via TEXT
+            );
+            INSERT INTO prompt_queue VALUES
+              (91,'supervisor','worker','retained message','2026-01-01',NULL,
+               'legacy-session','retained summary','2026-01-02','inferred_from_reply');
+            CREATE INDEX legacy_queue_source ON prompt_queue(source);
+            CREATE TRIGGER legacy_queue_preserve BEFORE DELETE ON prompt_queue
+              BEGIN SELECT RAISE(IGNORE); END;",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO operator_delivery_outbox
+                (event_id,prompt_id,payload_snapshot,created_at)
+                VALUES ('retained-event',9001,'retained outbox bytes','2026-01-01');",
+        )
+        .unwrap();
+        let before = get_schema_summary(&root)
+            .unwrap()
+            .tables
+            .into_iter()
+            .map(|t| (t.name, t.columns, t.row_count))
+            .collect::<Vec<_>>();
         let schema = schema_check(&root);
-        assert!(matches!(schema.status, CheckStatus::Warning), "{}", schema.message);
+        assert!(
+            matches!(schema.status, CheckStatus::Warning),
+            "{}",
+            schema.message
+        );
         for column in ["kind", "highest_stage", "delivery_attempts"] {
-            assert!(schema.message.contains(column), "missing {column}: {}", schema.message);
+            assert!(
+                schema.message.contains(column),
+                "missing {column}: {}",
+                schema.message
+            );
         }
         assert!(!schema.message.contains("up to date"), "{}", schema.message);
-        assert!(schema.message.contains("cas update --schema-only"), "{}", schema.message);
-        for check in [
-            supervisor_relay_check(&root),
-            delivery_retries_check(&root),
-        ] {
+        assert!(
+            schema.message.contains("cas update --schema-only"),
+            "{}",
+            schema.message
+        );
+        for check in [supervisor_relay_check(&root), delivery_retries_check(&root)] {
             assert!(
                 matches!(check.status, CheckStatus::Warning),
                 "{}",
@@ -6429,9 +6477,18 @@ mod tests {
                 assert!(!check.message.contains(sql), "{}", check.message);
             }
         }
-        assert_eq!(get_schema_summary(&root).unwrap().tables.into_iter()
-            .map(|t| (t.name,t.columns,t.row_count)).collect::<Vec<_>>(), before);
+        assert_eq!(
+            get_schema_summary(&root)
+                .unwrap()
+                .tables
+                .into_iter()
+                .map(|t| (t.name, t.columns, t.row_count))
+                .collect::<Vec<_>>(),
+            before
+        );
         // Repair is explicit and runs the actual numbered migration path.
+        conn.execute("DELETE FROM cas_migrations WHERE id=279", [])
+            .unwrap();
         let result = crate::migration::run_migrations(&root, false).unwrap();
         assert!(result.errors.is_empty(), "{result:?}");
         assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
@@ -6440,13 +6497,76 @@ mod tests {
         }
         cas_store::communication_slo::read_session(&root, "legacy-session", chrono::Utc::now())
             .expect("communication query must measure after supported repair");
-        let row: (String, Option<String>, Option<String>, Option<String>) = conn.query_row(
-            "SELECT prompt,acked_at,acked_via,highest_stage FROM prompt_queue WHERE id=91", [],
-            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
-        assert_eq!(row, ("retained message".into(), Some("2026-01-02".into()),
-            Some("inferred_from_reply".into()), None), "repair must not demote historical receipts");
+        let row: (String, Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT prompt,acked_at,acked_via,highest_stage FROM prompt_queue WHERE id=91",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "retained message".into(),
+                Some("2026-01-02".into()),
+                Some("inferred_from_reply".into()),
+                None
+            ),
+            "repair must not demote historical receipts"
+        );
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('legacy_queue_source','legacy_queue_preserve')", [], |r|r.get::<_,i64>(0)).unwrap(),2);
-        assert_eq!(crate::migration::run_migrations(&root, false).unwrap().applied_count,0);
+        assert_eq!(
+            conn.query_row(
+                "SELECT payload_snapshot FROM operator_delivery_outbox WHERE event_id='retained-event'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "retained outbox bytes"
+        );
+        assert_eq!(
+            crate::migration::run_migrations(&root, false)
+                .unwrap()
+                .applied_count,
+            0
+        );
+        // A previously recorded repair is replayable, and failure to record
+        // its receipt rolls back the DDL in the same owned transaction.
+        conn.execute_batch(
+            "ALTER TABLE prompt_queue DROP COLUMN first_attempt_at;
+                CREATE TRIGGER refuse_repair_receipt BEFORE INSERT ON cas_migration_reconciliations
+                WHEN NEW.migration_id=279 BEGIN SELECT RAISE(ABORT,'fixture refusal'); END;",
+        )
+        .unwrap();
+        assert!(crate::migration::run_migrations(&root, false).is_err());
+        assert!(!crate::migration::detector::column_exists(
+            &conn,
+            "prompt_queue",
+            "first_attempt_at"
+        ));
+        conn.execute_batch("DROP TRIGGER refuse_repair_receipt")
+            .unwrap();
+        crate::migration::run_migrations(&root, false).unwrap();
+        assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
+        // A detected-but-unrecorded row is computed, never written by doctor.
+        conn.execute("DELETE FROM cas_migrations WHERE id=279", [])
+            .unwrap();
+        assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM cas_migrations WHERE id=279",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        let unreadable = env.home().join("unreadable");
+        fs::create_dir_all(&unreadable).unwrap();
+        fs::write(unreadable.join("cas.db"), b"not a database").unwrap();
+        let unknown = schema_check(&unreadable);
+        assert!(matches!(unknown.status, CheckStatus::Warning));
+        assert!(unknown.message.starts_with("UNKNOWN prompt_queue schema:"));
         assert_eq!(
             prompt_queue_read_failure("database is locked"),
             "the database is in use by another process; run cas doctor again in a moment"

@@ -68,6 +68,12 @@ pub struct ReleaseReportArgs {
     /// Re-fetch sources and replace the Markdown source, including a manual source
     #[arg(long)]
     pub refresh_sources: bool,
+
+    /// A standalone `release-latency.receipt` from
+    /// `scripts/release-latency-receipt.sh <tag> --run-dir <dir>`; its run
+    /// directory is read alongside ~/.cas/artifacts/release
+    #[arg(long, value_name = "PATH")]
+    pub latency_receipt: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -550,7 +556,19 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
         let acquired = AcquiredSources::from_existing(&source_path, &source, &tag, project.clone());
         (source, acquired, false)
     } else {
-        let acquired = acquire_sources(&project_root, &version, &tag, &project_config, project)?;
+        let latency_receipt = args
+            .latency_receipt
+            .as_deref()
+            .map(|path| standalone_latency_receipt(&project_root, path, &tag))
+            .transpose()?;
+        let acquired = acquire_sources(
+            &project_root,
+            &version,
+            &tag,
+            &project_config,
+            project,
+            latency_receipt.as_deref(),
+        )?;
         let source = assemble_markdown(&project_root, &version, &tag, &acquired);
         write_text(&source_path, &source)?;
         (source, acquired, true)
@@ -814,6 +832,7 @@ fn acquire_sources(
     tag: &str,
     config: &Config,
     project: String,
+    latency_receipt: Option<&Path>,
 ) -> anyhow::Result<AcquiredSources> {
     let retrieved_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let mut warnings = Vec::new();
@@ -998,7 +1017,7 @@ fn acquire_sources(
         );
     }
 
-    let release_evidence = find_release_evidence(tag, &release);
+    let release_evidence = find_release_evidence(tag, &release, latency_receipt);
     if release_evidence
         .budget_breaches
         .as_ref()
@@ -1015,7 +1034,7 @@ fn acquire_sources(
     }
     if !release_evidence.has_reportable_publication_timing() {
         warnings.push(
-            "release receipts: green-to-published latency is unavailable under ~/.cas/artifacts/release/"
+            "release receipts: green-to-published latency is unavailable under ~/.cas/artifacts/release/; pass --latency-receipt <run-dir>/release-latency.receipt for a standalone measurement"
                 .to_string(),
         );
     }
@@ -2654,23 +2673,82 @@ fn collect_files(directory: &Path, output: &mut Vec<PathBuf>) {
     }
 }
 
-fn find_release_evidence(tag: &str, release: &Option<ReleaseMetadata>) -> ReleaseEvidence {
+/// cas-1a83: resolve and check `--latency-receipt` before any source is
+/// fetched. The receipt must exist and name this release's tag.
+fn standalone_latency_receipt(
+    project_root: &Path,
+    path: &Path,
+    tag: &str,
+) -> anyhow::Result<PathBuf> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root.join(path)
+    };
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("could not read latency receipt {}", path.display()))?;
+    let receipt_tag = parse_key_values(&content).get("TAG").cloned();
+    if receipt_tag
+        .as_deref()
+        .map(|value| value.trim_start_matches('v'))
+        != Some(tag.trim_start_matches('v'))
+    {
+        anyhow::bail!(
+            "latency receipt {} is for {}, not {tag}",
+            path.display(),
+            receipt_tag.as_deref().unwrap_or("no TAG")
+        );
+    }
+    Ok(path)
+}
+
+fn find_release_evidence(
+    tag: &str,
+    release: &Option<ReleaseMetadata>,
+    latency_receipt: Option<&Path>,
+) -> ReleaseEvidence {
     let Some(home) = dirs::home_dir() else {
         return ReleaseEvidence::default();
     };
-    find_release_evidence_under(tag, release, &home.join(".cas/artifacts/release"))
+    find_release_evidence_in(
+        tag,
+        release,
+        &home.join(".cas/artifacts/release"),
+        latency_receipt.and_then(Path::parent),
+    )
 }
 
+#[cfg(test)]
 fn find_release_evidence_under(
     tag: &str,
     release: &Option<ReleaseMetadata>,
     root: &Path,
+) -> ReleaseEvidence {
+    find_release_evidence_in(tag, release, root, None)
+}
+
+/// Files under `root` count when their path names the tag. A standalone
+/// run directory is this release's by the checked receipt, so all of its
+/// files count; they are read last and win over the shared root.
+fn find_release_evidence_in(
+    tag: &str,
+    release: &Option<ReleaseMetadata>,
+    root: &Path,
+    run_dir: Option<&Path>,
 ) -> ReleaseEvidence {
     let wanted = tag.to_ascii_lowercase();
     let bare = wanted.trim_start_matches('v');
     let mut files = Vec::new();
     collect_files(&root, &mut files);
     files.sort();
+    let mut run_files = Vec::new();
+    if let Some(dir) = run_dir {
+        collect_files(dir, &mut run_files);
+        run_files.sort();
+    }
+    let run_file_count = run_files.len();
+    files.extend(run_files);
+    let first_run_file = files.len() - run_file_count;
     let mut evidence = ReleaseEvidence {
         stage_trend: stage_trend(&files, tag, 5),
         ..ReleaseEvidence::default()
@@ -2680,9 +2758,9 @@ fn find_release_evidence_under(
     let mut published_at = release
         .as_ref()
         .and_then(|release| release.published_at.clone());
-    for path in files {
+    for (index, path) in files.into_iter().enumerate() {
         let path_text = path.to_string_lossy().to_ascii_lowercase();
-        if !path_text.contains(&wanted) && !path_text.contains(bare) {
+        if index < first_run_file && !path_text.contains(&wanted) && !path_text.contains(bare) {
             continue;
         }
         let Ok(content) = fs::read_to_string(&path) else {

@@ -4350,7 +4350,7 @@ fn canonical_id_collision_checks(
             .roots
             .iter()
             .filter(|root| {
-                crate::cloud::config::canonical_id_from_config_toml(&root.join(".cas"))
+                crate::cloud::canonical_id_from_config_toml(&root.join(".cas"))
                     .as_deref() != Some(collision.canonical_id.as_str())
             })
             .map(|path| path.display().to_string())

@@ -198,12 +198,45 @@ fn waiting_for_admission(reason: &str) -> String {
     format!("Waiting for build admission: {reason}.\nRetry the same capped Cargo command when host pressure or a builder slot clears.")
 }
 
-fn acquire_slot(root: &Path, cap: usize) -> Result<File> {
+#[derive(Debug)]
+struct BuilderSlot {
+    file: Option<File>,
+    index: usize,
+    root: PathBuf,
+}
+
+impl BuilderSlot {
+    fn audit(&self, event: &str) {
+        use std::io::Write;
+        // Never panic in Drop if a caller closes its log stream.
+        let _ = writeln!(std::io::stdout().lock(), "worker-check slot: {}", serde_json::json!({
+            "event": event,
+            "utc": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "slot": self.index,
+            "pid": std::process::id(),
+            "root": self.root,
+        }));
+    }
+}
+
+impl Drop for BuilderSlot {
+    fn drop(&mut self) {
+        // Close before recording release, including early error returns.
+        drop(self.file.take());
+        self.audit("released");
+    }
+}
+
+fn acquire_slot(root: &Path, cap: usize) -> Result<BuilderSlot> {
     std::fs::create_dir_all(root)?;
     for index in 0..cap {
         let slot = lock_file(&root.join(format!("slot-{index}.lock")))?;
         match slot.try_lock_exclusive() {
-            Ok(()) => return Ok(slot),
+            Ok(()) => {
+                let slot = BuilderSlot { file: Some(slot), index, root: root.to_path_buf() };
+                slot.audit("admitted");
+                return Ok(slot);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
             Err(error) => return Err(error.into()),
         }

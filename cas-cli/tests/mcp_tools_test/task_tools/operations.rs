@@ -3258,7 +3258,7 @@ async fn task_show_text(service: &CasCore, id: &str) -> String {
 
 /// A hold set with status=blocked survives its dependency closing and is
 /// surfaced by that close; a dependency-only block (even with an old blocker
-/// note, or status=blocked while the dependency is unmet) auto-unblocks.
+/// note) auto-unblocks. A hold also survives when set after the dependency.
 #[tokio::test]
 async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() {
     let mut test_env = TestEnvGuard::temp_home();
@@ -3277,7 +3277,7 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
     let decision_id = create_task_titled(&service, "Operator-held Slack ownership decision").await;
     let explicit_id = create_task_titled(&service, "Explicit status hold").await;
     let legacy_id = create_task_titled(&service, "Old blocker note control").await;
-    let dependency_id = create_task_titled(&service, "Status set while dependency is open").await;
+    let late_hold_id = create_task_titled(&service, "Hold set while dependency is open").await;
 
     // Decision hold: a decision note, then status=blocked records who/when/why.
     let decision_reason = "Wait for the operator to resolve Slack ownership after the peer board ships.";
@@ -3321,12 +3321,11 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
         }))
         .await
         .expect("legacy blocker note");
-    for id in [&decision_id, &explicit_id, &legacy_id, &dependency_id] {
+    for id in [&decision_id, &explicit_id, &legacy_id, &late_hold_id] {
         update_task_json(&service, serde_json::json!({"id": id, "blocked_by": blocker_id})).await;
     }
-    // Dependency control: status=blocked while the dependency is unmet is not a hold.
-    update_task_json(&service, serde_json::json!({"id": dependency_id, "status": "blocked", "notes": "Leave blocked until the API dependency closes."})).await;
-    assert!(hold_of(&dependency_id).is_none(), "an unmet dependency must not create a non-dependency hold");
+    // The dependency already blocks this task when the operator adds a hold.
+    update_task_json(&service, serde_json::json!({"id": late_hold_id, "status": "blocked", "notes": "Operator hold: wait for approval after the API dependency closes."})).await;
 
     let dispatch = cas_store::create_verification_dispatch(
         &cas_dir,
@@ -3369,7 +3368,7 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
         ("decision hold", &decision_id, "Blocked", Some("operator to resolve Slack ownership")),
         ("explicit hold", &explicit_id, "Blocked", Some("Operator hold: wait for Slack ownership")),
         ("old blocker note", &legacy_id, "Open", None),
-        ("status=blocked behind a dependency", &dependency_id, "Open", None),
+        ("hold set behind a dependency", &late_hold_id, "Blocked", Some("Operator hold: wait for approval after the API dependency closes")),
     ] {
         let show = task_show_text(&service, id).await;
         assert!(show.contains(&format!("Status: {status}")), "{case}: {show}");
@@ -3380,7 +3379,6 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
         );
     }
     assert!(!close_text.contains("earlier API outage"), "{close_text}");
-    assert!(!close_text.contains("Leave blocked until the API dependency closes"), "{close_text}");
 
     update_task_json(&service, serde_json::json!({"id": explicit_id, "status": "open"})).await;
     assert!(hold_of(&explicit_id).is_none(), "status=open removes the structured hold");

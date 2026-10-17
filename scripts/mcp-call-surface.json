@@ -161,6 +161,7 @@
         "priority",
         "prompt",
         "reason",
+        "reclaim_unknown_target",
         "request_id",
         "resource_id",
         "session_id",

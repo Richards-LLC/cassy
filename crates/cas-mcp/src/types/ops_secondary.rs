@@ -744,9 +744,15 @@ pub struct FactoryRequest {
     pub dry_run: Option<bool>,
 
     /// Explicitly opt into deleting durable task artifacts.
-    #[schemars(description = "gc_cleanup: artifact deletion (off by default); force=true dry_run=false plus retention checks.")]
+    #[schemars(description = "gc_cleanup: opt-in; force=true dry_run=false; retention applies.")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub artifacts: Option<bool>,
+
+    /// gc_cleanup only: exact absolute unknown-owner cache path authorized for reclaim.
+    /// Requires force=true, dry_run=false and the configured positive quiet window.
+    #[schemars(description = "gc_cleanup: exact unknown-owner target; force=true dry_run=false.")]
+    #[serde(default)]
+    pub reclaim_unknown_target: Option<String>,
 
     /// Clear the pinned epic focus for focus_epic
     #[schemars(description = "Clear the pinned epic focus (focus_epic only)")]
@@ -1436,15 +1442,21 @@ pub struct CoordinationRequest {
 
     /// Preview cleanup without making changes.
     #[schemars(
-        description = "Preview cleanup without making changes (worktree_cleanup; gc_cleanup target caches default to preview unless explicitly false)"
+        description = "Preview cleanup; gc_cleanup caches default to true."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub dry_run: Option<bool>,
 
     /// Explicitly opt into deleting durable task artifacts.
-    #[schemars(description = "gc_cleanup: artifact deletion (off by default); force=true dry_run=false plus retention checks.")]
+    #[schemars(description = "gc_cleanup: opt-in; force=true dry_run=false; retention applies.")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub artifacts: Option<bool>,
+
+    /// gc_cleanup only: exact absolute unknown-owner cache path authorized for reclaim.
+    /// Requires force=true, dry_run=false and the configured positive quiet window.
+    #[schemars(description = "gc_cleanup: exact unknown-owner target; force=true dry_run=false.")]
+    #[serde(default)]
+    pub reclaim_unknown_target: Option<String>,
 
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
@@ -1594,6 +1606,7 @@ impl CoordinationRequest {
             reason: self.reason.clone(),
             dry_run: self.dry_run,
             artifacts: self.artifacts,
+            reclaim_unknown_target: self.reclaim_unknown_target.clone(),
             clear: self.clear,
             branch: self.branch.clone(),
             older_than_secs: self.older_than_secs,

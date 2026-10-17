@@ -1483,7 +1483,21 @@ terminal task ownership loses its warm-cache reservation. Cleanup rechecks that
 ownership and holds the lane, Cargo and lifetime locks; recent writes, live
 users and uncertain evidence still preserve the cache. Missing-gitdir checkouts
 are measured with newest-write timestamps and manual-review guidance, but are
-never adopted or selected automatically.
+never adopted or selected automatically. An operator can authorize one exact
+unknown-owner cache with `factory action=gc_cleanup
+reclaim_unknown_target=/absolute/checkout/target force=true dry_run=false`.
+The opt-in also supports the exact retired `.cas/merge-sweeps/assembly-target`.
+Parents, patterns, aliases and arbitrary paths do not grant ownership or consent.
+The named operation runs only target-cache GC: source, task evidence, processes
+and journey recordings are untouched. It cannot combine `artifacts=true` or
+prompt expiry. Omit either destructive flag to preview with a refusal reason.
+
+Named reclaim still requires a positive `factory.target_cache_min_idle_secs`
+(default 7200 seconds), same-user nonsymlink files, no native process/open-handle
+use (opaque evidence refuses), and the existing lane, Cargo and lifetime guards.
+It rechecks recent writes under those guards and the target/worktree identities
+before and after quarantine. Neither path conventions nor explicit consent
+create an ownership/adoption record.
 
 
 Assembly and release scratch uses an owner record, PID start-time identity and

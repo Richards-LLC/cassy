@@ -2524,10 +2524,15 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
 
     // A refused automatic commit differs from the intentional staging above.
     // Keep Git/hooks real and preserve their refusal instead of disabling them.
+    // Native discovery deliberately rejects /tmp and artifact roots.
+    let host = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    env.set("HOME", host.path());
+    env.set("XDG_CONFIG_HOME", host.path().join(".config"));
+    env.set("CAS_CREDENTIALS_FILE", host.path().join("credentials.env"));
     #[cfg(unix)]
     for mode in ["all-projects", "sync"] {
         use std::os::unix::fs::PermissionsExt;
-        let fixture_home = env.home().join(mode);
+        let fixture_home = host.path().join(mode);
         let project = cas_6718_drifted_project(&fixture_home);
         let root = project.join(".cas");
         env.set("CAS_ROOT", &root);
@@ -2587,7 +2592,7 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
                 receipt["projects"][0]["skills"]
                     .as_str()
                     .unwrap()
-                    .starts_with("failed:"),
+                    .starts_with("FAILED:"),
                 "{output}"
             );
         }

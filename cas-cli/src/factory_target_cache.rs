@@ -315,6 +315,32 @@ pub fn cleanup_selected(
     policy: TargetCachePolicy,
     live_worktree_roots: &[PathBuf],
 ) -> io::Result<()> {
+    cleanup_selected_with_opt_in(cas_root, report, policy, live_worktree_roots, None)
+}
+
+/// An exact path is an explicit reclaim authorization, never ownership proof.
+/// Unknown-owner caches otherwise remain review-only.
+pub fn cleanup_selected_with_opt_in(
+    cas_root: &Path,
+    report: &mut TargetCacheReport,
+    policy: TargetCachePolicy,
+    live_worktree_roots: &[PathBuf],
+    reclaim_unknown_target: Option<&Path>,
+) -> io::Result<()> {
+    cleanup_selected_using(cas_root, report, policy, live_worktree_roots,
+        reclaim_unknown_target, Path::new("/proc"))
+}
+
+fn cleanup_selected_using(
+    cas_root: &Path,
+    report: &mut TargetCacheReport,
+    policy: TargetCachePolicy,
+    live_worktree_roots: &[PathBuf],
+    reclaim_unknown_target: Option<&Path>,
+    proc_root: &Path,
+) -> io::Result<()> {
+    // Red-first seam: exact-path authorization has not been implemented yet.
+    let _ = reclaim_unknown_target;
     if report.dry_run {
         return Ok(());
     }
@@ -366,13 +392,14 @@ pub fn cleanup_selected(
             record.reason = reason;
             continue;
         }
-        let mut guard = match cache_admission(
+        let mut guard = match cache_admission_at(
             cas_root,
             &rescanned.worktree,
             &rescanned.path,
             &canonical_live_roots,
             rescanned.snapshot.as_ref(),
             true,
+            proc_root,
         ) {
             Ok(guard) => guard,
             Err((disposition, reason)) => {
@@ -425,11 +452,12 @@ pub fn cleanup_selected(
         let descriptors = guard
             .as_ref()
             .map_or_else(Vec::new, legacy::Guard::descriptors);
-        if let Some(disposition) = process_block(
+        if let Some(disposition) = process_block_at(
             &record.worktree,
             &record.path,
             &descriptors,
             guard.is_some(),
+            proc_root,
         ) {
             record.disposition = disposition;
             record.reason = "process evidence changed before rename".into();
@@ -457,7 +485,7 @@ pub fn cleanup_selected(
         // live user appeared, restore the original name when possible and
         // leave the cache intact either way.
         let process_block =
-            process_block(&record.worktree, &quarantine, &descriptors, guard.is_some());
+            process_block_at(&record.worktree, &quarantine, &descriptors, guard.is_some(), proc_root);
         if guard
             .as_ref()
             .is_some_and(|guard| !guard.unchanged(&quarantine))
@@ -999,6 +1027,18 @@ fn cache_admission(
     snapshot: Option<&legacy::Snapshot>,
     lock: bool,
 ) -> Result<Option<legacy::Guard>, (CacheDisposition, String)> {
+    cache_admission_at(cas_root, worktree, cache, live, snapshot, lock, Path::new("/proc"))
+}
+
+fn cache_admission_at(
+    cas_root: &Path,
+    worktree: &Path,
+    cache: &Path,
+    live: &HashSet<PathBuf>,
+    snapshot: Option<&legacy::Snapshot>,
+    lock: bool,
+    proc_root: &Path,
+) -> Result<Option<legacy::Guard>, (CacheDisposition, String)> {
     if live.contains(worktree) {
         return Err((
             CacheDisposition::LiveProcess,
@@ -1011,14 +1051,14 @@ fn cache_admission(
             cas_root,
             worktree,
             cache,
-            Path::new("/proc"),
+            proc_root,
             snapshot,
             lock,
         )
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (cas_root, snapshot, lock);
+        let _ = (cas_root, snapshot, lock, proc_root);
         if live_process_uses(worktree, cache) {
             Err((
                 CacheDisposition::Indeterminate,
@@ -1132,13 +1172,23 @@ fn process_block(
     descriptors: &[i32],
     guarded: bool,
 ) -> Option<CacheDisposition> {
+    process_block_at(worktree, cache, descriptors, guarded, Path::new("/proc"))
+}
+
+fn process_block_at(
+    worktree: &Path,
+    cache: &Path,
+    descriptors: &[i32],
+    guarded: bool,
+    proc_root: &Path,
+) -> Option<CacheDisposition> {
     #[cfg(target_os = "linux")]
     {
-        linux_process_block(Path::new("/proc"), worktree, cache, descriptors, guarded)
+        linux_process_block(proc_root, worktree, cache, descriptors, guarded)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = guarded;
+        let _ = (guarded, proc_root);
         process_uses_many(worktree, cache, descriptors).then_some(CacheDisposition::Indeterminate)
     }
 }
@@ -2138,4 +2188,69 @@ mod tests {
         }
         assert_eq!(fs::read(worker.join("source.rs")).unwrap(), source);
     }
+    #[cfg(target_os = "linux")]
+    fn unknown_cache_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, TargetCachePolicy) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let cas = crate::store::init_cas_dir(&root).unwrap();
+        let checkout = cas.join("epic-missing-gitdir");
+        let target = checkout.join("target");
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::write(checkout.join(".git"), "gitdir: /nonexistent-cas-49b9/git-admin\n").unwrap();
+        fs::write(checkout.join("source.rs"), b"uncommitted WIP").unwrap();
+        fs::write(target.join("debug/output.rlib"), b"regenerable").unwrap();
+        fs::write(target.join("debug/.cargo-lock"), b"").unwrap();
+        fs::create_dir_all(cas.join("artifacts/cas-proof")).unwrap();
+        fs::write(cas.join("artifacts/cas-proof/LEDGER.md"), b"durable evidence").unwrap();
+        let old = SystemTime::now() - Duration::from_secs(4 * 3600);
+        for entry in WalkDir::new(&target).contents_first(true) {
+            let path = entry.unwrap().into_path();
+            fs::File::open(path).unwrap().set_times(fs::FileTimes::new().set_modified(old)).unwrap();
+        }
+        let proc = root.join("proc");
+        fs::create_dir_all(&proc).unwrap();
+        let policy = TargetCachePolicy { min_idle_secs: 2 * 3600, retention_count: 0, ..policy() };
+        (temp, cas, target, proc, policy)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cas_49b9_unknown_target_refuses_without_exact_opt_in_or_with_live_handle() {
+        let (_temp, cas, target, proc, policy) = unknown_cache_fixture();
+        for opt_in in [None, Some(target.parent().unwrap())] {
+            let mut report = inspect(&cas, policy, &[], &[], false).unwrap();
+            cleanup_selected_using(&cas, &mut report, policy, &[], opt_in, &proc).unwrap();
+            assert!(target.join("debug/output.rlib").is_file());
+            assert_eq!(report.reclaimed_bytes, 0, "absent/ancestor opt-in is review only");
+        }
+        // A child or build retaining a target handle vetoes explicit consent.
+        let pid = proc.join("123");
+        fs::create_dir_all(pid.join("fd")).unwrap();
+        fs::write(pid.join("stat"), "123 (child) S 1 1 1 0 0 0 0 0 0").unwrap();
+        std::os::unix::fs::symlink("/unrelated", pid.join("cwd")).unwrap();
+        std::os::unix::fs::symlink("/bin/cat", pid.join("exe")).unwrap();
+        fs::write(pid.join("cmdline"), b"cat\0").unwrap();
+        fs::write(pid.join("maps"), b"").unwrap();
+        std::os::unix::fs::symlink(target.join("debug/output.rlib"), pid.join("fd/7")).unwrap();
+        let mut report = inspect(&cas, policy, &[], &[], false).unwrap();
+        cleanup_selected_using(&cas, &mut report, policy, &[], Some(&target), &proc).unwrap();
+        let row = report.caches.iter().find(|row| row.path == target).unwrap();
+        assert_eq!(row.disposition, CacheDisposition::LiveProcess, "explicit consent cannot waive a live target handle: {}", row.reason);
+        assert!(target.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cas_49b9_exact_unknown_target_opt_in_reclaims_only_quiet_regenerable_subtree() {
+        let (_temp, cas, target, proc, policy) = unknown_cache_fixture();
+        let mut report = inspect(&cas, policy, &[], &[], false).unwrap();
+        assert_eq!(report.caches[0].disposition, CacheDisposition::OwnershipUncertain);
+        cleanup_selected_using(&cas, &mut report, policy, &[], Some(&target), &proc).unwrap();
+        assert!(!target.exists(), "an exact explicit opt-in plus proven quietness must reclaim target");
+        assert_eq!(report.caches[0].disposition, CacheDisposition::Reclaimed);
+        assert_eq!(report.reclaimed_bytes, b"regenerable".len() as u64);
+        assert_eq!(fs::read(target.parent().unwrap().join("source.rs")).unwrap(), b"uncommitted WIP");
+        assert_eq!(fs::read(cas.join("artifacts/cas-proof/LEDGER.md")).unwrap(), b"durable evidence");
+    }
+
 }

@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.62.0] - 2026-10-17
+
 ### Added
 
 - **Serve memory in `gc_report`** — Was: nothing showed how much memory each

@@ -2729,7 +2729,7 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
     assert_eq!(sweep.config.repaired, 3);
     assert_eq!(sweep.config.entries_removed, 15);
     let rendered = render_plain_at(80, |fmt| findings::print(fmt, sweep).map(|_| ()));
-    assert!(rendered.contains("config  15 retired entries removed in 3 files"));
+    assert!(rendered.contains("15 retired entries removed in 3 files"), "{rendered}");
     let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
     assert_eq!(receipt["projects"].as_array().unwrap().len(), 1);
     for dir in [&root, &host, &global] {

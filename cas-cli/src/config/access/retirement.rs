@@ -79,6 +79,9 @@ fn read_config(path: &Path) -> Result<Option<String>, String> {
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err("config is not a regular owned file".into());
     }
+    if metadata.permissions().readonly() {
+        return Err("config is read-only; restore owner write permission before cleanup".into());
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;

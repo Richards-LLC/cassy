@@ -12,7 +12,8 @@ use std::sync::atomic::AtomicBool;
 
 use cas::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
 use cas::hub::idle_sync::{
-    IdleSyncConfig, IdleSyncState, ProcessSyncRunner, STORE_LOG_FILE, SweepOutcome, run_sweep,
+    IdleSyncConfig, IdleSyncState, ProcessSyncRunner, STORE_LOG_FILE, SweepOutcome, SweepReport,
+    run_sweep,
 };
 use cas::store::{open_store_local, open_task_store_local};
 use flate2::read::GzDecoder;
@@ -85,6 +86,17 @@ fn seed_store(parent: &Path, name: &str, endpoint: &str, project: &str, entry: &
         )
         .unwrap();
     repo
+}
+
+/// One real sweep, off the async runtime the mock clouds run on.
+async fn sweep(runner: ProcessSyncRunner, repos: Vec<PathBuf>, state: PathBuf) -> SweepReport {
+    tokio::task::spawn_blocking(move || {
+        let cancel = AtomicBool::new(false);
+        run_sweep(&IdleSyncConfig::default(), &repos, &runner, &state, chrono::Utc::now(), &cancel)
+    })
+    .await
+    .unwrap()
+    .unwrap()
 }
 
 fn gunzip_json(body: &[u8]) -> serde_json::Value {
@@ -165,20 +177,8 @@ async fn one_sweep_pushes_and_pulls_each_idle_store_under_its_own_identity() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let alpha = seed_store(
-        tmp.path(),
-        "alpha",
-        &cloud_a.uri(),
-        "alpha-project",
-        "alpha-entry",
-    );
-    let beta = seed_store(
-        tmp.path(),
-        "beta",
-        &cloud_b.uri(),
-        "beta-project",
-        "beta-entry",
-    );
+    let alpha = seed_store(tmp.path(), "alpha", &cloud_a.uri(), "alpha-project", "alpha-entry");
+    let beta = seed_store(tmp.path(), "beta", &cloud_b.uri(), "beta-project", "beta-entry");
     let state = tmp.path().join("hub").join("idle-sync.json");
     let runner = ProcessSyncRunner::new(cas_binary())
         .with_env("HOME", &home)
@@ -186,21 +186,7 @@ async fn one_sweep_pushes_and_pulls_each_idle_store_under_its_own_identity() {
         .with_env("XDG_DATA_HOME", home.join(".local/share"))
         .with_env("XDG_CACHE_HOME", home.join(".cache"));
 
-    let repos = vec![alpha.clone(), beta.clone()];
-    let sweep_state = state.clone();
-    let report = tokio::task::spawn_blocking(move || {
-        run_sweep(
-            &IdleSyncConfig::default(),
-            &repos,
-            &runner,
-            &sweep_state,
-            chrono::Utc::now(),
-            &AtomicBool::new(false),
-        )
-    })
-    .await
-    .unwrap()
-    .unwrap();
+    let report = sweep(runner, vec![alpha.clone(), beta.clone()], state.clone()).await;
 
     let log = |repo: &Path| {
         std::fs::read_to_string(repo.join(".cas/logs").join(STORE_LOG_FILE)).unwrap_or_default()
@@ -213,23 +199,13 @@ async fn one_sweep_pushes_and_pulls_each_idle_store_under_its_own_identity() {
             .map(|(_, o)| *o);
         assert_eq!(outcome, Some(SweepOutcome::Synced), "{}", log(repo));
     }
-    assert_only_own_identity(
-        &cloud_a,
-        "alpha-project",
-        "alpha-token",
-        "alpha-entry",
-        ("beta-project", "beta-entry"),
-    )
-    .await;
-    assert_only_own_identity(
-        &cloud_b,
-        "beta-project",
-        "beta-token",
-        "beta-entry",
-        ("alpha-project", "alpha-entry"),
-    )
-    .await;
-
+    for (cloud, own, foreign) in [(&cloud_a, "alpha", "beta"), (&cloud_b, "beta", "alpha")] {
+        let [project, token, entry, foreign_project, foreign_entry] =
+            [(own, "project"), (own, "token"), (own, "entry"), (foreign, "project"), (foreign, "entry")]
+                .map(|(name, kind)| format!("{name}-{kind}"));
+        let foreign = (foreign_project.as_str(), foreign_entry.as_str());
+        assert_only_own_identity(cloud, &project, &token, &entry, foreign).await;
+    }
     for (repo, foreign) in [(&alpha, "beta-project"), (&beta, "alpha-project")] {
         let queue = SyncQueue::open(&repo.join(".cas")).unwrap();
         assert!(
@@ -259,34 +235,14 @@ async fn a_store_whose_lease_is_held_is_not_synced_twice() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let alpha = seed_store(
-        tmp.path(),
-        "alpha",
-        &cloud.uri(),
-        "alpha-project",
-        "alpha-entry",
-    );
+    let alpha = seed_store(tmp.path(), "alpha", &cloud.uri(), "alpha-project", "alpha-entry");
     let state = tmp.path().join("idle-sync.json");
     let runner = ProcessSyncRunner::new(cas_binary()).with_env("HOME", &home);
     let held = cas::cloud::sync_lease::SyncLease::try_acquire(&alpha.join(".cas"))
         .unwrap()
         .expect("the test holds the store's lease, as a serve mid-sync would");
 
-    let repos = vec![alpha.clone()];
-    let sweep_state = state.clone();
-    let report = tokio::task::spawn_blocking(move || {
-        run_sweep(
-            &IdleSyncConfig::default(),
-            &repos,
-            &runner,
-            &sweep_state,
-            chrono::Utc::now(),
-            &AtomicBool::new(false),
-        )
-    })
-    .await
-    .unwrap()
-    .unwrap();
+    let report = sweep(runner, vec![alpha.clone()], state).await;
     drop(held);
 
     assert_eq!(report.ran, vec![(alpha.clone(), SweepOutcome::Busy)]);

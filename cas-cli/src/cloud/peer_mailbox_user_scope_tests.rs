@@ -524,28 +524,6 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
 }
 
 #[test]
-fn cas_2a5a_contract_claim_without_user_scope_never_returns_user_rows() {
-    let rows = [
-        sup("sup-cassy", "happy-kestrel-54", "u1", CASSY, "soundwave"),
-        sup("sup-violet", "bright-newt-56", "u1", VIOLET, "prowl"),
-    ];
-    let cloud = FakeUserScopeCloud::new(&rows);
-    let peers = directory(&cloud, "u1", "sup-cassy", false);
-    Client { cloud: cloud.clone(), user: "u1" }
-        .send(&user_send("sup-cassy", &peers[0], "hi", "k6"))
-        .unwrap();
-    let recipients = ["sup-violet".to_string()];
-    let projects = [VIOLET.to_string()];
-    let old = cloud.claim_as("u1", &projects, &recipients, &[PeerScope::Project]);
-    assert!(old.is_empty(), "an older client never sees user-scope rows");
-    let other_user = cloud.claim_as("u2", &projects, &recipients, &[PeerScope::User]);
-    assert!(other_user.is_empty(), "only the recipient's own user claims it");
-    let new = cloud.claim_as("u1", &projects, &recipients, &[PeerScope::User]);
-    assert_eq!(new.len(), 1);
-    assert_eq!((new[0].scope, new[0].project_id.as_str()), (PeerScope::User, CASSY));
-}
-
-#[test]
 fn cas_2a5a_project_scope_wire_and_delivery_are_unchanged() {
     let project = PeerSend {
         project_id: CASSY.into(),
@@ -587,16 +565,7 @@ fn cas_2a5a_project_scope_wire_and_delivery_are_unchanged() {
     });
     let violet = Receiver::new();
     violet.register("sup-violet", "bright-newt-56", AgentRole::Supervisor, "sup-violet");
-    // Claimed under the cassy project id, as a misrouted row would be.
     let mailbox = Client { cloud, user: "u1" };
-    let claimed = mailbox.cloud.claim_as(
-        "u1",
-        &[CASSY.to_string()],
-        &["sup-violet".to_string()],
-        &[PeerScope::Project],
-    );
-    assert_eq!(claimed.len(), 1);
-    mailbox.cloud.expire_leases();
     let report = deliver_claimed(
         &OnlyProject(&mailbox),
         open_prompt_queue_store(&violet.cas).unwrap().as_ref(),

@@ -2,7 +2,6 @@
 
 #![cfg(feature = "mcp-proxy")]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cas::types::{Agent, AgentRole};
@@ -15,7 +14,6 @@ use support::CasSandbox;
 
 struct FakeCloud {
     endpoint: String,
-    request_count: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<Value>>>,
     _server: Arc<tiny_http::Server>,
 }
@@ -24,19 +22,13 @@ impl FakeCloud {
     fn start() -> Self {
         let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("fake Cloud binds"));
         let endpoint = format!("http://{}", server.server_addr().to_ip().unwrap());
-        let request_count = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let (thread_server, thread_count, thread_requests) = (
-            Arc::clone(&server),
-            Arc::clone(&request_count),
-            Arc::clone(&requests),
-        );
+        let (thread_server, thread_requests) = (Arc::clone(&server), Arc::clone(&requests));
         std::thread::spawn(move || {
             for mut request in thread_server.incoming_requests().take(1) {
                 let mut body = String::new();
                 let _ = request.as_reader().read_to_string(&mut body);
                 let payload: Value = serde_json::from_str(&body).expect("Cloud request is JSON");
-                thread_count.fetch_add(1, Ordering::SeqCst);
                 thread_requests.lock().unwrap().push(payload.clone());
                 let request_id = payload["request_id"].as_str().unwrap_or_default();
                 let response = json!({
@@ -68,7 +60,6 @@ impl FakeCloud {
         });
         Self {
             endpoint,
-            request_count,
             requests,
             _server: server,
         }
@@ -184,8 +175,9 @@ for line in sys.stdin:
     let status: Value = serde_json::from_slice(&status.stdout).expect("status output is JSON");
     assert_eq!(status["code"], "acquired");
     assert_eq!(status["receipt"], claim["receipt"]);
-    assert_eq!(cloud.request_count.load(Ordering::SeqCst), 1);
-    assert_eq!(cloud.requests.lock().unwrap()[0]["request_id"], request_id);
+    let requests = cloud.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one Cloud claim");
+    assert_eq!(requests[0]["request_id"], request_id);
     assert_eq!(
         std::fs::read_to_string(violet_calls)
             .unwrap()

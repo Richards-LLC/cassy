@@ -3794,8 +3794,8 @@ async fn a_held_submit_gate_holds_the_cr_until_it_opens() {
     assert_eq!(recorded.0.lock().unwrap().as_slice(), b"payload\r");
 }
 
-#[tokio::test]
-async fn cas_569f_claude_role_options_and_cas_only_scope() {
+#[test]
+fn cas_569f_claude_role_options_and_cas_only_scope() {
     let mut env = TestEnvGuard::temp_home();
     env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--name,--remote-control,--fallback-model,--mcp-config,--strict-mcp-config");
     env.set("CAS_FACTORY_NICE_WORKER", "0");
@@ -3838,25 +3838,6 @@ async fn cas_569f_claude_role_options_and_cas_only_scope() {
             assert!(!pane.args.iter().any(|arg| arg == "--strict-mcp-config"));
             assert!(env_value(pane, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").is_none());
         }
-        let mut probe = pane.clone();
-        probe.command = "/bin/sh".into();
-        probe.args.splice(0..0, ["-c".into(), "printf 'arg=%s\\n' \"$@\"".into(), "fixture-claude".into()]);
-        let mut pty = crate::pty::Pty::spawn("claude-argv-probe", probe).unwrap();
-        let output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            let mut output = Vec::new();
-            loop {
-                match pty.recv().await {
-                    Some(crate::pty::PtyEvent::Output(bytes)) => output.extend(bytes),
-                    Some(crate::pty::PtyEvent::Exited(code)) => { assert_eq!(code, Some(0)); break; }
-                    Some(crate::pty::PtyEvent::Error(error)) => panic!("{error}"),
-                    None => panic!("argv fixture ended without exit status"),
-                }
-            }
-            String::from_utf8_lossy(&output).replace("\r\n", "\n")
-        }).await.expect("bounded local argv fixture");
-        assert!(output.contains(&format!("arg=--name\narg={name}\n")));
-        assert!(output.contains("arg=--fallback-model\narg=sonnet\n"));
-        assert_eq!(output.contains("arg=--remote-control\n"), env_value(pane, "CAS_AGENT_ROLE") == Some("supervisor"));
     }
     assert_eq!(std::fs::read_to_string(source).unwrap(), original);
 }

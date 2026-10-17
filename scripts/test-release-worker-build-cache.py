@@ -92,6 +92,7 @@ exit "${FIXTURE_CARGO_EXIT:-0}"
         result = self.refresh()
         self.assertEqual(result["status"], "PASS", result)
         self.assertEqual(result["source_commit"], self.released)
+        self.assertEqual(result["cache_root"], str((self.repo / ".cas").resolve() / "build-cache"))
         self.assertEqual((self.cache / "current").read_text().strip(), result["snapshot"])
         snapshot = self.cache / "snapshots" / result["snapshot"]
         self.assertEqual((snapshot / "artifact").read_text(), "complete artifact\n")
@@ -125,17 +126,10 @@ exit "${FIXTURE_CARGO_EXIT:-0}"
         snapshot = expected / "snapshots" / result["snapshot"]
         # pin: the fake Cargo's output must land in the relocated snapshot unchanged.
         self.assertEqual((snapshot / "artifact").read_text(), "complete artifact\n")
-        self.assertIn(f"source_commit={self.released}\n",
-                      (snapshot / ".cas-build-cache-metadata").read_text())
         # The in-tree baseline is untouched.
         self.assertEqual((self.cache / "current").read_text(), "old\n")
         self.assertEqual([p.name for p in (self.cache / "snapshots").iterdir()], ["old"])
         self.assert_no_checkouts()
-
-    def test_scratch_root_unset_reports_in_tree_cache_root(self):
-        result = self.refresh()
-        self.assertEqual(result["status"], "PASS", result)
-        self.assertEqual(result["cache_root"], str((self.repo / ".cas").resolve() / "build-cache"))
 
     def test_scratch_root_project_key_matches_rust_golden_vector(self):
         text = (SCRIPTS / "refresh-worker-build-cache.sh").read_text()

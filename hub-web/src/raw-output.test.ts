@@ -47,14 +47,10 @@ describe("the daemon's rendered rows (cas-f285)", () => {
 });
 
 describe("an old daemon's raw bytes (cas-f285 fallback)", () => {
-  it("lose their control sequences, and a carriage return redraws its line", () => {
+  it("lose their control sequences, a carriage return redraws its line, and only the newest lines stay", () => {
     const bytes = encode("\u001b]0;title\u0007\u001b[1;32mready\u001b[0m\r\nprogress 10%\rprogress 100%\r\n\u001b[2Kdone\u0007\ttab\r\n");
     expect(rowsFromOutputBytes(bytes).map((line) => line.text)).toEqual(["ready", "progress 100%", "done    tab"]);
-  });
-
-  it("keep only the newest lines", () => {
-    const bytes = encode(Array.from({ length: 10 }, (_, index) => `line ${index}`).join("\n"));
-    expect(rowsFromOutputBytes(bytes, 3).map((line) => line.text)).toEqual(["line 7", "line 8", "line 9"]);
+    expect(rowsFromOutputBytes(bytes, 2).map((line) => line.text)).toEqual(["progress 100%", "done    tab"]);
   });
 
   it("are kept as a bounded tail", () => {
@@ -114,8 +110,10 @@ describe("the scrollback tail Raw output reads (cas-f285)", () => {
     expect(source.rows().at(-1)?.text).toBe("redrawn");
   });
 
-  it("ignores another pane's, generation's or request's page", () => {
+  it("ignores another pane's, generation's or request's page, and never pages above its bounded log", () => {
     const { source } = tail(10);
+    expect(source.hasScrollbackAbove()).toBe(false);
+    expect(source.theme()).toBe(RAW_OUTPUT_THEME);
     source.open();
     expect(source.accept(page(0, 10, 8))).toBe(false);
     expect(source.accept(page(0, 10, 7, "worker-1"))).toBe(false);
@@ -132,11 +130,5 @@ describe("the scrollback tail Raw output reads (cas-f285)", () => {
     expect(requests).toHaveLength(1);
     source.refresh(Date.now() + 6_000);
     expect(requests).toHaveLength(2);
-  });
-
-  it("is a bounded log: nothing above it pages in", () => {
-    const { source } = tail(10);
-    expect(source.hasScrollbackAbove()).toBe(false);
-    expect(source.theme()).toBe(RAW_OUTPUT_THEME);
   });
 });

@@ -384,15 +384,10 @@ fn context_reset_rebind_preserves_worker_name_and_lease_for_claude_and_codex() {
     }
 }
 
-/// cas-e9fc: live 2026-10-16 (smooth-robin-87). `/clear` makes Claude emit
-/// SessionEnd(reason=clear) for the old conversation and SessionStart for the
-/// new one at once, before clear_context has recorded the new session id on
-/// the worker row (the factory log shows the old SessionEnd's shutdown intent
-/// at 16:28:33.028, the new SessionStart at .050). The old SessionEnd then
-/// tore the worker down: its lease was released and the row deleted, while the
-/// claude process kept running, unregistered. Through the real hook path, a
-/// /clear SessionEnd must leave the worker registered under its name with its
-/// lease, and the new SessionStart must rebind that same row.
+/// cas-e9fc: `/clear` emits the old conversation's SessionEnd(reason=clear)
+/// before the worker row names the new session. Through the real hook path it
+/// must keep the worker registered with its lease, and the new SessionStart
+/// must rebind that same row.
 #[test]
 fn cas_e9fc_clear_session_end_before_rebind_keeps_the_worker_registered() {
     let _env = TestEnvGuard::with_optional_vars(&[

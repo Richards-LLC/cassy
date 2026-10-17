@@ -89,21 +89,17 @@ fn cas_a131_note_goes_to_live_supervisors_delivering_into_the_target() {
 }
 
 #[test]
-fn cas_a131_note_names_target_source_task_and_merger_and_is_informational() {
-    let (summary, body) = merge_intent_message(&intent("abc1234567"));
-    for expected in [TARGET, "factory/lively-puma-3-cas-a131", "cas-a131", "me@box", "abc1234"] {
-        assert!(body.contains(expected), "{expected:?} missing: {body}");
-    }
-    assert!(summary.contains(TARGET), "{summary}");
-    assert!(body.contains("nothing waits"), "informational only: {body}");
-}
-
-#[test]
 fn cas_a131_note_is_sent_once_per_tip_and_not_on_retry() {
     let dir = tempfile::tempdir().unwrap();
     let (own, _) = apply_same_repo_scope(peers(), SameRepoScope::Own);
     let mut sent: Vec<String> = Vec::new();
-    let mut send = |peer: &Peer, _summary: &str, _body: &str| {
+    let mut send = |peer: &Peer, summary: &str, body: &str| {
+        // An informational note naming target, source, task, merger and tip.
+        for expected in [TARGET, "factory/lively-puma-3-cas-a131", "cas-a131", "me@box", "tip-"] {
+            assert!(body.contains(expected), "{expected:?} missing: {body}");
+        }
+        assert!(summary.contains(TARGET), "{summary}");
+        assert!(body.contains("nothing waits"), "informational only: {body}");
         sent.push(peer.name.clone());
         Ok(())
     };

@@ -231,11 +231,8 @@ fn current_factory_task_id(core: &crate::mcp::server::CasCore) -> Result<String,
 
 fn filing_failure_reason(error: &str, task_identity_warning: Option<&str>) -> String {
     let safe_error = redact_known_credentials(error);
-    if safe_error.to_ascii_lowercase().contains("issues.repo") {
-        let mut reason = format!(
-            "GitHub filing failed: {safe_error}\nConfigure the receiving issue target with \
-             `cas config set issues.repo owner/name` before retrying."
-        );
+    if safe_error.starts_with("Invalid issue target: ") {
+        let mut reason = format!("GitHub filing failed: {safe_error}");
         if let Some(warning) = task_identity_warning {
             reason.push_str(&format!(
                 "\nTask identity warning: {}. The report was placed under `unassigned`.",
@@ -263,23 +260,37 @@ fn filing_failure_reason(error: &str, task_identity_warning: Option<&str>) -> St
 fn resolve_issue_repo(cas_root: &Path) -> Result<String, String> {
     let config = crate::config::Config::load(cas_root)
         .map_err(|error| format!("Failed to load config: {error}"))?;
-    let repo = config
-        .issues
-        .as_ref()
+    let issues = config.issues.as_ref();
+    let component = issues
+        .and_then(|issues| issues.components.as_ref())
+        .and_then(|components| components.cassy.as_deref())
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty());
+    let project = issues
         .and_then(|issues| issues.repo.as_deref())
         .map(str::trim)
-        .filter(|repo| !repo.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| config.issue_repo_registry().cassy);
+        .filter(|repo| !repo.is_empty());
+    // Only stored overrides participate; the checkout's inferred origin is
+    // project intake context, never an implicit Cassy bug filing target.
+    let (key, repo) = if let Some(repo) = component {
+        ("issues.components.cassy", repo.to_owned())
+    } else if let Some(repo) = project {
+        ("issues.repo", repo.to_owned())
+    } else {
+        (
+            "issues.components.cassy",
+            config.issue_repo_registry().cassy,
+        )
+    };
 
     if crate::gh_graphql::split_repo(&repo).is_err() {
-        return Err(
-            "issues.repo must be configured as `owner/name`; set it with `cas config set issues.repo owner/name`"
-                .to_string(),
-        );
+        return Err(format!(
+            "Invalid issue target: {key} must be configured as `owner/name`; \
+             set it with `cas config set {key} owner/name` before retrying."
+        ));
     }
 
-    Ok(repo.to_string())
+    Ok(repo)
 }
 
 fn file_bug_report<T: BugFilingTransport>(
@@ -580,7 +591,7 @@ impl CasService {
                 })?;
                 return Ok(Self::success(format!(
                     "Bug report was not filed. {failure_reason}\nStaged report: {}\n\n\
-                     File the staged report after GitHub credentials are available.",
+                     Resolve the filing failure above before filing the staged report.",
                     path.display()
                 )));
             }

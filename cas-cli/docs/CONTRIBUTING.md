@@ -322,9 +322,17 @@ These reads never save the inferred value. Raw `Config::get`/`list`, editing,
 serialization and `config diff` retain stored values. Legacy `report_cas_bug`,
 automatic issue triage and release-report GitHub intake retain their explicit
 configuration contracts; they do not infer a project target from origin.
-`report_cas_bug` continues using its explicit legacy override or the Cassy
-component repository. Only project initialization may persist a discovered
-origin; routine reads and updates do not backfill it.
+`report_cas_bug` selects the first nonblank stored destination in this order:
+`issues.components.cassy`, then the legacy `issues.repo` override, then the
+compiled Cassy repository (`Richards-LLC/cassy`). Blank values count as unset.
+It validates the selected destination as `owner/name` before any GitHub call;
+an invalid selected value never falls through to another tracker. Instead the
+report is durably staged under the task's artifacts directory and the response
+names the selected key and `cas config set <key> owner/name` remedy. Correct
+that setting before retrying; a staged report has not been filed. Existing
+credential failures and label degradation retain their filing behavior.
+Only project initialization may persist a discovered origin; routine reads
+and updates do not backfill it.
 
 ## Canonical install path
 

@@ -44,7 +44,7 @@ function view(state: InboxState, events: InboxEvent[] = [], presence?: PresenceS
   const inbox = new InboxView(controller as unknown as OperatorInboxController, { defaultLabel: "This browser" });
   (inbox as unknown as { snapshot: InboxSnapshot }).snapshot = snapshot;
   inbox.render();
-  return { inbox, controller };
+  return { inbox, controller, snapshot };
 }
 
 afterEach(() => {
@@ -53,6 +53,21 @@ afterEach(() => {
 });
 
 describe("operator inbox view (cas-9b7d QA round 1)", () => {
+  it("declares an empty inbox only after replay completes, and names a read outage", () => {
+    const { inbox, snapshot } = view({ kind: "ready", accountHint: null, label: "Phone" });
+    snapshot.replay = { kind: "loading" };
+    inbox.render();
+    expect(inbox.dialog.textContent).toContain("Loading inbox history");
+    expect(inbox.dialog.textContent).not.toContain("No messages yet");
+    snapshot.replay = { kind: "unavailable", reason: "Fixture history source unavailable" };
+    inbox.render();
+    expect(inbox.dialog.textContent).toContain(snapshot.replay.reason);
+    expect(inbox.dialog.textContent).not.toContain("No messages yet");
+    snapshot.replay = { kind: "ready" };
+    inbox.render();
+    expect(inbox.dialog.textContent).toContain("No messages yet");
+  });
+
   it("names an unavailable observer and separate component status without claiming power state", () => {
     vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-06T11:00:00Z"));
     const presence: PresenceSnapshot = {

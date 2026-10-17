@@ -30,6 +30,11 @@ export type InboxState =
   | { kind: "revoked"; reason: string }
   | { kind: "unavailable"; reason: string };
 
+export type InboxReplayState =
+  | { kind: "loading" }
+  | { kind: "ready" }
+  | { kind: "unavailable"; reason: string };
+
 export interface InboxMachine {
   machineId: string;
   hubId: string;
@@ -40,6 +45,8 @@ export interface InboxMachine {
 
 export interface InboxSnapshot {
   state: InboxState;
+  /** Reading history is independent of authentication and its retry loop. */
+  replay?: InboxReplayState;
   events: InboxEvent[];
   commands: QueuedCommand[];
   machines: InboxMachine[];
@@ -74,6 +81,7 @@ export class OperatorInboxController {
   private readonly replyRequests: ReplyGrantRequests;
   private replyRefresh: Promise<void> | null = null;
   private state: InboxState = { kind: "signed_out" };
+  private replay: InboxReplayState = { kind: "loading" };
   private machinesCache: { at: number; machines: InboxMachine[] } | null = null;
   private generationWarning: string | null = null;
   private presenceSnapshot: PresenceSnapshot | null = null;
@@ -98,6 +106,7 @@ export class OperatorInboxController {
 
   /** Restore this profile's identity or pending sign-in from storage. */
   async load(): Promise<InboxState> {
+    this.replay = { kind: "loading" };
     this.identity = await this.options.store.loadIdentity();
     this.pending = this.identity ? null : await this.options.store.loadPending();
     if (this.identity) {
@@ -133,6 +142,7 @@ export class OperatorInboxController {
     const cursor = identity ? await this.options.store.loadCursor(identity.accountId, identity.feedGeneration) : null;
     return {
       state: this.state,
+      replay: this.replay,
       events,
       commands,
       machines: this.machinesCache?.machines ?? [],
@@ -182,6 +192,7 @@ export class OperatorInboxController {
     }
     this.identity = await completeEnrollment(this.client, this.options.store, this.issuer, pending, outcome.emailHint);
     this.pending = null;
+    this.replay = { kind: "loading" };
     this.state = { kind: "ready", accountHint: this.identity.emailHint, label: this.identity.label };
     await this.changed();
     return null;
@@ -215,6 +226,7 @@ export class OperatorInboxController {
     this.presenceError = null;
     this.presenceFetchedAt = -Infinity;
     this.monitoringDecisions.clear();
+    this.replay = { kind: "loading" };
     this.state = next;
     await this.changed();
   }
@@ -404,12 +416,21 @@ export class OperatorInboxController {
     await this.refreshPresence();
     if (this.identity !== before) return 30_000;
     try {
-      await this.refreshReplyGrants();
+      try {
+        await this.refreshReplyGrants();
+      } catch (error) {
+        // Optional reply introspection cannot gate retained history. Explicit
+        // authority failures still take the existing sign-out path below.
+        if (error instanceof OperatorWireError && ["grant_revoked", "grant_expired", "grant_unknown"].includes(error.code)) throw error;
+        this.replyRequests.clear();
+        await this.changed();
+      }
       const identity = this.identity;
       if (!identity) return 30_000;
       const outcome = await this.withReplayLock(() => replayRound(this.context(identity)));
       if (this.identity !== identity) return 30_000;
       if (outcome?.kind === "generation_changed") {
+        this.replay = { kind: "loading" };
         this.generationWarning = "The account inbox was reset. Earlier history on this device is from the previous inbox.";
         identity.feedGeneration = outcome.feedGeneration;
         await this.options.store.saveIdentity(identity);
@@ -422,6 +443,9 @@ export class OperatorInboxController {
         await this.changed();
         return 60_000;
       }
+      const nextReplay = outcome?.kind === "caught_up" ? "ready" : "loading";
+      const replayChanged = outcome !== null && this.replay.kind !== nextReplay;
+      if (outcome) this.replay = { kind: nextReplay };
       const before = JSON.stringify((await this.options.store.commands(identity.accountId)).map((command) => [command.commandId, command.state]));
       const synced = await syncCommands(this.context(identity)).catch(() => null);
       if (synced && JSON.stringify(synced.map((command) => [command.commandId, command.state])) !== before) await this.changed();
@@ -430,8 +454,9 @@ export class OperatorInboxController {
       await this.machines().catch(() => undefined);
       if (!hadMachines && this.machinesCache) await this.changed();
       if (this.identity !== identity) return 30_000;
-      if (this.state.kind !== "ready") this.state = { kind: "ready", accountHint: identity.emailHint, label: identity.label };
-      if (outcome && (outcome.stored.length > 0 || outcome.kind === "more")) await this.changed();
+      const stateChanged = this.state.kind !== "ready";
+      if (stateChanged) this.state = { kind: "ready", accountHint: identity.emailHint, label: identity.label };
+      if (stateChanged || replayChanged || outcome && (outcome.stored.length > 0 || outcome.kind === "more")) await this.changed();
       if (!outcome) return 5_000;
       return outcome.kind === "more" ? 0 : Math.max(outcome.pollAfterMs, 5_000);
     } catch (error) {
@@ -444,6 +469,8 @@ export class OperatorInboxController {
         await this.changed();
         return 60_000;
       }
+      this.replay = { kind: "unavailable", reason: "Inbox history is unavailable from Cassy Cloud. Retrying." };
+      await this.changed();
       const retryAfter = error instanceof OperatorWireError ? error.retryAfterMs : null;
       return retryAfter ?? 15_000;
     }

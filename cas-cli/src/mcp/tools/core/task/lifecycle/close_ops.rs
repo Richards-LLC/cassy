@@ -8107,9 +8107,10 @@ impl CasCore {
                             )));
                         }
                     }
-                    // cas-d6eb: the blast-radius module check, made while the
-                    // worker can still widen proof_targets (parking locks the
-                    // scope; after verification only a supervisor fix could).
+                    // cas-eac2: fast-rows and focused-test receipts at this
+                    // exact tip, read (never run) while the worker can still
+                    // fix them; cas-d6eb: the blast-radius module check before
+                    // parking locks the proof scope.
                     if task.status != TaskStatus::AwaitingMerge
                         && let Some(tip) = anchor.as_deref()
                         && let Some(paths) = commit_receipt_window.as_ref().and_then(|window| {
@@ -8121,6 +8122,7 @@ impl CasCore {
                             &task,
                             &paths,
                             tip,
+                            &resolved_parent_branch,
                         )
                     {
                         return Ok(Self::tool_error(refusal));

@@ -666,6 +666,14 @@ sleep 2
         self.assertEqual(repeat.returncode, 0, repeat.stderr)
         self.assertNotIn("running fast rows", repeat.stderr)
 
+        # cas-eac2: lane CI no longer repeats these rows, so a missing tool
+        # fails the push loudly instead of passing it.
+        self.write("docs/note.md", "# Note\n")
+        self.commit()
+        missing = self.push(MARKDOWNLINT_CLI2=str(self.repo / "missing-markdownlint"))
+        self.assertNotEqual(missing.returncode, 0, missing.stderr)
+        self.assertIn("FAIL markdown-lint", missing.stderr)
+
     def test_builtin_agent_projection_drift_is_refused_cas_7bce(self):
         body = "Verify the task.\n"
         frontmatter = "---\nname: task-verifier\ndescription: Internal.\n---\n"

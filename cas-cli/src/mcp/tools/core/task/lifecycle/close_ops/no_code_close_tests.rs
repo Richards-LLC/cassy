@@ -620,31 +620,39 @@ async fn evidence_does_not_close_a_code_task_without_its_commits_cas_b38a() {
     assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge);
 }
 
-/// cas-38e7: the release rows run once, in lane CI. A worker parks a tree that
-/// ships the retired fast-rows scripts with no fast-rows receipt, and the core
-/// merge gate still refuses to close it before the merge.
+/// cas-eac2 (D2): the fast rows run once, in the worker's pre-push hook, and
+/// lane CI no longer repeats them for factory pushes. A tip that ships the
+/// hook but has no PASS receipt (an override or `--no-verify` push) is refused
+/// at park, which only reads the receipt; with it, the delivery parks and the
+/// core merge gate still refuses to close it before the merge.
 #[tokio::test]
-async fn worker_parks_without_a_fast_rows_receipt_and_merge_gate_still_refuses_cas_38e7() {
+async fn park_reads_the_pre_push_fast_rows_receipt_cas_eac2() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env, "main");
     let worker_path = f.cas_dir().join("worktrees").join(WORKER);
     std::fs::create_dir_all(worker_path.join("scripts")).unwrap();
-    std::fs::write(worker_path.join("scripts/release-integration-gates.py"), "print('rows')\n").unwrap();
+    std::fs::write(worker_path.join("scripts/fast-rows-pre-push.sh"), "exit 1\n").unwrap();
     std::fs::write(worker_path.join("feature.rs"), "pub fn feature() {}\n").unwrap();
     git(&worker_path, &["add", "."]);
     git(&worker_path, &["commit", "-q", "-m", "feat(cas-fr02): the feature"]);
-    git(&worker_path, &["push", "-q", "origin", LANE]);
+    git(&worker_path, &["push", "-q", "--no-verify", "origin", LANE]);
     let id = "cas-fr02";
     f.put(&assigned(id, TaskType::Task, "main"));
     claim(&f, id);
     let close = serde_json::json!({"action": "close", "id": id, "reason": "Delivered"});
 
+    let refused = call(&f.worker, close.clone()).await;
+    assert!(refused.contains("FAST ROWS REQUIRED"), "{refused}");
+    assert!(refused.contains("--fast-rows --base origin/main"), "{refused}");
+    assert_ne!(f.task(id).status, TaskStatus::AwaitingMerge, "{refused}");
+
+    let tip = git(&worker_path, &["rev-parse", "HEAD"]);
+    let receipts = std::path::PathBuf::from(git(&worker_path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]))
+        .join("cas/fast-rows");
+    std::fs::create_dir_all(&receipts).unwrap();
+    std::fs::write(receipts.join(format!("{tip}.pass")), format!("fast-rows: PASS {tip} base=main\n")).unwrap();
     let parked = call(&f.worker, close.clone()).await;
-    if parked.contains("DELIVERY BRANCH UNRESOLVED") {
-        panic!("fixture did not reach the park: {parked}");
-    }
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert!(!parked.contains("FAST ROWS"), "{parked}");
     assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{parked}");
 
     let again = call(&f.worker, close).await;

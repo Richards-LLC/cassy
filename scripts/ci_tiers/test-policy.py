@@ -199,8 +199,9 @@ fi
         body = expression.strip()
         if body.startswith('${{') and body.endswith('}}'):
             body = body[3:-2]
-        body = re.sub(r'\b(?:github|needs|steps)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
+        body = re.sub(r'\b(?:github|needs|steps|vars)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
         body = body.replace('always()', 'True').replace('&&', ' and ').replace('||', ' or ')
+        body = re.sub(r'!(?!=)', ' not ', body)
         return bool(eval(body, {'__builtins__': {}, 'startsWith': lambda a, b: str(a).startswith(b)}))
 
     def test_macos_check_warms_main_cache_but_stays_off_branch_pushes_cas_861c0(self):
@@ -230,6 +231,28 @@ fi
         for ref, expected in [('refs/heads/main', True), ('refs/heads/gh-readonly-queue/main/pr-1-abc', False)]:
             with self.subTest(save_ref=ref):
                 self.assertEqual(self.gh_expr(save_if, {'github.ref': ref}), expected)
+
+    def test_lane_slim_is_off_by_default_and_only_slims_factory_pushes_cas_eac2(self):
+        jobs = self.ci()['jobs']
+        def runs(job, name, slim, fast, event='push', ref='refs/heads/factory/w'):
+            step = next(s for s in jobs[job]['steps'] if s.get('name') == name)
+            return self.gh_expr(step['if'], {
+                'github.event_name': event, 'github.ref': ref, 'vars.CAS_LANE_SLIM': slim,
+                'steps.classify-diff.outputs.fast-admission': fast,
+                'steps.classify-diff.outputs.rust-unaffected': 'false'})
+        rust = 'Run change-scoped tests with impact evidence'
+        for job, name, fast in [
+            ('docs-lint', 'Run no-build release gate rows', 'true'), ('docs-lint', 'Markdown lint', 'true'),
+            ('scoped-validation-fast', 'Run no-build release gate rows', 'true'),
+            ('scoped-validation-fast', rust, 'true'),
+            ('scoped-validation-fast', 'Test snapshot-pinned CLI output surfaces', 'true'),
+            ('scoped-validation', rust, 'false'),
+            ('scoped-validation', 'Test snapshot-pinned CLI output surfaces', 'false'),
+        ]:
+            with self.subTest(job=job, step=name):
+                self.assertTrue(runs(job, name, '', fast), 'unset CAS_LANE_SLIM keeps the lane as it was')
+                self.assertFalse(runs(job, name, 'true', fast))
+        self.assertTrue(runs('scoped-validation', rust, 'true', 'false', event='pull_request', ref='refs/pull/1/merge'))
 
     def test_every_cache_summary_call_has_its_executable_skew_guard(self):
         sources = ['.github/actions/setup-rust-linux/action.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml']

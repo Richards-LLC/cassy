@@ -78,35 +78,47 @@ pub(super) fn for_close(
     (!scope.is_empty()).then(|| (scope.widen(task), scope.note(head)))
 }
 
-/// cas-d6eb: the refusal a blast-radius delivery gets at park, before parking
-/// locks its proof scope, when it reaches modules that neither its declared
-/// `proof_targets` nor a passing worker test receipt at `head` covers. The
-/// close gate would refuse the same modules after verification, when only a
-/// supervisor scope fix (and a fresh verification round) could repair them.
+/// The refusal a delivery gets at park, while its worker can still fix it.
+///
+/// cas-eac2 (operator D1, D2): lane CI no longer runs the no-build fast rows
+/// or broad Rust tests for factory pushes. The worker's pre-push hook runs the
+/// rows, and the worker's capped targeted tests prove each changed crate. Park
+/// only READS those receipts for this exact tip. It never executes a row, test
+/// or build, because operator decision Q6 (2026-10-15) removed park re-runs.
+/// A missing receipt is refused with its fix, never passed silently. The
+/// merge queue still runs the full suite on the final tree.
 pub(super) fn park_refusal(
     cas_root: &Path,
     proof_repo: &Path,
     task: &Task,
     changed_paths: &[String],
     head: &str,
+    target: &str,
 ) -> Option<String> {
+    let short = &head[..head.len().min(12)];
+    if let Some(refusal) = fast_rows_refusal(proof_repo, &task.id, head, target) {
+        return Some(refusal);
+    }
+    let caller = crate::mcp::tools::core::guidance::caller_prefix();
+    let tested = crate::factory_worker_check::passing_test_packages(cas_root, proof_repo, head);
+    let untested = untested_changed_crates(proof_repo, changed_paths, &tested);
+    if !untested.is_empty() {
+        return Some(format!(
+            "⚠️ FOCUSED PROOF REQUIRED (cas-eac2): task {id} changes Rust in crates that have no passing worker test receipt at {short}: {crates}. Lane CI no longer runs broad Rust tests for factory pushes, so the targeted fallback is yours. At {short}, run a capped targeted test for the changed behaviour in each crate (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`, or `--test <harness>`), then retry `{caller}task action=close id={id}`. A receipt from another crate does not count.",
+            id = task.id,
+            crates = untested.join(", "),
+        ));
+    }
+    // cas-d6eb: a blast-radius module neither declared nor covered by a
+    // receipt, while proof_targets can still be widened (parking locks them).
     if !task.risk.contains(&TaskRisk::BlastRadius) {
         return None;
     }
     let judged = for_close(cas_root, proof_repo, task, changed_paths, Some(head));
     let targets = judged.as_ref().map_or(&task.proof_targets, |(judged, _)| &judged.proof_targets);
     let uncovered = super::uncovered_blast_radius_modules(changed_paths, targets);
-    // cas-6c13: a crate that depends on a changed crate can fail on the change
-    // (a cas-pty prompt edit broke a cas-mux snapshot test, found 9 h later).
-    let tested = crate::factory_worker_check::passing_test_packages(cas_root, proof_repo, head);
-    let dependents = untested_dependents(proof_repo, changed_paths, &tested);
-    let short = &head[..head.len().min(12)];
     if uncovered.is_empty() {
-        return (!dependents.is_empty()).then(|| format!(
-            "⚠️ PROOF SCOPE INCOMPLETE (cas-6c13): task {} changes crates that other workspace crates depend on, and these dependents have no passing worker test receipt at {short}: {}. Run a capped targeted test in each (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`) at {short}, then retry close.",
-            task.id,
-            dependents.join(", "),
-        ));
+        return None;
     }
     let mut widened = cas_types::normalize_proof_targets(&task.proof_targets);
     for module in &uncovered {
@@ -114,20 +126,47 @@ pub(super) fn park_refusal(
             widened.push(module.clone());
         }
     }
-    let caller = crate::mcp::tools::core::guidance::caller_prefix();
-    let dependents = if dependents.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " Dependent crates without a passing receipt at {short} need one too (cas-6c13): {}.",
-            dependents.join(", ")
-        )
-    };
     Some(format!(
-        "⚠️ PROOF SCOPE INCOMPLETE (cas-d6eb): task {id} declares risk=blast-radius, and its delivery at {short} reaches source modules that neither its proof_targets nor a passing worker test receipt at that commit covers: {modules}. Parking locks the proof scope, so fix it now: run a capped targeted test in each module's crate at {short} (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`), or widen the declaration with `{caller}task action=update id={id} proof_targets=\"{targets}\"`. Then retry `{caller}task action=close id={id}`.{dependents}",
+        "⚠️ PROOF SCOPE INCOMPLETE (cas-d6eb): task {id} declares risk=blast-radius, and its delivery at {short} reaches source modules that neither its proof_targets nor a passing worker test receipt at that commit covers: {modules}. Parking locks the proof scope, so fix it now: run a capped targeted test in each module's crate at {short} (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`), or widen the declaration with `{caller}task action=update id={id} proof_targets=\"{targets}\"`. Then retry `{caller}task action=close id={id}`.",
         id = task.id,
         modules = uncovered.join(", "),
         targets = widened.join(","),
+    ))
+}
+
+/// cas-eac2 (D2): the refusal for a tip of a repository that ships
+/// `scripts/fast-rows-pre-push.sh` when no `fast-rows: PASS <tip>` receipt
+/// exists. That happens when the push skipped the hook through
+/// `CAS_SKIP_FAST_ROWS` or `--no-verify`, or when the rows failed.
+fn fast_rows_refusal(repo: &Path, task_id: &str, head: &str, target: &str) -> Option<String> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+    };
+    git(&["cat-file", "-e", &format!("{head}:scripts/fast-rows-pre-push.sh")])?;
+    let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+    let receipt = Path::new(String::from_utf8_lossy(&common.stdout).trim())
+        .join("cas/fast-rows")
+        .join(format!("{head}.pass"));
+    let text = std::fs::read_to_string(&receipt).unwrap_or_default();
+    if text.starts_with(&format!("fast-rows: PASS {head} ")) {
+        return None;
+    }
+    let fixes: String = text
+        .lines()
+        .filter(|line| line.starts_with("FIX "))
+        .take(10)
+        .map(|line| format!("\n- {line}"))
+        .collect();
+    Some(format!(
+        "⚠️ FAST ROWS REQUIRED (cas-eac2): task {task_id}'s tip {short} has no fast-rows PASS receipt ({path}). Lane CI no longer runs these no-build rows for factory pushes; your pre-push hook runs them (scripts/fast-rows-pre-push.sh), and park only reads the receipt.{fixes}\nWith everything committed at {short}, run `./scripts/release-gate.sh --fast-rows --base origin/{target}` (the hook's command), apply each FIX, push, then retry close.",
+        short = &head[..head.len().min(12)],
+        path = receipt.display(),
+        target = target.strip_prefix("origin/").unwrap_or(target),
     ))
 }
 
@@ -229,68 +268,31 @@ fn package_covers(
     }
 }
 
-/// cas-6c13: workspace packages that depend directly on a crate the delivery
-/// changes and have no passing test receipt in `tested`, as
-/// `dependent (depends on changed)`. A cas-pty change selects cas-mux.
-fn untested_dependents(repo: &Path, changed_paths: &[String], tested: &[String]) -> Vec<String> {
+/// cas-eac2 (D1): workspace packages whose Rust sources or tests the delivery
+/// changes and that no passing test receipt in `tested` covers. Matching is
+/// [`package_covers`], the one [`derive`] uses, so a receipt in an unrelated
+/// crate never satisfies a changed one. Paths outside a workspace crate, such
+/// as a repository without Cargo manifests, are not Rust changes.
+fn untested_changed_crates(repo: &Path, changed_paths: &[String], tested: &[String]) -> Vec<String> {
     let package_dirs = workspace_package_dirs(repo);
-    let changed: Vec<&String> = changed_source_modules(changed_paths)
-        .iter()
-        .filter_map(|module| {
-            package_dirs
-                .iter()
-                .find(|(_, dir)| **dir == module.crate_dir)
-                .map(|(name, _)| name)
-        })
-        .collect();
-    let tested: Vec<String> = tested
-        .iter()
-        .map(|package| package.to_ascii_lowercase())
-        .collect();
-    let mut missing = Vec::new();
-    for manifest in workspace_manifests(repo)
-        .iter()
-        .filter_map(|path| read_manifest(path))
-    {
-        let Some(name) = manifest
-            .get("package")
-            .and_then(|p| p.get("name"))
-            .and_then(toml::Value::as_str)
-        else {
+    let tests = changed_paths.iter().filter_map(|path| {
+        let (krate, _) = path.split_once("/tests/").filter(|_| path.ends_with(".rs"))?;
+        let crate_dir = krate.rsplit('/').next()?.to_ascii_lowercase();
+        Some(SourceModule { crate_dir, segments: Vec::new() })
+    });
+    let mut untested = Vec::new();
+    for module in changed_source_modules(changed_paths).into_iter().chain(tests) {
+        let Some((package, _)) = package_dirs.iter().find(|(_, dir)| **dir == module.crate_dir) else {
             continue;
         };
-        let name = name.to_ascii_lowercase();
-        if changed.contains(&&name) || tested.contains(&name) {
-            continue;
-        }
-        let sections = std::iter::once(&manifest).chain(
-            manifest
-                .get("target")
-                .and_then(toml::Value::as_table)
-                .into_iter()
-                .flat_map(|t| t.values()),
-        );
-        let dependency = sections
-            .flat_map(|section| {
-                ["dependencies", "dev-dependencies", "build-dependencies"]
-                    .map(|key| section.get(key))
-            })
-            .flatten()
-            .filter_map(toml::Value::as_table)
-            .flat_map(|table| table.iter())
-            .map(|(key, config)| {
-                config
-                    .get("package")
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or(key)
-                    .to_ascii_lowercase()
-            })
-            .find(|dependency| changed.contains(&dependency));
-        if let Some(dependency) = dependency {
-            missing.push(format!("{name} (depends on {dependency})"));
+        if !untested.contains(package)
+            && !tested.iter().any(|tested| package_covers(tested, &module, &package_dirs))
+        {
+            untested.push(package.clone());
         }
     }
-    missing
+    untested.sort();
+    untested
 }
 
 /// The root and member manifests of the workspace at `repo`.
@@ -348,49 +350,27 @@ fn read_manifest(path: &Path) -> Option<toml::Value> {
 mod tests {
     use super::*;
 
-    /// cas-6c13: a cas-pty-only change selects cas-mux (and the other direct
-    /// dependents) until each has a passing test receipt; unrelated crates
-    /// and the changed crate itself are not selected.
+    /// cas-eac2 (D1): every changed workspace crate, by source or test file,
+    /// needs its own receipt. A receipt in a dependent or unrelated crate never
+    /// stands in for it (the cas-6c13 weakness), and a path outside the
+    /// workspace's crates is not a Rust change.
     #[test]
-    fn a_cas_pty_change_selects_its_untested_dependents_cas_6c13() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::write(
-            root.join("Cargo.toml"),
-            "[workspace]\nmembers = [\"cas-cli\", \"crates/*\"]\n",
-        )
-        .unwrap();
-        for (dir, manifest) in [
-            ("crates/cas-pty", "[package]\nname = \"cas-pty\"\n"),
-            (
-                "crates/cas-mux",
-                "[package]\nname = \"cas-mux\"\n[dependencies]\ncas-pty = { path = \"../cas-pty\" }\n",
-            ),
-            ("crates/cas-store", "[package]\nname = \"cas-store\"\n"),
-            (
-                "cas-cli",
-                "[package]\nname = \"cas\"\n[target.'cfg(unix)'.dependencies]\npty = { package = \"cas-pty\", path = \"../crates/cas-pty\" }\n",
-            ),
-        ] {
-            std::fs::create_dir_all(root.join(dir)).unwrap();
-            std::fs::write(root.join(dir).join("Cargo.toml"), manifest).unwrap();
-        }
-        let changed = vec!["crates/cas-pty/src/pty.rs".to_string()];
-        assert_eq!(
-            untested_dependents(root, &changed, &["cas-pty".to_string()]),
-            vec![
-                "cas (depends on cas-pty)".to_string(),
-                "cas-mux (depends on cas-pty)".to_string()
-            ]
-        );
-        assert_eq!(
-            untested_dependents(root, &changed, &["cas".to_string(), "cas-mux".to_string()]),
-            Vec::<String>::new(),
-            "a passing receipt in each dependent satisfies the selection"
-        );
-        assert!(
-            untested_dependents(root, &["crates/cas-store/src/lib.rs".to_string()], &[]).is_empty()
-        );
+    fn each_changed_crate_needs_its_own_receipt_cas_eac2() {
+        let repo = workspace();
+        let changed = vec![
+            "crates/cas-store/src/prompt_queue_store.rs".to_string(),
+            "cas-cli/tests/factory_test.rs".to_string(),
+            "web/src/app.rs".to_string(),
+            "docs/notes.md".to_string(),
+        ];
+        let untested = |tested: &[&str]| {
+            let tested: Vec<String> = tested.iter().map(|p| p.to_string()).collect();
+            untested_changed_crates(repo.path(), &changed, &tested)
+        };
+        assert_eq!(untested(&[]), ["cas", "cas-store"]);
+        assert_eq!(untested(&["code-mode-mcp", "cas-mcp"]), ["cas", "cas-store"]);
+        assert_eq!(untested(&["cas"]), ["cas-store"]);
+        assert!(untested(&["cas", "cas-store"]).is_empty());
     }
 
     fn workspace() -> tempfile::TempDir {
@@ -587,11 +567,12 @@ mod tests {
         );
     }
 
-    /// cas-d6eb AC1: at park, a delivery reaching a crate nobody tested is
-    /// told which modules to cover and how, while proof_targets can still be
-    /// widened; once it widens them, or tests that crate, it parks.
+    /// cas-eac2 (D1) at park: a delivery reaching a crate nobody tested is
+    /// refused with the targeted fallback, and widening proof_targets no longer
+    /// substitutes for the test; a receipt in that crate parks it. Outside a
+    /// Cargo workspace the cas-d6eb scope refusal still names the modules.
     #[test]
-    fn park_names_uncovered_modules_while_the_worker_can_fix_them_cas_d6eb() {
+    fn park_requires_a_receipt_in_every_changed_crate_cas_eac2() {
         let repo = workspace();
         let cas_root = tempfile::tempdir().unwrap();
         let head = "e".repeat(40);
@@ -600,32 +581,26 @@ mod tests {
         crate::factory_worker_check::record_passing_test_for_tests(
             cas_root.path(), repo.path(), &head, "cas", "test(worker)",
         );
-        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &head)
+        let refusal = park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main")
             .expect("an untested crate is refused at park");
-        assert!(refusal.contains("PROOF SCOPE INCOMPLETE"), "{refusal}");
-        // Only the untested crate's module; the tested crate is covered.
-        assert!(refusal.contains("covers: prompt_queue_store::operator_cloud."), "{refusal}");
-        assert!(
-            refusal.contains(&format!(
-                "task action=update id={} proof_targets=\"close_ops,prompt_queue_store::operator_cloud\"",
-                task.id
-            )),
-            "{refusal}"
-        );
+        assert!(refusal.contains("FOCUSED PROOF REQUIRED"), "{refusal}");
+        assert!(refusal.contains(&format!("at {}: cas-store.", &head[..12])), "{refusal}");
 
-        // Following the suggested update clears the refusal.
         task.proof_targets.push("prompt_queue_store::operator_cloud".into());
-        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head).is_none());
-        // So does a test receipt in the untested crate instead.
-        task.proof_targets.pop();
+        let mut plain = task.clone();
+        plain.risk = vec![TaskRisk::None];
+        for task in [&task, &plain] {
+            assert!(park_refusal(cas_root.path(), repo.path(), task, &changed, &head, "main").is_some());
+        }
         crate::factory_worker_check::record_passing_test_for_tests(
             cas_root.path(), repo.path(), &head, "cas-store", "test(worker)",
         );
-        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head).is_none());
-        // A task without blast-radius risk is never refused here.
-        let mut plain = blast_radius_task(&[]);
-        plain.risk = vec![TaskRisk::None];
-        assert!(park_refusal(cas_root.path(), repo.path(), &plain, &changed, &"f".repeat(40)).is_none());
+        assert!(park_refusal(cas_root.path(), repo.path(), &task, &changed, &head, "main").is_none());
+
+        let bare = tempfile::tempdir().unwrap();
+        let scope = park_refusal(cas_root.path(), bare.path(), &blast_radius_task(&[]), &changed, &head, "main")
+            .expect("undeclared modules outside a workspace");
+        assert!(scope.contains("PROOF SCOPE INCOMPLETE (cas-d6eb)"), "{scope}");
     }
 
     /// cas-d6eb AC2: a widening that adds only crate-qualified modules of

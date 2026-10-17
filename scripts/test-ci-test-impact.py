@@ -108,6 +108,9 @@ class ImpactTests(unittest.TestCase):
         self.assertEqual(impact.plan(self.root, "0" * 40, self.base, None)["mode"], "scoped")
 
     def test_unmapped_input_runs_workspace(self):
+        # cas-eac2: Commander package scripts are not compiled input.
+        self.put("hub-web/package.json", '{}\n')
+        self.assertEqual(self.select()["mode"], "scoped")
         self.put("unknown.bin", 'new input\n')
         self.commit()
         self.assertEqual(impact.plan(self.root, self.base, "", None)["mode"], "workspace")

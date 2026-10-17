@@ -1968,6 +1968,11 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         run_git(&["push", "origin", "main", "epic/peer"], &repo.root);
         let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
         disable_system_a(&cas_root);
+        let config = cas_root.join("config.toml");
+        let mut body = std::fs::read_to_string(&config).unwrap();
+        body.push_str("\n[project]\ncanonical_id = \"peer-delivery\"\n");
+        std::fs::write(config, body).unwrap();
+        cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
         let peer = remote.path().join("peer");
         run_git(&["clone", repo.root.to_str().unwrap(), peer.to_str().unwrap()], &repo.root);
         run_git(&["config", "user.email", "peer@example.test"], &peer);
@@ -1988,7 +1993,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         task.deliverables.factory_branch_anchor = Some(anchor.clone());
         task.deliverables.parked_branch = Some("factory/peer-worker".into());
         task.deliverables.work_target = Some(WorkTarget {
-            repo_selector: "remote:github.com/org/peer-delivery".into(),
+            repo_selector: "project:peer-delivery".into(),
             target_branch: "epic/peer".into(),
         });
         tasks.add(&task).unwrap();

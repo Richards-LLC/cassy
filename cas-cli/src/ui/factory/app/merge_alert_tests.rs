@@ -432,6 +432,7 @@ fn cas_c926_held_worker_gets_no_merge_retry_relay_until_release() {
         "a held worker gets no relay: {prompts:?}"
     );
     f.app.event_detector.clear_worker_hold("merge-w");
+    // Release restores the merge relay.
     let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
-    assert_eq!(prompts.len(), 1, "release restores the merge relay");
+    assert_eq!(prompts.len(), 1);
 }

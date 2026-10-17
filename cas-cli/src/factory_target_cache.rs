@@ -1291,6 +1291,48 @@ mod tests {
     }
 
     #[test]
+    fn terminal_dead_worker_loses_warm_reservation_only_under_pressure_cas_04a9() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas = temp.path().canonicalize().unwrap().join(".cas");
+        let worker = cas.join("worktrees/dead-worker");
+        let target = worker.join("target");
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::write(target.join("debug/output"), b"rebuildable").unwrap();
+        fs::write(target.join("debug/.cargo-lock"), b"").unwrap();
+        let mut owner = cas_types::Agent::new("dead-owner".into(), "dead-worker".into());
+        owner.pid = Some(i32::MAX as u32);
+        owner.pid_starttime = Some(1);
+        owner.status = cas_types::AgentStatus::Shutdown;
+        owner.metadata.insert("clone_path".into(), worker.display().to_string());
+        crate::store::open_agent_store(&cas).unwrap().register(&owner).unwrap();
+        let tasks = crate::store::open_task_store(&cas).unwrap();
+        let mut task = cas_types::Task::new("cas-dead".into(), "finished lane".into());
+        task.assignee = Some(owner.id.clone());
+        tasks.add(&task).unwrap();
+        let pressure = TargetCachePolicy { high_watermark_percent: 1, low_watermark_percent: 0, min_idle_secs: 0, retention_count: 1 };
+        let report = inspect(&cas, pressure, &[], &[], true).unwrap();
+        assert_eq!(report.caches[0].disposition, CacheDisposition::Retained, "nonterminal work keeps its warm reservation");
+        task.status = cas_types::TaskStatus::Closed;
+        tasks.update(&task).unwrap();
+        let normal = inspect(&cas, TargetCachePolicy { high_watermark_percent: 100, low_watermark_percent: 99, ..pressure }, &[], &[], true).unwrap();
+        assert!(!normal.filesystem.pressure);
+        assert_eq!(normal.caches[0].disposition, CacheDisposition::Retained);
+        let mut report = inspect(&cas, pressure, &[], &[], true).unwrap();
+        assert!(report.filesystem.pressure);
+        assert_eq!(report.caches[0].bytes, 11);
+        assert_eq!(report.caches[0].disposition, CacheDisposition::Selected, "terminal-owned dead lane must yield under pressure");
+        assert_eq!(report.selected_bytes, 11);
+        cleanup_selected(&cas, &mut report, pressure, &[]).unwrap();
+        assert!(target.join("debug/output").is_file(), "dry run must preserve bytes");
+        task.status = cas_types::TaskStatus::InProgress;
+        tasks.update(&task).unwrap();
+        report.dry_run = false;
+        cleanup_selected(&cas, &mut report, pressure, &[]).unwrap();
+        assert_ne!(report.caches[0].disposition, CacheDisposition::Reclaimed, "task reopening invalidates pressure exemption");
+        assert!(target.exists());
+    }
+
+    #[test]
     fn capacity_probe_crosses_high_watermark_before_enospc() {
         let threshold_policy = TargetCachePolicy {
             high_watermark_percent: 85,

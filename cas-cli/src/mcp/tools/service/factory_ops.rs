@@ -19707,6 +19707,41 @@ mod artifact_project_scope_tests {
             cas_root.join("orphan/.git").is_file(),
             "report is read-only"
         );
+        let target = cas_root.join("orphan/target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("artifact"), b"rebuildable").unwrap();
+        let report = crate::factory_target_cache::inspect(
+            &cas_root,
+            crate::factory_target_cache::TargetCachePolicy {
+                high_watermark_percent: 1,
+                low_watermark_percent: 0,
+                min_idle_secs: 0,
+                retention_count: 0,
+            },
+            &[], &[], true,
+        ).unwrap();
+        let cache = report.caches.iter().find(|cache| cache.path == target)
+            .expect("missing-gitdir targets must be measured, even outside worktrees/");
+        assert_eq!(cache.bytes, 11);
+        assert!(cache.newest_write_unix_secs.is_some());
+        assert_eq!(cache.disposition, crate::factory_target_cache::CacheDisposition::OwnershipUncertain);
+        assert!(cache.reason.contains("review-only") && cache.reason.contains("manual"), "{}", cache.reason);
+        assert_eq!(report.selected_bytes, 0);
+        assert!(target.join("artifact").is_file());
+
+        let retired = cas_root.join("merge-sweeps/assembly-target");
+        std::fs::create_dir_all(&retired).unwrap();
+        std::fs::write(retired.join("artifact"), b"legacy").unwrap();
+        let scratch = crate::factory_target_cache::scratch::render(&cas_root, false);
+        let raw = scratch.lines().find_map(|line| line.strip_prefix("RELEASE_SCRATCH_STATUS_JSON="))
+            .expect("retired cache remains inventoried");
+        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let row = value["caches"].as_array().unwrap().iter()
+            .find(|row| row["path"] == retired.display().to_string()).unwrap();
+        assert_eq!(row["bytes"], 6);
+        assert_eq!(row["reclaimable_bytes"], 0);
+        assert!(row["remediation"].as_str().is_some_and(|text| text.contains("--adopt-legacy-cache")), "{row}");
+        assert!(retired.join("artifact").is_file());
     }
 
     #[test]
@@ -19727,11 +19762,25 @@ mod artifact_project_scope_tests {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("proof.md"), "evidence").unwrap();
         }
+        let renamed = base.join("cas-src-old-key/cas-a4b1/DerivedData");
+        let shared = base.join("shared-builds/target");
+        for dir in [&renamed, &shared] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("build"), b"rebuild").unwrap();
+        }
         let closed = ["cas-a4b1".to_string()].into_iter().collect();
         let report = factory_artifact_cleanup(&a_root, &closed, true, &closed);
         assert_eq!(report.removed, 1);
         assert!(!a_root.join("cas-a4b1").exists());
         assert!(b_root.join("cas-a4b1/proof.md").is_file());
         assert!(base.join("cas-a4b1/proof.md").is_file());
+        let output = report.render();
+        for path in [&b_root, &base.join("cas-a4b1"), &base.join("cas-src-old-key"), &base.join("shared-builds")] {
+            assert!(output.contains(&path.display().to_string()), "unscoped roots must be visible: {output}");
+        }
+        assert!(output.contains("bytes=7"), "{output}");
+        assert!(output.contains(&renamed.display().to_string()) && output.contains(&shared.display().to_string()), "regenerable outputs must be flagged: {output}");
+        assert!(renamed.join("build").is_file());
+        assert!(shared.join("build").is_file());
     }
 }

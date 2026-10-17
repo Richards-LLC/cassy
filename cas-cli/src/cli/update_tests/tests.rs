@@ -1616,8 +1616,19 @@ fn tty_update_without_yes_keeps_confirmation_and_human_output_enabled() {
         UpdateInteractivity {
             no_confirm: false,
             show_output: false,
-            show_download_progress: true,
+            show_download_progress: false,
         }
+    );
+    // cas-70a8 QA: a failed install names the cause without self_update's
+    // type prefix, and says the current binary is untouched.
+    let error = install_error(
+        &self_update::errors::Error::Network("Download request failed with status: 500".into()),
+        "3.17.1",
+        "9.9.9",
+    );
+    assert_eq!(
+        error.to_string(),
+        "could not install Cassy 9.9.9: Download request failed with status: 500; Cassy 3.17.1 is unchanged, so rerun `cas update` to retry"
     );
 }
 

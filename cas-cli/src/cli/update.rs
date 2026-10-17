@@ -3749,8 +3749,14 @@ fn perform_update(
         confirm_install(current_version, &target_version)?;
     }
 
-    // Perform the update
-    let status = updater.update()?;
+    // Perform the update. A run that asked first shows its download on the
+    // phase line (cas-70a8): self_update's own bar ended without a newline,
+    // so the phase result landed on the same line.
+    let status = {
+        let _download = live::during_open_phase(format!("downloading Cassy {target_version}"));
+        updater.update()
+    }
+    .map_err(|error| install_error(&error, current_version, &target_version))?;
     if matches!(&status, Status::Updated(_)) {
         // A new updater can remove quarantine before the first child launch.
         // An older parent cannot, so execute_post_swap repeats this before
@@ -3829,6 +3835,20 @@ fn perform_update(
     })
 }
 
+/// A failed download or swap, in the reader's words: self_update's type
+/// prefix (`UpdateError:`, `NetworkError:`) is dropped and the state of the
+/// installed binary is said, so the next step is clear (cas-70a8).
+fn install_error(error: &self_update::errors::Error, current: &str, target: &str) -> anyhow::Error {
+    let text = error.to_string();
+    let cause = match text.split_once(": ") {
+        Some((kind, rest)) if kind.ends_with("Error") && !kind.contains(' ') => rest.to_owned(),
+        _ => text,
+    };
+    anyhow::anyhow!(
+        "could not install Cassy {target}: {cause}; Cassy {current} is unchanged, so rerun `cas update` to retry"
+    )
+}
+
 /// Ask before replacing the binary: `Enter` or `y` installs, anything else
 /// keeps the current binary, as self_update's own prompt did.
 fn confirm_install(current: &str, target: &str) -> anyhow::Result<()> {
@@ -3890,12 +3910,12 @@ fn update_interactivity(
     let no_confirm = args.yes || silent;
     // cas-0aa5 / cas-70a8: the phase line says what self_update's chatter
     // said, and the confirmation is CAS's own (`confirm_install`), so the
-    // release check never prints. A run that asks first keeps the download
-    // bar: nothing else draws on its terminal then.
+    // release check never prints.
     UpdateInteractivity {
         no_confirm,
         show_output: false,
-        show_download_progress: !no_confirm,
+        // cas-70a8 QA F01: the phase line shows the download instead.
+        show_download_progress: false,
     }
 }
 
@@ -4658,7 +4678,10 @@ impl UpdateStepTracker {
             }
             (value, output)
         } else {
-            (f(), String::new())
+            live::set_open_phase(Some((mode, counter.clone(), label.to_owned())));
+            let value = f();
+            live::set_open_phase(None);
+            (value, String::new())
         };
         let shown = result(&value);
         print_phase_line(
@@ -4675,7 +4698,7 @@ impl UpdateStepTracker {
 }
 
 /// The real terminal, held open while the phase's own stdout is captured.
-fn terminal_handle() -> Option<std::fs::File> {
+pub(super) fn terminal_handle() -> Option<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::fd::FromRawFd;

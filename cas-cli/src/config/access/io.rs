@@ -220,7 +220,7 @@ impl Config {
                     "Failed to parse config.toml at line {line}: {e}. Restore a known-good config.toml backup, then rerun `cas doctor`."
                 ))
             })?;
-            config.note_retired_sections();
+            config.note_retired_sections(cas_dir);
 
             // If YAML also exists, merge any settings that are missing from TOML.
             // This handles the case where something wrote to config.yaml after
@@ -247,7 +247,7 @@ impl Config {
         if yaml_path.exists() {
             let content = std::fs::read_to_string(&yaml_path)?;
             let config: Self = serde_yaml::from_str(&content)?;
-            config.note_retired_sections();
+            config.note_retired_sections(cas_dir);
 
             // Auto-migrate to TOML
             if let Err(e) = config.save_toml(cas_dir) {
@@ -269,7 +269,10 @@ impl Config {
     /// Print a one-line note, once per process, when the loaded file still
     /// carries a retired section. The section itself is ignored on load and
     /// dropped on the next save.
-    fn note_retired_sections(&self) {
+    fn note_retired_sections(&self, cas_dir: &Path) {
+        if super::notices::defer_retired_config(cas_dir, self) {
+            return;
+        }
         static NOTED: std::sync::Once = std::sync::Once::new();
         if self.retired_jev.is_some() {
             NOTED.call_once(|| eprintln!("{RETIRED_JEV_SECTION_NOTE}"));

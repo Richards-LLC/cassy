@@ -2721,16 +2721,30 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
     let cli = update_test_cli(false);
     let run = || {
         let (result, output) = capture_phase(true, || {
+            let startup =
+                crate::cli::try_parse_from_with_wordmark(["cas", "update", "--all-projects"])
+                    .unwrap();
+            let _notices = crate::cli::startup_config_notices(&startup);
             // The real binary first reads config to decide crash-reporting
             // policy, then startup logging, then project discovery.
             let _enabled = crate::sentry::is_sentry_enabled();
             crate::config::Config::load(&root).unwrap();
-            refresh_all_projects_with_user_refresh(&args, &cli, Some(&root), None, None, None, || {
-                refresh_user_level_store_with_builtins(&args, &cli, || Ok(()))
-            })
+            refresh_all_projects_with_user_refresh(
+                &args,
+                &cli,
+                Some(&root),
+                None,
+                None,
+                None,
+                || refresh_user_level_store_with_builtins(&args, &cli, || Ok(())),
+            )
         });
         #[cfg(unix)]
-        assert!(!output.contains("ignored and dropped on the next save") && !output.contains("[jev] config section is retired"), "raw startup notice escaped structured maintenance: {output}");
+        assert!(
+            !output.contains("ignored and dropped on the next save")
+                && !output.contains("[jev] config section is retired"),
+            "raw startup notice escaped structured maintenance: {output}"
+        );
         result
     };
     let report = run().unwrap();
@@ -2775,8 +2789,70 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
         original
     );
     let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
-    assert_eq!(receipt["projects"][0]["retired_toml"]["status"], "unchanged");
+    assert_eq!(
+        receipt["projects"][0]["retired_toml"]["status"],
+        "unchanged"
+    );
     assert!(!project.join(".cas/.cas").exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn cas_4585_retired_notices_survive_nested_failure_and_other_modes() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.set_current_dir(&home);
+    let root = home.join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    env.set("CAS_ROOT", &root);
+    let path = root.join("config.toml");
+    let original = "[factory]\nmerge_sweep = true\n[jev]\nendpoint = 'fixture-only'\n";
+    std::fs::write(&path, original).unwrap();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    let startup =
+        crate::cli::try_parse_from_with_wordmark(["cas", "update", "--all-projects"]).unwrap();
+    let (_, output) = capture_phase(true, || {
+        let _outer = crate::cli::startup_config_notices(&startup);
+        let _enabled = crate::sentry::is_sentry_enabled();
+        let (_, nested) = capture_phase(true, || {
+            let _inner = crate::cli::startup_config_notices(&startup);
+            crate::config::Config::load(&root).unwrap();
+        });
+        assert!(
+            nested.is_empty(),
+            "nested scope drained its caller's notices: {nested}"
+        );
+        assert_eq!(crate::config::retire_config(&root, false).status, "failed");
+        // A refused or failed maintenance does not resolve this file. Scope
+        // exit replays it even if the command never reaches a final receipt.
+    });
+    assert!(
+        output
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("2 retired config entries remain ignored"),
+        "{output}"
+    );
+    assert!(!output.contains("ignored and dropped on the next save"));
+    assert!(
+        output.lines().all(|line| line.chars().count() <= 80),
+        "{output}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    // --check is not native maintenance: its ordinary config diagnostic is
+    // neither hidden nor consumed by the earlier updater scope.
+    let check = crate::cli::try_parse_from_with_wordmark(["cas", "update", "--check"]).unwrap();
+    let (_, ordinary) = capture_phase(true, || {
+        let _scope = crate::cli::startup_config_notices(&check);
+        crate::config::Config::load(&root).unwrap();
+    });
+    assert!(
+        ordinary.contains("ignored and dropped on the next save"),
+        "{ordinary}"
+    );
 }
 
 #[test]

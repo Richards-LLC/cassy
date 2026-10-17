@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Codex integration research — 2026-10-17</title><style>
+/* Generated from design-tokens.json by scripts/gen-design-tokens-css.py. Do not edit.
+   Paste into the artifact's <style>; DESIGN.md tokens replace these when a project has one. */
+:root {
+  color-scheme: light dark;
+  --bg: #F7F4EE;
+  --surface: #FFFFFF;
+  --surface-hero: #F1E7DD;
+  --line: #DAD3C7;
+  --line-strong: #8F8371;
+  --ink: #1B1D24;
+  --ink-muted: #5A5F6E;
+  --verdict: #2E3A9F;
+  --verdict-soft: #DDE1F7;
+  --evidence: #5A5F6E;
+  --action: #2E3A9F;
+  --good: #226845;
+  --warning: #7F5504;
+  --danger: #B3261E;
+  --good-tint: rgba(34,104,69,0.10);
+  --warning-tint: rgba(127,85,4,0.10);
+  --danger-tint: rgba(179,38,30,0.10);
+  --focus: #2E3A9F;
+  --series-1: #4C5CA8;
+  --series-2: #9D433B;
+  --series-3: #0095A0;
+  --series-4: #693F88;
+  --series-5: #5C6C00;
+  --magnitude-1: #E5E8F8;
+  --magnitude-2: #B7BEEB;
+  --magnitude-3: #8590DA;
+  --magnitude-4: #5563C2;
+  --magnitude-5: #2E3A9F;
+  --polarity-1: #B3261E;
+  --polarity-2: #DAD3C7;
+  --polarity-3: #226845;
+  --series-neutral: #6B7280;
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Times New Roman", serif;
+  --font-body: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --type-eyebrow: 600 12px/16px var(--font-mono);
+  --type-caption: 400 14px/20px var(--font-body);
+  --type-body: 400 17px/26px var(--font-body);
+  --type-lede: 400 21px/30px var(--font-body);
+  --type-heading: 600 27px/32px var(--font-body);
+  --type-title: 400 34px/38px var(--font-display);
+  --type-verdict: 400 clamp(32px, 4.6vw, 52px)/1.08 var(--font-display);
+  --type-hero-number: 500 clamp(56px, 8vw, 96px)/1 var(--font-mono);
+  --type-ledger: 400 15px/22px var(--font-mono);
+  --measure: 68ch;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-24: 96px;
+  --container: 1120px;
+  --gutter: 24px;
+  --margin-column: 240px;
+  --radius-chip: 4px;
+  --radius-panel: 8px;
+  --radius-ledger: 0px;
+}
+@media screen and (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12141A;
+    --surface: #191C24;
+    --surface-hero: #241E1E;
+    --line: #2B3040;
+    --line-strong: #6B7390;
+    --ink: #E9E6E0;
+    --ink-muted: #A3A7B4;
+    --verdict: #A9B3FF;
+    --verdict-soft: rgba(169,179,255,0.16);
+    --evidence: #A3A7B4;
+    --action: #A9B3FF;
+    --good: #5FC492;
+    --warning: #E2B14D;
+    --danger: #EF7B72;
+    --good-tint: rgba(95,196,146,0.14);
+    --warning-tint: rgba(226,177,77,0.14);
+    --danger-tint: rgba(239,123,114,0.14);
+    --focus: #A9B3FF;
+    --series-1: #7083D1;
+    --series-2: #C86A60;
+    --series-3: #00A5B4;
+    --series-4: #8C52B6;
+    --series-5: #819334;
+    --magnitude-1: #2A3050;
+    --magnitude-2: #3F4A8C;
+    --magnitude-3: #5B69C4;
+    --magnitude-4: #8592EA;
+    --magnitude-5: #A9B3FF;
+    --polarity-1: #EF7B72;
+    --polarity-2: #2B3040;
+    --polarity-3: #5FC492;
+    --series-neutral: #9AA1AF;
+  }
+}
+
+
+*{box-sizing:border-box}html{background:var(--bg);color:var(--ink);scroll-behavior:auto}body{margin:0;font:var(--type-body);background:var(--bg);color:var(--ink)}a{color:var(--action);text-decoration-thickness:1px;text-underline-offset:3px;overflow-wrap:anywhere}a:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--focus);outline-offset:4px}.skip{position:absolute;top:8px;left:8px;transform:translateY(-200%);background:var(--surface);color:var(--ink);padding:12px}.skip:focus{transform:none}.hero{background:var(--surface-hero);color:var(--ink);padding:32px 24px 24px;border-bottom:3px solid var(--verdict)}.hero-inner,main,footer{max-width:1120px;margin:auto}.eyebrow{font:var(--type-eyebrow);letter-spacing:.08em;text-transform:uppercase;margin:0 0 12px;color:var(--ink-muted)}h1{font:var(--type-verdict);max-width:30ch;letter-spacing:-.015em;margin:0 0 16px}.hero p{max-width:85ch;margin:0 0 16px}.hero>p{font:var(--type-lede)}figure{margin:16px 0 0}figcaption{font:var(--type-caption);margin-top:12px;max-width:90ch;color:var(--ink-muted)}main{padding:0 24px}section{padding:40px 0 8px;border-bottom:1px solid var(--line)}h2{font:var(--type-heading);margin:0 0 24px;max-width:40ch}p,ul,ol{max-width:78ch;margin:0 0 20px}p,li,td,th{overflow-wrap:anywhere}strong{font-weight:650}code{font-family:var(--font-mono);font-size:.87em;overflow-wrap:anywhere}pre{max-width:100%;overflow:auto;white-space:pre-wrap;padding:16px;border-left:3px solid var(--line-strong);background:var(--surface);color:var(--ink)}pre code{font-size:14px;line-height:1.6}table{border-collapse:collapse;width:100%;text-align:left;font-size:15px;line-height:1.5}caption{text-align:left;font:var(--type-caption);color:var(--ink-muted);padding-bottom:12px}th{font-weight:650;border-top:2px solid var(--line-strong);border-bottom:1px solid var(--line-strong);padding:12px;vertical-align:top}td{padding:12px;vertical-align:top;border-bottom:1px solid var(--line)}th+th,td+td{border-left:1px solid var(--line-strong)}.hero-ledger{table-layout:fixed}.hero-ledger caption{font:var(--type-eyebrow);letter-spacing:.04em}.hero-ledger th{border-top:1px solid var(--line-strong)}.hero-ledger td{border-color:var(--line-strong)}.table-scroll{max-width:100%;overflow:auto;margin:24px 0 32px}.table-scroll table{min-width:680px}.table-scroll th:first-child{width:27%}footer{padding:32px 24px 48px;font:var(--type-caption);color:var(--ink-muted)}@media(max-width:600px){.hero{padding:20px 16px 16px}h1{font-size:32px}.hero p{font-size:15px;line-height:1.45;margin-bottom:12px}.hero-ledger{font-size:13px;line-height:1.4}.hero-ledger th,.hero-ledger td{padding:10px 8px}.hero-ledger caption{font-size:11px}figcaption{font-size:12px;line-height:1.45}main{padding:0 16px}section{padding-top:32px}h2{font-size:25px;line-height:1.2}p{font-size:16px;line-height:1.6}.table-scroll{margin-top:16px}}@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}@media print{html,body{background:var(--bg);color:var(--ink)}.hero{background:var(--bg);color:var(--ink);padding:0 0 16px}main,footer{padding-left:0;padding-right:0}section{padding-top:24px}a[href^="http"]::after{content:" (" attr(href) ")";font-size:10px;overflow-wrap:anywhere}thead{display:table-header-group}tr,figure,pre{break-inside:avoid}.table-scroll{overflow:visible}.table-scroll table{min-width:0;font-size:10px}th,td{padding:6px}h1{font-size:30px}h2{font-size:22px}p,li{font-size:11px;line-height:1.5}.skip{display:none}@page{size:A4;margin:15mm}}
+
+</style></head><body><a class="skip" href="#sources-and-scope">Skip to evidence</a><header class="hero"><div class="hero-inner"><p class="eyebrow">Cassy · Codex · Research / 2026-10-17</p><h1 id="adopt-native-codex-projections-within-cassy-authority">Adopt native Codex projections within Cassy authority</h1>
+<p>Use native lifecycle and role projections within Cassy's ownership; validate transport replacements before adoption. Confidence: high in the bounded structure, moderate in unmeasured adapter benefits.</p>
+<figure aria-label="Native evidence and its authority boundaries"><table class="hero-ledger"><caption>Native evidence / authority boundaries</caption>
+<thead>
+<tr>
+<th scope="col">Evidence for native projections</th>
+<th scope="col">Counter-evidence requiring a boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Executed: SessionStart context and Stop continuation/re-entry work on 0.163.0.</td>
+<td>MCP-name matching was exercised; MCP execution enforcement was not.</td>
+</tr>
+<tr>
+<td>Documented: custom agents, skills and structured turn events provide native integration seams.</td>
+<td>Native roles and turn events do not establish a Cassy assignment or independent reviewer.</td>
+</tr>
+<tr>
+<td>Pinned source: configuration and managed-requirement readers expose useful context.</td>
+<td>No complete supported resolved tool/role reader was found; app-server production support is limited.</td>
+</tr>
+</tbody>
+</table><figcaption>Figure source: official guides and pinned 0.163.0 source reviewed 2026-10-17; peer cas-d0fe immutable canaries at 21:13Z and 21:17Z. This is an evidence comparison, not a performance measurement.</figcaption></figure>
+</div></header><main><section><h2 id="sources-and-scope">Sources and scope</h2>
+<p>Research date: <strong>2026-10-17 UTC</strong>. Cassy tree examined: <strong>5e4774024045f19adaddf8da0e7ac1e69d19a9ad</strong>, on the 3.64 epic. This report creates no 3.63 dependency and changes no product source, runtime, credentials or configuration.</p>
+<p>Independently queried <a href="https://api.github.com/repos/openai/codex/releases/latest">OpenAI's latest stable release</a>: <strong>0.163.0</strong>, published <strong>2026-10-15T21:30:38Z</strong>, neither draft nor prerelease. The annotated tag resolves to source <strong>83086188ae0614bd882818ff1aa23f3194962012</strong>. Published stable, installed binary, configured channel and demonstrated operation remain separate evidence fields.</p>
+<p>The <a href="https://developers.openai.com/codex/llms.txt">official Codex index</a> redirected to <a href="https://learn.chatgpt.com/docs/llms.txt">the current documentation index</a>. Its 199 linked entries were inventoried. Twenty-five priority pages were fetched with URL, HTTP status and retrieval time; 23 received scoped substantive reads and two were only fetched/indexed. This is a coverage ledger, not a claim to have read every current page. Live documentation has no version guarantee and can lead a stable binary.</p>
+<div class="table-scroll" role="region" aria-label="Sources and scope" tabindex="0"><table><caption>Sources and scope</caption>
+<thead>
+<tr>
+<th scope="col">Source / retrieval date</th>
+<th scope="col">Evidence type</th>
+<th scope="col">Reliability boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://api.github.com/repos/openai/codex/releases/latest">Official latest-release API</a> / Oct 17</td>
+<td>Published stable metadata and annotated tag</td>
+<td>Authoritative publication state at retrieval; not installed state.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openai/codex/releases">Official release notes</a> / Oct 17</td>
+<td>Seven stable bodies, 0.159.3–0.163.0</td>
+<td>Upstream descriptions; not an executed Cassy regression run.</td>
+</tr>
+<tr>
+<td><a href="https://learn.chatgpt.com/docs/llms.txt">Official docs index</a> and 25 linked pages / Oct 17</td>
+<td>Current supported shapes and stated maturity</td>
+<td>Live, unversioned; scoped reads and omissions below.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openai/codex/tree/83086188ae0614bd882818ff1aa23f3194962012">Pinned upstream source</a> / Oct 17</td>
+<td>Stable implementation and generated schemas</td>
+<td>Strong for inspected paths; not a full source audit.</td>
+</tr>
+<tr>
+<td>Cassy base 5e477402 / Oct 17</td>
+<td>Existing integration seams</td>
+<td>Static source evidence, not runtime behavior.</td>
+</tr>
+<tr>
+<td>cas-d0fe immutable canaries / Oct 17, 21:13Z and 21:17Z</td>
+<td>Executed 0.163.0 observations</td>
+<td>Exact controls only; MCP execution and full conformance unexercised.</td>
+</tr>
+<tr>
+<td>cas-6c54 reader map and cas-558a parity matrix / Oct 17</td>
+<td>Peer source analysis and historical conformance provenance</td>
+<td>Reused, attributed evidence; pending implementations are not claimed complete.</td>
+</tr>
+</tbody>
+</table></div>
+<p>Primary guides used below: <a href="https://learn.chatgpt.com/docs/hooks">hooks</a>, <a href="https://learn.chatgpt.com/docs/agent-configuration/subagents">subagents</a>, <a href="https://learn.chatgpt.com/docs/build-skills">skills</a>, <a href="https://learn.chatgpt.com/docs/app-server">app-server</a>, <a href="https://learn.chatgpt.com/docs/config-file/config-basic">configuration basics</a>, <a href="https://learn.chatgpt.com/docs/config-file/config-advanced">advanced configuration</a>, <a href="https://learn.chatgpt.com/docs/config-file/config-reference">configuration reference</a>, <a href="https://learn.chatgpt.com/docs/extend/mcp">MCP</a>, <a href="https://learn.chatgpt.com/docs/auth">authentication</a>, <a href="https://learn.chatgpt.com/docs/non-interactive-mode">exec</a>, and <a href="https://learn.chatgpt.com/docs/developer-commands?surface=cli">developer commands</a>. Each subsequent claim links its supporting primary source; local receipts identify executed evidence separately.</p>
+</section>
+<section><h2 id="release-coverage-every-missing-stable-entry">Release coverage: every missing stable entry</h2>
+<p>Two official release API pages, 50 records each, reached older stable releases beyond the requested floor. Seven stable releases fall in 0.159.3–0.163.0. All release bodies and appended PR titles were triaged; upstream implementations were inspected only for the specific precedence and reader questions below. The title inventory contains 661 entries: 444 keyword-selected candidates and 217 peripheral entries. These are triage counts, not audited-code counts.</p>
+<div class="table-scroll" role="region" aria-label="Release coverage: every missing stable entry" tabindex="0"><table><caption>Release coverage: every missing stable entry</caption>
+<thead>
+<tr>
+<th scope="col">Stable / published UTC date</th>
+<th scope="col">Cassy-relevant additions and fixes</th>
+<th scope="col">Applicability decision</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://github.com/openai/codex/releases/tag/rust-v0.159.3">0.159.3</a> / Sep 30</td>
+<td>Optional account security reminders for eligible ChatGPT local sessions.</td>
+<td>Defer UI handling unless observed; account eligibility is contextual.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openai/codex/releases/tag/rust-v0.160.0">0.160.0</a> / Oct 1</td>
+<td>Reconnect queue deduplication; launch/workspace permission restoration; server-supplied model/provider/history settings retained; subagent setup failures propagated; SQLite failures more visible; explicit catalogs authoritative.</td>
+<td>Test delivery/admission and permission-resume adapters. Preserve explicit model selection. Command-center pagination and Linux X11 selection are UI changes, not delivery proof.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openai/codex/releases/tag/rust-v0.160.1">0.160.1</a> / Oct 5</td>
+<td>Remote stdio MCP preserves required Windows environment variables.</td>
+<td>Defer Windows-specific implementation here; keep remote environment forwarding in cross-platform conformance scope.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openai/codex/releases/tag/rust-v0.161.0">0.161.0</a> / Oct 7</td>
+<td>Background work retains originating permissions; escalation retains denies/network policy; explicit launch permissions survive reconnect; active-session MCP login; authoritative resume history; paste-expiry fix; SQLite corruption backup; conditional Daybreak/Bedrock changes.</td>
+<td>Test permissions, resume and PTY admission; do not change provider/model or infer universal eligibility. Voice/device settings are outside this Linux factory integration review.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openai/codex/releases/tag/rust-v0.162.0">0.162.0</a> / Oct 8</td>
+<td>Managed worktrees; provider search/compaction capability overrides; CodeMode promise/tool-search changes; explicit model/effort preservation; sandbox path protections; lineage, queued-mail attribution and subagent delivery fixes.</td>
+<td>Preserve Cassy worktree ownership; test model/tool exposure and queue identity. PRs #50427/#50458 truncate command/MCP history: do not treat retained history as a complete forensic log. #51482–#51493 change skill/capability-root identity and ownership.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openai/codex/releases/tag/rust-v0.162.1">0.162.1</a> / Oct 9</td>
+<td>Multiline question hyperlink crash fix; daemon compatibility checks use explicit overrides rather than defaults.</td>
+<td>Keep profile/default/explicit provenance distinct; no inference that every installed daemon is compatible.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openai/codex/releases/tag/rust-v0.163.0">0.163.0</a> / Oct 15</td>
+<td>Live config/daemon controls; instant steering cancels nested work; parallel read-only tools; permission-aware cold resume; network proxy validation; thread-affine replies; bounded output draining; shell backend migration; conditional Daybreak changes.</td>
+<td>Test cancellation, output and resume at the real transport seam. Appended PRs add experimental read state, async/speculative compaction, provisional children and connection-bound replies; none independently establish Cassy ACK, task ownership or durable reviewer authority.</td>
+</tr>
+</tbody>
+</table></div>
+<p>The 0.163.0 appendix also covers launch-cwd-independent global app-server configuration (#51872), subagent capability/fork separation (#52241), read state (#52337/#52350/#52395), runtime reset (#52825), retained outputs through compaction (#52937), cold permissions (#53150/#53419/#53424), compaction internals (#53595/#53606/#53614/#53620), hidden native tools with retained runtime (#53617), provisional children (#53654), cloned hook views (#53657), MCP launcher/sandbox separation (#53709) and execution-server capability discovery (#53723). These are applicability leads, not evidence that Cassy's current adapters use them correctly.</p>
+</section>
+<section><h2 id="lifecycle-and-trust-adopt-a-bounded-projection">Lifecycle and trust: adopt a bounded projection</h2>
+<p>The <a href="https://learn.chatgpt.com/docs/hooks">hook guide</a> documents merged matching hooks across active configuration layers; a higher layer does not simply replace lower hooks. Project trust can exclude project layers while user/system hooks remain. Exact hook-definition trust and managed restrictions are separate controls. <code>features.hooks=false</code>, managed feature pins and managed-only hook policy must remain effective operator constraints; a supported feature does not authorize enabling it.</p>
+<p>Tool matching covers shell aliases, file-edit aliases and MCP tool names, with stated opt-outs and hosted-tool limitations. A PreToolUse denial is useful only when the handler emits a supported decision. Unsupported/malformed output and some handler errors continue execution; MCP hook failures/timeouts are documented as fail-open. These mechanisms cannot be the only authority boundary. Auto-review failures have a different, fail-closed contract in the <a href="https://learn.chatgpt.com/docs/agent-approvals-security#automatic-approval-reviews">security guide</a>; the two failure policies must not be conflated.</p>
+<p><strong>Executed peer evidence:</strong> cas-d0fe's immutable <code>canary/results/20261017T211351Z/ANALYSIS.md</code>, using codex-cli 0.163.0 with model gpt-6.1-sol, proves SessionStart ran and its developer context was consumed, and Bash/MCP-name PreToolUse matching fired before approval. MCP execution itself was refused by the canary's approval policy and remains unexercised. This task launched no model session.</p>
+<p>The discriminating <code>canary/results/stop-20261017T211715Z/ANALYSIS.md</code> proves trusted Stop blocking caused continuation, a subsequent <code>stop_hook_active=true</code> stopped cleanly, and an untrusted UserPromptSubmit control stayed silent while a trusted hook ran. Its <code>hooks/list</code> receipt shows matcher-ignored events omit the matcher from trust identity; Cassy's existing helper always included an empty matcher. This resolves the earlier silent-Stop ambiguity. It does not reproduce every historical operator trust prompt.</p>
+<p>At Cassy base, <code>crates/cas-pty/src/codex_trust.rs</code> pins older hash behavior, <code>cas-cli/src/cli/hook/config_gen.rs</code> generates tool hooks, and <code>crates/cas-mux/src/backend/codex.rs:21</code> reports static hook support false. <strong>Adopt the adapter direction through cas-d0fe</strong>, preserving exact trust, existing user files and explicit disablement. Then verify installation/review and real failed/successful execution controls before claiming enforcement.</p>
+<p>Async hooks are unsuitable for admission, policy or Stop continuation: the guide makes their output deferred to a safe model point, gives them no blocking/rewrite power and does not promise to wake an idle session. Keep blocking lifecycle paths synchronous and continuation bounded by the native re-entry field.</p>
+</section>
+<section><h2 id="roles-skills-and-independent-verification">Roles, skills and independent verification</h2>
+<p>The <a href="https://learn.chatgpt.com/docs/agent-configuration/subagents">subagent guide</a> defines personal <code>~/.codex/agents/*.toml</code> and project <code>.codex/agents/*.toml</code>, with <code>name</code>, <code>description</code> and <code>developer_instructions</code>. Canonical Cassy role bodies can generate these projections without duplicating policy. Preserve unowned files/symlinks and intentional operator overrides. Role configuration can override model/effort selection; inherited approval, sandbox and provider constraints cannot be strengthened merely by describing an agent as read-only.</p>
+<p>At base, <code>cas-cli/src/harness_policy.rs:231</code> derives required verification from static optional capability bits. <code>hooks/handlers/handlers_events/pre_tool.rs:1016</code> and <code>handlers_state.rs:645</code> bind a registered Task/Agent handoff to SubagentStart. A discoverable Codex role, spawn response or native turn is not that sealed registration. <strong>Adopt cas-6c54's contextual capability separation and independent-review fallback</strong>, subject to its implementation review. Never make independent review disappear because an optional native feature is unavailable; preserve explicitly authorized skip policy.</p>
+<p>There is a concrete docs/stable-source discrepancy. The live guide describes <code>agents.enabled=false</code> as disabling multi-agent behavior. In <a href="https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/config/mod.rs#L1637">0.163.0 config resolution</a>, enabled <code>multi_agent_v2</code> selects V2 before checking that boolean. The <a href="https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/features/src/lib.rs#L1468">pinned feature definitions</a> distinguish V1 <code>multi_agent</code> (stable, default true) and V2 (stable, default false). Consequently one flag is insufficient effective-availability evidence. Record requested disablement and report a conflict/unknown where the native effective state is unresolved; do not silently rewrite settings.</p>
+<p>The <a href="https://learn.chatgpt.com/docs/build-skills">skill guide</a> uses canonical <code>.agents/skills</code> discovery, including repository ancestors and personal scope. Equal names do not merge; <code>agents/openai.yaml</code> can disable implicit invocation while retaining explicit invocation. Dependencies metadata is not permission to install servers. Cassy currently shares legacy <code>CODEX_HOME/skills</code>; an app-server example also uses <code>.codex/skills</code>. <strong>Test discovery and duplicate/override behavior before migration</strong>, using owned projections rather than moving user content. <a href="https://learn.chatgpt.com/docs/custom-prompts">Custom prompts are deprecated</a>; cas-558a already owns the existing finish-skill/diary reconciliation, so this report requests no overlapping edit.</p>
+</section>
+<section><h2 id="native-readers-preserve-unknowns">Native readers: preserve unknowns</h2>
+<p>Prefer supported native evidence over a second implementation of CLI/project/profile/managed precedence. The <a href="https://learn.chatgpt.com/docs/app-server">app-server reference</a> documents <code>config/read</code> with <code>cwd</code> and <code>includeLayers</code>, and <code>configRequirements/read</code> for constraints. The latter spelling matters. They reveal layered on-disk configuration and origins, not a complete callable-tool list for an active model turn. Feature-list state similarly does not establish every model's tool availability.</p>
+<p>Pinned schemas confirm the limit: <a href="https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/app-server-protocol/schema/json/v2/ConfigReadParams.json">ConfigReadParams</a> supports cwd/layers; configuration permits additional fields; the fetched <code>ModelProviderCapabilitiesReadResponse</code> contains image-generation and web-search information, not an authoritative native-agent catalog.</p>
+<p>The documented <code>debug prompt-input</code> is not a resolved-tools reader. In <a href="https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/cli/src/main.rs#L1995">the stable CLI</a>, it builds configuration and performs authentication/Git/skill setup; <a href="https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/prompt_debug.rs">prompt_debug</a> returns input messages (<code>Vec&lt;ResponseItem&gt;</code>). No invocation was made here. No complete supported resolved role/tool reader was found in the reviewed docs/source, so that field stays <strong>Unknown</strong> rather than guessed.</p>
+<p>Recommended capability evidence record: harness/channel, binary version and path, source tag/commit where known, cwd and state-home identity, requested model/profile/CLI overrides, trusted layers and managed requirements, operation, supported/disabled/unknown, evidence kind, receipt and timestamp. Redact secrets; distinguish configuration evidence, available-tool evidence and demonstrated execution. A model catalog or version alone never proves all three.</p>
+</section>
+<section><h2 id="transport-and-background-execution-test-before-replacement">Transport and background execution: test before replacement</h2>
+<p>The <a href="https://learn.chatgpt.com/docs/app-server">app-server protocol</a> offers initialized connections, thread identity, typed items and turn completion statuses. <code>turn/start</code> acknowledgement, <code>turn/started</code>, completed items and <code>turn/completed</code> are different observations. <code>turn/steer</code> targets an expected active turn; it does not create a new turn. <code>thread/inject_items</code> persists history without starting a turn. Experimental thread read state is not a Cassy delivery ACK.</p>
+<p>Cassy's current <code>ui/factory/daemon/runtime/queue_and_events.rs:3051</code> distinguishes normal delivery turn evidence from byte submission; <code>delivery_probe_jobs.rs:97</code>, mux pane completion and <code>commander_mirror.rs:166</code> already carry transport ownership. Route an experimental adapter through these seams instead of adding a second queue owner. Test UUID-targeted <code>codex queue</code>, reconnect/duplicate delivery, idle/busy states, turn attribution and failure controls with cas-353b. Queue acceptance alone cannot prove model consumption.</p>
+<p>There is material counter-evidence to immediate replacement. The <a href="https://learn.chatgpt.com/docs/developer-commands?surface=cli">command reference</a> calls app-server a development/debug surface that may change; the <a href="https://learn.chatgpt.com/docs/mcp-server">removed Codex MCP-server guide</a> points at app-server while warning about experimental/production support. WebSocket transport is experimental. Use a private, version-pinned pilot with the existing PTY path retained. This task executed neither app-server nor queue delivery.</p>
+<p>Do not confuse removal of Codex's own MCP-server mode with support for external MCP servers: Cassy's canonical <code>cs</code> stdio server is a Codex client integration. Keep <code>mcp__cs__</code> naming/policy identity in <code>crates/cas-mux/src/backend/codex.rs</code> and PTY launch identity in <code>crates/cas-pty/src/pty.rs:1473</code>. CodeMode/ranked tool search and native alias changes require execution-level policy tests before changing exposure.</p>
+<p>Background/process APIs have separate scope and maturity. Some app-server command-execution methods run outside the agent sandbox; they are not interchangeable with policy-governed model tool calls. Experimental terminal list/terminate/clean operations require exact owned process identity. Releases improve permission retention, cancellation and late-output draining, but Cassy's complete saved conformance pin is still <code>crates/cas-pty/conformance/codex-cli-0.156.0-2026-09-23.json</code>. Reuse d0fe's narrow 0.163 receipts without presenting them as a complete replacement conformance run.</p>
+</section>
+<section><h2 id="state-compaction-account-and-profile-boundaries">State, compaction, account and profile boundaries</h2>
+<p><a href="https://learn.chatgpt.com/docs/config-file/config-basic">Configuration precedence</a> layers explicit CLI, trusted project context, selected profile, user/cloud/system settings and defaults under managed constraints. <a href="https://learn.chatgpt.com/docs/config-file/config-advanced#profiles">Standalone named profile files</a> replace removed legacy inline profiles; this is not a new 0.163 migration. Project config cannot redirect all sensitive provider/authentication settings. The beta <a href="https://learn.chatgpt.com/docs/permissions">permission profile</a> system has compatibility/precedence rules with older sandbox flags and requires an active proxy for domain restrictions. Do not switch Cassy's launch policy during this research task.</p>
+<p><a href="https://learn.chatgpt.com/docs/auth">Authentication storage</a> can be file, keyring, automatic or ephemeral. <code>cas-cli/src/accounts.rs:118</code> shares AGENTS, agents, hooks, config, plugins, skills and memories across account homes, while current account handling also reads <code>auth.json</code>. A distinct home directory is not sufficient proof of effective authenticated account when keyring or workspace constraints apply. Test identity/credential storage and shared-trust effects in a separately approved isolated fixture; this static review establishes a compatibility question, not a reproduced account leak.</p>
+<p><a href="https://learn.chatgpt.com/docs/config-file/environment-variables">Environment controls</a> separate <code>CODEX_HOME</code> from SQLite home overrides. The <a href="https://learn.chatgpt.com/docs/config-file/config-advanced#shell-environment-policy">shell environment policy</a> applies filters and explicit sets in an order that can reintroduce excluded values; default secret exclusion must not be assumed. A future evidence harness should preserve required CAS authority markers while giving HOME/XDG/runtime/temp and Git state private roots and an explicit credential-free allowlist.</p>
+<p><a href="https://learn.chatgpt.com/docs/customization/memories">Native memories</a> are optional, generated background context under Codex state. They do not replace Cassy's durable tasks/memory or authorize a second work owner. Manual compaction acknowledgement is distinct from a completed context-compaction item. Prefer documented item events over transcript-path scraping; a transcript path is not a stable API. Defer automatic/speculative compaction enablement and native goal continuation until cancellation, authority and context preservation are demonstrated. No memory/compaction performance benefit was measured here.</p>
+<p><a href="https://learn.chatgpt.com/docs/environments/git-worktrees">Codex-managed worktrees</a> have their own storage/cleanup rules, and ignored-file copying is explicitly scoped to desktop-managed worktrees. Preserve Cassy's branch/worktree/scratch ownership; do not import desktop cleanup or secret-copy behavior into factory worktrees. New models/providers, Daybreak eligibility, cloud/plugin workflows and UI controls remain optional context rather than reasons to change account or execution policy.</p>
+</section>
+<section><h2 id="adopt-test-defer-matrix">Adopt / test / defer matrix</h2>
+<p>“Adopt” approves a structure for an existing owned implementation task; it does not claim that this report installed it. Every expected benefit below is a hypothesis unless an executed observation is explicitly cited above.</p>
+<div class="table-scroll" role="region" aria-label="Adopt / test / defer matrix" tabindex="0"><table><caption>Adopt / test / defer matrix</caption>
+<thead>
+<tr>
+<th scope="col">Decision and owner / seam</th>
+<th scope="col">Expected benefit and existing evidence</th>
+<th scope="col">Required proof / compatibility cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Adopt direction — d0fe:</strong> synchronous SessionStart/Stop adapters; <code>codex_trust.rs</code>, <code>config_gen.rs</code>.</td>
+<td>Native context/continuation demonstrated by peer canaries.</td>
+<td>Exact trust identity, explicit disabled/managed policy, bounded re-entry, install/review controls; keep existing user definitions. MCP execution remains unproven.</td>
+</tr>
+<tr>
+<td><strong>Adopt direction — 6c54:</strong> contextual capability records and independent-review fallback; <code>harness_policy.rs</code>, backend.</td>
+<td>Avoid static false bits suppressing review; source mismatch demonstrated.</td>
+<td>Preserve requested overrides, V1/V2 conflict, unknown model/tool state; no fabricated availability from one feature flag.</td>
+</tr>
+<tr>
+<td><strong>Adopt direction — 6c54:</strong> canonical role body to native TOML; <code>builtins.rs</code>, sealed handoff handlers.</td>
+<td>Avoid policy drift between catalogs.</td>
+<td>Discovery and invocation fixture; preserve unowned files; native child must not inherit Cassy verifier authority without registration.</td>
+</tr>
+<tr>
+<td><strong>Test — skill integration owner to assign:</strong> canonical skill projection and deprecated-prompt migration.</td>
+<td>Supported native discovery; finish skill already reconciled by 558a.</td>
+<td>Ancestor/user/legacy roots, duplicate names and explicit/implicit invocation; no blind move or user-file overwrite.</td>
+</tr>
+<tr>
+<td><strong>Test — 353b:</strong> UUID queue/admission adapter; queue/turn evidence handlers.</td>
+<td>Potentially reduce PTY submission ambiguity; docs/release fixes only.</td>
+<td>Idle/busy/reconnect/cancel, duplicate control, actual turn and model consumption; CAS receipt ownership retained.</td>
+</tr>
+<tr>
+<td><strong>Test — transport owner to assign:</strong> private app-server event pilot; backend/mux boundary.</td>
+<td>Typed thread/item/turn events could improve attribution.</td>
+<td>Versioned schema/error handling, reply identity, disconnect, compaction and PTY fallback; production-support warning prevents immediate replacement.</td>
+</tr>
+<tr>
+<td><strong>Test — d0fe/policy owner:</strong> MCP execution and failure controls; tool hook ingress.</td>
+<td>Matching already exercised before approval.</td>
+<td>Actual allowed/denied execution, malformed output/timeout/unavailable handler, hosted/CodeMode opt-outs; hook fail-open cannot become sole authority.</td>
+</tr>
+<tr>
+<td><strong>Test — conformance owner:</strong> background, interruption, output, cold resume.</td>
+<td>Upstream fixes address real transport failure classes.</td>
+<td>Root-approved full conformance at exact version/launch policy; reuse partial receipts, preserve originating permission and process ownership.</td>
+</tr>
+<tr>
+<td><strong>Test — account owner:</strong> auth/profile/state-home evidence; <code>accounts.rs</code>, PTY launch.</td>
+<td>Detect identity/config sharing ambiguity before rollout.</td>
+<td>File/keyring/ephemeral and forced-workspace controls, explicit profiles, credential-free fixture; source concern is not observed leakage.</td>
+</tr>
+<tr>
+<td><strong>Test — context owner:</strong> compaction item events and retained output.</td>
+<td>Could avoid transcript heuristics and stale context.</td>
+<td>Completion versus acceptance, cancellation, model-visible context; no auto-feature enablement or timing claim.</td>
+</tr>
+<tr>
+<td><strong>Defer:</strong> native memory as an authoritative store; speculative/async compaction enablement.</td>
+<td>Optional native context may be useful later.</td>
+<td>Separate CAS ownership, settings, cost and retention; no current benefit measurement.</td>
+</tr>
+<tr>
+<td><strong>Defer:</strong> native goal/worktree orchestration and wholesale plugin/SDK migration.</td>
+<td>Adds another owner before a demonstrated need.</td>
+<td>One CAS task/start/close owner; retain factory branches, scratch and process lifecycle. SDK wrapper alone does not solve authority.</td>
+</tr>
+<tr>
+<td><strong>Defer:</strong> forced model/provider/Daybreak changes; Windows/voice/desktop-only policy.</td>
+<td>Release availability is conditional and platform-specific.</td>
+<td>Preserve explicit operator model/account/settings; no inherent model comparison or new 3.63 gate.</td>
+</tr>
+</tbody>
+</table></div>
+</section>
+<section><h2 id="coverage-ledger-and-omissions">Coverage ledger and omissions</h2>
+<p>The complete machine ledger inventories all 199 index entries with reviewed/fetched/unfetched status and reasons. Raw pages, metadata, release bodies, tag resolution, selected stable source and PR-title inventory remain under task artifact <code>cas-9ca1/</code>; they are not copied into product configuration.</p>
+<div class="table-scroll" role="region" aria-label="Coverage ledger and omissions" tabindex="0"><table><caption>Coverage ledger and omissions</caption>
+<thead>
+<tr>
+<th scope="col">Official page group / fetched count</th>
+<th scope="col">Read scope and explicit omissions</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Hooks, subagents, skills / 3</td>
+<td>Discovery, trust, lifecycle, inheritance and invocation; not every handler/authoring/model-choice example.</td>
+</tr>
+<tr>
+<td>App-server, developer commands, SDK, removed MCP-server / 4</td>
+<td>Selected lifecycle/config/turn/queue/experimental APIs; full command/auth/app-settings catalog not read. SDK/MCP-server notices read; no execution.</td>
+</tr>
+<tr>
+<td>Config basic/advanced/reference/environment / 4</td>
+<td>Layering, profiles, feature/role controls, state and shell environment; reference is targeted lookup, not a linear read. Telemetry/provider/UI examples not exhaustively read.</td>
+</tr>
+<tr>
+<td>AGENTS, rules, managed configuration / 3</td>
+<td>Instruction discovery, command rule precedence and selected managed controls; enterprise deployment and all example trees not read.</td>
+</tr>
+<tr>
+<td>Auth, MCP, exec / 3</td>
+<td>Storage/identity, server/tool policy, noninteractive events/resume; sign-in/OAuth and CI recipes not exhaustively read.</td>
+</tr>
+<tr>
+<td>Memories, permissions, security, worktrees, maturity / 5</td>
+<td>Relevant state/ownership/maturity boundaries; permission/network/OS and desktop walkthroughs only scoped reads.</td>
+</tr>
+<tr>
+<td>Deprecated custom prompts / 1</td>
+<td>Guide read; reuse existing finish-skill ownership.</td>
+</tr>
+<tr>
+<td>CLI overview, skills-and-plugins / 2</td>
+<td>Fetched/indexed only, not substantively reviewed; no adoption conclusion drawn from these pages.</td>
+</tr>
+</tbody>
+</table></div>
+<p>Out-of-scope or unresolved content includes the rest of the index (administration, enterprise/cloud/IDE/desktop workflows and adjacent feature pages), full upstream PR diffs, beta platform enforcement matrices, hosted-tool coverage, actual MCP execution, full 0.163 PTY conformance, queue/app-server runtime delivery and model-dependent tool availability. Initial obsolete upstream feature and unversioned schema paths returned 404; the correct pinned feature crate and v2 schema paths were retrieved. No final finding relies on that failed path.</p>
+</section>
+<section><h2 id="confidence-counter-evidence-and-implications">Confidence, counter-evidence and implications</h2>
+<p><strong>High confidence:</strong> published stable/tag provenance; the seven-release inventory; supported documented role/hook/config shapes; pinned V2 precedence; peer canary observations within their exact controls. <strong>Moderate confidence:</strong> which adapter will improve Cassy's delivery reliability, because no end-to-end transport comparison was run. <strong>Unknown:</strong> full effective native tools/roles for every model/profile, complete hook enforcement, account isolation across credential backends and any performance gain.</p>
+<p>The strongest case against native adoption is support and authority mismatch: app-server support is limited, hook execution can fail open, roles inherit constraints and do not register independent reviewers, and current Cassy conformance is older. These are reasons for small reversible adapters with independent receipts. A supported native catalog/availability API or a production-support commitment could change the transport recommendation; failed real denial/continuation tests would narrow the lifecycle recommendation.</p>
+<p>Send this matrix to cas-d0fe, cas-6c54 and cas-558a; pair it with cas-f1ca's Claude review. The common structure should keep one canonical Cassy role/policy source, harness-native projections, contextual evidence records and a transport adapter that preserves existing task/receipt ownership. Proposed tests without an assigned owner remain proposals, not newly authorized work. No runtime setting, verifier skip, trust bypass, model change or release gate follows automatically from this report.</p>
+</section>
+<section><h2 id="provenance-and-reproduction">Provenance and reproduction</h2>
+<p>Author: quick-crow-35, task cas-9ca1. Analysis baseline: <code>5e4774024045f19adaddf8da0e7ac1e69d19a9ad</code>. Stable upstream baseline: <code>83086188ae0614bd882818ff1aa23f3194962012</code>. Source Markdown: <code>docs/analysis/2026-10-17-cas-9ca1-codex-integration-research.md</code>; HTML is generated from this complete source with inline house tokens and no network dependency.</p>
+<p>Artifact directory: <code>/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-9ca1/</code>. <code>coverage-ledger.json</code>, <code>sources/docs-fetch-ledger.json</code>, <code>sources/release-pagination.json</code>, <code>sources/release-pr-scope-inventory.json</code> and per-file HTTP metadata record scope and retrieval. Initial official fetches began 21:15Z on 2026-10-17; individual timestamps are authoritative. <code>build-coverage.py</code> inventories the index and annotates read scope; <code>render-report.mjs</code> generates the offline review surface.</p>
+<p>Read-only discovery commands included:</p>
+<pre><code class="language-sh">exa-search --domains developers.openai.com,learn.chatgpt.com --raw 'Codex official documentation llms.txt'
+exa-search --contents https://developers.openai.com/codex/llms.txt --raw
+</code></pre>
+<p>Public HTTP GETs recorded in the fetch scripts/metadata included:</p>
+<pre><code class="language-text">https://api.github.com/repos/openai/codex/releases/latest
+https://api.github.com/repos/openai/codex/releases?per_page=50&amp;page=1
+https://api.github.com/repos/openai/codex/releases?per_page=50&amp;page=2
+https://api.github.com/repos/openai/codex/git/ref/tags/rust-v0.163.0
+https://learn.chatgpt.com/docs/&lt;slug&gt;.md
+https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/&lt;path&gt;
+</code></pre>
+<p>Local inspection used <code>rg</code> and bounded <code>sed</code> reads against the named baseline paths. Peer evidence was read from immutable files in cas-d0fe, cas-6c54 and cas-558a; no canary, model session, Rust check, production migration or live profile probe was repeated. Report verification consists of document lint, complete-source rendering, strict visual QA in light/dark desktop/phone, JavaScript-disabled content and print review; it does not certify runtime adapters.</p>
+</section></main><footer>Diffable source: <a href="2026-10-17-cas-9ca1-codex-integration-research.md">2026-10-17-cas-9ca1-codex-integration-research.md</a>. Research-only delivery; no runtime adoption claim.</footer></body></html>

@@ -75,7 +75,10 @@ fn sweep_clean_merged_worktree_removes_it() {
     let origin = temp.path().join("origin");
     fs::create_dir_all(&origin).unwrap();
     git_ok(&origin, &["init", "--bare", "-q", "-b", "main"]);
-    git_ok(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git_ok(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
     git_ok(&repo, &["push", "-q", "origin", "main"]);
     git_ok(&repo, &["fetch", "-q", "origin"]);
     fs::write(wt.join("merged.txt"), "merged upstream").unwrap();
@@ -83,8 +86,28 @@ fn sweep_clean_merged_worktree_removes_it() {
     git_ok(&wt, &["commit", "-q", "-m", "merged upstream"]);
     // Push from an independent clone so this repo's origin/main is stale too.
     let publisher = temp.path().join("publisher");
-    git_ok(temp.path(), &["clone", "-q", repo.to_str().unwrap(), publisher.to_str().unwrap()]);
-    git_ok(&publisher, &["push", "-q", origin.to_str().unwrap(), "origin/factory/worker1:refs/heads/main"]);
+    git_ok(
+        temp.path(),
+        &[
+            "clone",
+            "-q",
+            repo.to_str().unwrap(),
+            publisher.to_str().unwrap(),
+        ],
+    );
+    git_ok(
+        &publisher,
+        &[
+            "push",
+            "-q",
+            origin.to_str().unwrap(),
+            "origin/factory/worker1:refs/heads/main",
+        ],
+    );
+    let merged_commit = String::from_utf8(git(&wt, &["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_string();
 
     let report = sweep_one_repo(&repo, SweepOptions::default());
 
@@ -95,6 +118,26 @@ fn sweep_clean_merged_worktree_removes_it() {
     ));
     assert!(!wt.exists(), "worktree dir must be gone");
     assert!(report.prune_ran, "prune must run when worktrees existed");
+    assert_eq!(
+        report.comparison,
+        Some(("origin/main".into(), merged_commit))
+    );
+    // Failed fetches must preserve worktrees and name the failure, never
+    // silently fall back to the stale local main.
+    let retained = add_worktree(&repo, "fetch-failed");
+    git_ok(
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            temp.path().join("missing-origin").to_str().unwrap(),
+        ],
+    );
+    let failed = sweep_one_repo(&repo, SweepOptions::default());
+    assert!(failed.repo_error.unwrap().contains("origin fetch failed"));
+    assert!(failed.worktrees.is_empty());
+    assert!(retained.exists());
 }
 
 /// GH #529: pnpm's package entries are symlinks. If the primary checkout has

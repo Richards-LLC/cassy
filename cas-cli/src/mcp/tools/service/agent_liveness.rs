@@ -15,6 +15,8 @@
 
 use cas_types::{Agent, AgentRole, AgentStatus};
 
+use crate::cli::factory::wedged::{ProcessTable, RealProcessTable};
+
 /// Heartbeat age at which a worker is considered **stale** for supervision
 /// prune / dual-signal (same constant as `factory_ops::WORKER_STALE_SECS`).
 pub const WORKER_STALE_SECS: i64 = 30;
@@ -45,6 +47,11 @@ pub fn agent_heartbeat_age_secs(agent: &Agent) -> i64 {
 
 /// cas-3e56/cas-e98e: whether this agent still has a live harness process.
 pub fn agent_process_is_alive(agent: &Agent) -> bool {
+    agent_process_is_alive_with_table(agent, &RealProcessTable)
+}
+
+/// Keep the OS process discovery boundary injectable across host platforms.
+pub(crate) fn agent_process_is_alive_with_table(agent: &Agent, table: &dyn ProcessTable) -> bool {
     if agent_process_is_alive_with(
         agent,
         crate::mcp::daemon::pid_alive,
@@ -52,11 +59,13 @@ pub fn agent_process_is_alive(agent: &Agent) -> bool {
     ) {
         return true;
     }
-    crate::cli::factory::wedged::find_worker_pid(
-        &crate::cli::factory::wedged::RealProcessTable,
-        &agent.name,
-    )
-    .is_some()
+    // Retirement ends this registration's authority over its display name.
+    // Only its own registered process/fingerprinted parent can still prove
+    // it alive; a same-name process can belong to the next harness session.
+    if agent.status == AgentStatus::Shutdown {
+        return false;
+    }
+    crate::cli::factory::wedged::find_worker_pid(table, &agent.name).is_some()
 }
 
 /// Injected-probe registered-pid check (unit tests).
@@ -170,13 +179,26 @@ pub fn should_keep_worker_pane<'a>(
     name: &str,
     agents: impl IntoIterator<Item = &'a Agent>,
 ) -> bool {
+    should_keep_worker_pane_with_table(name, agents, &RealProcessTable)
+}
+
+pub(crate) fn should_keep_worker_pane_with_table<'a>(
+    name: &str,
+    agents: impl IntoIterator<Item = &'a Agent>,
+    table: &dyn ProcessTable,
+) -> bool {
     let matching: Vec<&Agent> = agents.into_iter().filter(|a| a.name == name).collect();
     if matching.is_empty() {
         return true;
     }
-    matching
-        .iter()
-        .any(|a| evaluate_supervision_liveness(a).is_live())
+    matching.iter().any(|agent| {
+        evaluate_supervision_liveness_with(
+            agent,
+            agent_process_is_alive_with_table(agent, table),
+            WORKER_STALE_SECS,
+        )
+        .is_live()
+    })
 }
 
 /// `agent_list` status token using authoritative liveness.
@@ -201,6 +223,40 @@ mod tests {
         a.status = status;
         a.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(hb_age_secs);
         a
+    }
+
+    /// A different generation advertises the retired worker's display name.
+    struct ReplacementProcessTable;
+
+    impl ProcessTable for ReplacementProcessTable {
+        fn pids(&self) -> Vec<u32> {
+            vec![std::process::id()]
+        }
+
+        fn cmdline(&self, _pid: u32) -> Option<Vec<u8>> {
+            Some(b"codex\0".to_vec())
+        }
+
+        fn environ(&self, _pid: u32) -> Option<Vec<u8>> {
+            Some(b"CAS_AGENT_NAME=w1\0".to_vec())
+        }
+    }
+
+    #[test]
+    fn shutdown_row_does_not_borrow_replacements_pid_cas_5037() {
+        let mut retired = worker(AgentStatus::Shutdown, 0);
+        retired.cc_session_id = Some("retired-session".into());
+        assert!(
+            !agent_process_is_alive_with_table(&retired, &ReplacementProcessTable),
+            "a replacement's display-name match cannot revive the retired session"
+        );
+        // A Shutdown row may still own its original process during teardown;
+        // keep the existing direct-PID proof, rather than ignoring all rows.
+        retired.pid = Some(std::process::id());
+        assert!(agent_process_is_alive_with_table(
+            &retired,
+            &ReplacementProcessTable,
+        ));
     }
 
     #[test]

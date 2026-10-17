@@ -64,17 +64,13 @@ const REMINDER_EXPIRY_BUSY_BUDGET: Duration = Duration::from_millis(100);
 
 /// Operator-facing detail for a worker that launched but never registered.
 ///
-/// cas-28a49 (GH #97): for `cli=codex` the overwhelmingly likely cause is an
-/// untrusted working directory — Codex parks on its interactive trust prompt
-/// before it can start `cas serve`, so the generic "inspect the pane" advice
-/// sends the operator hunting. Cassy pre-trusts the cwd at launch
-/// (`cas_pty::codex_trust`), so a Codex timeout that still happens means that
-/// write did not take, and the message says so. Non-Codex harnesses keep the
-/// previous wording verbatim.
+/// A timeout alone says nothing about project trust. Name that hypothesis
+/// only when the launched worker's actual profile has no entry for its cwd.
 fn registration_timeout_detail(
     timeout: Duration,
     cli: cas_mux::SupervisorCli,
     pane_tail: Option<&str>,
+    codex_project: Option<(&std::path::Path, &std::path::Path)>,
 ) -> String {
     let base = format!(
         "Worker process launched but did not register with Cassy within {} seconds; \
@@ -82,13 +78,40 @@ fn registration_timeout_detail(
         timeout.as_secs()
     );
     let detail = match cli {
-        cas_mux::SupervisorCli::Codex => format!("{base} {}", cas_pty::CODEX_TRUST_TIMEOUT_HINT),
+        cas_mux::SupervisorCli::Codex
+            if codex_project
+                .is_some_and(|(config, cwd)| codex_project_entry_missing(config, cwd)) =>
+        {
+            format!("{base} {}", cas_pty::CODEX_TRUST_TIMEOUT_HINT)
+        }
         _ => base,
     };
     match pane_tail.filter(|tail| !tail.trim().is_empty()) {
         Some(tail) => format!("{detail}\n\nLast worker pane output:\n{tail}"),
         None => detail,
     }
+}
+
+/// Read failures and invalid TOML are unknown, not evidence of missing trust.
+fn codex_project_entry_missing(config: &std::path::Path, cwd: &std::path::Path) -> bool {
+    let contents = match std::fs::read_to_string(config) {
+        Ok(contents) => contents,
+        Err(error) => return error.kind() == std::io::ErrorKind::NotFound,
+    };
+    let Ok(absolute) = std::path::absolute(cwd) else {
+        return false;
+    };
+    let canonical = absolute.canonicalize().ok();
+    std::iter::once(absolute.as_path())
+        .chain(canonical.as_deref())
+        .all(|path| {
+            path.to_str().is_some_and(|key| {
+                matches!(
+                    cas_pty::codex_trust::config_has_project(&contents, key),
+                    Ok(false)
+                )
+            })
+        })
 }
 
 /// Return a bounded, readable final pane excerpt for a timeout diagnosis.
@@ -6160,10 +6183,12 @@ impl FactoryDaemon {
                 } else if now.saturating_duration_since(verification.launched_at)
                     >= SPAWN_REGISTRATION_TIMEOUT
                 {
+                    let trust_paths = self.app.worker_codex_trust_paths(worker);
                     return Some((worker.clone(), VerificationAction::Failed(registration_timeout_detail(
                         SPAWN_REGISTRATION_TIMEOUT,
                         self.app.harness_for(worker),
                         pane_tail.as_deref(),
+                        trust_paths.as_ref().map(|(config, cwd)| (config.as_path(), cwd.as_path())),
                     ))));
                 }
                 None
@@ -10439,11 +10464,27 @@ impl FactoryDaemon {
                     }
                 }
                 SpawnAction::Shutdown => {
+                    let expected_generation = match request.worker_spec.as_deref() {
+                        None => None,
+                        Some(json) => match serde_json::from_str::<crate::ui::factory::app::PhantomWorkerTarget>(json) {
+                            Ok(target) if request.worker_names.as_slice() == std::slice::from_ref(&target.name)
+                                && target.process_group_id.is_some() => Some(target),
+                            _ => {
+                                record_terminal_spawn_state(
+                                    self.app.cas_dir(), request.id,
+                                    cas_store::SpawnLifecycleState::Failed, None,
+                                    "Invalid scoped teardown generation; no process stopped",
+                                );
+                                continue;
+                            }
+                        },
+                    };
                     self.pending_spawns.push_back(PendingSpawn::Shutdown {
                         request_id: Some(request.id),
                         count: request.count.map(|c| c as usize),
                         names: request.worker_names,
                         force: request.force,
+                        expected_generation,
                     });
                 }
                 SpawnAction::Respawn => {
@@ -11120,7 +11161,41 @@ impl FactoryDaemon {
                 count,
                 names,
                 force,
+                expected_generation,
             } => {
+                // Validate before cancellation, lease release or any name-based
+                // operation: a queued phantom refers to the observed process,
+                // never to a replacement that later reused its pane name.
+                if let Some(expected) = expected_generation {
+                    let current = self.app.phantom_worker_target(&expected.name);
+                    let still_dead = if current != expected {
+                        false
+                    } else {
+                        match open_agent_store(self.app.cas_dir())
+                            .and_then(|store| store.list(None).map_err(Into::into))
+                        {
+                            Ok(agents) => !expected.should_keep(&agents),
+                            Err(error) => {
+                                append_spawn_audit(
+                                    self.app.cas_dir(), &self.session_name,
+                                    shutdown_request_id, Some(&expected.name),
+                                    "shutdown", "failed",
+                                    &format!("Scoped teardown revalidation failed; no process stopped: {error}"),
+                                );
+                                return;
+                            }
+                        }
+                    };
+                    if !still_dead {
+                        append_spawn_audit(
+                            self.app.cas_dir(), &self.session_name,
+                            shutdown_request_id, Some(&expected.name),
+                            "shutdown", "completed",
+                            "Stale phantom teardown skipped; no process stopped or task binding released",
+                        );
+                        return;
+                    }
+                }
                 // Shutdowns are fast - process synchronously
                 // A shutdown may jump the FIFO while a slow spawn is in flight.
                 // Only expose that generation to shutdown if it was already
@@ -13178,16 +13253,18 @@ mod tests {
         }
     }
 
-    /// cas-28a49 (GH #97): a Codex worker that launches but never registers is
-    /// almost always parked on Codex's interactive trust prompt. The timeout
-    /// diagnostic must name that cause and the file to fix; other harnesses keep
-    /// the original wording.
+    /// Trust is a possible diagnosis only with a missing project entry in the
+    /// launched profile. Existing entries and malformed config never imply it.
     #[test]
     fn registration_timeout_names_the_codex_trust_cause() {
+        let fixture = tempfile::tempdir().unwrap();
+        let config = fixture.path().join("config.toml");
+        let cwd = fixture.path().join("worker");
         let codex = registration_timeout_detail(
             Duration::from_secs(60),
             cas_mux::SupervisorCli::Codex,
             None,
+            Some((&config, &cwd)),
         );
         assert!(
             codex.contains("did not register with Cassy within 60 seconds"),
@@ -13202,8 +13279,30 @@ mod tests {
             "codex timeout must name the interactive trust prompt: {codex}"
         );
 
+        let key = serde_json::to_string(cwd.to_str().unwrap()).unwrap();
+        for (contents, missing) in [
+            (String::new(), true),
+            (
+                format!("[projects.{key}]\ntrust_level = \"trusted\"\n"),
+                false,
+            ),
+            (
+                format!("projects = {{ {key} = {{ trust_level = \"untrusted\" }} }}\n"),
+                false,
+            ),
+            ("[malformed".into(), false),
+        ] {
+            std::fs::write(&config, contents).unwrap();
+            let detail = registration_timeout_detail(
+                Duration::from_secs(60),
+                cas_mux::SupervisorCli::Codex,
+                None,
+                Some((&config, &cwd)),
+            );
+            assert_eq!(detail.contains("trust prompt"), missing, "{detail}");
+        }
         for other in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Grok] {
-            let detail = registration_timeout_detail(Duration::from_secs(60), other, None);
+            let detail = registration_timeout_detail(Duration::from_secs(60), other, None, None);
             assert_eq!(
                 detail,
                 "Worker process launched but did not register with Cassy within 60 seconds; \
@@ -13219,6 +13318,7 @@ mod tests {
             Duration::from_secs(60),
             cas_mux::SupervisorCli::Claude,
             Some("Claude failed to load settings.json"),
+            None,
         );
         assert!(detail.contains("Last worker pane output:"), "{detail}");
         assert!(detail.contains("failed to load settings.json"), "{detail}");
@@ -16803,6 +16903,7 @@ mod tests {
                 count: None,
                 names: vec!["booting-worker".into()],
                 force: false,
+                expected_generation: None,
             },
         ]);
 
@@ -16856,6 +16957,7 @@ mod tests {
             count: Some(0),
             names: vec![],
             force: false,
+            expected_generation: None,
         }]);
 
         assert!(matches!(
@@ -17183,6 +17285,7 @@ mod tests {
                 count: None,
                 names: vec!["calm-otter-4".to_string()],
                 force: false,
+                expected_generation: None,
             },
             PendingSpawn::Respawn("steady-wren-3".to_string()),
         ];

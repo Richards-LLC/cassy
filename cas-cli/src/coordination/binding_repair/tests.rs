@@ -156,7 +156,7 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
     let state = IntakeJournal::new(&root).read().unwrap();
     assert_eq!(state.pauses[0].operation_id, report.operation_id);
     assert!(
-        matches!(&state.policies[0].disposition,ChannelDisposition::Managed { completion } if completion.latest_attempt.as_ref().unwrap().id == report.activation_id.as_ref().unwrap().as_str())
+        matches!(&state.policies[0].disposition,ChannelDisposition::Managed { operation_id, completion } if *operation_id == report.operation_id && completion.latest_attempt.as_ref().unwrap().id == report.activation_id.as_ref().unwrap().as_str())
     );
 }
 
@@ -187,6 +187,16 @@ fn cas_9021_old_or_unknown_actual_runtime_preflight_sends_zero_post() {
     let unknown = client.repair(&root, &scope).unwrap();
     assert!(matches!(unknown.outcome, RepairOutcome::Blocked));
     assert!(unknown.error.unwrap().contains("build"));
+    metadata.daemon_build_hash = Some(option_env!("CAS_GIT_HASH").unwrap().into());
+    metadata.daemon_pid_starttime = metadata.daemon_pid_starttime.map(|value| value + 1);
+    crate::ui::factory::SessionManager::new()
+        .save_metadata(&metadata)
+        .unwrap();
+    let stale = client.repair(&root, &scope).unwrap();
+    assert!(matches!(stale.outcome, RepairOutcome::Blocked));
+    std::fs::write(&metadata_path, b"{").unwrap();
+    let corrupt = client.repair(&root, &scope).unwrap();
+    assert!(matches!(corrupt.outcome, RepairOutcome::Blocked));
     assert!(
         server.try_recv().unwrap().is_none(),
         "no GET/POST may escape unsafe actual-runtime preflight"

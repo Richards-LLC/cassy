@@ -65,12 +65,21 @@ impl RuntimeInventory {
                 let socket = gui_socket_path(&metadata.name);
                 recorded_sockets.insert(socket.clone());
                 if !crate::mcp::daemon::pid_alive(metadata.daemon_pid) {
+                    if socket.exists() {
+                        return Err("dead runtime metadata still has a GUI endpoint; inspect factory sessions".into());
+                    }
                     continue;
                 }
                 let actual = crate::mcp::daemon::read_pid_starttime(metadata.daemon_pid);
                 if matches!((metadata.daemon_pid_starttime, actual), (Some(expected), Some(actual)) if expected != actual)
                 {
+                    if socket.exists() {
+                        return Err("stale runtime identity still has a GUI endpoint; inspect factory sessions".into());
+                    }
                     continue;
+                }
+                if metadata.daemon_pid_starttime.is_none() || actual.is_none() {
+                    return Err("runtime process start identity is unknown".into());
                 }
                 let project = metadata
                     .project_dir
@@ -126,11 +135,32 @@ impl RuntimeInventory {
         Ok(Self { probes })
     }
     pub fn drain(&self, scope: &IntakeScope, pause: &PauseRecord) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(30);
         for probe in &self.probes {
             probe.identity.validate()?;
-            let mut stream = UnixStream::connect(&probe.socket)
-                .map_err(|_| "runtime Unix control unavailable; pause retained")?;
-            let deadline = Instant::now() + Duration::from_secs(30);
+            let path = probe.socket.clone();
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or("runtime preflight deadline expired")?;
+            let mut stream = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|_| "local control connector unavailable")?;
+                runtime.block_on(async {
+                    tokio::time::timeout(remaining, tokio::net::UnixStream::connect(path))
+                        .await
+                        .map_err(|_| "runtime Unix connect timed out; pause retained")?
+                        .map_err(|_| "runtime Unix control unavailable; pause retained")?
+                        .into_std()
+                        .map_err(|_| "runtime Unix control unavailable; pause retained")
+                })
+            })
+            .join()
+            .map_err(|_| "runtime Unix connector failed; pause retained")??;
+            stream
+                .set_nonblocking(false)
+                .map_err(|_| "runtime Unix mode unavailable")?;
             stream
                 .set_write_timeout(Some(Duration::from_secs(5)))
                 .map_err(|e| e.to_string())?;
@@ -198,21 +228,38 @@ fn receive(stream: &mut UnixStream, deadline: Instant) -> Result<DaemonMessage, 
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .ok_or("runtime drain deadline expired; pause retained")?;
-    stream
-        .set_read_timeout(Some(remaining))
-        .map_err(|e| e.to_string())?;
+    let _ = remaining;
     let mut header = [0; 4];
-    stream
-        .read_exact(&mut header)
-        .map_err(|_| "runtime drain read failed/timed out; pause retained")?;
+    read_exact_until(stream, &mut header, deadline)?;
     let length = u32::from_be_bytes(header) as usize;
     if length == 0 || length > MAX_MESSAGE_SIZE {
         return Err("invalid runtime control frame length".into());
     }
     let mut bytes = vec![0; length];
-    stream
-        .read_exact(&mut bytes)
-        .map_err(|_| "runtime drain frame incomplete; pause retained")?;
+    read_exact_until(stream, &mut bytes, deadline)?;
     serde_json::from_slice(&bytes)
         .map_err(|_| "unknown/corrupt runtime control response; pause retained".into())
+}
+
+fn read_exact_until(
+    stream: &mut UnixStream,
+    mut bytes: &mut [u8],
+    deadline: Instant,
+) -> Result<(), String> {
+    while !bytes.is_empty() {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("runtime drain deadline expired; pause retained")?;
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(|e| e.to_string())?;
+        let read = stream
+            .read(bytes)
+            .map_err(|_| "runtime drain read failed/timed out; pause retained")?;
+        if read == 0 {
+            return Err("runtime control closed before complete drain; pause retained".into());
+        }
+        bytes = &mut bytes[read..];
+    }
+    Ok(())
 }

@@ -51,6 +51,7 @@ pub enum ChannelDisposition {
     Paused,
     Unknown,
     Managed {
+        operation_id: Uuid,
         completion: Box<ReconciliationResponse>,
     },
     LegacyAllowed,
@@ -179,7 +180,15 @@ impl IntakeJournal {
                 return Err("duplicate channel intake policy".into());
             }
             match &policy.disposition {
-                ChannelDisposition::Managed { completion } => {
+                ChannelDisposition::Managed {
+                    operation_id,
+                    completion,
+                } => {
+                    if !state.pauses.iter().any(|pause| {
+                        pause.operation_id == *operation_id && pause.scope == policy.scope
+                    }) {
+                        return Err("managed evidence lacks its submission operation".into());
+                    }
                     let request = ReconciliationRequest::new(
                         &policy.scope.team_id,
                         &policy.scope.canonical_project_id,
@@ -285,10 +294,27 @@ impl IntakeJournal {
         self.write_locked(&state)
     }
 
-    pub fn store_completed(
+    pub(super) fn store_invocation(
+        &self,
+        invocation: super::binding_repair::CompletedInvocation,
+    ) -> Result<(), String> {
+        self.persist_completion(invocation.operation_id(), invocation.response(), true)
+    }
+
+    #[cfg(test)]
+    fn store_completed(
         &self,
         operation_id: Uuid,
         response: &ReconciliationResponse,
+    ) -> Result<(), String> {
+        self.persist_completion(operation_id, response, false)
+    }
+
+    fn persist_completion(
+        &self,
+        operation_id: Uuid,
+        response: &ReconciliationResponse,
+        from_http: bool,
     ) -> Result<(), String> {
         let _lock = self.lock()?;
         let mut state = self.read_locked()?;
@@ -321,6 +347,7 @@ impl IntakeJournal {
             ChannelDisposition::Unknown => {}
             ChannelDisposition::Managed {
                 completion: previous,
+                ..
             } => {
                 if previous.binding != response.binding
                     || previous.fence_receipt != response.fence_receipt
@@ -329,6 +356,9 @@ impl IntakeJournal {
                         "immutable managed tuple/fence changed; explicit operator repair required"
                             .into(),
                     );
+                }
+                if from_http && previous.activation_id == response.activation_id {
+                    return Err("ordinary invocation reused an earlier attempt receipt; managed evidence retained".into());
                 }
                 if previous.as_ref() == &response {
                     return Ok(());
@@ -342,6 +372,7 @@ impl IntakeJournal {
         state.policies.push(ChannelPolicy {
             scope,
             disposition: ChannelDisposition::Managed {
+                operation_id,
                 completion: Box::new(response),
             },
         });

@@ -91,6 +91,15 @@ impl OrdinaryBindingClient {
     /// No active Cloud registration is created or used. Caller discovery is
     /// checked against the existing ordinary team-project read, never ensure().
     pub fn repair(&self, cas_dir: &Path, scope: &IntakeScope) -> Result<RepairReport, String> {
+        scope.validate()?;
+        let local =
+            crate::cloud::CloudConfig::load_from_cas_dir(cas_dir).map_err(|e| e.to_string())?;
+        if local.active_team_id().as_deref() != Some(scope.team_id.as_str())
+            || crate::cloud::resolve_canonical_id(cas_dir).as_deref()
+                != Some(scope.canonical_project_id.as_str())
+        {
+            return Err("reconciliation scope does not match this local project/team".into());
+        }
         let journal = IntakeJournal::new(cas_dir);
         let state = journal.read()?;
         let pause = match state
@@ -125,18 +134,68 @@ impl OrdinaryBindingClient {
                 error.reason,
             ));
         }
-        // RED: the real ordinary invocation is added after the public path test.
-        Ok(RepairReport::blocked(
-            scope,
-            pause.operation_id,
-            "ordinary invocation not implemented".into(),
-        ))
+        // This durable transition precedes request construction/send. Every
+        // transport/parser/refusal path retains it; no negative observation can
+        // prove that an earlier in-flight invocation had no effect.
+        journal.mark_submitting(pause.operation_id)?;
+        let request = ReconciliationRequest::new(
+            &scope.team_id,
+            &scope.canonical_project_id,
+            &scope.channel_id,
+        )
+        .map_err(|e| e.to_string())?;
+        let response = match self.invoke(&request) {
+            Ok(response) => response,
+            Err(error) => {
+                return Ok(RepairReport {
+                    channel_id: scope.channel_id.clone(),
+                    operation_id: pause.operation_id,
+                    activation_id: None,
+                    outcome: RepairOutcome::Unknown,
+                    response: None,
+                    error: Some(error),
+                });
+            }
+        };
+        let activation_id = response.activation_id.clone();
+        if response.code != ReconciliationCode::Completed {
+            return Ok(RepairReport {
+                channel_id: scope.channel_id.clone(),
+                operation_id: pause.operation_id,
+                activation_id,
+                outcome: RepairOutcome::Blocked,
+                error: Some(response.guidance.clone()),
+                response: Some(response),
+            });
+        }
+        // Sole product constructor: only the direct response to THIS ordinary
+        // HTTP invocation may cross the journal's completion boundary. A GET,
+        // cached global-latest receipt or caller-supplied body cannot create it.
+        let invocation = CompletedInvocation {
+            operation_id: pause.operation_id,
+            response: response.clone(),
+        };
+        if let Err(error) = journal.store_invocation(invocation) {
+            return Ok(RepairReport {
+                channel_id: scope.channel_id.clone(),
+                operation_id: pause.operation_id,
+                activation_id,
+                outcome: RepairOutcome::Unknown,
+                response: Some(response),
+                error: Some(error),
+            });
+        }
+        Ok(RepairReport {
+            channel_id: scope.channel_id.clone(),
+            operation_id: pause.operation_id,
+            activation_id,
+            outcome: RepairOutcome::Managed,
+            response: Some(response),
+            error: None,
+        })
     }
-    fn invoke(
-        &self,
-        operation_id: Uuid,
-        request: &ReconciliationRequest,
-    ) -> Result<ReconciliationResponse, String> {
+
+    fn invoke(&self, request: &ReconciliationRequest) -> Result<ReconciliationResponse, String> {
         let response = self
             .agent
             .post(&format!("{}{RECONCILE_PATH}", self.endpoint))
@@ -168,7 +227,6 @@ impl OrdinaryBindingClient {
         if bytes.len() as u64 > RESPONSE_LIMIT {
             return Err("reconciliation response exceeds byte budget; outcome uncertain".into());
         }
-        let _ = operation_id; // association is carried into CompletedInvocation below
         request
             .parse_response(status, &bytes)
             .map_err(|e| e.to_string())

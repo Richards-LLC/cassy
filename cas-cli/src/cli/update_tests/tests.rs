@@ -1628,7 +1628,7 @@ fn tty_update_without_yes_keeps_confirmation_and_human_output_enabled() {
     );
     assert_eq!(
         error.to_string(),
-        "could not install Cassy 9.9.9: Download request failed with status: 500; Cassy 3.17.1 is unchanged, so rerun `cas update` to retry"
+        "could not install Cassy 9.9.9: Download request failed with status: 500\n  Cassy 3.17.1 is unchanged; rerun `cas update` to retry"
     );
 }
 

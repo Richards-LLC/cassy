@@ -2189,109 +2189,106 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
 
     #[cfg(unix)]
     #[test]
-    fn six_simultaneous_invocations_respect_cap_even_with_soft_guard_off() {
+    fn concurrent_processes_respect_cap_and_audit_slot_lifetime() {
+        use std::io::{BufRead, Write};
+        use std::process::Stdio;
+        const CHILD: &str = "CAS_WORKER_CAP_PROCESS_FIXTURE";
+        const NAME: &str = "factory_worker_check::tests::concurrent_processes_respect_cap_and_audit_slot_lifetime";
+        if let Some(input) = std::env::var_os(CHILD) {
+            let paths: Vec<PathBuf> = serde_json::from_str(&input.to_string_lossy()).unwrap();
+            let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"]
+                .map(str::to_string);
+            match execute_at(&paths[0], &args, &paths[1], &paths[2]) {
+                Ok(()) => println!("RUNNER_RESULT admitted"),
+                Err(error) => println!("RUNNER_RESULT refused: {error:#}"),
+            }
+            return;
+        }
         let _env =
             crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".cas");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(
-            root.join("config.toml"),
-            "[factory]\nmax_concurrent_builders = 2\n",
-        )
-        .unwrap();
+        std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders = 2\n").unwrap();
         let fake = dir.path().join("fake-cargo");
-        // Admitted children remain live until the controller releases them;
-        // this makes every refusal compete with two occupied OS slot locks.
-        fake_cargo(
-            &fake,
-            r#"touch "$PWD/target/started"
-while [ ! -e "$PWD/../../release" ]; do sleep 0.01; done
-printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
-        );
-        let mut repos = Vec::new();
-        for index in 0..6 {
+        // A pipe handshake holds admitted payloads until all N+1 processes
+        // report admission/refusal. No compiler, host load, or sleep race.
+        fake_cargo(&fake, r#"printf 'PAYLOAD_STARTED\n'
+IFS= read -r release
+printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut children = Vec::new();
+        let mut readers = Vec::new();
+        for index in 0..3 {
             let repo = root.join(format!("worktrees/worker-{index}"));
             fixture_commit(&repo);
             std::fs::create_dir(repo.join("target")).unwrap();
-            repos.push(repo);
-        }
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(6));
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let mut threads = Vec::new();
-        for repo in &repos {
-            let (repo, root, fake, barrier, sender) = (
-                repo.clone(),
-                root.clone(),
-                fake.clone(),
-                barrier.clone(),
-                sender.clone(),
-            );
-            threads.push(std::thread::spawn(move || {
-                barrier.wait();
-                let args = vec![
-                    "nextest".into(),
-                    "run".into(),
-                    "-p".into(),
-                    "cas".into(),
-                    "--lib".into(),
-                    "-E".into(),
-                    "test(worker)".into(),
-                ];
-                let result = execute_at(&root, &args, &repo, &fake);
-                sender
-                    .send(result.map_err(|error| error.to_string()))
-                    .unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .env(CHILD, serde_json::to_string(&[&root, &repo, &fake]).unwrap())
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
+                .spawn().unwrap();
+            let output = child.stdout.take().unwrap();
+            let sender = sender.clone();
+            readers.push(std::thread::spawn(move || {
+                let mut lines = Vec::new();
+                for line in std::io::BufReader::new(output).lines() {
+                    let line = line.unwrap();
+                    if line == "PAYLOAD_STARTED" || line.starts_with("RUNNER_RESULT refused:") {
+                        sender.send(line.clone()).unwrap();
+                    }
+                    lines.push(line);
+                }
+                lines
             }));
+            children.push(child);
         }
-        let mut refusals = Vec::new();
-        for _ in 0..4 {
-            match receiver.recv_timeout(std::time::Duration::from_secs(10)) {
-                Ok(result) => refusals.push(result),
+        let mut events = Vec::new();
+        for _ in 0..3 {
+            match receiver.recv_timeout(std::time::Duration::from_secs(20)) {
+                Ok(event) => events.push(event),
                 Err(_) => break,
             }
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while repos
-            .iter()
-            .filter(|repo| repo.join("target/started").exists())
-            .count()
-            < 2
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        // Release before assertions, including a failed handshake, so no
+        // payload survives a failed regression.
+        for child in &mut children {
+            if let Some(mut input) = child.stdin.take() {
+                let _ = writeln!(input, "release");
+            }
         }
-        let started = repos
-            .iter()
-            .filter(|repo| repo.join("target/started").exists())
-            .count();
-        // Release before assertions so a failing test cannot strand children.
-        std::fs::write(root.join("release"), "go").unwrap();
-        for thread in threads {
-            thread.join().unwrap();
+        for child in &mut children {
+            assert!(child.wait().unwrap().success());
         }
-        assert_eq!(
-            refusals.len(),
-            4,
-            "four invocations must be refused before release"
-        );
-        for refusal in refusals {
-            assert!(refusal.unwrap_err().contains("max_concurrent_builders=2"));
+        let logs: Vec<_> = readers.into_iter().map(|reader| reader.join().unwrap()).collect();
+        assert_eq!(events.len(), 3, "all runner processes must answer: {logs:?}");
+        assert_eq!(events.iter().filter(|line| *line == "PAYLOAD_STARTED").count(), 2);
+        let refusal = events.iter().find(|line| line.starts_with("RUNNER_RESULT refused:")).unwrap();
+        assert!(refusal.contains("Waiting for build admission"), "{refusal}");
+        assert!(refusal.contains("max_concurrent_builders=2"), "{refusal}");
+        let mut held_slots = Vec::new();
+        for lines in logs.iter().filter(|lines| lines.iter().any(|line| line == "PAYLOAD_STARTED")) {
+            // pin: AC3 audit records bind admission/release UTC to one slot,
+            // rather than inferring a build lifetime from a reused log inode.
+            let stamps: Vec<serde_json::Value> = lines.iter()
+                .filter_map(|line| line.strip_prefix("worker-check slot: "))
+                .map(|json| serde_json::from_str(json).unwrap()).collect();
+            assert_eq!(stamps.len(), 2, "missing admission/release audit: {lines:?}");
+            assert_eq!(stamps[0]["event"], "admitted");
+            assert_eq!(stamps[1]["event"], "released");
+            assert_eq!(stamps[0]["slot"], stamps[1]["slot"]);
+            let slot = stamps[0]["slot"].as_u64().unwrap();
+            assert!(slot < 2);
+            held_slots.push(slot);
+            let admitted = chrono::DateTime::parse_from_rfc3339(stamps[0]["utc"].as_str().unwrap()).unwrap();
+            let released = chrono::DateTime::parse_from_rfc3339(stamps[1]["utc"].as_str().unwrap()).unwrap();
+            assert_eq!(admitted.offset().local_minus_utc(), 0);
+            assert!(admitted <= released);
         }
-        assert_eq!(started, 2);
-        for _ in 0..2 {
-            receiver
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap()
-                .unwrap();
-        }
-        assert_eq!(
-            repos
-                .iter()
-                .map(|repo| passing_test_receipts(&root, repo, &clean_head(repo).unwrap()).len())
-                .sum::<usize>(),
-            2
-        );
+        held_slots.sort_unstable();
+        assert_eq!(held_slots, [0, 1]);
+        // A subsequent process can acquire a released slot.
+        assert!(acquire_slot(&root.join("worker-check-slots"), 2).is_ok());
     }
 
     /// cas-39f3: `git status` refreshes a stat-dirty index and rewrites it

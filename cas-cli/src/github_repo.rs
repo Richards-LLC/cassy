@@ -35,7 +35,9 @@ fn valid_slug(slug: &str) -> bool {
 
 pub(crate) fn origin_slug(cwd: &Path, timeout: Duration) -> Result<Option<String>, String> {
     let mut git = Command::new("git");
-    git.current_dir(cwd).args(["remote", "get-url", "origin"]);
+    // Read the configured identity before Git's url.*.insteadOf transport
+    // rewriting (SSH aliases and local fixture servers are not repository IDs).
+    git.current_dir(cwd).args(["config", "--get", "remote.origin.url"]);
     let output = run_command(&mut git, Deadline::after(timeout), timeout)
         .map_err(|_| "cannot inspect GitHub origin (bounded Git lookup unavailable)".to_string())?;
     if !output.status.success() {
@@ -105,6 +107,54 @@ pub(crate) fn resolve_origin(
     })?;
     resolve_slug(&origin, cwd, binary, timeout)
 }
+
+/// GitHub's nullable Repository.mergeQueue(branch) names the queue for this
+/// branch, including ruleset-backed queues. Do not infer one from workflows,
+/// plan names or branch protection alone. Provider errors are not absence.
+/// Schema: https://docs.github.com/en/graphql/reference/repos#repository
+pub(crate) fn merge_queue_enabled(
+    repo: &str,
+    branch: &str,
+    cwd: &Path,
+    binary: &Path,
+    timeout: Duration,
+) -> Result<bool, String> {
+    let (owner, name) = repo.split_once('/').ok_or("invalid GitHub repository")?;
+    let mut command = Command::new(binary);
+    command.current_dir(cwd).env("GH_HOST", "github.com").args([
+        "api", "graphql", "-f",
+        "query=query($owner:String!,$name:String!,$branch:String!){repository(owner:$owner,name:$name){mergeQueue(branch:$branch){id}}}",
+        "-f", &format!("owner={owner}"),
+        "-f", &format!("name={name}"),
+        "-f", &format!("branch={branch}"),
+    ]);
+    let output = run_command(&mut command, Deadline::after(timeout), timeout)
+        .map_err(|_| "merge queue lookup unavailable or timed out".to_string())?;
+    if !output.status.success() {
+        return Err("merge queue lookup failed".into());
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "merge queue lookup returned invalid JSON")?;
+    if value
+        .get("errors")
+        .is_some_and(|errors| errors.as_array().is_none_or(|errors| !errors.is_empty()))
+    {
+        return Err("merge queue lookup returned GraphQL errors".into());
+    }
+    match value.pointer("/data/repository/mergeQueue") {
+        Some(serde_json::Value::Null) => Ok(false),
+        Some(queue)
+            if queue
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.is_empty()) =>
+        {
+            Ok(true)
+        }
+        _ => Err("merge queue lookup omitted repository.mergeQueue".into()),
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

@@ -27,6 +27,10 @@ impl Config {
                 self.get("slack.transport").unwrap(),
             ),
             (
+                "peers.same_repo_scope".to_string(),
+                self.get("peers.same_repo_scope").unwrap(),
+            ),
+            (
                 "slack.wake_enabled".to_string(),
                 self.get("slack.wake_enabled").unwrap(),
             ),
@@ -159,6 +163,9 @@ impl Config {
                 qa.telemetry_sweep.unwrap_or_default(),
             ),
             // Factory section (cas-1a05): the keys `get` and `set` accept.
+            ("factory.claude.worker_mcp".into(), factory.claude.worker_mcp.as_str().into()),
+            ("factory.claude.remote_control".into(), factory.claude.remote_control.to_string()),
+            ("factory.claude.fallback_model".into(), factory.claude.fallback_model.clone().unwrap_or_default()),
             ("factory.commander_mirror_enabled".to_string(), factory.commander_mirror_enabled.to_string()),
             ("factory.write_roots".to_string(), factory.write_roots.join(",")),
             ("factory.supervisor_only_mcp".to_string(), factory.worker_policy.supervisor_only_mcp.join(",")),
@@ -172,6 +179,10 @@ impl Config {
                     .artifacts_root
                     .clone()
                     .unwrap_or_else(|| FACTORY_ARTIFACTS_ROOT_DEFAULT.to_string()),
+            ),
+            (
+                "factory.scratch_root".to_string(),
+                factory.scratch_root.clone().unwrap_or_default(),
             ),
             (
                 "factory.message_max_chars".to_string(),
@@ -189,6 +200,10 @@ impl Config {
                 "factory.max_concurrent_builders".to_string(),
                 factory.max_concurrent_builders.to_string(),
             ),
+            ("factory.build_guard.max_load_ratio".to_string(), format!("{:?}", factory.build_guard.max_load_ratio)),
+            ("factory.build_guard.max_cpu_pressure_percent".to_string(), format!("{:?}", factory.build_guard.max_cpu_pressure_percent)),
+            ("factory.build_guard.max_memory_pressure_percent".to_string(), format!("{:?}", factory.build_guard.max_memory_pressure_percent)),
+            ("factory.build_guard.min_available_memory_gib".to_string(), factory.build_guard.min_available_memory_gib.to_string()),
             (
                 "factory.worker_memory_high_gib".to_string(),
                 factory.worker_memory_high_gib.to_string(),
@@ -315,6 +330,7 @@ impl Config {
             ),
             ("qa.mode".to_string(), qa.mode.to_string()),
             ("qa.evidence_gate".to_string(), qa.evidence_gate.to_string()),
+            ("qa.api_paths".to_string(), qa.api_paths.join(",")),
             (
                 "qa.terminal_render_paths".to_string(),
                 qa.terminal_render_paths.join(","),

@@ -31,9 +31,11 @@ pub mod embeddings;
 // cas-e477: peer supervisor discovery through the cloud agent registry.
 pub mod peers;
 pub mod peers_detail;
+pub mod peers_session_start;
 pub mod presence;
 // cas-f9c7: cross-machine supervisor messaging through a cloud peer mailbox.
 pub mod peer_mailbox;
+pub mod peer_merge;
 // M7 (cas-db6e): the daemon-tick drain that keeps every corpus embedded without
 // anyone running `cas cloud sync`.
 pub mod embed_drain;
@@ -44,10 +46,15 @@ pub(crate) mod me;
 /// rows are attributed to their canonical project instead of counted foreign.
 pub mod project_aliases;
 mod sync_queue;
+pub mod sync_lease;
 pub(crate) mod syncer;
 pub mod task_proposals;
 // cas-c117: explicit, verified project↔team registration for `cas cloud sync`.
 pub mod team_registration;
+/// cas-b512 (spec-022d part (a)): the shared `cassy.coordination/v1`
+/// contract fixtures, checked from Cassy's side.
+#[cfg(test)]
+mod coordination_contract_tests;
 
 // T6: first-run backfill — `pub` so integration tests can call the inner seam.
 pub use backfill::{BackfillOutcome, maybe_apply_team_backfill, maybe_apply_team_backfill_inner};
@@ -108,6 +115,7 @@ pub use embeddings::{
 pub use me::{
     FetchTeamsOutcome, fetch_and_cache_teams, fetch_and_cache_teams_inner, teams_cache_stale,
 };
+pub(crate) use sync_queue::MEMORY_FOLD_CONFLICT;
 pub use sync_queue::{
     EntityType, PULL_ID_COLLISION, QUARANTINE_TASK, QUARANTINED_ROW_STATEMENTS, QueueHealth,
     QueuedSync, QuarantinedRow, SYNC_REVISION_STATEMENTS, SyncOperation, SyncQueue,
@@ -116,7 +124,8 @@ pub use sync_queue::{
     parse_wire_revision, wire_revision,
 };
 pub(crate) use sync_queue::{
-    TaskSyncFulfillMode, TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload,
+    DependencyEndpointState, TaskSyncFulfillMode, TaskSyncFulfillResult, TaskSyncIntent,
+    TaskSyncPayload,
 };
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,

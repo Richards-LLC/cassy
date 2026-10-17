@@ -81,6 +81,7 @@ impl SqliteAgentStore {
                             return Ok(ClaimResult::AlreadyClaimed {
                                 task_id: task_id.to_string(),
                                 held_by,
+                                user_id: None,
                                 expires_at: expires,
                             });
                         }

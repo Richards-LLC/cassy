@@ -72,6 +72,122 @@ fn assignment_is_stale_for_recipient(
 /// is not dropped.
 const SURFACE_LIMIT: usize = 10;
 
+/// cas-bf890 (GH #1215 §3): digest notices one turn may fold into its single
+/// digest row. They cost one line, not a body, so the bound is generous;
+/// anything past it folds into the next turn's row.
+const DIGEST_LIMIT: usize = 50;
+
+/// cas-bf890: notices the digest row names one by one before `+N more`.
+const DIGEST_NAMED: usize = 6;
+
+/// cas-bf890: the lane a surfaced row renders in. Peer-supervisor and
+/// operator traffic leads the block with its own label and is never folded;
+/// everything else keeps its delivery order behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum InboxLane {
+    Operator,
+    PeerSupervisor,
+    Ordinary,
+}
+
+impl InboxLane {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Operator => "[operator] ",
+            Self::PeerSupervisor => "[peer supervisor] ",
+            Self::Ordinary => "",
+        }
+    }
+}
+
+/// cas-bf890: classify `row` by its server-stamped origin, never by its
+/// caller-settable `source`: a paired Commander device is the operator; a
+/// Cloud peer-mailbox envelope CAS itself wrote, or a registered agent whose
+/// registry role is supervisor (another one: `own_names` excludes an echo),
+/// is a peer supervisor. The same stamps the daemon's wake gate reads
+/// (`FactoryDaemon::supervisor_wake_class`), so the label cannot be forged by
+/// spelling a name.
+pub(crate) fn inbox_lane(
+    row: &QueuedPrompt,
+    supervisor_ids: &std::collections::HashMap<String, String>,
+    own_names: &[String],
+) -> InboxLane {
+    match row.origin.as_ref() {
+        Some(cas_store::QueueOrigin::PairedDevice { .. }) => InboxLane::Operator,
+        Some(cas_store::QueueOrigin::Daemon)
+            if crate::cloud::peer_mailbox::parse_envelope(&row.prompt).is_some() =>
+        {
+            InboxLane::PeerSupervisor
+        }
+        Some(cas_store::QueueOrigin::RegisteredAgent { agent_id }) => supervisor_ids
+            .get(agent_id)
+            .filter(|name| !own_names.iter().any(|own| own.eq_ignore_ascii_case(name)))
+            .map_or(InboxLane::Ordinary, |_| InboxLane::PeerSupervisor),
+        _ => InboxLane::Ordinary,
+    }
+}
+
+/// cas-bf890: registry id to name for every supervisor among the senders of
+/// `rows`; empty when no row came from a registered agent.
+fn supervisor_senders(
+    cas_root: &Path,
+    rows: &[QueuedPrompt],
+) -> std::collections::HashMap<String, String> {
+    let mut found = std::collections::HashMap::new();
+    let ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| match row.origin.as_ref() {
+            Some(cas_store::QueueOrigin::RegisteredAgent { agent_id }) => Some(agent_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    if ids.is_empty() {
+        return found;
+    }
+    let Ok(agents) = crate::store::open_agent_store(cas_root) else {
+        return found;
+    };
+    for id in ids {
+        if let Ok(agent) = agents.get(id)
+            && matches!(agent.role, crate::types::AgentRole::Supervisor)
+        {
+            found.insert(id.to_string(), agent.name.clone());
+        }
+    }
+    found
+}
+
+/// cas-bf890: the one digest row that stands for `notices`. It names a few by
+/// id and summary and says how to read any of them whole.
+fn digest_row(notices: &[QueuedPrompt]) -> Option<String> {
+    if notices.is_empty() {
+        return None;
+    }
+    let named: Vec<String> = notices
+        .iter()
+        .take(DIGEST_NAMED)
+        .map(|row| {
+            let summary = row
+                .summary
+                .as_deref()
+                .map(str::trim)
+                .filter(|summary| !summary.is_empty())
+                .unwrap_or("system notice");
+            format!("#{} {summary}", row.id)
+        })
+        .collect();
+    let more = notices.len().saturating_sub(DIGEST_NAMED);
+    Some(format!(
+        "[digest] {} system notice{} folded here instead of a wake each, no action needed \
+         (messages abandoned to recipients that have ended): {}{}. Read one whole with \
+         inbox_poll notification_id=<id>.",
+        notices.len(),
+        if notices.len() == 1 { "" } else { "s" },
+        named.join("; "),
+        if more > 0 { format!("; +{more} more") } else { String::new() },
+    ))
+}
+
 /// Resolve the queue recipient names this agent answers to.
 ///
 /// A worker answers to exactly one name. A supervisor answers to two: its pane
@@ -488,6 +604,46 @@ fn surface_factory_inbox_with_transport_delivery(
             }
         }
     }
+    // cas-bf890: the first surfacing of a turn folds every unread digest
+    // notice into one row. The daemon never transports these, so this is
+    // their only automatic path.
+    let mut digest: Vec<QueuedPrompt> = Vec::new();
+    if notes {
+        for alias in &aliases {
+            match queue.surface_for_recipient_within_budget(
+                alias,
+                session.as_deref(),
+                cas_store::HookDrain::NoticeDigest,
+                DIGEST_LIMIT.saturating_sub(digest.len()),
+                0,
+            ) {
+                Ok(found) => {
+                    for row in found.rows {
+                        if !digest.iter().any(|existing| existing.id == row.id) {
+                            digest.push(row);
+                        }
+                    }
+                }
+                Err(error) => {
+                    drain_failed = true;
+                    tracing::debug!(
+                        target: "cas::coordination",
+                        recipient = %alias,
+                        %error,
+                        "cas-bf890: digest notice surfacing failed"
+                    );
+                }
+            }
+        }
+        if !digest.is_empty() {
+            crate::harness_policy::mirror_receipts_across_aliases_with_source(
+                &*queue,
+                &digest,
+                &aliases,
+                cas_store::SurfacingSource::HookSurfaced,
+            );
+        }
+    }
     over_budget.sort_unstable();
     over_budget.dedup_by_key(|(id, _)| *id);
     over_budget.retain(|(id, _)| !rows.iter().any(|row| row.id == *id));
@@ -559,16 +715,32 @@ fn surface_factory_inbox_with_transport_delivery(
             Surfacing::PolledUnacked(_) => POLLED_REPEAT_HEADER,
         }
     };
+    // cas-bf890: peer-supervisor and operator rows lead the block.
+    let supervisor_ids = supervisor_senders(cas_root, &rows);
+    rows.sort_by_key(|row| inbox_lane(row, &supervisor_ids, &aliases));
+    let lanes: Vec<InboxLane> = rows
+        .iter()
+        .map(|row| inbox_lane(row, &supervisor_ids, &aliases))
+        .collect();
     Some(SurfacingOutcome {
-        text: render_block(&block_notes, &rows, header),
+        text: render_block(&block_notes, &rows, &lanes, digest_row(&digest), header),
         complete,
     })
 }
 
 /// cas-1f0c: the `[incoming messages]` block: notes first, then the rows.
 /// `None` when there is neither.
-fn render_block(notes: &[String], rows: &[QueuedPrompt], header: &str) -> Option<String> {
-    if notes.is_empty() && rows.is_empty() {
+///
+/// cas-bf890: `rows` arrive lane-ordered with their `lanes`; the digest row,
+/// when there is one, closes the block as a single line.
+fn render_block(
+    notes: &[String],
+    rows: &[QueuedPrompt],
+    lanes: &[InboxLane],
+    digest: Option<String>,
+    header: &str,
+) -> Option<String> {
+    if notes.is_empty() && rows.is_empty() && digest.is_none() {
         return None;
     }
     let mut out = String::from("[incoming messages]\n");
@@ -577,12 +749,17 @@ fn render_block(notes: &[String], rows: &[QueuedPrompt], header: &str) -> Option
         out.push('\n');
     }
     if !rows.is_empty() {
-        let rendered = render_surfaced_with_header(rows, header);
+        let rendered = render_rows_with_header(rows, lanes, header);
         out.push_str(
             rendered
                 .strip_prefix("[incoming messages]\n")
                 .unwrap_or(&rendered),
         );
+    }
+    if let Some(digest) = digest {
+        out.push('\n');
+        out.push_str(&digest);
+        out.push('\n');
     }
     Some(out)
 }
@@ -842,18 +1019,21 @@ fn wake_named_ids(prompt: &str) -> Vec<i64> {
 /// Pure so the shape is testable without a store. The rendering states the
 /// sender and the message id for every row, because the recipient's only way
 /// to acknowledge or reply is to name that id back.
+#[cfg(test)]
 pub(crate) fn render_surfaced(rows: &[QueuedPrompt]) -> String {
-    render_surfaced_with_header(rows, TURN_START_HEADER)
+    render_rows_with_header(rows, &[], TURN_START_HEADER)
 }
 
-fn render_surfaced_with_header(rows: &[QueuedPrompt], header: &str) -> String {
+/// `lanes[i]` labels `rows[i]`; a missing lane renders as ordinary.
+fn render_rows_with_header(rows: &[QueuedPrompt], lanes: &[InboxLane], header: &str) -> String {
     let mut out = format!("[incoming messages]\n{header}\n");
-    for row in rows {
+    for (index, row) in rows.iter().enumerate() {
+        let label = lanes.get(index).copied().unwrap_or(InboxLane::Ordinary).label();
         let reply_hint = crate::mcp::tools::service::agent_search_system::message::commander_reply_command(row)
             .map(|command| format!("Reply with: `{command}`\n"))
             .unwrap_or_default();
         out.push_str(&format!(
-            "\n--- from {} (message {}{}) ---\n{}\n{}{}\n",
+            "\n--- {label}from {} (message {}{}) ---\n{}\n{}{}\n",
             row.source,
             row.id,
             if row.urgent { ", urgent" } else { "" },

@@ -31,6 +31,18 @@ impl SyncQueue {
         Ok(Self::group_pending_items(items))
     }
 
+    /// The next personal push batch, grouped for the syncer: pending rows
+    /// minus edges still waiting on a pending endpoint task (cas-9b5d).
+    pub fn pushable_pending_by_type(
+        &self,
+        entity_type: Option<EntityType>,
+        limit: usize,
+        max_retries: i32,
+    ) -> Result<PendingByType, CasError> {
+        let items = self.pushable_pending_for_entity_type(entity_type, limit, max_retries)?;
+        Ok(Self::group_pending_items(items))
+    }
+
     /// Get personal pending items for one entity type, grouped for the syncer.
     pub fn pending_by_type_for_entity(
         &self,
@@ -231,6 +243,20 @@ impl SyncQueue {
                 EntityType::Task.as_str(),
                 crate::cloud::sync_queue::PULL_ID_COLLISION
             ],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Opaque folded-memory IDs with retained conflict copies, newest first.
+    pub fn memory_fold_conflict_ids(&self) -> Result<Vec<String>, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT entity_id FROM sync_conflicts WHERE entity_type = ?1 AND strategy = ?2
+             GROUP BY entity_id ORDER BY MAX(id) DESC",
+        )?;
+        let rows = stmt.query_map(
+            params![EntityType::Entry.as_str(), super::MEMORY_FOLD_CONFLICT],
             |row| row.get::<_, String>(0),
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)

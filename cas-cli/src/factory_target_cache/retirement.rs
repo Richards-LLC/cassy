@@ -84,7 +84,7 @@ fn retire(
         return Ok(false);
     }
     if registry(cas_root, &worktree)? {
-        tracing::warn!(target = %worktree.join("target").display(), "retired target deferred: registered owner is live");
+        tracing::warn!(target = %crate::factory_scratch::worker_target_dir(&worktree).display(), "retired target deferred: registered owner is live");
         return Ok(false);
     }
     let Some(repo) = cas_root.parent() else {
@@ -105,7 +105,8 @@ fn retire(
     let Some(_lane) = crate::factory_worker_check::try_lock_lane(cas_root, &worktree)? else {
         return Ok(false);
     };
-    let target = worktree.join("target");
+    // cas-3f93: follow a target relocated under `[factory] scratch_root`.
+    let target = crate::factory_scratch::worker_target_dir(&worktree);
     if !target.exists() || fs::symlink_metadata(&target)?.file_type().is_symlink() {
         return Ok(false);
     }
@@ -222,7 +223,12 @@ fn retire(
     {
         return Ok(false);
     }
-    let quarantine = worktree.join(format!("{QUARANTINE_PREFIX}retired-{stamp}"));
+    // A sibling keeps the rename on the target's filesystem; in-tree that
+    // sibling is the checkout itself.
+    let quarantine = target
+        .parent()
+        .unwrap_or(&worktree)
+        .join(format!("{QUARANTINE_PREFIX}retired-{stamp}"));
     fs::rename(&target, &quarantine)?;
     #[cfg(unix)]
     if !target_lease.revalidate(&quarantine)? {
@@ -384,6 +390,59 @@ mod tests {
         let artifacts = temp.path().join("artifacts/cas-fixture");
         (temp, root, worker, artifacts)
     }
+    /// cas-3f93: retirement follows a target relocated under
+    /// `[factory] scratch_root`, keeps its evidence, removes the whole target
+    /// and quarantines beside it on the scratch filesystem.
+    #[test]
+    fn scratch_root_retirement_reclaims_relocated_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        super::super::tests::git(&repo, &["init", "-q"]);
+        super::super::tests::git(&repo, &["config", "user.email", "fixture@example.invalid"]);
+        super::super::tests::git(&repo, &["config", "user.name", "Fixture"]);
+        fs::write(repo.join("source"), "keep").unwrap();
+        super::super::tests::git(&repo, &["add", "."]);
+        super::super::tests::git(&repo, &["commit", "-qm", "fixture"]);
+        let root = repo.join(".cas");
+        let scratch = temp.path().join("rewind");
+        fs::create_dir_all(root.join("worktrees")).unwrap();
+        fs::write(
+            root.join("config.toml"),
+            format!("[factory]\nscratch_root = {:?}\n", scratch.display().to_string()),
+        )
+        .unwrap();
+        let worker = root.join("worktrees/retired");
+        super::super::tests::git(
+            &repo,
+            &["worktree", "add", "-qb", "factory/retired", worker.to_str().unwrap()],
+        );
+        drop(super::super::owner::acquire(&root, &worker).unwrap().unwrap());
+        let target = crate::factory_scratch::worker_target_dir(&worker);
+        assert!(target.starts_with(&scratch), "{}", target.display());
+        assert!(!worker.join("target").exists(), "ownership creates no in-tree target");
+        fs::create_dir_all(target.join("debug/deps")).unwrap();
+        fs::write(target.join("debug/.cargo-lock"), "").unwrap();
+        fs::write(target.join("debug/deps/output"), "regenerable").unwrap();
+        fs::write(target.join("worker-check.log"), "proof log").unwrap();
+        let artifacts = temp.path().join("artifacts/cas-fixture");
+        assert!(
+            retire(&root, &worker, &artifacts, None, |_, _, _| false, |_, _| Ok(false)).unwrap()
+        );
+        assert!(!target.exists());
+        assert_eq!(fs::read_to_string(worker.join("source")).unwrap(), "keep");
+        assert!(WalkDir::new(&artifacts).into_iter().flatten().any(|entry| {
+            entry.file_name() == "worker-check.log"
+                && fs::read_to_string(entry.path()).unwrap() == "proof log"
+        }));
+        let leftovers: Vec<_> = fs::read_dir(target.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(leftovers.is_empty(), "quarantine removed: {leftovers:?}");
+    }
+
     #[test]
     fn retirement_relocates_evidence_and_removes_whole_target_keeps_checkout_cas_72f4() {
         let (_temp, root, worker, artifacts) = fixture();

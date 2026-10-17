@@ -101,7 +101,9 @@ pub(crate) fn park(
             if record.generation.is_empty()
                 || now.admin != record.admin
                 || now.head != record.head
-                || !record.worktree.join("target/debug").is_dir()
+                || !crate::factory_scratch::worker_target_dir(&record.worktree)
+                    .join("debug")
+                    .is_dir()
             {
                 return None;
             }
@@ -142,7 +144,8 @@ fn marker_is_current(path: &Path, recorded: &ParkedCache) -> bool {
 }
 
 fn prune_debug(worktree: &Path) -> io::Result<()> {
-    let target = worktree.join("target");
+    // cas-3f93: follow a target relocated under `[factory] scratch_root`.
+    let target = crate::factory_scratch::worker_target_dir(worktree);
     let debug = target.join("debug");
     if !debug.exists() {
         return Ok(());
@@ -280,6 +283,40 @@ mod tests {
             .filter(|entry| entry.path().join("target/debug").exists())
             .count();
         assert_eq!(count, if reclaim { 1 } else { 6 });
+    }
+
+    /// cas-3f93: parking prunes `debug/` of a target relocated under
+    /// `[factory] scratch_root` and keeps its proof logs.
+    #[test]
+    fn scratch_root_parked_targets_prune_relocated_debug() {
+        let (temp, root) = fixture();
+        let reclaim = super::super::tests::reclamation_available();
+        let scratch = temp.path().canonicalize().unwrap().join("rewind");
+        fs::write(
+            root.join("config.toml"),
+            format!("[factory]\nscratch_root = {:?}\n", scratch.display().to_string()),
+        )
+        .unwrap();
+        let mut targets = Vec::new();
+        for name in ["first", "second"] {
+            let path = worker(&root, name);
+            fs::remove_dir_all(path.join("target")).unwrap();
+            let target = crate::factory_scratch::worker_target_dir(&path);
+            assert!(target.starts_with(&scratch), "{}", target.display());
+            fs::create_dir_all(target.join("debug/deps")).unwrap();
+            fs::write(target.join("debug/deps/output"), "regenerable").unwrap();
+            fs::write(target.join("worker-check.log"), "proof").unwrap();
+            targets.push((path, target));
+        }
+        park(&root, &targets[0].0, 0, None).unwrap();
+        assert_eq!(targets[0].1.join("debug").exists(), !reclaim);
+        park(&root, &targets[1].0, 1, None).unwrap();
+        assert!(targets[1].1.join("debug").exists(), "retention keeps the newest");
+        for (path, target) in &targets {
+            // pin: proof logs outside debug/ must survive pruning byte-for-byte.
+            assert_eq!(fs::read_to_string(target.join("worker-check.log")).unwrap(), "proof");
+            assert!(!path.join("target").exists());
+        }
     }
 
     #[test]

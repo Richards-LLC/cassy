@@ -22,7 +22,7 @@
 //! [`ProxyClient`] **must not** be dropped from inside an active tokio
 //! runtime — `rt.block_on(...)` in [`Drop`] panics with "Cannot start a
 //! runtime from within a runtime". Today the only constructor sites
-//! (`vercel::default_client`, `neon::LiveNeonClient::default`) are
+//! (`vercel::default_client`) are
 //! reached from `cas integrate` running on sync `main`, so this is fine.
 //! Future async callers must call [`ProxyClient::shutdown`] explicitly
 //! from a non-async context before allowing the value to drop.

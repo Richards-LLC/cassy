@@ -66,6 +66,20 @@ Cassy stores agent-facing knowledge in seven distinct surfaces. They are not tie
 | **Artifacts** | Files a task published — a PDF report, a capture, a log bundle — with the digest and size measured locally before upload. The pre-signed upload URL is never stored; `cloud_url` is the durable location the server returns at complete. | `artifacts` table; bytes live at their original path and, once uploaded, in Cloud storage | `artifact` MCP tool, `cas artifact publish` | `artifact action=show`/`list`, `cas artifact show\|list` |
 | **Patterns** | Cross-project personal/team conventions. | **Not local** — Cassy Cloud, reached over the `/api/patterns` HTTP surface | `pattern` MCP tool | `pattern` MCP tool (requires login) |
 
+Memory entries use opaque `mem-` IDs containing 128 random bits, generated at
+the shared `Entry::generate_id` seam by SQLite, Markdown and mock stores. Legacy
+`YYYY-MM-DD-N` IDs remain readable and syncable. Both personal and team pulls
+preserve independent legacy memories when a counter ID collides: different
+immutable creation timestamps plus different titles or bodies cause the incoming
+memory to receive a deterministic recovery ID, derived from the old ID and its
+creation instant. The incumbent stays intact, and an attributable recovered row
+is queued in the pull's own scope. An unchanged replay does not enqueue it again.
+Matching creation timestamps retain ordinary last-write-wins editing; independent
+historical births at exactly the same timestamp cannot be distinguished from
+edits with the legacy fields. Identical title/body duplicates still dedupe.
+Alias folding itself belongs to Cloud (tracked in petra-stella-cloud#163), which
+must preserve distinct rows before they reach the client.
+
 Two properties of the knowledge surface are load-bearing and easy to get wrong:
 
 - **Bodies never enter SQLite.** `knowledge_pages_fts` is a *contentless* FTS5 table (`content=''`, `contentless_delete=1`) over title + snippet + body: the inverted index lives in the DB, the prose only ever lives on disk. That is what makes the pages greppable with ordinary tools and keeps the database small.
@@ -187,3 +201,80 @@ defaults retain their custom filters. Disabled hooks retain their behavior;
 Slack policy remains independent of ordinary PreToolUse enablement. Factory
 role settings and Codex's Bash-only tool-hook projection keep their own
 harness-specific coverage.
+
+### Cloud alias-fold memory IDs (rule v1)
+
+Cloud owns alias-family folding and computes `<old-id>-fold<12 lowercase hex>`
+from its scoped family and memory identity (petra-stella-cloud#163, PR #169).
+Cassy accepts the rewritten `data.id` as an opaque identity; it does not compute
+Cloud destinations. `cli/cloud.rs::execute_project_adopt_aliases` only adopts
+**task** origins. `cloud/project_aliases.rs` caches project registry aliases;
+neither path folds or renames memories.
+
+The memory identity paths are:
+
+- `cas-types::Entry::generate_id` creates random `mem-` IDs; SQLite, Markdown,
+  mocks and the CLI/MCP callers delegate to it. Existing IDs stay unchanged.
+- `cloud/syncer/entry_identity.rs::legacy_counter_id`, `recovery_id`,
+  `prepare_pulled_entry` and `verify_recovery_birth` implement the independent
+  local `-recovered-` namespace for colliding legacy counters. Known-birth hashes
+  remain unchanged. Unknown births use title/body instead of a synthetic date.
+- Both HTTP pull loops in `cloud/syncer/pull.rs` deserialize the rewritten ID,
+  then `upsert_entry_lww`/`merge_entry_lww` preserve it. The occupied-fold guard
+  recognizes only the final `-fold` plus 12 lowercase hex characters, without
+  stripping or reconstructing the ID. Sharing a known birth or identical
+  title/body remains ordinary last-write-wins.
+- If a fold destination holds a distinct memory, the incumbent remains intact
+  and `preserve_fold_conflict` journals both copies as `fold_conflict`. It is a
+  consumed local conflict: the watermark advances and later rows still sync.
+  Sync/status and doctor warn; `cas cloud conflicts --json` exposes both copies.
+- Missing/null `created` deserializes to a reserved year-1 UTC sentinel in typed
+  Entry/SQLite storage. It never proves a shared birth and is omitted on JSON
+  serialization, so an edit/push does not invent an immutable identity. Human
+  memory date text labels it `unknown`; search provenance uses a null creation
+  date, and chronological lists keep undated rows last in either direction.
+  Date-based retrieval/decay ignores the placeholder as creation evidence.
+- SQLite stores IDs verbatim, `SearchIndex::index_entry` indexes them verbatim,
+  memory MCP resolution uses the full store key, and `SyncingEntryStore` queues
+  edits under that same key. Personal/team push transports those queued IDs.
+  The search ID extractor recognizes task/rule/skill shortcuts only; it never
+  strips a memory's fold suffix. Legacy `p-`/`g-` context display prefixes are
+  presentation only.
+
+`cloud/syncer/cloud_rekey_vectors.json` contains actual Cloud 193102b function
+outputs, including its Alpha/Beta test vectors. Named `cas_e29c_` tests consume
+those rows through personal and team HTTP pulls, SQLite, Tantivy, editing,
+compressed HTTP pushes and replay. No client alias-fold calculator is added.
+
+## Managed project files
+
+`project_files::ignored_paths` is the ownership inventory shared by init/update,
+Git reconciliation and doctor. Consumer repositories use the following policy;
+the Cassy authoring checkout retains its tracked rendered fixtures.
+
+| Classification | Files | Ownership boundary |
+| --- | --- | --- |
+| Managed and ignored | Exact installed builtin catalog paths for each enabled harness; `.claude/skills/cas/SKILL.md`; generated store rules in `.claude/rules/cas/`; database skill SKILL.md projections; `.cas/` runtime state and Codex `hooks.toml.cas-lock` / `config.toml.cas-lock`; `.env.worktree`; `.fallow/` | Source catalog/store owns the generated file. Untracking keeps its working copy. Retired managed files already pruned from disk are removed from the index. |
+| Managed and ignored when purely derived | Root `AGENTS.md` containing only the CAS block, or explicitly generated from CLAUDE.md | An AGENTS.md with project-authored text stays tracked; only its CAS block is owned. |
+| Project tracked | `.gitignore`, `CLAUDE.md`, mixed `AGENTS.md` | Only the delimited Cassy block; surrounding project bytes remain unchanged and unstaged. |
+| Project tracked | `.claude/settings.json`, `.mcp.json`, `.codex/config.toml`, `.codex/hooks.json` | Cassy hook commands, permissions, statusline and MCP entries; project hooks and configuration keys are preserved. |
+| Project tracked, project customizable | `.env.worktree.template`, `scripts/worktree-boot.sh` | Only exact generated templates are eligible for the initial automatic commit. Subsequent customization belongs to the project. |
+
+Before writing, update checks for unmerged paths, symlinks, malformed documents,
+namespace conflicts and local edits to managed content. A conflict is reported
+and leaves that project's files and index untouched. Ordinary project edits
+outside the owned portions remain in the worktree; selective index blobs are
+rendered from index-side project content so those edits never enter Cassy's
+commit. Existing staged work is preserved: update stages the repair and reports
+that a commit is pending. Conflicts and pending commits remain warnings in the
+compact multi-project summary, rather than becoming successful skills phases.
+With no other staged work, it makes one dedicated
+`chore(cassy): reconcile managed project files` commit, using a command-scoped
+Cassy author identity. It never pushes. A second update is a no-op.
+
+The default update and `--all-projects` share the project refresh loop; `--sync`
+uses the same file repair. The sweep excludes non-Git roots as well as the
+existing temporary/worktree discovery exclusions. Doctor reports one
+**managed file drift** finding pointing to `cas update`; outside project edits
+are not managed drift. Full host convergence is verified after installing the
+release, not by modifying real repositories during worker development.

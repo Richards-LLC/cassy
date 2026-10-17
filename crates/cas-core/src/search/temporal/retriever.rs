@@ -63,13 +63,15 @@ impl TemporalRetriever {
         let mut relation = TemporalRelation::PrecedesButValid;
 
         // Score for creation time
-        if period.contains(&entry.created) {
-            score += self.creation_weight;
-            relation = TemporalRelation::CreatedDuring;
-        } else {
-            // Score based on proximity to period
-            let creation_proximity = self.time_proximity(&entry.created, period);
-            score += self.creation_weight * creation_proximity * 0.5;
+        if let Some(created) = entry.known_creation() {
+            if period.contains(&created) {
+                score += self.creation_weight;
+                relation = TemporalRelation::CreatedDuring;
+            } else {
+                // Unknown births never supply a fictional proximity score.
+                let creation_proximity = self.time_proximity(&created, period);
+                score += self.creation_weight * creation_proximity * 0.5;
+            }
         }
 
         // Score for validity overlap
@@ -208,5 +210,30 @@ impl TemporalRetriever {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod unknown_birth_tests {
+    use super::*;
+    use crate::search::temporal::filter_entries_by_time;
+
+    #[test]
+    fn cas_e29c_unknown_birth_is_not_a_year_one_temporal_match() {
+        let unknown: Entry = serde_json::from_value(serde_json::json!({
+            "id":"unknown", "content":"body"
+        }))
+        .unwrap();
+        let period = TimePeriod::new(
+            "0001-01-01T00:00:00Z".parse().unwrap(),
+            "0001-01-02T00:00:00Z".parse().unwrap(),
+        );
+        assert!(filter_entries_by_time(vec![unknown.clone()], &period).is_empty());
+        // Isolate creation evidence: no validity or access weight can obscure it.
+        assert!(
+            TemporalRetriever::new(1.0, 0.0, 0.0)
+                .retrieve(&[unknown], &period, 2)
+                .is_empty()
+        );
     }
 }

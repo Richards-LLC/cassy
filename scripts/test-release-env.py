@@ -49,7 +49,7 @@ class Fixture(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(os.path.realpath(self.temp.name))
         # Fixtures live under /tmp; a fake temporary root stands in for it.
-        self.env = {"PATH": "", "CAS_RELEASE_ENV_SCRATCH_ROOT": "",
+        self.env = {"PATH": "", "CAS_RELEASE_ENV_SCRATCH_ROOT": "", "CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT": "",
                     "CAS_RELEASE_ENV_TEMP_ROOTS": str(self.root / "fake-tmp")}
 
     def tearDown(self):
@@ -163,6 +163,75 @@ class ScratchPerFilesystem(Fixture):
         checks = release_env.check_scratch([self.home_checkout, other, self.rewind_checkout], self.host, self.env)
         self.assertEqual([(check.name, check.ok) for check in checks],
                          [(f"scratch {self.home}", True), (f"scratch {self.rewind}", True)])
+
+
+class FactoryScratchRoot(Fixture):
+    """cas-baa8: `[factory] scratch_root` relocates the release scratch base to
+    <root>/<project-key>/release-gate, on a filesystem other than the checkout's."""
+
+    def setUp(self):
+        super().setUp()
+        self.home, self.rewind = self.root / "home-fs", self.root / "rewind-fs"
+        (self.home / "cas-release-gate").mkdir(parents=True)
+        self.scratch = self.rewind / "cas"
+        self.scratch.mkdir(parents=True)
+        self.checkout = self.home / "user/cassy"
+        (self.checkout / ".cas").mkdir(parents=True)
+        self.host = FakeHost({self.home: 1, self.rewind: 2})
+        self.env["CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT"] = ""
+        self.key = release_env.project_key(self.checkout / ".cas")
+        self.base = self.scratch / self.key / "release-gate/base"
+
+    def resolve(self, **kwargs):
+        return release_env.resolve_scratch(self.checkout, self.env, host=self.host, durable=True, **kwargs)
+
+    def test_scratch_root_project_key_matches_rust_golden_vector(self):
+        # Same vector as cas_types::factory_scratch and the refresh script.
+        self.assertEqual(
+            release_env.project_key(Path("/srv/demo repo/.cas")),
+            "demo-repo-57694f919d7a09378d7bd9dde4b21bd900b11644a97685c8a94b79ecc97046c8")
+
+    def test_scratch_root_on_another_device_is_accepted_and_created(self):
+        unset = self.resolve()
+        self.assertEqual((unset.base, unset.problem), (str(self.home / "cas-release-gate/base"), ""))
+        self.env["CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT"] = str(self.scratch)
+        resolved = self.resolve(create=True)
+        self.assertEqual((resolved.base, resolved.source, resolved.problem),
+                         (str(self.base), "factory.scratch_root", ""))
+        self.assertTrue(self.base.is_dir())
+
+    def test_an_exported_cross_device_base_must_sit_inside_the_scratch_root(self):
+        # The gate exports the resolved base to its children, which re-check it.
+        self.env["CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT"] = str(self.scratch)
+        (self.rewind / "elsewhere").mkdir()
+        self.base.parent.mkdir(parents=True)
+        self.env[release_env.GATE_VAR] = str(self.base)
+        self.assertEqual(self.resolve().problem, "")
+        self.env[release_env.GATE_VAR] = str(self.rewind / "elsewhere/base")
+        self.assertIn("filesystem boundary", self.resolve().problem)
+
+    def test_staging_scratch_root_on_another_device_is_still_refused(self):
+        self.env["CAS_RELEASE_ENV_SCRATCH_ROOT"] = str(self.scratch)
+        resolved = self.resolve()
+        self.assertEqual(resolved.base, str(self.home / "cas-release-gate/base"))
+        self.assertIn("filesystem boundary", resolved.rejected[0])
+
+    def test_a_mount_below_the_scratch_root_is_refused(self):
+        # Seeding hard-links the build-cache into the clone target: the base
+        # must share the scratch root's filesystem, not merely sit under it.
+        self.env["CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT"] = str(self.scratch)
+        self.base.parent.mkdir(parents=True)
+        host = FakeHost({self.home: 1, self.rewind: 2, self.base.parent: 5})
+        resolved = release_env.resolve_scratch(self.checkout, self.env, host=host, durable=True)
+        self.assertNotEqual(resolved.base, str(self.base))
+        self.assertIn("scratch root", resolved.rejected[0])
+
+    def test_scratch_root_relocates_the_proof_build_cache(self):
+        self.env["CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT"] = str(self.scratch)
+        self.assertEqual(release_env.build_cache_root(self.checkout, self.env),
+                         self.scratch / self.key / "build-cache")
+        self.env["CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT"] = ""
+        self.assertEqual(release_env.build_cache_root(self.checkout, self.env), self.checkout / ".cas/build-cache")
 
 
 class Doctor(Fixture):

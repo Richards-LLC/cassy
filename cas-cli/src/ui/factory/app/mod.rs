@@ -14,7 +14,7 @@ use ratatui::layout::Rect;
 
 use super::director::{
     DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
-    MergeAlertFreshness, PanelAreas, Prompt, SidecarFocus, ViewMode, check_merge_alert_freshness,
+    PanelAreas, Prompt, SidecarFocus, ViewMode,
     generate_prompt_at, revalidate_event_for_delivery_with_context,
     revalidate_event_for_delivery_with_focus, supervisor_actionable_state_with_classifiers,
 };
@@ -35,6 +35,9 @@ pub(crate) mod delivery_evidence;
 mod director_refresh;
 mod imports;
 mod init;
+mod merge_alert;
+#[cfg(test)]
+pub(crate) mod merge_alert_tests;
 mod panels_and_modes;
 pub(crate) mod render_and_ops;
 mod sidecar_and_selection;
@@ -219,6 +222,17 @@ fn admit_worker_spawn(worktree_path: &Path, min_free_gib: u32) -> anyhow::Result
     if min_free_gib == 0 {
         return Ok(());
     }
+    // cas-3f93: build output is what fills a disk. When `[factory]
+    // scratch_root` relocates the worker target, its filesystem is measured
+    // first; the checkout's own filesystem still has to hold the sources.
+    let target = crate::factory_scratch::worker_target_dir(worktree_path);
+    if crate::factory_scratch::is_relocated(worktree_path, &target) {
+        admit_spawn_filesystem(&target, min_free_gib)?;
+    }
+    admit_spawn_filesystem(worktree_path, min_free_gib)
+}
+
+fn admit_spawn_filesystem(worktree_path: &Path, min_free_gib: u32) -> anyhow::Result<()> {
     // The target path may not exist yet or may be on a separate mount.
     let mut filesystem_path = worktree_path;
     while !filesystem_path.exists() {
@@ -444,7 +458,9 @@ pub(crate) fn seed_worker_target_from_baseline(
     if std::env::var("CAS_FACTORY_DISABLE_TARGET_SEED").as_deref() == Ok("1") {
         return Ok(None);
     }
-    let pointer = cas_dir.join("build-cache").join("current");
+    // cas-3f93: `[factory] scratch_root` may move the baseline and target.
+    let build_cache = crate::factory_scratch::build_cache_dir(cas_dir);
+    let pointer = build_cache.join("current");
     let Ok(snapshot_name) = std::fs::read_to_string(&pointer) else {
         return Ok(None);
     };
@@ -459,10 +475,7 @@ pub(crate) fn seed_worker_target_from_baseline(
         );
     }
 
-    let source = cas_dir
-        .join("build-cache")
-        .join("snapshots")
-        .join(snapshot_name);
+    let source = build_cache.join("snapshots").join(snapshot_name);
     if !source.is_dir() {
         anyhow::bail!(
             "worker build-cache snapshot '{}' does not exist at {}",
@@ -473,22 +486,35 @@ pub(crate) fn seed_worker_target_from_baseline(
 
     let metadata = read_target_seed_metadata(&source)?;
 
-    let target = worktree_path.join("target");
+    let target = crate::factory_scratch::worker_target_dir(worktree_path);
     if target.join("debug").exists() {
         return Ok(None);
     }
     if std::fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         anyhow::bail!("worker target is a symlink; refusing baseline re-seed");
     }
+    // Hard links cannot cross filesystems; refuse before any byte moves.
+    crate::factory_scratch::ensure_same_filesystem(&source, &target)?;
+    let relocated = crate::factory_scratch::is_relocated(worktree_path, &target);
     // Reject invalid snapshots before creating target provenance or seed data.
     let base_commit = git_head(worktree_path)?;
     let skipped_crates =
         changed_workspace_crates(worktree_path, &metadata.source_commit, &base_commit)?;
     #[cfg(unix)]
     let _target_lease = crate::factory_target_cache::owner::acquire(cas_dir, worktree_path)?;
-    let staging = worktree_path.join(".target-seed-in-progress");
+    let staging = if relocated {
+        // A sibling of the relocated target, so the final rename stays on
+        // the scratch filesystem.
+        let name = target.file_name().unwrap_or_default().to_string_lossy();
+        target.with_file_name(format!(".{name}.target-seed-in-progress"))
+    } else {
+        worktree_path.join(".target-seed-in-progress")
+    };
     if staging.exists() {
         std::fs::remove_dir_all(&staging)?;
+    }
+    if let Some(parent) = staging.parent().filter(|_| relocated) {
+        std::fs::create_dir_all(parent)?;
     }
 
     let age_secs = target_seed_age(metadata.created_at_unix);
@@ -871,11 +897,21 @@ impl WorkerSpawnPrep {
                         worker = %self.worker_name,
                         "spawn prep: no worker Cargo target baseline available"
                     ),
-                    Err(error) => tracing::warn!(
-                        worker = %self.worker_name,
-                        error = %error,
-                        "spawn prep: worker Cargo target seed skipped"
-                    ),
+                    Err(error) => {
+                        tracing::warn!(
+                            worker = %self.worker_name,
+                            error = %error,
+                            "spawn prep: worker Cargo target seed skipped"
+                        );
+                        // cas-3f93: a split scratch layout is an operator
+                        // misconfiguration, not a routine cache miss.
+                        if error
+                            .downcast_ref::<crate::factory_scratch::CrossFilesystemSeed>()
+                            .is_some()
+                        {
+                            target_seed_warning = Some(error.to_string());
+                        }
+                    }
                 }
             }
 
@@ -933,10 +969,13 @@ impl WorkerSpawnPrep {
                 isolated = false,
                 "spawn prep: non-isolated worker — sharing process cwd"
             );
+            // cas-10c8: a non-isolated worker shares the project's store; it
+            // is rooted there so Claude MCP isolation can provision it.
+            let cas_root = crate::store::find_cas_root_from(&cwd).ok();
             Ok(WorkerSpawnResult {
                 worker_name: self.worker_name,
                 cwd,
-                cas_root: None,
+                cas_root,
                 worktree: None,
                 worktree_created: false,
                 target_seed: None,
@@ -1014,6 +1053,7 @@ pub struct FactoryApp {
     /// cas-207e: lane CI of parked deliveries by (branch, tip). A settled
     /// result is final for its tip; a pending one is re-read after a minute.
     lane_ci_pending: delivery_evidence::LaneCiCache,
+    merge_alert_retries: merge_alert::Retries,
     /// Cached full epic-status containment, keyed by delivery and target tips.
     delivery_containment: delivery_evidence::DeliveryContainmentCache,
     /// Factory loop v2 (cas-223f): the store half of the supervisor-stall
@@ -1520,6 +1560,7 @@ impl FactoryApp {
             idle_liveness,
             facts,
             session: session_progress,
+            mut merge_alerts,
         } = inputs;
         let session_progress = session_progress.unwrap_or_default();
         // cas-223f review M3: revalidation joins the fresh read's store facts
@@ -1561,6 +1602,10 @@ impl FactoryApp {
         // durable attention relay delivers it below), so its busy-worker
         // guard does not apply on this path.
         let unfiltered_data = loaded_data.unwrap_or_else(|_| self.unfiltered_director_data.clone());
+        let merge_now = self.merge_alert_retries.clock();
+        for event in events {
+            self.merge_alert_retries.remember(event, merge_now);
+        }
 
         // cas-9fff: pass session-focused epic so EpicAllSubtasksClosed can
         // use session-affinity routing (not just epic_verification_owner).
@@ -1609,13 +1654,6 @@ impl FactoryApp {
         let gated_task_ids =
             crate::ui::factory::director::compute_gated_task_ids(&non_closed_ids, &blocks_deps);
 
-        // cas-6883: repo root for the send-time MERGE REQUIRED freshness
-        // check — same derivation as `close_project_root` in close_ops.rs /
-        // `repo_root` in `director.rs::load_all_git_changes` (`.cas`'s
-        // parent is the main checkout all `factory/*` and `epic/*` branches
-        // live in).
-        let repo_root = self.cas_dir.parent().unwrap_or(&self.cas_dir).to_path_buf();
-
         let mut prompts: Vec<Prompt> = Vec::with_capacity(delivery_events.len());
         for event in &delivery_events {
             // cas-d4ae: taskless idle and escalated stall events are factory
@@ -1633,42 +1671,15 @@ impl FactoryApp {
             ) {
                 continue;
             }
-            // cas-6883: re-validate a MERGE REQUIRED / AwaitingMerge idle
-            // signal against live git state, and against what was last
-            // actually sent, immediately before generating its prompt —
-            // as close to true send time as this tick-based pipeline gets.
-            // `NotApplicable` (wrong event shape, task no longer
-            // AwaitingMerge, or no resolvable epic branch) falls through to
-            // `generate_prompt` unaffected, exactly as before this fix.
-            // cas-223f: without a fresh read there is nothing to check the
-            // alert against; it is delivered as detected.
-            let freshness = if delivery_state_is_authoritative {
-                check_merge_alert_freshness(event, &unfiltered_data, &repo_root)
-            } else {
-                MergeAlertFreshness::NotApplicable
-            };
-            let merge_alert_evidence =
-                match freshness {
-                    MergeAlertFreshness::NotApplicable => None,
-                    // AC1: branch already carries zero unmerged commits vs
-                    // the epic — drop the alert entirely rather than
-                    // instruct a merge that already happened.
-                    MergeAlertFreshness::Stale => continue,
-                    MergeAlertFreshness::Fresh(evidence) => {
-                        // AC3: same (task, branch) pair, same evidence as
-                        // last time — suppress the repeat.
-                        if self.event_detector.merge_alert_should_emit(
-                            &evidence.task_id,
-                            &evidence.factory_branch,
-                            evidence.unmerged_count,
-                            &evidence.epic_sha,
-                        ) {
-                            Some(evidence)
-                        } else {
-                            continue;
-                        }
-                    }
-                };
+            // An actionable merge demand needs completed exact-tip CI and a
+            // successful live-target read. Both were computed on the external
+            // lane, alongside this delivery read, never on the loop.
+            let ready = if let Some(task_id) = merge_alert::task_id(event) {
+                let Some(ready) = merge_alerts.remove(task_id) else { continue; };
+                if !self.merge_alert_retries.actionable(&ready, merge_now) { continue; }
+                Some(ready)
+            } else { None };
+            let merge_alert_evidence = ready.as_ref().map(|ready| &ready.evidence);
 
             // cas-dc1b: worker-facing tool names come from the recipient
             // worker's harness, not the session-wide spawn default.
@@ -1684,7 +1695,7 @@ impl FactoryApp {
                 self.supervisor_cli,
                 worker_cli,
                 &gated_task_ids,
-                merge_alert_evidence.as_ref(),
+                merge_alert_evidence,
                 snapshot_at,
             ) {
                 if let DirectorEvent::WorkerIdle { worker, .. } = event {
@@ -1698,6 +1709,30 @@ impl FactoryApp {
                         {
                             continue;
                         }
+                    }
+                }
+                if let Some(ready) = ready {
+                    if !self.event_detector.merge_alert_should_emit(
+                        &ready.evidence.task_id, &ready.tip, ready.ci,
+                    ) { continue; }
+                    if matches!(ready.ci, "failure" | "unknown") {
+                        let prefix = self.supervisor_cli.backend().capabilities().tool_prefix;
+                        let decision = if ready.ci == "unknown" {
+                            "CI unknown for 10 minutes. Supervisor decision needed: inspect the missing workflow or unavailable CI service and confirm appropriate validation before merging."
+                        } else {
+                            "CI failed. Supervisor decision needed: request changes, or explicitly review and override red CI before merging."
+                        };
+                        let text = format!(
+                            "{decision}\nTask {} on {} at {}.\n{} unmerged commit(s) vs {} at {}.\nLive task: `{prefix}task action=show id={}`",
+                            ready.evidence.task_id, ready.evidence.factory_branch, ready.tip,
+                            ready.evidence.unmerged_count, ready.evidence.checked_epic_ref,
+                            ready.evidence.epic_sha, ready.evidence.task_id,
+                        );
+                        if let DirectorEvent::WorkerIdle { worker, .. } = event {
+                            prompt.text = super::director::with_response_instructions(&text, worker, self.supervisor_cli);
+                        }
+                    } else {
+                        prompt.text = format!("CI completed successfully for delivery {}.\n{}", ready.tip, prompt.text);
                     }
                 }
                 prompts.push(prompt);
@@ -7138,6 +7173,126 @@ mod spawn_isolation_tests {
                 .target_seed_warning
                 .as_deref()
                 .is_some_and(|warning| warning.contains("scripts/refresh-worker-build-cache.sh"))
+        );
+    }
+
+    /// cas-3f93: with `[factory] scratch_root` set, a new worker's private
+    /// target and the published baseline both live under the project's
+    /// scratch namespace, seeding still hard-links, ownership provenance is
+    /// published and the checkout gets no in-tree target.
+    #[cfg(unix)]
+    #[test]
+    fn scratch_root_new_worker_target_is_hardlinked_on_scratch() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let scratch = tmp.path().join("rewind");
+        let cas_dir = repo.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            format!(
+                "[factory]\nspawn_min_free_gib = 0\nscratch_root = {:?}\n",
+                scratch.display().to_string()
+            ),
+        )
+        .unwrap();
+        let project = scratch.join(cas_types::factory_scratch::project_key(&cas_dir));
+        let snapshot = project.join("build-cache/snapshots/target-main-test");
+        let cached_artifact = snapshot.join("debug/deps/libwarm.rlib");
+        std::fs::create_dir_all(cached_artifact.parent().unwrap()).unwrap();
+        std::fs::write(&cached_artifact, b"warm dependency artifact").unwrap();
+        std::fs::write(project.join("build-cache/current"), "target-main-test\n").unwrap();
+        std::fs::write(
+            snapshot.join(TARGET_SEED_METADATA_FILE),
+            format!("source_commit={}\ncreated_at_unix=0\n", git_head(&repo).unwrap()),
+        )
+        .unwrap();
+        // An in-tree baseline must be ignored once the root is configured.
+        std::fs::create_dir_all(cas_dir.join("build-cache")).unwrap();
+        std::fs::write(cas_dir.join("build-cache/current"), "missing-in-tree\n").unwrap();
+
+        let worktree_path = cas_dir.join("worktrees/scratch-worker");
+        let prep = WorkerSpawnPrep {
+            worker_name: "scratch-worker".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worktree_path.clone(),
+                branch_name: "factory/scratch-worker".to_string(),
+                parent_branch: "main".to_string(),
+                base_ref: None,
+                repo_root: repo,
+                cas_dir: cas_dir.clone(),
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        };
+        let result = prep.run().expect("create and seed worker worktree");
+        assert!(result.target_seed.is_some(), "baseline must seed the relocated target");
+        let target = project.join("targets/scratch-worker");
+        let seeded = target.join("debug/deps/libwarm.rlib");
+        assert_eq!(std::fs::read(&seeded).unwrap(), b"warm dependency artifact");
+        let source = std::fs::metadata(&cached_artifact).unwrap();
+        let copy = std::fs::metadata(&seeded).unwrap();
+        assert_eq!((source.dev(), source.ino()), (copy.dev(), copy.ino()));
+        assert!(copy.nlink() > 1, "seeding must hard-link, never copy");
+        assert!(!result.cwd.join("target").exists(), "no in-tree target when relocated");
+        assert!(
+            !project.join("targets/.scratch-worker.target-seed-in-progress").exists(),
+            "the staging sibling is published or removed"
+        );
+        let lease = crate::factory_target_cache::owner::for_retirement(&cas_dir, &result.cwd)
+            .unwrap()
+            .expect("relocated target carries verifiable ownership");
+        assert!(lease.revalidate(&target).unwrap());
+    }
+
+    /// cas-3f93: the disk floor measures the relocated target's filesystem
+    /// before the checkout's own.
+    #[cfg(unix)]
+    #[test]
+    fn scratch_root_spawn_disk_floor_measures_scratch_filesystem() {
+        let tmp = TempDir::new().unwrap();
+        let cas_dir = tmp.path().join("repo/.cas");
+        let scratch = tmp.path().join("rewind");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            format!("[factory]\nscratch_root = {:?}\n", scratch.display().to_string()),
+        )
+        .unwrap();
+        let worktree = cas_dir.join("worktrees/floor-worker");
+        let floor = u32::try_from(
+            crate::fs_space::fs_space(&scratch).unwrap().available_bytes / (1 << 30) + 2,
+        )
+        .unwrap();
+        let error = admit_worker_spawn(&worktree, floor).unwrap_err().to_string();
+        let target = crate::factory_scratch::worker_target_dir(&worktree);
+        assert!(target.starts_with(&scratch), "{}", target.display());
+        assert!(error.contains("spawn_disk_floor"), "{error}");
+        assert!(error.contains(&target.display().to_string()), "{error}");
+        admit_worker_spawn(&worktree, 0).unwrap();
+    }
+
+    /// cas-3f93: unset keeps the in-tree admission path exactly.
+    #[cfg(unix)]
+    #[test]
+    fn scratch_root_unset_spawn_disk_floor_names_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let cas_dir = tmp.path().join("repo/.cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        let worktree = cas_dir.join("worktrees/floor-worker");
+        let floor = u32::try_from(
+            crate::fs_space::fs_space(&cas_dir).unwrap().available_bytes / (1 << 30) + 2,
+        )
+        .unwrap();
+        let error = admit_worker_spawn(&worktree, floor).unwrap_err().to_string();
+        assert!(
+            error.starts_with(&format!("spawn_disk_floor: {} has", worktree.display())),
+            "{error}"
         );
     }
 

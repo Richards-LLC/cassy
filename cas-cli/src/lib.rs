@@ -21,6 +21,7 @@ compile_error!(
 );
 
 // Core modules
+pub mod accounts;
 pub mod agent_id;
 pub(crate) mod ai_enrichment;
 pub(crate) mod ambient_recall;
@@ -34,6 +35,7 @@ pub mod cloud;
 pub mod capability;
 pub mod config;
 pub mod consolidation;
+pub mod coordination;
 pub mod daemon;
 pub mod duplicate_check;
 pub mod error;
@@ -54,6 +56,7 @@ pub mod factory_daemon_health;
 pub mod factory_session_scope;
 pub mod factory_supervisor_overlap;
 pub(crate) mod supervisor_notices;
+pub(crate) mod factory_scratch;
 pub mod factory_target_cache;
 pub mod fs_space;
 pub mod gh_graphql;
@@ -83,6 +86,8 @@ pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;
 pub(crate) mod task_assignment;
 pub mod qa_pass;
+/// cas-e8d1 (GH #1233): open work the record says is done.
+pub(crate) mod backlog_hygiene;
 pub(crate) mod qa_batch;
 pub(crate) mod review_body;
 pub mod retrieval_eval;
@@ -215,7 +220,8 @@ pub(crate) mod test_support {
                 // silently maintaining a second list here.
                 (!crate::test_env_guard::is_scrubbed_ambient_env_key(key)
                     || key == "CAS_ROOT"
-                    || key == "CAS_FACTORY_BUILD_GUARD")
+                    || key == "CAS_FACTORY_BUILD_GUARD"
+                    || key == "CAS_GH_BIN")
                     && !matches!(
                         key,
                         "CLAUDE_CONFIG_DIR"
@@ -235,6 +241,14 @@ pub(crate) mod test_support {
             std::path::Path::new(&pinned),
             guard.home().join(".cas"),
             "CAS_ROOT must be the hermetic root inside the temp HOME"
+        );
+        let gh = std::env::var_os("CAS_GH_BIN").expect("guard must pin gh away from the host");
+        assert!(
+            std::process::Command::new(gh)
+                .arg("--version")
+                .output()
+                .is_err(),
+            "the default gh fixture must fail before any process or network call"
         );
         drop(guard);
         assert_eq!(

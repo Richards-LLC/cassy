@@ -1,6 +1,9 @@
 //! Contracts integration suites, linked once.
 //! Run with nextest for one-process-per-test environment/cwd isolation.
 
+#[path = "../../src/test_env_guard.rs"]
+mod test_env_guard;
+
 #[path = "../agent_definition_contract_test.rs"]
 mod agent_definition_contract_test;
 #[path = "../agents_md_sync_test.rs"]

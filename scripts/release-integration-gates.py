@@ -14,7 +14,7 @@ FAST_ROWS = (
     "release-notes-shell-injection", "procedure-guardrails", "test-targets",
     "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene",
     "journey-catalog", "builtin-skill-limits", "doctor-snapshot", "migration-registry",
-    "ci-script-tests-changed", "fixture-paths-src", "builtin-projections-src",
+    "communication-slos", "ci-script-tests-changed", "fixture-paths-src", "builtin-projections-src",
     "call-shapes",
     "release-notes-draft",
 )

@@ -57,6 +57,7 @@ fn message(id: &str, recipient: &str, project: &str, body: &str) -> ClaimedPeerM
         in_reply_to: None,
         created_at: "2026-10-11T03:00:00Z".to_string(),
         attempts: 1,
+        scope: Default::default(),
     }
 }
 
@@ -112,6 +113,7 @@ fn envelope_round_trips_and_is_only_read_from_the_first_line() {
         repo: REPO.into(),
         in_reply_to: None,
         kind: None,
+        scope: PeerScope::Project,
     };
     let line = render_envelope(&envelope);
     assert!(!line.contains('\n'), "{line}");
@@ -394,6 +396,10 @@ fn peer(name: &str, machine: &str, live: bool) -> Peer {
         last_heartbeat: chrono::Utc::now(),
         heartbeat_age_secs: if live { 5 } else { PEER_LIVE_SECS + 1 },
         live,
+        user_id: None,
+        owner: None,
+        branch: None,
+        own: None,
     }
 }
 

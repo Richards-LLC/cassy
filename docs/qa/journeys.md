@@ -323,7 +323,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - The "Write to a supervisor" button opens a thread straight away.
 - Attention and machine problems live in the desktop rail and are hidden on a phone.
-- The supervisor pane's host beside the thread is hidden, inert and out of the accessibility tree: it never widens the conversation or takes a hit, and Raw output opens over it as a bottom sheet whose Close returns focus to Raw output, in light and dark (cas-ff3d, cas-0546).
+- The thread is the only thing in its stage: no pane host, terminal or canvas sits beside it, nothing widens the conversation or takes its hit, and Raw output opens over it as a bottom sheet whose Close returns focus to Raw output, in light and dark (cas-ff3d, cas-0546, cas-f285).
 
 ### HUB-J10 · Switch to dark and keep reading
 
@@ -400,6 +400,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 8. On a legacy socket, a second message sent before the refusal arrives waits too — a hub without the machine protocol stops reading a session's socket once it refuses a send, so a message written before that refusal reached the page is held with the first; both go out once, in order, when the session is back; and once the session has stayed live for 10 s, the next drop retries after about 1 s again, receipt or not
 9. A revoked pairing says so and offers Re-pair, on a phone too — a definitive refusal shows "Needs pairing", the banner says the machine needs pairing again instead of "Reconnecting…", the rail card is headed "Machine needs pairing", and the banner carries a Re-pair control (44 px on a phone) that opens pairing; a message waiting to send reads Not sent ("<machine> needs pairing again. Re-pair <machine>, then retry.") with Retry, and one already sent without a receipt reads Not confirmed, never Sending…
 10. The whole machine drops, then returns — while it retries, the banner alone tells it ("Lost connection to <machine>. Reconnecting…"): no Attention card in transport terms ("Reconnecting to hub", "Stuck dialing", heartbeat counts), and no control toast over the conversation; a card appears only for a failure that will not retry, worded like the banner. While it is down the header's Interrupt says "Interrupt and raw output return when it reconnects"; once it is back, control this browser held is taken back by itself (unless another device took it), Interrupt is available again, and no "Control released" notice is left on screen or to a screen reader. A refused pairing leaves no "connection dropped" notice: Interrupt and Raw output say "Re-pair it to interrupt the supervisor or read its raw output" through later heartbeats, and a press interrupts nothing
+11. Reload while the whole machine is unreachable — within a second the list shows the conversations it last knew and the last one reopens with its held message, never "0 conversations"; once the machine answers, the same conversation attaches and the message goes out once (cas-9846)
 
 #### Expected experience
 
@@ -572,16 +573,16 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` at 1280 with two paired machines, a live cas-src conversation open, on a device whose pairing may force a take (hub-admin); parts at 390 light, 390 dark and 1280 dark, the light phone without hub-admin
 - **Goal:** I stop what the supervisor is doing, or read what its terminal shows, without leaving the conversation, from the keyboard alone
-- **Touches:** `hub-web/src/conversation-shell.ts`, `hub-web/src/transcript-view.ts`, `hub-web/src/connection-state-view.ts`, `hub-web/src/connection.ts`, `hub-web/src/early-thread.ts`
+- **Touches:** `hub-web/src/conversation-shell.ts`, `hub-web/src/transcript-view.ts`, `hub-web/src/raw-output.ts`, `hub-web/src/connection-state-view.ts`, `hub-web/src/connection.ts`, `hub-web/src/early-thread.ts`
 - **Suite:** `hub-web/e2e/journeys/interrupt-raw-output.journey.ts`: one main test and three part tests marked `journeyPart` (390 light, 390 dark, 1280 dark), receipts under `journeys/HUB-J18/parts/<part>/`
 - **Gaps:** the hub double records the InterruptPane frame and models another device's lease (refused unless forced by hub-admin, as hub/auth.rs does); that the supervisor's pane really stops is proven by the hub's Rust tests
 
 #### Steps
 
-1. Open a conversation; only the thread shows — the header carries Raw output and "Interrupt the cas-src supervisor" (visible "Interrupt"), both available; the supervisor's pane surface is attached beside the thread but hidden, inert and out of the accessibility tree; no control, palette command or text names a terminal view
-2. Interrupt the supervisor from the keyboard — Tab from the list search reaches Interrupt without stopping in the hidden pane; Enter sends one InterruptPane for the supervisor pane, the toast says "Interrupted the cas-src supervisor.", and focus stays on Interrupt
+1. Open a conversation; only the thread shows — the header carries Raw output and "Interrupt the cas-src supervisor" (visible "Interrupt"), both available; no pane host, terminal or canvas stands beside the thread (cas-f285); no control, palette command or text names a terminal view
+2. Interrupt the supervisor from the keyboard — Tab from the list search reaches Interrupt without stopping in a terminal; Enter sends one InterruptPane for the supervisor pane, the toast says "Interrupted the cas-src supervisor.", and focus stays on Interrupt
 3. Take control from another device to interrupt — with Studio iPad in control, Interrupt forces the take and says so: "Took control from Studio iPad. Interrupted the cas-src supervisor."
-4. Read the raw output from the keyboard — Enter on Raw output opens the "Raw output" drawer, described as read-only, with the supervisor's text ("The supervisor is ready."); it takes no text and typing in it sends nothing; Escape closes it and returns focus to Raw output
+4. Read the raw output from the keyboard — Enter on Raw output opens the "Raw output" drawer, described as read-only, with the supervisor's text ("The supervisor is ready.") read from the daemon's rendered rows; it takes no text and typing in it sends nothing; Escape closes it and returns focus to Raw output
 
 #### Expected experience
 
@@ -599,7 +600,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` at 390×844 on a browser profile with no paired machine and no inbox sign-in, while soundwave (enrolled in the account's operator inbox) is off; a second desktop profile joins later
 - **Goal:** I sign in with my account alone, read the supervisor's messages from the last weeks, and leave a reply that waits for soundwave until it is back and receives it
-- **Touches:** `hub-web/src/inbox/*`, `hub-web/src/conversation-shell.ts`, `hub-web/test/operator-cloud-double.ts`
+- **Touches:** `hub-web/src/inbox/*`, `hub-web/src/conversation-shell.ts`, `hub-web/test/operator-cloud-double.ts`, `hub-web/test/reply-grant-double.ts`
 - **Suite:** `hub-web/e2e/journeys/operator-inbox.journey.ts`, with the cloud answered by `hub-web/e2e/journeys/operator-cloud-route.ts`
 - **Gaps:** the cloud is a protocol double (PoP, enrollment check, epoch wraps, coverage, ACKs, commands), so the deployed-cloud two-profile journey of cas-9b7d S5 is the acceptance gate; soundwave's reservation and admission are modeled by the double, and proven by the hub's Rust tests (`operator_inbox::commands`)
 
@@ -622,6 +623,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A revoked or expired device returns to signed-out and its stored inbox is wiped (unit-tested in `src/inbox/controller.test.ts`).
 - An account reset warns once and continues on the new inbox.
 - Expired history shows "Older history has expired. Messages are kept for 90 days." instead of an empty success.
+- Machine-alert part (cas-e3dd): an account-management phone explicitly enables monitoring; reporting age and Hub/Serve/Factory observations stay separate from watchdog health. Both independent profiles persist one signed outage and the matching recovered notice, including reload; notices never become conversation bubbles. The phone can disable monitoring with the machine unreachable, while a read-only device cannot change it. Phone/desktop light/dark and forced-colors, more-contrast and reduced-motion captures are serial. These are protocol-double choreography checks; the deployed-cloud two-device outage/recovery remains the acceptance gate.
+
+- Reply-upgrade parts (cas-874b, proposed petra-stella-cloud#174): only an explicitly advertised `reply-grant-upgrade-v1` offers Ask to reply in the read-only inbox conversation. An independently enrolled account-management owner approves/denies the exact conversation; approval upgrades the same device and permits one queued reply without enrollment, signing out or losing history. Denied/expired requests remain read-only across reload. This is a protocol-double proposal; production activation requires Cloud agreement and deployment.
 
 ### HUB-J20 · Grant a task write access outside its worktree from my phone
 

@@ -58,7 +58,7 @@ describe("bounded connection recovery (cas-2b3a5)", () => {
   it.each(["/v1/auth/refresh", "/v1/diagnostics"])("bounds signing/fetch/body for %s", async path => {
     vi.stubGlobal("crypto", webcrypto);
     const machine = { id: "hub", label: "Secret label", baseUrl: "https://hub.test", credential: "secret-credential", credentialId: "credential", deviceId: "device", scopes: [] as [], expiresAt: "2027-01-01T00:00:00Z", ...await createDeviceKey() };
-    const connection = new HubConnectionSupervisor(machine, { onState: () => {}, onSessions: () => {}, onMachineEvent: () => {}, onSessionState: () => {}, onOutput: () => {}, onPaneKeyframe: () => {}, onSocketError: () => {} });
+    const connection = new HubConnectionSupervisor(machine, { onState: () => {}, onSessions: () => {}, onMachineEvent: () => {}, onSessionState: () => {}, onOutput: () => {}, onSocketError: () => {} });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 200, ok: true, json: () => new Promise(() => {}) }));
     vi.useFakeTimers();
     const result = connection.request(path.includes("refresh") ? "POST" : "GET", path);

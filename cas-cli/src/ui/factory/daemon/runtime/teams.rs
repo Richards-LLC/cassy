@@ -166,12 +166,61 @@ struct InboxFileLock<'a> {
 }
 
 impl<'a> InboxFileLock<'a> {
-    fn acquire(file: &'a std::fs::File, path: &'a std::path::Path) -> anyhow::Result<Self> {
-        if let Err(error) = fs2::FileExt::lock_exclusive(file) {
-            anyhow::bail!("Failed to lock inbox file {:?}: {}", path, error);
-        }
-        Ok(Self { file, path })
+    /// Releases the lock [`open_locked_inbox`] took on `file` when dropped.
+    fn held(file: &'a std::fs::File, path: &'a std::path::Path) -> Self {
+        Self { file, path }
     }
+}
+
+/// cas-c312: the file every CAS inbox writer locks, beside the inbox and
+/// never renamed or removed. [`replace_inbox_file`] swaps the inbox itself,
+/// so a lock on the inbox would be left on a replaced file while the next
+/// writer locked the new one. A hidden `.cas-lock` name stays clear of
+/// `*.json` inbox scans and of a `<inbox>.lock` that other tools may use.
+pub(crate) fn inbox_lock_path(path: &std::path::Path) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}.cas-lock"))
+}
+
+/// cas-c312: takes the exclusive lock that serializes CAS writers of `path`,
+/// blocking until it is free. There is no retry or give-up path: the lock file
+/// is stable, so holding it always means holding the inbox. Callers unlock
+/// through [`InboxFileLock`].
+pub(crate) fn open_locked_inbox(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
+    let lock_path = inbox_lock_path(path);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    if let Err(error) = fs2::FileExt::lock_exclusive(&file) {
+        anyhow::bail!("Failed to lock inbox file {:?}: {}", path, error);
+    }
+    Ok(file)
+}
+
+/// cas-c312: writes an inbox as a whole new file renamed over `path`. Inbox
+/// readers take no lock (the harness, `inbox_has_unread_copy`,
+/// `unread_alerts`); truncating and then writing in place let one parse an
+/// empty file (CI run 38948837325). Hold the lock from
+/// [`open_locked_inbox`] across the read-modify-replace.
+pub(crate) fn replace_inbox_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(dir)?;
+    if let Ok(existing) = std::fs::metadata(path) {
+        file.as_file().set_permissions(existing.permissions())?;
+    }
+    file.write_all(contents)?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 impl Drop for InboxFileLock<'_> {
@@ -319,7 +368,7 @@ impl InboxPruner {
             });
             if messages.len() != before {
                 let json = serde_json::to_string_pretty(&messages)?;
-                std::fs::write(&inbox_path, json)?;
+                replace_inbox_file(&inbox_path, json.as_bytes())?;
             }
             Ok(retracted)
         })
@@ -374,7 +423,7 @@ fn prune_stale_rows_in(
 
         if removed > 0 {
             let json = serde_json::to_string_pretty(&messages)?;
-            std::fs::write(&inbox_path, json)?;
+            replace_inbox_file(&inbox_path, json.as_bytes())?;
         }
 
         Ok(removed)
@@ -549,40 +598,41 @@ pub(crate) fn reap_stranded_native_inbox_copies_in(
 /// [`InboxMessage`] — native rows carry `msgV` / `msg_id` / `type` fields the
 /// typed struct does not model and would silently drop on re-serialize.
 fn mark_inbox_rows_inert(path: &std::path::Path, log_message: &'static str) -> usize {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return 0;
-    };
-    let Ok(mut rows) = serde_json::from_str::<Vec<serde_json::Value>>(&content) else {
-        return 0;
-    };
-
-    let mut changed = 0usize;
-    for row in rows.iter_mut() {
-        let Some(obj) = row.as_object_mut() else {
-            continue;
-        };
-        if obj.get("read").and_then(|v| v.as_bool()) == Some(false) {
-            obj.insert("read".to_string(), serde_json::Value::Bool(true));
-            changed += 1;
+    // Rows go inert at most once; an inbox with nothing unread is never
+    // locked or rewritten (and gains no lock file).
+    let mark = |content: &str| -> Option<(usize, String)> {
+        let mut rows = serde_json::from_str::<Vec<serde_json::Value>>(content).ok()?;
+        let mut changed = 0usize;
+        for row in rows.iter_mut() {
+            let Some(obj) = row.as_object_mut() else {
+                continue;
+            };
+            if obj.get("read").and_then(|v| v.as_bool()) == Some(false) {
+                obj.insert("read".to_string(), serde_json::Value::Bool(true));
+                changed += 1;
+            }
         }
-    }
-    if changed == 0 {
-        return 0;
-    }
-
-    let Ok(json) = serde_json::to_string_pretty(&rows) else {
+        if changed == 0 {
+            return None;
+        }
+        serde_json::to_string_pretty(&rows).ok().map(|json| (changed, json))
+    };
+    let Some(_) = std::fs::read_to_string(path).ok().as_deref().and_then(mark) else {
         return 0;
     };
-    // Same exclusive-lock discipline as every other inbox mutation, so a
-    // concurrent harness write cannot interleave with this rewrite.
-    let write = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
+    // Same exclusive-lock discipline as every other inbox mutation. cas-c312:
+    // re-read under the lock, so a row written since the check is kept.
+    let mut changed = 0usize;
+    let write = open_locked_inbox(path)
+        .map_err(|e| std::io::Error::other(e.to_string()))
         .and_then(|file| {
-            let _lock =
-                InboxFileLock::acquire(&file, path).map_err(|e| std::io::Error::other(e.to_string()))?;
-            std::fs::write(path, &json)
+            let _lock = InboxFileLock::held(&file, path);
+            let content = std::fs::read_to_string(path)?;
+            let Some((count, json)) = mark(&content) else {
+                return Ok(());
+            };
+            changed = count;
+            replace_inbox_file(path, json.as_bytes())
         });
     match write {
         Ok(()) => {
@@ -1357,11 +1407,8 @@ impl TeamsManager {
         inbox_path: &std::path::Path,
         operation: impl FnOnce() -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(inbox_path)?;
-        let _lock = InboxFileLock::acquire(&file, inbox_path)?;
+        let file = open_locked_inbox(inbox_path)?;
+        let _lock = InboxFileLock::held(&file, inbox_path);
         operation()
     }
 
@@ -1487,7 +1534,7 @@ impl TeamsManager {
                 // avoid a write storm on hot duplicate senders.
                 if retention_pruned {
                     let json = serde_json::to_string_pretty(&messages)?;
-                    std::fs::write(&inbox_path, json)?;
+                    replace_inbox_file(&inbox_path, json.as_bytes())?;
                 }
                 return Ok(());
             }
@@ -1506,7 +1553,7 @@ impl TeamsManager {
 
             // Write back
             let json = serde_json::to_string_pretty(&messages)?;
-            std::fs::write(&inbox_path, json)?;
+            replace_inbox_file(&inbox_path, json.as_bytes())?;
 
             tracing::debug!("Wrote message to inbox: {} -> {}", from, target);
 
@@ -3002,15 +3049,108 @@ mod tests {
             "the injected post-lock failure must remain an I/O error: {error:#}"
         );
 
+        // cas-c312: writers serialize on the stable sibling lock file.
         let contender = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(&inbox_path)
+            .open(inbox_lock_path(&inbox_path))
             .unwrap();
         fs2::FileExt::try_lock_exclusive(&contender)
             .expect("an error exit must release LOCK_EX even while a forked child retains the fd");
         fs2::FileExt::unlock(&contender).unwrap();
         drop(child.take());
+    }
+
+    fn c312_manager(root: &std::path::Path) -> TeamsManager {
+        let inboxes_dir = root.join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        TeamsManager {
+            team_name: "cas-src-test".to_string(),
+            teams_dir: root.to_path_buf(),
+            inboxes_dir,
+            config: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// cas-c312: CI run 38948837325 read a worker inbox while a job thread
+    /// was writing it and parsed an empty file ("EOF while parsing"). Readers
+    /// take no lock (the harness, `inbox_has_unread_copy`, `unread_alerts`),
+    /// so a write must replace the file whole, never truncate it first.
+    #[test]
+    fn concurrent_inbox_reader_never_sees_an_empty_or_partial_file_cas_c312() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let tmp = tempfile::tempdir().unwrap();
+        let teams = c312_manager(tmp.path());
+        teams.write_to_inbox("worker", "supervisor", "seed", None, None).unwrap();
+        let path = teams.inboxes_dir.join("worker.json");
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        let reader = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                let (mut reads, mut torn) = (0usize, Vec::new());
+                while !done.load(Ordering::Acquire) {
+                    reads += 1;
+                    match std::fs::read_to_string(&path) {
+                        Ok(content) => {
+                            if serde_json::from_str::<Vec<InboxMessage>>(&content).is_err() {
+                                torn.push(content.len());
+                            }
+                        }
+                        Err(error) => torn.push(error.raw_os_error().unwrap_or(-1) as usize),
+                    }
+                }
+                (reads, torn)
+            })
+        };
+        let padding = "x".repeat(2048);
+        for index in 0..300 {
+            teams
+                .write_to_inbox("worker", "supervisor", &format!("message {index} {padding}"), None, None)
+                .unwrap();
+        }
+        done.store(true, Ordering::Release);
+        let (reads, torn) = reader.join().unwrap();
+        assert!(reads > 0, "the reader must have overlapped the writes");
+        assert!(torn.is_empty(), "{} of {reads} reads saw a torn inbox: {torn:?}", torn.len());
+    }
+
+    /// cas-c312: replacing the file swaps its inode, so writers serialize on
+    /// a stable sibling lock file instead. Every contended writer waits its
+    /// turn and lands its row: none gives up, none overwrites another.
+    #[test]
+    fn concurrent_inbox_writers_keep_every_row_across_file_replacement_cas_c312() {
+        let tmp = tempfile::tempdir().unwrap();
+        c312_manager(tmp.path())
+            .write_to_inbox("worker", "supervisor", "seed", None, None)
+            .unwrap();
+        let writers: Vec<_> = (0..8)
+            .map(|writer| {
+                let root = tmp.path().to_path_buf();
+                std::thread::spawn(move || {
+                    let teams = c312_manager(&root);
+                    for index in 0..40 {
+                        teams
+                            .write_to_inbox("worker", "supervisor", &format!("writer {writer} row {index}"), None, None)
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let rows: Vec<InboxMessage> = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("inboxes/worker.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1 + 8 * 40, "a concurrent write lost rows");
+        // The inbox directory holds the inbox and its lock file, nothing staged.
+        let mut entries: Vec<String> = std::fs::read_dir(tmp.path().join("inboxes"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, [".worker.json.cas-lock", "worker.json"]);
     }
 
     /// cas-ceae (GH #124): the write-time dedup guard sees only copies the

@@ -150,9 +150,9 @@ impl FactoryApp {
                 cwds.insert(name.clone(), worktree.path.clone());
             }
 
-            (Some(manager), cwds, Some(cas_dir.clone()))
+            (Some(manager), cwds, initial_mux_cas_root(true, &cas_dir))
         } else {
-            (None, HashMap::new(), None)
+            (None, HashMap::new(), initial_mux_cas_root(false, &cas_dir))
         };
 
         // Resolve theme: explicit config overrides auto-detection
@@ -228,6 +228,7 @@ impl FactoryApp {
             cas_dir,
             director_stores,
             lane_ci_pending: Default::default(),
+            merge_alert_retries: Default::default(),
             delivery_containment: Default::default(),
             parked_facts: Default::default(),
             git_evidence: Default::default(),
@@ -419,6 +420,7 @@ impl FactoryApp {
             cas_dir,
             director_stores,
             lane_ci_pending: Default::default(),
+            merge_alert_retries: Default::default(),
             delivery_containment: Default::default(),
             parked_facts: Default::default(),
             git_evidence: Default::default(),
@@ -681,6 +683,7 @@ impl FactoryApp {
             cas_dir: PathBuf::from("/tmp/cas-test"),
             director_stores: None,
             lane_ci_pending: Default::default(),
+            merge_alert_retries: Default::default(),
             delivery_containment: Default::default(),
             parked_facts: Default::default(),
             git_evidence: Default::default(),
@@ -804,10 +807,73 @@ impl FactoryApp {
     }
 }
 
+/// cas-10c8: the Cassy store the initial panes are rooted in, with or
+/// without worktrees. Claude worker MCP isolation (`cas_only`) writes its
+/// strict config there; a `--no-worktrees` fleet used to get none and every
+/// Claude worker refused to launch.
+pub(crate) fn initial_mux_cas_root(_enable_worktrees: bool, cas_dir: &std::path::Path) -> Option<PathBuf> {
+    Some(cas_dir.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use cas_mux::SupervisorCli;
+
+    /// cas-10c8: a standalone daemon started with `--no-worktrees` on an
+    /// initialized project builds its initial Claude worker with a rooted,
+    /// strict MCP config instead of refusing; a pane with no root still
+    /// refuses.
+    #[test]
+    fn cas_10c8_no_worktree_initial_claude_worker_gets_rooted_strict_mcp_config() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config --strict-mcp-config");
+        let repo = env.home().join("scratch-project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        let fleet = |cas_root: Option<PathBuf>| MuxConfig {
+            cwd: repo.clone(),
+            cas_root,
+            workers: 1,
+            worker_names: vec!["solo-worker".to_string()],
+            supervisor_name: "solo-supervisor".to_string(),
+            supervisor_cli: SupervisorCli::Claude,
+            worker_cli: SupervisorCli::Claude,
+            include_director: false,
+            ..MuxConfig::default()
+        };
+        let worker = |config: &MuxConfig| {
+            Mux::factory_pane_configs(config)
+                .into_iter()
+                .find(|(name, _)| name == "solo-worker")
+                .map(|(_, pty)| pty)
+                .expect("worker pane")
+        };
+
+        let rooted = worker(&fleet(initial_mux_cas_root(false, &cas_dir)));
+        assert_eq!(
+            env_value(&rooted, "CAS_FACTORY_WORKER_LAUNCH_ERROR"),
+            None,
+            "the initial worker must launch: {:?}",
+            rooted.env
+        );
+        let at = rooted.args.iter().position(|arg| arg == "--mcp-config").expect("--mcp-config");
+        assert!(rooted.args.contains(&"--strict-mcp-config".to_string()), "{:?}", rooted.args);
+        assert!(
+            std::path::Path::new(&rooted.args[at + 1]).is_file(),
+            "a rooted worker MCP config is written: {:?}",
+            rooted.args
+        );
+
+        // An intentionally rootless pane still refuses before launch.
+        let rootless = worker(&fleet(None));
+        assert!(
+            env_value(&rootless, "CAS_FACTORY_WORKER_LAUNCH_ERROR")
+                .is_some_and(|error| error.contains("requires a Cassy project root")),
+            "{:?}",
+            rootless.env
+        );
+    }
 
     fn env_value<'a>(config: &'a cas_mux::PtyConfig, key: &str) -> Option<&'a str> {
         config

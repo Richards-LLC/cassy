@@ -3264,7 +3264,18 @@ pub fn harness_installed_for_user(harness: SupervisorCli) -> bool {
     };
     match harness {
         SupervisorCli::Claude => true,
-        SupervisorCli::Codex => home.join(".codex").is_dir(),
+        // cas-e1f4: once ~/.codex is retired as an account, a named home or
+        // the shared base still means Codex is installed.
+        SupervisorCli::Codex => {
+            home.join(".codex").is_dir()
+                || crate::accounts::Provider::Codex.base_dir(&home).is_dir()
+                || std::fs::read_dir(&home).is_ok_and(|entries| {
+                    entries.flatten().any(|entry| {
+                        entry.file_name().to_str().is_some_and(|name| name.starts_with(".codex-"))
+                            && entry.path().is_dir()
+                    })
+                })
+        }
         SupervisorCli::Grok => home.join(".grok").is_dir(),
         SupervisorCli::OpenCode => {
             let config = std::env::var_os("XDG_CONFIG_HOME")
@@ -3495,7 +3506,7 @@ pub fn ensure_builtin_gitignore(
     project_root: &Path,
     harnesses: &[SupervisorCli],
 ) -> std::io::Result<BuiltinGitignoreReport> {
-    let entries = builtin_gitignore_entries(harnesses);
+    let entries = crate::cli::project_files::ignored_paths(project_root, harnesses);
     if entries.is_empty() {
         return Ok(BuiltinGitignoreReport::default());
     }
@@ -3532,7 +3543,7 @@ fn is_cas_authoring_repo(project_root: &Path) -> bool {
         && project_root.join("cas-cli/src/builtins.rs").is_file()
 }
 
-fn render_builtin_gitignore_block(entries: &[String]) -> String {
+pub(crate) fn render_builtin_gitignore_block(entries: &[String]) -> String {
     let mut block = String::new();
     block.push_str(BUILTIN_GITIGNORE_BEGIN);
     block.push('\n');
@@ -3540,6 +3551,7 @@ fn render_builtin_gitignore_block(entries: &[String]) -> String {
         block.push_str(entry);
         block.push('\n');
     }
+    block.push_str("# Worktree-specific files (generated per worktree)\n# fallow incremental analysis cache (used by the fallow skill)\n");
     block.push_str(BUILTIN_GITIGNORE_END);
     block.push('\n');
     block
@@ -4735,6 +4747,35 @@ This is the body content."#;
                 .iter()
                 .any(|b| b.path == "skills/cas-ideate/SKILL.md")
         );
+    }
+
+    /// The same owner rule must survive real installation for every harness;
+    /// drift used to leave no owner for full tests in no-queue projects.
+    #[test]
+    fn full_suite_owner_rule_syncs_for_every_harness_cas_7e91e() {
+        // pin: GH #1243 requires this one identical ownership sentence across installed skill surfaces.
+        const RULE: &str = "With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only.";
+        for harness in [
+            SupervisorCli::Claude,
+            SupervisorCli::Codex,
+            SupervisorCli::Grok,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            sync_all_builtins_for_harness(harness, dir.path()).unwrap();
+            for path in [
+                "skills/cas-tdd/SKILL.md",
+                "skills/verify-before-claim/SKILL.md",
+                "skills/cas-qa-craft/references/journeys.md",
+                "skills/cas-qa-craft/references/verifier-evidence-gate.md",
+                "skills/cas-qa-craft/references/evidence-bundle.md",
+            ] {
+                let body = std::fs::read_to_string(dir.path().join(path)).unwrap();
+                assert!(
+                    body.contains(RULE),
+                    "{harness:?} {path} lost full-suite ownership"
+                );
+            }
+        }
     }
 
     /// The launch contract lives in cas-pty. Worker skills link the on-demand
@@ -8263,4 +8304,44 @@ This is the body content."#;
             REQUIRED_FACTORY_AGENTS
         );
     }
+}
+
+/// Read-only provenance check used before update changes a dirty managed body.
+pub(crate) fn matches_shipped_project_file(path: &str, bytes: &[u8]) -> bool {
+    let Some((_, relative)) = path.trim_start_matches('.').split_once('/') else {
+        return false;
+    };
+    let hash = file_bytes_hash(bytes);
+    [
+        BUILTIN_AGENTS,
+        BUILTIN_SKILLS,
+        CODEX_BUILTIN_AGENTS,
+        CODEX_BUILTIN_SKILLS,
+        GROK_BUILTIN_AGENTS,
+        GROK_BUILTIN_SKILLS,
+        BUILTIN_WORKFLOWS,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|f| f.path == relative && f.content.as_bytes() == bytes)
+        || is_shipped_builtin_reference_version(relative, &hash)
+}
+
+/// Catalog-managed bodies cannot silently claim an existing project override.
+pub(crate) fn project_managed_body(path: &str) -> bool {
+    let Some((_, relative)) = path.split_once('/') else {
+        return false;
+    };
+    [
+        BUILTIN_AGENTS,
+        BUILTIN_SKILLS,
+        CODEX_BUILTIN_AGENTS,
+        CODEX_BUILTIN_SKILLS,
+        GROK_BUILTIN_AGENTS,
+        GROK_BUILTIN_SKILLS,
+    ]
+    .into_iter()
+    .flatten()
+    .chain(opencode_builtin_skills().iter())
+    .any(|f| f.path == relative && is_managed_by_cas(f.content))
 }

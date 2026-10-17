@@ -50,6 +50,11 @@ button:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--bg-h
 button:disabled,
 button[aria-disabled="true"] { opacity: .42; cursor: not-allowed; }
 
+/* System palettes replace button fills; keep the house controls recognizable. */
+@media (forced-colors: active) {
+  button { border: var(--line-width) solid ButtonBorder; }
+}
+
 .status-row,
 .attention-item,
 .palette-command { transition: background-color 100ms ease; }
@@ -184,9 +189,10 @@ main {
 .danger { color: var(--state-crit); }
 
 /* == Conversation stage == */
-/* #pane-grid holds an open conversation: its connection card, its thread and
-   (hidden) its pane host. The disconnected banner is positioned inside it. */
-.pane-grid {
+/* #conversation-stage holds an open conversation: its connection card and its
+   thread (cas-f285: no pane host or terminal surface). The disconnected banner
+   is positioned inside it. */
+.conversation-stage {
   position: relative;
   display: block;
   height: 100%;
@@ -195,14 +201,10 @@ main {
   background: var(--bg-root);
 }
 
-/* cas-0546: the hidden per-session pane host renders nothing — no box, no
-   paint, no focus or pointer — and the thread is never inside it. */
-.pane-host, .pane-host[hidden] { display: none !important; }
-
 /* cas-861c (fixture QA, 844×390): the connection verdict card is taller than a
    landscape phone's pane, and the clipped pane hid Retry and Diagnose. While it
    shows, the pane scrolls vertically; it still never scrolls sideways. */
-.pane-grid:has(> .terminal-state) { overflow-y: auto; overscroll-behavior: contain; }
+.conversation-stage:has(> .terminal-state) { overflow-y: auto; overscroll-behavior: contain; }
 
 /* == Raw output transcript == */
 /* The supervisor pane's emulator lines reflowed at UI text size, read-only,
@@ -1680,7 +1682,7 @@ dialog form > *,
 @media print {
   html, body, #app { height: auto; overflow: visible; }
 
-  .pane-grid, .transcript, .transcript-line, .attention-detail, .connection-log, .connection-log pre, .pair-details { height: auto; max-height: none; overflow: visible; }
+  .conversation-stage, .transcript, .transcript-line, .attention-detail, .connection-log, .connection-log pre, .pair-details { height: auto; max-height: none; overflow: visible; }
 
   .transcript-line, .connection-log pre, .attention-payload pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 
@@ -1893,7 +1895,7 @@ dialog form > *,
 .conversation-identity .host-where.codename-squeezed > .host-machine { min-width: 0; }
 #conversation-connection, #conversation-control { flex: none; white-space: pre; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
-.conversation-pane-slot .pane-grid { display: block; position: relative; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
+.conversation-pane-slot .conversation-stage { display: block; position: relative; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
 /* The thread's own slot beside the hidden pane host (cas-0546). */
 .conversation-mount { min-height: 0; min-width: 0; }
 .conversation-pane-slot .conversation-thread-slot { height: 100%; min-height: 0; }
@@ -1902,7 +1904,7 @@ dialog form > *,
    room for it with a spacer of the banner's height (main.ts measures it):
    at the top of history the first lines move below the banner, and a reader
    further down keeps their place (scroll anchoring), as before. */
-.conversation-pane-slot .pane-grid.terminal-disconnected .conversation-reading.thread::before { content: ""; display: block; flex: none; height: var(--outage-banner-space, 0px); }
+.conversation-pane-slot .conversation-stage.terminal-disconnected .conversation-reading.thread::before { content: ""; display: block; flex: none; height: var(--outage-banner-space, 0px); }
 
 /* ---- Pebble thread (cas-d167) --------------------------------------------
  * Tokens are the epic contract (cas-cac1) ported by Pebble 1 into tokens.css:
@@ -2837,7 +2839,7 @@ button.chip:disabled { cursor: default; }
    second (counted from the open; openingLine sets each dot's delay), then
    pulse quietly. The
    verdict card (.terminal-state) is kept for a failure. */
-.conversation-pane-slot .pane-grid > .conversation-opening { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; height: 100%; min-height: 0; padding: 60px 40px; box-sizing: border-box; text-align: center; color: var(--ink-mid); }
+.conversation-pane-slot .conversation-stage > .conversation-opening { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; height: 100%; min-height: 0; padding: 60px 40px; box-sizing: border-box; text-align: center; color: var(--ink-mid); }
 .conversation-loading { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; margin: 0; max-width: 34ch; color: var(--ink-mid); font: var(--weight-regular) 15px/1.45 var(--font-ui); }
 .conversation-loading > .dots { display: flex; gap: 4px; }
 .conversation-loading > .dots > i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent, var(--ink-mid)); opacity: 0; animation: opening-dots 1.2s ease-in-out 1s infinite; }
@@ -2847,15 +2849,20 @@ button.chip:disabled { cursor: default; }
 @media (prefers-reduced-motion: reduce) { .conversation-loading > .dots > i { animation: none; opacity: 0.6; } }
 @media (forced-colors: active) { .conversation-loading > .dots > i { background: CanvasText; } }
 /* Details hangs below the line, so the line never moves when it appears or opens. */
-.conversation-pane-slot .pane-grid > .conversation-opening { position: relative; }
+.conversation-pane-slot .conversation-stage > .conversation-opening { position: relative; }
 .conversation-opening > .connection-details { position: absolute; top: calc(50% + 22px); left: 50%; translate: -50% 0; width: min(calc(100% - 80px), 34ch); max-height: calc(50% - 30px); overflow: auto; color: var(--ink-mid); font-size: 12px; }
 /* cas-fc2c: kept messages show before the session attaches. The thread takes
  * the space and the opening/reconnecting card sits under it as one compact
  * block, its details in flow rather than overlaid on the centre. */
-.conversation-pane-slot .pane-grid.has-early-thread { display: flex; flex-direction: column; }
-.conversation-pane-slot .pane-grid.has-early-thread > .conversation-early { flex: 1 1 auto; height: auto; min-height: 0; }
-.conversation-pane-slot .pane-grid.has-early-thread > .empty { flex: none; height: auto; padding: 12px 20px 16px; gap: 6px; border-top: 1px solid var(--line-subtle); }
-.conversation-pane-slot .pane-grid.has-early-thread > .conversation-opening > .connection-details { position: static; translate: none; width: auto; max-height: none; }
+.conversation-pane-slot .conversation-stage.has-early-thread { display: flex; flex-direction: column; }
+.conversation-pane-slot .conversation-stage.has-early-thread > .conversation-early { flex: 1 1 auto; height: auto; min-height: 0; }
+.conversation-pane-slot .conversation-stage.has-early-thread > .empty { flex: none; height: auto; padding: 12px 20px 16px; gap: 6px; border-top: 1px solid var(--line-subtle); }
+.conversation-pane-slot .conversation-stage.has-early-thread > .conversation-opening > .connection-details { position: static; translate: none; width: auto; max-height: none; }
+/* cas-9846: a whole machine away puts its full outage card here (attempt,
+   diagnostic, cause, recovery). The kept thread keeps most of the height and
+   the card scrolls, so the held message is never pushed out of view. */
+.conversation-pane-slot .conversation-stage.has-early-thread > .conversation-early { min-height: 55%; }
+.conversation-pane-slot .conversation-stage.has-early-thread > .empty { max-height: 45%; min-height: 0; overflow-y: auto; }
 
 /* cas-537f: what Enter in a search field opens is marked while the field has
    focus: a raised fill and an "Enter" hint. The same row is the field's
@@ -2994,6 +3001,22 @@ button.chip:disabled { cursor: default; }
 .operator-inbox-warning, .operator-inbox-status { color: var(--text-mid); border-left: 3px solid currentColor; padding-left: var(--space-2); }
 .operator-inbox-signin, .operator-inbox-approval, .operator-inbox-ready, .operator-inbox-thread-view { display: flex; flex-direction: column; gap: var(--space-3); }
 .operator-inbox-code { align-self: flex-start; }
+/* Machine leases and cloud notices stay separate from conversation turns. */
+.machine-presence { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.machine-presence h3 { font-size: var(--fs-md); margin: 0; }
+.machine-presence-history { display: flex; flex-direction: column; gap: var(--space-2); margin-block-start: var(--space-2); padding-block-start: var(--space-3); border-block-start: var(--line-width) solid var(--line-subtle); }
+.machine-presence-history h4 { font-size: var(--fs-md); margin: 0; }
+.machine-presence-rows, .machine-presence-notices { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+.machine-presence-rows > li, .machine-presence-notices > li { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; overflow-wrap: anywhere; }
+.machine-presence p { margin: 0; }
+.machine-presence time { color: var(--text-mid); }
+.machine-presence details { min-width: 0; }
+.machine-presence summary { cursor: pointer; min-height: var(--button-height); display: flex; align-items: center; gap: var(--space-2); }
+.machine-presence-chevron { flex: none; width: 7px; height: 7px; border-inline-end: 2px solid currentColor; border-block-end: 2px solid currentColor; transform: rotate(-45deg); }
+.machine-presence details[open] > summary .machine-presence-chevron { transform: translateY(-2px) rotate(45deg); }
+.machine-presence details[open] { display: flex; flex-direction: column; gap: var(--space-2); }
+.machine-presence summary:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--focus-ring-width); }
+.machine-presence button { align-self: flex-start; max-width: 100%; white-space: normal; text-align: left; }
 .operator-inbox-threads, .operator-inbox-turns { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
 .operator-inbox-thread { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: var(--space-1) var(--space-3); text-align: left; }
 .operator-inbox-thread .operator-inbox-preview { grid-column: 1; color: var(--text-mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

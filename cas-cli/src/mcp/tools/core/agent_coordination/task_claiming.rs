@@ -425,6 +425,7 @@ impl CasCore {
                 task_id,
                 held_by,
                 expires_at,
+                ..
             } => Ok(Self::success(format!(
                 "Task {} is already claimed by {}\nExpires at: {}{}",
                 task_id,

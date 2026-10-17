@@ -110,7 +110,7 @@ pub fn build_consolidation_prompt(entries: &[Entry]) -> String {
         ));
         prompt.push_str(&format!(
             "**Created**: {}\n",
-            entry.created.format("%Y-%m-%d")
+            entry.format_created("%Y-%m-%d")
         ));
         prompt.push_str(&format!("\n{}\n\n", entry.content));
         prompt.push_str("---\n\n");

@@ -9,6 +9,18 @@ use rusqlite::{OptionalExtension, params};
 // and registration conflicts remain failures, so reporting cannot hide them.
 pub(super) const INTENTIONAL_PARK: &str = "COALESCE(last_outcome = 'parked' AND last_reason IN ('unattributed_origin', 'dependency_endpoint_unavailable', 'dependency_endpoint_deleted', 'dependency_endpoint_moved', 'dependency_endpoint_foreign'), 0)";
 
+/// SQL predicate over a `sync_queue AS q` row: a dependency edge whose
+/// endpoint task still has a pending row in the same scope (cas-9b5d). Push
+/// selection leaves these edges out so they cannot fill a batch.
+pub(super) const EDGE_AWAITS_PENDING_ENDPOINT: &str = "(q.entity_type = 'task_dependency'
+    AND EXISTS (SELECT 1 FROM sync_queue AS endpoint
+        WHERE endpoint.entity_type = 'task'
+          AND endpoint.team_id = COALESCE(q.team_id, '')
+          AND endpoint.retry_count < ?1
+          AND endpoint.entity_id IN (
+              CASE WHEN json_valid(q.payload) THEN json_extract(q.payload, '$.from_id') END,
+              CASE WHEN json_valid(q.payload) THEN json_extract(q.payload, '$.to_id') END)))";
+
 impl SyncQueue {
     pub(crate) fn park_intentionally(
         &self,
@@ -16,15 +28,28 @@ impl SyncQueue {
         reason: &str,
         max_retries: i32,
     ) -> Result<(), CasError> {
+        self.park_intentionally_with_error(id, reason, reason, max_retries)
+    }
+
+    /// [`Self::park_intentionally`] with a fuller diagnostic than the bare
+    /// reason, so reason-scoped retries can also match the cause it names.
+    pub(crate) fn park_intentionally_with_error(
+        &self,
+        id: i64,
+        reason: &str,
+        error: &str,
+        max_retries: i32,
+    ) -> Result<(), CasError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE sync_queue SET last_outcome='parked', last_reason=?2,
-            last_error=?2, retry_count=MAX(retry_count,?3), failed_client_version=?4 WHERE id=?1",
+            last_error=?5, retry_count=MAX(retry_count,?3), failed_client_version=?4 WHERE id=?1",
             params![
                 id,
                 reason,
                 max_retries,
-                super::maintenance::recording_client_version()
+                super::maintenance::recording_client_version(),
+                error
             ],
         )?;
         Ok(())
@@ -160,20 +185,55 @@ impl SyncQueue {
         Ok(refusal.is_none())
     }
 
-    /// Tasks are pushed first. If an endpoint is still queued afterwards, its
-    /// dependency must wait for acknowledgment, including terminal task errors.
-    pub(crate) fn dependency_endpoint_queued(
+    /// Where a dependency edge's endpoint tasks stand in one sync scope's
+    /// outbox. Tasks are pushed first; an edge is sent only once neither
+    /// endpoint has a queued row left (cas-9b5d). A pending endpoint will be
+    /// retried, so the edge waits. A terminally parked endpoint will not be
+    /// retried until an operator acts, so waiting on it would hold the edge
+    /// in the pending queue forever; the caller parks the edge instead.
+    pub(crate) fn dependency_endpoint_state(
         &self,
         from: &str,
         to: &str,
         team: &str,
-    ) -> Result<bool, CasError> {
+        max_retries: i32,
+    ) -> Result<DependencyEndpointState, CasError> {
         let conn = self.conn.lock().unwrap();
-        Ok(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sync_queue WHERE entity_type='task'
-            AND entity_id IN (?1,?2) AND team_id=?3)",
-            params![from, to, team],
-            |r| r.get(0),
-        )?)
+        let row = conn
+            .query_row(
+                "SELECT entity_id, retry_count < ?4,
+                    COALESCE(last_reason, last_error, 'parked')
+                FROM sync_queue WHERE entity_type='task'
+                AND entity_id IN (?1,?2) AND team_id=?3
+                ORDER BY retry_count ASC, id ASC LIMIT 1",
+                params![from, to, team, max_retries],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, bool>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(match row {
+            None => DependencyEndpointState::Clear,
+            Some((_, true, _)) => DependencyEndpointState::Pending,
+            Some((endpoint, false, reason)) => {
+                DependencyEndpointState::Parked { endpoint, reason }
+            }
+        })
     }
+}
+
+/// Outbox state of a dependency edge's endpoint tasks; see
+/// [`SyncQueue::dependency_endpoint_state`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DependencyEndpointState {
+    /// Neither endpoint has a queued row: the edge may be sent.
+    Clear,
+    /// An endpoint row is still pending: the edge waits for it.
+    Pending,
+    /// Only terminally parked endpoint rows remain.
+    Parked { endpoint: String, reason: String },
 }

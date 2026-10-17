@@ -14,6 +14,15 @@ to the operator continue to be recorded. Existing conversation history is retain
 
 ## Coordination messages and reminders
 
+Worker-idle merge notices wait for completed CI on the delivery's exact tip
+and a successful refresh of its integration target. Parked deliveries retry
+each minute, including when the director snapshot is unchanged. Pending CI
+stays silent; ten minutes with no CI answer produces one "CI unknown" decision
+notice. Failed target fetches defer the notice. Each task, delivery tip and CI
+conclusion produces one notice per running factory; unrelated integration
+commits do not create another. A red conclusion asks for a supervisor decision
+instead of instructing an unconditional merge.
+
 Projects that review a batch once on staging can select `qa.mode=batch`.
 Unmerged user-facing deliveries park with evidence deferred and no automatic
 per-task QA pass. A registered supervisor records the shared published ledger
@@ -87,6 +96,24 @@ the pushed ref and states that the worker checkout was left untouched.
 Unpushed or mismatched tips retain the dirty-checkout refusal; cleanup requests
 retain the existing protection against deleting uncommitted work.
 
+For Claude supervisors in Teams factories, an authenticated action event whose
+complete framed payload fits the hook budget travels in one PTY turn, with its
+queue id and body inline. No Teams pointer or relay copy is written. A busy
+pane, in-flight tool call or dirty composer holds the event in the durable
+queue for a later wake or the recipient's next hook/poll. Progress FYIs such as
+`task_started` remain quiet and readable at that boundary. The same authenticated
+wake classes still decide which events can start a turn. Worker pointer delivery
+and oversized full-body Teams delivery retain their existing paths. A transport
+write is provisional; only the existing per-recipient rendering/poll receipts
+retire a body from the unread view. Already-held Teams copies retain their
+legacy wake recovery; timed pointer-to-body fallback applies to workers.
+Fired reminders use the same path and pane/tool/composer vetoes; a recent
+completed checkpoint plus continuing heartbeats does not postpone an idle
+supervisor's reminder. Self reminders that exhaust a wake budget stay readable
+and retry after the existing park interval, without inter-agent abandonment or
+unread escalation. Replacement supervisors retain self-addressing for those
+reminders; original owner and target IDs stay in the durable reminder record.
+
 Recipient drains revalidate typed lifecycle relays against the task's current
 terminal state before recording surfacing or spending the hook body budget.
 An obsolete relay is retained with `superseded_stale`, its task/status reason
@@ -103,6 +130,63 @@ shared branches remain eligible. Age/deadline expiry works without a task table;
 malformed envelopes and human messages retain normal delivery semantics.
 Expired rows keep their history, acknowledgement and `superseded_stale` reason.
 
+Exhausting a supervisor message's wake budget stops active wakes while keeping
+its body readable at the next hook or inbox poll. The delivery detail identifies
+the notification and task when available, and reports the failed wake. Merge
+requests, typed status messages and blockers stay actionable until a separate
+premise check proves them obsolete. Missing task state permits delivery; it
+does not prove expiry. Positively stale lifecycle relays retain their withdrawal
+notice, and undelivered worker-death relays retain their dedicated failure report.
+
+
+## Claude factory launch options
+
+Claude agents receive their factory identity as `--name` when the installed
+CLI advertises that exact option. By default, Claude workers use a private, mode-0600 MCP
+configuration containing only `cas`, together with `--mcp-config` and
+`--strict-mcp-config`. The existing project CAS definition is retained when
+present; otherwise Cassy supplies `cas serve`. Supervisor MCP discovery keeps
+its normal scopes. Native hooks, account selection and Teams settings still
+apply. Project files are left intact, and supervisor-only environment denials
+also apply to the generated CAS definition.
+
+In the default `cas_only` mode, workers refuse to start if strict MCP flags are unsupported, the project root
+is missing, configuration cannot be provisioned, or `supervisor_only_mcp`
+denies `cas`. Upgrade Claude or correct the reported project configuration
+before retrying. Tasks needing other native MCP servers should go through the
+supervisor or the configured Cassy proxy, or use the project opt-out below.
+
+Claude settings apply to initial, dynamic and recycled Claude agents:
+
+```toml
+[factory.claude]
+worker_mcp = "cas_only" # Default; choose "inherit" for native MCP discovery.
+remote_control = false # Opt in for the supervisor only; workers stay network-quiet.
+# fallback_model = "sonnet" # Explicit overload fallback for both roles.
+```
+
+Use `cas config set factory.claude.worker_mcp inherit` to let this project's
+Claude workers load their native project/user MCP scopes. With no configured
+denials, `inherit` emits neither strict/config flags nor a private MCP JSON
+file and does not require strict-MCP CLI support. Restore the default with
+`cas config set factory.claude.worker_mcp cas_only`.
+If `supervisor_only_mcp` or `supervisor_only_env` contains any entries,
+`inherit` refuses before discovery: use `cas_only`, or clear the denial policy.
+Credential grants alone do not prevent inheritance. Supervisors and Codex
+keep their existing MCP behavior under either value; hooks, account selection,
+Teams and worker credential protections still apply. Invalid values are refused
+by both config commands and TOML loading.
+
+Use `cas config set factory.claude.remote_control true` to opt in, and
+`cas config set factory.claude.fallback_model sonnet` to choose a fallback.
+An empty fallback value clears it. Explicitly requested unsupported flags
+produce a launch error; model availability and remote access are resolved by
+Claude. Capability detection shares one successful `claude --help` capture
+per factory process; restart the factory after changing the installed CLI.
+
+Dynamic system-prompt exclusion remains deferred pending a controlled cache,
+cost and context-correctness comparison. This change claims no startup-time,
+token or cost improvement.
 
 ## Factory cloud client (disabled by default)
 
@@ -266,12 +350,12 @@ silently reintroduce fixed bugs.
 
 ## Peer work awareness
 
-`coordination action=peers detail=true` shows each peer supervisor's machine,
-factory session, epic focus, active task claims, live workers and registered
-branches. `peer=<name>` or `peer=<name>@<machine>` selects one supervisor and
-implies detail. `json=true` returns the full report without truncation.
-The terminal equivalent is `cas peers --detail`, with `--peer <name>` and
-`--json` accepting the same filters and output contract. The outcome and peer
+`cas peers --detail` shows each peer supervisor's machine, factory session,
+epic focus, active task claims, live workers and registered branches.
+`--peer <name>` or `--peer <name>@<machine>` selects one supervisor and implies
+detail. `--json` returns the full report without truncation. From an agent,
+`coordination action=peers` lists the same supervisors without the detail;
+its claims and workers view is not on the published coordination surface. The outcome and peer
 count appear first, followed by owner-grouped work and presence/mailbox receipts. JSON carries the typed
 `cloud_presence` record, `cloud_presence_message`, and `mailbox_status` too.
 Agent pagination echoes the returned `next_sort_cursor` with the other cursors.
@@ -307,12 +391,13 @@ or truncation is a mailbox warning; current verified addresses keep receiving.
 Failed claim batches remain visible while successful batches are admitted and
 acknowledged.
 
-Cloud locks are private to one user account: a team peer on another account shows
-`Claims not visible (different account)` and worker tasks as `not visible`.
-If the caller's account identity is unknown, the report says so. JSON includes
-`claims_visibility`, `user_id`, `team_id` and `project_id`; an empty claims array
-is authoritative only when visibility is `same_account` and `claims_status.state`
-is `ready`. A failed lock read is `unavailable`, not an empty inventory. The viewer account
+Cloud project lock reads include teammates on the same team project (Cloud #155).
+Peer details show `Claims visible (team project)` with the owning account, agent
+and machine; start, claim and spawn refuse an active teammate claim. Personal
+projects retain account isolation. JSON includes `claims_visibility`, `user_id`,
+`team_id` and `project_id`; an empty claims array is authoritative only when
+visibility is `same_account` or `team_project` and `claims_status.state` is `ready`.
+A failed lock read is `unavailable`, not an empty inventory. The viewer account
 comes from the token-owned agent list, independently of caller session lookup.
 Operator CLI identity uses the same session/ancestor-PID lookup as status.
 Peer discovery also excludes every agent registered in this project's local
@@ -512,11 +597,13 @@ and environment are preserved. Spawn diagnostics record denied names only.
 Configured workers get a private, materialized MCP configuration under
 `<cas_root>/worker-mcp/<name>.json`. Tracked and existing worktree `.mcp.json`
 files stay unchanged, so provisioning keeps the tree clean and cannot commit
-supervisor-only removals into the project. Claude
-uses `--strict-mcp-config` so local and user scopes cannot add servers; allowed
-direct servers must be declared in the project file. Cassy remains available
-even if it was registered only in local scope. Every worker uses the same private
-store path, including shared-cwd workers. Codex disables the named native MCP servers, and
+supervisor-only removals into the project. Claude's default `cas_only` mode
+uses `--strict-mcp-config` with only the project CAS definition (or a generated
+`cas serve` definition), including when CAS was registered only in local scope.
+`factory.claude.worker_mcp = "inherit"` restores native discovery only when the
+MCP/environment denial lists are empty; otherwise it refuses before discovery.
+Private worker configurations use the same store path, including shared-cwd
+workers. Codex disables the named native MCP servers, and
 its Cassy proxy filters those upstreams before startup and reload.
 Codex addresses dotted or otherwise special server names with a quoted key in
 a parent-table override so the name remains literal.
@@ -791,6 +878,30 @@ copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
 
+Build admission reads Linux `/proc/pressure/cpu` and `/proc/pressure/memory`
+`some avg10` stall percentages, plus `MemAvailable` from `/proc/meminfo`.
+Valid CPU PSI replaces the raw load check, so unrelated I/O-heavy work does not
+block an otherwise healthy host. Missing or malformed CPU PSI falls back to
+one-minute load divided by CPU count. Missing memory probes remain unknown.
+Memory pressure and the memory floor are rechecked even when a proof continuation
+carries its earlier CPU admission. Swap usage alone is not a refusal signal;
+PSI measures time lost to contention. Non-Linux hosts retain unavailable probes.
+
+| Config key | Default | Meaning |
+| --- | --- | --- |
+| `factory.build_guard.max_load_ratio` | `1.0` | Positive finite fallback load/CPU ceiling |
+| `factory.build_guard.max_cpu_pressure_percent` | `90.0` | Maximum CPU `some avg10`, 0–100% |
+| `factory.build_guard.max_memory_pressure_percent` | `10.0` | Maximum memory `some avg10`, 0–100% |
+| `factory.build_guard.min_available_memory_gib` | `2` | Minimum available GiB; 0 disables this floor |
+
+For example, `cas config set factory.build_guard.max_load_ratio 1.5` changes the
+fallback threshold. PSI limits and `factory.max_concurrent_builders` still apply.
+Invalid hand-edited thresholds use defaults. A denied worker command prints
+`Waiting for build admission` with its measured reason and asks for the same
+capped command to be retried; it does not hold a builder slot while waiting.
+`force=true` only overrides the existing spawn-time soft check, never capped
+worker slot locks.
+
 On Linux, the capped runner launches each build in a dedicated
 `systemd-run --user --scope` with `MemoryHigh`, keeping compiler reclaim separate
 from the supervisor and daemon. `factory.worker_memory_high_gib` sets the limit
@@ -867,7 +978,7 @@ the final-tree integration gate and the only gate to `main`; its required
 checks, including the Rust suite, run once on the exact merged tree. Commander
 journeys run there only when `hub-web/` product inputs change. Do not add
 lane-merge compile or fast-row checks, park receipts, or a separate assembly
-journey run. The normal epic close follows the green queue landing. Where the
+journey run. The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
 epic close gate accepts a local `ASSEMBLY_PROOF`, it covers the Rust build and
 suite only; it does not replace the queue's path to `main` or require a
 journey receipt.
@@ -1373,6 +1484,16 @@ after confirming no Cargo process is running and no cache lease is held. It was
 29 GB at discovery; use the inventory receipt for its current byte count.
 Never silently adopt or delete an unknown cache to bypass the liveness check.
 
+Durable task evidence has a separate cleanup opt-in: `gc_cleanup force=true
+dry_run=false` reaps processes and eligible caches while preserving artifacts.
+Deleting task artifact directories additionally requires `artifacts=true`.
+Only tasks closed at least seven days ago are eligible; missing close dates,
+references from open tasks or tasks updated within seven days (including notes),
+and unavailable reference evidence preserve artifacts. References may name the
+task/path or a published artifact ID or durable URL. Unknown directories and
+ambiguous legacy artifact roots remain review-only. Orphan cleanup reaps a
+private process group or fingerprinted descendants, preserving shared groups.
+
 Lane compile previews carry provenance and a lifetime owner lock.
 Previews are direct children of `.cas/worktrees` so the existing private target
 ownership check admits them. Their sibling metadata directory binds the exact
@@ -1427,6 +1548,57 @@ The target repository's config applies to cross-repository workers. Existing
 usable targets and `CAS_FACTORY_DISABLE_TARGET_SEED=1` bypass seeding, while
 all spawn paths still apply the disk floor. Seeding normally hardlinks artifacts;
 the floor reserves space for subsequent worker writes and builds.
+
+#### Scratch root for worker build output
+
+`factory.scratch_root` (unset by default) moves regenerable worker build output
+to a scratch drive, for example `cas config set factory.scratch_root /mnt/rewind/cas`.
+The value must be an absolute path. Once it is set, each project gets its own
+`<scratch_root>/<project-key>/` directory, where the key is the
+`<name>-<sha256>` label the durable artifacts root uses:
+
+- Each managed worker (`.cas/worktrees/<name>`) builds into
+  `<scratch_root>/<project-key>/targets/<name>`. The spawn environment's
+  `CARGO_TARGET_DIR`, the capped worker check, target seeding, ownership
+  leases, parking and retirement all resolve this same path. Sources stay in
+  the checkout, and the main checkout and lane previews keep their in-tree
+  `target/`.
+- Published baselines live in `<scratch_root>/<project-key>/build-cache`.
+  `scripts/refresh-worker-build-cache.sh` reads the key through `cas config get`
+  and prints `Worker build-cache root:`, and the release host update reads that
+  line to find the root.
+- Seeding hard-links from the baseline into the target, so both must be on one
+  filesystem. If their device ids differ, the seed is refused before anything is
+  written, the spawn reports why, and Cargo builds privately. The baseline is
+  never copied.
+- The `factory.spawn_min_free_gib` floor checks the scratch filesystem first,
+  then the checkout's. Factory launch also checks the scratch filesystem's
+  watermark.
+
+When the root is unset, every path stays as it was: `<worktree>/target` and
+`.cas/build-cache`. Running workers keep their current target. They move only
+when they respawn, and live targets are never moved. Run the refresh script
+after you change the root, so new workers have a baseline to seed from.
+Retirement and park-time pruning cover relocated worker targets.
+
+The release scratch base follows the same root (cas-baa8).
+`scripts/release_env.py` resolves it first, as
+`<scratch_root>/<project-key>/release-gate/base`. Every release-gate archive and
+assembly clone sits beside that base in `release-gate/`, including each clone's
+`repo/target`. This base may
+sit on a different device from the checkout, but it must share the scratch
+root's filesystem: assembly clones hard-link the baseline from
+`<project-key>/build-cache`, which `scripts/proof_target.py` now reads from the
+same root. A mount below the root is refused. Any other base on another
+device, including a `staging.scratch_root` base, is still refused. The gate's
+`scratch-base` row asks `release_env.py` about a device mismatch, so the
+boundary rule lives in one resolver. The legacy in-tree
+`.cas/merge-sweeps/assembly-target` inventory stays where the old caches were.
+
+`gc_report` lists the relocated caches with their sizes under "Scratch root
+caches": the build-cache, each worker target and the release scratch base. Its
+release-scratch section scans the relocated base. `gc_cleanup` still reclaims
+only in-tree worker targets.
 
 Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
 checkout paths remain in its cache keys (measured 0/45 hits even with
@@ -1771,9 +1943,12 @@ wire or structural contracts carry `// pin: <reason>` immediately above the
 statement or test/helper declaration, or on the assertion line. A reason does
 not convert a source-order assertion into behavior coverage.
 
-Workers and independent QA run `npm test`, `npm run typecheck` in `hub-web`,
-and `scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected
-journeys at four workers. The wrapper resolves the task's declared target;
+Workers run `npm test`, `npm run typecheck` in `hub-web`, and
+`scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected journeys
+at four workers. Independent QA consumes matching passing worker receipts
+(base/head, selected IDs, native results and execution environment), then runs
+independent adjacent/demo/visual cells; missing or incompatible evidence needs
+its own affected checks. The wrapper resolves the task's declared target;
 `--affected <base>` binds an explicit base. No browser runs for an empty impact
 selection; it emits an explicit receipt. Caller spec/grep filters are refused.
 
@@ -1873,6 +2048,15 @@ Each grant admits only its modes; a project root admits all three:
 Every write admitted this way is logged as a `workspace_write_root_used`
 event (tool, path, mode, root, task, agent) in the factory session log. A
 refusal lists the roots in effect.
+Shell writes are checked against their possible effective directories after
+`cd`, including writes in literal nested shell payloads. Earlier simple
+directory bindings are resolved in order; conditional bindings retain their
+possible values, and subshell directory changes stay scoped. Literal shell
+bodies may use status/PID values and read-only substitutions as data; their
+recognized filesystem effects are inspected recursively. Unresolved shell
+programs, executables, directory operands/searches, write targets and excessive
+nesting fail closed. Use explicit directory operands and bounded literal
+payloads so each write can be attributed to a root.
 
 **Operator-only, guardrail-grade (not security-grade).** The operator and the
 agents share a Unix user. The PreToolUse hook is the actual gate against
@@ -1931,3 +2115,21 @@ from automatic project cleanup: a flat directory can contain more than one
 project's evidence. New writes, issue attachments, QA rounds, message spills,
 search discovery and cleanup use the scoped namespace. No automatic file move
 or ownership guess is made for legacy directories.
+
+
+### First factory push scope and reference admission
+
+The shared CI classifier resolves a first factory push against the unique
+maximal merge base among fetched `origin/epic/*` refs, preserving the task fork
+when sibling merges advance the epic. It falls back to the configured default
+remote branch when no epic parent is available. Local refs,
+unknown bases and incomparable epic parents cannot authorize a Rust skip.
+Subsequent repair pushes compare against the previous push, so unrelated epic
+changes do not widen a test-only repair. All scoped consumers use that resolved
+base; the merge queue still proves the complete integration delta.
+
+The Violet/fixture repository reference scan runs in the existing `ci-diff`
+admission job on factory and epic pushes and PRs, including direct release
+edits. It was removed from the late `test-ci-tiers` queue recipe. Its independent
+boundary self-tests remain there; merge-group admission does not repeat the
+content scan.

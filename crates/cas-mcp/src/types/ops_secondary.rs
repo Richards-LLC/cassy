@@ -743,6 +743,11 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub dry_run: Option<bool>,
 
+    /// Explicitly opt into deleting durable task artifacts.
+    #[schemars(description = "gc_cleanup: artifact deletion (off by default); force=true dry_run=false plus retention checks.")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub artifacts: Option<bool>,
+
     /// Clear the pinned epic focus for focus_epic
     #[schemars(description = "Clear the pinned epic focus (focus_epic only)")]
     #[serde(default, deserialize_with = "deser::option_bool")]
@@ -942,7 +947,8 @@ pub struct FactoryRequest {
 ///   message_ack, message_status.
 /// Factory actions: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity,
 ///   clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic,
-///   remind, remind_list, remind_cancel, restart_spawn_queue.
+///   remind, remind_list, remind_cancel, restart_spawn_queue, claim, claim_status,
+///   release_claim, transfer_claim, accept_claim.
 /// Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup,
 ///   worktree_merge, worktree_status.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -972,11 +978,51 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub json: Option<bool>,
 
+    /// cas-2a5a: `all` lists every supervisor of the caller's own account.
+    #[schemars(description = "peers only: `all` lists your account's supervisors in every project")]
+    #[serde(default)]
+    pub scope: Option<String>,
+
     // ========== Shared Fields ==========
     /// Agent ID, worktree ID, or branch name
     #[schemars(description = "Agent ID or worktree ID/branch name")]
     #[serde(default)]
     pub id: Option<String>,
+
+    /// Slack permalink for coordination action=claim.
+    #[schemars(description = "claim only: Slack thread permalink; Violet resolves and verifies the canonical thread")]
+    #[serde(default)]
+    pub external_ref: Option<String>,
+
+    /// Immutable idempotency key for external-work mutations; claim_status lookup key.
+    #[schemars(description = "External-work mutation: optional lowercase UUID request_id. claim_status: required original request_id")]
+    #[serde(default)]
+    pub request_id: Option<String>,
+
+    /// External-work claim resource; accept_claim instead uses handoff_id.
+    #[schemars(description = "release_claim/transfer_claim only: external-work resource id")]
+    #[serde(default)]
+    pub resource_id: Option<String>,
+
+    /// Handoff offer id for accept_claim.
+    #[schemars(description = "accept_claim only: handoff offer id")]
+    #[serde(default)]
+    pub handoff_id: Option<String>,
+
+    /// Current claim generation required for release, transfer, and accept.
+    #[schemars(description = "release_claim/transfer_claim/accept_claim: required current generation")]
+    #[serde(default, deserialize_with = "deser::option_u64")]
+    pub expected_generation: Option<u64>,
+
+    /// Logical supervisor slot to receive a transfer offer.
+    #[schemars(description = "transfer_claim only: eligible destination supervisor slot id")]
+    #[serde(default)]
+    pub to_slot_id: Option<String>,
+
+    /// Transfer offer lifetime.
+    #[schemars(description = "transfer_claim only: offer lifetime in seconds (default 600)")]
+    #[serde(default, deserialize_with = "deser::option_u32")]
+    pub offer_ttl_secs: Option<u32>,
 
     /// Task ID (for loop_start, worktree_create, spawn_workers, server_start,
     /// server_list, remind, or a
@@ -1395,6 +1441,11 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub dry_run: Option<bool>,
 
+    /// Explicitly opt into deleting durable task artifacts.
+    #[schemars(description = "gc_cleanup: artifact deletion (off by default); force=true dry_run=false plus retention checks.")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub artifacts: Option<bool>,
+
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
@@ -1542,6 +1593,7 @@ impl CoordinationRequest {
             force: self.force,
             reason: self.reason.clone(),
             dry_run: self.dry_run,
+            artifacts: self.artifacts,
             clear: self.clear,
             branch: self.branch.clone(),
             older_than_secs: self.older_than_secs,

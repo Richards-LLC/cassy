@@ -431,6 +431,54 @@ pub(crate) fn worker_cli_from_agent(agent: &cas_types::Agent) -> cas_mux::Superv
         .unwrap_or(cas_mux::SupervisorCli::Claude)
 }
 
+/// How a confirmed context reset was recorded on the worker's row (cas-e9fc).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ResetRegistration {
+    /// The row names the new session (it may already have been rebound).
+    Recorded,
+    /// The row exists but the new session id could not be written.
+    Unrecorded(String),
+    /// The row was gone; Cassy re-registered the worker under its name.
+    Restored,
+    /// The row was gone and could not be re-registered.
+    RestoreFailed(String),
+}
+
+/// Record a confirmed context reset on the worker's row as it is now, never
+/// from the pre-reset copy: the new conversation's SessionStart may have
+/// rebound the row already. If the row is gone (the process kept running but
+/// its registration did not survive), re-register the worker under the same
+/// name so messages and shutdown_workers reach it again (cas-e9fc AC3).
+pub(crate) fn record_reset_registration(
+    store: &dyn crate::store::AgentStore,
+    pre_reset: &cas_types::Agent,
+    new_session: &str,
+) -> ResetRegistration {
+    match store.get(&pre_reset.id) {
+        Ok(mut current) => {
+            if current.cc_session_id.as_deref() == Some(new_session) {
+                return ResetRegistration::Recorded;
+            }
+            current.cc_session_id = Some(new_session.to_string());
+            match store.update(&current) {
+                Ok(()) => ResetRegistration::Recorded,
+                Err(error) => ResetRegistration::Unrecorded(error.to_string()),
+            }
+        }
+        Err(cas_store::StoreError::NotFound(_)) => {
+            let mut restored = pre_reset.clone();
+            restored.cc_session_id = Some(new_session.to_string());
+            restored.status = cas_types::AgentStatus::Active;
+            restored.last_heartbeat = chrono::Utc::now();
+            match store.register(&restored) {
+                Ok(()) => ResetRegistration::Restored,
+                Err(error) => ResetRegistration::RestoreFailed(error.to_string()),
+            }
+        }
+        Err(error) => ResetRegistration::Unrecorded(error.to_string()),
+    }
+}
+
 /// First 8 characters of a session UUID — enough to compare two sessions at a
 /// glance without wrapping the line (cas-dffe).
 fn short_session(session_id: &str) -> &str {
@@ -2160,6 +2208,22 @@ fn factory_provision_build_compatibility(
     let Some(daemon_build) = known_factory_build_id(metadata.daemon_build_hash.as_deref()) else {
         return FactoryProvisionBuildCheck::Skipped("daemon build ID unavailable");
     };
+    // cas-cef2 (GH #1242): a daemon that pinned its executable provisions from
+    // that pin, never from the installed binary `cas update` may have replaced.
+    // Judge the file that will actually run; an unreadable pin falls back to
+    // the installed probe below. On Linux the pin links the daemon's process
+    // image, so it is only probed while that exact daemon is alive.
+    if crate::ui::factory::daemon_identity_is_live(&metadata)
+        && let Some(Ok(pinned)) = crate::ui::factory::pinned_provisioner_build_hash(session)
+    {
+        return if known_factory_build_id(Some(&pinned)) == Some(daemon_build) {
+            FactoryProvisionBuildCheck::Compatible
+        } else {
+            FactoryProvisionBuildCheck::Mismatch(format!(
+                "provision_build_mismatch: factory session {session} daemon build {daemon_build} differs from its pinned provisioner build {pinned}. Restart this factory session before spawning: run `cas factory kill <session>` and relaunch `cas factory`."
+            ))
+        };
+    }
     let Some(provisioner_build) = known_factory_build_id(provisioner_build) else {
         return FactoryProvisionBuildCheck::Skipped("provisioner build ID unavailable");
     };
@@ -4618,7 +4682,14 @@ impl CasService {
                     task.assignee.as_deref() == Some(agent.name.as_str())
                         || task.assignee.as_deref() == Some(agent.id.as_str())
                 });
-                let worktree_status = collect_worker_worktree_status(&self.inner.cas_root, agent, held_task);
+                let worktree_status = collect_worker_worktree_status_with_timeout(
+                    &self.inner.cas_root,
+                    agent,
+                    held_task,
+                    std::time::Duration::from_secs(2),
+                    std::path::Path::new("gh"),
+                )
+                .await;
                 let clone_path = worktree_status.clone_path;
                 let clone_info = worktree_status.clone_info;
                 // cas-844bf: git introspection — branch/HEAD/ahead-behind/dirty/PR
@@ -5749,6 +5820,9 @@ impl CasService {
         // enough (GH #145).
         let deadline = std::time::Instant::now() + reset::confirmation_timeout();
         let mut confirmed: Vec<(String, reset::ContextResetEvidence, String)> = Vec::new();
+        // cas-e9fc: resets whose worker row was gone once the new session
+        // appeared, and whether Cassy could restore the registration.
+        let mut lost: Vec<(String, reset::ContextResetEvidence, Result<(), String>)> = Vec::new();
         let mut outstanding: Vec<PendingReset> = pending;
         while !outstanding.is_empty() && std::time::Instant::now() < deadline {
             tokio::time::sleep(reset::CONFIRMATION_POLL).await;
@@ -5763,17 +5837,26 @@ impl CasService {
                         // Point Cassy's transcript resolution at the live session
                         // so worker_status/worker_activity/is-wedged stop
                         // reading the pre-reset file (AC4).
-                        let mut updated = item.agent.clone();
-                        updated.cc_session_id = Some(evidence.session_id.clone());
-                        if let Err(e) = agent_store.update(&updated) {
-                            tracing::warn!(
-                                agent = %item.agent.name,
-                                error = %e,
-                                "cas-dffe: context reset confirmed but recording the new session \
-                                 id failed; worker_status will keep resolving the old transcript"
-                            );
+                        match record_reset_registration(agent_store.as_ref(), &item.agent, &evidence.session_id) {
+                            ResetRegistration::Recorded => {
+                                confirmed.push((item.agent.name.clone(), evidence, previous));
+                            }
+                            ResetRegistration::Unrecorded(error) => {
+                                tracing::warn!(
+                                    agent = %item.agent.name,
+                                    %error,
+                                    "cas-dffe: context reset confirmed but recording the new session \
+                                     id failed; worker_status will keep resolving the old transcript"
+                                );
+                                confirmed.push((item.agent.name.clone(), evidence, previous));
+                            }
+                            ResetRegistration::Restored => {
+                                lost.push((item.agent.name.clone(), evidence, Ok(())));
+                            }
+                            ResetRegistration::RestoreFailed(error) => {
+                                lost.push((item.agent.name.clone(), evidence, Err(error)));
+                            }
                         }
-                        confirmed.push((item.agent.name.clone(), evidence, previous));
                         false
                     }
                     None => true,
@@ -5807,11 +5890,29 @@ impl CasService {
                     .join(", "),
             ));
         }
+        for (name, evidence, outcome) in &lost {
+            match outcome {
+                Ok(()) => output.push_str(&format!(
+                    "❌ {name}: context reset landed (new session {}), but the worker's registration \
+                     was gone afterwards. Cassy restored it under the same name, so messages and \
+                     shutdown_workers reach it again; its task leases may have been released, so \
+                     check its assignment with worker_status before relying on it.\n",
+                    short_session(&evidence.session_id),
+                )),
+                Err(error) => output.push_str(&format!(
+                    "❌ {name}: context reset landed (new session {}), but the worker's registration \
+                     was gone afterwards and could not be restored ({error}). Its process is still \
+                     running unregistered: stop it (ps for --agent-name {name}) and spawn_workers \
+                     the same name with its task.\n",
+                    short_session(&evidence.session_id),
+                )),
+            }
+        }
         for refusal in &refusals {
             output.push_str(&format!("❌ {refusal}\n"));
         }
 
-        if !outstanding.is_empty() || !refusals.is_empty() {
+        if !outstanding.is_empty() || !refusals.is_empty() || !lost.is_empty() {
             // Never report success for a reset that was not observed.
             return Err(Self::error(ErrorCode::INTERNAL_ERROR, output));
         }
@@ -5830,6 +5931,20 @@ impl CasService {
         // Read-only: never auto-register or revive the caller for a lookup.
         let self_id = self.inner.get_registered_agent_id_read_only().ok();
         let text = tokio::task::spawn_blocking(move || {
+            // cas-2a5a: every supervisor of the caller's own account.
+            if req
+                .scope
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|scope| scope.eq_ignore_ascii_case("all"))
+            {
+                return crate::cloud::peers::user_peers_report(
+                    &cas_root,
+                    self_id.as_deref(),
+                    req.json.unwrap_or(false),
+                    req.detail.unwrap_or(false),
+                );
+            }
             if !req.detail.unwrap_or(false) && req.peer.is_none() && !req.json.unwrap_or(false) {
                 return Ok(crate::cloud::peers::peers_section(
                     &cas_root,
@@ -6448,6 +6563,8 @@ impl CasService {
         }
         out.push_str(&orphan_processes.render());
         out.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, false));
+        // cas-baa8: caches factory.scratch_root moved off the checkout.
+        out.push_str(&crate::factory_scratch::render_relocated(&self.inner.cas_root));
         out.push_str(&artifact_report.render());
         // GH #704: leaked disposable roots under $TMPDIR filled a 32 GB tmpfs
         // and broke every live session's shell output. Name them here, with
@@ -7103,24 +7220,59 @@ impl CasService {
             target_cache_mutation_authorized,
         );
         let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
-        let closed_task_ids = crate::store::open_task_store(&self.inner.cas_root)
-            .ok()
-            .and_then(|store| store.list(Some(cas_types::TaskStatus::Closed)).ok())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|task| task.id)
-            .collect();
-        let artifact_root = crate::config::project_factory_artifacts_root(&self.inner.cas_root, &crate::config::resolved_factory_artifacts_root(
-            config.factory().artifacts_root.as_deref(),
-        ));
-        // Durable receipts are deleted only after their task is closed, and
-        // only through the same explicit destructive gate as cache reclamation.
-        // Unknown directories are inventory-only: an operator must review them.
-        let artifact_cleanup = factory_artifact_cleanup(
-            &artifact_root,
-            &closed_task_ids,
-            target_cache_mutation_authorized,
+        let artifact_authorized = target_cache_mutation_authorized && req.artifacts.unwrap_or(false);
+        let tasks = crate::store::open_task_store(&self.inner.cas_root)
+            .map_err(|error| error.to_string())
+            .and_then(|store| {
+                store
+                    .list(if artifact_authorized {
+                        None
+                    } else {
+                        Some(cas_types::TaskStatus::Closed)
+                    })
+                    .map_err(|error| error.to_string())
+            });
+        let closed_task_ids = tasks
+            .as_ref()
+            .map(|tasks| {
+                tasks
+                    .iter()
+                    .filter(|task| task.status == cas_types::TaskStatus::Closed)
+                    .map(|task| task.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let artifact_root = crate::config::project_factory_artifacts_root(
+            &self.inner.cas_root,
+            &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()),
         );
+        // Artifact deletion is separate from process/cache cleanup. Unknown
+        // close dates or reference evidence must preserve durable receipts.
+        let eligible = if artifact_authorized {
+            tasks
+                .as_ref()
+                .map_err(|error| error.clone())
+                .and_then(|tasks| {
+                    eligible_artifact_tasks(&self.inner.cas_root, tasks, chrono::Utc::now())
+                })
+        } else {
+            Ok(Default::default())
+        };
+        let artifact_cleanup = match eligible {
+            Ok(eligible) => factory_artifact_cleanup(
+                &artifact_root,
+                &closed_task_ids,
+                artifact_authorized,
+                &eligible,
+            ),
+            Err(error) => {
+                let mut inventory = factory_artifact_inventory(artifact_root, &closed_task_ids);
+                inventory.error = Some(format!(
+                    "retention/reference evidence unavailable; preserved all artifacts: {error}"
+                ));
+                inventory
+            }
+        };
         let target_cache_result = {
             let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
             let known_roots = known_target_cache_worktrees(
@@ -7282,10 +7434,11 @@ impl FactoryArtifactInventory {
                 path.display()
             ));
         }
+        out.push_str("  Retention: at least 7 days since close; open tasks and tasks updated in the last 7 days preserve referenced evidence.\n");
         if let Some(error) = &self.error {
             out.push_str(&format!("  - artifact inventory unavailable: {error}\n"));
         } else if self.dry_run && !self.closed.is_empty() {
-            out.push_str("  Reclaim closed-task artifacts with gc_cleanup force=true dry_run=false. Strays are never auto-deleted.\n");
+            out.push_str("  Durable artifact deletion is off by default; artifacts=true is a separate opt-in requiring force=true dry_run=false. Strays are never auto-deleted.\n");
         } else if self.removed > 0 {
             out.push_str(&format!(
                 "  Closed-task artifact directories removed: {}\n",
@@ -7334,15 +7487,69 @@ fn factory_artifact_inventory(
     inventory
 }
 
+/// Keep at least seven days of evidence after close. Any nonterminal task,
+/// or task updated in that window (including appended notes), can keep older
+/// evidence alive by citing its task/path or a published artifact alias.
+fn eligible_artifact_tasks(
+    cas_root: &std::path::Path,
+    tasks: &[cas_types::Task],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let cutoff = now - chrono::Duration::days(7);
+    let references = serde_json::to_string(
+        &tasks
+            .iter()
+            .filter(|task| !task.is_terminal() || task.updated_at >= cutoff)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| error.to_string())?;
+    let artifacts =
+        cas_store::SqliteArtifactStore::open(cas_root).map_err(|error| error.to_string())?;
+    let mut eligible = std::collections::BTreeSet::new();
+    for task in tasks.iter().filter(|task| {
+        task.status == cas_types::TaskStatus::Closed
+            && task.closed_at.is_some_and(|closed| closed <= cutoff)
+    }) {
+        if references.contains(&task.id) {
+            continue;
+        }
+        let published = artifacts
+            .list_for_task(&task.id)
+            .map_err(|error| error.to_string())?;
+        let referenced = published.iter().any(|artifact| {
+            std::iter::once(Some(artifact.id.as_str()))
+                .chain([
+                    artifact.cloud_artifact_id.as_deref(),
+                    artifact.cloud_url.as_deref(),
+                    artifact.slack_permalink.as_deref(),
+                ])
+                .flatten()
+                .any(|alias| !alias.is_empty() && references.contains(alias))
+        });
+        if !referenced {
+            eligible.insert(task.id.clone());
+        }
+    }
+    Ok(eligible)
+}
+
 fn factory_artifact_cleanup(
     root: &std::path::Path,
     closed_task_ids: &std::collections::BTreeSet<String>,
     authorized: bool,
+    eligible: &std::collections::BTreeSet<String>,
 ) -> FactoryArtifactInventory {
     let mut inventory = factory_artifact_inventory(root.to_path_buf(), closed_task_ids);
     inventory.dry_run = !authorized;
     if authorized {
         for path in &inventory.closed {
+            if !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|id| eligible.contains(id))
+            {
+                continue;
+            }
             if std::fs::remove_dir_all(path).is_ok() {
                 inventory.removed += 1;
             }
@@ -7778,16 +7985,93 @@ fn collect_worker_worktree_status(
     agent: &cas_types::Agent,
     task: Option<&cas_types::Task>,
 ) -> WorkerWorktreeStatus {
+    collect_worker_worktree_status_with_gh(cas_root, agent, task, std::path::Path::new("gh"))
+}
+
+fn collect_worker_worktree_status_with_gh(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+    task: Option<&cas_types::Task>,
+    gh_program: &std::path::Path,
+) -> WorkerWorktreeStatus {
     match resolve_worker_clone_path(cas_root, agent) {
         WorkerClonePathResolve::Ready(path) => {
             let clone_path = path.display().to_string();
-            let mut gs = collect_worker_git_status(&path);
+            let mut gs = collect_worker_git_status_with_gh(&path, gh_program);
             if let Some(task) = task {
-                apply_task_delivery_git_status(&path, task, &agent.name, &mut gs);
+                apply_task_delivery_git_status_with_gh(
+                    &path,
+                    task,
+                    &agent.name,
+                    &mut gs,
+                    gh_program,
+                );
             }
             WorkerWorktreeStatus {
                 clone_info: format!("\n    Clone: {clone_path}"),
                 git_info: format_worker_git_status(&gs),
+                clone_path: Some(clone_path),
+            }
+        }
+        WorkerClonePathResolve::NotOnDisk { candidate, .. } => {
+            let missing_path = candidate.display().to_string();
+            WorkerWorktreeStatus {
+                clone_info: format!("\n    Clone: {missing_path} [missing-worktree]"),
+                git_info: "\n    git: missing-worktree".to_string(),
+                clone_path: Some(missing_path),
+            }
+        }
+    }
+}
+
+async fn collect_worker_worktree_status_with_timeout(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+    task: Option<&cas_types::Task>,
+    timeout: std::time::Duration,
+    gh_program: &std::path::Path,
+) -> WorkerWorktreeStatus {
+    let fallback = worker_worktree_status_timeout_fallback(cas_root, agent);
+    let failure_fallback =
+        worker_worktree_status_fallback(cas_root, agent, "status lookup failed");
+    let cas_root = cas_root.to_path_buf();
+    let agent = agent.clone();
+    let task = task.cloned();
+    let gh_program = gh_program.to_path_buf();
+    let worktree_status = tokio::task::spawn_blocking(move || {
+        collect_worker_worktree_status_with_gh(
+            &cas_root,
+            &agent,
+            task.as_ref(),
+            &gh_program,
+        )
+    });
+
+    match tokio::time::timeout(timeout, worktree_status).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(_)) => failure_fallback,
+        Err(_) => fallback,
+    }
+}
+
+fn worker_worktree_status_timeout_fallback(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+) -> WorkerWorktreeStatus {
+    worker_worktree_status_fallback(cas_root, agent, "status lookup timed out")
+}
+
+fn worker_worktree_status_fallback(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+    reason: &'static str,
+) -> WorkerWorktreeStatus {
+    match resolve_worker_clone_path(cas_root, agent) {
+        WorkerClonePathResolve::Ready(path) => {
+            let clone_path = path.display().to_string();
+            WorkerWorktreeStatus {
+                clone_info: format!("\n    Clone: {clone_path}"),
+                git_info: format!("\n    git: {reason}\n    PR: unknown ({reason})"),
                 clone_path: Some(clone_path),
             }
         }
@@ -7809,6 +8093,22 @@ fn apply_task_delivery_git_status(
     task: &cas_types::Task,
     worker: &str,
     status: &mut WorkerGitStatus,
+) {
+    apply_task_delivery_git_status_with_gh(
+        repo,
+        task,
+        worker,
+        status,
+        std::path::Path::new("gh"),
+    );
+}
+
+fn apply_task_delivery_git_status_with_gh(
+    repo: &std::path::Path,
+    task: &cas_types::Task,
+    worker: &str,
+    status: &mut WorkerGitStatus,
+    gh_program: &std::path::Path,
 ) {
     let branch = task.deliverables.parked_branch.clone().unwrap_or_else(|| {
         crate::mcp::tools::core::task::lifecycle::close_ops::close_measured_factory_branch(
@@ -7841,7 +8141,7 @@ fn apply_task_delivery_git_status(
     } else {
         "none".to_string()
     };
-    status.pr_url = collect_worker_pr_url(repo, &status.branch, &status.pushed_ref, std::path::Path::new("gh"));
+    status.pr_url = collect_worker_pr_url(repo, &status.branch, &status.pushed_ref, gh_program);
 }
 
 /// Gather the live dirty-worktree floor for `worker_activity`.
@@ -10864,10 +11164,9 @@ impl std::fmt::Display for WorkerPrUrl {
 /// duplicating the collector.
 ///
 /// NOTE: This is a synchronous, blocking function that shells out to `git`
-/// and, optionally, `gh`.  It is intended to be called from within
-/// `factory_worker_status` (which is `async` but performs several other
-/// blocking operations already).  Callers in a strict async context should
-/// wrap in `tokio::task::spawn_blocking` if needed.
+/// and, optionally, `gh`. `factory_worker_status` calls it through
+/// `tokio::task::spawn_blocking` and bounds the wait; other strict async callers
+/// should do the same.
 pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> WorkerGitStatus {
     collect_worker_git_status_with_gh(worktree_path, std::path::Path::new("gh"))
 }
@@ -11841,6 +12140,48 @@ mod spawn_lifecycle_tests {
 mod tests {
     use super::*;
 
+    /// cas-e9fc AC3: a confirmed clear_context records the new session on the
+    /// row as it is now (keeping a SessionStart rebind), and a worker whose row
+    /// vanished is re-registered under its name, never left a silent orphan.
+    #[test]
+    fn cas_e9fc_reset_registration_keeps_or_restores_the_worker_row() {
+        let project = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let store = crate::store::open_agent_store(&root).unwrap();
+        let mut worker = cas_types::Agent::new_with_role(
+            "cd08c932-old".into(),
+            "smooth-robin-87".into(),
+            cas_types::AgentRole::Worker,
+        );
+        worker.cc_session_id = Some("cd08c932-old".into());
+        worker.pid = Some(4242);
+        store.register(&worker).unwrap();
+
+        // A SessionStart rebind changed the PID; recording keeps it.
+        let mut rebound = store.get(&worker.id).unwrap();
+        rebound.pid = Some(5151);
+        store.update(&rebound).unwrap();
+        assert_eq!(
+            record_reset_registration(store.as_ref(), &worker, "34398e29-new"),
+            ResetRegistration::Recorded
+        );
+        let current = store.get(&worker.id).unwrap();
+        assert_eq!(current.cc_session_id.as_deref(), Some("34398e29-new"));
+        assert_eq!(current.pid, Some(5151), "the stale pre-reset copy never overwrites the row");
+
+        // The row vanished while the process kept running: restored, by name.
+        store.unregister(&worker.id).unwrap();
+        assert_eq!(
+            record_reset_registration(store.as_ref(), &worker, "34398e29-new"),
+            ResetRegistration::Restored
+        );
+        let restored = store.get(&worker.id).unwrap();
+        assert_eq!(restored.name, "smooth-robin-87");
+        assert_eq!(restored.role, cas_types::AgentRole::Worker);
+        assert_eq!(restored.status, cas_types::AgentStatus::Active);
+        assert_eq!(restored.cc_session_id.as_deref(), Some("34398e29-new"));
+    }
+
     #[test]
     fn cas_6eec_stall_evidence_counts_only_the_workers_scoped_edits_and_commits() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
@@ -11877,7 +12218,8 @@ mod tests {
         session: &str,
         daemon_build_hash: Option<&str>,
         provisioner_build: Option<&str>,
-    ) -> (String, Vec<cas_store::SpawnRequest>) {
+        pinned_build: Option<&str>,
+    ) -> (Result<String, String>, Vec<cas_store::SpawnRequest>) {
         use cas_store::SpawnQueueStore;
         use cas_types::TaskType;
 
@@ -11909,6 +12251,15 @@ mod tests {
             )
             .expect("write session metadata");
         }
+        // cas-cef2: the daemon's pinned provisioner, reporting `pinned_build`.
+        #[cfg(unix)]
+        if let Some(pinned_build) = pinned_build {
+            use std::os::unix::fs::PermissionsExt;
+            let pin = crate::ui::factory::provisioner_pin_path(session);
+            std::fs::create_dir_all(pin.parent().unwrap()).unwrap();
+            std::fs::write(&pin, format!("#!/bin/sh\necho {pinned_build}\n")).unwrap();
+            std::fs::set_permissions(&pin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
         #[cfg(feature = "mcp-proxy")]
@@ -11927,17 +12278,20 @@ mod tests {
                 req,
                 provisioner_build,
             )
-            .await
-            .expect("spawn is queued when build identity is inconclusive");
+            .await;
         let receipt = response
-            .content
-            .into_iter()
-            .filter_map(|content| match content.raw {
-                rmcp::model::RawContent::Text(text) => Some(text.text),
-                _ => None,
+            .map(|response| {
+                response
+                    .content
+                    .into_iter()
+                    .filter_map(|content| match content.raw {
+                        rmcp::model::RawContent::Text(text) => Some(text.text),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .map_err(|error| error.to_string());
         let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
         (receipt, queue.peek(10).expect("read spawn queue"))
     }
@@ -11945,8 +12299,9 @@ mod tests {
     #[tokio::test]
     async fn missing_factory_session_metadata_skips_build_check_and_queues_spawn() {
         let (receipt, queue) =
-            spawn_build_check_case("missing-metadata-1174", None, Some("known-provisioner"))
+            spawn_build_check_case("missing-metadata-1174", None, Some("known-provisioner"), None)
                 .await;
+        let receipt = receipt.expect("spawn is queued when build identity is inconclusive");
 
         assert!(
             receipt.contains(
@@ -11960,7 +12315,8 @@ mod tests {
     #[tokio::test]
     async fn unprobeable_provisioner_identity_skips_build_check_and_queues_spawn() {
         let (receipt, queue) =
-            spawn_build_check_case("unprobeable-1174", Some("known-daemon"), None).await;
+            spawn_build_check_case("unprobeable-1174", Some("known-daemon"), None, None).await;
+        let receipt = receipt.expect("spawn is queued when build identity is inconclusive");
 
         assert!(
             receipt.contains(
@@ -11969,6 +12325,37 @@ mod tests {
             "receipt should explain why the early check was skipped: {receipt}"
         );
         assert_eq!(queue.len(), 1, "an unprobeable provisioner must not refuse spawn");
+    }
+
+    /// cas-cef2 (GH #1242): `cas update` replaced the binary under a running
+    /// daemon and spawn refused for the rest of the session. The daemon
+    /// provisions from its pin, so the check judges the pin: an upgraded
+    /// installed binary still spawns, and a pin of another build is still
+    /// refused (#1174).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_judges_the_daemons_pinned_build_not_the_installed_binary_cas_cef2() {
+        let (receipt, queue) = spawn_build_check_case(
+            "pinned-cef2",
+            Some("ee41e82"),
+            Some("f15ccb5"),
+            Some("ee41e82"),
+        )
+        .await;
+        assert!(receipt.is_ok(), "{receipt:?}");
+        assert_eq!(queue.len(), 1);
+
+        let (refusal, queue) = spawn_build_check_case(
+            "foreign-pin-cef2",
+            Some("ee41e82"),
+            Some("ee41e82"),
+            Some("other-build"),
+        )
+        .await;
+        let refusal = refusal.expect_err("a pin of another build must not provision");
+        assert!(refusal.contains("provision_build_mismatch"), "{refusal}");
+        assert!(refusal.contains("other-build"), "{refusal}");
+        assert!(queue.is_empty());
     }
 
     #[tokio::test]
@@ -18157,6 +18544,44 @@ effort = "high"
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_status_git_collection_times_out_when_gh_stalls() {
+        let tmp = setup_git_repo_with_pushed_factory_branch("slow-gh-worker");
+        let gh = write_gh_stub(tmp.path(), "#!/bin/sh\nsleep 1\n");
+        let mut agent = cas_types::Agent::new_with_role(
+            "slow-gh-session".to_string(),
+            "slow-gh-worker".to_string(),
+            AgentRole::Worker,
+        );
+        agent.metadata.insert(
+            "clone_path".to_string(),
+            tmp.path().to_string_lossy().to_string(),
+        );
+
+        let started = std::time::Instant::now();
+        let status = collect_worker_worktree_status_with_timeout(
+            tmp.path(),
+            &agent,
+            None,
+            std::time::Duration::from_millis(100),
+            &gh,
+        )
+        .await;
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(750),
+            "a slow gh subprocess must not hold up the worker_status poll: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(status.clone_path.as_deref(), Some(tmp.path().to_string_lossy().as_ref()));
+        assert!(status.git_info.contains("status lookup timed out"), "{status:?}");
+        assert!(
+            status.git_info.contains("PR: unknown (status lookup timed out)"),
+            "timeout must not claim a successful empty PR query: {status:?}"
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn collect_git_status_reports_gh_failure_as_redacted_unknown() {
         let tmp = setup_git_repo_with_pushed_factory_branch("gh-failure-worker");
@@ -19021,7 +19446,7 @@ mod artifact_project_scope_tests {
             std::fs::write(dir.join("proof.md"), "evidence").unwrap();
         }
         let closed = ["cas-a4b1".to_string()].into_iter().collect();
-        let report = factory_artifact_cleanup(&a_root, &closed, true);
+        let report = factory_artifact_cleanup(&a_root, &closed, true, &closed);
         assert_eq!(report.removed, 1);
         assert!(!a_root.join("cas-a4b1").exists());
         assert!(b_root.join("cas-a4b1/proof.md").is_file());

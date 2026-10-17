@@ -54,16 +54,18 @@ Commit first; zero matched tests fail. Success records
 receipts. Run the red test before fixing it, then commit and run the green test.
 
 Write or update Rust tests, read the diff, and trace callers, struct literals,
-and match arms across consumers. Full Rust builds and suites, cargo test,
+and match arms across consumers. Before the push, cut the tests you added to the
+[fewest that fail without the change](../../cas-tdd/SKILL.md#fewest-tests). Full Rust builds and suites, cargo test,
 clippy, rustc, and scoped-test scripts remain supervisor-owned. Do not record
 a scoped `--proof`,
 `SCOPED_PROOF:` or `loaded_proof` receipt. If the installed runtime predates the
 targeted-test exception, park and name the unverified crates for the supervisor.
 
-The full build and tests run once at the epic's final gate: the merge queue
-where base has one, otherwise the supervisor's assembly, which records
-`ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` on
-the epic. Child closes reference it; final-gate failures return as follow-up tasks.
+With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; workers run targeted tests only. Read existing receipts; each check runs once.
+For a supervisor's integrated run, record
+`ASSEMBLY_PROOF: head=<tested sha> result=PASS command=<cmd> log=<path>` on
+the epic. Child closes reference the epic's integration proof; final-gate
+failures return as follow-up tasks.
 
 ## Browser checks
 
@@ -76,17 +78,11 @@ filters cannot substitute for the producer's selection. Manual named-spec or
 canonical-ID runs remain available for iteration and failure controls.
 
 The hook denies factory workers/reviewers `--full`, unfiltered Playwright and
-unfiltered journey npm scripts. The merge queue runs the full suite once; close
+unfiltered journey npm scripts. Full-suite ownership follows the rule above; close
 and QA do not require a journey receipt. Documentation/ledger-only rebinds must
 prove product/catalog/tool inputs are unchanged. A failure control runs only
 the failing spec with one worker and keeps the original failure; it never
 reports that failure as PASS.
-
-## Other non-Rust checks
-
-Run non-Rust suites (for example `npm`/`vitest`/`playwright`) in the worker.
-Record exact passed and failed counts in the close note. A green exit without
-a nonzero test count is a failure to run.
 
 ## Clean-CI environment
 

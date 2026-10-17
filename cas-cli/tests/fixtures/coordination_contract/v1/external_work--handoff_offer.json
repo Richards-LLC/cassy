@@ -1,0 +1,173 @@
+{
+  "contract": "cassy.coordination/v1",
+  "surface": "external_work.handoff_offer",
+  "method": "POST",
+  "path": "/api/coordination/external-work/{id}/handoffs",
+  "spec": "§4 §5",
+  "cases": [
+    {
+      "name": "offered",
+      "request": {
+        "path_params": {
+          "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000041-2222-4222-8222-000000000041",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "expected_generation": 1,
+          "to_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+          "offer_ttl_secs": 600
+        }
+      },
+      "response": {
+        "status": 201,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Offer recorded. You remain the owner until the peer accepts.",
+          "receipt": {
+            "operation_id": "00000b41-1111-4111-8111-000000000b41",
+            "request_id": "00000041-2222-4222-8222-000000000041",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "registration_id": "reg-supervisor-alpha-01",
+              "label": "alpha (laptop)",
+              "is_caller": true
+            },
+            "generation": 1,
+            "expires_at": "2026-10-16T14:05:00.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "proceed",
+            "handoff": {
+              "id": "00004a0f-1111-4111-8111-000000004a0f",
+              "status": "offered",
+              "from_slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "to_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+              "owner_generation": 1,
+              "expires_at": "2026-10-16T14:10:00.000Z"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "ineligible peer",
+      "request": {
+        "path_params": {
+          "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000042-2222-4222-8222-000000000042",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "expected_generation": 1,
+          "to_slot_id": "00000bad-1111-4111-8111-000000000bad"
+        }
+      },
+      "response": {
+        "status": 409,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "rejected",
+          "guidance": "That supervisor is not an authorized member of this project's team.",
+          "reason": "ineligible_peer",
+          "receipt": {
+            "operation_id": "00000b42-1111-4111-8111-000000000b42",
+            "request_id": "00000042-2222-4222-8222-000000000042",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "registration_id": "reg-supervisor-alpha-01",
+              "label": "alpha (laptop)",
+              "is_caller": true
+            },
+            "generation": 1,
+            "expires_at": "2026-10-16T14:05:00.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "fix_request"
+          }
+        }
+      }
+    },
+    {
+      "name": "unresolved reply blocks handoff",
+      "request": {
+        "path_params": {
+          "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "00000043-2222-4222-8222-000000000043",
+          "actor": {
+            "registration_id": "reg-supervisor-alpha-01"
+          },
+          "expected_generation": 1,
+          "to_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b"
+        }
+      },
+      "response": {
+        "status": 409,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "rejected",
+          "guidance": "A reply on this thread has an unresolved Slack outcome; handoff waits for reconciliation.",
+          "reason": "reply_unresolved",
+          "receipt": {
+            "operation_id": "00000b43-1111-4111-8111-000000000b43",
+            "request_id": "00000043-2222-4222-8222-000000000043",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "registration_id": "reg-supervisor-alpha-01",
+              "label": "alpha (laptop)",
+              "is_caller": true
+            },
+            "generation": 1,
+            "expires_at": "2026-10-16T14:05:00.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "reconcile"
+          }
+        }
+      }
+    }
+  ]
+}

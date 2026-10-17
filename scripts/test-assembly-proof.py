@@ -17,6 +17,10 @@ import time
 import unittest
 from unittest import mock
 
+# cas-baa8: fixtures never read this host's `cas config get factory.scratch_root`
+# (proof_target seeds from the configured build-cache); tests that need the
+# relocation set it themselves.
+os.environ["CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT"] = ""
 spec = importlib.util.spec_from_file_location("assembly_proof", Path(__file__).with_name("assembly-proof.py"))
 proof = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(proof)

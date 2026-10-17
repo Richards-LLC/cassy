@@ -421,6 +421,9 @@ struct ConnectedServer {
     tools: Vec<Tool>,
     generation: u64,
     last_successful_call: AtomicU64,
+    /// cas-b3b4a: when a call last reached this connection (or it started),
+    /// for the idle stop.
+    last_used_ms: AtomicU64,
 }
 
 const RETRY_BASE_SECS: u64 = 5;
@@ -532,6 +535,11 @@ enum FailureVisibility {
 /// Engine that proxies tool calls to upstream MCP servers.
 pub struct ProxyEngine {
     servers: RwLock<HashMap<String, ConnectedServer>>,
+    /// cas-b3b4a: every upstream's known tools, live or dormant. Listing and
+    /// policy read this, so an upstream need not run to be visible.
+    catalog: RwLock<HashMap<String, Vec<Tool>>>,
+    /// cas-b3b4a: where catalogs persist between serves, if anywhere.
+    catalog_path: Option<PathBuf>,
     configs: RwLock<HashMap<String, ServerConfig>>,
     health: RwLock<HashMap<String, UpstreamHealth>>,
     session_id: String,
@@ -568,20 +576,25 @@ impl ProxyEngine {
     /// whatever servers connected successfully.
     pub async fn from_configs(configs: HashMap<String, ServerConfig>) -> Result<Self> {
         validate_configs(&configs)?;
-        Self::from_configs_with_timeout(configs, Duration::from_secs(CONNECT_TIMEOUT_SECS)).await
+        Self::from_configs_with_timeout(configs, Duration::from_secs(CONNECT_TIMEOUT_SECS), None)
+            .await
     }
 
     async fn from_configs_with_timeout(
         configs: HashMap<String, ServerConfig>,
         connect_timeout: Duration,
+        catalog_path: Option<PathBuf>,
     ) -> Result<Self> {
         let session_id = new_session_id();
         let health = configs
             .iter()
             .map(|(name, config)| (name.clone(), initial_health(name, config)))
             .collect();
+        let cached = catalog_path.as_deref().map(load_catalog).unwrap_or_default();
         let engine = Self {
             servers: RwLock::new(HashMap::new()),
+            catalog: RwLock::new(HashMap::new()),
+            catalog_path,
             configs: RwLock::new(configs.clone()),
             health: RwLock::new(health),
             session_id,
@@ -593,16 +606,120 @@ impl ProxyEngine {
             health_epoch: AtomicU64::new(0),
         };
 
+        // cas-b3b4a: an upstream whose catalog is cached for this exact
+        // configuration starts dormant: listed, healthy, and not spawned.
         let mut names: Vec<_> = configs.keys().cloned().collect();
         names.sort();
-        futures::future::join_all(names.iter().filter_map(|name| {
+        let mut eager = Vec::new();
+        for name in names {
+            let Some(config) = configs.get(&name) else {
+                continue;
+            };
+            match cached.get(&name) {
+                Some(entry) if entry.fingerprint == config_fingerprint(config) => {
+                    engine.catalog.write().await.insert(name.clone(), entry.tools.clone());
+                    let mut health = engine.health.write().await;
+                    let record = health
+                        .entry(name.clone())
+                        .or_insert_with(|| initial_health(&name, config));
+                    record.state = UpstreamState::Healthy;
+                    record.tool_count = entry.tools.len();
+                    record.connected = false;
+                }
+                _ => eager.push(name),
+            }
+        }
+        futures::future::join_all(eager.iter().filter_map(|name| {
             configs.get(name).map(|config| {
                 engine.connect_and_record_with_timeout(name, config, now_ms(), connect_timeout)
             })
         }))
         .await;
+        engine.persist_catalog().await;
 
         Ok(engine)
+    }
+
+    /// Write the known catalogs, keyed by configuration fingerprint.
+    async fn persist_catalog(&self) {
+        let Some(path) = self.catalog_path.as_deref() else {
+            return;
+        };
+        let configs = self.configs.read().await;
+        let entries: HashMap<String, CatalogCacheEntry> = self
+            .catalog
+            .read()
+            .await
+            .iter()
+            .filter_map(|(name, tools)| {
+                configs.get(name).map(|config| {
+                    (
+                        name.clone(),
+                        CatalogCacheEntry {
+                            fingerprint: config_fingerprint(config),
+                            tools: tools.clone(),
+                        },
+                    )
+                })
+            })
+            .collect();
+        if let Err(error) = store_catalog(path, &entries) {
+            tracing::warn!(%error, "could not persist the MCP upstream catalog");
+        }
+    }
+
+    /// cas-b3b4a: like [`Self::from_configs`], but an upstream whose tool
+    /// catalog is cached at `catalog` for its exact configuration starts
+    /// dormant: its tools are listed and it is spawned on the first call.
+    pub async fn from_configs_with_catalog(
+        configs: HashMap<String, ServerConfig>,
+        catalog: Option<PathBuf>,
+    ) -> Result<Self> {
+        validate_configs(&configs)?;
+        Self::from_configs_with_timeout(configs, Duration::from_secs(CONNECT_TIMEOUT_SECS), catalog)
+            .await
+    }
+
+    /// cas-b3b4a: stop every live upstream unused for `idle`; it stays
+    /// listed and restarts on its next call. Returns how many stopped.
+    pub async fn stop_idle(&self, idle: Duration) -> usize {
+        let now = now_ms();
+        let idle_ms = u64::try_from(idle.as_millis()).unwrap_or(u64::MAX);
+        let stopped: Vec<(String, ConnectedServer)> = {
+            let mut servers = self.servers.write().await;
+            let names: Vec<String> = servers
+                .iter()
+                .filter(|(_, server)| {
+                    now.saturating_sub(server.last_used_ms.load(Ordering::Acquire)) >= idle_ms
+                })
+                .map(|(name, _)| name.clone())
+                .collect();
+            names
+                .into_iter()
+                .filter_map(|name| servers.remove(&name).map(|server| (name, server)))
+                .collect()
+        };
+        let count = stopped.len();
+        for (name, server) in stopped {
+            // The catalog stays; the next call starts it again.
+            self.catalog
+                .write()
+                .await
+                .insert(name.clone(), server.tools.clone());
+            if let Some(record) = self.health.write().await.get_mut(&name) {
+                record.connected = false;
+            }
+            let _ = server.service.cancel().await;
+            tracing::info!(
+                upstream = %public_upstream_id(&name),
+                proxy_session = %self.session_id,
+                "MCP upstream stopped after idling"
+            );
+        }
+        if count > 0 {
+            self.health_epoch.fetch_add(1, Ordering::AcqRel);
+        }
+        count
     }
 
     /// Bound every subsequent upstream tool call by `timeout` (cas-53ce).
@@ -636,9 +753,12 @@ impl ProxyEngine {
             return;
         }
         let now = now_ms();
+        let dormant = self.catalog.read().await.contains_key(name);
         let due = self.health.read().await.get(name).is_some_and(|record| {
-            record.state == UpstreamState::Backoff
-                && record.next_retry_at_ms.is_some_and(|retry| retry <= now)
+            (record.state == UpstreamState::Backoff
+                && record.next_retry_at_ms.is_some_and(|retry| retry <= now))
+                // cas-b3b4a: a dormant upstream starts on its first call.
+                || (dormant && record.state == UpstreamState::Healthy)
         });
         if !due {
             return;
@@ -741,7 +861,7 @@ impl ProxyEngine {
         configs: HashMap<String, ServerConfig>,
         connect_timeout: Duration,
     ) -> Result<ProxyHealthSnapshot> {
-        let engine = Self::from_configs_with_timeout(configs, connect_timeout).await?;
+        let engine = Self::from_configs_with_timeout(configs, connect_timeout, None).await?;
         let snapshot = engine.health_snapshot().await;
         engine.shutdown().await;
         Ok(snapshot)
@@ -800,6 +920,10 @@ impl ProxyEngine {
         match result {
             Ok(connected) => {
                 let tool_count = connected.tools.len();
+                self.catalog
+                    .write()
+                    .await
+                    .insert(name.to_string(), connected.tools.clone());
                 self.servers
                     .write()
                     .await
@@ -873,7 +997,7 @@ impl ProxyEngine {
     /// description, and input_schema fields. If `max_length` is set, the JSON
     /// output is truncated to that many bytes.
     pub async fn search(&self, query: &str, max_length: Option<usize>) -> Result<Value> {
-        let servers = self.servers.read().await;
+        let servers = self.catalog.read().await;
         let configs = self.configs.read().await;
         let public_servers = public_upstream_ids(configs.keys().map(String::as_str));
 
@@ -906,7 +1030,7 @@ impl ProxyEngine {
 
         let mut results: Vec<SearchResult> = Vec::new();
 
-        for (server_name, connected) in servers.iter() {
+        for (server_name, tools) in servers.iter() {
             let public_server = public_servers
                 .get(server_name)
                 .cloned()
@@ -919,10 +1043,9 @@ impl ProxyEngine {
                 }
             }
 
-            let public_tools =
-                public_tool_ids(connected.tools.iter().map(|tool| tool.name.as_ref()));
+            let public_tools = public_tool_ids(tools.iter().map(|tool| tool.name.as_ref()));
             let policy = self.policy.read().await.clone();
-            for tool in &connected.tools {
+            for tool in tools {
                 if matches_keywords(tool, &keywords) {
                     let policy = match policy.catalog_access(server_name, tool.name.as_ref()) {
                         CatalogAccess::Callable => None,
@@ -1050,8 +1173,7 @@ impl ProxyEngine {
 
     /// Return the total number of tools across all connected servers.
     pub async fn tool_count(&self) -> usize {
-        let servers = self.servers.read().await;
-        servers.values().map(|s| s.tools.len()).sum()
+        self.catalog.read().await.values().map(Vec::len).sum()
     }
 
     /// One line naming every upstream tool the policy lets someone call
@@ -1059,20 +1181,19 @@ impl ProxyEngine {
     /// it silently shut off would otherwise be discovered one refusal at a
     /// time. Supervisor-only tools are marked, and denied tools are counted.
     pub async fn callable_tools_banner(&self) -> String {
-        let servers = self.servers.read().await;
+        let servers = self.catalog.read().await;
         let configs = self.configs.read().await;
         let public_servers = public_upstream_ids(configs.keys().map(String::as_str));
         let policy = self.policy.read().await.clone();
         let mut callable = Vec::new();
         let mut denied = 0usize;
-        for (server_name, connected) in servers.iter() {
+        for (server_name, tools) in servers.iter() {
             let public_server = public_servers
                 .get(server_name)
                 .cloned()
                 .unwrap_or_else(|| public_upstream_id(server_name));
-            let public_tools =
-                public_tool_ids(connected.tools.iter().map(|tool| tool.name.as_ref()));
-            for tool in &connected.tools {
+            let public_tools = public_tool_ids(tools.iter().map(|tool| tool.name.as_ref()));
+            for tool in tools {
                 let public_tool = public_tools
                     .get(tool.name.as_ref())
                     .cloned()
@@ -1103,21 +1224,29 @@ impl ProxyEngine {
     /// session. Callers use this only for explicit operator-facing recovery
     /// paths; normal dispatch still goes through the policy and routing gates.
     pub async fn upstream_connected(&self, server: &str) -> bool {
-        self.servers.read().await.contains_key(server)
+        if self.servers.read().await.contains_key(server) {
+            return true;
+        }
+        // cas-b3b4a: a dormant upstream is available; its next call starts it.
+        self.catalog.read().await.contains_key(server)
+            && self
+                .health
+                .read()
+                .await
+                .get(server)
+                .is_some_and(|record| record.state == UpstreamState::Healthy)
     }
 
     /// Return catalog entries grouped by server name.
     pub async fn catalog_entries_by_server(&self) -> HashMap<String, Vec<CatalogEntry>> {
-        let servers = self.servers.read().await;
+        let servers = self.catalog.read().await;
         let configs = self.configs.read().await;
         let public_servers = public_upstream_ids(configs.keys().map(String::as_str));
         servers
             .iter()
-            .map(|(name, connected)| {
-                let public_tools =
-                    public_tool_ids(connected.tools.iter().map(|tool| tool.name.as_ref()));
-                let entries = connected
-                    .tools
+            .map(|(name, tools)| {
+                let public_tools = public_tool_ids(tools.iter().map(|tool| tool.name.as_ref()));
+                let entries = tools
                     .iter()
                     .map(|tool| CatalogEntry {
                         name: public_tools
@@ -1174,6 +1303,9 @@ impl ProxyEngine {
             .write()
             .await
             .retain(|name, _| configs.contains_key(name));
+        self.catalog.write().await.retain(|name, _| {
+            configs.contains_key(name) && old_configs.get(name) == configs.get(name)
+        });
 
         let mut reconnect = Vec::new();
         // Connect new servers and reconnect changed ones
@@ -1352,12 +1484,11 @@ impl ProxyEngine {
     /// not destructive (cas-ff74). Unknown tools and missing annotations are
     /// not read-only.
     async fn tool_read_only_hint(&self, server_name: &str, tool_name: &str) -> bool {
-        let servers = self.servers.read().await;
-        let Some(server) = servers.get(server_name) else {
+        let catalog = self.catalog.read().await;
+        let Some(tools) = catalog.get(server_name) else {
             return false;
         };
-        server
-            .tools
+        tools
             .iter()
             .find(|tool| &*tool.name == tool_name)
             .and_then(|tool| tool.annotations.as_ref())
@@ -1416,6 +1547,9 @@ impl ProxyEngine {
             Some(self.absent_message(&resolved_server, &requested_public).await)
         };
         let servers = self.servers.read().await;
+        if let Some(server) = servers.get(&resolved_server) {
+            server.last_used_ms.store(now_ms(), Ordering::Release);
+        }
         let server = servers.get(&resolved_server).with_context(|| {
             let mut available: Vec<String> = servers
                 .keys()
@@ -2031,6 +2165,7 @@ async fn connect_server(name: &str, config: &ServerConfig) -> Result<ConnectedSe
                 .iter()
                 .map(|arg| expand_environment_placeholders(arg))
                 .collect::<Result<Vec<_>>>()?;
+            check_stdio_argv(&args_clone)?;
             let env_clone = with_pinned_timezone(command, &args_clone, env_clone);
             let transport = TokioChildProcess::new(cmd.configure(move |cmd| {
                 cmd.args(&args_clone);
@@ -2085,7 +2220,65 @@ async fn connect_server(name: &str, config: &ServerConfig) -> Result<ConnectedSe
         tools: tools_result.tools,
         generation: CONNECTION_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         last_successful_call: AtomicU64::new(0),
+        last_used_ms: AtomicU64::new(now_ms()),
     })
+}
+
+/// cas-b3b4a: the argv and environment a stdio upstream is launched with.
+/// cas-b3b4a: a credential never travels in argv, where any local user can
+/// read it with `ps`; an argument that looks like one refuses the launch.
+pub fn check_stdio_argv(args: &[String]) -> Result<()> {
+    if let Some(position) = args.iter().position(|arg| looks_like_credential(arg)) {
+        anyhow::bail!(
+            "stdio upstream argument {position} looks like a credential; pass it through the server's environment (`env` in proxy.toml) instead of argv, where `ps` shows it"
+        );
+    }
+    Ok(())
+}
+
+/// Prefixes of the API keys and tokens upstream launches have carried.
+const CREDENTIAL_PREFIXES: &[&str] = &[
+    "napi_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "xoxb-", "xoxp-",
+    "xoxa-", "sk-ant-", "sk-proj-", "sk_live_", "AKIA",
+];
+
+fn looks_like_credential(arg: &str) -> bool {
+    let value = arg.split_once('=').map_or(arg, |(_, value)| value);
+    CREDENTIAL_PREFIXES.iter().any(|prefix| value.starts_with(prefix))
+}
+
+/// cas-b3b4a: one upstream's cached catalog.
+#[derive(Serialize, Deserialize)]
+struct CatalogCacheEntry {
+    fingerprint: String,
+    tools: Vec<Tool>,
+}
+
+/// A digest of an upstream's configuration (never the values, which may
+/// hold keys): a changed command, args, URL or env invalidates its cached
+/// catalog. A new Cassy build may hash differently; that only relearns it.
+fn config_fingerprint(config: &ServerConfig) -> String {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_vec(config).unwrap_or_default().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn load_catalog(path: &Path) -> HashMap<String, CatalogCacheEntry> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn store_catalog(path: &Path, entries: &HashMap<String, CatalogCacheEntry>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_vec(entries)?)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 /// Node Postgres MCP servers whose drivers turn `timestamp without time zone`
@@ -2986,6 +3179,8 @@ mod tests {
             &script,
             r#"import json, os, sys, time
 log = sys.argv[1]
+with open(os.path.join(os.path.dirname(log), "starts.log"), "a") as handle:
+    handle.write("start\n")
 def send(message):
     sys.stdout.write(json.dumps(message) + "\n")
     sys.stdout.flush()
@@ -3044,6 +3239,55 @@ for line in sys.stdin:
 
     async fn fake_health(engine: &ProxyEngine) -> UpstreamHealth {
         engine.health.read().await.get("fake").cloned().expect("fake health")
+    }
+
+    /// cas-b3b4a: with a cached catalog a serve spawns no upstream until one
+    /// of its tools is called; an idle upstream stops and the next call
+    /// starts it again. Its tools stay listed throughout.
+    #[tokio::test]
+    async fn cas_b3b4a_cached_upstream_starts_on_first_call_and_stops_when_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("catalog.json");
+        let configs = HashMap::from([("fake".to_string(), fake_upstream(dir.path()))]);
+        let starts = || {
+            std::fs::read_to_string(dir.path().join("starts.log"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        // The first serve learns the catalog once.
+        let first = ProxyEngine::from_configs_with_catalog(configs.clone(), Some(cache.clone()))
+            .await
+            .unwrap();
+        first.shutdown().await;
+        assert_eq!(starts(), 1);
+
+        let engine = ProxyEngine::from_configs_with_catalog(configs, Some(cache))
+            .await
+            .unwrap();
+        assert_eq!(starts(), 1, "a cached upstream is not spawned at startup");
+        assert_eq!(engine.tool_count().await, 3, "its tools are still listed");
+        assert!(engine.upstream_connected("fake").await, "it is available on demand");
+
+        assert_eq!(call_fake(&engine, "echo").await.unwrap(), "ok");
+        assert_eq!(starts(), 2, "the first call starts it");
+        assert_eq!(engine.stop_idle(Duration::ZERO).await, 1);
+        assert_eq!(engine.tool_count().await, 3);
+        assert_eq!(call_fake(&engine, "echo").await.unwrap(), "ok");
+        assert_eq!(starts(), 3, "the next call restarts it");
+        engine.shutdown().await;
+    }
+
+    /// cas-b3b4a: no credential in a stdio upstream's argv.
+    #[test]
+    fn cas_b3b4a_stdio_launch_keeps_credentials_out_of_argv() {
+        let args = |values: &[&str]| values.iter().map(|value| value.to_string()).collect::<Vec<_>>();
+        check_stdio_argv(&args(&["-y", "@playwright/mcp@latest", "--browser", "chrome"])).unwrap();
+        for argv in [&["start", "napi_secret123"][..], &["--token=ghp_abcdef123456"][..]] {
+            let error = check_stdio_argv(&args(argv)).unwrap_err().to_string();
+            assert!(error.contains("environment"), "{error}");
+            assert!(!error.contains("secret123") && !error.contains("abcdef"), "{error}");
+        }
     }
 
     /// cas-53ce (GH #1168): a transport error drops the upstream, health
@@ -3979,6 +4223,7 @@ for line in sys.stdin:
         let engine = ProxyEngine::from_configs_with_timeout(
             HashMap::from([("first".to_string(), first), ("second".to_string(), second)]),
             timeout,
+            None,
         )
         .await
         .unwrap();

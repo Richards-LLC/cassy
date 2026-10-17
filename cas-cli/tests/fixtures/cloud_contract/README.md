@@ -111,3 +111,17 @@ python3 -I scripts/test-cloud-contract-fixtures.py --token-file ~/.cas/cloud.jso
 - **Checking the result:** the self-test checks the schema, coverage, recorded
   statuses and error codes, the contract relations cas-c7c7 depends on, and
   redaction. Pass `--token-file` to also scan for the exact token.
+
+
+## Cloud #155 amendment (2026-10-16)
+
+The capture above is an immutable PR #153 recording. Migration 0036 adds
+`user_id`, `project_id` and `team_id` to lock records and `user_id` to claim
+conflicts. The distributed fake's parity replay overlays exactly those additive
+fields from the published #155 contract; it does not rewrite the recording.
+The two-account MCP test separately checks teammate visibility, start/claim/spawn
+refusals and owner-only release/renew, including personal-project isolation.
+`GET /api/agents/tasks/<key>/lock` remains account-private; teammate reads use
+`GET /api/agents/locks?project=<canonical_id>`. The live runner's `team_claims`
+step requires two sandbox profiles on an existing shared team project and never
+counts a same-account or stand-in run as two-account proof.

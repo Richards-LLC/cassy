@@ -72,6 +72,19 @@ impl Config {
                     }
                 };
             }
+            "peers.same_repo_scope" => {
+                self.peers
+                    .get_or_insert_with(PeersConfig::default)
+                    .same_repo_scope = match value.trim() {
+                    "team" => SameRepoScope::Team,
+                    "own" => SameRepoScope::Own,
+                    _ => {
+                        return Err(MemError::Parse(format!(
+                            "Invalid peers.same_repo_scope: {value}; use team or own"
+                        )));
+                    }
+                };
+            }
             "slack.wake_enabled" => {
                 self.slack.get_or_insert_with(SlackConfig::default).wake_enabled =
                     Some(value.parse().map_err(|_| {
@@ -168,6 +181,18 @@ impl Config {
                     MemError::Parse(format!("Invalid integer value for factory.target_cache_retention_count: {value}"))
                 })?;
             }
+            "factory.claude.worker_mcp" => {
+                let mode = value.parse().map_err(MemError::Parse)?;
+                self.factory.get_or_insert_with(FactoryConfig::default).claude.worker_mcp = mode;
+            }
+            "factory.claude.remote_control" => {
+                let enabled = value.parse().map_err(|_| MemError::Other(format!("Invalid boolean value for {key}: {value}")))?;
+                self.factory.get_or_insert_with(FactoryConfig::default).claude.remote_control = enabled;
+            }
+            "factory.claude.fallback_model" => {
+                let model = cas_types::factory_claude::FactoryClaudeConfig::parse_fallback(value).map_err(MemError::Other)?;
+                self.factory.get_or_insert_with(FactoryConfig::default).claude.fallback_model = model;
+            }
             "factory.nice_cargo" => {
                 self.factory.get_or_insert_with(FactoryConfig::default).nice_cargo =
                     value.parse().map_err(|_| MemError::Parse(format!(
@@ -181,6 +206,25 @@ impl Config {
                         "Invalid integer value for factory.max_concurrent_builders: {value}"
                     ))
                 })?;
+            }
+            "factory.build_guard.max_load_ratio"
+            | "factory.build_guard.max_cpu_pressure_percent"
+            | "factory.build_guard.max_memory_pressure_percent" => {
+                let number: f64 = value.parse().map_err(|_| MemError::Parse(format!("Invalid number for {key}: {value}")))?;
+                let load_ratio = key.ends_with("max_load_ratio");
+                if !number.is_finite() || if load_ratio { number <= 0.0 } else { !(0.0..=100.0).contains(&number) } {
+                    return Err(MemError::Parse(format!("Invalid value for {key}: expected {}", if load_ratio { "a positive finite ratio" } else { "a percentage from 0 to 100" })));
+                }
+                let limits = &mut self.factory.get_or_insert_with(FactoryConfig::default).build_guard;
+                match key {
+                    "factory.build_guard.max_load_ratio" => limits.max_load_ratio = number,
+                    "factory.build_guard.max_cpu_pressure_percent" => limits.max_cpu_pressure_percent = number,
+                    _ => limits.max_memory_pressure_percent = number,
+                }
+            }
+            "factory.build_guard.min_available_memory_gib" => {
+                let gib: u32 = value.parse().map_err(|_| MemError::Parse(format!("Invalid GiB value for {key}: {value}")))?;
+                self.factory.get_or_insert_with(FactoryConfig::default).build_guard.min_available_memory_gib = gib;
             }
             "factory.worker_memory_high_gib" => {
                 self.factory.get_or_insert_with(FactoryConfig::default).worker_memory_high_gib =
@@ -285,6 +329,16 @@ impl Config {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 let root = value.trim();
                 factory.artifacts_root = (!root.is_empty()).then(|| root.to_string());
+            }
+            "factory.scratch_root" => {
+                let root = value.trim();
+                if !root.is_empty() && !std::path::Path::new(root).is_absolute() {
+                    return Err(MemError::Parse(format!(
+                        "factory.scratch_root must be an absolute path, got {root:?}"
+                    )));
+                }
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.scratch_root = (!root.is_empty()).then(|| root.to_string());
             }
             "factory.supervisor_only_mcp"
             | "factory.supervisor_only_env"
@@ -650,14 +704,19 @@ impl Config {
                     .map(ToOwned::to_owned)
                     .collect();
             }
-            "qa.user_facing_paths" => {
+            "qa.user_facing_paths" | "qa.api_paths" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);
-                qa.user_facing_paths = value
+                let paths = value
                     .split(',')
                     .map(str::trim)
                     .filter(|glob| !glob.is_empty())
                     .map(ToOwned::to_owned)
                     .collect();
+                if key == "qa.api_paths" {
+                    qa.api_paths = paths;
+                } else {
+                    qa.user_facing_paths = paths;
+                }
             }
             "qa.pass_timeout_mins" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);

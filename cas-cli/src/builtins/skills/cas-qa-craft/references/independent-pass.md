@@ -21,22 +21,35 @@ serve it through `cas-servers`. For hub-web, run `npm run build`, then serve
 `hub-web/dist`. A build or serve failure is a **Blocking** finding. Record the
 command, the URL, and `npx playwright --version` in the ledger header.
 
-## 2. Cover the source-impact-selected journeys
+## 2. Review the worker's affected-journey evidence
+
+Derive the selection at the exact reviewed tip:
 
 ```bash
 scripts/journeys-for-diff.py <base> <bound_head>   # JSON: id, title, suite, reason
+```
+
+Consume the implementer's passing receipt when its full base/head SHAs match
+this selection, every selected ID has a positive pass count and no failures or
+skips, and the native suite exit and runner errors are zero/empty. Check the
+native report and recorded Playwright version against the reviewed build's
+lockfile and execution environment. Cite the original receipt/log paths in the
+round bundle and ledger; preserve their producer and timestamps. Reuse matching
+unit/typecheck receipts as well. Run independent adjacent/demo/visual cells in
+steps 3–4; the automated selection is the worker's responsibility. Read the
+tests the delivery adds against [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests):
+bloat, restated implementation, sleeps and retry-wrapped flakes are Normal findings.
+
+If that evidence is absent, failed, incomplete, or belongs to different inputs
+or an incompatible environment, run the missing checks. For affected journeys:
+
+```bash
 scripts/journey-eval.sh <ledger-dir> --affected <base> --workers=4
 ```
 
-For hub-web source or dist changes, derive selection at the exact bound tip
-from `journeys-for-diff`, then cover every selected ID. Include
-`journey_receipt` in the round bundle per
-[evidence-bundle.md](evidence-bundle.md). A hand-picked subset that omits a
-selected ID refuses QA. Reuse the implementer's receipt when it covers the
-same tip and selection; walk independent cells and inspect actual pixels.
-Workers and reviewers use affected journeys; the supervisor owns the one
-full-suite run per epic assembly and the merge queue. If a test fails, retain
-that run and rerun only its spec at one worker to distinguish a flake.
+A hand-picked subset cannot replace the source-impact selection. Keep an
+original failure and rerun only its spec at one worker for a failure control.
+The merge queue owns the full run on the final integration tree.
 
 Ports: hub-web's Playwright config never reuses a running server. Each
 checkout gets its own default port pair in 20000–32767, derived from its

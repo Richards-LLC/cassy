@@ -84,6 +84,27 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         keywords: &["factory", "operator", "commander", "mirror", "privacy"],
         use_cases: &["See supervisor replies without first sending a message", "Opt out of automatic supervisor reply capture"],
     });
+    for (key, name, description, value_type, default) in [
+        ("factory.claude.remote_control", "Claude Supervisor Remote Control", "Opt in to Claude Remote Control for the supervisor only. Workers remain network-quiet. Requires installed CLI support.", ConfigType::Bool, "false"),
+        ("factory.claude.fallback_model", "Claude Overload Fallback Model", "Explicit Claude fallback model for workers and supervisor. Empty clears it. Requires installed CLI support; model availability is resolved by Claude.", ConfigType::String, ""),
+    ] {
+        registry.register(ConfigMeta {
+            key, section: "factory", name, description, value_type, default,
+            constraint: Constraint::None, advanced: false, requires_feature: None,
+            keywords: &["factory", "claude", "remote", "fallback", "model"],
+            use_cases: &["Configure supported Claude launch options"],
+        });
+    }
+    registry.register(ConfigMeta {
+        key: "factory.claude.worker_mcp", section: "factory",
+        name: "Claude Worker MCP Scope",
+        description: "cas_only uses a private strict CAS-only configuration (default). inherit loads native MCP scopes only when no supervisor-only MCP/environment denials exist; otherwise launch refuses. Supervisors and Codex are unchanged.",
+        value_type: ConfigType::String, default: "cas_only",
+        constraint: Constraint::OneOf(vec!["cas_only".into(), "inherit".into()]),
+        advanced: false, requires_feature: None,
+        keywords: &["factory", "claude", "worker", "mcp", "scope", "inherit"],
+        use_cases: &["Let Claude workers use additional native MCP servers in this project"],
+    });
     // FACTORY SECTION
     // ============================================================
     for (key, name, description) in [
@@ -147,6 +168,23 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.scratch_root",
+        section: "factory",
+        name: "Worker Build Scratch Root",
+        description: "Absolute base for regenerable worker build output. When set, each factory worker's Cargo target lives at <root>/<project-key>/targets/<worktree> and published target baselines at <root>/<project-key>/build-cache, which must share one filesystem so seeding can hard-link. Empty keeps <worktree>/target and .cas/build-cache. Running workers move on respawn; rebuild the baseline with scripts/refresh-worker-build-cache.sh after changing it.",
+        value_type: ConfigType::String,
+        default: "",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "scratch", "target", "cargo", "build-cache", "disk", "drive", "cache"],
+        use_cases: &[
+            "Put worker Cargo targets and build-cache baselines on a dedicated scratch drive such as /mnt/rewind/cas",
+            "Leave empty to keep targets inside each worker checkout",
+        ],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.message_max_chars",
         section: "factory",
         name: "Agent Message Character Cap",
@@ -192,7 +230,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         key: "factory.max_concurrent_builders",
         section: "factory",
         name: "Maximum Concurrent Builders",
-        description: "Builder cap for worker compile checks and targeted tests, enforced with OS slot locks. spawn_workers also refuses when a request would exceed this cap or one-minute load exceeds CPU count; force=true overrides only the spawn-time soft guard.",
+        description: "Builder cap for worker compile checks and targeted tests, enforced with OS slot locks. spawn_workers also checks configured PSI/memory pressure, or the load ratio when PSI is unavailable; force=true overrides only the spawn-time soft guard.",
         value_type: ConfigType::Int,
         default: "4",
         constraint: Constraint::Range(1, 256),
@@ -203,6 +241,62 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             "Keep a shared 32-core host at four concurrent builders",
             "Raise the cap only when the host has spare CPU capacity",
         ],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.build_guard.max_load_ratio",
+        section: "factory",
+        name: "Fallback Maximum Load Ratio",
+        description: "Positive finite load/CPU ceiling when CPU PSI is unavailable. PSI and memory thresholds take precedence on supported hosts.",
+        value_type: ConfigType::Float,
+        default: "1.0",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "cargo", "build", "admission", "pressure", "load", "memory"],
+        use_cases: &["Tune build admission on a shared host without changing builder slots"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.build_guard.max_cpu_pressure_percent",
+        section: "factory",
+        name: "Maximum CPU Pressure (%)",
+        description: "Maximum CPU PSI some avg10 stall percentage (0..100). Replaces the raw-load test when available.",
+        value_type: ConfigType::Float,
+        default: "90.0",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "cargo", "build", "admission", "pressure", "load", "memory"],
+        use_cases: &["Tune build admission on a shared host without changing builder slots"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.build_guard.max_memory_pressure_percent",
+        section: "factory",
+        name: "Maximum Memory Pressure (%)",
+        description: "Maximum memory PSI some avg10 stall percentage (0..100). Rechecked even for an admitted proof continuation.",
+        value_type: ConfigType::Float,
+        default: "10.0",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "cargo", "build", "admission", "pressure", "load", "memory"],
+        use_cases: &["Tune build admission on a shared host without changing builder slots"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.build_guard.min_available_memory_gib",
+        section: "factory",
+        name: "Minimum Available Memory (GiB)",
+        description: "Minimum MemAvailable before build admission. Zero disables this floor; PSI and the hard builder cap still apply.",
+        value_type: ConfigType::Int,
+        default: "2",
+        constraint: Constraint::Range(0, 65536),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "cargo", "build", "admission", "pressure", "load", "memory"],
+        use_cases: &["Tune build admission on a shared host without changing builder slots"],
     });
 
     registry.register(ConfigMeta {

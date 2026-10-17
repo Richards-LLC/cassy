@@ -1,6 +1,9 @@
 //! Cli integration suites, linked once.
 //! Run with nextest for one-process-per-test environment/cwd isolation.
 
+#[path = "../../src/test_env_guard.rs"]
+mod test_env_guard;
+
 #[path = "../artifact_publish_test.rs"]
 mod artifact_publish_test;
 #[path = "../bridge_server_sse_test.rs"]
@@ -15,6 +18,8 @@ mod claude_profile_test;
 mod cli_test;
 #[path = "../codex_profile_test.rs"]
 mod codex_profile_test;
+#[path = "../coordination_cli_test.rs"]
+mod coordination_cli_test;
 #[path = "../gh701_origin_filter_measurement_test.rs"]
 mod gh701_origin_filter_measurement_test;
 #[path = "../host_registry_isolation_test.rs"]

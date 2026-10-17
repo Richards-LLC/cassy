@@ -33,6 +33,14 @@ impl Config {
                 }
                 .to_string(),
             ),
+            "peers.same_repo_scope" => Some(
+                self.peers
+                    .as_ref()
+                    .map(|peers| peers.same_repo_scope)
+                    .unwrap_or_default()
+                    .as_str()
+                    .to_string(),
+            ),
             "slack.wake_enabled" => Some(
                 self.slack
                     .as_ref()
@@ -98,6 +106,7 @@ impl Config {
                     .clone()
                     .unwrap_or_else(|| FACTORY_ARTIFACTS_ROOT_DEFAULT.to_string()),
             ),
+            "factory.scratch_root" => Some(factory.scratch_root.clone().unwrap_or_default()),
             "factory.message_max_chars" => Some(factory.message_max_chars.to_string()),
             "factory.write_roots" => Some(factory.write_roots.join(",")),
             "factory.supervisor_only_mcp" => Some(factory.worker_policy.supervisor_only_mcp.join(",")),
@@ -113,6 +122,10 @@ impl Config {
             "factory.note_max_chars" => Some(factory.note_max_chars.to_string()),
             "factory.commander_mirror_enabled" => Some(factory.commander_mirror_enabled.to_string()),
             "factory.max_concurrent_builders" => Some(factory.max_concurrent_builders.to_string()),
+            "factory.build_guard.max_load_ratio" => Some(format!("{:?}", factory.build_guard.max_load_ratio)),
+            "factory.build_guard.max_cpu_pressure_percent" => Some(format!("{:?}", factory.build_guard.max_cpu_pressure_percent)),
+            "factory.build_guard.max_memory_pressure_percent" => Some(format!("{:?}", factory.build_guard.max_memory_pressure_percent)),
+            "factory.build_guard.min_available_memory_gib" => Some(factory.build_guard.min_available_memory_gib.to_string()),
             "factory.worker_memory_high_gib" => Some(factory.worker_memory_high_gib.to_string()),
             "factory.render_max_fps" => Some(factory.render_max_fps.to_string()),
             "factory.render_unfocused_fps" => Some(factory.render_unfocused_fps.to_string()),
@@ -129,6 +142,9 @@ impl Config {
             "factory.target_cache_low_watermark_percent" => Some(factory.target_cache_low_watermark_percent.to_string()),
             "factory.target_cache_min_idle_secs" => Some(factory.target_cache_min_idle_secs.to_string()),
             "factory.target_cache_retention_count" => Some(factory.target_cache_retention_count.to_string()),
+            "factory.claude.worker_mcp" => Some(factory.claude.worker_mcp.as_str().into()),
+            "factory.claude.remote_control" => Some(factory.claude.remote_control.to_string()),
+            "factory.claude.fallback_model" => Some(factory.claude.fallback_model.clone().unwrap_or_default()),
             "factory.nice_cargo" => Some(factory.nice_cargo.to_string()),
             "factory.spawn_min_free_gib" => Some(factory.spawn_min_free_gib.to_string()),
             "factory.prompt_retention_days" => Some(factory.prompt_retention_days.to_string()),
@@ -155,6 +171,7 @@ impl Config {
             "qa.terminal_render_paths" => Some(qa.terminal_render_paths.join(",")),
             "qa.terminal_interaction_paths" => Some(qa.terminal_interaction_paths.join(",")),
             "qa.user_facing_paths" => Some(qa.user_facing_paths.join(",")),
+            "qa.api_paths" => Some(qa.api_paths.join(",")),
             "qa.pass_timeout_mins" => Some(qa.pass_timeout_mins.to_string()),
             "qa.max_rounds" => Some(qa.max_rounds.to_string()),
             "qa.github_status" => Some(qa.github_status.to_string()),

@@ -24,7 +24,10 @@ use crate::ui::theme::{ActiveTheme, Icons};
 
 use crate::cli::Cli;
 
+mod backlog_hygiene;
+mod idle_sync;
 mod slack_transport;
+mod communication;
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
@@ -228,6 +231,8 @@ impl CheckGroup {
     }
 
     fn for_name(name: &str) -> Self {
+        // Keep exact-name arms literal: check-doctor-snapshot.py reads this
+        // table without a Rust build to validate the accepted row groups.
         match name.to_ascii_lowercase().as_str() {
             "host"
             | "user-level store"
@@ -239,7 +244,9 @@ impl CheckGroup {
             | "registered project roots"
             | "host user skills"
             | "host install parity"
-            | "slack transport" => Self::Host,
+            | "slack transport"
+            | "account links"
+            | "hub idle sync" => Self::Host,
             "user skills" | "scratchpad policy" => Self::Config,
             "legacy search index"
             | "pre-versioned search index"
@@ -254,10 +261,12 @@ impl CheckGroup {
             | "cloud identity metadata"
             | "project aliases"
             | "cloud sync queue"
+            | "cloud idle sync"
             | "cross-project rows"
             | "foreign knowledge pages"
             | "supervisor relay"
-            | "delivery retries" => Self::Cloud,
+            | "delivery retries"
+            | "communication slos" => Self::Cloud,
             "configuration"
             | "config repair"
             | "mcp config"
@@ -1014,6 +1023,7 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
         host_hub_service_check(),
         host_hub_transport_check(),
         host_hub_audit_check(),
+        idle_sync::host_check(),
     ];
     // Commander needs a usable provider under the service's environment.
     // Keep one result per CLI so a missing provider is easy to identify. A CLI
@@ -1055,6 +1065,7 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
     checks.extend(registered_project_root_checks(current.unwrap_or_else(|| Path::new(""))));
     checks.push(scratchpad_policy_check());
     checks.push(slack_transport::check());
+    checks.push(account_links_check());
     let targets = user_skill_scan_targets();
     let mut skills = stray_user_skills_check(&scan_user_skill_dirs(&targets));
     skills.name = "host user skills".into();
@@ -1067,6 +1078,60 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
     }
     checks.push(install_parity_check(&gather_install_parity()));
     checks
+}
+
+/// cas-e1f4: once accounts share a base folder, every Claude and Codex
+/// account's shared items must still link to it.
+fn account_links_check() -> Check {
+    let Some(home) = dirs::home_dir() else {
+        return Check::new("account links", CheckStatus::Ok, "no home directory");
+    };
+    if !crate::accounts::Provider::ALL
+        .iter()
+        .any(|provider| provider.base_dir(&home).is_dir())
+    {
+        return Check::new(
+            "account links",
+            CheckStatus::Ok,
+            "accounts do not share a base folder yet (`cas accounts link --dry-run` previews it)",
+        );
+    }
+    let mut drift = Vec::new();
+    for provider in crate::accounts::Provider::ALL {
+        match crate::accounts::drift(provider, &home) {
+            Ok(found) => drift.extend(found),
+            Err(error) => {
+                return Check::new(
+                    "account links",
+                    CheckStatus::Warning,
+                    format!("could not read {} accounts: {error}", provider.name()),
+                );
+            }
+        }
+    }
+    if drift.is_empty() {
+        return Check::new(
+            "account links",
+            CheckStatus::Ok,
+            "every account links its shared items to the base",
+        );
+    }
+    let shown: Vec<String> = drift
+        .iter()
+        .take(5)
+        .map(|item| format!("~/{}/{}", item.account, item.item))
+        .collect();
+    Check::new(
+        "account links",
+        CheckStatus::Warning,
+        format!(
+            "{} shared item{} not linked to the base: {}{}; run `cas accounts link --dry-run`, then `cas accounts link`",
+            drift.len(),
+            if drift.len() == 1 { "" } else { "s" },
+            shown.join(", "),
+            if drift.len() > shown.len() { ", ..." } else { "" }
+        ),
+    )
 }
 
 /// The harness homes `cas update --user` writes, compared against the
@@ -2364,6 +2429,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     recorder.mark("host checks", &checks);
     if let Some(check) = github_origin_check(project_root) { checks.push(check); }
     recorder.mark("GitHub origin", &checks);
+    checks.push(managed_file_drift_check(project_root));
+    recorder.mark("managed file drift", &checks);
     checks.push(prompt_hook_check(&cas_root));
     recorder.mark("prompt hook", &checks);
     checks.push(session_start_budget_check());
@@ -2478,6 +2545,9 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // a recipient is unreachable — visible here BEFORE the row exhausts its
     // budget and dies, which is the only window in which anyone can act.
     checks.push(delivery_retries_check(&cas_root));
+    checks.push(communication::check(&cas_root));
+    // cas-e8d1 (GH #1233): open work the record says is done.
+    checks.push(backlog_hygiene::check(&cas_root));
 
     recorder.mark("message handoff", &checks);
     // Check 3b: Schema details (tables and columns). An unreadable schema is a
@@ -3024,10 +3094,13 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 cli,
             );
         }
+        checks.extend(idle_sync::project_check(&cas_root));
         checks.push(cloud_queue_check(&cas_root));
         checks.push(cloud_team_only_check(&cas_root));
+        checks.extend(cloud_pull_freshness_check(&cas_root));
         checks.extend(sync_warning_checks(&sync_warnings));
         checks.extend(pull_id_collision_check(&cas_root));
+        checks.extend(memory_fold_conflict_check(&cas_root));
         checks.extend(unauthored_pull_check(&cas_root));
         // Quarantine is local state, so an unreadable ledger reports zero
         // rather than failing the whole check: the check's job is to describe
@@ -4507,6 +4580,102 @@ fn cloud_team_only_check(cas_root: &Path) -> Check {
     }
 }
 
+/// How old the newest pull watermark may get before doctor flags the store
+/// (cas-9b5d). A live `cas serve` pulls every minute, so a day means no
+/// session has synced this project in that time.
+const CLOUD_PULL_STALE_AFTER: chrono::Duration = chrono::Duration::hours(24);
+
+/// Flag a logged-in store whose cloud pull has gone stale (cas-9b5d).
+///
+/// Cloud sync runs only inside a live `cas serve`, which exists only while
+/// an agent session is open in the project. A project nobody opens stops
+/// syncing silently: prowl's petra-stella-cloud last pulled when its last
+/// session ended, 13 days earlier. Freshness takes the newer of the personal
+/// watermark and the active team's scoped one, so a team-linked store that
+/// pulled in team scope is not reported stale.
+fn cloud_pull_freshness_check(cas_root: &Path) -> Option<Check> {
+    cloud_pull_freshness_check_at(cas_root, chrono::Utc::now(), cloud_serve_is_live(cas_root))
+}
+
+/// Whether a `cas serve` daemon is accepting connections for this store.
+fn cloud_serve_is_live(cas_root: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(crate::mcp::socket::socket_path(cas_root)).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cas_root;
+        false
+    }
+}
+
+fn cloud_pull_freshness_check_at(
+    cas_root: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+    serve_live: bool,
+) -> Option<Check> {
+    const NAME: &str = "cloud pull freshness";
+    // The daemon also syncs with the machine-wide login; inherit it in memory
+    // only, since doctor must not write the project's cloud.json.
+    let mut config = crate::cloud::CloudConfig::load_from_cas_dir(cas_root).ok()?;
+    if !config.is_logged_in()
+        && let Ok(user) = crate::cloud::CloudConfig::load_user()
+    {
+        config.inherit_credentials_from(&user);
+    }
+    if !config.is_logged_in() || crate::cloud::presence::opted_out(cas_root) {
+        return None;
+    }
+    let queue = crate::cloud::SyncQueue::open_read_only(cas_root).ok()?;
+    let mut watermarks = vec![queue.get_metadata("last_pull_at").ok().flatten()];
+    if let Some(team_id) = config.active_team_id()
+        && let Ok(project_id) = crate::cloud::resolve_canonical_id_for_sync(cas_root)
+    {
+        watermarks.push(
+            queue
+                .get_metadata(&format!("last_team_pull_at_{team_id}_{project_id}"))
+                .ok()
+                .flatten(),
+        );
+    }
+    let newest = watermarks
+        .into_iter()
+        .flatten()
+        .filter_map(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
+        .map(|at| at.with_timezone(&chrono::Utc))
+        .max();
+    let cause = if serve_live {
+        "a `cas serve` is live for this store, so its sync is failing: inspect `cas cloud status` and `cas cloud queue --verbose`"
+    } else {
+        "no live `cas serve` for this store; cloud sync runs only while an agent session is open in the project. Run `cas cloud sync` here, or open a session, to catch up"
+    };
+    let Some(newest) = newest else {
+        return Some(Check::new(
+            NAME,
+            CheckStatus::Warning,
+            format!("logged in but this store has never pulled; {cause}"),
+        ));
+    };
+    let age = now.signed_duration_since(newest);
+    if age <= CLOUD_PULL_STALE_AFTER {
+        return Some(Check::new(
+            NAME,
+            CheckStatus::Ok,
+            format!("last pull {}", newest.to_rfc3339()),
+        ));
+    }
+    Some(Check::new(
+        NAME,
+        CheckStatus::Warning,
+        format!(
+            "last pull {} ({} day(s) ago); {cause}",
+            newest.to_rfc3339(),
+            age.num_days()
+        ),
+    ))
+}
+
 /// Report cloud watermarks and registration markers that belong to another
 /// project identity. These values are local evidence of the old multi-root
 /// cache leak; sync itself now writes only the current root's scope.
@@ -5528,6 +5697,24 @@ fn unauthored_pull_check_for(counts: &BTreeMap<String, usize>) -> Option<Check> 
     ))
 }
 
+/// Surface retained Cloud fold conflicts even after the watermark advances.
+fn memory_fold_conflict_check(cas_root: &Path) -> Option<Check> {
+    let ids = crate::cloud::SyncQueue::open_read_only(cas_root)
+        .and_then(|queue| queue.memory_fold_conflict_ids())
+        .ok()?;
+    if ids.is_empty() {
+        return None;
+    }
+    Some(Check::new(
+        "folded memory conflicts",
+        CheckStatus::Warning,
+        format!(
+            "{} folded memory id(s) had distinct copies; both retained.\nInspect: cas cloud conflicts --json",
+            ids.len()
+        ),
+    ))
+}
+
 /// Report pulled task rows that were parked because they shared an id with a
 /// different local task (cas-7a63, GH #1000). Silent when there are none, so a
 /// clean project's report is unchanged.
@@ -6014,6 +6201,49 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// cas-9b5d: prowl's petra-stella-cloud had no open session for 13 days,
+    /// so nothing pulled. Doctor names the stale pull and its cause, and a
+    /// team-scoped pull counts as fresh (the cas-7e38 watermark trap).
+    #[test]
+    fn cas_9b5d_pull_freshness_flags_a_store_without_a_live_serve() {
+        use crate::cloud::SyncQueue;
+        let temp = TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("config.toml"),
+            "[project]\ncanonical_id = \"p\"\n",
+        )
+        .unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-16T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        fs::write(
+            temp.path().join("cloud.json"),
+            r#"{"endpoint":"https://cloud.invalid","token":"t","team_id":"team-1","team_slug":"team"}"#,
+        )
+        .unwrap();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        queue
+            .set_metadata("last_pull_at", "2026-10-02T14:27:08.386Z")
+            .unwrap();
+
+        let idle = cloud_pull_freshness_check_at(temp.path(), now, false).unwrap();
+        assert!(matches!(idle.status, CheckStatus::Warning), "{}", idle.message);
+        assert!(idle.message.contains("13 day(s) ago"), "{}", idle.message);
+        assert!(idle.message.contains("no live `cas serve`"), "{}", idle.message);
+        assert!(idle.message.contains("cas cloud sync"), "{}", idle.message);
+
+        let live = cloud_pull_freshness_check_at(temp.path(), now, true).unwrap();
+        assert!(matches!(live.status, CheckStatus::Warning), "{}", live.message);
+        assert!(live.message.contains("sync is failing"), "{}", live.message);
+
+        queue
+            .set_metadata("last_team_pull_at_team-1_p", "2026-10-16T11:30:00Z")
+            .unwrap();
+        let fresh = cloud_pull_freshness_check_at(temp.path(), now, false).unwrap();
+        assert!(matches!(fresh.status, CheckStatus::Ok), "{}", fresh.message);
+    }
+
     /// cas-25c1: a checkout with `cloud.team_only` off whose personal rows
     /// the cloud rejected as `team_owned_project` is the prowl mismatch. Doctor
     /// must warn with the exact fix instead of reporting "off" as healthy.
@@ -6351,6 +6581,43 @@ mod tests {
             "{}",
             check.message
         );
+    }
+
+    #[test]
+    fn cas_e29c_doctor_reports_retained_fold_conflicts_once_per_id() {
+        let temp = TempDir::new().unwrap();
+        let queue = crate::cloud::SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        assert!(memory_fold_conflict_check(temp.path()).is_none());
+        for id in ["opaque-fold0123456789ab", "opaque-fold0123456789ab"] {
+            queue
+                .record_conflict(
+                    "entry",
+                    id,
+                    "{}",
+                    "local",
+                    crate::cloud::MEMORY_FOLD_CONFLICT,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        queue
+            .record_conflict(
+                "task",
+                "unrelated",
+                "{}",
+                "local",
+                crate::cloud::MEMORY_FOLD_CONFLICT,
+                None,
+                None,
+            )
+            .unwrap();
+        let check = memory_fold_conflict_check(temp.path()).unwrap();
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.starts_with("1 folded memory id(s)"));
+        assert!(!check.message.contains("0001-01-01"));
+        assert!(check.message.contains("cas cloud conflicts --json"));
     }
 
     /// cas-7a63: a parked id collision is reported once per id, and a clean
@@ -9226,6 +9493,21 @@ mod tests {
         assert!(matches!(divergent_user_skills_check(&identical).status, CheckStatus::Ok));
     }
 
+    #[test]
+    fn cas_f1fb_idle_sync_rows_preserve_host_and_cloud_groups() {
+        for (name, expected) in [
+            ("registered project roots", CheckGroup::Host),
+            ("host", CheckGroup::Host),
+            (idle_sync::HOST_CHECK, CheckGroup::Host),
+            ("canonical id", CheckGroup::Cloud),
+            ("cloud sync queue", CheckGroup::Cloud),
+            (idle_sync::PROJECT_CHECK, CheckGroup::Cloud),
+        ] {
+            let check = Check::new(name, CheckStatus::Ok, "healthy");
+            assert_eq!(check.group(), expected, "doctor row {name}");
+        }
+    }
+
     /// cas-57c02: installed-vs-catalog parity is a host row. Drift names the
     /// harness, the kind and a sample path and points at `cas update --user`;
     /// preserved local edits are reported without failing the check.
@@ -11490,6 +11772,18 @@ fn write_finding(
     width: usize,
     verbose: bool,
 ) -> std::io::Result<()> {
+    if check.name == "communication SLOs" {
+        fmt.write_raw("  ")?;
+        fmt.mark(status_verdict(&check.status))?;
+        fmt.write_bold_plain(" communication SLOs")?;
+        fmt.newline()?;
+        for line in check.message.lines() {
+            for part in wrap_report_text(line, width.saturating_sub(4), fmt.unicode()) {
+                write_report_line(fmt, &format!("    {part}"))?;
+            }
+        }
+        return Ok(());
+    }
     let max_lines = if verbose { usize::MAX } else { FINDING_MAX_LINES };
     let times = if fmt.unicode() { "\u{00d7}" } else { "x" };
     let name = if repeats > 1 {
@@ -11658,7 +11952,7 @@ fn render_report(
         let ok_checks: Vec<&Check> = section
             .iter()
             .copied()
-            .filter(|check| matches!(check.status, CheckStatus::Ok))
+            .filter(|check| matches!(check.status, CheckStatus::Ok) && check.name != "communication SLOs")
             .collect();
         if ok_checks.len() == section.len() {
             write_ok_section_line(fmt, group, &ok_checks, width)?;
@@ -11784,7 +12078,7 @@ fn collapse_findings<'a>(section: &[&'a Check]) -> Vec<(&'a Check, usize)> {
     for check in section
         .iter()
         .copied()
-        .filter(|check| !matches!(check.status, CheckStatus::Ok))
+        .filter(|check| !matches!(check.status, CheckStatus::Ok) || check.name == "communication SLOs")
     {
         match findings.last_mut() {
             Some((last, repeats))
@@ -11910,5 +12204,26 @@ mod prompt_hook_tests {
         let check = prompt_hook_check(temp.path());
         assert!(matches!(check.status, CheckStatus::Warning));
         assert_eq!(check.message, "UserPromptSubmit hook silent for 3 prompts; restart Claude");
+    }
+}
+
+fn managed_file_drift_check(root: &Path) -> Check {
+    let harnesses = crate::cli::project_files::harnesses(root);
+    match crate::cli::project_files::drift(root, &harnesses) {
+        Ok(0) => Check::new(
+            "managed file drift",
+            CheckStatus::Ok,
+            "managed project files are current",
+        ),
+        Ok(count) => Check::new(
+            "managed file drift",
+            CheckStatus::Warning,
+            format!("{count} managed file drift item(s); run `cas update`"),
+        ),
+        Err(error) => Check::new(
+            "managed file drift",
+            CheckStatus::Warning,
+            format!("managed file conflict: {error}; run `cas update`"),
+        ),
     }
 }

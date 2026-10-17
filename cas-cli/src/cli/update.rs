@@ -305,6 +305,19 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         return execute_post_swap(args, cli, current_version);
     }
 
+    // A sync preview must stop before both filesystem writers and Git repair.
+    if args.sync && args.dry_run {
+        if cli.json {
+            println!(
+                "{}",
+                serde_json::json!({"managed_files": {"outcome":"planned"}})
+            );
+        } else {
+            println!("Managed files: planned; no changes written");
+        }
+        return Ok(());
+    }
+
     // cas-49c0: a factory worker refreshes only its own worktree. Its
     // `--sync` used to rewrite the supervisor's main checkout, and the
     // host-wide modes walk every registered project.
@@ -317,10 +330,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         WorkerUpdatePlan::Unrestricted => {}
         WorkerUpdatePlan::Refuse(message) => anyhow::bail!(message),
         WorkerUpdatePlan::SyncWorktree(worktree) => {
-            let mut steps = UpdateStepTracker::new(1, !cli.json);
-            return steps.run("Syncing .claude/.codex files in this worktree", || {
-                sync_claude_files_into(cli, cas_root, Some(&worktree))
-            });
+            return sync_claude_files_into(cli, cas_root, Some(&worktree)).map(|_| ());
         }
     }
 
@@ -362,10 +372,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     // Handle sync-only mode (just sync .claude/.codex files)
     if args.sync {
-        let mut steps = UpdateStepTracker::new(1, !cli.json);
-        return steps.run("Syncing .claude/.codex files", || {
-            sync_claude_files(cli, cas_root)
-        });
+        return sync_claude_files(cli, cas_root).map(|_| ());
     }
 
     // Handle schema-only mode
@@ -1151,7 +1158,17 @@ fn refresh_all_projects_with_user_refresh(
     user_refresh: impl FnOnce() -> ProjectPhase,
 ) -> anyhow::Result<RefreshReport> {
     let started_at = Instant::now();
-    let discovery = discover_local_projects(current_cas_root);
+    let mut discovery = discover_local_projects(current_cas_root);
+    for project in std::mem::take(&mut discovery.projects) {
+        if crate::cli::project_files::git_root(&project) {
+            discovery.projects.push(project);
+        } else {
+            discovery.skipped_unregistered.push(SkippedProject {
+                project,
+                reason: "not a Git project root".into(),
+            });
+        }
+    }
     let mut receipts = Vec::with_capacity(discovery.projects.len());
 
     // Account registrations must converge before project proxies choose their
@@ -1198,9 +1215,7 @@ fn refresh_all_projects_with_user_refresh(
             details.push_str(&output);
             phase_details.push((search_index.is_ok(), output));
             let (skills, output) = capture_phase(!cli.json, || {
-                run_project_phase("skills", args.dry_run, || {
-                    sync_claude_files(cli, Some(&cas_root))
-                })
+                refresh_project_files(cli, &cas_root, args.dry_run)
             });
             details.push_str(&output);
             phase_details.push((skills.is_ok(), output));
@@ -1502,6 +1517,25 @@ fn run_project_phase(
     }
 }
 
+// Preserve the managed-file verdict through the compact sweep. In particular,
+// a skipped writer must never become an OK skills phase with its warning hidden.
+fn refresh_project_files(cli: &Cli, cas_root: &Path, dry_run: bool) -> ProjectPhase {
+    if dry_run {
+        return ProjectPhase::Planned("skills".into());
+    }
+    match sync_claude_files(cli, Some(cas_root)) {
+        Err(error) => ProjectPhase::Failed(format!("skills: {error:#}")),
+        Ok(report) if !report.conflicts.is_empty() => ProjectPhase::Warning(format!(
+            "{} managed file conflict(s); run `cas update --sync --json`",
+            report.conflicts.len()
+        )),
+        Ok(report) if report.outcome == "staged" => {
+            ProjectPhase::Warning("managed changes staged; commit pending".into())
+        }
+        Ok(report) => ProjectPhase::Ok(format!("skills; managed files {}", report.outcome)),
+    }
+}
+
 /// Refresh the user-level membership cache and resolve the project scope
 /// without changing an explicit project team selection or canonical project
 /// pin. `maybe_adopt_team_scope` already carries that precedence contract.
@@ -1596,6 +1630,7 @@ fn sync_project_cloud(
             dry_run: false,
             full: false,
             rehome: false,
+            background: false,
         },
         cli,
         cas_root,
@@ -2103,7 +2138,10 @@ fn scan_for_projects(root: &Path, depth: usize, projects: &mut BTreeSet<PathBuf>
 }
 
 /// Sync rules, skills, and configuration to .claude/.codex directories
-fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result<()> {
+fn sync_claude_files(
+    cli: &Cli,
+    cas_root_param: Option<&Path>,
+) -> anyhow::Result<crate::cli::project_files::Report> {
     sync_claude_files_into(cli, cas_root_param, None)
 }
 
@@ -2113,26 +2151,20 @@ fn sync_claude_files_into(
     cli: &Cli,
     cas_root_param: Option<&Path>,
     project_root: Option<&Path>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<crate::cli::project_files::Report> {
     // cas_root is optional - if not provided and Cassy is not initialized, nothing to sync
     let cas_root = match cas_root_param {
         Some(path) => path.to_path_buf(),
         None => {
             // Not initialized, nothing to sync
-            return Ok(());
+            return Ok(crate::cli::project_files::Report {
+                outcome: "skipped",
+                ..Default::default()
+            });
         }
     };
 
-    // A worktree-scoped sync (cas-49c0) leaves host-level installs alone.
-    #[cfg(feature = "mcp-proxy")]
-    if project_root.is_none() {
-        crate::cli::integrate::violet_retirement::retire_installed_hub(Some(
-            &cas_root.join("proxy.toml"),
-        ))?;
-        crate::cli::integrate::violet_retirement::repair_proxy_credentials_on_update(Some(
-            &cas_root.join("proxy.toml"),
-        ));
-    }
+    let _refresh_host_integration = project_root.is_none();
     let project_root = project_root.unwrap_or_else(|| cas_root.parent().unwrap_or(&cas_root));
     let claude_dir = project_root.join(".claude");
     let codex_dir = project_root.join(".codex");
@@ -2153,17 +2185,26 @@ fn sync_claude_files_into(
     // Builtin files are generated into consumer projects and should not be
     // committed there. The authoring checkout is exempted inside the helper
     // because its rendered files are intentional tracked fixtures.
-    let mut builtin_harnesses = vec![cas_mux::SupervisorCli::Claude];
-    if codex_enabled {
-        builtin_harnesses.push(cas_mux::SupervisorCli::Codex);
+    let builtin_harnesses = crate::cli::project_files::harnesses(project_root);
+    let reconciliation =
+        match crate::cli::project_files::Reconcile::begin(project_root, &builtin_harnesses)? {
+            Some(plan) if plan.blocked() => {
+                report_managed_files(cli, &plan.report)?;
+                return Ok(plan.report);
+            }
+            plan => plan,
+        };
+    // A worktree-scoped sync (cas-49c0) leaves host-level installs alone.
+    #[cfg(feature = "mcp-proxy")]
+    if _refresh_host_integration {
+        crate::cli::integrate::violet_retirement::retire_installed_hub(Some(
+            &cas_root.join("proxy.toml"),
+        ))?;
+        crate::cli::integrate::violet_retirement::repair_proxy_credentials_on_update(Some(
+            &cas_root.join("proxy.toml"),
+        ));
     }
-    if grok_enabled {
-        builtin_harnesses.push(cas_mux::SupervisorCli::Grok);
-    }
-    if opencode_enabled {
-        builtin_harnesses.push(cas_mux::SupervisorCli::OpenCode);
-    }
-    let builtin_gitignore = ensure_builtin_gitignore(project_root, &builtin_harnesses)?;
+    let mut builtin_gitignore = ensure_builtin_gitignore(project_root, &builtin_harnesses)?;
 
     if !cli.json {
         let mut out = io::stdout();
@@ -2172,24 +2213,6 @@ fn sync_claude_files_into(
         if builtin_gitignore.updated {
             fmt.write_raw("  ")?;
             fmt.success("Updated .gitignore with Cassy-managed builtin paths")?;
-        }
-        if !builtin_gitignore.tracked_paths.is_empty() {
-            fmt.write_raw("  ")?;
-            fmt.warning(&format!(
-                "{} Cassy-managed builtin path(s) are already tracked and will not be hidden by \
-                 .gitignore:",
-                builtin_gitignore.tracked_paths.len()
-            ))?;
-            for path in &builtin_gitignore.tracked_paths {
-                fmt.write_raw(&format!("    ! {path}"))?;
-                fmt.newline()?;
-            }
-            fmt.write_raw("    ")?;
-            fmt.write_raw(
-                "To make the ignore rule effective, review and run `git rm --cached <path>` \
-                 for each path, then commit the removal.",
-            )?;
-            fmt.newline()?;
         }
     }
 
@@ -2340,7 +2363,11 @@ fn sync_claude_files_into(
     let skill_store = open_skill_store(&cas_root)?;
     let skills = skill_store.list(None)?;
     let skill_syncer = SkillSyncer::with_defaults(project_root);
-    let skill_report = skill_syncer.sync_all(&skills)?;
+    // Preserve project-authored cas-* siblings; builtin pruning already
+    // belongs to its own writer. Explicit disabled database
+    // skills are still handled by sync_skill inside this operation.
+    let retained = skill_syncer.list_synced()?.into_iter().collect();
+    let skill_report = skill_syncer.sync_all_preserving(&skills, &retained)?;
 
     // Sync built-in agents, skills, and commands AFTER database sync
     // (so they don't get removed as "stale" by the skill syncer)
@@ -2460,6 +2487,20 @@ fn sync_claude_files_into(
         0
     };
 
+    let managed_files = if let Some(plan) = reconciliation {
+        let report = plan.finish(&builtin_harnesses)?;
+        builtin_gitignore.tracked_paths.clear();
+        report
+    } else {
+        crate::cli::project_files::Report {
+            outcome: "skipped",
+            ..Default::default()
+        }
+    };
+    if !cli.json {
+        report_managed_files(cli, &managed_files)?;
+    }
+
     if cli.json {
         let config_json: Vec<String> = config_updated.iter().map(|s| format!("\"{s}\"")).collect();
         let codex_config_json: Vec<String> = codex_config_updated
@@ -2467,7 +2508,7 @@ fn sync_claude_files_into(
             .map(|s| format!("\"{s}\""))
             .collect();
         println!(
-            r#"{{"config_updated":[{}],"builtins_updated":{},"builtin_reference_conflicts":{},"codex_config_updated":[{}],"codex_builtins_updated":{},"codex_builtin_reference_conflicts":{},"grok_builtins_updated":{},"grok_builtin_reference_conflicts":{},"opencode_builtins_updated":{},"rules_synced":{},"rules_removed":{},"skills_synced":{},"skills_removed":{},"factory_tooling":"{}","builtin_gitignore_updated":{},"builtin_gitignore_tracked":{}}}"#,
+            r#"{{"config_updated":[{}],"builtins_updated":{},"builtin_reference_conflicts":{},"codex_config_updated":[{}],"codex_builtins_updated":{},"codex_builtin_reference_conflicts":{},"grok_builtins_updated":{},"grok_builtin_reference_conflicts":{},"opencode_builtins_updated":{},"rules_synced":{},"rules_removed":{},"skills_synced":{},"skills_removed":{},"factory_tooling":"{}","builtin_gitignore_updated":{},"builtin_gitignore_tracked":{},"managed_files":{}}}"#,
             config_json.join(","),
             builtin_result.total_updated(),
             builtin_result.modified_reference_files.len(),
@@ -2483,7 +2524,8 @@ fn sync_claude_files_into(
             skill_report.removed,
             factory_tooling_result,
             builtin_gitignore.updated,
-            serde_json::to_string(&builtin_gitignore.tracked_paths)?
+            serde_json::to_string(&builtin_gitignore.tracked_paths)?,
+            serde_json::to_string(&managed_files)?
         );
     } else {
         let mut out = io::stdout();
@@ -2517,7 +2559,7 @@ fn sync_claude_files_into(
         }
     }
 
-    Ok(())
+    Ok(managed_files)
 }
 
 /// Distribute embedded built-in skills/agents/commands to user-level dirs
@@ -3248,6 +3290,56 @@ fn post_swap_first_launch_ms() -> anyhow::Result<u64> {
     Ok(0)
 }
 
+/// cas-cef2 (GH #1242): running factory sessions as `(name, pinned)`, where
+/// `pinned` means the daemon pinned its own executable for provisioning.
+fn running_factory_sessions() -> Vec<(String, bool)> {
+    crate::ui::factory::SessionManager::new()
+        .list_sessions_read_only()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|session| session.is_running)
+        .map(|session| {
+            let pinned = crate::ui::factory::provisioner_pin_path(&session.name).is_file();
+            (session.name, pinned)
+        })
+        .collect()
+}
+
+/// cas-cef2: what a binary update means for factory sessions already running.
+/// A daemon keeps its own build until relaunched; one that pinned its
+/// executable keeps spawning workers with it, and an older one cannot spawn.
+fn running_factory_update_notice(sessions: &[(String, bool)], version: &str) -> Option<String> {
+    if sessions.is_empty() {
+        return None;
+    }
+    let names = |pinned: bool| {
+        sessions
+            .iter()
+            .filter(|(_, is_pinned)| *is_pinned == pinned)
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut notice = format!(
+        "{} running factory session(s) keep their current build until relaunched.",
+        sessions.len()
+    );
+    let pinned = names(true);
+    if !pinned.is_empty() {
+        notice.push_str(&format!(" {pinned} keep spawning workers with that build."));
+    }
+    let unpinned = names(false);
+    if !unpinned.is_empty() {
+        notice.push_str(&format!(
+            " {unpinned} started before build pinning and cannot spawn new workers until relaunched."
+        ));
+    }
+    notice.push_str(&format!(
+        " To move a session to {version}, run `cas factory kill <session>` and relaunch `cas factory`; this stops its workers."
+    ));
+    Some(notice)
+}
+
 /// Download and install the latest (or specified) version
 fn perform_update(
     args: &UpdateArgs,
@@ -3382,6 +3474,13 @@ fn perform_update(
             fmt.write_accent("cas changelog")?;
             fmt.write_raw(" to see what's new")?;
             fmt.newline()?;
+            if let Some(notice) =
+                running_factory_update_notice(&running_factory_sessions(), v.trim_start_matches('v'))
+            {
+                fmt.write_raw("  ")?;
+                fmt.warning(&notice)?;
+                fmt.newline()?;
+            }
             v.trim_start_matches('v').to_owned()
         }
     };
@@ -4172,3 +4271,28 @@ fn write_skill_sync_sentinel(cas_root: &std::path::Path) {
 #[cfg(test)]
 #[path = "update_tests/tests.rs"]
 mod tests;
+
+fn report_managed_files(
+    cli: &Cli,
+    report: &crate::cli::project_files::Report,
+) -> anyhow::Result<()> {
+    if cli.json {
+        println!("{}", serde_json::json!({"managed_files": report}));
+    } else {
+        let message = if !report.conflicts.is_empty() {
+            format!(
+                "Managed files: {} conflicts preserved; cas update --sync --json for paths",
+                report.conflicts.len()
+            )
+        } else if report.outcome == "staged" {
+            "Managed files: staged; commit pending (index already had staged changes)".to_string()
+        } else {
+            format!(
+                "Managed files: {} ({} untracked, {} staged)",
+                report.outcome, report.untracked, report.staged
+            )
+        };
+        println!("{message}");
+    }
+    Ok(())
+}

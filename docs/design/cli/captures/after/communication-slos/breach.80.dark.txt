@@ -1,0 +1,36 @@
+doctor found safe automatic fixes; apply now? [y/N]
+⚠ 5 warnings · 29 ok · 1 info · breach · 3.59.0
+────────────────────────────────────────────────────────────────────────────────
+Host          ✓ registered project roots
+  ⚠ host  host: 3 findings — see `cas doctor --host`
+Store         ✓ cas directory  ✓ prompt hook  ✓ database  ✓ schema  ✓ tables
+              ✓ entry store  ✓ memory stats  ✓ memory decay  ✓ rules  ✓ tasks
+              ✓ cloud team-only
+Indexes       ✓ legacy search index  ✓ symbol index  ✓ code index copies
+              ✓ embedding drain  ✓ embeddings
+  ⚠ search index        Index not found at
+                        [SANDBOX]/breach/.cas/index/tantivy-v15.
+                        Will be created on first search; Run a search to build …
+  ⚠ code history index  cannot check code history index: not a git repository:
+                        [SANDBOX]/breach (fatal: not a git
+                        repository (or any parent up to mount point /) Stopping…
+Cloud         ✓ supervisor relay  ✓ delivery retries  ✓ canonical id
+              ✓ cloud sync queue  ✓ cross-project rows
+  ⚠ communication SLOs
+    BREACH communication: 5 breach(es); session fixture-session
+    BREACH false-abandon: 1 (target 0)
+    BREACH operator relay receipts: 0.0% (0/1, target 100%)
+    BREACH duplicate body reads: 1 (target 0)
+    BREACH director nudges: 2.000/hour (target <=1/hour)
+    BREACH gated-without-outcome: 1 (target 0)
+    Nudges: 1 / 0.500 worker-hours
+Config        ✓ SessionStart budget  ✓ configuration  ✓ MCP stdio upstreams
+              ✓ MCP upstream reachability  ✓ sync target  ✓ mcp config
+  ⚠ issue repositories  issues.repo unset; no usable GitHub origin; set `cas
+                        config set issues.repo owner/repo` |
+                        cassy=Richards-LLC/cassy | violet=Richards-LLC/violet_p…
+  ℹ shipped issues      skipped: no GitHub repository resolved for this project
+Integrations  ✓ integrations
+
+29 ok · 1 info · 5 warnings · 0 errors · 296ms
+cas doctor --verbose for timings and full messages

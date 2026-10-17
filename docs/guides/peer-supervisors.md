@@ -14,7 +14,7 @@ its workers, and it cannot direct yours.
 | Presence | The first line of that section is your own cloud registration: `Cloud presence: registered …` or `Cloud presence: failing: <cause>`. |
 | Messaging | `coordination action=message target=<name>` (or `<name>@<machine>`) reaches a peer's inbox through the Cassy Cloud mailbox. Replies use `in_reply_to`; `coordination action=message_status id=<peer message id>` reads delivery. |
 | Worker peer lane | A worker may message another registered worker in the same factory session with `coordination action=message target=<worker-name>`. Each peer message is copied to the session supervisor. This is a narrow local lane, not cross-session or cross-machine worker chat. |
-| Awareness | `coordination action=peers detail=true` (or `peer=<name>`) shows a peer's focus, task claims, live workers and branches. |
+| Awareness | `cas peers --detail` (or `--peer <name>`) shows a peer's focus, task claims, live workers and branches. |
 | Claim and spawn refusal | `task start`, `task action=claim` and `spawn_workers task_id=` refuse a task another session of this repository holds, naming the holder and when its claim runs out. Nothing is queued. |
 | Epic split | `factory action=epic_split` records which children of an epic each side owns. Each side's start and spawn on the other's children is refused. |
 
@@ -32,14 +32,32 @@ On every machine:
    messages. A supervisor without one is listed, but a send to it fails with
    `<name>@<machine> is not running a factory daemon, so it cannot receive peer messages`.
 
-**Accounts.** Discovery and messaging work across the members of a team
-project. **Task claims are visible only within one user account today.** Two
-machines logged in to the same account refuse each other's claimed work; a
-peer on another account cannot see your claims and you cannot see its, so an
-empty claim list is not proof that it is idle. Agree on ownership by message
-and record it with an epic split, which both databases enforce.
-[petra-stella-cloud#155](https://github.com/Richards-LLC/petra-stella-cloud/issues/155)
-tracks claims across team accounts.
+**Accounts.** Discovery, messaging and task claims span members of the same
+team project. Another account's held task appears in peer details with its
+owner and machine, and refuses start, claim and spawn. JSON marks these claims
+`team_project`; a failed read remains unknown. Personal projects keep per-account
+isolation. Renew and release remain owner-only, so a teammate's claim must be
+released by its owner or expire before another account can claim it.
+
+**Whose supervisors you see.** Every peer names its owning account: `owner
+you` for your own supervisors, `owner teammate <email>` for another member's
+(`cas peers` shows the same as `Account …`). A shared team project lists
+teammates' supervisors by default. To keep this project to your own account,
+the operator runs:
+
+```bash
+cas config set peers.same_repo_scope own
+```
+
+With `own`, the peer list, `cas peers` and plain-name messages reach only your
+own supervisors. Other accounts' supervisors are counted (`1 supervisor of
+other accounts hidden: peers.same_repo_scope is own`), and a message or reply
+to one is refused by name with `Nothing was sent.` The default is `team`.
+Changing the key is operator-only. Messages to supervisors of your other
+projects are always limited to your own account, whatever this key says.
+Cassy enforces `own` on this client; the cloud still lets a teammate on the
+team project message you
+([petra-stella-cloud#168](https://github.com/Richards-LLC/petra-stella-cloud/issues/168)).
 
 **Opting out.** A project that sets `cloud.auto_sync = false` does not register
 its agents, so their names, hostnames and branches stay on the machine. Its
@@ -69,6 +87,7 @@ Cloud presence: registered (focus -, branch main, registered 3s ago)
 Peers (github.com/petrastella-live-check/qa-b9d2-29dfcb, via Cassy
   Cloud):
   qa-6f85-b-29dfcb [live] on soundwave, heartbeat 3s ago
+    owner you
     session qa6f85-b-29dfcb | focus -
 Peer mailbox: receiving.
 ```
@@ -78,13 +97,14 @@ with the cloud on start, retries if that fails, and refreshes its focus and
 branch on every heartbeat. `Peer mailbox: receiving.` means this factory's
 daemon is claiming peer messages.
 
-For a peer's claims, workers and branches, add `detail=true`, or `peer=<name>`
-for one peer:
+For a peer's claims, workers and branches, run `cas peers --detail`, or
+`cas peers --peer <name>` for one peer:
 
 ```text
 [OK] 1 peer supervisor | 1 live
 Repo github.com/petrastella-live-check/qa-7e32-b251eb
 qa7e32-b-b251eb [live]
+  Account you
   Machine soundwave
   Session q7e32b-b251eb
   Focus   cas-3775
@@ -107,8 +127,21 @@ qa7e32-b-b251eb [live]
 Peer mailbox: receiving.
 ```
 
-`cas peers --detail` (or `--peer <name>`, and `--json`) prints the same view
-from a shell.
+Add `--json` for the same report as one document with untruncated values.
+
+A supervisor also sees its live peers when its session starts, including
+after `/clear`. The block reads the same snapshot as `cas peers`:
+
+```text
+## Live peer supervisors on this repo (Cassy Cloud)
+- qa7e32-b-b251eb on soundwave: heartbeat 13s ago, focus cas-3775, 3 claimed tasks
+2 stale (seen in the last 24h, not live)
+Their claims and work: `cas peers --detail`. Coordinate before taking the same tasks.
+```
+
+There is no block when no peer is live, when the project does not use Cassy
+Cloud, or for workers. If the cloud does not answer within 3 seconds, the
+block is one line saying the peers are unknown, never that there are none.
 
 ### 2. Message and reply
 
@@ -148,6 +181,45 @@ you when the peer's daemon claimed it. A peer message never interrupts the
 peer (`urgent=true` is refused) and carries no operator authority: the peer
 reads it as a colleague's request.
 
+### Supervisors of your other projects
+
+Supervisors in different projects of **your own** Cassy Cloud account can
+also message each other, on one machine or across machines. Supervisors of
+another user are never listed or addressable, even on a shared team project.
+
+```text
+coordination action=peers scope=all
+```
+
+```text
+[OK] 15 supervisors in 8 projects | 4 live
+Live:
+  bright-newt-56 gabber-studio on prowl, seen 13s ago
+    session gabber-studio-smooth-heron-38
+  fierce-shark-94 petra-stella-cloud on soundwave, seen 16s ago
+    session petra-stella-cloud-happy-puma-17 | focus cas-8cb0
+Stale, seen in the last 24h (11): abundant-mines 2, gabber-studio 5, ...
+  List them with --verbose or --json.
+Message one: coordination action=message target=supervisor:gabber-studio
+  summary="<one line>" message="<text>"
+Cross-project messages are advisory: never urgent, never the operator.
+```
+
+Address one by project, name, or `name@machine`. A project name that still
+names more than one supervisor is refused with every candidate listed:
+
+```text
+coordination action=message target=supervisor:gabber-studio summary="retry design?" message="How did you build the hub retry?" attachment=docs/retry.md
+```
+
+`attachment` takes a published artifact id, or a file in your checkout as
+`path` or `path@<commit>`. The recipient reads a file pointer directly when
+it is on the same machine; across machines, publish an artifact. The
+recipient sees the sender's project and machine, and the message is
+advisory: it is never urgent, cannot raise a blocker, and carries no
+operator authority. The Cloud side of this contract is
+[petra-stella-cloud#162](https://github.com/Richards-LLC/petra-stella-cloud/issues/162).
+
 ### 3. Claims keep you off each other's tasks
 
 A started task `cas-1c99`. B's spawn for it is refused before anything is
@@ -161,6 +233,34 @@ queued:
 claim runs out. When A closes or releases the task, B can start it. Use
 `force=true` only after the holder agrees. A claim nobody is renewing does not
 block: the start proceeds on the local lease and says `⚠️  STALE PEER CLAIM`.
+
+### Merging into the same branch
+
+Two supervisors may merge into the same branch. They coordinate and agree;
+Cassy never locks, fences or refuses a merge for them. Two helpers inform:
+
+- **About-to-merge note.** When a supervisor starts `worktree_merge` into a
+  target branch, every other live supervisor of this project whose factory runs
+  on that branch gets one peer message, before the merge starts:
+  `About to merge factory/<worker> (<task>) @ <tip> into <target>, by
+  <name>@<machine>.` It respects `peers.same_repo_scope` and is sent once per
+  merged tip; a retried merge does not send it again. The merge never waits for
+  it.
+- **Same-file overlap warning.** `cas peers` and the session-start peer block
+  warn when one of your in-flight worktree branches and a peer worker's branch
+  change the same files on the way into the same target:
+
+  ```text
+  [WARN] Same files in flight into epic/burn-down:
+    yours  factory/swift-fox-2
+    theirs factory/happy-owl-25 (happy-owl@prowl (teammate bob@example.com))
+    files  src/BeginConversation.vue
+    Agree the merge order by message; nothing is blocked.
+  ```
+
+  It reads the branches your git already has (`origin/<branch>` after a fetch),
+  skips branches already merged, and gives up quietly after 3 seconds or 24
+  branches.
 
 ### 4. Split an epic
 
@@ -235,7 +335,7 @@ expires after `ttl_secs` (default 1800).
 | `Could not deliver to <name>@<machine> mailbox: peer message refused (404): {"error":"recipient_not_found"…}` | The cloud cannot address that recipient in this project (unknown, wrong project or not visible to you; the cloud does not say which). Not retried. | Check peers again and confirm both clones resolve to the same project. |
 | `Could not deliver to <name>@<machine> mailbox: <cause>; queued for automatic retry as peer-outbox:<id>` | A temporary failure (network, 5xx, 408, 429). The send is kept and retried for up to 15 minutes. | `coordination action=message_status id=peer-outbox:<id>` shows its state. Do not resend: the retry keeps the same identity, so the peer gets it once. |
 | Inbox notice `Message peer-outbox:<id> to <recipient> was abandoned as undeliverable: <reason>` | Retrying ran out (`retry TTL expired`) or hit a permanent refusal. | Fix the named cause, then send again. |
-| `Claims not visible (different account)` in peer details | That peer is on another Cassy Cloud account, whose claims you cannot read. | It is not idle by default. Agree on ownership by message and an epic split. |
+| `Claims visible (team project)` in peer details | Cloud authorizes the teammate's claims for this shared project. | Coordinate with the named owner before taking its work. |
 | `⛔ HELD BY A PEER — task <id> is claimed by <who> … until <time>.` | Another session of this repository holds the claim. | Message the holder. `force=true` only after it agrees or its claim is stale. |
 | `⛔ SPLIT TO A PEER — <id> belongs to peer supervisor <name>@<machine> under epic split <split> …` | The child is the other side's share. | Ask the peer, or end the split with `decision=cancel`. |
 | `⚠️  PEERS NOT CHECKED — Cassy Cloud is unreachable (<reason>), so claims on <id> from other machines could not be checked. Started on the local lease only.` | The start went ahead without the cross-machine check. | Check peers before dispatching more work on that epic. |

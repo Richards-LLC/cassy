@@ -217,25 +217,26 @@ pub fn strip_cas_hooks(settings: &mut serde_json::Value) -> bool {
         };
 
         let original_len = entries_arr.len();
+        for entry in entries_arr.iter_mut() {
+            if let Some(list) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                let old_len = list.len();
+                list.retain(|hook| {
+                    let shell = hook
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|c| {
+                            c.starts_with("cas hook ") || c.starts_with("cas factory ")
+                        });
+                    !(shell || is_cas_hook_args(hook) || is_cas_factory_args(hook))
+                });
+                modified |= old_len != list.len();
+            }
+        }
         entries_arr.retain(|entry| {
-            let Some(hook_list) = entry.get("hooks").and_then(|h| h.as_array()) else {
-                return true; // keep non-standard entries
-            };
-            // Remove entry if ALL its hooks are Cassy hooks (shell form OR exec form)
-            let all_cas = hook_list.iter().all(|hook| {
-                // Legacy shell-string form
-                let cmd_match = hook
-                    .get("command")
-                    .and_then(|c| c.as_str())
-                    .map(|cmd| {
-                        cmd.starts_with("cas hook ") || cmd.starts_with("cas factory ")
-                    })
-                    .unwrap_or(false);
-                // Exec-form (Claude Code 2.1.139+)
-                let args_match = is_cas_hook_args(hook) || is_cas_factory_args(hook);
-                cmd_match || args_match
-            });
-            !all_cas
+            !entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .is_some_and(Vec::is_empty)
         });
 
         if entries_arr.len() != original_len {
@@ -829,7 +830,23 @@ fn configure_codex_dir(codex_dir: &Path) -> anyhow::Result<bool> {
     let hooks_changed = configure_codex_tool_hooks(&codex_dir)?;
 
     if changed {
-        let formatted = toml::to_string_pretty(&config)?;
+        let generated: toml_edit::DocumentMut = toml::to_string_pretty(&config)?.parse()?;
+        let mut document: toml_edit::DocumentMut =
+            existing_content.as_deref().unwrap_or_default().parse()?;
+        if document.get("mcp_servers").is_none() {
+            document["mcp_servers"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        let servers = document["mcp_servers"]
+            .as_table_like_mut()
+            .ok_or_else(|| anyhow::anyhow!("mcp_servers is not a table"))?;
+        for old in &cassy_keys {
+            servers.remove(old);
+        }
+        servers.insert(
+            CODEX_CAS_SERVER_KEY,
+            generated["mcp_servers"][CODEX_CAS_SERVER_KEY].clone(),
+        );
+        let formatted = document.to_string();
         if existing_content.as_ref() != Some(&formatted) {
             std::fs::write(&config_path, formatted)?;
         }
@@ -886,9 +903,9 @@ pub fn provision_codex_user_config(codex_dir: &Path) -> anyhow::Result<bool> {
 /// Install Cassy's command guards and task-anchor hook using Codex's native
 /// `hooks.json` schema.
 ///
-/// The timeout is three seconds (Codex timeout units are seconds, unlike the
-/// millisecond values in Claude's settings). Existing non-Cassy hook groups are
-/// preserved, while older Cassy entries are converged to these exact matchers and
+/// PreToolUse gets a generous response budget; PostToolUse remains three
+/// seconds. Codex timeout units are seconds, unlike Claude's settings. Existing
+/// non-Cassy hook groups are preserved, while older Cassy entries are converged to these exact matchers and
 /// handlers.
 fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
     let hooks_path = codex_dir.join("hooks.json");
@@ -927,25 +944,18 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
         // form. Remove either before adding the canonical entry so an upgrade
         // never leaves two registrations for the same Codex event.
         let legacy_command = format!("cas hook {event}");
-        groups.retain(|group| {
-            !group
-                .get("hooks")
-                .and_then(|handlers| handlers.as_array())
-                .is_some_and(|handlers| {
-                    handlers.iter().any(|handler| {
-                        matches!(
-                            handler.get("command").and_then(|value| value.as_str()),
-                            Some(existing) if existing == command || existing == legacy_command
-                        )
-                    })
-                })
-        });
+        for group in groups.iter_mut() {
+            if let Some(handlers) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                handlers.retain(|handler| !matches!(handler.get("command").and_then(|v| v.as_str()), Some(existing) if existing == command || existing == legacy_command));
+            }
+        }
+        groups.retain(|group| !group.get("hooks").and_then(|h| h.as_array()).is_some_and(Vec::is_empty));
         groups.push(serde_json::json!({
             "matcher": codex_hook_matcher(event),
             "hooks": [{
                 "type": "command",
                 "command": command,
-                "timeout": 3
+                "timeout": if event == "PreToolUse" { cas_pty::CODEX_PRE_TOOL_TIMEOUT_SECS } else { 3 }
             }]
         }));
     }

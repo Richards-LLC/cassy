@@ -1,3 +1,5 @@
+mod shell_effects;
+
 use crate::hooks::handlers::*;
 
 // PreToolUse Hook Handler
@@ -15,14 +17,63 @@ pub fn handle_pre_tool_use(
     input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
-    // cas-38e7: worker browser/JS suites are no longer rewritten through
-    // scripts/worker-memory.py; the shared-host memory admission is retired.
-    handle_pre_tool_use_inner(input, cas_root)
+    // Select the literal capped Cargo route before policy stores or provider
+    // lookups. Every protection still evaluates the rewritten command below.
+    if worker_cargo_request(input) {
+        let command = input
+            .tool_input
+            .as_ref()
+            .and_then(|v| v.get("command"))
+            .and_then(|v| v.as_str())
+            .unwrap();
+        let (args, suffix) = worker_check_command(command).expect("route was selected");
+        let Some(root) = cas_root else {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                "Worker check needs a Cassy root for max_concurrent_builders admission",
+            ));
+        };
+        if let Some(reason) = worker_check_log_denial(input, &suffix) {
+            return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+        }
+        let executable = std::env::current_exe()?;
+        let rewritten = format!(
+            "{} factory worker-check --cas-root {} -- {}{}",
+            shell_quote_path(&executable),
+            shell_quote_path(root),
+            args.iter()
+                .map(|arg| if arg.trim_start().starts_with("test(") {
+                    format!("'{arg}'")
+                } else {
+                    arg.clone()
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+            suffix
+        );
+        let mut updated = input.tool_input.clone().unwrap_or_default();
+        updated["command"] = serde_json::Value::String(rewritten);
+        return handle_pre_tool_use_inner(input, cas_root, Some(updated));
+    }
+    handle_pre_tool_use_inner(input, cas_root, None)
 }
 
+/// Pure admission selection; safe before logging, DB discovery or telemetry.
+pub(crate) fn worker_cargo_request(input: &HookInput) -> bool {
+    crate::harness_policy::is_worker(input)
+        && input.tool_name.as_deref() == Some("Bash")
+        && input
+            .tool_input
+            .as_ref()
+            .and_then(|v| v.get("command"))
+            .and_then(|v| v.as_str())
+            .and_then(worker_check_command)
+            .is_some()
+}
 fn handle_pre_tool_use_inner(
     input: &HookInput,
     cas_root: Option<&Path>,
+    prepared_cargo_input: Option<serde_json::Value>,
 ) -> Result<HookOutput, MemError> {
     let tool_name = match &input.tool_name {
         Some(name) => name.as_str(),
@@ -128,50 +179,14 @@ fn handle_pre_tool_use_inner(
                  A workspace normalization requires separate operator approval and must not be run from a worker.",
             ));
         }
-        // Only the literal package-scoped Cargo shapes may compile. Rewrite through the
-        // capped runner; a snapshot alone cannot prevent simultaneous starts.
-        if let Some((args, suffix)) = command.and_then(worker_check_command) {
-            let Some(root) = cas_root else {
-                return Ok(HookOutput::with_pre_tool_permission(
-                    "deny",
-                    "Worker check needs a Cassy root for max_concurrent_builders admission",
-                ));
-            };
-            if let Some(reason) = worker_check_log_denial(input, &suffix) {
-                return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
-            }
-            let executable = std::env::current_exe()?;
-            let rewritten = format!(
-                "{} factory worker-check --cas-root {} -- {}{}",
-                shell_quote_path(&executable),
-                shell_quote_path(root),
-                args.iter()
-                    .map(|arg| {
-                        if arg.trim_start().starts_with("test(") {
-                            format!("'{}'", arg)
-                        } else {
-                            arg.clone()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                suffix,
-            );
-            let mut updated = input.tool_input.clone().unwrap_or_default();
-            updated["command"] = serde_json::Value::String(rewritten);
+        if let Some(updated) = prepared_cargo_input {
             let mut rewritten_input = input.clone();
             rewritten_input.tool_input = Some(updated.clone());
-            // Evaluate every existing protection against the command that
-            // will actually run, including early rule-based approvals.
-            let mut output = handle_pre_tool_use(&rewritten_input, cas_root)?;
-            // cas-980d: in the shape the harness applies. Codex honours the
-            // rewrite only with permissionDecision "allow" and otherwise runs
-            // the raw command; a deny from a later guard stands.
+            let mut output = handle_pre_tool_use_inner(&rewritten_input, cas_root, None)?;
             output.rewrite_pre_tool_input(updated);
             return Ok(output);
-        } else if let Some(what) =
-            command.and_then(|command| worker_command_rust_build(command, Path::new(&input.cwd)))
-        {
+        }
+        if let Some(what) = command.and_then(|command| worker_command_rust_build(command, Path::new(&input.cwd))) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
                 &format!(
@@ -2296,7 +2311,7 @@ pub(crate) const FACTORY_AUTO_APPROVE_TOOLS: &[&str] = &[
     "NotebookEdit",
 ];
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ShellToken {
     Word(String),
     Operator(char),
@@ -2396,24 +2411,35 @@ fn worker_pattern_kill_group(group: &[Vec<String>], piped: bool, depth: usize) -
 /// redirections. In particular, metacharacters inside a quoted commit message
 /// stay inside one word and can never be mistaken for file-creation syntax.
 fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
+    factory_shell_tokens_with_literals(command).0
+}
+
+/// Preserve whether the outer shell can change a word's program structure.
+/// Single-quoted words are literal; numeric status/PID parameters cannot inject
+/// shell syntax. The effect collector still checks their use as commands/paths.
+fn factory_shell_tokens_with_literals(command: &str) -> (Vec<ShellToken>, Vec<bool>) {
     let mut tokens = Vec::new();
+    let mut literals = Vec::new();
     let mut word = String::new();
+    let mut literal = true;
     let mut quote = None;
     let mut escaped = false;
     let mut comment = false;
-
-    let push_word = |tokens: &mut Vec<ShellToken>, word: &mut String| {
+    let push_word = |tokens: &mut Vec<ShellToken>, literals: &mut Vec<bool>, word: &mut String, literal: &mut bool| {
         if !word.is_empty() {
             tokens.push(ShellToken::Word(std::mem::take(word)));
+            literals.push(*literal);
+            *literal = true;
         }
     };
-
-    for ch in command.chars() {
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
         if comment {
             if matches!(ch, '\n' | '\r') {
                 comment = false;
-                push_word(&mut tokens, &mut word);
+                push_word(&mut tokens, &mut literals, &mut word, &mut literal);
                 tokens.push(ShellToken::Operator(';'));
+                literals.push(true);
             }
             continue;
         }
@@ -2421,6 +2447,16 @@ fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
             word.push(ch);
             escaped = false;
             continue;
+        }
+        if quote != Some('\'') {
+            if ch == '$' && chars.peek().is_some_and(|next| matches!(next, '?' | '$' | '!')) {
+                word.push(ch);
+                word.push(chars.next().unwrap());
+                continue;
+            }
+            if matches!(ch, '$' | '`') || (quote.is_none() && matches!(ch, '*' | '?' | '[')) {
+                literal = false;
+            }
         }
         match quote {
             Some(active) if ch == active => quote = None,
@@ -2430,14 +2466,16 @@ fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
                 '\'' | '"' => quote = Some(ch),
                 '#' if word.is_empty() => comment = true,
                 '>' | '<' | '|' | '&' | ';' | '(' | ')' => {
-                    push_word(&mut tokens, &mut word);
+                    push_word(&mut tokens, &mut literals, &mut word, &mut literal);
                     tokens.push(ShellToken::Operator(ch));
+                    literals.push(true);
                 }
                 '\n' | '\r' => {
-                    push_word(&mut tokens, &mut word);
+                    push_word(&mut tokens, &mut literals, &mut word, &mut literal);
                     tokens.push(ShellToken::Operator(';'));
+                    literals.push(true);
                 }
-                ch if ch.is_whitespace() => push_word(&mut tokens, &mut word),
+                ch if ch.is_whitespace() => push_word(&mut tokens, &mut literals, &mut word, &mut literal),
                 _ => word.push(ch),
             },
         }
@@ -2445,26 +2483,52 @@ fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
     if escaped {
         word.push('\\');
     }
-    push_word(&mut tokens, &mut word);
-    tokens
+    push_word(&mut tokens, &mut literals, &mut word, &mut literal);
+    (tokens, literals)
 }
 
 /// Return shell statements with heredoc bodies and comments removed. Quoted
 /// arguments remain one word, so a formatter name in a script string cannot be
 /// mistaken for the executable command.
+///
+/// cas-b7a1: a `$(…)` that is an argument of a resolved command does not end
+/// that command. Its body is a statement of its own, and the words after its
+/// `)` stay in the enclosing statement (`echo $(cat f) sed -i x c` runs `echo`).
+/// A substitution that may become the command (first word, after an
+/// assignment or a wrapper such as `env` or `timeout`), a group or subshell,
+/// and an unmatched `)` (a `case` pattern) still end the statement as before.
 pub(super) fn shell_statement_words(command: &str) -> Vec<Vec<String>> {
     let shell_command = shell_command_without_heredoc_bodies(command);
     let tokens = factory_shell_tokens(&shell_command);
     let mut statements = Vec::new();
-    let mut words = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    // One entry per open `(`: the enclosing statement an argument
+    // substitution returns to, or `None` when `)` starts a new statement.
+    let mut open: Vec<Option<Vec<String>>> = Vec::new();
     for token in tokens {
         match token {
             ShellToken::Word(word) => words.push(word),
-            ShellToken::Operator(';')
-            | ShellToken::Operator('|')
-            | ShellToken::Operator('&')
-            | ShellToken::Operator('(')
-            | ShellToken::Operator(')') => {
+            ShellToken::Operator('(') => {
+                let argument_substitution = words.last().is_some_and(|word| word.ends_with('$'))
+                    && unwrapped_command_index(&words).is_some_and(|index| index + 1 < words.len());
+                if argument_substitution {
+                    open.push(Some(std::mem::take(&mut words)));
+                } else {
+                    if !words.is_empty() {
+                        statements.push(std::mem::take(&mut words));
+                    }
+                    open.push(None);
+                }
+            }
+            ShellToken::Operator(')') => {
+                if !words.is_empty() {
+                    statements.push(std::mem::take(&mut words));
+                }
+                if let Some(Some(enclosing)) = open.pop() {
+                    words = enclosing;
+                }
+            }
+            ShellToken::Operator(';') | ShellToken::Operator('|') | ShellToken::Operator('&') => {
                 if !words.is_empty() {
                     statements.push(std::mem::take(&mut words));
                 }
@@ -2474,6 +2538,12 @@ pub(super) fn shell_statement_words(command: &str) -> Vec<Vec<String>> {
     }
     if !words.is_empty() {
         statements.push(words);
+    }
+    // An unclosed argument substitution still reports its enclosing words.
+    for enclosing in open.into_iter().flatten().rev() {
+        if !enclosing.is_empty() {
+            statements.push(enclosing);
+        }
     }
     statements
 }
@@ -3227,6 +3297,48 @@ fn script_write_targets_from_command(command: &str) -> Vec<String> {
     targets
 }
 
+/// cas-a673: the command position a `)` returns to. A `$(…)` substitution
+/// closes back into the position its `$` word started in: inside an argument
+/// (`echo $(cat f) touch x`) the following words are still arguments, while
+/// at command position (`$(true) touch x`, which runs `touch` when the
+/// substitution expands to nothing) they may be the command. A bare group or
+/// subshell, and an unmatched `)` such as a `case` pattern, return to command
+/// position as before.
+#[derive(Default)]
+struct ParenPositions {
+    open: Vec<bool>,
+    /// Command position in effect when the previous word token began.
+    word_entry: Option<bool>,
+}
+
+impl ParenPositions {
+    fn word(&mut self, command_position: bool) {
+        self.word_entry = Some(command_position);
+    }
+
+    fn open(&mut self, tokens: &[ShellToken], index: usize) {
+        let substitution = index
+            .checked_sub(1)
+            .and_then(|previous| tokens.get(previous))
+            .is_some_and(|token| matches!(token, ShellToken::Word(word) if word.ends_with('$')));
+        let resume = match self.word_entry {
+            Some(entry) if substitution => entry,
+            _ => true,
+        };
+        self.open.push(resume);
+        self.word_entry = None;
+    }
+
+    fn close(&mut self) -> bool {
+        self.word_entry = None;
+        self.open.pop().unwrap_or(true)
+    }
+
+    fn operator(&mut self) {
+        self.word_entry = None;
+    }
+}
+
 /// Identify shell words that are actual output targets, without treating every
 /// path-shaped argument as a write. This deliberately handles only the small
 /// set of write forms guarded by the factory workspace contract; unrecognised
@@ -3261,18 +3373,29 @@ fn bash_write_targets(command: &str) -> Vec<String> {
     // command. This is intentionally a small recognizer, not a shell parser.
     let mut index = 0;
     let mut command_position = true;
+    let mut parens = ParenPositions::default();
     while index < tokens.len() {
         match &tokens[index] {
-            ShellToken::Operator(';')
-            | ShellToken::Operator('|')
-            | ShellToken::Operator('&')
-            | ShellToken::Operator('(')
-            | ShellToken::Operator(')') => {
+            ShellToken::Operator('(') => {
+                parens.open(&tokens, index);
                 command_position = true;
                 index += 1;
             }
-            ShellToken::Operator(_) => index += 1,
+            ShellToken::Operator(')') => {
+                command_position = parens.close();
+                index += 1;
+            }
+            ShellToken::Operator(';') | ShellToken::Operator('|') | ShellToken::Operator('&') => {
+                parens.operator();
+                command_position = true;
+                index += 1;
+            }
+            ShellToken::Operator(_) => {
+                parens.operator();
+                index += 1;
+            }
             ShellToken::Word(command) if command_position => {
+                parens.word(true);
                 // `do`/`then` introduce a new command position without an
                 // operator token. Recognising them lets the small parser see
                 // commands inside `for` loops and shell conditionals.
@@ -3331,9 +3454,13 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                         add_target(&operand);
                     }
                 }
+                // The operands were consumed here; a `$(` among them resumes
+                // at command position, as before (conservative).
+                parens.operator();
                 index = cursor;
             }
             ShellToken::Word(_) => {
+                parens.word(false);
                 command_position = false;
                 index += 1;
             }
@@ -3417,18 +3544,30 @@ fn bash_delete_targets(command: &str) -> Vec<(String, bool)> {
     let mut targets = Vec::new();
     let mut index = 0;
     let mut command_position = true;
+    // cas-a673: a `)` closing an argument substitution keeps argument position.
+    let mut parens = ParenPositions::default();
     while index < tokens.len() {
         match &tokens[index] {
-            ShellToken::Operator(';')
-            | ShellToken::Operator('|')
-            | ShellToken::Operator('&')
-            | ShellToken::Operator('(')
-            | ShellToken::Operator(')') => {
+            ShellToken::Operator('(') => {
+                parens.open(&tokens, index);
                 command_position = true;
                 index += 1;
             }
-            ShellToken::Operator(_) => index += 1,
+            ShellToken::Operator(')') => {
+                command_position = parens.close();
+                index += 1;
+            }
+            ShellToken::Operator(';') | ShellToken::Operator('|') | ShellToken::Operator('&') => {
+                parens.operator();
+                command_position = true;
+                index += 1;
+            }
+            ShellToken::Operator(_) => {
+                parens.operator();
+                index += 1;
+            }
             ShellToken::Word(word) if command_position => {
+                parens.word(true);
                 if matches!(word.as_str(), "do" | "then" | "else" | "elif")
                     || word.starts_with('-')
                     || word.contains('=')
@@ -3471,15 +3610,171 @@ fn bash_delete_targets(command: &str) -> Vec<(String, bool)> {
                         targets.push((expanded, recursive));
                     }
                 }
+                parens.operator();
                 index = cursor;
             }
             ShellToken::Word(_) => {
+                parens.word(false);
                 command_position = false;
                 index += 1;
             }
         }
     }
     targets
+}
+
+/// cas-7d68: one link a shell command creates, with its operands as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellLink {
+    /// Where the link is created.
+    link: String,
+    /// What it points at (symbolic) or the file it shares (hard).
+    destination: String,
+    symbolic: bool,
+    /// `ln -r`: a symbolic destination is read relative to the cwd, not to
+    /// the link's directory.
+    destination_from_cwd: bool,
+}
+
+/// cas-7d68: every link `ln`, `link` (and `cp -s`/`cp -l`) creates in a shell
+/// command, however wrapped (see [`shell_invocations`]). A link does not
+/// exist when the hook runs, so the caller judges its destination and the
+/// writes made through it, instead of resolving the link on disk.
+fn bash_link_creations(command: &str, cwd: &Path) -> Vec<ShellLink> {
+    let mut links = Vec::new();
+    for (name, args) in shell_invocations(command) {
+        if !matches!(name.as_str(), "ln" | "link" | "cp") {
+            continue;
+        }
+        let mut symbolic = false;
+        let mut hard = name != "cp";
+        let mut relative = false;
+        let mut no_target_directory = false;
+        let mut target_directory: Option<String> = None;
+        let mut operands = Vec::new();
+        let mut index = 0;
+        let mut options_done = false;
+        while index < args.len() {
+            let arg = &args[index];
+            index += 1;
+            if options_done || arg == "-" || !arg.starts_with('-') {
+                operands.push(arg.clone());
+                continue;
+            }
+            if arg == "--" {
+                options_done = true;
+                continue;
+            }
+            if let Some(long) = arg.strip_prefix("--") {
+                let (key, value) = match long.split_once('=') {
+                    Some((key, value)) => (key, Some(value.to_string())),
+                    None => (long, None),
+                };
+                match key {
+                    "symbolic" | "symbolic-link" => symbolic = true,
+                    "link" => hard = true,
+                    "relative" => relative = true,
+                    "no-target-directory" => no_target_directory = true,
+                    "target-directory" => {
+                        target_directory = value.or_else(|| {
+                            index += 1;
+                            args.get(index - 1).cloned()
+                        });
+                    }
+                    "suffix" if value.is_none() => index += 1,
+                    _ => {}
+                }
+                continue;
+            }
+            for (position, flag) in arg.char_indices().skip(1) {
+                match flag {
+                    's' => symbolic = true,
+                    'l' if name == "cp" => hard = true,
+                    'r' if name == "ln" => relative = true,
+                    'T' => no_target_directory = true,
+                    't' | 'S' => {
+                        let attached = &arg[position + 1..];
+                        let value = if attached.is_empty() {
+                            index += 1;
+                            args.get(index - 1).cloned()
+                        } else {
+                            Some(attached.to_string())
+                        };
+                        if flag == 't' {
+                            target_directory = value;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !symbolic && !hard {
+            continue;
+        }
+        let basename = |destination: &str| {
+            Path::new(destination)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(destination)
+                .to_string()
+        };
+        let into = |directory: &str, destination: &str| {
+            Path::new(directory).join(basename(destination)).display().to_string()
+        };
+        let pairs: Vec<(String, String)> = if let Some(directory) = target_directory {
+            operands.iter().map(|destination| (into(&directory, destination), destination.clone())).collect()
+        } else if operands.len() == 1 {
+            vec![(basename(&operands[0]), operands[0].clone())]
+        } else if let Some(last) = operands.pop() {
+            if operands.len() > 1 || (!no_target_directory && cwd.join(&last).is_dir()) {
+                operands.iter().map(|destination| (into(&last, destination), destination.clone())).collect()
+            } else {
+                operands.into_iter().map(|destination| (last.clone(), destination)).collect()
+            }
+        } else {
+            Vec::new()
+        };
+        links.extend(pairs.into_iter().map(|(link, destination)| ShellLink {
+            link,
+            destination,
+            symbolic,
+            destination_from_cwd: relative || !symbolic,
+        }));
+    }
+    links
+}
+
+/// cas-7d68: `path` (absolute, not yet normalized) as the filesystem will
+/// resolve it, given the links `aliases` that the same command creates first
+/// (link path, already-resolved destination). A `..` after a symlink leaves
+/// the symlink's real destination, not its lexical parent, so an existing
+/// symlink is resolved before `..` pops it. `None` when such a symlink cannot
+/// be resolved (dangling): the write is not attributable to any root.
+fn resolve_through_links(path: &Path, aliases: &[(std::path::PathBuf, std::path::PathBuf)]) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let mut current = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => current.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if std::fs::symlink_metadata(&current)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    current = current.canonicalize().ok()?;
+                }
+                current.pop();
+            }
+            Component::Normal(name) => {
+                current.push(name);
+                if let Some((_, destination)) = aliases.iter().rev().find(|(link, _)| *link == current) {
+                    current = destination.clone();
+                }
+            }
+        }
+    }
+    Some(current)
 }
 
 /// cas-cf4f / cas-aa4e: a Cassy runtime file under `~/.cas` (a socket, lock
@@ -3863,12 +4158,17 @@ fn factory_write_decision(
         } else {
             lexically_normalize_path(std::path::PathBuf::from(&input.cwd).join(expanded))
         };
+        // cas-7d68: any project's policy path, judged lexically as well as
+        // at its resolved location.
+        let lexical_policy = super::write_roots::is_cas_policy_path(&path);
         let resolved = canonicalize_for_containment(&path).unwrap_or(path);
-        policy
-            .protected
-            .iter()
-            .filter_map(|dir| canonicalize_for_containment(dir))
-            .any(|dir| resolved.starts_with(&dir) || (ancestors_too && dir.starts_with(&resolved)))
+        (lexical_policy
+            || super::write_roots::is_cas_policy_path(&resolved)
+            || policy
+                .protected
+                .iter()
+                .filter_map(|dir| canonicalize_for_containment(dir))
+                .any(|dir| resolved.starts_with(&dir) || (ancestors_too && dir.starts_with(&resolved))))
             .then(|| FactoryWriteViolation {
                 evaluated_path: raw_path.to_string(),
                 resolved_path: resolved,
@@ -3877,6 +4177,101 @@ fn factory_write_decision(
     };
     let Some(tool_input) = input.tool_input.as_ref() else {
         return FactoryWriteDecision::Allowed;
+    };
+    // cas-7d68: a link the command creates does not exist when this hook
+    // runs, so resolving paths on disk would judge a write through it at the
+    // link's own location. Resolve every link the command creates to its real
+    // destination first. A link may never point at, into or above a Cassy
+    // policy path; a hard link is a write to the file it shares; the link
+    // path is itself a write; and every other path the command writes is
+    // judged where it lands through those links.
+    let cwd = std::path::PathBuf::from(&input.cwd);
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let absolute = |raw: &str, base: &std::path::Path| -> Option<std::path::PathBuf> {
+        let expanded = if raw == "~" {
+            home.clone()?
+        } else if let Some(rest) = raw.strip_prefix("~/") {
+            home.as_ref()?.join(rest)
+        } else {
+            std::path::PathBuf::from(raw)
+        };
+        Some(if expanded.is_absolute() { expanded } else { base.join(expanded) })
+    };
+    let unresolved_word = |raw: &str| raw.contains('$') || raw.contains('`');
+    let link_violation = |evaluated: String, resolved: std::path::PathBuf, matched_rule: &'static str| {
+        FactoryWriteDecision::Denied(FactoryWriteViolation {
+            evaluated_path: evaluated,
+            resolved_path: resolved,
+            matched_rule,
+        })
+    };
+    let protected_dirs: Vec<std::path::PathBuf> = policy
+        .protected
+        .iter()
+        .filter_map(|dir| canonicalize_for_containment(dir))
+        .collect();
+    let shell_effects = if tool == "Bash" {
+        match shell_effects::collect(tool_input.get("command").and_then(|value| value.as_str()).unwrap_or(""), &cwd) {
+            Ok(effects) => effects,
+            Err(rule) => return link_violation(input.cwd.clone(), cwd.clone(), rule),
+        }
+    } else {
+        shell_effects::ShellEffects::default()
+    };
+    let mut aliases: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    let mut link_targets: Vec<(String, Option<WriteMode>)> = Vec::new();
+    if tool == "Bash" {
+        for (link, link_cwd) in &shell_effects.links {
+            let evaluated = format!("{} -> {}", link.link, link.destination);
+            if unresolved_word(&link.link) || unresolved_word(&link.destination) {
+                return link_violation(evaluated, std::path::PathBuf::from(&link.link), "link with an unresolved shell variable");
+            }
+            let Some(link_path) = absolute(&link.link, link_cwd).and_then(|path| resolve_through_links(&path, &aliases)) else {
+                return link_violation(evaluated, std::path::PathBuf::from(&link.link), "link through a symlink that cannot be resolved");
+            };
+            let base = if link.destination_from_cwd {
+                link_cwd.clone()
+            } else {
+                link_path.parent().map(std::path::Path::to_path_buf).unwrap_or_else(|| link_cwd.clone())
+            };
+            let Some(destination) = absolute(&link.destination, &base).and_then(|path| resolve_through_links(&path, &aliases)) else {
+                return link_violation(evaluated, link_path, "link through a symlink that cannot be resolved");
+            };
+            let destination = canonicalize_for_containment(&destination).unwrap_or(destination);
+            let reaches_policy = super::write_roots::is_cas_policy_path(&destination)
+                || destination.file_name().is_some_and(|name| name == ".cas")
+                || protected_dirs
+                    .iter()
+                    .any(|dir| dir.starts_with(&destination) || destination.starts_with(dir));
+            if reaches_policy {
+                return link_violation(evaluated, destination, "link to, into or above a Cassy policy path");
+            }
+            link_targets.push((link_path.display().to_string(), None));
+            if !link.symbolic {
+                link_targets.push((destination.display().to_string(), Some(WriteMode::Edit)));
+            }
+            aliases.push((link_path, destination));
+        }
+    }
+    // The path a raw target names once the command's links exist and any
+    // existing symlink before a `..` is followed. Unchanged when neither
+    // applies; a target with a shell variable is judged as before.
+    let physical = |raw: &str| -> Result<String, FactoryWriteViolation> {
+        if unresolved_word(raw) {
+            return Ok(raw.to_string());
+        }
+        let Some(path) = absolute(raw, &cwd) else {
+            return Ok(raw.to_string());
+        };
+        match resolve_through_links(&path, &aliases) {
+            Some(resolved) if resolved == lexically_normalize_path(path.clone()) => Ok(raw.to_string()),
+            Some(resolved) => Ok(resolved.display().to_string()),
+            None => Err(FactoryWriteViolation {
+                evaluated_path: raw.to_string(),
+                resolved_path: path,
+                matched_rule: "a path through a symlink that cannot be resolved",
+            }),
+        }
     };
     let mut uses = Vec::new();
     let admit = |resolved: std::path::PathBuf, mode: WriteMode, uses: &mut Vec<WriteRootUse>| {
@@ -3890,10 +4285,12 @@ fn factory_write_decision(
         })
     };
     // cas-cf4f: Bash deletions are judged as deletions, before creation.
-    if tool == "Bash"
-        && let Some(command) = tool_input.get("command").and_then(|value| value.as_str())
-    {
-        for (raw_path, _recursive) in bash_delete_targets(command) {
+    if tool == "Bash" {
+        for (raw_path, _recursive) in &shell_effects.deletes {
+            let raw_path = match physical(&raw_path) {
+                Ok(path) => path,
+                Err(violation) => return FactoryWriteDecision::Denied(violation),
+            };
             if let Some(violation) = protected_violation(&raw_path, true) {
                 return FactoryWriteDecision::Denied(violation);
             }
@@ -3920,12 +4317,15 @@ fn factory_write_decision(
     // policy files are refused for it too. (The default contract judges only
     // `file_path`/`path`, unchanged here.)
     if tool == "NotebookEdit"
-        && let Some(violation) = tool_input
-            .get("notebook_path")
-            .and_then(|value| value.as_str())
-            .and_then(|path| protected_violation(path, false))
+        && let Some(path) = tool_input.get("notebook_path").and_then(|value| value.as_str())
     {
-        return FactoryWriteDecision::Denied(violation);
+        let path = match physical(path) {
+            Ok(path) => path,
+            Err(violation) => return FactoryWriteDecision::Denied(violation),
+        };
+        if let Some(violation) = protected_violation(&path, false) {
+            return FactoryWriteDecision::Denied(violation);
+        }
     }
     let targets: Vec<(String, Option<WriteMode>)> = match tool {
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => tool_input
@@ -3935,15 +4335,18 @@ fn factory_write_decision(
             .map(|path| vec![(path.to_string(), None)])
             .unwrap_or_default(),
         "Bash" => {
-            let Some(command) = tool_input.get("command").and_then(|value| value.as_str()) else {
-                return FactoryWriteDecision::Allowed;
-            };
             // cas-3147 (GH #1169 item 4): once the operator has configured
             // roots, in-place edits and rename sources are judged like any
             // other write. Without them the default contract stays as it
             // was, except that the protected policy files are never edited
             // in place or renamed (GH #1182).
-            let mut in_place = bash_in_place_edit_targets(command);
+            let mut in_place = Vec::new();
+            for raw_path in &shell_effects.edits {
+                match physical(raw_path) {
+                    Ok(path) => in_place.push(path),
+                    Err(violation) => return FactoryWriteDecision::Denied(violation),
+                }
+            }
             for raw_path in &in_place {
                 if let Some(violation) = protected_violation(raw_path, false) {
                     return FactoryWriteDecision::Denied(violation);
@@ -3952,7 +4355,7 @@ fn factory_write_decision(
             if !policy.configured {
                 in_place.clear();
             }
-            bash_write_targets(command)
+            shell_effects.writes
                 .into_iter()
                 .map(|path| (path, None))
                 .chain(in_place.into_iter().map(|path| (path, Some(WriteMode::Edit))))
@@ -3971,7 +4374,16 @@ fn factory_write_decision(
         }
         _ => return FactoryWriteDecision::Allowed,
     };
+    let mut resolved_targets = Vec::with_capacity(targets.len() + link_targets.len());
     for (raw_path, mode) in targets {
+        match physical(&raw_path) {
+            Ok(path) => resolved_targets.push((path, mode)),
+            Err(violation) => return FactoryWriteDecision::Denied(violation),
+        }
+    }
+    // Link paths are already resolved; never alias a link to itself.
+    resolved_targets.extend(link_targets);
+    for (raw_path, mode) in resolved_targets {
         if let Some(violation) = protected_violation(&raw_path, false) {
             return FactoryWriteDecision::Denied(violation);
         }
@@ -4049,6 +4461,12 @@ fn cas_config_file_write_denial(input: &HookInput) -> Option<String> {
                 .into_iter()
                 .chain(bash_in_place_edit_targets(command))
                 .chain(bash_delete_targets(command).into_iter().map(|(path, _)| path))
+                // cas-7d68: `ln -sf forged.toml .cas/config.toml` replaces it.
+                .chain(
+                    bash_link_creations(command, Path::new(&input.cwd))
+                        .into_iter()
+                        .map(|link| link.link),
+                )
                 .collect()
         }
         "apply_patch" => tool_input
@@ -5540,6 +5958,20 @@ fn factory_workspace_contract_denial(
     let worktree = worktree_root
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    if matches!(violation.matched_rule,
+        "a write with an unresolved effective working directory"
+        | "a link with an unresolved effective working directory"
+        | "an unresolved shell payload"
+        | "an unresolved shell executable"
+        | "an unresolved shell write target"
+        | "a shell command without a resolvable payload"
+        | "a shell payload beyond the resolution limit"
+        | "an unmatched shell scope") {
+        return format!(
+            "🚫 FACTORY WORKSPACE CONTRACT: cannot resolve shell filesystem effects ({}). Use literal directory operands and a literal, bounded shell payload so every write can be checked against its effective directory. Assigned worktree: `{}`.",
+            violation.matched_rule, worktree.display(),
+        );
+    }
     if violation.matched_rule == "unresolved shell variable" {
         let suffix = violation.evaluated_path.split_once('$').map(|(_, rest)| rest).unwrap_or("");
         let variable = if suffix.starts_with('$') {
@@ -5552,6 +5984,17 @@ fn factory_workspace_contract_denial(
         return format!(
             "🚫 FACTORY WORKSPACE CONTRACT: cannot establish the write root because of unexpanded shell variable `{variable}` in `{}`. Use a literal sanctioned root before the variable suffix, or bind the variable with a simple earlier assignment. Assigned worktree: `{}`.",
             violation.evaluated_path, worktree.display(),
+        );
+    }
+    if violation.matched_rule.starts_with("link") || violation.matched_rule.starts_with("a path through") {
+        return format!(
+            "🚫 FACTORY WORKSPACE CONTRACT: {} (`{}` resolves to `{}`). A write is judged where it lands: a link may not point at, into or above a Cassy policy path (`.cas/config.toml`, `.cas/config.yaml`, `.cas/operator/`), a hard link is a write to the file it shares, and a write through a link the same command creates must land in your worktree, under `{}/<task-id>/`{} or in an operator write root. Use literal link operands. Assigned worktree: `{}`.",
+            violation.matched_rule,
+            violation.evaluated_path,
+            violation.resolved_path.display(),
+            artifacts,
+            scratch,
+            worktree.display(),
         );
     }
     if violation.matched_rule.starts_with("deletion") {
@@ -5837,7 +6280,7 @@ mod workspace_contract_tests {
 
         // The PreToolUse hook applies it to an agent's Bash call.
         let input = bash_input("cas mcp remove vercel", root.path());
-        let output = handle_pre_tool_use_inner(&input, Some(root.path())).expect("hook");
+        let output = handle_pre_tool_use_inner(&input, Some(root.path()), None).expect("hook");
         let rendered = serde_json::to_string(&output).expect("serialize");
         assert!(
             rendered.contains("deny") && rendered.contains("supervisor-only"),
@@ -5901,6 +6344,160 @@ mod workspace_contract_tests {
             ("cas config set", bash_input("cas config set issues.repo a/b", &main)),
         ] {
             assert_eq!(cas_config_file_write_denial(&input), None, "{case}");
+        }
+    }
+
+    /// cas-a673: through the real PreToolUse, words after an argument
+    /// substitution's `)` are still that command's arguments, so filename data
+    /// is not a config write. A real write stays refused, whether it follows an
+    /// operator, sits inside the substitution, or follows a substitution in
+    /// command position (`$(true) touch x` runs `touch`).
+    #[cfg(unix)]
+    #[test]
+    fn cas_a673_argument_substitution_data_is_not_a_config_write() {
+        let mut env = TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let project = home.join("projects/a673");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let worktree = cas_root.join("worktrees/lively-puma-3");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::write(worktree.join("src/new.rs"), "pub fn new() {}\n").unwrap();
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD", "CAS_ROOT"] {
+            env.remove(key);
+        }
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "cas-a673");
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_AGENT_NAME", "lively-puma-3");
+        env.set("CAS_CLONE_PATH", &worktree);
+        let decide = |command: &str| -> (String, String) {
+            let input = HookInput {
+                hook_event_name: "PreToolUse".to_string(),
+                agent_role: Some("worker".to_string()),
+                ..bash_input(command, &worktree)
+            };
+            let output = handle_pre_tool_use(&input, Some(&cas_root)).expect("handler ok");
+            let value = serde_json::to_value(output).unwrap();
+            (
+                value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("").to_string(),
+                value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").to_string(),
+            )
+        };
+        for command in [
+            "echo $(cat src/new.rs) touch ../../config.toml",
+            "echo $(cat src/new.rs) rm ../../config.toml",
+            "printf '%s\\n' $(cat src/new.rs) mv src/new.rs ../../config.toml",
+            "echo $(cat $(ls src)) tee ../../config.toml",
+        ] {
+            let (decision, reason) = decide(command);
+            assert!(
+                decision != "deny" && !reason.contains("CASSY CONFIG"),
+                "read-only `{command}` must be allowed: {decision} {reason}"
+            );
+        }
+        for command in [
+            "touch ../../config.toml",
+            "echo $(touch ../../config.toml)",
+            "echo $(cat src/new.rs) $(rm ../../config.toml)",
+            "$(true) touch ../../config.toml",
+            "echo $(cat src/new.rs); touch ../../config.toml",
+            "echo $(cat src/new.rs) && mv src/new.rs ../../config.toml",
+            "(cd src) ; rm ../../config.toml",
+            "case x in x) touch ../../config.toml ;; esac",
+        ] {
+            let (decision, reason) = decide(command);
+            assert_eq!(decision, "deny", "`{command}` writes the config and stays refused: {reason}");
+            assert!(reason.contains("CASSY CONFIG"), "`{command}`: {reason}");
+        }
+    }
+
+    /// cas-b7a1: the shared statement splitter keeps an argument
+    /// substitution's trailing words in the command that owns them, so data
+    /// after `echo $(…)` is never an in-place edit. A substitution in command
+    /// position, or after a wrapper whose command it may become, still ends
+    /// the statement as before.
+    #[test]
+    fn cas_b7a1_statement_words_continue_after_an_argument_substitution() {
+        let words = |command: &str| shell_statement_words(command);
+        assert_eq!(
+            words("echo $(cat f) sed -i x config.toml"),
+            vec![vec!["cat", "f"], vec!["echo", "$", "sed", "-i", "x", "config.toml"]]
+        );
+        assert_eq!(
+            words("echo $(cat $(ls src)) sed -i x c"),
+            vec![vec!["ls", "src"], vec!["cat", "$"], vec!["echo", "$", "sed", "-i", "x", "c"]]
+        );
+        for (command, edit) in [
+            ("$(true) sed -i x c", vec!["sed", "-i", "x", "c"]),
+            ("X=$(cat f) sed -i x c", vec!["sed", "-i", "x", "c"]),
+            ("env $(cat f) sed -i x c", vec!["sed", "-i", "x", "c"]),
+            ("timeout $(cat t) sed -i x c", vec!["sed", "-i", "x", "c"]),
+            ("(cd src) ; sed -i x c", vec!["sed", "-i", "x", "c"]),
+            ("case a in a) sed -i x c ;; esac", vec!["sed", "-i", "x", "c"]),
+        ] {
+            assert!(
+                words(command).contains(&edit.iter().map(|word| word.to_string()).collect()),
+                "`{command}` keeps `sed` as its own statement: {:?}",
+                words(command)
+            );
+        }
+    }
+
+    /// cas-b7a1: through the real PreToolUse, data after an argument
+    /// substitution is not an in-place config edit; real in-place edits stay
+    /// refused, including inside `$()` and after a command-position
+    /// substitution.
+    #[cfg(unix)]
+    #[test]
+    fn cas_b7a1_argument_substitution_data_is_not_an_in_place_config_edit() {
+        let mut env = TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let project = home.join("projects/b7a1");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let worktree = cas_root.join("worktrees/lively-puma-3");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::write(worktree.join("src/new.rs"), "pub fn new() {}\n").unwrap();
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD", "CAS_ROOT"] {
+            env.remove(key);
+        }
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "cas-b7a1");
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_AGENT_NAME", "lively-puma-3");
+        env.set("CAS_CLONE_PATH", &worktree);
+        let decide = |command: &str| -> (String, String) {
+            let input = HookInput {
+                hook_event_name: "PreToolUse".to_string(),
+                agent_role: Some("worker".to_string()),
+                ..bash_input(command, &worktree)
+            };
+            let output = handle_pre_tool_use(&input, Some(&cas_root)).expect("handler ok");
+            let value = serde_json::to_value(output).unwrap();
+            (
+                value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("").to_string(),
+                value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").to_string(),
+            )
+        };
+        for command in [
+            "echo $(cat src/new.rs) sed -i x ../../config.toml",
+            "printf '%s\\n' $(cat src/new.rs) perl -pi -e x ../../config.toml",
+        ] {
+            let (decision, reason) = decide(command);
+            assert!(
+                decision != "deny",
+                "read-only `{command}` must be allowed: {decision} {reason}"
+            );
+        }
+        for command in [
+            "sed -i x ../../config.toml",
+            "echo $(sed -i x ../../config.toml)",
+            "$(true) sed -i x ../../config.toml",
+            "X=$(cat src/new.rs) sed -i x ../../config.toml",
+            "env $(cat src/new.rs) sed -i x ../../config.toml",
+            "echo $(cat src/new.rs); sed -i x ../../config.toml",
+        ] {
+            let (decision, reason) = decide(command);
+            assert_eq!(decision, "deny", "`{command}` edits the config and stays refused: {reason}");
         }
     }
 
@@ -7179,6 +7776,238 @@ mod workspace_contract_tests {
             let (decision, reason) = decide(&cas_a, &project_a, role, config_write);
             assert_eq!(decision, "deny", "{role}: config.toml is never writable: {reason}");
         }
+    }
+
+    /// cas-7d68 (GH #1182 QA): a link the command itself creates does not
+    /// exist when the hook runs, so a single-command link-then-write
+    /// (`ln -s ../../.. up && echo x >> up/.cas/operator/write-policy.toml`)
+    /// used to resolve inside the worktree and pass. Through the real
+    /// PreToolUse handler, for worker and supervisor: every write is judged at
+    /// the destination the command's own links give it, a link may never
+    /// point at, into or above a Cassy policy path, a hard link is a write to
+    /// its target, and the link path itself is a write. Links and writes that
+    /// stay inside the permitted roots are unaffected.
+    #[cfg(unix)]
+    #[test]
+    fn cas_7d68_single_command_link_then_write_cannot_reach_policy_or_escape_roots() {
+        let mut env = TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let outside = home.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let project = home.join("projects/a");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        std::fs::create_dir_all(cas_root.join("operator")).unwrap();
+        let worktree = cas_root.join("worktrees/brisk-otter-7");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD", "CAS_ROOT"] {
+            env.remove(key);
+        }
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "cas-7d68");
+
+        let mut decide = |role: &str, command: &str| -> (String, String) {
+            env.set("CAS_AGENT_ROLE", role);
+            env.set("CAS_AGENT_NAME", format!("{role}-cas-7d68"));
+            let cwd = if role == "worker" {
+                env.set("CAS_CLONE_PATH", &worktree);
+                worktree.clone()
+            } else {
+                env.remove("CAS_CLONE_PATH");
+                project.clone()
+            };
+            let input = HookInput {
+                hook_event_name: "PreToolUse".to_string(),
+                agent_role: Some(role.to_string()),
+                ..bash_input(command, &cwd)
+            };
+            let output = handle_pre_tool_use(&input, Some(&cas_root)).expect("handler ok");
+            let value = serde_json::to_value(output).unwrap();
+            (
+                value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("").to_string(),
+                value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").to_string(),
+            )
+        };
+        let outside_dir = outside.display().to_string();
+        // Worker cwd: <project>/.cas/worktrees/brisk-otter-7.
+        let worker_denied = [
+            "ln -s ../../.. up && echo x >> up/.cas/operator/write-policy.toml".to_string(),
+            "ln -s ../../.. up && echo x >> up/.cas/config.toml".to_string(),
+            "ln -s ../../config.toml cfg && echo x >> cfg".to_string(),
+            "ln -s ../../operator op; printf x > op/write-policy.toml".to_string(),
+            "ln -sfn ../.. c && cp /tmp/forged.toml c/config.toml".to_string(),
+            "ln -s ../../.. up && rm -rf up/.cas/operator".to_string(),
+            "ln ../../config.toml cfg".to_string(),
+            "mkdir -p d && ln -s ../../../.. d/up && echo x | tee -a d/up/.cas/operator/write-policy.toml".to_string(),
+            "sh -c 'ln -s ../../config.toml cfg && echo x >> cfg'".to_string(),
+            format!("ln -s {outside_dir} o && echo x > o/escaped.txt"),
+            format!("ln -s {outside_dir}/target.txt t && echo x > t"),
+            "ln -s \"$TARGET\" t && echo x > t".to_string(),
+        ];
+        for command in &worker_denied {
+            let (decision, reason) = decide("worker", command);
+            assert_eq!(decision, "deny", "worker must be refused `{command}`: {reason}");
+        }
+        // Supervisor cwd: the project's main checkout, which it may write.
+        let supervisor_denied = [
+            "ln -s .cas/operator op && echo x > op/write-policy.toml",
+            "ln -s .cas c && echo x >> c/config.toml",
+            "ln .cas/config.toml cfg && echo x >> cfg",
+            "ln -sf /tmp/forged.toml .cas/config.toml",
+            "ln -s ../.. up && echo x >> up/projects/a/.cas/operator/write-policy.toml",
+            "cd src && ln -s ../.cas/operator op",
+        ];
+        for command in supervisor_denied {
+            let (decision, reason) = decide("supervisor", command);
+            assert_eq!(decision, "deny", "supervisor must be refused `{command}`: {reason}");
+        }
+        // A symlink left by an earlier command: `..` after it leaves its real
+        // destination, not its lexical parent. `a/b/l -> <worktree>` makes
+        // `a/b/l/../../config.toml` the project's `.cas/config.toml`.
+        std::fs::create_dir_all(worktree.join("a/b")).unwrap();
+        std::os::unix::fs::symlink(&worktree, worktree.join("a/b/l")).unwrap();
+        for command in [
+            "echo x >> a/b/l/../../config.toml",
+            "echo x > a/b/l/../../operator/write-policy.toml",
+            "link ../../config.toml cfg",
+        ] {
+            let (decision, reason) = decide("worker", command);
+            assert_eq!(decision, "deny", "worker must be refused `{command}`: {reason}");
+        }
+        for (role, command) in [
+            ("worker", "ln -s src s && echo x > s/new.rs"),
+            ("worker", "ln -sf ../src/lib.rs src/alias.rs"),
+            ("worker", "ln src/existing.rs src/hard.rs"),
+            ("supervisor", "ln -s src s && echo x > s/new.rs"),
+            ("supervisor", "cat .cas/config.toml"),
+            ("worker", "ln -s src/existing.rs s.rs && cat s.rs"),
+        ] {
+            std::fs::write(worktree.join("src/existing.rs"), "x").unwrap();
+            let (decision, reason) = decide(role, command);
+            assert_ne!(decision, "deny", "{role} `{command}` stays allowed: {reason}");
+        }
+    }
+
+    /// The three ordinary-worker allow-to-deny flips in the 200-call replay,
+    /// with only the artifact namespace/cwd mapped into a hermetic project.
+    #[test]
+    fn cas_e460_literal_shell_bodies_keep_status_pid_and_read_only_monitor_commands() {
+        let mut env = TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        let worktree = root.join("worktrees/worker-e460");
+        let artifacts = crate::config::resolved_factory_artifact_paths(&root, None).project_root;
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(artifacts.join("cas-426f")).unwrap();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "worker-e460");
+        env.set("CAS_CLONE_PATH", &worktree);
+        env.remove("CDPATH");
+        let artifacts = artifacts.display();
+        let commands = [
+            format!(r#"mkdir -p {artifacts}/cas-426f; nohup bash -c 'scripts/release.sh; rc=$?; printf "\nRELEASE_EXIT=%s\n" "$rc"; exit "$rc"' > {artifacts}/cas-426f/release.log 2>&1 < /dev/null & echo $! > {artifacts}/cas-426f/release.pid"#),
+            format!(r#"bash -c 'printf "%s\n" "$$" > {artifacts}/cas-426f/release.pid; scripts/release.sh > {artifacts}/cas-426f/release.log 2>&1; rc=$?; printf "\nRELEASE_EXIT=%s\n" "$rc" >> {artifacts}/cas-426f/release.log; exit "$rc"'"#),
+            r#"timeout 590 bash -c 'while [ $(grep -c "Summary \[" target/w58r2.log) -lt 2 ]; do sleep 10; done'; grep -E "FAIL|Summary|SIGABRT|TIMEOUT" target/w58r2.log; grep -c PASS target/w58r2.log"#.to_string(),
+            r#"sh -c 'printf "%s\n" "$?"'"#.to_string(),
+        ];
+        let mut mismatches = Vec::new();
+        for command in commands {
+            let input = HookInput { hook_event_name: "PreToolUse".into(),
+                agent_role: Some("worker".into()), ..bash_input(&command, &worktree) };
+            let output = handle_pre_tool_use(&input, Some(&root)).unwrap();
+            let value = serde_json::to_value(output).unwrap();
+            if value["hookSpecificOutput"]["permissionDecision"] != "allow" {
+                mismatches.push(format!("{command}: {value}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn cas_e460_real_pre_tool_resolves_effective_cwd_and_nested_shell_writes() {
+        let mut env = TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let worktree = cas_root.join("worktrees/worker-e460");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::create_dir_all(cas_root.join("operator")).unwrap();
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD", "CAS_ROOT", "CDPATH"] {
+            env.remove(key);
+        }
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "cas-e460");
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_AGENT_NAME", "worker-e460");
+        env.set("CAS_CLONE_PATH", &worktree);
+        let mut mismatches = Vec::new();
+        for (command, denied) in [
+            ("cd ../../operator && printf x > write-policy.toml", true),
+            ("cd ../.. && printf x > config.toml", true),
+            ("sh -c 'printf x > ../../operator/write-policy.toml'", true),
+            ("bash -c 'cd ../.. && printf x > config.toml'", true),
+            ("(cd ../.. && printf x > config.toml)", true),
+            ("cd \"$UNKNOWN_CWD\" && printf x > file.txt", true),
+            ("cd \"$LATER_CWD\"; LATER_CWD=src; printf x > file.txt", true),
+            ("D=../..; cd \"$D\"; D=src; printf x > config.toml", true),
+            ("{ cd ../..; }; printf x > config.toml", true),
+            ("D=../..; false && D=src; cd \"$D\" && printf x > config.toml", true),
+            ("false && D=src; cd \"$D\" && printf x > file.txt", true),
+            ("CDPATH=../..; cd operator && printf x > write-policy.toml", true),
+            ("CDPATH=../.. cd operator && printf x > write-policy.toml", true),
+            ("sh -c 'cd && printf x > new.rs'; HOME=src", true),
+            ("CDPATH=../..; cd ./src && printf x > new.rs", false),
+            ("sh -c \"$UNKNOWN_SCRIPT\"", true),
+            ("sh -c '$UNKNOWN_SCRIPT'", true),
+            ("sh -c '$(printf touch) src/new.rs'", true),
+            ("sh -c 'cd $(printf src) && printf x > new.rs'", true),
+            ("sh -c 'printf x > \"$(printf src/new.rs)\"'", true),
+            ("sh -c \"printf x $UNKNOWN_SCRIPT\"", true),
+            ("sh -c 'printf \"%s\" \"$(cat src/new.rs)\"'", false),
+            ("sh -c 'printf \"%s\" \"$(touch ../../config.toml)\"'", true),
+            ("sh -c \"printf '%s' $?\"", false),
+            ("B=$PWD/target/debug/cas; $B --version", false),
+            ("R='env -i PATH=/usr/bin /bin/true'; $R", false),
+            ("kill $(cat target/a.pid) $(cat target/b.pid)", false),
+            ("echo $(cat src/new.rs) touch ../../ordinary-data.txt", false),
+            ("echo $(touch ../../config.toml) data", true),
+            ("C=touch; $C ../../config.toml", true),
+            ("C=touch; sh -c '$C ../../config.toml'", true),
+            ("CMD=$UNKNOWN; $CMD", true),
+            ("sh -c '$UNKNOWN/tool src/new.rs'", true),
+            ("cd src && printf x > new.rs", false),
+            ("D=src; cd \"$D\" && printf x > new.rs", false),
+            ("cd ../.. && cd worktrees/worker-e460 && printf x > local.rs", false),
+            ("cd ../.. && cd worktrees/worker-e460; printf x > config.toml", true),
+            ("cd src && printf x > ../../../operator/write-policy.toml", true),
+            ("cd src; cd ../../..; printf x > config.toml", true),
+            ("cd ../.. || printf x > config.toml", true),
+            ("if true; then cd ../..; fi; printf x > config.toml", true),
+            ("(cd ../..); printf x > config.toml", false),
+            ("sh -c 'cd ../..'; printf x > config.toml", false),
+            ("cd src && sh -c 'printf x > ../../../config.toml'", true),
+            ("sh -c 'bash -c \"printf x > ../../config.toml\"'", true),
+            ("sh -c 'rm ../../config.toml'", true),
+            ("cd ../.. && sed -i 's/a/b/' config.toml", true),
+            ("cd src && ln -s ../../../operator op", true),
+            ("cd src && ln -s . local && printf x > local/new.rs", false),
+            ("cd src && python3 - <<'PY'\nopen('../../../config.toml','w').write('x')\nPY", true),
+            ("cd src && python3 - <<'PY'\nopen('new.rs','w').write('x')\nPY", false),
+            ("cd \"$UNKNOWN_CWD\" && cat file.txt", false),
+            ("sh -c 'printf x > src/new.rs'", false),
+            ("(cd src && printf x > new.rs); printf x > local.rs", false),
+            ("cd ../.. && cat config.toml", false),
+        ] {
+            let input = HookInput { hook_event_name: "PreToolUse".to_string(),
+                agent_role: Some("worker".to_string()), ..bash_input(command, &worktree) };
+            let output = handle_pre_tool_use(&input, Some(&cas_root)).unwrap();
+            let value = serde_json::to_value(output).unwrap();
+            let decision = value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("");
+            if (decision == "deny") != denied {
+                mismatches.push(format!("{command}: expected denied={denied}, got {value}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     /// cas-cf4f: `rm` is deletion, not creation. A worker may delete inside

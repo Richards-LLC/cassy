@@ -8,7 +8,7 @@ import { DEFAULT_EXPLORER_ORIGIN, explorerUrl } from '../src/app-switcher';
 import { applyActionAvailability, applyKeyboardViewport, conversationListState, conversationShellMarkup, conversationSkeletonMarkup, dressComposer, ensureConversationStage, fitConversationHost, keyboardViewportHeight, rawOutputDrawerMarkup } from '../src/conversation-shell';
 import { CONVERSATION_OPENING, fatalConnectionRecovery, lostConnectionBanner, pairingControlsReason, renderConnectionSurfaceInto } from '../src/connection-state-view';
 import { TranscriptView, type TranscriptSource } from '../src/transcript-view';
-import type { GhosttyCell, GhosttyColor, GhosttyRow } from '../src/terminal/ghostty/core';
+import type { TranscriptCell, TranscriptColor, TranscriptRow } from '../src/transcript';
 import { applyDraftNote, applyMicState, composerMarkup, type MicState } from '../src/composer-markup';
 import { syncContextRail } from '../src/context-rail';
 import { installAttentionObjects, renderAskObject, renderBlockerObject } from '../src/attention-objects';
@@ -425,8 +425,8 @@ const FATAL_BROWSER_REASON = 'This browser is missing AbortSignal.timeout, which
  */
 function renderConnectionStage(paneSlot: HTMLElement, view: ConversationView, state: 'connection-failed-retry' | 'connection-fatal-browser'): void {
   const grid = document.createElement('section');
-  grid.id = 'pane-grid';
-  grid.className = 'pane-grid';
+  grid.id = 'conversation-stage';
+  grid.className = 'conversation-stage';
   grid.dataset.sessionKey = 'atlas-linux:one';
   paneSlot.append(grid);
   if (state === 'connection-failed-retry') {
@@ -437,7 +437,7 @@ function renderConnectionStage(paneSlot: HTMLElement, view: ConversationView, st
     renderConnectionSurfaceInto(placeholder, 'one', snapshot, { retry: () => {}, diagnose: () => {} }, Date.now(), { openingTitle: CONVERSATION_OPENING, quietOpening: true });
     return;
   }
-  ensureConversationStage(grid).slot.append(view.element);
+  ensureConversationStage(grid).append(view.element);
   const banner = document.createElement('div');
   banner.className = 'terminal-disconnected-banner';
   banner.setAttribute('role', 'status');
@@ -450,10 +450,10 @@ function renderConnectionStage(paneSlot: HTMLElement, view: ConversationView, st
   grid.classList.add('terminal-disconnected');
 }
 
-function transcriptRow(text: string, wrapsToNext = false, isWrapContinuation = false): GhosttyRow {
-  const foreground: GhosttyColor = { r: 232, g: 235, b: 242 };
-  const background: GhosttyColor = { r: 12, g: 14, b: 19 };
-  const cell = (character: string): GhosttyCell => ({ text: character, wide: 0, foreground, background, bold: false, italic: false, invisible: false, strikethrough: false, overline: false, underline: false, selected: false });
+function transcriptRow(text: string, wrapsToNext = false, isWrapContinuation = false): TranscriptRow {
+  const foreground: TranscriptColor = { r: 232, g: 235, b: 242 };
+  const background: TranscriptColor = { r: 12, g: 14, b: 19 };
+  const cell = (character: string): TranscriptCell => ({ text: character, wide: 0, foreground, background, bold: false, italic: false, invisible: false, strikethrough: false, underline: false });
   return { cells: [...text].map(cell), text, wrapsToNext, isWrapContinuation };
 }
 

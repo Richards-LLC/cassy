@@ -1,12 +1,16 @@
 //! cas-f9c7: `coordination action=message` to a peer supervisor of this repo
 //! on another machine, through the Cassy Cloud peer mailbox.
 //!
+//! cas-2a5a: `target=supervisor:<project>` (or a name no same-repo peer
+//! has) reaches any supervisor of the caller's own Cassy Cloud user in
+//! another project, never another user's. Same rules: advisory only.
+//!
 //! Only a registered supervisor may send. A peer message is never urgent and
 //! never operator-authored, and it is only ever delivered to a supervisor, so
 //! it cannot interrupt a pane or spawn or direct workers (cas-604d).
 
 use crate::cloud::peer_mailbox::{self, PeerMailbox};
-use crate::cloud::peers::{PeerDiscovery, discover_peers};
+use crate::cloud::peers::{PeerDiscovery, UserPeerDiscovery, discover_peers, discover_user_peers};
 use crate::mcp::tools::service::imports::*;
 
 /// The local-only targets that never route to a peer.
@@ -28,6 +32,7 @@ impl CasService {
         urgent: bool,
         kind: Option<&str>,
         blocker: bool,
+        attachment: Option<&str>,
     ) -> Result<Option<CallToolResult>, McpError> {
         if LOCAL_TARGETS
             .iter()
@@ -39,6 +44,9 @@ impl CasService {
             return Ok(None);
         }
         let cas_root = self.inner.cas_root.clone();
+        let explicit_account_peer = target
+            .get(..11)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("supervisor:"));
         let refuse_urgent = || {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -85,9 +93,42 @@ impl CasService {
             if urgent {
                 return Err(refuse_urgent());
             }
+            // cas-d58d: under `own`, a reply to another account's supervisor
+            // of this repo is refused like a new message.
+            if envelope.scope == peer_mailbox::PeerScope::Project
+                && crate::cloud::peers::same_repo_scope(&cas_root)
+                    == crate::config::SameRepoScope::Own
+            {
+                let (root, self_id) = (cas_root.clone(), sender.id.clone());
+                let discovery =
+                    tokio::task::spawn_blocking(move || discover_peers(&root, Some(&self_id)))
+                        .await
+                        .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                let own = match discovery {
+                    Ok(PeerDiscovery::Found { peers, .. }) => {
+                        peers.iter().any(|peer| peer.agent_id == envelope.sender_agent_id)
+                    }
+                    _ => false,
+                };
+                if !own {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_REQUEST,
+                        format!(
+                            "{}@{} is not a supervisor of your own Cassy Cloud account (or its \
+                             account could not be confirmed); this project's \
+                             peers.same_repo_scope is own, so only your own supervisors are \
+                             messaged. Nothing was sent.",
+                            envelope.sender_name, envelope.machine
+                        ),
+                    ));
+                }
+            }
             let (sender_id, sender_name) = (sender.id.clone(), sender.name.clone());
+            let message = self.peer_body(message, attachment).await?;
+            // cas-2a5a: a reply across projects is advisory too.
+            let blocker = blocker && envelope.scope == peer_mailbox::PeerScope::Project;
             let (body, summary) = (
-                peer_mailbox::attach_message_intent(message, kind, blocker),
+                peer_mailbox::attach_message_intent(&message, kind, blocker),
                 summary.to_string(),
             );
             let reply = tokio::task::spawn_blocking(move || {
@@ -116,6 +157,16 @@ impl CasService {
             }));
         }
 
+        if explicit_account_peer {
+            if urgent {
+                return Err(refuse_urgent());
+            }
+            let message = self.peer_body(message, attachment).await?;
+            return self
+                .user_peer_message_send(sender, target, summary, &message, kind, true)
+                .await;
+        }
+
         // A target naming a local agent stays local.
         let qualified = target.contains('@');
         if !qualified {
@@ -139,8 +190,8 @@ impl CasService {
         let discovery = tokio::task::spawn_blocking(move || discover_peers(&root, Some(&self_id)))
             .await
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-        let peers = match discovery {
-            Ok(PeerDiscovery::Found { peers, .. }) => peers,
+        let (peers, hidden) = match discovery {
+            Ok(PeerDiscovery::Found { peers, hidden, .. }) => (peers, hidden),
             Ok(PeerDiscovery::NotLoggedIn) => {
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
@@ -167,11 +218,28 @@ impl CasService {
                 ));
             }
         };
-        let peer = peer_mailbox::resolve_peer_target(&peers, &wanted)
+        // cas-d58d: under `peers.same_repo_scope = own`, a name that is
+        // another account's supervisor of this repo is refused, never
+        // delivered and never tried as a cross-project or local target.
+        let peer = match crate::cloud::peers::resolve_same_repo_target(&peers, &hidden, &wanted)
             .map_err(|ambiguous| Self::error(ErrorCode::INVALID_PARAMS, ambiguous))?
-            .cloned();
+        {
+            crate::cloud::peers::SameRepoTarget::Peer(peer) => Some(peer.clone()),
+            crate::cloud::peers::SameRepoTarget::Refused(reason) => {
+                return Err(Self::error(ErrorCode::INVALID_REQUEST, reason));
+            }
+            crate::cloud::peers::SameRepoTarget::NotFound => None,
+        };
         let Some(peer) = peer else {
-            return Ok(None);
+            // cas-2a5a: not a supervisor of this repo; perhaps one of
+            // another project of the same user. Unknown stays local.
+            if urgent {
+                return Ok(None);
+            }
+            let message = self.peer_body(message, attachment).await?;
+            return self
+                .user_peer_message_send(sender, target, summary, &message, kind, false)
+                .await;
         };
         if peer
             .session
@@ -189,9 +257,10 @@ impl CasService {
         if urgent {
             return Err(refuse_urgent());
         }
+        let message = self.peer_body(message, attachment).await?;
         let (sender_id, body, summary) = (
             sender.id.clone(),
-            peer_mailbox::attach_message_intent(message, kind, blocker),
+            peer_mailbox::attach_message_intent(&message, kind, blocker),
             summary.to_string(),
         );
         let to = peer.clone();
@@ -227,6 +296,117 @@ impl CasService {
             receipt.status,
             peer.name,
             peer.machine,
+            receipt.id
+        ))))
+    }
+
+    /// cas-2a5a: `message` with the pointer `attachment` names (a published
+    /// artifact or a file in this repo), resolved only when sending to a peer.
+    async fn peer_body(&self, message: &str, attachment: Option<&str>) -> Result<String, McpError> {
+        let Some(raw) = attachment.map(str::trim).filter(|raw| !raw.is_empty()) else {
+            return Ok(message.to_string());
+        };
+        let (root, raw) = (self.inner.cas_root.clone(), raw.to_string());
+        let pointer =
+            tokio::task::spawn_blocking(move || peer_mailbox::resolve_attachment(&root, &raw))
+                .await
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+        Ok(peer_mailbox::attach_pointers(message, &[pointer]))
+    }
+
+    /// cas-2a5a: send to a supervisor of another project of the caller's own
+    /// Cassy Cloud user. `explicit` (a `supervisor:` target) reports every
+    /// failure; otherwise an unresolved target falls back to the local path.
+    /// Never urgent, and a blocker is carried only as an ask: the recipient
+    /// supervisor decides.
+    async fn user_peer_message_send(
+        &self,
+        sender: &cas_types::Agent,
+        target: &str,
+        summary: &str,
+        message: &str,
+        kind: Option<&str>,
+        explicit: bool,
+    ) -> Result<Option<CallToolResult>, McpError> {
+        let cas_root = self.inner.cas_root.clone();
+        let (root, self_id) = (cas_root.clone(), sender.id.clone());
+        let discovery =
+            tokio::task::spawn_blocking(move || discover_user_peers(&root, Some(&self_id)))
+                .await
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let (owner, peers) = match discovery {
+            Ok(UserPeerDiscovery::Found {
+                owner_user_id,
+                peers,
+            }) => (owner_user_id, peers),
+            Ok(UserPeerDiscovery::NotLoggedIn) if explicit => {
+                return Err(Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    format!(
+                        "Could not resolve '{target}': not logged in to Cassy Cloud (`cas \
+                         login`). Nothing was sent."
+                    ),
+                ));
+            }
+            Err(error) if explicit => {
+                return Err(Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!(
+                        "Could not look up your account's supervisors for '{target}': {error}. \
+                         Nothing was sent."
+                    ),
+                ));
+            }
+            _ => return Ok(None),
+        };
+        let peer = peer_mailbox::resolve_user_peer_target(&peers, target)
+            .map_err(|ambiguous| Self::error(ErrorCode::INVALID_PARAMS, ambiguous))?
+            .cloned();
+        let Some(peer) = peer else {
+            if !explicit {
+                return Ok(None);
+            }
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "'{target}' names no supervisor of your Cassy Cloud account (list them \
+                     with coordination action=peers scope=all). Nothing was sent."
+                ),
+            ));
+        };
+        let body = peer_mailbox::attach_message_intent(message, kind, false);
+        let (sender_id, summary_text, to) = (sender.id.clone(), summary.to_string(), peer.clone());
+        let receipt = tokio::task::spawn_blocking(move || {
+            peer_mailbox::send_to_user_peer(
+                &cas_root,
+                &sender_id,
+                &owner,
+                &to,
+                &body,
+                Some(&summary_text),
+            )
+        })
+        .await
+        .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+        .map_err(|error| {
+            Self::error(
+                ErrorCode::INVALID_REQUEST,
+                format!(
+                    "Could not deliver to {}@{} mailbox: {error}",
+                    peer.name, peer.machine
+                ),
+            )
+        })?;
+        Ok(Some(Self::success(format!(
+            "Message sent to supervisor {}@{} of your project {} via Cassy Cloud (peer message \
+             {}, {}). It is advisory: never urgent, never the operator. Check delivery with \
+             coordination action=message_status id={}.",
+            peer.name,
+            peer.machine,
+            peer.project_name().unwrap_or_else(|| "unknown".into()),
+            receipt.id,
+            receipt.status,
             receipt.id
         ))))
     }
@@ -290,3 +470,4 @@ impl CasService {
         Ok(Self::success(text))
     }
 }
+

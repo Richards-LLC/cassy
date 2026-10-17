@@ -190,6 +190,69 @@ impl CasSandbox {
         &self.xdg_config_home
     }
 
+    /// Run existing CLI cases with a worker binding to this disposable host
+    /// stand-in, proving that their own fixtures do not write into it.
+    pub fn assert_child_tests_leave_worktree_untouched(&self, cases: &[&str]) {
+        for harness in [".codex", ".grok"] {
+            std::fs::create_dir_all(self.path().join(harness)).unwrap();
+        }
+        // Force a visible write if an escaped worker sync reaches this root.
+        std::fs::remove_file(self.path().join(".claude/skills/cas-worker/SKILL.md")).unwrap();
+        let snapshot = || {
+            walkdir::WalkDir::new(self.path())
+                .into_iter()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| {
+                    let path = entry.path();
+                    (
+                        path.strip_prefix(self.path()).unwrap().to_path_buf(),
+                        (
+                            std::fs::read(path).unwrap(),
+                            std::fs::metadata(path).unwrap().modified().unwrap(),
+                        ),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = snapshot();
+        for case in cases {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            self.configure_command(&mut child);
+            let output = child
+                .args(["--exact", case, "--nocapture"])
+                .env("CAS_AGENT_ROLE", "worker")
+                .env("CAS_AGENT_ID", "cas-76e4-disposable-worker")
+                .env("CAS_FACTORY_SESSION", "cas-76e4-disposable-session")
+                .env("CAS_CLONE_PATH", self.path())
+                .env("CODEX_HOME", self.path().join(".codex"))
+                .output()
+                .unwrap();
+            let after = snapshot();
+            let changed: std::collections::BTreeSet<_> = before
+                .keys()
+                .chain(after.keys())
+                .filter(|path| before.get(*path) != after.get(*path))
+                .collect();
+            assert!(
+                changed.is_empty(),
+                "{case} wrote outside its fixture into the worker worktree: {} paths; first8: {:?}",
+                changed.len(),
+                changed.iter().take(8).collect::<Vec<_>>()
+            );
+            assert!(
+                output.status.success(),
+                "{case} failed under worker env:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{case} did not execute one test"
+            );
+        }
+    }
+
     pub fn task_count(&self) -> i64 {
         let conn = Connection::open(self.cas_root.join("cas.db"))
             .expect("open sandbox database for task count");

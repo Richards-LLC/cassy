@@ -7,7 +7,7 @@
 //! | Kind | Lane | Budget | What moved off the loop |
 //! |---|---|---|---|
 //! | `DirectorSnapshot` | read | 250 ms | the two-second director read, plus the supervisor-stall delivery evidence (git, gh, task store, QA passes) |
-//! | `RevalidateFresh` | read | 250 ms | the delivery read after detection and the inject loop's final re-check |
+//! | `RevalidateFresh` | read (external for merge delivery evidence) | 250 ms (10 s external) | the delivery read after detection and the inject loop's final re-check |
 //! | `WorkerHealthProbe` | blocking | 100 ms | stall confirmation (worker resolution, `/proc` scan, transcript reads), and the idle-worker liveness observed with each delivery read (cas-3b16) |
 //! | `ReminderScan` | write (StoreWorker) | 100 ms | reminder expiry, due reads and firing |
 //! | `CiStatus` | external | 10 s | the git half of the supervisor-stall evidence: delivery tips, lane CI via `gh`, merged state |

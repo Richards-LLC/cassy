@@ -610,6 +610,7 @@ async fn execute_sync_hits_each_pull_endpoint_exactly_once_when_team_configured(
         dry_run: false,
         rehome: false,
         full: false,
+        background: false,
     };
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
@@ -724,6 +725,7 @@ async fn execute_sync_does_not_hit_team_pull_when_no_team_configured() {
         dry_run: false,
         rehome: false,
         full: false,
+        background: false,
     };
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
@@ -775,6 +777,7 @@ async fn execute_sync_full_ignores_personal_team_and_knowledge_watermarks() {
         dry_run: false,
         rehome: false,
         full: true,
+        background: false,
     };
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();

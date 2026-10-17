@@ -438,6 +438,8 @@ async fn a_peer_message_to_another_repo_is_refused_and_a_resend_is_one_message()
             summary: None,
             in_reply_to: None,
             dedupe_key: "k1".into(),
+            scope: Default::default(),
+            recipient_project_id: None,
         });
         assert!(refused.unwrap_err().contains("403"));
 
@@ -449,6 +451,8 @@ async fn a_peer_message_to_another_repo_is_refused_and_a_resend_is_one_message()
             summary: None,
             in_reply_to: None,
             dedupe_key: "k2".into(),
+            scope: Default::default(),
+            recipient_project_id: None,
         };
         assert_eq!(mailbox.send(&resend).unwrap().status, "queued");
         assert_eq!(mailbox.send(&resend).unwrap().status, "duplicate");

@@ -9,6 +9,14 @@ use message_attention::MessageAttention;
 #[path = "message_attention_tests.rs"]
 mod message_attention_tests;
 
+/// The daemon's own reminder to its owner is not an inter-agent relay.
+/// Caller-written reminder text cannot use this exception.
+fn self_addressed_reminder(row: &cas_store::QueuedPrompt) -> bool {
+    row.origin == Some(cas_store::QueueOrigin::Daemon)
+        && row.source.eq_ignore_ascii_case(&row.target)
+        && cas_store::parse_reminder_delivery_id(&row.prompt).is_some()
+}
+
 /// What a delivery probe learned about recipient-authored activity (GH #1163).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecipientActivity {
@@ -2158,10 +2166,8 @@ pub(super) enum LifecycleRedelivery {
     /// The recipient acknowledged this notification; redelivery must stop
     /// permanently, not merely pause.
     StopAcknowledged,
-    /// cas-7787 (GH #160): the row has burned its whole retry budget without
-    /// ever reaching the recipient. Stop retrying AND record the failure —
-    /// the audience is gone, and a relay nobody will ever read must not keep
-    /// re-waking forever.
+    /// The row spent its wake budget without a recipient read. Stop active
+    /// wakes and record the failure; current/unknown premises remain readable.
     StopUndelivered,
 }
 
@@ -2177,9 +2183,9 @@ pub(super) enum LifecycleRedelivery {
 /// The bound exists to make the two ends EXHAUSTIVE. Before it, a relay whose
 /// task never left `awaiting_merge` had no terminal state at all: the
 /// staleness suppressor only fires when the task moves on, so a lane parked
-/// behind a supervisor who never returned would retry forever. Terminating on
-/// budget exhaustion is what guarantees every relay reaches exactly one of
-/// delivered or visibly-failed, and never a third silent path.
+/// behind a supervisor who never returned would retry forever. Wake exhaustion
+/// records a visible failure and stops active wakes. A current or unknown task
+/// premise stays readable for the next hook or inbox poll.
 pub(super) const LIFECYCLE_MAX_RENUDGE_ATTEMPTS: u32 = 20;
 
 /// cas-d732 (GH #119): decide whether a pending lifecycle row may be
@@ -2198,8 +2204,8 @@ pub(super) const LIFECYCLE_MAX_RENUDGE_ATTEMPTS: u32 = 20;
 /// cas-7787 (GH #160): `attempts` is how many times this row has already been
 /// (re)delivered without arriving. Once it exceeds
 /// [`LIFECYCLE_MAX_RENUDGE_ATTEMPTS`] the row stops retrying and is reported
-/// as a failure, so the pending set stays bounded and no relay can end in
-/// silence.
+/// as a failure. The body remains readable unless a separate premise check
+/// proves it obsolete.
 pub(super) fn lifecycle_redelivery_decision(
     acked: bool,
     last_attempt: Option<std::time::Instant>,
@@ -3957,6 +3963,13 @@ impl FactoryDaemon {
                             );
                         }
                     }
+                    RelayOutput::ExternalWorkReconciled(Ok(count)) if count > 0 => {
+                        tracing::debug!(count, "reconciled due external-work journal operation(s)");
+                    }
+                    RelayOutput::ExternalWorkReconciled(Ok(_)) => {}
+                    RelayOutput::ExternalWorkReconciled(Err(error)) => {
+                        tracing::warn!(%error, "external-work reconciliation job failed; retrying on a later daemon pass");
+                    }
                 }
             }
         }
@@ -4353,15 +4366,14 @@ impl FactoryDaemon {
     }
 
     fn teams_pointer_recipients(&self) -> Vec<String> {
-        let supervisor = self.app.supervisor_name();
-        let mut recipients: Vec<_> = self.app.worker_names().iter()
+        // GH #1231: supervisor events now carry their body in the sole PTY
+        // wake (or wait for a hook). Oversized bodies already travel whole.
+        // The timed Teams-pointer fallback belongs only to worker pointers;
+        // treating an inline handoff as a pointer would append a second body.
+        self.app.worker_names().iter()
             .filter(|name| !self.dead_workers.contains(*name))
             .filter(|name| self.app.harness_for(name) == cas_mux::SupervisorCli::Claude)
-            .cloned().collect();
-        if self.app.harness_for(supervisor) == cas_mux::SupervisorCli::Claude {
-            recipients.extend(["supervisor".to_string(), supervisor.to_string()]);
-        }
-        recipients
+            .cloned().collect()
     }
 
     fn decide_pointer_read(&mut self, generation: u64, rows: Vec<(cas_store::QueuedPrompt, String)>) {
@@ -5169,9 +5181,22 @@ impl FactoryDaemon {
         attempts: u32,
         escalate: bool,
     ) -> bool {
-        let silent =
-            escalate && wake_starved_needs_supervisor(self.prepared_wake_evidence(pane_target));
-        let detail = if silent {
+        let self_reminder = self_addressed_reminder(queued);
+        let supervisor_recipient = pane_target.eq_ignore_ascii_case(self.app.supervisor_name());
+        let silent = !self_reminder
+            && !supervisor_recipient
+            && escalate
+            && wake_starved_needs_supervisor(self.prepared_wake_evidence(pane_target));
+        let detail = if self_reminder {
+            "self reminder waiting for the next turn or wake recheck; no inter-agent alarm".to_string()
+        } else if supervisor_recipient {
+            crate::prompt_revalidation::exhausted_wake_notice(
+                queued.id,
+                &queued.prompt,
+                queued.summary.as_deref(),
+                attempts,
+            )
+        } else if silent {
             format!(
                 "wake budget spent after {attempts} attempts and the recipient's transcript has been \
                  silent for {}+ minutes; escalated to the supervisor. Wake retries stopped; the message \
@@ -5195,9 +5220,15 @@ impl FactoryDaemon {
             &queued.target,
             super::prompt_queue_jobs::QueueStamp::ParkBusy { detail, recheck_at },
         );
+        if self_reminder {
+            // Retry only after ParkBusy's durable recheck. No body was handed
+            // off, and an eventual idle pane must still get its one wake.
+            self.lifecycle_redelivery_counts.remove(&queued.id);
+            self.lifecycle_redelivery_attempts.remove(&queued.id);
+        }
         // Live probes would keep acting on a row Cassy decided to stop
-        // waking. The redelivery counters stay, so the recheck lands on the
-        // same exhausted budget instead of starting a fresh one.
+        // waking. Ordinary relay counters stay, so their recheck lands on
+        // the same exhausted budget instead of starting a fresh one.
         self.urgent_wake_probes.remove(&queued.id);
         self.normal_delivery_probes.remove(&queued.id);
         self.queue_jobs.normal_probe_jobs.forget_row(queued.id);
@@ -6774,7 +6805,13 @@ impl FactoryDaemon {
         if let Some(reason) = pane.veto_for_idle_recipient() {
             return WakeDecision::deny(reason);
         }
-        if !Self::agent_signals_look_quiet(data, pane_target, now) {
+        // cas-f265: a completed checkpoint and continuing heartbeats can
+        // outlive the supervisor's turn. A fired reminder uses the pane/tool
+        // veto above to judge current work; historical activity must not
+        // postpone it. Missing recipients and other wake classes stay gated.
+        let reminder = class == SupervisorWakeClass::Reminder
+            && data.agents.iter().any(|agent| agent.name == pane_target);
+        if !reminder && !Self::agent_signals_look_quiet(data, pane_target, now) {
             return WakeDecision::deny("supervisor heartbeat and activity both look live");
         }
         WakeDecision::allow(match class {
@@ -8206,6 +8243,12 @@ impl FactoryDaemon {
             facts: row_facts,
             operator_replies,
         } = selection;
+        // Reuse the hook's message-class seam for inline operator/peer labels.
+        // The roster arrived from QueueSelect; there is no loop-thread read.
+        let supervisor_senders: HashMap<String, String> = registered_agents.iter()
+            .filter(|agent| agent.role == cas_types::AgentRole::Supervisor)
+            .map(|agent| (agent.id.clone(), agent.name.clone())).collect();
+        let supervisor_aliases = vec!["supervisor".to_string(), self.app.supervisor_name().to_string()];
         tracing::trace!(target: "cas::coordination", generation, rows = prompts.len(), "delivering a QueueSelect batch");
         for id in retargeted_rows
             .into_iter()
@@ -8543,11 +8586,8 @@ impl FactoryDaemon {
                         &queued.prompt,
                         &task,
                     ),
-                    LifecycleTaskRead::NotFound => {
-                        LifecyclePromptDecision::SuppressStale {
-                            task_id: envelope.task_id.clone(),
-                        }
-                    }
+                    // Missing state cannot prove that the task moved on.
+                    LifecycleTaskRead::NotFound => LifecyclePromptDecision::Deliver,
                     LifecycleTaskRead::Unavailable(error) => {
                         tracing::warn!(
                             prompt_id = queued.id,
@@ -8780,10 +8820,15 @@ impl FactoryDaemon {
             // was queued at spawn but reaches the worker after a supervisor
             // reply must read as old spawn boilerplate, not a fresh reassignment.
             prompt_with_instructions = format!(
-                "{}\n{}\n{}",
+                "{}\n{}{}\n{}",
                 crate::mcp::tools::service::agent_search_system::message::first_message_provenance(
                     &queued
                 ),
+                if target == "supervisor" || target == self.app.supervisor_name() {
+                    crate::hooks::handlers::handlers_middle::factory_inbox::inbox_lane(
+                        &queued, &supervisor_senders, &supervisor_aliases,
+                    ).label()
+                } else { "" },
                 crate::mcp::tools::service::agent_search_system::message::commander_reply_command(
                     &queued,
                 )
@@ -8822,6 +8867,13 @@ impl FactoryDaemon {
                     self.app.harness_for(pane_target),
                     true,
                 ) == super::delivery::DeliveryChannel::TeamsInbox;
+            // GH #1231: bounded supervisor events have one delivery path.
+            // Preserve already-held legacy copies until their recovery settles.
+            let inline_supervisor_body = claude_inbox_target
+                && (target == "supervisor" || target == self.app.supervisor_name())
+                && cas_store::fits_hook_surface(&prompt_with_instructions)
+                && facts.deferred_inbox.is_none()
+                && !self.inbox_deferred_writes.contains_key(&queued.id);
             // cas-786a6 (H3): the durable marker, read by QueueSelect.
             let durable_deferred_inbox = claude_inbox_target && facts.deferred_inbox.is_some();
             let deferred_inbox_recorded =
@@ -9126,14 +9178,19 @@ impl FactoryDaemon {
                                  retrying as a pane nudge"
                             );
                         }
-                        self.lifecycle_redelivery_attempts
-                            .insert(queued.id, std::time::Instant::now());
-                        // cas-7787: only a real (re)delivery burns budget —
-                        // a cooldown tick is policy, not a failed attempt.
-                        *self
-                            .lifecycle_redelivery_counts
-                            .entry(queued.id)
-                            .or_insert(0) += 1;
+                        // cas-6e355: inline supervisor rows have not reached
+                        // any transport yet. Reserve their cadence only after
+                        // the wake gate allows the body-bearing PTY attempt.
+                        if !inline_supervisor_body || queued.urgent {
+                            self.lifecycle_redelivery_attempts
+                                .insert(queued.id, std::time::Instant::now());
+                            // cas-7787: only a real (re)delivery burns budget —
+                            // a cooldown tick is policy, not a failed attempt.
+                            *self
+                                .lifecycle_redelivery_counts
+                                .entry(queued.id)
+                                .or_insert(0) += 1;
+                        }
                     }
                     LifecycleRedelivery::Cooldown => {
                         // GatedNotReady: withheld by policy, not a failed
@@ -9186,39 +9243,29 @@ impl FactoryDaemon {
                         continue;
                     }
                     LifecycleRedelivery::StopUndelivered => {
-                        // cas-7787 (GH #160): the retry budget is gone and the
-                        // relay never arrived. Stop retrying — an audience
-                        // that has not appeared in 20 minutes is not going to
-                        // — but terminate as a RECORDED FAILURE so the row
-                        // becomes visible in worker_status/doctor rather than
-                        // lingering as a zombie or vanishing into silence.
-                        // cas-3dcb: a death relay has no task_id, and reporting
-                        // one as "(unknown task)" would bury the one fact the
-                        // supervisor needs — which worker is gone.
+                        if self_addressed_reminder(&queued) {
+                            let pane = pane_target.to_string();
+                            self.park_wake_starved_row(
+                                &queued, &pane, LIFECYCLE_MAX_RENUDGE_ATTEMPTS, false,
+                            );
+                            continue;
+                        }
+                        // cas-af23 / GH #1241: the earlier premise checks are
+                        // the only authority to withdraw an obsolete task
+                        // message. A spent wake budget says nothing about the
+                        // task; keep its body available to hooks and inbox_poll.
+                        // Preserve the dedicated worker-death failure report.
                         if Self::row_is_supervisor_wake(
-                    &wake_sender,
-                    self.app.supervisor_name(),
-                    &queued.source,
-                    &queued.prompt,
-                ) {
-                            let notice =
-                                match crate::prompt_revalidation::parse_worker_died_envelope(
-                                    &queued.prompt,
-                                ) {
-                                    Some(envelope) => {
-                                        crate::prompt_revalidation::undelivered_worker_died_notice(
-                                            &envelope.worker_name,
-                                        )
-                                    }
-                                    None => crate::prompt_revalidation::undelivered_relay_notice(
-                                        &crate::prompt_revalidation::parse_lifecycle_envelope(
-                                            &queued.prompt,
-                                        )
-                                        .map(|envelope| envelope.task_id)
-                                        .unwrap_or_else(|| "(unknown task)".to_string()),
-                                        queued.summary.as_deref(),
-                                    ),
-                                };
+                            &wake_sender,
+                            self.app.supervisor_name(),
+                            &queued.source,
+                            &queued.prompt,
+                        ) && let Some(envelope) =
+                            crate::prompt_revalidation::parse_worker_died_envelope(&queued.prompt)
+                        {
+                            let notice = crate::prompt_revalidation::undelivered_worker_died_notice(
+                                &envelope.worker_name,
+                            );
                             self.queue_jobs.stamp(
                                 self.app.cas_dir(),
                                 queued.id,
@@ -9226,12 +9273,11 @@ impl FactoryDaemon {
                                 super::prompt_queue_jobs::QueueStamp::UndeliveredRelay { notice },
                             );
                         } else {
-                            // cas-d1659: an ordinary message is not a relay
-                            // whose premise expires. Stop re-nudging, keep the
-                            // row for the recipient's next turn.
+                            // Stop re-nudging; a live or unknown premise stays
+                            // queued for the recipient's next turn.
                             let pane_target = pane_target.to_string();
                             self.park_wake_starved_row(
-                                    &queued,
+                                &queued,
                                 &pane_target,
                                 LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
                                 false,
@@ -9305,6 +9351,24 @@ impl FactoryDaemon {
                 }
                 self.last_idle_message_times
                     .insert(queued.source.clone(), now);
+            }
+
+            if inline_supervisor_body && !queued.urgent
+                && !Self::row_is_supervisor_wake(
+                    &wake_sender, self.app.supervisor_name(), &queued.source, &queued.prompt,
+                )
+            {
+                // FYI (including task_started) is read on the recipient's
+                // next tool/turn boundary. Park it out of daemon selection so
+                // a full batch of quiet rows cannot starve later action rows.
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(), queued.id, &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                        detail: "quiet supervisor event; awaiting the recipient's next hook or inbox_poll".into(),
+                        recheck_at: chrono::Utc::now() + chrono::Duration::minutes(1),
+                    },
+                );
+                continue;
             }
 
             // Skip PTY injection for native extension agents that use plain PTY mode —
@@ -9740,6 +9804,23 @@ impl FactoryDaemon {
                         )
                     };
                     let worker_is_idle = wake_decision.allowed;
+                    if inline_supervisor_body && !worker_is_idle {
+                        // A veto holds the row for the hook/poll or next wake.
+                        // No inbox handoff occurred, so release the reservation
+                        // instead of recording a held Teams copy.
+                        self.queue_jobs.release_inject_claim(
+                            self.app.cas_dir(), queued.id, &queued.target,
+                        );
+                        self.queue_jobs.record_outcome(queued.id, &queued.target, inject_generation);
+                        self.queue_jobs.stamp(
+                            self.app.cas_dir(), queued.id, &queued.target,
+                            super::prompt_queue_jobs::QueueStamp::PendingReason {
+                                reason: cas_store::PendingReason::GatedNotReady,
+                                detail: Some(wake_decision.status_detail()),
+                            },
+                        );
+                        continue;
+                    }
                     if !worker_is_idle {
                         tracing::debug!(
                             target: "cas::coordination",
@@ -9854,7 +9935,17 @@ impl FactoryDaemon {
                     // so it withdraws itself once the merge lands instead of
                     // being read later as an outstanding ask.
                     super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: transport"));
-                    if nudge_only {
+                    if inline_supervisor_body {
+                        // A busy-pane veto above delivered nothing and must
+                        // not delay this row when the supervisor becomes idle.
+                        // Actual attempts still share the bounded cadence.
+                        self.lifecycle_redelivery_attempts
+                            .insert(queued.id, std::time::Instant::now());
+                        *self.lifecycle_redelivery_counts.entry(queued.id).or_insert(0) += 1;
+                        self.deliver_supervisor_event_inline(
+                            &inbox_source, &prompt_with_instructions, queued.id,
+                        ).await
+                    } else if nudge_only {
                         // cas-ef14 (GH #139): the recipient's harness already
                         // holds this payload — re-writing the inbox is the
                         // GH #124 storm. Only the pane nudge is left to try.
@@ -9875,7 +9966,13 @@ impl FactoryDaemon {
                             wake_decision,
                             merge_request_task.as_deref(),
                             Some(queued.id),
-                            Some(&queued.prompt),
+                            // A new oversized supervisor event must carry its
+                            // whole text, even if only the framing pushed it
+                            // over the inline cap. Held legacy copies keep
+                            // their pointer so their dedup probe still matches.
+                            if is_supervisor_target && !deferred_inbox_recorded {
+                                None
+                            } else { Some(&queued.prompt) },
                         )
                         .await
                     }
@@ -11921,7 +12018,15 @@ pub(super) fn fire_reminder(
             // its own origin; an unstamped row can never wake a pane. The
             // source names the owner by agent name, as other mail does, and
             // the dedupe key keeps a stale snapshot from writing it twice.
-            let owner = reminder_owner_name(reminder, agent_id_to_name, cas_dir);
+            // A self reminder stays self-addressed if a replacement supervisor
+            // takes over its Shutdown owner's wake. The reminder record keeps
+            // the original owner and target IDs; delegated reminders retain
+            // their actual sender for inter-agent delivery accounting.
+            let owner = if reminder.owner_id == reminder.target_id {
+                target.clone()
+            } else {
+                reminder_owner_name(reminder, agent_id_to_name, cas_dir)
+            };
             queue
                 .enqueue_idempotent(
                     &owner,
@@ -13384,6 +13489,13 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        // The reused name belongs to a live worker of this session. cas-bf890:
+        // that is what keeps the sender notice an actionable inbox row; a
+        // notice about a recipient with no live agent is a digest row instead.
+        crate::store::open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&crate::types::Agent::new("wise-raven-21-id".into(), "wise-raven-21".into()))
+            .unwrap();
 
         let ancient = queue
             .enqueue("supervisor", "wise-raven-21", "verify+close cas-85c0")
@@ -14677,9 +14789,9 @@ mod tests {
             attempts, LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
             "the retry budget must be spent exactly once before the failure arm"
         );
-        // And the terminal arm is the LOUD one: the daemon call site maps
-        // StopUndelivered to `mark_undelivered_lifecycle_relay` + a
-        // tracing::error!, which is what puts it in worker_status/doctor.
+        // The failure arm stops active wakes. Current/unknown task messages
+        // retain their body and an exhaustion detail for the next inbox poll;
+        // a worker-death relay keeps its dedicated terminal failure report.
         assert_eq!(
             lifecycle_redelivery_decision(
                 false,
@@ -19966,3 +20078,11 @@ mod queue_control_tests;
 #[cfg(test)]
 #[path = "delivery_probe_tests.rs"]
 mod delivery_probe_tests;
+
+#[cfg(test)]
+#[path = "reminder_dispatch_tests.rs"]
+mod reminder_dispatch_tests;
+
+#[cfg(test)]
+#[path = "relay_retry_exhaustion_tests.rs"]
+mod relay_retry_exhaustion_tests;

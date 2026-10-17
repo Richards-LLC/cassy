@@ -21,7 +21,7 @@ readonly -a gate_check_ids=(
     version-literals ci-script-tests hub-web-tests release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
-    journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
+    journey-catalog builtin-skill-limits doctor-snapshot communication-slos migration-registry ci-script-tests-changed
     fixture-paths-src builtin-projections-src call-shapes release-notes-draft
 )
 
@@ -703,10 +703,23 @@ check_scratch_base() {
     assert_no_cas_ancestor "$scratch_base" || return 1
     checkout_device="${CAS_RELEASE_GATE_CHECKOUT_DEVICE:-$(release_portable_stat_device "$repo_root" || true)}"
     scratch_device="${CAS_RELEASE_GATE_SCRATCH_DEVICE:-$(release_portable_stat_device "$parent" || true)}"
+    local boundary_note="same device $scratch_device"
     if [[ -z "$checkout_device" || -z "$scratch_device" || "$checkout_device" != "$scratch_device" ]]; then
-        printf 'scratch-base: filesystem boundary: checkout device=%s scratch-parent device=%s; use a base on the checkout mount\n' \
-            "${checkout_device:-unknown}" "${scratch_device:-unknown}"
-        return 1
+        # cas-baa8: a base inside the configured [factory] scratch_root may sit
+        # on another device. release_env.py, which derived it, still requires
+        # it to share the scratch root's filesystem (clone seeding hard-links).
+        local release_env_check
+        if [[ -n "$scratch_device" && -f "$repo_root/scripts/release_env.py" ]] \
+            && release_env_check="$(CAS_RELEASE_GATE_HOME_DIR="$scratch_base" \
+                python3 "$repo_root/scripts/release_env.py" resolve --worktree "$repo_root" 2>/dev/null)" \
+            && (eval "$release_env_check"
+                [[ -z "$RELEASE_ENV_SCRATCH_PROBLEM" && "$RELEASE_ENV_SCRATCH_SOURCE" == *'inside factory.scratch_root'* ]]); then
+            boundary_note="factory.scratch_root device $scratch_device (checkout device ${checkout_device:-unknown})"
+        else
+            printf 'scratch-base: filesystem boundary: checkout device=%s scratch-parent device=%s; use a base on the checkout mount\n' \
+                "${checkout_device:-unknown}" "${scratch_device:-unknown}"
+            return 1
+        fi
     fi
 
     last_archive_bytes="${CAS_RELEASE_GATE_LAST_ARCHIVE_BYTES:-}"
@@ -733,11 +746,11 @@ check_scratch_base() {
                 "$free_bytes" "$required_bytes" "$last_archive_bytes"
             return 1
         fi
-        printf 'scratch-base: parent writable; same device %s; %s bytes free >= 2x last archive %s\n' \
-            "$scratch_device" "$free_bytes" "$last_archive_bytes"
+        printf 'scratch-base: parent writable; %s; %s bytes free >= 2x last archive %s\n' \
+            "$boundary_note" "$free_bytes" "$last_archive_bytes"
     else
-        printf 'scratch-base: parent writable; same device %s; %s bytes free; no prior archive size recorded\n' \
-            "$scratch_device" "$free_bytes"
+        printf 'scratch-base: parent writable; %s; %s bytes free; no prior archive size recorded\n' \
+            "$boundary_note" "$free_bytes"
     fi
 }
 
@@ -1765,6 +1778,10 @@ check_doctor_snapshot() {
     fi
 }
 
+check_communication_slos() {
+    python3 scripts/check-communication-slos.py
+}
+
 check_migration_registry() {
     if ! lane_touches cas-cli/src/migration scripts/check-migration-registry.py; then
         printf 'migration-registry: no migration change\n'
@@ -2179,7 +2196,7 @@ if [[ "$fast_rows" == false ]]; then
 fi
 
 run_check scratch-base \
-    'parent writable; same mount as checkout; no .cas ancestor; free bytes >= 2x last archive' \
+    'parent writable; same mount as checkout or inside factory.scratch_root; no .cas ancestor; free bytes >= 2x last archive' \
     check_scratch_base
 if row_selected scratch-base && [[ "${#failures[@]}" -gt 0 ]]; then
     printf 'RELEASE GATE FAILED: scratch-base (aborted before costly or mutating rows)\n'
@@ -2281,6 +2298,9 @@ gate_row builtin-skill-limits 'python3 scripts/check-builtin-skill-limits.py (de
     check_builtin_skill_limits
 gate_row doctor-snapshot 'python3 scripts/check-doctor-snapshot.py (row groups; new doctor phases update the snapshot)' \
     check_doctor_snapshot
+# cas-7e24: <5s fixture measurement in existing no-build fast/integration stage.
+gate_row communication-slos 'five communication SLOs against fixture factory session' \
+    check_communication_slos
 gate_row migration-registry 'python3 scripts/check-migration-registry.py (every migration declared, registered, in order)' \
     check_migration_registry
 gate_row ci-script-tests-changed 'python3 scripts/ci-script-tests-for-diff.py (script tests for changed scripts)' \

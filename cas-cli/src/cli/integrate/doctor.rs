@@ -50,10 +50,7 @@ fn vercel_report(repo_root: &Path) -> VerifyReport {
 }
 
 fn neon_report(repo_root: &Path) -> VerifyReport {
-    // The Live neon client is currently a deliberate placeholder (see
-    // cas-1ece module doc). Calling it produces McpUnreachable for every
-    // recorded branch — exactly the "doctor can render a 'skip' row"
-    // semantics we want here.
+    // Neon verification uses authenticated CLI reads, without an MCP server.
     let client = LiveNeonClient::new();
     neon::verify_report(repo_root, &client)
 }

@@ -106,8 +106,9 @@ pub const COORDINATION_ACTIONS: &[&str] = &[
 ];
 
 /// Actions of the supervisor `factory` tool (D2 split, cas-8563b): fleet,
-/// worktree, server, database, loop and queue control. `coordination` still
-/// accepts each of them for one release as a deprecated alias.
+/// worktree, server, database, loop and queue control, plus Slack-thread
+/// authority. `coordination` accepts the original factory actions for one
+/// release as deprecated aliases; external-work actions are factory-only.
 pub const FACTORY_ACTIONS: &[&str] = &[
     // Fleet
     "spawn_workers",
@@ -151,6 +152,22 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "queue_poll",
     "queue_peek",
     "queue_ack",
+    // cas-72d3: supervisor-only Slack-thread external-work ownership.
+    "claim",
+    "claim_status",
+    "release_claim",
+    "transfer_claim",
+    "accept_claim",
+];
+
+/// Journaled Slack-thread authority is deliberately absent from the
+/// worker-loaded `coordination` tool and is published only by `factory`.
+pub const EXTERNAL_WORK_ACTIONS: &[&str] = &[
+    "claim",
+    "claim_status",
+    "release_claim",
+    "transfer_claim",
+    "accept_claim",
 ];
 
 /// Every action `CoordinationRequest` deserializes: the `coordination`
@@ -356,4 +373,3 @@ fn feature_gated(base: &[&'static str], proxy_only: &[&'static str]) -> Vec<&'st
     }
     actions
 }
-

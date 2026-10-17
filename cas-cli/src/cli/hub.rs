@@ -1716,6 +1716,11 @@ fn serve_foreground_logged(
         // inbox, independent of viewer presence. Idle until enrolled.
         let operator_inbox_task =
             crate::hub::operator_inbox::drain::spawn_drain_loop(paths.root().to_path_buf());
+        // cas-f1fb: sync registered cloud-linked stores no session has open.
+        let idle_sync_loop =
+            crate::hub::idle_sync::spawn_idle_sync_loop(paths.root().to_path_buf());
+        let presence_task =
+            crate::hub::operator_inbox::presence::spawn_presence_loop(paths.root().to_path_buf());
 
         lock.set_phase("running")?;
         let result = if let Some(proxy_listener) = tailscale_listener {
@@ -1725,6 +1730,8 @@ fn serve_foreground_logged(
         };
         event_task.abort();
         operator_inbox_task.abort();
+        idle_sync_loop.stop();
+        presence_task.abort();
         if let Some(task) = attention_task {
             task.abort();
         }
@@ -3268,10 +3275,14 @@ mod tests {
         );
         assert_eq!(receipt.hub.state, ObservationState::Unknown);
         assert_eq!(receipt.serve_publication.state, ObservationState::Unknown);
+        // Phase B supports Cloud presence; this local, read-only probe has no
+        // authenticated Cloud snapshot and therefore cannot know its health.
         assert_eq!(
             receipt.independent_monitoring.state,
-            ObservationState::Unsupported
+            ObservationState::Unknown
         );
+        // pin: local diagnostic receipts name why remote monitoring is unknown.
+        assert_eq!(receipt.independent_monitoring.reason, "cloud_snapshot_required");
         assert!(!home.path().join(".cas").exists());
     }
 

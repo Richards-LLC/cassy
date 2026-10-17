@@ -43,6 +43,7 @@
 //! ```
 
 pub mod claude_trust;
+mod codex_hook_warning;
 pub mod codex_trust;
 pub mod conformance;
 mod error;
@@ -56,9 +57,9 @@ pub use claude_trust::{
     ensure_claude_project_trusted_in,
 };
 pub use codex_trust::{
-    CODEX_TRUST_TIMEOUT_HINT, CodexTrustOutcome, codex_home, ensure_cas_hooks_trusted,
-    ensure_cas_hooks_trusted_in, ensure_project_trusted, ensure_project_trusted_in,
-    update_codex_config_locked,
+    CODEX_PRE_TOOL_TIMEOUT_SECS, CODEX_TRUST_TIMEOUT_HINT, CodexTrustOutcome, codex_home,
+    ensure_cas_hooks_trusted, ensure_cas_hooks_trusted_in, ensure_project_trusted,
+    ensure_project_trusted_in, prepare_cas_tool_hooks_in, update_codex_config_locked,
 };
 
 pub use conformance::{
@@ -69,7 +70,7 @@ pub use conformance::{
 };
 pub use error::{Error, Result};
 pub use input_queue::{PTY_INPUT_BUFFER_CAP, PtyInput};
-pub use pty::claude_supports_chrome_flag;
+pub use pty::{claude_supports_chrome_flag, claude_supports_flag};
 pub use pty::{
     ContractRole, PROTECTED_OPERATOR_ENV, claude_supervisor_contract, claude_worker_contract,
     missing_contract_elements, rendered_contract_surface,

@@ -13,6 +13,7 @@ import { commandStatusLabel } from "./commands";
 import type { CommandState } from "./store";
 import type { InboxSnapshot, InboxState, OperatorInboxController } from "./controller";
 import { inboxThreads, type InboxTurn } from "./projection";
+import { presenceLabel, presenceNotices } from "./presence";
 
 export interface InboxViewDeps {
   defaultLabel: string;
@@ -35,6 +36,11 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, attributes: Record<st
   for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, value);
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+function presenceTimestamp(value: string): string {
+  const age = relativeTimestamp(value);
+  return age === "now" ? age : `${age} ago`;
 }
 
 /** QA F03: envelopes refused on open or verification are kept for replay
@@ -88,6 +94,8 @@ export class InboxView {
   private polling = false;
   private busy = false;
   private status = "";
+  private statusError = false;
+  private readonly replyDrafts = new Map<string, string>();
 
   constructor(private readonly controller: OperatorInboxController, private readonly deps: InboxViewDeps) {
     this.dialog = el("dialog", { id: "operator-inbox-dialog", "aria-labelledby": "operator-inbox-title", class: "operator-inbox" });
@@ -106,9 +114,13 @@ export class InboxView {
     this.snapshot = await this.controller.snapshot();
     this.render();
     if (this.controller.current().kind === "ready") void this.controller.machines().then(async () => {
+      await this.controller.refreshPresence();
       this.snapshot = await this.controller.snapshot();
       this.render();
     }).catch(() => undefined);
+    if (this.controller.current().kind === "ready" && this.controller.refreshReplyGrants) {
+      void this.controller.refreshReplyGrants().catch(() => undefined);
+    }
     this.pollIfWaiting();
   }
 
@@ -139,10 +151,12 @@ export class InboxView {
     if (this.busy) return;
     this.busy = true;
     this.status = "";
+    this.statusError = false;
     this.render();
     try {
       await work();
     } catch (error) {
+      this.statusError = true;
       this.status = `${failure} ${error instanceof Error && "reason" in error ? `(${String((error as { reason: unknown }).reason)})` : ""}`.trim();
     } finally {
       this.busy = false;
@@ -153,6 +167,10 @@ export class InboxView {
   }
 
   render(): void {
+    const focusedId = this.dialog.contains(document.activeElement) ? document.activeElement?.id : null;
+    const focusedText = document.activeElement instanceof HTMLTextAreaElement ? document.activeElement : null;
+    const selection = focusedText ? [focusedText.selectionStart, focusedText.selectionEnd] as const : null;
+    const expanded = new Set(Array.from(this.dialog.querySelectorAll<HTMLDetailsElement>(".machine-presence details[open]")).map((node) => node.id));
     const state = this.controller.current();
     const body = el("section", { class: "operator-inbox-body" });
     const header = el("header", { class: "operator-inbox-heading" });
@@ -168,9 +186,22 @@ export class InboxView {
       warning.append(" ", dismiss);
       body.append(warning);
     }
+    if (state.kind === "ready") {
+      const requests = this.ownerReplyRequestsMarkup();
+      if (requests) body.append(requests);
+    }
     body.append(this.stateMarkup(state));
-    if (this.status) body.append(el("p", { class: "operator-inbox-status", role: "alert" }, this.status));
+    if (this.status) body.append(el("p", { class: "operator-inbox-status", role: this.statusError ? "alert" : "status" }, this.status));
+    if (state.kind !== "ready") this.replyDrafts.clear();
     this.dialog.replaceChildren(body);
+    for (const details of this.dialog.querySelectorAll<HTMLDetailsElement>(".machine-presence details")) details.open = expanded.has(details.id);
+    if (focusedId) {
+      const next = this.dialog.ownerDocument.getElementById(focusedId);
+      if (next && this.dialog.contains(next)) {
+        next.focus();
+        if (selection && next instanceof HTMLTextAreaElement) next.setSelectionRange(...selection);
+      }
+    }
   }
 
   private stateMarkup(state: InboxState): HTMLElement {
@@ -236,6 +267,7 @@ export class InboxView {
     const selected = this.selected ? threads.find((thread) => thread.hubId === this.selected!.hubId && thread.session === this.selected!.session) : undefined;
     const withheld = snapshot ? unverifiedCount(snapshot) : 0;
     if (withheld > 0) section.append(el("p", { class: "operator-inbox-withheld", role: "status" }, withheldCopy(withheld)));
+    if (!selected) section.append(this.presenceMarkup());
     if (selected) {
       section.append(this.threadMarkup(selected));
     } else if (threads.length === 0) {
@@ -316,6 +348,118 @@ export class InboxView {
     return section;
   }
 
+  private presenceMarkup(): HTMLElement {
+    const section = el("section", { class: "machine-presence", "aria-labelledby": "machine-presence-title" });
+    section.append(el("h3", { id: "machine-presence-title" }, "Machine alerts"));
+    const snapshot = this.snapshot;
+    const presence = snapshot?.presence;
+    if (snapshot?.presenceError) section.append(el("p", { role: "status" }, snapshot.presenceError));
+    if (!presence) {
+      section.append(el("p", {}, "Machine status has not been checked yet."));
+    } else {
+      const observerStale = presence.observerCheckedAt === null || Date.now() - Date.parse(presence.observerCheckedAt) > 180_000;
+      if (presence.observerStatus === "unavailable" || observerStale) {
+        section.append(el("p", { class: "operator-inbox-warning", role: "status" }, "Cassy Cloud's alert check is unavailable, so an alert may take longer than five minutes."));
+      }
+      const machines = el("ul", { class: "machine-presence-rows", "aria-label": "Monitored machines" });
+      for (const machine of presence.machines) {
+        const label = snapshot?.machines.find((entry) => entry.machineId === machine.machineId)?.label ?? "Machine";
+        const row = el("li", { "data-machine-presence": machine.machineId });
+        row.append(el("strong", {}, label), el("p", {}, `${snapshot?.presenceError ? "Last known: " : ""}${presenceLabel(machine)}`));
+        if (machine.lastReportAt) {
+          const report = el("p", {}, "Last report ");
+          report.append(el("time", { datetime: machine.lastReportAt }, presenceTimestamp(machine.lastReportAt)));
+          row.append(report);
+        }
+        if (machine.silence) row.append(el("p", {}, `Alerts resume ${new Date(machine.silence.until).toLocaleString()}.`));
+        if (machine.components.length > 0) {
+          const components = el("ul", { "aria-label": `${label} component observations` });
+          for (const component of machine.components) {
+            const names = { hub: "Hub", serve: "Serve", factory: "Factory" };
+            const states = { up: "up", degraded: "degraded", down: "down", unknown: "not known" };
+            const item = el("li", {}, `${names[component.component]}: ${states[component.state]} · observed `);
+            item.append(el("time", { datetime: component.observedAt }, presenceTimestamp(component.observedAt)));
+            components.append(item);
+          }
+          row.append(components);
+        }
+        if (machine.monitoring !== "not_capable") {
+          if (this.controller.canManageMonitoring()) {
+            const consent = el("details", { id: `presence-consent-${machine.machineId}` });
+            const summary = el("summary", { id: `presence-details-${machine.machineId}`, "aria-label": `Monitoring settings for ${label}` });
+            summary.append(el("span", { class: "machine-presence-chevron", "aria-hidden": "true" }), document.createTextNode("Monitoring settings"));
+            consent.append(summary);
+            consent.append(el("p", {}, "Cassy Cloud receives a report about this machine's Hub, Serve and Factory about once a minute. If reports stop, an alert appears in this inbox within about five minutes while Cassy Cloud's alert check is working. It keeps only the latest status and keeps notices for 90 days; Cassy Cloud can read them. No email or phone push is sent."));
+            if (machine.monitoring === "disabled") {
+              const setup = el("p", {}, "Enable alerts, then run ");
+              setup.append(el("code", {}, "cas hub restart"), document.createTextNode(` on ${label}. This machine must be allowed to send status reports to Cassy Cloud.`));
+              consent.append(setup);
+            }
+            const enabled = machine.monitoring !== "enabled";
+            const action = `${enabled ? "Enable" : "Disable"} alerts`;
+            const toggle = el("button", { type: "button", id: `presence-toggle-${machine.machineId}`, "aria-label": `${action} for ${label}` }, action);
+            toggle.disabled = this.busy;
+            toggle.onclick = () => void this.act(() => this.controller.setMonitoring(machine.machineId, enabled), `Could not ${enabled ? "enable" : "disable"} alerts. Review the current setting and try again.`);
+            consent.append(toggle);
+            row.append(consent);
+          } else {
+            row.append(el("p", {}, "An account-management device can change monitoring, even while this machine is off."));
+          }
+        }
+        machines.append(row);
+      }
+      if (presence.machines.length > 0) section.append(machines);
+      else section.append(el("p", {}, "No enrolled machines yet."));
+    }
+    const notices = snapshot ? presenceNotices(snapshot.events) : [];
+    if (notices.length > 0) {
+      const history = el("section", { class: "machine-presence-history", "aria-labelledby": "machine-presence-history-title" });
+      history.append(el("h4", { id: "machine-presence-history-title" }, "Alert history"));
+      const list = el("ol", { class: "machine-presence-notices", "aria-label": "Machine alert history" });
+      for (const notice of notices.slice().reverse()) {
+        const label = snapshot?.machines.find((entry) => entry.machineId === notice.machineId)?.label ?? "Machine";
+        const item = el("li", { "data-presence-event": notice.eventId, "data-outage-epoch": notice.outageEpoch });
+        item.append(el("strong", {}, `${label} ${notice.kind === "machine_unobserved" ? "unreachable" : "recovered"}`), el("time", { datetime: notice.detectedAt }, presenceTimestamp(notice.detectedAt)));
+        if (notice.refEventId) item.setAttribute("data-ref-event", notice.refEventId);
+        list.append(item);
+      }
+      history.append(list);
+      section.append(history);
+    }
+    const refresh = el("button", { type: "button", id: "presence-refresh" }, "Refresh machine status");
+    refresh.disabled = this.busy;
+    refresh.onclick = () => void this.act(() => this.controller.refreshPresence(true), "Could not refresh machine status.");
+    section.append(refresh);
+    return section;
+  }
+
+  private ownerReplyRequestsMarkup(): HTMLElement | null {
+    const state = this.snapshot?.replyGrants;
+    if (!state?.supported || !state.owner) return null;
+    const pending = state.requests.filter(r => r.status === "pending");
+    if (!pending.length) return null;
+    const section = el("section", { "aria-label": "Reply requests" });
+    section.append(el("h3", {}, "Reply requests"));
+    const threads = this.snapshot ? inboxThreadList(this.snapshot) : [];
+    for (const request of pending) {
+      const thread = threads.find(t => t.hubId === request.hub_id && t.projectId === request.project_id && t.sessionId === request.session_id);
+      const conversation = thread ? `${thread.machineLabel} · ${codename(thread.session)}` : `${request.hub_id} · ${request.session_id}`;
+      const group = el("section", { "aria-label": `${request.device_label} asks to reply` });
+      group.append(el("p", {}, `${request.device_label} (${request.origin}) asks to reply to ${conversation}. This allows replies only in this conversation and keeps the browser's messages.`));
+      for (const [decision, text] of [["approve", "Allow"], ["deny", "Deny"]] as const) {
+        const button = el("button", { type: "button", id: `reply-decision-${request.request_id}-${decision}`, "aria-label": `${text} ${request.device_label} to reply to ${conversation}` }, text);
+        button.disabled = this.busy;
+        button.onclick = () => void this.act(async () => {
+          await this.controller.decideReplyRequest(request.request_id, decision);
+          this.status = decision === "approve" ? `Replying allowed for ${request.device_label}.` : `Reply request denied for ${request.device_label}.`;
+        }, "The decision could not be confirmed. Refresh and try again.");
+        group.append(button);
+      }
+      section.append(group);
+    }
+    return section;
+  }
+
   private composerMarkup(thread: Thread): HTMLElement {
     const form = el("form", { class: "operator-inbox-composer" });
     const machine = this.snapshot?.machines.find((entry) => entry.hubId === thread.hubId && entry.status === "active");
@@ -333,10 +477,29 @@ export class InboxView {
         // grant's reply access is fixed when it is approved; asking for it in
         // place needs Cassy Cloud to upgrade a grant, which it cannot yet.
         : "This browser can read this conversation but not reply. To reply from it, sign out of the inbox, sign in again and allow replies when you approve it. Signing out removes the messages kept in this browser."));
+      const upgrades = this.snapshot?.replyGrants;
+      if (machine && upgrades?.supported) {
+        form.replaceChildren(el("p", {}, "This browser can read this conversation but not reply."));
+        const request = [...upgrades.requests].reverse().find(r => r.device_id === upgrades.deviceId && r.hub_id === thread.hubId && r.project_id === thread.projectId && r.session_id === thread.sessionId);
+        const copy = request?.status === "pending" ? "Waiting for the account owner to allow replies. Your messages stay here."
+          : request?.status === "denied" ? "The owner denied this reply request. This browser is still read-only."
+          : request?.status === "expired" ? "This reply request expired. This browser is still read-only."
+          : request?.status === "approved" ? "Reply permission is being refreshed. Your messages stay here." : "Ask the account owner to allow replies without signing out.";
+        form.append(el("p", { role: "status" }, copy));
+        if (request?.status !== "pending" && request?.status !== "approved") {
+          const ask = el("button", { type: "button", id: "operator-inbox-ask-reply" }, this.busy ? "Asking…" : "Ask to reply");
+          ask.disabled = this.busy;
+          ask.onclick = () => void this.act(() => this.controller.askToReply({ hubId: thread.hubId, projectId: thread.projectId, sessionId: thread.sessionId }), "The request could not be confirmed. Try again.");
+          form.append(ask);
+        }
+      }
       return form;
     }
     const label = el("label", { for: "operator-inbox-reply" }, `Reply — ${machine.label ?? "the machine"} gets it when it’s back`);
     const text = el("textarea", { id: "operator-inbox-reply", rows: "3", maxlength: "8000" });
+    const draftKey = JSON.stringify([thread.hubId, thread.projectId, thread.sessionId]);
+    text.value = this.replyDrafts.get(draftKey) ?? "";
+    text.oninput = () => this.replyDrafts.set(draftKey, text.value);
     const send = el("button", { type: "submit", class: "primary", id: "operator-inbox-send" }, this.busy ? "Queuing…" : "Queue reply");
     form.append(label, text, send);
     form.onsubmit = (event) => {
@@ -348,6 +511,7 @@ export class InboxView {
           { machineId: machine.machineId, hubId: thread.hubId, projectId: thread.projectId, sessionId: thread.sessionId, sessionName: thread.session },
           body,
         );
+        this.replyDrafts.delete(draftKey);
         text.value = "";
       }, "The reply was not queued.");
     };

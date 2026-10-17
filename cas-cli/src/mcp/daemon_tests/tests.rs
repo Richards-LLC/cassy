@@ -11,6 +11,104 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::test_support::TestEnvGuard;
 
+/// cas-f1fb: exercise the serve's real sync entrypoint, including the lease
+/// around queue writes and HTTP. A hub sweep already in flight must win;
+/// after it releases, the daemon must sync and keep competing holders out.
+#[tokio::test]
+async fn cas_f1fb_daemon_cloud_sync_respects_and_holds_store_lease() {
+    use crate::cloud::sync_lease::SyncLease;
+    use std::sync::atomic::AtomicUsize;
+
+    let mut env = TestEnvGuard::temp_home();
+    let project = env.home().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let root = init_cas_dir(&project).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set_current_dir(&project);
+    crate::cloud::set_canonical_id_in_config_toml(&root, "daemon-lease-project").unwrap();
+
+    let server = MockServer::start().await;
+    let mut cloud = CloudConfig::default();
+    cloud.endpoint = server.uri();
+    cloud.token = Some("synthetic-lease-test-token".into());
+    cloud.save_to_cas_dir(&root).unwrap();
+    let queue = SyncQueue::open(&root).unwrap();
+    queue.init().unwrap();
+    queue
+        .enqueue(
+            EntityType::Entry,
+            "daemon-lease-entry",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"daemon-lease-entry","scope":"project","origin_project":"daemon-lease-project","content":"queued"}"#),
+        )
+        .unwrap();
+
+    // Observe contention at the network boundary, while run_cloud_sync is
+    // still in flight. This also catches a lease dropped before HTTP begins.
+    let excluded_competitors = Arc::new(AtomicUsize::new(0));
+    for (verb, suffix, body) in [
+        (
+            "POST",
+            "push",
+            serde_json::json!({"synced": {"entries": 1}}),
+        ),
+        (
+            "GET",
+            "pull",
+            serde_json::json!({
+                "entries": [], "tasks": [], "rules": [], "skills": [],
+                "specs": [], "events": [], "prompts": [],
+                "file_changes": [], "commit_links": [],
+                "pulled_at": "2026-10-16T13:00:00Z",
+            }),
+        ),
+    ] {
+        let root = root.clone();
+        let excluded = excluded_competitors.clone();
+        Mock::given(method(verb))
+            .and(path(format!("/api/sync/{suffix}")))
+            .respond_with(move |_: &wiremock::Request| {
+                if SyncLease::try_acquire(&root).unwrap().is_none() {
+                    excluded.fetch_add(1, Ordering::SeqCst);
+                }
+                ResponseTemplate::new(200).set_body_json(&body)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let daemon = EmbeddedDaemon::new(EmbeddedDaemonConfig {
+        cas_root: root.clone(),
+        index_code: false,
+        ..Default::default()
+    });
+    let held = SyncLease::try_acquire(&root).unwrap().unwrap();
+    let skipped = daemon.trigger_cloud_sync().await.unwrap();
+    assert!(skipped.errors.is_empty(), "{:?}", skipped.errors);
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "the daemon must make no cloud request while the hub holds the lease"
+    );
+    assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
+
+    drop(held);
+    let synced = daemon.trigger_cloud_sync().await.unwrap();
+    assert!(synced.errors.is_empty(), "{:?}", synced.errors);
+    assert_eq!(synced.pushed_entries, 1);
+    assert!(queue.pending(10, 5).unwrap().is_empty());
+    assert_eq!(
+        excluded_competitors.load(Ordering::SeqCst),
+        2,
+        "the daemon must hold the lease during both push and pull"
+    );
+    server.verify().await;
+    assert!(
+        SyncLease::try_acquire(&root).unwrap().is_some(),
+        "the daemon must release the lease when its cycle finishes"
+    );
+}
+
 #[tokio::test]
 async fn cas_8095_team_only_daemon_makes_only_team_calls() {
     let server = MockServer::start().await;
@@ -286,6 +384,93 @@ fn context_reset_rebind_preserves_worker_name_and_lease_for_claude_and_codex() {
     }
 }
 
+/// cas-e9fc: `/clear` emits the old conversation's SessionEnd(reason=clear)
+/// before the worker row names the new session. Through the real hook path it
+/// must keep the worker registered with its lease, and the new SessionStart
+/// must rebind that same row.
+#[test]
+fn cas_e9fc_clear_session_end_before_rebind_keeps_the_worker_registered() {
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", Some("worker")),
+        ("CAS_AGENT_NAME", Some("smooth-robin-87")),
+        ("CAS_FACTORY_SESSION", Some("factory-e9fc")),
+        ("CAS_FACTORY_WORKER_CLI", Some("claude")),
+    ]);
+    let temp = TempDir::new().expect("temp project");
+    let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
+    let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
+    let task_store = crate::store::open_task_store(&cas_root).expect("open task store");
+    task_store
+        .add(&Task::new("cas-e9fc-lease".to_string(), "scratch root".to_string()))
+        .expect("seed task");
+    let old_session = "cd08c932-378b-4b5c-a69a-c5ade0b8aa62";
+    let new_session = "34398e29-2e78-46c0-b17f-127c407f02e4";
+    let cc_pid = std::process::id();
+
+    // The worker as spawned: registered by its first SessionStart.
+    let (original, _) = register_session_start_agent(
+        &cas_root,
+        agent_store.as_ref(),
+        old_session,
+        Some("smooth-robin-87"),
+        Some("worker"),
+        cc_pid,
+        Some("/tmp/smooth-robin-87"),
+    )
+    .expect("register worker");
+    agent_store
+        .try_claim("cas-e9fc-lease", &original.id, 600, Some("in progress"))
+        .expect("claim task before reset");
+
+    // /clear: the old conversation's SessionEnd lands while the row still
+    // names the old session (clear_context has not recorded the new one).
+    crate::hooks::handlers::handle_session_end(
+        &crate::hooks::HookInput {
+            session_id: old_session.into(),
+            hook_event_name: "SessionEnd".into(),
+            reason: Some("clear".into()),
+            ..Default::default()
+        },
+        Some(&cas_root),
+    )
+    .expect("SessionEnd");
+    let kept = agent_store
+        .get(&original.id)
+        .expect("a /clear SessionEnd keeps the worker registered");
+    assert_eq!(kept.name, "smooth-robin-87");
+    assert_eq!(
+        agent_store
+            .get_lease("cas-e9fc-lease")
+            .unwrap()
+            .filter(|lease| lease.status == cas_types::LeaseStatus::Active)
+            .expect("the task lease survives a /clear")
+            .agent_id,
+        original.id
+    );
+
+    // The new conversation's SessionStart rebinds the same row.
+    let (resolved, reused) = register_session_start_agent(
+        &cas_root,
+        agent_store.as_ref(),
+        new_session,
+        Some("smooth-robin-87"),
+        Some("worker"),
+        cc_pid,
+        Some("/tmp/smooth-robin-87"),
+    )
+    .expect("rebind after /clear");
+    assert!(reused, "the post-clear SessionStart reuses the worker row");
+    assert_eq!(resolved.id, original.id);
+    assert_eq!(resolved.cc_session_id.as_deref(), Some(new_session));
+    let workers = agent_store
+        .list(None)
+        .unwrap()
+        .into_iter()
+        .filter(|agent| agent.name == "smooth-robin-87")
+        .count();
+    assert_eq!(workers, 1, "one row, reachable by name");
+}
+
 /// Duplicate rows are a recovery case for databases written by the buggy
 /// build. Both harnesses must make the daemon choose the newest identity row
 /// before stale cleanup or heartbeat ownership is evaluated.
@@ -497,16 +682,25 @@ async fn embedded_daemon_cloud_cycle_drains_team_queue() {
     const TEAM_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
     let server = MockServer::start().await;
+    // cas-9b5d: a team-linked daemon pulls in team scope only (cas-421e);
+    // a personal pull from it would be refused or miss teammates' rows.
     let personal_pull_path = ["/api/sync", "pull"].join("/");
     Mock::given(method("GET"))
         .and(path(personal_pull_path))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{TEAM_ID}/sync/pull")))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "entries": [], "tasks": [], "rules": [], "skills": [],
-            "specs": [], "events": [], "prompts": [],
-            "file_changes": [], "commit_links": [],
+            "task_dependencies": [],
             "pulled_at": chrono::Utc::now().to_rfc3339(),
+            "team_id": TEAM_ID,
+            "status": "ok",
         })))
-        .expect(1)
+        .expect(1..)
         .mount(&server)
         .await;
     Mock::given(method("POST"))

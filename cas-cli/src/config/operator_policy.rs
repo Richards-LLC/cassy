@@ -543,6 +543,9 @@ pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
     "qa.evidence_gate",
     "qa.independent_pass",
     "release.claude_account_allowlist",
+    // cas-d58d: the operator's privacy rule for same-repo peers; `team`
+    // admits other users' supervisors again.
+    "peers.same_repo_scope",
 ];
 
 /// Whether `key` is operator-only (cas-0d4f0), including `factory.write_roots`.
@@ -1134,6 +1137,7 @@ mod tests {
             ("qa.evidence_gate", "false"),
             ("qa.mode", "batch"),
             ("release.claude_account_allowlist", "agent@example.com"),
+            ("peers.same_repo_scope", "own"),
         ] {
             assert!(is_operator_only_config_key(key), "{key}");
             let mut changed = before.clone();

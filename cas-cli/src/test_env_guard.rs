@@ -172,6 +172,15 @@ impl TestEnvGuard {
         // opts into this override; guard unit tests use evaluate() with
         // injected snapshots and therefore still exercise refusal behavior.
         guard.set("CAS_FACTORY_BUILD_GUARD", "off");
+        // A path beneath this executable cannot resolve to another program.
+        // Fail before spawning host gh, even with inherited credentials.
+        // GitHub fixtures must explicitly install their own CAS_GH_BIN.
+        guard.set(
+            "CAS_GH_BIN",
+            std::env::current_exe()
+                .expect("test executable")
+                .join("disabled-gh"),
+        );
         guard
     }
 

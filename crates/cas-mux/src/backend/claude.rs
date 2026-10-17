@@ -49,6 +49,7 @@ impl Backend for Claude {
             launch.secure_storage_dir,
             launch.config_dir_source,
         );
+        apply_launch_options(&mut config, launch.cas_root, launch.name, false);
         finish_worker_config(
             &mut config,
             launch.supervisor_cli,
@@ -71,6 +72,7 @@ impl Backend for Claude {
             launch.effort,
             launch.teams,
         );
+        apply_launch_options(&mut config, launch.cas_root, launch.name, true);
         finish_supervisor_config(&mut config, self.name(), launch.worker_names);
         config
     }
@@ -87,7 +89,9 @@ impl Backend for Claude {
             )
         })?;
         match cas_pty::ensure_claude_project_trusted_in(&config, cwd) {
-            Ok(cas_pty::ClaudeTrustOutcome::Added(_) | cas_pty::ClaudeTrustOutcome::AlreadyPresent) => Ok(()),
+            Ok(
+                cas_pty::ClaudeTrustOutcome::Added(_) | cas_pty::ClaudeTrustOutcome::AlreadyPresent,
+            ) => Ok(()),
             Ok(cas_pty::ClaudeTrustOutcome::Skipped(reason)) => Err(Error::pty(format!(
                 "refusing to launch Claude before its workspace trust is recorded: {reason}"
             ))),
@@ -101,5 +105,41 @@ impl Backend for Claude {
 
     fn turn_cancel_bytes(&self) -> &'static [u8] {
         &[0x1b]
+    }
+}
+
+/// One role-aware application for initial, dynamic and recycled Claude panes.
+fn apply_launch_options(
+    config: &mut PtyConfig,
+    root: Option<&std::path::PathBuf>,
+    name: &str,
+    supervisor: bool,
+) {
+    let result = (|| -> std::result::Result<(), String> {
+        let options =
+            crate::worker_resources::load_claude_config(root.map(std::path::PathBuf::as_path))
+                .map_err(|error| error.to_string())?;
+        let mut flags = Vec::new();
+        if supervisor && options.remote_control {
+            flags.push(("--remote-control", name.to_owned()));
+        }
+        if let Some(model) = options.fallback_model {
+            flags.push(("--fallback-model", model));
+        }
+        for (flag, value) in flags {
+            if !cas_pty::claude_supports_flag(flag) {
+                return Err(format!(
+                    "Claude launch requested {flag}, but the installed CLI does not support it; upgrade Claude or clear the corresponding factory.claude option"
+                ));
+            }
+            config.args.extend([flag.to_owned(), value]);
+        }
+        Ok(())
+    })();
+    if let Err(reason) = result {
+        // Pty::spawn checks this before discovery for every role.
+        config
+            .env
+            .push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), reason));
     }
 }

@@ -174,6 +174,8 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
     /// The server `Date` header, for clock-skew correction.
     pub date: Option<String>,
+    /// Retry-After seconds on throttled operator routes.
+    pub retry_after_s: Option<u32>,
 }
 
 /// A finite, synchronous HTTPS exchange. Tests substitute an in-process cloud.
@@ -238,6 +240,9 @@ impl HttpClient for UreqHttp {
         };
         let status = response.status();
         let date = response.header("Date").map(str::to_owned);
+        let retry_after_s = response
+            .header("Retry-After")
+            .and_then(|value| value.parse().ok());
         let mut bytes = Vec::new();
         response
             .into_reader()
@@ -251,6 +256,7 @@ impl HttpClient for UreqHttp {
             status,
             body: bytes,
             date,
+            retry_after_s,
         })
     }
 }

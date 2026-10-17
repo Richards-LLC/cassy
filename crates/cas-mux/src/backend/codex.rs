@@ -129,7 +129,17 @@ impl Backend for Codex {
                 ))),
             },
         };
-        trust
+        trust?;
+        if let Some(home) = config_dir
+            .filter(|dir| !dir.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(cas_pty::codex_home)
+        {
+            let config = home.join("config.toml");
+            cas_pty::prepare_cas_tool_hooks_in(&config, &home.join("hooks.json"))?;
+            cas_pty::prepare_cas_tool_hooks_in(&config, &cwd.join(".codex/hooks.json"))?;
+        }
+        Ok(())
     }
 
     fn push_factory_session(&self, config: &mut PtyConfig, session: &str) {
@@ -427,9 +437,12 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(
             home.join("hooks.json"),
-            r#"{"hooks":{"PreToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"CAS_HOOK_HARNESS=codex cas hook PreToolUse"}]}],"PostToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"cas hook PostToolUse"}]}]}}"#,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"CAS_HOOK_HARNESS=codex cas hook PreToolUse","timeout":3}]}],"PostToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"cas hook PostToolUse"}]}]}}"#,
         )
         .unwrap();
+
+        std::fs::create_dir_all(worktree.join(".codex")).unwrap();
+        std::fs::copy(home.join("hooks.json"), worktree.join(".codex/hooks.json")).unwrap();
 
         CODEX
             .prepare_workdir(&worktree, Some(home.to_str().unwrap()))
@@ -441,6 +454,22 @@ mod tests {
         assert!(config.contains(&hooks));
         assert!(config.contains(":pre_tool_use:0:0"));
         assert!(config.contains(":post_tool_use:0:0"));
+        for hooks in [home.join("hooks.json"), worktree.join(".codex/hooks.json")] {
+            let value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(hooks).unwrap()).unwrap();
+            assert_eq!(
+                value["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"],
+                cas_pty::CODEX_PRE_TOOL_TIMEOUT_SECS
+            );
+        }
+        assert!(
+            config.contains(
+                &worktree
+                    .join(".codex/hooks.json")
+                    .to_string_lossy()
+                    .to_string()
+            )
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

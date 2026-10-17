@@ -32,6 +32,7 @@ export CAS_RELEASE_GATE_HOME_DIR
 # `cas config` staging.scratch_root, so Zig and scratch resolve from fixtures.
 export CAS_RELEASE_ENV_FILE="$tmp/no-release.env"
 export CAS_RELEASE_ENV_SCRATCH_ROOT=""
+export CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT=""
 mkdir -p "$CAS_RELEASE_GATE_HOME_DIR"
 
 # Fail loudly rather than silently reintroducing the same class: if the chosen
@@ -124,6 +125,11 @@ echo 'PASS operator launch smoke: fixture'
 EOF_OPERATOR_LAUNCH
     printf 'fixture license\n' >"$repo/LICENSE"
     cp "$script_dir/release-test-env.sh" "$script_dir/release-integration-gates.py" "$repo/scripts/"
+    # Exercise the real no-build SLO row, including its checked-in SQLite session.
+    cp "$script_dir/check-communication-slos.py" "$repo/scripts/"
+    mkdir -p "$repo/scripts/fixtures/communication-slos" "$repo/crates/cas-store/src/communication_slo"
+    cp "$script_dir/fixtures/communication-slos/"*.sql "$repo/scripts/fixtures/communication-slos/"
+    cp "$script_dir/../crates/cas-store/src/communication_slo/"*.sql "$repo/crates/cas-store/src/communication_slo/"
     for helper in test-check-portable-x86_64-isa check-portable-x86_64-isa check-portable-x86_64-dependencies check-blake3-no-avx512-build; do
         cp "$script_dir/$helper.sh" "$repo/scripts/$helper.sh"
     done
@@ -577,7 +583,7 @@ fi
 # cas-dcb4: the gate schedules independent rows concurrently under declared
 # resources. Spans come from the fake Cargo, visual-QA and script fixtures;
 # the receipt, timing.tsv and failure reporting keep canonical row order.
-readonly gate_canonical_rows='scratch-base,epic-worktree-fresh,epic-worktree-zig,publish-toolchain,failure-log,assemble-stale-base,ancestor-proxy-config,version-literals,ci-script-tests,hub-web-tests,release-binary-isa,operator-launch-smoke,fixture-paths,workspace-tests,macos-check,hub-web-dist-drift,hub-web-visual-qa,nextest,doctests,archive-mode,snapshot-portability,builtin-projections,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,test-env,builtin-doc-hygiene,journey-catalog,builtin-skill-limits,doctor-snapshot,migration-registry,ci-script-tests-changed,fixture-paths-src,builtin-projections-src,call-shapes,release-notes-draft,working-tree'
+readonly gate_canonical_rows='scratch-base,epic-worktree-fresh,epic-worktree-zig,publish-toolchain,failure-log,assemble-stale-base,ancestor-proxy-config,version-literals,ci-script-tests,hub-web-tests,release-binary-isa,operator-launch-smoke,fixture-paths,workspace-tests,macos-check,hub-web-dist-drift,hub-web-visual-qa,nextest,doctests,archive-mode,snapshot-portability,builtin-projections,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,test-env,builtin-doc-hygiene,journey-catalog,builtin-skill-limits,doctor-snapshot,communication-slos,migration-registry,ci-script-tests-changed,fixture-paths-src,builtin-projections-src,call-shapes,release-notes-draft,working-tree'
 
 # span_check <log> overlap A B | disjoint A B... | max | wall
 span_check() {
@@ -829,7 +835,7 @@ assert_all_pass() {
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
         version-literals release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
         builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env ci-script-tests builtin-doc-hygiene \
-        journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed fixture-paths-src builtin-projections-src call-shapes release-notes-draft \
+        journey-catalog builtin-skill-limits doctor-snapshot communication-slos migration-registry ci-script-tests-changed fixture-paths-src builtin-projections-src call-shapes release-notes-draft \
         hub-web-tests hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
@@ -1609,6 +1615,29 @@ output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$tmp/gate-scratch/base" \
 assert_named_failure scratch-base "$output"
 grep -qF 'filesystem boundary' <<<"$output" && ok 'scratch-base names a cross-device base' \
     || bad "scratch-base omitted the filesystem boundary: $output"
+
+# cas-baa8: a base inside the configured [factory] scratch_root may sit on
+# another device; release_env.py decides, the same resolver that derived it.
+factory_scratch="$tmp/factory-scratch"
+mkdir -p "$factory_scratch"
+factory_key="$(cd "$repo" && python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, "scripts"); import release_env; print(release_env.project_key(Path(".cas").absolute()))')"
+mkdir -p "$factory_scratch/$factory_key/release-gate"
+output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$factory_scratch/$factory_key/release-gate/base" \
+    CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT="$factory_scratch" \
+    CAS_RELEASE_GATE_CHECKOUT_DEVICE=11 CAS_RELEASE_GATE_SCRATCH_DEVICE=22 \
+    "$repo/scripts/release-gate.sh" 9.99.7 --only scratch-base 2>&1 || true)"
+if grep -qE '^PASS scratch-base' <<<"$output" && grep -qF 'factory.scratch_root' <<<"$output"; then
+    ok 'scratch-base accepts a cross-device base inside factory.scratch_root'
+else
+    bad "scratch-base refused the configured factory.scratch_root base: $output"
+fi
+output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$tmp/gate-scratch/base" \
+    CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT="$factory_scratch" \
+    CAS_RELEASE_GATE_CHECKOUT_DEVICE=11 CAS_RELEASE_GATE_SCRATCH_DEVICE=22 \
+    "$repo/scripts/release-gate.sh" 9.99.7 --only scratch-base 2>&1 || true)"
+assert_named_failure scratch-base "$output"
+grep -qF 'filesystem boundary' <<<"$output" && ok 'scratch-base still refuses an unrelated cross-device base' \
+    || bad "scratch-base accepted a cross-device base outside factory.scratch_root: $output"
 
 output="$(cd "$repo" && CAS_RELEASE_GATE_HOME_DIR="$tmp/gate-scratch/base" \
     CAS_RELEASE_GATE_CHECKOUT_DEVICE=11 CAS_RELEASE_GATE_SCRATCH_DEVICE=11 \

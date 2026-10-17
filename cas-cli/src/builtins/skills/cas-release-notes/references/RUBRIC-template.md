@@ -72,7 +72,8 @@ Save the postable draft as `docs/release-notes/<date>-<topic>-slack.md`
 (date `YYYY-MM-DD`, topic kebab-case) before posting.
 
 Immediately after posting, before ending the task or turn, annotate that saved
-draft with a `## POSTED` block containing the UTC timestamp, channel, and the
+draft with a `## POSTED` block containing the posting time in Eastern 12-hour
+form (for example `9:45 AM ET`), channel, and the
 `message_id` and permalink of every top-level post and reply. This is the searchable receipt
 that the announcement happened.
 
@@ -80,7 +81,7 @@ that the announcement happened.
 
 Slack renders mrkdwn, not Markdown: single `*bold*`, `_italic_`, backtick code
 and `•` bullets. The Violet transport refuses a body containing `**`, a
-`#` heading or a `- ` bullet, so write the draft in mrkdwn from the start.
+`#` heading or a dash bullet, so write the draft in mrkdwn from the start.
 
 User top-level:
 

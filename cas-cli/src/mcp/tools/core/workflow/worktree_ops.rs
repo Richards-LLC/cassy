@@ -293,6 +293,87 @@ pub(crate) fn delivery_ci_pending(branch: &str, target: &str, cwd: &Path) -> boo
     )
 }
 
+/// A merge idle relay concerns this exact delivery tip. Missing checks,
+/// lookup errors and any unfinished check all defer it, even if another
+/// check is already red. Do not borrow an older code commit's green result.
+pub(crate) fn delivery_tip_ci_conclusion(sha: &str, cwd: &Path) -> &'static str {
+    delivery_tip_ci_answer(sha, cwd).unwrap_or("unknown")
+}
+
+fn delivery_tip_ci_answer(sha: &str, cwd: &Path) -> Option<&'static str> {
+    let binary = crate::github_repo::gh_binary();
+    let repo = crate::github_repo::resolve_origin(cwd, &binary, BRANCH_CI_LOOKUP_TIMEOUT).ok()?;
+    let output = fetch_branch_ci(sha, cwd, &repo.canonical, &binary);
+    if !output.success { return None; }
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let runs = parsed.get("check_runs")?.as_array()?;
+    if runs.is_empty() { return None; }
+    if runs.iter().any(|run| matches!(run.get("status").and_then(serde_json::Value::as_str),
+        Some("queued" | "in_progress" | "requested" | "waiting" | "pending"))) {
+        return Some("pending");
+    }
+    if runs.iter().any(|run| {
+        run.get("status").and_then(serde_json::Value::as_str) != Some("completed")
+            || run.get("conclusion").and_then(serde_json::Value::as_str).is_none()
+    }) { return None; }
+    match classify_branch_ci_response("", sha, output) {
+        BranchCiState::Green { .. } => Some("success"),
+        BranchCiState::Red { .. } => Some("failure"),
+        _ => None,
+    }
+}
+
+/// Epic close reads the existing exact-default-SHA receipt. A skipped test
+/// alongside a green lint/preview is not a successfully executed suite.
+/// Share worktree_merge's bounded lookup and validation-job classifier; never
+/// fall back to an ancestor code SHA or trigger a workflow.
+pub(crate) fn epic_tip_ci_proof(sha: &str, cwd: &Path) -> Result<String, String> {
+    let binary = crate::github_repo::gh_binary();
+    let repo = crate::github_repo::resolve_origin(cwd, &binary, BRANCH_CI_LOOKUP_TIMEOUT)?;
+    let output = fetch_branch_ci(sha, cwd, &repo.canonical, &binary);
+    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
+    let runs = parsed
+        .as_ref()
+        .and_then(|value| value.get("check_runs"))
+        .and_then(serde_json::Value::as_array);
+    let complete = runs.is_some_and(|runs| {
+        !runs.is_empty()
+            && parsed
+                .as_ref()
+                .and_then(|value| value.get("total_count"))
+                .and_then(serde_json::Value::as_u64)
+                .is_none_or(|total| total <= runs.len() as u64)
+            && runs.iter().all(|run| {
+                run.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+                    && run
+                        .get("conclusion")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some()
+                    && !run
+                        .get("head_sha")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|head| head != sha)
+                    && run
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_none_or(|name| {
+                            !is_test_check_run(run, name)
+                                || run.get("conclusion").and_then(serde_json::Value::as_str)
+                                    == Some("success")
+                        })
+            })
+    });
+    match classify_branch_ci_response("", sha, output) {
+        BranchCiState::Green { test_checks, .. } if complete => Ok(format!(
+            "CI check-runs on exact SHA {sha} passed: {}",
+            test_checks.join(", ")
+        )),
+        _ => Err(format!(
+            "CI check-runs on exact SHA {sha} are missing, incomplete or not successful (cancelled, skipped and budget-blocked runs do not count)"
+        )),
+    }
+}
+
 /// Prefer tip CI that contains code checks: a multi-commit push runs CI there.
 /// Otherwise query the latest code commit in merge-base..tip, or Docs Lint at
 /// the tip for a pure docs delivery. Both lookups are bounded and never poll.
@@ -3635,6 +3716,43 @@ impl CasCore {
             } else {
                 None
             };
+            // cas-a131: a heads-up to other live supervisors delivering into
+            // this target. Fire and forget: the merge never waits for it.
+            if let Ok(caller_id) = self.get_agent_id()
+                && let Some(caller) = self
+                    .open_agent_store()
+                    .ok()
+                    .and_then(|agents| agents.get(&caller_id).ok())
+                    .filter(|agent| agent.role == cas_types::AgentRole::Supervisor)
+            {
+                let tip = parked_anchor
+                    .map(str::to_string)
+                    .or_else(|| manager.git().resolve_commit(&worktree.branch));
+                if let Some(tip) = tip {
+                    let (root, target, source) =
+                        (cas_root.clone(), worktree.parent_branch.clone(), worktree.branch.clone());
+                    let task = task_id.map(str::to_string);
+                    let merger = format!(
+                        "{}@{}",
+                        caller.name,
+                        crate::cloud::peers::machine_label_for(&cas_root)
+                    );
+                    std::thread::spawn(move || {
+                        let outcome = crate::cloud::peer_merge::announce_merge(
+                            &root,
+                            &caller.id,
+                            &crate::cloud::peer_merge::MergeIntent {
+                                target: &target,
+                                source: &source,
+                                task_id: task.as_deref(),
+                                tip: &tip,
+                                merger: &merger,
+                            },
+                        );
+                        tracing::debug!(?outcome, %target, %source, "cas-a131 merge-intent note");
+                    });
+                }
+            }
             let merge_result = if let Some(anchor) = dirty_pushed_anchor {
                 let result = manager.merge_pushed_delivery_preserving_worktree(&mut worktree, anchor);
                 if result.is_ok() {

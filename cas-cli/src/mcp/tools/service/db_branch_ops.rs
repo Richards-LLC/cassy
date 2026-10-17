@@ -1,123 +1,14 @@
 //! `db_branch_create` / `db_branch_show` / `db_branch_delete` (cas-0033,
 //! GH #1005 item 3), plus teardown when a task ends.
 //!
-//! Supervisor-only. The supervisor's `cas serve` holds the Neon credential
-//! through the MCP proxy (`neon.*` is allowlisted for supervisors only), so a
-//! worker never holds `NEON_API_KEY` and never sees a connection string: it
-//! reads `.env.cas-db` in its own worktree. The provider-independent logic is
+//! Supervisor-only. The supervisor's `cas serve` runs `neonctl` with its own
+//! Neon credential (cas-b3b4a: no Neon MCP upstream), so a worker never holds
+//! `NEON_API_KEY` and never sees a connection string: it reads `.env.cas-db`
+//! in its own worktree. The provider-independent logic is
 //! in [`crate::db_branch`].
 
 use crate::db_branch::{self, DbBranchRecord};
-#[cfg(feature = "mcp-proxy")]
-use crate::db_branch::{NeonBranchApi, NeonBranchInfo};
 use crate::mcp::tools::service::imports::*;
-
-/// The proxy server name Neon is registered under in `.cas/proxy.toml`.
-#[cfg(feature = "mcp-proxy")]
-const NEON_SERVER: &str = "neon";
-
-/// [`NeonBranchApi`] over the supervisor's MCP proxy.
-#[cfg(feature = "mcp-proxy")]
-struct ProxyNeonApi<'a> {
-    proxy: &'a cmcp_core::ProxyEngine,
-    caller: cmcp_core::ProxyCaller,
-}
-
-#[cfg(feature = "mcp-proxy")]
-impl ProxyNeonApi<'_> {
-    async fn call(&self, tool: &str, args: serde_json::Value) -> Result<String, String> {
-        let code =
-            serde_json::json!({ "server": NEON_SERVER, "tool": tool, "args": args }).to_string();
-        let result = self
-            .proxy
-            .execute(&self.caller, &code, Some(400_000))
-            .await
-            .map_err(|error| {
-                db_branch::redact_connection_strings(&cmcp_core::describe_upstream_call_error(
-                    &error,
-                ))
-            })?;
-        if result.is_error {
-            let text: String = db_branch::redact_connection_strings(&result.text)
-                .chars()
-                .take(400)
-                .collect();
-            return Err(format!("{NEON_SERVER}.{tool} failed: {text}"));
-        }
-        Ok(result.text)
-    }
-}
-
-#[cfg(feature = "mcp-proxy")]
-impl NeonBranchApi for ProxyNeonApi<'_> {
-    async fn list_branches(&self, project_id: &str) -> Result<Vec<NeonBranchInfo>, String> {
-        let text = self
-            .call(
-                "list_branches",
-                serde_json::json!({ "project_id": project_id }),
-            )
-            .await?;
-        Ok(db_branch::parse_branches(&text))
-    }
-
-    async fn create_branch(
-        &self,
-        project_id: &str,
-        name: &str,
-        parent_id: &str,
-    ) -> Result<NeonBranchInfo, String> {
-        let text = self
-            .call(
-                "create_branch",
-                serde_json::json!({
-                    "project_id": project_id,
-                    "name": name,
-                    "parent_id": parent_id,
-                    // Cost cap: a small autoscaling ceiling that suspends when idle.
-                    "compute": {
-                        "min_cu": 0.25,
-                        "max_cu": db_branch::MAX_CU,
-                        "suspend_timeout_seconds": 300
-                    }
-                }),
-            )
-            .await?;
-        let created = db_branch::parse_branches(&text);
-        created
-            .iter()
-            .find(|branch| branch.name == name)
-            .or_else(|| created.first())
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "{NEON_SERVER}.create_branch returned no branch id for {name}; check the Neon console for a stray branch"
-                )
-            })
-    }
-
-    async fn connection_string(&self, project_id: &str, branch_id: &str) -> Result<String, String> {
-        let text = self
-            .call(
-                "get_connection_string",
-                serde_json::json!({ "project_id": project_id, "branch_id": branch_id }),
-            )
-            .await?;
-        db_branch::extract_connection_string(&text).ok_or_else(|| {
-            format!(
-                "{NEON_SERVER}.get_connection_string returned no postgres:// URL for {branch_id}"
-            )
-        })
-    }
-
-    async fn delete_branch(&self, project_id: &str, branch_id: &str) -> Result<(), String> {
-        self.call(
-            "delete_branch",
-            serde_json::json!({ "project_id": project_id, "branch_id": branch_id }),
-        )
-        .await
-        .map(|_| ())
-    }
-}
 
 /// Whether a task has ended (closed, cancelled, or no longer exists).
 fn task_ended(tasks: Option<&std::sync::Arc<dyn cas_store::TaskStore>>, task_id: &str) -> bool {
@@ -202,18 +93,19 @@ impl CasService {
             })
     }
 
-    #[cfg(feature = "mcp-proxy")]
-    fn db_branch_api(&self) -> Result<ProxyNeonApi<'_>, McpError> {
-        let proxy = self.proxy.as_deref().ok_or_else(|| {
+    /// cas-b3b4a: Neon through `neonctl`, with this process's `NEON_API_KEY`
+    /// or else neonctl's own login.
+    fn db_branch_api(&self) -> Result<db_branch::NeonCli, McpError> {
+        let program = db_branch::NeonCli::locate().ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_REQUEST,
-                "db_branch needs the Neon MCP server in .cas/proxy.toml (allowlisted as supervisor:neon.*)",
+                "db_branch needs neonctl: npm install -g neonctl, then neonctl auth (or set NEON_API_KEY)",
             )
         })?;
-        Ok(ProxyNeonApi {
-            proxy,
-            caller: self.proxy_caller()?,
-        })
+        let api_key = std::env::var("NEON_API_KEY")
+            .ok()
+            .filter(|key| !key.trim().is_empty());
+        Ok(db_branch::NeonCli { program, api_key })
     }
 
     /// Provision a disposable branch for a task.
@@ -265,7 +157,6 @@ impl CasService {
             .unwrap_or_else(|| self.inner.cas_root.clone());
         let binding = db_branch::project_binding(&project_root)
             .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
-        #[cfg(feature = "mcp-proxy")]
         {
             let api = self.db_branch_api()?;
             let record = db_branch::provision(
@@ -304,14 +195,6 @@ impl CasService {
                 record.env_file.display(),
                 db_branch::TTL_HOURS,
             )))
-        }
-        #[cfg(not(feature = "mcp-proxy"))]
-        {
-            let _ = (worktree, binding);
-            Err(Self::error(
-                ErrorCode::INVALID_REQUEST,
-                "db_branch_create needs a build with the mcp-proxy feature",
-            ))
         }
     }
 
@@ -401,7 +284,6 @@ impl CasService {
         task_id: &str,
         select: impl Fn(&DbBranchRecord) -> bool,
     ) -> Result<db_branch::TeardownReport, McpError> {
-        #[cfg(feature = "mcp-proxy")]
         {
             let api = self.db_branch_api()?;
             db_branch::teardown(
@@ -413,14 +295,6 @@ impl CasService {
             )
             .await
             .map_err(|message| Self::error(ErrorCode::INTERNAL_ERROR, message))
-        }
-        #[cfg(not(feature = "mcp-proxy"))]
-        {
-            let _ = (task_id, select);
-            Err(Self::error(
-                ErrorCode::INVALID_REQUEST,
-                "db_branch needs a build with the mcp-proxy feature",
-            ))
         }
     }
 

@@ -99,6 +99,28 @@ impl SupervisorCli {
     }
 }
 
+/// cas-3f93: a managed worker checkout under a project whose
+/// `[factory] scratch_root` is set builds into its relocated private target,
+/// the same directory the capped worker check and target seeding use. Unset,
+/// or any unmanaged checkout, leaves Cargo's in-tree default untouched.
+fn worker_scratch_target(cwd: &Path) -> Option<PathBuf> {
+    let cas_dir = cas_types::factory_scratch::managed_worktree_store(cwd)?;
+    let contents = std::fs::read_to_string(cas_dir.join("config.toml")).ok()?;
+    let document: toml::Value = toml::from_str(&contents).ok()?;
+    let value = document.get("factory")?.get("scratch_root")?.as_str();
+    let root = cas_types::factory_scratch::parse_scratch_root(value)?;
+    Some(cas_types::factory_scratch::worker_target_dir(Some(&root), cwd))
+}
+
+fn push_worker_target_env(config: &mut PtyConfig) {
+    if let Some(target) = config.cwd.as_deref().and_then(worker_scratch_target) {
+        config.env.retain(|(name, _)| name != "CARGO_TARGET_DIR");
+        config
+            .env
+            .push(("CARGO_TARGET_DIR".to_string(), target.to_string_lossy().into_owned()));
+    }
+}
+
 pub(super) fn finish_worker_config(
     config: &mut PtyConfig,
     supervisor_cli: SupervisorCli,
@@ -107,6 +129,7 @@ pub(super) fn finish_worker_config(
     cas_root: Option<&PathBuf>,
 ) {
     config.apply_worker_build_concurrency(active_workers);
+    push_worker_target_env(config);
     config.env.push((
         "CAS_FACTORY_SUPERVISOR_CLI".to_string(),
         supervisor_cli.backend().name().to_string(),
@@ -173,7 +196,28 @@ pub(super) fn finish_worker_config(
     if !warning.is_empty() {
         config.env.push((cas_pty::WORKER_CREDENTIAL_WARNING_ENV.into(), warning));
     }
-    if !policy.is_empty() {
+    let claude = config.effective_command() == "claude";
+    if claude {
+        let options = match crate::worker_resources::load_claude_config(cas_root.map(PathBuf::as_path)) {
+            Ok(options) => options,
+            Err(error) => {
+                config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), error.to_string()));
+                return;
+            }
+        };
+        if options.worker_mcp == cas_types::factory_claude::WorkerMcp::Inherit {
+            if !policy.is_empty() {
+                config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(),
+                    "Claude worker_mcp=inherit conflicts with the denial policy; use cas_only, or clear the denial policy".into()));
+            }
+            return;
+        }
+    }
+    if claude && (!cas_pty::claude_supports_flag("--mcp-config") || !cas_pty::claude_supports_flag("--strict-mcp-config")) {
+        config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), "Claude worker isolation requires --mcp-config and --strict-mcp-config; upgrade the installed Claude CLI before spawning".into()));
+        return;
+    }
+    if claude || !policy.is_empty() {
         // Grok discovers original project/user MCP configuration and has no
         // supported per-launch isolation override. Other unsupported native
         // harnesses must also refuse, before Pty::spawn can start discovery.
@@ -187,7 +231,9 @@ pub(super) fn finish_worker_config(
             "factory worker resource denials; tasks needing these resources route to supervisor");
         let worker = config.env.iter().rev().find_map(|(key, value)| (key == "CAS_AGENT_NAME").then_some(value.clone())).unwrap_or_else(|| "worker".into());
         if let Some(root) = cas_root {
-            match crate::worker_resources::prepare_worker_mcp(root, &worker, &policy) {
+            let scope = if claude { crate::worker_resources::McpScope::CasOnly }
+                else { crate::worker_resources::McpScope::AllowedProject };
+            match crate::worker_resources::prepare_worker_mcp(root, &worker, &policy, scope) {
                 Ok(path) => {
                     let cli = config.effective_command();
                     if cli == "claude" {
@@ -209,8 +255,10 @@ pub(super) fn finish_worker_config(
                         }
                     }
                 }
-                Err(_) => config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), "Worker MCP isolation could not be provisioned; fix the project .mcp.json and private worker-mcp directory before spawning".into())),
+                Err(error) => config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), format!("Worker MCP isolation could not be provisioned: {error}; fix the project MCP configuration/policy and private worker-mcp directory before spawning"))),
             }
+        } else if claude {
+            config.env.push(("CAS_FACTORY_WORKER_LAUNCH_ERROR".into(), "Claude worker isolation requires a Cassy project root; supply cas_root before spawning".into()));
         }
     }
 }
@@ -626,4 +674,61 @@ pub(super) fn sanitize_toml_arg(value: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod scratch_root_tests {
+    use super::*;
+
+    fn worker_config(cwd: PathBuf) -> PtyConfig {
+        PtyConfig {
+            command: "true".into(),
+            args: vec![],
+            cwd: Some(cwd),
+            env: vec![],
+            env_remove: vec![],
+            rows: 24,
+            cols: 80,
+        }
+    }
+
+    fn target_env(config: &PtyConfig) -> Vec<&str> {
+        config
+            .env
+            .iter()
+            .filter(|(name, _)| name == "CARGO_TARGET_DIR")
+            .map(|(_, value)| value.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn scratch_root_worker_spawn_exports_relocated_cargo_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = dir.path().join(".cas");
+        let worktree = cas.join("worktrees/worker-1");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let scratch = dir.path().join("rewind");
+
+        // Unset: no CARGO_TARGET_DIR, so Cargo keeps <worktree>/target.
+        let mut config = worker_config(worktree.clone());
+        push_worker_target_env(&mut config);
+        assert!(target_env(&config).is_empty());
+
+        std::fs::write(
+            cas.join("config.toml"),
+            format!("[factory]\nscratch_root = {:?}\n", scratch.display().to_string()),
+        )
+        .unwrap();
+        let mut config = worker_config(worktree.clone());
+        push_worker_target_env(&mut config);
+        let expected = scratch
+            .join(cas_types::factory_scratch::project_key(&cas))
+            .join("targets/worker-1");
+        assert_eq!(target_env(&config), [expected.to_str().unwrap()]);
+
+        // The main checkout is not a managed worker checkout.
+        let mut config = worker_config(dir.path().to_path_buf());
+        push_worker_target_env(&mut config);
+        assert!(target_env(&config).is_empty());
+    }
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise the real atomic cache publisher with fake Cargo; no Rust builds."""
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -55,12 +56,23 @@ printf 'complete artifact\n' >"$CARGO_TARGET_DIR/artifact"
 exit "${FIXTURE_CARGO_EXIT:-0}"
 ''')
         self.cargo.chmod(0o755)
+        # A hermetic `cas` answers `config get factory.scratch_root` (cas-3f93).
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        fake_cas = self.bin / "cas"
+        fake_cas.write_text(
+            "#!/usr/bin/env bash\n"
+            "[[ \"$*\" == 'config get factory.scratch_root' ]] || exit 31\n"
+            "printf '%s\\n' \"${FIXTURE_SCRATCH_ROOT:-}\"\n")
+        fake_cas.chmod(0o755)
         self.receipt = self.root / "host-update.json"
         self.env = patch.dict(os.environ, {
             "CARGO": str(self.cargo), "FIXTURE_RELEASED": self.released,
             "FIXTURE_CARGO_EXIT": "0", "CAS_ROOT": str(self.root / "wrong-root"),
             "CAS_RELEASE_TRAIN_WORKER_CACHE_CMD": str(SCRIPTS / "refresh-worker-build-cache.sh"),
             "CAS_RELEASE_TRAIN_WORKER_CACHE_TIMEOUT_SECS": "60",
+            "PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            "FIXTURE_SCRATCH_ROOT": "",
         })
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -80,6 +92,7 @@ exit "${FIXTURE_CARGO_EXIT:-0}"
         result = self.refresh()
         self.assertEqual(result["status"], "PASS", result)
         self.assertEqual(result["source_commit"], self.released)
+        self.assertEqual(result["cache_root"], str((self.repo / ".cas").resolve() / "build-cache"))
         self.assertEqual((self.cache / "current").read_text().strip(), result["snapshot"])
         snapshot = self.cache / "snapshots" / result["snapshot"]
         self.assertEqual((snapshot / "artifact").read_text(), "complete artifact\n")
@@ -88,6 +101,52 @@ exit "${FIXTURE_CARGO_EXIT:-0}"
         self.assertTrue((self.cache / "snapshots/old").is_dir())
         self.assertEqual((self.repo / "source").read_text(), "uncommitted edit\n")
         self.assertFalse((self.root / "wrong-root").exists())
+        self.assert_no_checkouts()
+
+    def test_scratch_root_publishes_baseline_under_project_scratch_namespace(self):
+        """cas-3f93: the refresh and the host update agree on the relocated root."""
+        scratch = self.root / "rewind"
+        store = (self.repo / ".cas").resolve()
+        label = "".join(ch if ch.isascii() and (ch.isalnum() or ch in "-_") else "-"
+                        for ch in store.parent.name[:48])
+        expected = (scratch / f"{label}-{hashlib.sha256(bytes(store)).hexdigest()}"
+                    / "build-cache")
+        script = self.cargo.read_text()
+        script = script.replace('"$CAS_ROOT/build-cache/snapshots/target-"*',
+                                '"$FIXTURE_CACHE/snapshots/target-"*')
+        script = script.replace('[[ "$(cat "$CAS_ROOT/build-cache/current")" == old ]] || exit 25\n',
+                                '[[ ! -e "$FIXTURE_CACHE/current" ]] || exit 25\n')
+        self.cargo.write_text(script)
+        with patch.dict(os.environ, FIXTURE_SCRATCH_ROOT=f" {scratch} ",
+                        FIXTURE_CACHE=str(expected)):
+            result = self.refresh()
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["cache_root"], str(expected))
+        self.assertEqual((expected / "current").read_text().strip(), result["snapshot"])
+        snapshot = expected / "snapshots" / result["snapshot"]
+        # pin: the fake Cargo's output must land in the relocated snapshot unchanged.
+        self.assertEqual((snapshot / "artifact").read_text(), "complete artifact\n")
+        # The in-tree baseline is untouched.
+        self.assertEqual((self.cache / "current").read_text(), "old\n")
+        self.assertEqual([p.name for p in (self.cache / "snapshots").iterdir()], ["old"])
+        self.assert_no_checkouts()
+
+    def test_scratch_root_project_key_matches_rust_golden_vector(self):
+        text = (SCRIPTS / "refresh-worker-build-cache.sh").read_text()
+        start = text.index("project_key() {")
+        body = text[start:text.index("\n}\n", start) + 3]
+        key = subprocess.run(["bash", "-c", body + 'project_key "/srv/demo repo/.cas"'],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        # Same vector as cas_types::factory_scratch's golden test.
+        self.assertEqual(
+            key, "demo-repo-57694f919d7a09378d7bd9dde4b21bd900b11644a97685c8a94b79ecc97046c8")
+
+    def test_scratch_root_relative_value_is_refused(self):
+        with patch.dict(os.environ, FIXTURE_SCRATCH_ROOT="rewind/cas"):
+            result = self.refresh()
+        self.assertEqual(result["status"], "WARN")
+        self.assertEqual(result["exit"], 2)
+        self.assertEqual((self.cache / "current").read_text(), "old\n")
         self.assert_no_checkouts()
 
     def test_failed_build_keeps_old_snapshot_and_removes_incomplete_one(self):

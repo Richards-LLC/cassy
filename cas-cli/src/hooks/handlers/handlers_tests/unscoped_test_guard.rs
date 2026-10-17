@@ -557,4 +557,17 @@ fn codex_nested_exec_command_check_runs_through_the_capped_runner_cas_980d() {
     let out = handle_pre_tool_use(&codex_payload("call_nested", command), Some(&root)).unwrap();
     let stdout = serde_json::to_value(&out).unwrap();
     assert_eq!(codex_effective_command(&stdout, command), None, "{stdout}");
+
+    // Early route selection still checks operator denials against both the
+    // original Cargo command and the actual replacement executable.
+    let executable = std::env::current_exe().unwrap();
+    for denied in ["cargo", executable.file_name().unwrap().to_str().unwrap()] {
+        let mut config = crate::config::Config::default();
+        config.factory.get_or_insert_with(Default::default).worker_denied_clis = vec![denied.into()];
+        config.save(&root).unwrap();
+        let command = "cargo check -p cas --tests";
+        let output = handle_pre_tool_use(&codex_payload("call_denied", command), Some(&root)).unwrap();
+        assert!(deny_reason(&output).is_some_and(|reason| reason.contains(denied)), "{output:?}");
+        assert_eq!(codex_effective_command(&serde_json::to_value(output).unwrap(), command), None);
+    }
 }

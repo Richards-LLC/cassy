@@ -4045,12 +4045,17 @@ async fn cas_fd42_failed_task_push_withholds_dependent_edge() {
         .into_iter()
         .find(|row| row.entity_type == crate::cloud::EntityType::TaskDependency)
         .unwrap();
-    assert_eq!(edge.retry_count, 0);
-    assert!(
-        edge.last_error
-            .unwrap()
-            .contains("waiting for endpoint task")
+    // cas-9b5d: a terminally parked endpoint withholds the edge by parking
+    // it with a named reason, not by leaving it pending forever where it
+    // could fill a push batch. Retrying scope_mismatch releases both.
+    assert_eq!(edge.retry_count, 5);
+    assert_eq!(
+        edge.last_reason.as_deref(),
+        Some("dependency_endpoint_unavailable")
     );
+    let error = edge.last_error.unwrap();
+    assert!(error.contains("fd42-child"), "{error}");
+    assert!(error.contains("scope_mismatch"), "{error}");
 }
 
 #[tokio::test]
@@ -4084,5 +4089,388 @@ async fn cas_fd42_repaired_backlog_pushes_tasks_before_dependency() {
         decode_push_body(writes[1])
             .get("task_dependencies")
             .is_some()
+    );
+}
+
+/// cas-9b5d fixture: a pinned personal store whose push replies acknowledge
+/// every task and dependency it receives, with a deliberately small batch so
+/// the prowl head-of-line shape (one full batch of waiting edges) is cheap.
+async fn cas_9b5d_personal_fixture(
+    batch_size: usize,
+) -> (
+    tempfile::TempDir,
+    Arc<SyncQueue>,
+    CloudSyncer,
+    wiremock::MockServer,
+) {
+    use crate::cloud::CloudConfig;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(|request: &wiremock::Request| {
+            let body = decode_push_body(request);
+            let mut reply = serde_json::Map::new();
+            for key in ["tasks", "task_dependencies"] {
+                if let Some(rows) = body.get(key).and_then(|rows| rows.as_array()) {
+                    reply.insert(
+                        key.to_string(),
+                        serde_json::json!({"inserted": rows.len(), "updated": 0, "skipped": 0}),
+                    );
+                }
+            }
+            ResponseTemplate::new(200).set_body_json(serde_json::Value::Object(reply))
+        })
+        .mount(&server)
+        .await;
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    crate::store::open_store_local(temp.path()).unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            ..Default::default()
+        },
+        CloudSyncerConfig {
+            batch_size,
+            ..Default::default()
+        },
+        "p".into(),
+        temp.path(),
+    );
+    (temp, queue, syncer, server)
+}
+
+fn cas_9b5d_enqueue_task(queue: &SyncQueue, id: &str) {
+    use crate::cloud::{EntityType, SyncOperation};
+    queue
+        .enqueue(
+            EntityType::Task,
+            id,
+            SyncOperation::Upsert,
+            Some(&format!(r#"{{"id":"{id}","title":"{id}","origin_project":"p"}}"#)),
+        )
+        .unwrap();
+}
+
+fn cas_9b5d_enqueue_edge(queue: &SyncQueue, from: &str, to: &str) {
+    use crate::cloud::{EntityType, SyncOperation};
+    queue
+        .enqueue(
+            EntityType::TaskDependency,
+            &format!("{from}:{to}:blocks"),
+            SyncOperation::Upsert,
+            Some(&format!(
+                r#"{{"from_id":"{from}","to_id":"{to}","dep_type":"blocks","origin_project":"p"}}"#
+            )),
+        )
+        .unwrap();
+}
+
+/// cas-9b5d (prowl gabber-studio): the endpoint tasks were rejected as
+/// team_owned_project and parked, and the oldest pending batch was made of
+/// edges waiting on them. The edges waited forever, every round pushed
+/// nothing, and the push stopped "after making no progress" on every daemon
+/// tick, so the thousands of rows behind them were never sent.
+#[tokio::test]
+async fn cas_9b5d_parked_endpoints_do_not_wedge_the_personal_push() {
+    let (_temp, queue, syncer, server) = cas_9b5d_personal_fixture(2).await;
+    let max_retries = CloudSyncerConfig::default().max_retries;
+    for id in ["parked-a", "parked-b"] {
+        cas_9b5d_enqueue_task(&queue, id);
+        let row = queue
+            .list_all(10)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.entity_id == id)
+            .unwrap();
+        queue
+            .record_row_outcome(row.id, "rejected", Some("team_owned_project"))
+            .unwrap();
+        queue
+            .park_failed(
+                row.id,
+                "cloud rejected tasks: reason=team_owned_project",
+                max_retries,
+            )
+            .unwrap();
+    }
+    cas_9b5d_enqueue_edge(&queue, "parked-a", "parked-b");
+    cas_9b5d_enqueue_edge(&queue, "parked-b", "parked-a");
+    cas_9b5d_enqueue_task(&queue, "live-task");
+
+    let result = syncer.push().unwrap();
+
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|error| error.contains("no progress")),
+        "{:?}",
+        result.errors
+    );
+    assert_eq!(result.pushed_tasks, 1, "the row behind the edges is sent");
+    assert_eq!(result.pushed_task_dependencies, 0, "edges stay withheld");
+    let rows = queue.list_all(10).unwrap();
+    assert!(rows.iter().all(|row| row.entity_id != "live-task"));
+    let edges: Vec<_> = rows
+        .iter()
+        .filter(|row| row.entity_type == crate::cloud::EntityType::TaskDependency)
+        .collect();
+    assert_eq!(edges.len(), 2);
+    for edge in edges {
+        assert_eq!(edge.retry_count, max_retries, "edge leaves the pending queue");
+        assert_eq!(
+            edge.last_reason.as_deref(),
+            Some("dependency_endpoint_unavailable")
+        );
+        let error = edge.last_error.as_deref().unwrap();
+        assert!(error.contains("team_owned_project"), "{error}");
+    }
+    assert_eq!(
+        queue
+            .intentional_park_counts(None, max_retries)
+            .unwrap()
+            .get("dependency_endpoint_unavailable"),
+        Some(&2)
+    );
+    let posts = server.received_requests().await.unwrap();
+    assert!(posts.iter().all(|request| {
+        decode_push_body(request)
+            .get("task_dependencies")
+            .is_none()
+    }));
+}
+
+/// cas-9b5d: edges older than their still-pending endpoint tasks must not
+/// fill the FIFO batch either, or the endpoints are never reached.
+#[tokio::test]
+async fn cas_9b5d_edges_ahead_of_pending_endpoints_do_not_fill_the_batch() {
+    let (_temp, queue, syncer, server) = cas_9b5d_personal_fixture(2).await;
+    cas_9b5d_enqueue_edge(&queue, "late-a", "late-b");
+    cas_9b5d_enqueue_edge(&queue, "late-b", "late-a");
+    cas_9b5d_enqueue_task(&queue, "late-a");
+    cas_9b5d_enqueue_task(&queue, "late-b");
+
+    let result = syncer.push().unwrap();
+
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.pushed_tasks, 2);
+    assert_eq!(result.pushed_task_dependencies, 2);
+    assert!(queue.list_all(10).unwrap().is_empty());
+    let posts = server.received_requests().await.unwrap();
+    let first = decode_push_body(&posts[0]);
+    assert!(first.get("tasks").is_some(), "{first}");
+    assert!(first.get("task_dependencies").is_none(), "{first}");
+}
+
+/// cas-9b5d: one automatic daemon sync (`sync_with_sessions`) against a mock
+/// cloud, for a store that is personal, team-linked, or team-only. Returns the
+/// requests per endpoint, the queue and the sync result.
+async fn cas_9b5d_daemon_sync(
+    team_id: Option<&str>,
+    team_only: bool,
+) -> (
+    std::collections::BTreeMap<&'static str, usize>,
+    tempfile::TempDir,
+    Arc<SyncQueue>,
+    SyncResult,
+) {
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation};
+    use crate::store::{
+        open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
+        open_rule_store_local, open_skill_store_local, open_spec_store, open_store_local,
+        open_task_store_local,
+    };
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tasks": {"inserted": 1, "updated": 0, "skipped": 0}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(super::pull::PULL_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [], "tasks": [], "rules": [], "skills": [],
+            "pulled_at": "2026-10-16T12:00:00Z",
+        })))
+        .mount(&server)
+        .await;
+    if let Some(team_id) = team_id {
+        Mock::given(method("GET"))
+            .and(path(format!("/api/teams/{team_id}/sync/pull")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [], "tasks": [], "rules": [], "skills": [],
+                "task_dependencies": [],
+                "pulled_at": "2026-10-16T12:00:00Z",
+                "team_id": team_id,
+                "status": "ok",
+            })))
+            .mount(&server)
+            .await;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    let store = open_store_local(temp.path()).unwrap();
+    let task_store = open_task_store_local(temp.path()).unwrap();
+    let rule_store = open_rule_store_local(temp.path()).unwrap();
+    let skill_store = open_skill_store_local(temp.path()).unwrap();
+    let spec_store = open_spec_store(temp.path()).unwrap();
+    let event_store = open_event_store(temp.path()).unwrap();
+    let prompt_store = open_prompt_store(temp.path()).unwrap();
+    let file_change_store = open_file_change_store(temp.path()).unwrap();
+    let commit_link_store = open_commit_link_store(temp.path()).unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    queue
+        .enqueue(
+            EntityType::Task,
+            "personal-row",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"personal-row","title":"personal-row","origin_project":"p"}"#),
+        )
+        .unwrap();
+    // petra-stella-cloud's frozen personal watermark (cas-59d9 preflight).
+    queue
+        .set_metadata("last_pull_at", "2026-10-02T14:27:08.386Z")
+        .unwrap();
+    if let Some(team_id) = team_id {
+        // gabber-studio's stuck team watermark (cas-59d9 preflight).
+        queue
+            .set_metadata(
+                &format!("last_team_pull_at_{team_id}_p"),
+                "2026-10-15T21:52:10.801Z",
+            )
+            .unwrap();
+    }
+
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            team_id: team_id.map(str::to_string),
+            team_only,
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "p".into(),
+        temp.path(),
+    );
+    let result = syncer
+        .sync_with_sessions(
+            store.as_ref(),
+            task_store.as_ref(),
+            rule_store.as_ref(),
+            skill_store.as_ref(),
+            spec_store.as_ref(),
+            event_store.as_ref(),
+            prompt_store.as_ref(),
+            file_change_store.as_ref(),
+            commit_link_store.as_ref(),
+            &[],
+        )
+        .unwrap();
+
+    let mut calls = std::collections::BTreeMap::new();
+    for request in server.received_requests().await.unwrap() {
+        let key = match (request.method.as_str(), request.url.path()) {
+            ("POST", "/api/sync/push") => "personal_push",
+            ("GET", super::pull::PULL_PATH) => "personal_pull",
+            ("GET", p) if p.ends_with("/sync/pull") => "team_pull",
+            ("POST", p) if p.ends_with("/sync/push") => "team_push",
+            _ => "other",
+        };
+        *calls.entry(key).or_default() += 1;
+    }
+    (calls, temp, queue, result)
+}
+
+/// cas-9b5d: prowl's team-linked stores (team_id set, team_only off) pushed
+/// personal rows the cloud refused as team_owned_project every daemon tick,
+/// and never pulled team scope, so gabber-studio's team watermark stayed at
+/// a manual sync from the day before. The daemon must follow cas-421e: team
+/// scope only, personal rows left queued and untouched.
+#[tokio::test]
+async fn cas_9b5d_team_linked_daemon_sync_uses_team_scope_only() {
+    let (calls, _temp, queue, result) = cas_9b5d_daemon_sync(Some("team-1"), false).await;
+
+    assert_eq!(calls.get("personal_push"), None, "{calls:?}");
+    assert_eq!(calls.get("personal_pull"), None, "{calls:?}");
+    assert!(calls.get("team_pull").is_some_and(|n| *n >= 1), "{calls:?}");
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(
+        queue
+            .get_metadata("last_team_pull_at_team-1_p")
+            .unwrap()
+            .as_deref(),
+        Some("2026-10-16T12:00:00Z"),
+        "the team watermark advances"
+    );
+    assert_eq!(
+        queue.get_metadata("last_pull_at").unwrap().as_deref(),
+        Some("2026-10-02T14:27:08.386Z"),
+        "the personal watermark is untouched"
+    );
+    let rows = queue.list_all(10).unwrap();
+    assert_eq!(rows.len(), 1, "the personal row stays queued");
+    assert_eq!(rows[0].entity_id, "personal-row");
+    assert_eq!(rows[0].team_id.as_deref().unwrap_or(""), "");
+    assert_eq!(rows[0].retry_count, 0);
+    assert_eq!(rows[0].last_error, None);
+}
+
+/// cas-9b5d control: team-only stores already synced in team scope.
+#[tokio::test]
+async fn cas_9b5d_team_only_daemon_sync_stays_team_scoped() {
+    let (calls, _temp, queue, result) = cas_9b5d_daemon_sync(Some("team-1"), true).await;
+
+    assert_eq!(calls.get("personal_push"), None, "{calls:?}");
+    assert_eq!(calls.get("personal_pull"), None, "{calls:?}");
+    assert!(calls.get("team_pull").is_some_and(|n| *n >= 1), "{calls:?}");
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(
+        queue
+            .get_metadata("last_team_pull_at_team-1_p")
+            .unwrap()
+            .as_deref(),
+        Some("2026-10-16T12:00:00Z")
+    );
+}
+
+/// cas-9b5d control: a personal store keeps its personal push and pull.
+#[tokio::test]
+async fn cas_9b5d_personal_daemon_sync_is_unchanged() {
+    let (calls, _temp, queue, result) = cas_9b5d_daemon_sync(None, false).await;
+
+    assert_eq!(calls.get("personal_push"), Some(&1), "{calls:?}");
+    assert_eq!(calls.get("personal_pull"), Some(&1), "{calls:?}");
+    assert_eq!(calls.get("team_pull"), None, "{calls:?}");
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.pushed_tasks, 1);
+    assert!(queue.list_all(10).unwrap().is_empty());
+    assert_eq!(
+        queue.get_metadata("last_pull_at").unwrap().as_deref(),
+        Some("2026-10-16T12:00:00Z")
     );
 }

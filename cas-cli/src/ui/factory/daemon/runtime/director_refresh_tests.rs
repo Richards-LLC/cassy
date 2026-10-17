@@ -20,6 +20,42 @@ const PASS_LATENCY_LIMIT: Duration = Duration::from_millis(100);
 const SLOW_READ: Duration = Duration::from_millis(500);
 
 #[tokio::test]
+async fn cas_9efb_merge_ci_probe_runs_on_external_lane_without_blocking_control() {
+    let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+    let cas_dir = fixture.app.cas_dir().to_path_buf();
+    crate::test_paths::warm_stub(&cas_dir.join("gh-fixture"),
+        "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{\"nameWithOwner\":\"acme/cas\"}'; else sleep 0.4; cat .cas/ci.json; fi\n");
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    std::mem::swap(&mut daemon.app, &mut fixture.app);
+    let mut refresh = DirectorRefresh::new();
+    let started = Instant::now();
+    refresh.start_delivery_read(&daemon.app, &mut daemon.queue_jobs, vec![fixture.event.clone()]).unwrap();
+    assert!(started.elapsed() < PASS_LATENCY_LIMIT, "submitting merge evidence blocked control");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut external_seen = false;
+    let mut slowest = Duration::ZERO;
+    let (events, inputs) = loop {
+        assert!(Instant::now() < deadline, "merge evidence did not finish");
+        let pass = Instant::now();
+        let ready = refresh.take_delivery_read(&mut daemon.queue_jobs);
+        slowest = slowest.max(pass.elapsed());
+        external_seen |= daemon.queue_jobs.job_lanes().unwrap().lane_stats().into_iter().any(|stats| {
+            stats.running.is_some_and(|job| {
+                job.lane == super::super::jobs::Lane::External && job.key == super::super::factory_jobs::DELIVERY_READ_KEY
+            })
+        });
+        if let Some(ready) = ready { break ready; }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert!(external_seen, "the actual merge read must use the external lane");
+    let pass = Instant::now();
+    let (_, prompts, _) = daemon.app.revalidate_and_prompt_for_delivery_from(&events, inputs);
+    slowest = slowest.max(pass.elapsed());
+    assert_eq!(prompts.len(), 1);
+    assert!(slowest < PASS_LATENCY_LIMIT, "control waited for GitHub: {slowest:?}");
+}
+
+#[tokio::test]
 async fn a_slow_director_read_never_extends_a_loop_pass_cas_ee9ab() {
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();

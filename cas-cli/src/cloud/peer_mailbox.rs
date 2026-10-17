@@ -48,9 +48,28 @@ const RETIRED_RECIPIENT_MAX: usize = 100;
 const RETIREMENT_CAP_WARNING: &str =
     "retired peer recipients capped at 100; older addresses were not checked";
 
+/// Who may be addressed (cas-2a5a, petra-stella-cloud#162). One mailbox,
+/// one scope dimension: `Project` is the same-repo peer mailbox as it has
+/// always been; `User` reaches any supervisor of the caller's own Cassy
+/// Cloud user, in any project, and never another user's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerScope {
+    #[default]
+    Project,
+    User,
+}
+
+impl PeerScope {
+    pub fn is_project(&self) -> bool {
+        *self == Self::Project
+    }
+}
+
 /// One outbound peer message (`POST /api/peer-messages`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerSend {
+    /// The sender's project identity, for either scope.
     pub project_id: String,
     pub sender_agent_id: String,
     pub recipient_agent_id: String,
@@ -61,6 +80,12 @@ pub struct PeerSend {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<String>,
     pub dedupe_key: String,
+    /// Omitted for the project scope, so older servers see today's request.
+    #[serde(default, skip_serializing_if = "PeerScope::is_project")]
+    pub scope: PeerScope,
+    /// The recipient's project identity when `scope` is `user`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_project_id: Option<String>,
 }
 
 /// The cloud's answer to a send.
@@ -98,6 +123,10 @@ pub struct ClaimedPeerMessage {
     /// which stays the fallback for a sender the registry does not list.
     #[serde(default)]
     pub sender_label: Option<String>,
+    /// `user` for a message from another project of the same user
+    /// (cas-2a5a); `project_id` is then the sender's project.
+    #[serde(default)]
+    pub scope: PeerScope,
 }
 
 impl ClaimedPeerMessage {
@@ -184,6 +213,9 @@ pub struct PeerEnvelope {
     pub repo: String,
     pub in_reply_to: Option<String>,
     pub kind: Option<PeerMessageKind>,
+    /// `User` when the sender is a supervisor of another project of the same
+    /// user (cas-2a5a); `repo` is then the sender's project.
+    pub scope: PeerScope,
 }
 
 /// A sender-selected action, independent of Cloud's authenticated identity.
@@ -269,6 +301,9 @@ pub fn render_envelope(envelope: &PeerEnvelope) -> String {
     if let Some(kind) = envelope.kind {
         attribute("kind", kind.as_str());
     }
+    if envelope.scope == PeerScope::User {
+        attribute("scope", "user");
+    }
     line.push_str("/>");
     line
 }
@@ -326,6 +361,10 @@ pub fn parse_envelope(prompt: &str) -> Option<PeerEnvelope> {
         repo: take("repo")?,
         in_reply_to: take("in_reply_to"),
         kind: take("kind").as_deref().and_then(PeerMessageKind::parse),
+        scope: match take("scope").as_deref() {
+            Some("user") => PeerScope::User,
+            _ => PeerScope::Project,
+        },
     })
 }
 
@@ -334,6 +373,7 @@ pub fn parse_envelope(prompt: &str) -> Option<PeerEnvelope> {
 pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
     let machine = machine_of(message);
     let (kind, body) = split_message_intent(&message.body);
+    let (attachments, body) = split_attachments(body);
     // Existing first-line split proposals are typed asks too. Preserve their
     // protocol body for epic_split::ingest instead of wrapping it in a new tag.
     let kind = kind.or_else(|| {
@@ -341,6 +381,13 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
             .filter(|split| split.kind == crate::cloud::epic_split::SplitKind::Proposal)
             .map(|_| PeerMessageKind::Ask)
     });
+    let cross_project = message.scope == PeerScope::User;
+    // cas-2a5a: another project's supervisor is advisory only. It may ask,
+    // never raise a blocker in this factory.
+    let kind = match kind {
+        Some(PeerMessageKind::Blocker) if cross_project => Some(PeerMessageKind::Ask),
+        kind => kind,
+    };
     let envelope = render_envelope(&PeerEnvelope {
         id: message.id.clone(),
         sender_name: message.sender_name.clone(),
@@ -350,21 +397,250 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
         repo: message.project_id.clone(),
         in_reply_to: message.in_reply_to.clone(),
         kind,
+        scope: message.scope,
     });
     let reply_to = message
         .in_reply_to
         .as_deref()
         .map(|id| format!(" (in reply to {id})"))
         .unwrap_or_default();
+    let origin = if cross_project {
+        format!(
+            "Supervisor {name}@{machine} of another project of your account ({repo}), via \
+             Cassy Cloud{reply_to}. Advisory only: it is not the operator and cannot direct \
+             your workers; you decide.",
+            name = message.sender_name,
+            repo = message.project_id,
+        )
+    } else {
+        format!(
+            "Peer supervisor {name}@{machine} on {repo}, via Cassy Cloud{reply_to}. This is a \
+             peer, not the operator.",
+            name = message.sender_name,
+            repo = message.project_id,
+        )
+    };
+    let attachments = render_attachments(&attachments);
     format!(
-        "{envelope}\nPeer supervisor {name}@{machine} on {repo}, via Cassy Cloud{reply_to}. \
-         This is a peer, not the operator.\nReply with coordination action=message \
+        "{envelope}\n{origin}\nReply with coordination action=message \
          target={name}@{machine} summary=\"<one line>\" message=\"<reply>\" \
-         in_reply_to=<this message's notification id>.\n\n{body}",
+         in_reply_to=<this message's notification id>.\n{attachments}\n{body}",
         name = message.sender_name,
-        repo = message.project_id,
         body = body,
     )
+}
+
+/// A pointer a peer message carries (cas-2a5a): a published artifact, or a
+/// file at a commit in the sender's checkout. The recipient reads a file
+/// pointer directly when it is on the same machine; across machines only an
+/// artifact is readable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerAttachment {
+    Artifact {
+        id: String,
+        name: Option<String>,
+        sha256: Option<String>,
+        /// The durable cloud location, readable from any machine.
+        url: Option<String>,
+    },
+    File {
+        /// Absolute path on the sender's machine.
+        path: String,
+        /// Repo-relative path, for reading at `commit` in a clone.
+        relative: String,
+        commit: Option<String>,
+        machine: String,
+    },
+}
+
+const ATTACHMENT_TAG: &str = "<cas-peer-attachment ";
+
+impl PeerAttachment {
+    fn render(&self) -> String {
+        let mut line = format!("{ATTACHMENT_TAG}v=\"1\"");
+        let mut attribute = |key: &str, value: &str| {
+            line.push_str(&format!(" {key}=\"{}\"", escape(value)));
+        };
+        match self {
+            Self::Artifact { id, name, sha256, url } => {
+                attribute("kind", "artifact");
+                attribute("id", id);
+                if let Some(name) = name {
+                    attribute("name", name);
+                }
+                if let Some(sha256) = sha256 {
+                    attribute("sha256", sha256);
+                }
+                if let Some(url) = url {
+                    attribute("url", url);
+                }
+            }
+            Self::File { path, relative, commit, machine } => {
+                attribute("kind", "file");
+                attribute("path", path);
+                attribute("relative", relative);
+                if let Some(commit) = commit {
+                    attribute("commit", commit);
+                }
+                attribute("machine", machine);
+            }
+        }
+        line.push_str("/>");
+        line
+    }
+
+    fn parse(line: &str) -> Option<Self> {
+        let mut rest = line.strip_prefix(ATTACHMENT_TAG)?.strip_suffix("/>")?;
+        let mut attributes = std::collections::HashMap::new();
+        loop {
+            rest = rest.trim_start();
+            if rest.is_empty() {
+                break;
+            }
+            let (key, after) = rest.split_once("=\"")?;
+            let (value, after) = after.split_once('"')?;
+            attributes.insert(key.to_string(), unescape(value));
+            rest = after;
+        }
+        (attributes.get("v")?.as_str() == "1").then_some(())?;
+        let mut take = |key: &str| attributes.remove(key).filter(|value| !value.is_empty());
+        match take("kind")?.as_str() {
+            "artifact" => Some(Self::Artifact {
+                id: take("id")?,
+                name: take("name"),
+                sha256: take("sha256"),
+                url: take("url"),
+            }),
+            "file" => Some(Self::File {
+                path: take("path")?,
+                relative: take("relative")?,
+                commit: take("commit"),
+                machine: take("machine")?,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// The pointer a sender's `attachment` names (cas-2a5a): a published
+/// artifact id, else a file in this project's checkout, as `path` or
+/// `path@<commit>`. A file outside the checkout is refused.
+pub fn resolve_attachment(cas_root: &Path, raw: &str) -> Result<PeerAttachment, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("attachment must name a published artifact or a file in this repo".into());
+    }
+    if let Ok(store) = cas_store::SqliteArtifactStore::open(cas_root)
+        && let Ok(Some(artifact)) = store.get(raw)
+    {
+        return Ok(PeerAttachment::Artifact {
+            id: artifact.id,
+            name: Some(artifact.name),
+            sha256: Some(artifact.sha256),
+            url: artifact.cloud_url,
+        });
+    }
+    let (path, commit) = match raw.rsplit_once('@') {
+        Some((path, commit))
+            if commit.len() >= 7 && commit.chars().all(|c| c.is_ascii_hexdigit()) =>
+        {
+            (path, Some(commit.to_string()))
+        }
+        _ => (raw, None),
+    };
+    let root = cas_root
+        .parent()
+        .ok_or("this project has no checkout root")?
+        .canonicalize()
+        .map_err(|error| format!("cannot read this project's checkout: {error}"))?;
+    let candidate = if Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        root.join(path)
+    };
+    let file = candidate
+        .canonicalize()
+        .ok()
+        .filter(|file| file.starts_with(&root) && file.is_file())
+        .ok_or_else(|| {
+            format!(
+                "attachment '{raw}' is neither a published artifact nor a file in this repo ({})",
+                root.display()
+            )
+        })?;
+    let relative = file
+        .strip_prefix(&root)
+        .map(|relative| relative.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let commit = commit.or_else(|| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|sha| !sha.is_empty())
+    });
+    Ok(PeerAttachment::File {
+        path: file.to_string_lossy().into_owned(),
+        relative,
+        commit,
+        machine: crate::cloud::peers::machine_label_for(cas_root),
+    })
+}
+
+/// Prefix `body` with one CAS-written line per attachment. Lines follow the
+/// optional intent line, so [`attach_message_intent`] wraps this result.
+pub fn attach_pointers(body: &str, attachments: &[PeerAttachment]) -> String {
+    let mut out = String::new();
+    for attachment in attachments {
+        out.push_str(&attachment.render());
+        out.push('\n');
+    }
+    out.push_str(body);
+    out
+}
+
+/// The attachment lines at the start of `body`, and the rest.
+pub fn split_attachments(mut body: &str) -> (Vec<PeerAttachment>, &str) {
+    let mut attachments = Vec::new();
+    while let Some((line, rest)) = body.split_once('\n') {
+        let Some(attachment) = PeerAttachment::parse(line) else {
+            break;
+        };
+        attachments.push(attachment);
+        body = rest;
+    }
+    (attachments, body)
+}
+
+fn render_attachments(attachments: &[PeerAttachment]) -> String {
+    let mut out = String::new();
+    for attachment in attachments {
+        match attachment {
+            PeerAttachment::Artifact { id, name, sha256, url } => out.push_str(&format!(
+                "Attachment: published artifact {id}{}{}{}.\n",
+                name.as_deref().map(|name| format!(" ({name})")).unwrap_or_default(),
+                sha256.as_deref().map(|sha| format!(", sha256 {sha}")).unwrap_or_default(),
+                url.as_deref().map(|url| format!(", at {url}")).unwrap_or_default(),
+            )),
+            PeerAttachment::File { path, relative, commit, machine } => {
+                let at = commit.as_deref().map(|commit| format!(" at commit {commit}")).unwrap_or_default();
+                let access = if Path::new(path).is_file() {
+                    format!("readable here at {path}")
+                } else {
+                    format!(
+                        "not on this machine ({path} on {machine}); read {relative}{at} in a \
+                         clone, or ask the sender to publish it as an artifact"
+                    )
+                };
+                out.push_str(&format!("Attachment: file {relative}{at}, {access}.\n"));
+            }
+        }
+    }
+    out
 }
 
 fn machine_of(message: &ClaimedPeerMessage) -> String {
@@ -453,6 +729,93 @@ pub fn resolve_peer_target<'a>(
                     peer.agent_id,
                     peer.name,
                     peer.machine,
+                    peer.session.as_deref().unwrap_or("unknown")
+                ))
+                .collect::<Vec<_>>()
+                .join(" or ")
+        )),
+    }
+}
+
+/// Resolve `target` among the account-wide directory (cas-2a5a).
+///
+/// `target` is `supervisor:<selector>` or a bare selector. A selector is an
+/// agent id, `name`, `name@machine`, a project name (`violet`, or a full
+/// canonical id) or `project@machine`. Names win over project names. Live
+/// supervisors win over stale ones; a project name that still names more
+/// than one supervisor is refused with every candidate listed.
+pub fn resolve_user_peer_target<'a>(
+    peers: &'a [Peer],
+    target: &str,
+) -> Result<Option<&'a Peer>, String> {
+    let target = target.trim();
+    let selector = target
+        .strip_prefix("supervisor:")
+        .map(str::trim)
+        .unwrap_or(target);
+    if selector.is_empty() {
+        return Ok(None);
+    }
+    if let Some(peer) = resolve_peer_target(peers, selector)? {
+        return Ok(Some(peer));
+    }
+    let (project, machine) = match selector.rsplit_once('@') {
+        Some((project, machine)) => (project.trim(), Some(machine.trim())),
+        None => (selector, None),
+    };
+    let wanted = crate::cloud::normalize_project_canonical_id(project);
+    let candidates: Vec<&Peer> = peers
+        .iter()
+        .filter(|peer| {
+            peer.project_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case(project))
+                || peer.canonical_id.as_deref().is_some_and(|id| {
+                    wanted.is_some()
+                        && crate::cloud::normalize_project_canonical_id(id) == wanted
+                })
+        })
+        .filter(|peer| {
+            machine.is_none_or(|machine| {
+                peer.machine.eq_ignore_ascii_case(machine)
+                    || peer
+                        .machine_id
+                        .as_deref()
+                        .is_some_and(|id| id.eq_ignore_ascii_case(machine))
+            })
+        })
+        .collect();
+    let live: Vec<&Peer> = candidates.iter().copied().filter(|peer| peer.live).collect();
+    let pool = if live.is_empty() {
+        // One identity per supervisor while every candidate is down: its most
+        // recent registration, which its successor claims for.
+        let mut latest: BTreeMap<(String, String, Option<&str>), &Peer> = BTreeMap::new();
+        for peer in candidates {
+            let key = (
+                peer.name.to_ascii_lowercase(),
+                peer.machine.to_ascii_lowercase(),
+                peer.session.as_deref(),
+            );
+            let slot = latest.entry(key).or_insert(peer);
+            if peer.last_heartbeat > slot.last_heartbeat {
+                *slot = peer;
+            }
+        }
+        latest.into_values().collect()
+    } else {
+        live
+    };
+    match pool.as_slice() {
+        [] => Ok(None),
+        [peer] => Ok(Some(peer)),
+        many => Err(format!(
+            "'{target}' names {} supervisors of your account; address one as {}",
+            many.len(),
+            many.iter()
+                .map(|peer| format!(
+                    "{}@{} ({}, session {})",
+                    peer.name,
+                    peer.machine,
+                    peer.project_name().unwrap_or_else(|| "unknown project".into()),
                     peer.session.as_deref().unwrap_or("unknown")
                 ))
                 .collect::<Vec<_>>()
@@ -558,6 +921,8 @@ fn send_unverified_address_notice(
             summary: Some("Retired peer address: resend to current supervisor ID".into()),
             in_reply_to: Some(message.id.clone()),
             dedupe_key,
+            scope: PeerScope::Project,
+            recipient_project_id: None,
         })
         .map(|_| ())
         .map_err(|error| {
@@ -873,13 +1238,28 @@ fn deliver_claimed_with_history(
     };
     report.claimed = claimed.len();
     // cas-c7c7: show each sender under its machine label, not its id.
-    if !claimed.is_empty() {
-        let mut senders: Vec<String> = claimed.iter().map(|m| m.sender_agent_id.clone()).collect();
-        senders.sort();
-        senders.dedup();
-        let labels = mailbox.sender_labels(canonical_id, &senders);
+    // cas-2a5a: a sender in another project of this user is listed under
+    // its own project, so its label is asked for there.
+    let mut by_project: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for message in &claimed {
+        let project = match message.scope {
+            PeerScope::Project => canonical_id.to_string(),
+            PeerScope::User => message.project_id.clone(),
+        };
+        by_project
+            .entry(project)
+            .or_default()
+            .insert(message.sender_agent_id.clone());
+    }
+    for (project, senders) in by_project {
+        let senders: Vec<String> = senders.into_iter().collect();
+        let labels = mailbox.sender_labels(&project, &senders);
         for message in claimed.iter_mut() {
-            if let Some(label) = labels.get(&message.sender_agent_id) {
+            let in_project = match message.scope {
+                PeerScope::Project => project == canonical_id,
+                PeerScope::User => message.project_id == project,
+            };
+            if in_project && let Some(label) = labels.get(&message.sender_agent_id) {
                 message.sender_label = Some(label.clone());
             }
         }
@@ -904,7 +1284,11 @@ fn deliver_claimed_with_history(
             }
             continue;
         }
-        let Some(recipient) = recipient.filter(|_| same_repo) else {
+        // cas-2a5a: a user-scope message comes from another project of this
+        // user; the cloud admitted it only for a recipient of the same user,
+        // and it still reaches only a live local supervisor route.
+        let addressable = same_repo || message.scope == PeerScope::User;
+        let Some(recipient) = recipient.filter(|_| addressable) else {
             report.rejected += 1;
             acks.push((message.id.clone(), PeerAckOutcome::Rejected));
             continue;
@@ -996,6 +1380,74 @@ pub(crate) fn send_raw(
     in_reply_to: Option<&str>,
     recipient_label: &str,
 ) -> Result<SendReceipt, PeerSendError> {
+    send_scoped(
+        cas_root,
+        sender_agent_id,
+        recipient_agent_id,
+        body,
+        summary,
+        in_reply_to,
+        recipient_label,
+        PeerScope::Project,
+        None,
+    )
+}
+
+/// Send `body` from local supervisor `sender_agent_id` to `peer`, a
+/// supervisor of another project of the same Cassy Cloud user (cas-2a5a).
+///
+/// Refused before any network call unless the directory recorded `peer` as
+/// a supervisor of `owner_user_id`, the caller's own user; the cloud
+/// enforces the same rule (petra-stella-cloud#162). The message is advisory:
+/// it carries no urgency, and the recipient's daemon admits it only as a
+/// Daemon-stamped row for a live supervisor.
+pub fn send_to_user_peer(
+    cas_root: &Path,
+    sender_agent_id: &str,
+    owner_user_id: &str,
+    peer: &Peer,
+    body: &str,
+    summary: Option<&str>,
+) -> Result<SendReceipt, PeerSendError> {
+    let label = format!("{}@{}", peer.name, peer.machine);
+    let owner = owner_user_id.trim();
+    if owner.is_empty() || peer.user_id.as_deref() != Some(owner) {
+        return Err(PeerSendError::Failed {
+            cause: format!(
+                "{label} is not a supervisor of your Cassy Cloud account; supervisors of \
+                 another user are never addressable. Nothing was sent"
+            ),
+            retry: String::new(),
+        });
+    }
+    if peer.session.as_deref().is_none_or(|s| s.trim().is_empty()) {
+        return Err(PeerSendError::NoReceivingDaemon(label));
+    }
+    send_scoped(
+        cas_root,
+        sender_agent_id,
+        &peer.agent_id,
+        body,
+        summary,
+        None,
+        &label,
+        PeerScope::User,
+        peer.canonical_id.clone(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_scoped(
+    cas_root: &Path,
+    sender_agent_id: &str,
+    recipient_agent_id: &str,
+    body: &str,
+    summary: Option<&str>,
+    in_reply_to: Option<&str>,
+    recipient_label: &str,
+    scope: PeerScope,
+    recipient_project_id: Option<String>,
+) -> Result<SendReceipt, PeerSendError> {
     let project_id =
         crate::cloud::resolve_canonical_id(cas_root).ok_or_else(|| PeerSendError::Failed {
             cause: "this project has no canonical id to address peers by".into(),
@@ -1011,6 +1463,8 @@ pub(crate) fn send_raw(
             summary: summary.map(str::to_string),
             in_reply_to: in_reply_to.map(str::to_string),
             dedupe_key: String::new(),
+            scope,
+            recipient_project_id,
         },
         recipient_label,
     )
@@ -1066,7 +1520,11 @@ pub fn reply_to_peer_row(
         ))
         .to_string());
     }
-    let receipt = send_raw(
+    // cas-2a5a: a reply to another project's supervisor stays in the user
+    // scope; the cloud refuses it unless both share the user.
+    let recipient_project =
+        (envelope.scope == PeerScope::User).then(|| envelope.repo.clone());
+    let receipt = send_scoped(
         cas_root,
         sender_agent_id,
         &envelope.sender_agent_id,
@@ -1074,6 +1532,8 @@ pub fn reply_to_peer_row(
         summary,
         Some(&envelope.id),
         &format!("{}@{}", envelope.sender_name, envelope.machine),
+        envelope.scope,
+        recipient_project,
     )
     .map_err(|error| error.to_string())?;
     queue
@@ -1297,6 +1757,9 @@ impl PeerMailbox for HttpPeerMailbox {
             for recipients in recipient_agent_ids.chunks(50) {
                 let batch = Self::read::<PeerClaim>("peer message claim", self.post("/claim", serde_json::json!({
                     "project_ids":projects,"recipient_agent_ids":recipients,"consumer_id":consumer_id,
+                    // cas-2a5a: also this user's other projects' supervisors
+                    // (petra-stella-cloud#162); older servers ignore it.
+                    "scopes":["project","user"],
                     "max":CLAIM_MAX,"lease_secs":LEASE_SECS,
                 })));
                 match batch {
@@ -1385,3 +1848,7 @@ impl PeerMailbox for HttpPeerMailbox {
 #[cfg(test)]
 #[path = "peer_mailbox_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "peer_mailbox_user_scope_tests.rs"]
+mod user_scope_tests;

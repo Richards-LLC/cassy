@@ -40,6 +40,7 @@ mod worktree;
 pub mod cloud;
 mod config;
 mod config_tui;
+mod coordination;
 mod device;
 mod doctor;
 // cas-728b: pub(crate) so ui::factory::director::events can reach
@@ -53,10 +54,13 @@ pub mod foreign_rows;
 // cas-9e81: pub(crate) so factory_ops can reuse `config_gen`'s canonical
 // known-Claude-config-dir list instead of re-deriving `~/.claude` by hand.
 pub(crate) mod hook;
+pub use hook::{execute_native_pre_tool_use, is_native_codex_pre_tool};
 mod init;
+pub(crate) mod project_files;
 pub mod integrate;
 pub mod interactive;
 mod limits;
+pub(crate) mod accounts;
 mod list;
 pub(crate) mod mcp_cmd;
 pub mod memory;
@@ -297,8 +301,15 @@ pub enum Commands {
     /// Show this repository's peer supervisors through Cassy Cloud
     Peers(peers::PeersArgs),
 
+    /// Claim, transfer or reconcile ownership of a Slack thread
+    #[command(subcommand)]
+    Coordination(coordination::ExternalWorkCommands),
+
     /// Show local provider rate-limit and credit availability
     Limits(LimitsArgs),
+
+    /// Share one base folder across every Claude and Codex account
+    Accounts(accounts::AccountsArgs),
 
     /// Output a status line for agent integrations
     #[command(alias = "statusline")]
@@ -467,7 +478,9 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Config(_)
         | Commands::Status(_)
         | Commands::Peers(_)
+        | Commands::Coordination(_)
         | Commands::Limits(_)
+        | Commands::Accounts(_)
         | Commands::StatusLine(_)
         | Commands::Mcp(_)
         | Commands::Queue(_)
@@ -678,7 +691,9 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Config(_) => "config".to_string(),
         Commands::Status(_) => "status".to_string(),
         Commands::Peers(_) => "peers".to_string(),
+        Commands::Coordination(_) => "coordination".to_string(),
         Commands::Limits(_) => "limits".to_string(),
+        Commands::Accounts(_) => "accounts".to_string(),
         Commands::StatusLine(_) => "statusline".to_string(),
         Commands::Hook(_) => "hook".to_string(),
         Commands::Auth(_) => "auth".to_string(),
@@ -814,8 +829,14 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         }
         Commands::Status(args) => status::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Peers(args) => peers::execute(args, cli, require_cas_root(cas_root)?),
+        Commands::Coordination(command) => coordination::execute(command, cli, require_cas_root(cas_root)?),
         Commands::Limits(args) => limits::execute(args, cli),
-        Commands::StatusLine(args) => statusline::execute(args, cli, require_cas_root(cas_root)?),
+        Commands::Accounts(args) => accounts::execute(args, cli),
+        // cas-e1f4: outside a Cassy project the line still names the account.
+        Commands::StatusLine(args) => match cas_root {
+            Some(root) => statusline::execute(args, cli, root),
+            None => statusline::execute_account_only(args),
+        },
         Commands::Hook(args) => hook::execute(args, cli),
         Commands::Auth(cmd) => auth::execute(cmd, cli),
         Commands::Login(args) => auth::execute(&AuthCommands::Login(args.clone()), cli),
@@ -861,6 +882,8 @@ fn serve_execute() -> anyhow::Result<()> {
     // Without the harness, stdout writes now fail with EPIPE and the service
     // ends through its normal shutdown path.
     crate::server_signals::ignore_sigpipe_for_server();
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    crate::mcp::configure_serve_allocator();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

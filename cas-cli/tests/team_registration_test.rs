@@ -234,6 +234,7 @@ async fn sync_fails_loud_when_server_never_registers_the_project() {
         dry_run: false,
         rehome: false,
         full: false,
+        background: false,
     };
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
@@ -624,6 +625,7 @@ async fn sync_adopts_resolved_id_before_its_team_push_and_pull() {
         dry_run: false,
         rehome: false,
         full: false,
+        background: false,
     };
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
@@ -907,6 +909,7 @@ async fn sync_adopts_the_resolvable_team_without_any_manual_team_command() {
         dry_run: false,
         rehome: false,
         full: false,
+        background: false,
     };
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();

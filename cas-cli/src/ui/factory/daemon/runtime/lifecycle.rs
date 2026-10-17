@@ -3885,6 +3885,10 @@ impl FactoryDaemon {
         // Cleanup
         let cleanup_result = self.cleanup().await;
 
+        // Shutdown is outside the control loop. Keep store I/O on Blocking;
+        // retirement events preserve worker exposure after registry cleanup.
+        persist_communication_session_summary(self.app.cas_dir().to_path_buf(), self.session_name.clone()).await;
+
         let duration_secs = session_started_at.elapsed().as_secs().to_string();
         let final_workers = self.app.worker_names().len().to_string();
         crate::telemetry::track(
@@ -4039,6 +4043,11 @@ impl FactoryDaemon {
     ) -> bool {
         loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshDirector);
         let refresh_started = std::time::Instant::now();
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        self.relay_jobs.submit_external_work_reconciliation(
+            &mut self.queue_jobs,
+            move || super::external_work_reconcile_jobs::reconcile_due(&cas_dir),
+        );
         // cas-223f: health probes that finished since the last pass feed this
         // pass's stall confirmation.
         let (reports, failed) = refresh.take_health_reports(&mut self.queue_jobs);
@@ -4649,5 +4658,35 @@ mod stall_nudge_routing_rework_tests {
         prompt.stall_nudge_task = None;
         assert_eq!(enqueue_stall_nudge_prompt(&cas_dir, "session", &prompt, Some(chrono::Utc::now())).unwrap(), None);
         assert_eq!(queue.peek_all(10).unwrap().len(), 1);
+    }
+}
+
+
+async fn persist_communication_session_summary(cas_dir: std::path::PathBuf, session: String) {
+    match tokio::task::spawn_blocking(move || {
+        cas_store::communication_slo::write_session_end(&cas_dir, &session, chrono::Utc::now())
+    }).await {
+        Ok(Ok(summary)) => tracing::info!(summary = %summary.message(), "factory communication summary"),
+        Ok(Err(error)) => tracing::warn!(%error, "factory communication summary unavailable"),
+        Err(error) => tracing::warn!(%error, "factory communication summary job failed"),
+    }
+}
+
+#[cfg(test)]
+mod communication_summary_tests {
+    #[tokio::test]
+    async fn cas_7e24_factory_session_end_persists_summary() {
+        let project = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        use cas_store::PromptQueueStore;
+        let queue = cas_store::SqlitePromptQueueStore::open(&root).unwrap();
+        queue.init().unwrap();
+        queue.enqueue_with_session("supervisor", "worker", "body", "ended-session").unwrap();
+        super::persist_communication_session_summary(root.clone(), "ended-session".into()).await;
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        let summary: String = conn.query_row("SELECT summary_json FROM communication_slo_summaries WHERE factory_session='ended-session'", [], |r| r.get(0)).unwrap();
+        let summary: cas_store::communication_slo::CommunicationSlos = serde_json::from_str(&summary).unwrap();
+        assert_eq!(summary.lines().len(), 5);
+        assert_eq!(summary.factory_session, "ended-session");
     }
 }

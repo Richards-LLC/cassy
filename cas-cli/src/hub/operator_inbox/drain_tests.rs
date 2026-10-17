@@ -71,6 +71,7 @@ impl Cloud {
             status,
             body: serde_json::to_vec(&body).unwrap(),
             date: None,
+            retry_after_s: None,
         }
     }
 

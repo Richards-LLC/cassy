@@ -490,6 +490,7 @@ fn factory_req(action: &str) -> FactoryRequest {
         force: None,
         reason: None,
         dry_run: None,
+        artifacts: None,
         // allow_trunk is CoordinationRequest/worktree_merge only — not FactoryRequest
         clear: None,
         branch: None,
@@ -525,8 +526,16 @@ fn coord_req(action: &str) -> CoordinationRequest {
         detail: None,
         peer: None,
         json: None,
+        scope: None,
         action: action.to_string(),
         id: None,
+        external_ref: None,
+        request_id: None,
+        resource_id: None,
+        handoff_id: None,
+        expected_generation: None,
+        to_slot_id: None,
+        offer_ttl_secs: None,
         task_id: None,
         delivery_mode: None,
         merge_request: None,
@@ -586,6 +595,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         owner: None,
         orphans: None,
         dry_run: None,
+        artifacts: None,
         command: None,
         cwd: None,
         port: None,
@@ -5842,7 +5852,7 @@ async fn test_gc_report_lists_stale_temp_roots_without_deleting_them() {
 }
 
 #[tokio::test]
-async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
+async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248() {
     let env = FactoryTestEnv::new();
     let base = env.cas_root.join("durable-artifacts");
     let root = cas::config::project_factory_artifacts_root(&env.cas_root, &base);
@@ -5850,6 +5860,8 @@ async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
     let closed_id = task_store.generate_id().expect("generate closed task id");
     let mut closed = Task::new(closed_id.clone(), "closed artifact owner".to_string());
     closed.status = TaskStatus::Closed;
+    closed.closed_at = Some(chrono::Utc::now() - chrono::Duration::days(8));
+    closed.updated_at = closed.closed_at.unwrap();
     task_store.add(&closed).expect("add closed task");
     let open_id = task_store.generate_id().expect("generate open task id");
     task_store
@@ -5873,7 +5885,11 @@ async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
 
     let legacy = base.join(&closed_id);
     std::fs::create_dir_all(&legacy).unwrap();
-    std::fs::write(legacy.join("historical-proof.txt"), "possibly shared evidence").unwrap();
+    std::fs::write(
+        legacy.join("historical-proof.txt"),
+        "possibly shared evidence",
+    )
+    .unwrap();
     let report = env
         .service
         .factory_request(Parameters(factory_req("gc_report")))
@@ -5891,26 +5907,18 @@ async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
 
     let mut preview = factory_req("gc_cleanup");
     preview.force = Some(true);
-    let preview = env.service.factory_request(Parameters(preview)).await.unwrap();
-    assert!(get_text(&preview).contains("mode=review-only"));
+    preview.dry_run = Some(false);
+    let preview = env
+        .service
+        .factory_request(Parameters(preview))
+        .await
+        .unwrap();
     assert!(
         root.join(&closed_id).exists(),
-        "force alone must not delete durable proof"
+        "process-only force=true dry_run=false deleted durable evidence: {}",
+        get_text(&preview)
     );
 
-    let mut cleanup = factory_req("gc_cleanup");
-    cleanup.force = Some(true);
-    cleanup.dry_run = Some(false);
-    let cleanup = env.service.factory_request(Parameters(cleanup)).await.unwrap();
-    let cleanup_text = get_text(&cleanup);
-    assert!(
-        cleanup_text.contains("Closed-task artifact directories removed: 1"),
-        "{cleanup_text}"
-    );
-    assert!(
-        !root.join(&closed_id).exists(),
-        "closed-task artifact should be GC'd"
-    );
     assert!(
         root.join(&open_id).exists(),
         "open task artifact must be preserved"
@@ -5919,8 +5927,80 @@ async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
         root.join("operator-review-stray").exists(),
         "stray inventory must never delete"
     );
-    assert!(legacy.join("historical-proof.txt").is_file(), "ambiguous legacy proof must never be cleaned by a project");
+    assert!(
+        legacy.join("historical-proof.txt").is_file(),
+        "ambiguous legacy proof must never be cleaned by a project"
+    );
+}
 
+#[tokio::test]
+async fn test_gc_artifact_opt_in_retains_young_and_referenced_evidence_gh_1248() {
+    let env = FactoryTestEnv::new();
+    let base = env.cas_root.join("durable-artifacts");
+    let root = cas::config::project_factory_artifacts_root(&env.cas_root, &base);
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        format!(
+            "[factory]\nartifacts_root = {:?}\n",
+            base.display().to_string()
+        ),
+    )
+    .unwrap();
+    let now = chrono::Utc::now();
+    let old = now - chrono::Duration::days(8);
+    let store = env.task_store();
+    for id in ["cas-a001", "cas-a002", "cas-a003", "cas-a004", "cas-a006"] {
+        let mut task = Task::new(id.into(), "closed evidence owner".into());
+        task.status = TaskStatus::Closed;
+        task.closed_at = Some(if id == "cas-a002" { now } else { old });
+        task.updated_at = task.closed_at.unwrap();
+        if id == "cas-a006" {
+            task.updated_at = now;
+            task.notes = "Recent review uses cas-a004/proof.txt".into();
+        }
+        store.add(&task).unwrap();
+        std::fs::create_dir_all(root.join(id)).unwrap();
+        std::fs::write(root.join(id).join("proof.txt"), "durable evidence").unwrap();
+    }
+    let mut open = Task::new("cas-a005".into(), "open review".into());
+    open.notes = "Review artifact://art-7a82".into();
+    store.add(&open).unwrap();
+    cas_store::SqliteArtifactStore::open(&env.cas_root)
+        .unwrap()
+        .record_local(&cas_store::NewArtifact {
+            id: "art-7a82".into(),
+            task_id: "cas-a003".into(),
+            name: "proof.txt".into(),
+            mime: "text/plain".into(),
+            size_bytes: 16,
+            sha256: "a".repeat(64),
+        })
+        .unwrap();
+
+    let mut request = factory_req("gc_cleanup");
+    request.force = Some(true);
+    request.dry_run = Some(false);
+    request.artifacts = Some(true);
+    let result = env
+        .service
+        .factory_request(Parameters(request))
+        .await
+        .unwrap();
+    let output = get_text(&result);
+    for (id, guard) in [
+        ("cas-a002", "7-day floor"),
+        ("cas-a003", "open artifact reference"),
+        ("cas-a004", "recent note reference"),
+    ] {
+        assert!(
+            root.join(id).join("proof.txt").is_file(),
+            "{guard} lost evidence: {output}"
+        );
+    }
+    assert!(
+        !root.join("cas-a001").exists(),
+        "expired unreferenced evidence must be reclaimed: {output}"
+    );
 }
 
 // Linux reclamation requires readable process evidence; unavailable evidence
@@ -6902,8 +6982,16 @@ fn coord_msg(
         detail: None,
         peer: None,
         json: None,
+        scope: None,
         action: action.to_string(),
         id: None,
+        external_ref: None,
+        request_id: None,
+        resource_id: None,
+        handoff_id: None,
+        expected_generation: None,
+        to_slot_id: None,
+        offer_ttl_secs: None,
         task_id: None,
         delivery_mode: None,
         merge_request: None,
@@ -6963,6 +7051,7 @@ fn coord_msg(
         owner: None,
         orphans: None,
         dry_run: None,
+        artifacts: None,
         command: None,
         cwd: None,
         port: None,

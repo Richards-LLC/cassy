@@ -350,8 +350,8 @@ html[data-scheme="dark"] {
   }
   /* The middle column is open to the aurora. */
   :root .conversation-main,
-  :root .conversation-shell .pane-grid,
-  :root .conversation-pane-slot .pane-grid,
+  :root .conversation-shell .conversation-stage,
+  :root .conversation-pane-slot .conversation-stage,
   :root .conversation-reading.thread { background: transparent; }
 
   :root .conversation-row { border-radius: 16px; }

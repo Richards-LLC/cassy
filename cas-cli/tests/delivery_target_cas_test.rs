@@ -211,7 +211,9 @@ async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> De
     let cas_root = init_cas_dir(&repo.root).expect("init CAS");
     // Keep deliberate CI doubles (notably the red-override regression).
     // Other target-CAS fixtures need explicit successful code validation.
-    if std::env::var_os(cas::github_issue_attach::GH_BIN_ENV).is_none() {
+    if std::env::var_os(cas::github_issue_attach::GH_BIN_ENV)
+        .is_none_or(|binary| !Path::new(&binary).is_file())
+    {
         env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(&cas_root));
     }
     let artifact_root = cas_root.join("durable-artifacts");

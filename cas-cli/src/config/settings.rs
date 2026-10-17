@@ -10,6 +10,33 @@ pub enum SlackTransport {
     Any,
 }
 
+/// cas-d58d: which same-repo peer supervisors a project lists and messages.
+/// `team` (the default) keeps teammates' supervisors on a shared team project,
+/// each labelled with its owner; `own` admits only the caller's own account.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SameRepoScope {
+    #[default]
+    Team,
+    Own,
+}
+
+impl SameRepoScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Team => "team",
+            Self::Own => "own",
+        }
+    }
+}
+
+/// `[peers]` — same-repo peer supervisor policy (cas-d58d).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PeersConfig {
+    #[serde(default)]
+    pub same_repo_scope: SameRepoScope,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SlackConfig {
     #[serde(default)]
@@ -378,6 +405,10 @@ pub struct QaConfig {
     #[serde(default = "default_user_facing_paths")]
     pub user_facing_paths: Vec<String>,
 
+    /// Non-rendered API/server paths; HTTP transcript and contract diff QA.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_paths: Vec<String>,
+
     /// cas-619f: minutes one independent QA round may take before it times
     /// out and the supervisor must redispatch or waive.
     #[serde(default = "default_pass_timeout_mins")]
@@ -504,6 +535,7 @@ impl Default for QaConfig {
             terminal_render_paths: default_terminal_render_paths(),
             terminal_interaction_paths: default_terminal_interaction_paths(),
             user_facing_paths: default_user_facing_paths(),
+            api_paths: Vec::new(),
             pass_timeout_mins: default_pass_timeout_mins(),
             max_rounds: default_max_rounds(),
             github_status: false,
@@ -541,9 +573,66 @@ impl Default for OrchestrationConfig {
     }
 }
 
+/// Resource thresholds for the spawn and capped-build admission guard.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BuildGuardConfig {
+    /// Fallback load / CPU count ceiling when CPU PSI is unavailable.
+    pub max_load_ratio: f64,
+    /// Maximum CPU `some avg10` stall time, as a percentage.
+    pub max_cpu_pressure_percent: f64,
+    /// Maximum memory `some avg10` stall time, as a percentage.
+    pub max_memory_pressure_percent: f64,
+    /// Minimum MemAvailable; zero disables only this memory floor.
+    pub min_available_memory_gib: u32,
+}
+
+impl Default for BuildGuardConfig {
+    fn default() -> Self {
+        Self {
+            max_load_ratio: 1.0,
+            max_cpu_pressure_percent: 90.0,
+            max_memory_pressure_percent: 10.0,
+            min_available_memory_gib: 2,
+        }
+    }
+}
+
+impl BuildGuardConfig {
+    /// Hand-edited TOML can bypass the setter; invalid limits use defaults.
+    pub(crate) fn effective(&self) -> Self {
+        let mut limits = self.clone();
+        let defaults = Self::default();
+        if !limits.max_load_ratio.is_finite() || limits.max_load_ratio <= 0.0 {
+            limits.max_load_ratio = defaults.max_load_ratio;
+        }
+        for (limit, default) in [
+            (
+                &mut limits.max_cpu_pressure_percent,
+                defaults.max_cpu_pressure_percent,
+            ),
+            (
+                &mut limits.max_memory_pressure_percent,
+                defaults.max_memory_pressure_percent,
+            ),
+        ] {
+            if !limit.is_finite() || !(0.0..=100.0).contains(limit) {
+                *limit = default;
+            }
+        }
+        if limits.min_available_memory_gib > 65536 {
+            limits.min_available_memory_gib = defaults.min_available_memory_gib;
+        }
+        limits
+    }
+}
+
 /// Factory mode configuration for supervisor task assignment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactoryConfig {
+    /// Claude launch options shared by initial, dynamic and recycled agents.
+    #[serde(default)]
+    pub claude: cas_types::factory_claude::FactoryClaudeConfig,
     /// Resource denials applied to every factory worker, across harnesses.
     #[serde(flatten)]
     pub worker_policy: cas_types::factory_worker_policy::FactoryWorkerPolicy,
@@ -561,6 +650,15 @@ pub struct FactoryConfig {
     /// resolves a real-disk fallback under `~/.cas/artifacts`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts_root: Option<String>,
+
+    /// cas-3f93: absolute base for regenerable worker build output. When set,
+    /// each managed worker's Cargo target lives at
+    /// `<scratch_root>/<project-key>/targets/<worktree>` and target baselines
+    /// at `<scratch_root>/<project-key>/build-cache`, so they can sit on a
+    /// dedicated scratch drive. Unset keeps `<worktree>/target` and
+    /// `.cas/build-cache`. Running workers migrate on respawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scratch_root: Option<String>,
 
     /// Operator-only automatic supervisor replies in local history. Terminal
     /// questions and explicit operator messages are recorded separately. This
@@ -636,10 +734,14 @@ pub struct FactoryConfig {
 
     /// Maximum number of workers allowed to build concurrently on this host.
     /// Worker compile checks and targeted tests hold OS slot locks under this hard cap.
-    /// `spawn_workers` additionally applies a soft load/concurrency guard;
+    /// `spawn_workers` additionally applies a soft resource/concurrency guard;
     /// `force=true` overrides only that spawn-time check.
     #[serde(default = "default_max_concurrent_builders")]
     pub max_concurrent_builders: usize,
+
+    /// Host pressure and load fallback thresholds for build admission.
+    #[serde(default)]
+    pub build_guard: BuildGuardConfig,
 
     /// Per-build systemd MemoryHigh in GiB. 0 reserves half of host RAM
     /// across max_concurrent_builders (bounded to 256 MiB..16 GiB per build).
@@ -963,9 +1065,11 @@ impl Default for FactoryConfig {
     fn default() -> Self {
         Self {
             worker_policy: Default::default(),
+            claude: Default::default(),
             worker_denied_clis: default_worker_denied_clis(),
             worker_denied_mcp_tools: default_worker_denied_mcp_tools(),
             artifacts_root: None,
+            scratch_root: None,
             commander_mirror_enabled: true,
             write_roots: Vec::new(),
             message_max_chars: default_message_max_chars(),
@@ -977,6 +1081,7 @@ impl Default for FactoryConfig {
             cargo_build_jobs: default_auto(),
             nice_cargo: true,
             max_concurrent_builders: default_max_concurrent_builders(),
+            build_guard: BuildGuardConfig::default(),
             worker_memory_high_gib: 0,
             render_max_fps: default_render_max_fps(),
             render_unfocused_fps: default_render_unfocused_fps(),
@@ -1036,27 +1141,8 @@ pub fn project_factory_artifacts_root(
     cas_root: &std::path::Path,
     artifacts_base: &std::path::Path,
 ) -> std::path::PathBuf {
-    use sha2::{Digest, Sha256};
-    let store = cas_root
-        .canonicalize()
-        .unwrap_or_else(|_| cas_root.to_path_buf());
-    let label = store
-        .parent()
-        .and_then(|parent| parent.file_name())
-        .and_then(|name| name.to_str())
-        .unwrap_or("project")
-        .chars()
-        .take(48)
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    let hash = Sha256::digest(store.as_os_str().as_encoded_bytes());
-    artifacts_base.join(format!("{label}-{hash:x}"))
+    // cas-3f93: the scratch root namespaces projects with the same key.
+    artifacts_base.join(cas_types::factory_scratch::project_key(cas_root))
 }
 
 /// Resolve the artifact base and its writable project namespace together.

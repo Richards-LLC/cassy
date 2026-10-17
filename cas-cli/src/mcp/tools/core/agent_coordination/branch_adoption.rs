@@ -72,12 +72,26 @@ pub(super) fn adopt_task_branch(
     if task.is_terminal() || receiver.role != AgentRole::Worker {
         return Err("only a nonterminal task can adopt a registered worker's branch".into());
     }
-    let destination = receiver
+    // cas-2d20: an isolated worker's registration can lack clone_path; its
+    // managed worktree (`<worktree base>/<name>`) is then the one Cassy
+    // provisioned for it. Either way the binding check below must pass.
+    let destination: PathBuf = receiver
         .metadata
         .get("clone_path")
-        .filter(|path| !path.trim().is_empty())
-        .ok_or("receiver has no registered clone_path; spawn an isolated worker first")?;
-    let destination = Path::new(destination);
+        .map(|path| path.trim())
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            crate::mcp::tools::core::task::lifecycle::close_ops::resolve_system_b_worktree_path(
+                cas_root,
+                &receiver.name,
+            )
+        })
+        .ok_or(
+            "receiver has no registered clone_path and no managed worktree; spawn an isolated \
+             worker first",
+        )?;
+    let destination = destination.as_path();
     verify_worker_worktree_binding(&receiver.name, destination, None).map_err(|e| e.to_string())?;
     let deadline = Deadline::after(Duration::from_secs(20));
     let git = Git {

@@ -194,6 +194,10 @@ fn lock_file(path: &Path) -> Result<File> {
     Ok(options.open(path)?)
 }
 
+fn waiting_for_admission(reason: &str) -> String {
+    format!("Waiting for build admission: {reason}.\nRetry the same capped Cargo command when host pressure or a builder slot clears.")
+}
+
 fn acquire_slot(root: &Path, cap: usize) -> Result<File> {
     std::fs::create_dir_all(root)?;
     for index in 0..cap {
@@ -204,7 +208,7 @@ fn acquire_slot(root: &Path, cap: usize) -> Result<File> {
             Err(error) => return Err(error.into()),
         }
     }
-    bail!("Worker check refused: max_concurrent_builders={cap} slots are occupied; retry later")
+    bail!("{}", waiting_for_admission(&format!("max_concurrent_builders={cap} slots are occupied")))
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -728,11 +732,11 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
     let violations = snapshot.admission_violations(load_admitted);
     if !violations.is_empty() {
-        bail!("Worker check refused: {}; retry later", violations.join("; "));
+        bail!("{}", waiting_for_admission(&violations.join("; ")));
     }
     if load_admitted && !snapshot.violations().is_empty() {
         println!(
-            "Worker check: continuing the proof that just passed at {head}; its load admission carries over (load_1m={:?}, cpu_count={})",
+            "Worker check: continuing the proof that just passed at {head}; its CPU admission carries over (load_1m={:?}, cpu_count={})",
             snapshot.load_1m, snapshot.cpu_count
         );
     }
@@ -746,8 +750,10 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     }
     #[cfg(unix)]
     let target_lease = crate::factory_target_cache::owner::acquire(&cas_root, &repo)?;
+    // cas-3f93: the private target, relocated when `[factory] scratch_root` is set.
+    let target_dir = crate::factory_scratch::worker_target_dir(&repo);
     #[cfg(unix)]
-    discard_shared_fingerprints(&repo.join("target"))?;
+    discard_shared_fingerprints(&target_dir)?;
     let count_file = slots.join(format!("count-{lane_key}"));
     let host_path_opt_out = if test.is_some() { host_path_opt_out()? } else { None };
     if let Some(reason) = &host_path_opt_out {
@@ -809,7 +815,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     command
         .args(&cargo_args)
         .current_dir(&repo)
-        .env("CARGO_TARGET_DIR", repo.join("target"))
+        .env("CARGO_TARGET_DIR", &target_dir)
         // Never let a long-lived compiler cache retain the target lease.
         .env("RUSTC_WRAPPER", "")
         .env("RUSTC_WORKSPACE_WRAPPER", "");
@@ -1203,6 +1209,39 @@ printf '%s\n' "$@" > target/cargo-args"#);
         assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
     }
 
+    /// cas-3f93: with `[factory] scratch_root` set the capped check builds
+    /// into the worker's relocated private target, under its lifetime lease,
+    /// and never creates in-tree build output.
+    #[cfg(unix)]
+    #[test]
+    fn scratch_root_worker_check_builds_into_relocated_target() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        let scratch = dir.path().join("rewind");
+        std::fs::write(
+            root.join("config.toml"),
+            format!("[factory]\nscratch_root = {:?}\n", scratch.display().to_string()),
+        )
+        .unwrap();
+        let expected = scratch
+            .join(cas_types::factory_scratch::project_key(&root))
+            .join("targets/worker");
+        let cargo = dir.path().join("cargo");
+        fake_cargo(&cargo, &format!(
+            "[ \"$CARGO_TARGET_DIR\" = {:?} ] || exit 4\n[ -f \"$CARGO_TARGET_DIR/{}\" ] || exit 5\necho run >> \"$CARGO_TARGET_DIR/runs\"",
+            expected.display().to_string(),
+            crate::factory_target_cache::owner::MARKER,
+        ));
+        execute_at(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo).unwrap();
+        assert_eq!(std::fs::read_to_string(expected.join("runs")).unwrap(), "run\n");
+        assert!(!repo.join("target/debug").exists());
+        assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
+    }
+
     #[cfg(unix)]
     #[test]
     fn worker_memory_scope_falls_back_without_a_user_session_or_systemd() {
@@ -1440,6 +1479,8 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
             expected_build: "yes",
             max_concurrent_builders: 2,
             disabled: false,
+            pressure: Default::default(),
+            limits: Default::default(),
         };
         assert_eq!(snapshot.admission_violations(false).len(), 1, "independent checks stay load-gated");
         assert!(snapshot.violations()[0].contains("exceeds 32 CPUs"));
@@ -2171,7 +2212,9 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
             let dir = tempfile::tempdir().unwrap();
             let first = acquire_slot(dir.path(), 2).unwrap();
             let second = acquire_slot(dir.path(), 2).unwrap();
-            assert!(acquire_slot(dir.path(), 2).is_err());
+            let refusal = acquire_slot(dir.path(), 2).unwrap_err().to_string();
+            assert!(refusal.contains("Waiting for build admission"), "{refusal}");
+            assert!(refusal.contains("max_concurrent_builders=2"), "{refusal}");
             drop(first);
             assert!(acquire_slot(dir.path(), 2).is_ok());
             drop(second);

@@ -8,6 +8,12 @@ use crate::store::open_agent_store;
 
 /// Run the MCP server with 13 meta-tools (11 Cassy + 2 proxy)
 pub async fn run_server() -> anyhow::Result<()> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    return tokio::select! {
+        result = run_server_impl() => result,
+        () = super::memory::reclaim_when_idle() => unreachable!("allocator maintenance ended"),
+    };
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
     run_server_impl().await
 }
 
@@ -409,7 +415,15 @@ async fn run_server_impl() -> anyhow::Result<()> {
                     cfg.servers.len()
                 );
                 let snapshot_config = cfg.clone();
-                match cmcp_core::ProxyEngine::from_configs(cfg.servers).await {
+                // cas-b3b4a: cached upstreams start on their first call and
+                // stop when idle, so a session that never uses one never runs it.
+                let idle_timeout = proxy_idle_timeout(&snapshot_config);
+                match cmcp_core::ProxyEngine::from_configs_with_catalog(
+                    cfg.servers,
+                    Some(cas_root.join(PROXY_CATALOG_FILE)),
+                )
+                .await
+                {
                     Ok(engine) => {
                         install_proxy_policy(&engine, &snapshot_config).await;
                         engine
@@ -442,7 +456,9 @@ async fn run_server_impl() -> anyhow::Result<()> {
                                 "[Cassy] Failed to surface unpollable Viktor watches: {error}"
                             );
                         }
-                        Some(std::sync::Arc::new(engine))
+                        let engine = std::sync::Arc::new(engine);
+                        spawn_idle_upstream_sweeper(&engine, idle_timeout);
+                        Some(engine)
                     }
                     Err(e) => {
                         eprintln!("[Cassy] MCP proxy init failed (continuing without proxy): {e}");
@@ -681,6 +697,43 @@ fn install_machine_viktor_credential(config: &mut cmcp_core::config::Config, key
 /// shorter than any pathological hang the original incident exhibited.
 /// Tuned per cas-5c05 review (supervisor verification).
 const EAGER_INIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// cas-b3b4a: where proxy upstream tool catalogs persist between serves.
+#[cfg(feature = "mcp-proxy")]
+const PROXY_CATALOG_FILE: &str = "proxy-catalog.json";
+
+/// The configured idle stop (`idle_timeout_secs`, default 10 minutes);
+/// `None` keeps upstreams running.
+#[cfg(feature = "mcp-proxy")]
+fn proxy_idle_timeout(config: &cmcp_core::config::Config) -> Option<std::time::Duration> {
+    match config.idle_timeout_secs.unwrap_or(600) {
+        0 => None,
+        secs => Some(std::time::Duration::from_secs(secs)),
+    }
+}
+
+/// Stop idle upstreams once a minute for as long as the engine lives.
+#[cfg(feature = "mcp-proxy")]
+fn spawn_idle_upstream_sweeper(
+    engine: &std::sync::Arc<cmcp_core::ProxyEngine>,
+    idle: Option<std::time::Duration>,
+) {
+    let Some(idle) = idle else {
+        return;
+    };
+    let engine = std::sync::Arc::downgrade(engine);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let Some(engine) = engine.upgrade() else {
+                return;
+            };
+            engine.stop_idle(idle).await;
+        }
+    });
+}
 
 /// Eagerly open every store and the search index before serving MCP requests.
 ///

@@ -10,6 +10,20 @@ use std::str::FromStr;
 use crate::error::TypeError;
 use crate::scope::Scope;
 
+fn unknown_created() -> DateTime<Utc> {
+    DateTime::from_timestamp(-62_135_596_800, 0).expect("year 1 is a valid UTC timestamp")
+}
+
+fn is_unknown_created(created: &DateTime<Utc>) -> bool {
+    *created == unknown_created()
+}
+
+fn deserialize_created<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<DateTime<Utc>, D::Error> {
+    Ok(Option::<DateTime<Utc>>::deserialize(deserializer)?.unwrap_or_else(unknown_created))
+}
+
 /// Type of memory entry
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -253,7 +267,7 @@ impl FromStr for MemoryTier {
 /// A memory entry stored by cas
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
-    /// Unique identifier in scope-YYYY-MM-DD-NNN format (e.g., g-2025-01-01-001 or p-2025-01-01-001)
+    /// Opaque identity: random mem- IDs, legacy counters and Cloud fold IDs.
     pub id: String,
 
     /// Storage scope (global or project)
@@ -282,7 +296,14 @@ pub struct Entry {
     #[serde(default)]
     pub tags: Vec<String>,
 
-    /// When the entry was created
+    /// When the entry was created. Legacy wire rows without a birth use the
+    /// reserved year-1 UTC sentinel in typed/local storage; serialization omits
+    /// it again so a pull/edit/push never invents a shared creation identity.
+    #[serde(
+        default = "unknown_created",
+        deserialize_with = "deserialize_created",
+        skip_serializing_if = "is_unknown_created"
+    )]
     pub created: DateTime<Utc>,
 
     /// The memory content (may be compressed summary)
@@ -436,3 +457,41 @@ mod behavior;
 #[cfg(test)]
 #[path = "entry_tests/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod legacy_creation_tests {
+    use super::*;
+
+    #[test]
+    fn cas_e29c_unknown_creation_round_trips_without_inventing_a_birth() {
+        for raw in [
+            serde_json::json!({"id":"opaque-fold0123456789ab","content":"body"}),
+            serde_json::json!({"id":"opaque-fold0123456789ab","content":"body","created":null}),
+        ] {
+            let entry: Entry = serde_json::from_value(raw).unwrap();
+            assert!(!entry.has_known_creation());
+            assert!(entry.known_creation().is_none());
+            assert_eq!(entry.format_created("%Y-%m-%d"), "unknown");
+            let encoded = serde_json::to_value(&entry).unwrap();
+            assert!(encoded.get("created").is_none());
+            let restored: Entry = serde_json::from_value(encoded).unwrap();
+            assert_eq!(restored.created, entry.created);
+        }
+        let known = Entry::new("opaque-id".into(), "body".into());
+        let restored: Entry =
+            serde_json::from_value(serde_json::to_value(&known).unwrap()).unwrap();
+        assert!(restored.has_known_creation());
+        assert_eq!(restored.known_creation(), Some(known.created));
+        assert_eq!(
+            restored.format_created("%Y-%m-%d"),
+            known.created.format("%Y-%m-%d").to_string()
+        );
+        assert_eq!(restored.created, known.created);
+        assert!(
+            serde_json::from_value::<Entry>(serde_json::json!({
+                "id":"opaque","content":"body","created":"not a timestamp"
+            }))
+            .is_err()
+        );
+    }
+}

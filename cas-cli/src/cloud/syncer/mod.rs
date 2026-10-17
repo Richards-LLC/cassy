@@ -13,6 +13,7 @@ use crate::error::CasError;
 use crate::types::{Entry, Rule, Skill};
 
 mod knowledge;
+mod entry_identity;
 pub use knowledge::{
     KNOWLEDGE_ENTITY, KnowledgePageRecord, KnowledgePullReport, knowledge_share_scope,
 };
@@ -26,6 +27,8 @@ mod team_push;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod entry_collision_tests;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct PushBacklog {
@@ -121,6 +124,9 @@ pub struct SyncResult {
     pub conflicts_resolved_remote: usize,
     /// Conflict decisions retained for verbose human-facing output.
     pub conflicts: Vec<SyncConflict>,
+    /// Contested Cloud fold IDs whose incoming copies were retained in the journal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_fold_conflicts: Vec<String>,
     /// Errors encountered during sync
     pub errors: Vec<String>,
     /// Number of personal queue batches fetched and attempted.

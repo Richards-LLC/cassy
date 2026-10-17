@@ -32,7 +32,7 @@ Every call answers `{"ok": true, "schema_version": 1, …}` or `{"ok": false, "e
    ```markdown
    ## POSTED
 
-   - **Posted at (UTC):** `<timestamp>`
+   - **Posted at:** `<16 October 2026 · 9:45 AM ET>`
    - **Channel:** `#<project>-internal` (`<channel_id>`)
    - **User top-level:** `message_id=<id>` · <permalink>
    - **User reply:** `message_id=<id>` · <permalink>

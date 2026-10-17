@@ -211,7 +211,7 @@ pub fn build_learning_review_context(store: &dyn Store, config: &Config) -> Opti
 
     for entry in unreviewed.iter().take(10) {
         let preview = entry.preview(60);
-        let created = entry.created.format("%Y-%m-%d").to_string();
+        let created = entry.format_created("%Y-%m-%d").to_string();
         context.push_str(&format!("| {} | {} | {} |\n", entry.id, created, preview));
     }
 

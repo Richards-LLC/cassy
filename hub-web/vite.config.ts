@@ -37,12 +37,12 @@ export default defineConfig({
         assetFileNames(asset) {
           const name = asset.names[0] ?? "asset";
           if (name.endsWith(".css")) return "app.css";
-          if (name.endsWith("ghostty-vt.wasm")) return "ghostty-vt.wasm";
-          if (name.endsWith("ghostty-write-pty.wasm")) return "ghostty-write-pty.wasm";
           // cas-4427: Commander's bundled UI and mono faces (fonts.css).
           if (name.endsWith("Inter-latin-wght.woff2")) return "inter.woff2";
           if (name.endsWith("JetBrainsMono-latin-wght.woff2")) return "jetbrains-mono.woff2";
-          if (name.endsWith(".woff2")) return "symbols.woff2";
+          // Any other asset keeps its name, and dist-manifest.test.ts fails
+          // until the hub embeds it (cas-f285 removed the Ghostty WASM and
+          // symbols font).
           return "[name][extname]";
         }
       }

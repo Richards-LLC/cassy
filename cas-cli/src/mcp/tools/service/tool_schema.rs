@@ -72,6 +72,8 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
     "remind_id",
     "remind_ttl_secs",
     "cross_session",
+    // cas-2a5a: `peers scope=all` lists the account's supervisors.
+    "scope",
 ];
 
 /// Descriptions `coordination` publishes in place of the shared
@@ -84,7 +86,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("message", "Body chars (configurable defaults): 1200; blocker/merge 2500; task notes 1500. Over-cap operator/Commander refused; supervisor to agent spills to artifact."),
     ("urgent", "Interrupt recipient and inject next; discards in-flight work."),
     ("blocker", "Blocker escalation; wakes idle supervisor."),
-    ("merge_request", "Merge request for parked task_id."),
+    ("merge_request", "Parked task_id merge request."),
     ("in_reply_to", "notification_id of direct message answered."),
     ("kind", "answer|status|receipt|ask|blocker; worker status/ready wakes supervisor."),
     ("attachment", "Published artifact id for a Commander turn."),
@@ -93,12 +95,12 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("sticky", "Broadcast: late joiners get it."),
     ("task_id", "Parked task for merge_request; remind: bind to task."),
     // cas-6ccb: polled rows can resurface once until acknowledged.
-    ("notification_id", "message_ack/message_status: the notification id. inbox_poll: read it even if transport holds it; polled rows not acked reappear once."),
+    ("notification_id", "message_ack/message_status: its id. inbox_poll: read it even if transport holds it; polled rows not acked reappear once."),
     ("limit", "inbox_poll: max rows."),
     ("name", "register/session_start: agent name."),
     ("agent_type", "register/session_start: primary, sub_agent, worker or ci."),
     ("parent_id", "register/session_start: parent agent id."),
-    ("session_id", "register/session_start/session_end: harness session id."),
+    ("session_id", "register/session_start/session_end: harness id."),
     ("remind_message", "Required reminder text; message kind=ask: default taken at deadline."),
     ("remind_delay_secs", "Delay seconds; message kind=ask: deadline."),
     ("remind_event", "task_completed, task_blocked, worker_idle, epic_completed; branch_contained_in, tag_exists, ci_completed require cross_session=true."),
@@ -106,6 +108,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("remind_id", "remind_cancel: reminder id."),
     ("remind_ttl_secs", "TTL seconds: default 3600; external default 604800 (7 days); 0=never."),
     ("cross_session", "remind: survive session end and task close."),
+    ("scope", "peers: all=account-wide."),
 ];
 
 /// Messaging and reminder parameters the supervisor `factory` tool does not
@@ -128,6 +131,7 @@ pub(crate) const FACTORY_HIDDEN_FIELDS: &[&str] = &[
     "remind_id",
     "remind_ttl_secs",
     "cross_session",
+    "scope",
 ];
 
 /// Narrow the shared `CoordinationRequest` schema to the tool publishing it:
@@ -324,7 +328,8 @@ mod tests {
     }
 
     /// cas-8563b (D2): the two tools sharing `CoordinationRequest` publish
-    /// disjoint action enums, and `coordination` drops the supervisor params.
+    /// disjoint action enums. Slack-thread authority actions and their fields
+    /// stay on the supervisor factory tool, outside the worker-loaded schema.
     #[test]
     fn coordination_and_factory_publish_their_own_actions_and_params() {
         let tools = crate::mcp::tools::CasService::tool_definitions_for_build();
@@ -350,6 +355,17 @@ mod tests {
         assert_eq!(enum_of(&coordination), cas_mcp::actions::COORDINATION_ACTIONS);
         assert_eq!(enum_of(&factory), cas_mcp::actions::FACTORY_ACTIONS);
 
+        for action in cas_mcp::actions::EXTERNAL_WORK_ACTIONS {
+            assert!(
+                !enum_of(&coordination).iter().any(|published| published == action),
+                "coordination still publishes external-work action {action}"
+            );
+            assert!(
+                enum_of(&factory).iter().any(|published| published == action),
+                "factory does not publish external-work action {action}"
+            );
+        }
+
         let coordination_params: Vec<&String> =
             coordination["properties"].as_object().unwrap().keys().collect();
         for param in &coordination_params {
@@ -363,6 +379,30 @@ mod tests {
             assert!(
                 factory["properties"].as_object().unwrap().contains_key(supervisor_only),
                 "factory must publish {supervisor_only}"
+            );
+        }
+        for external_work_param in [
+            "external_ref",
+            "request_id",
+            "resource_id",
+            "handoff_id",
+            "expected_generation",
+            "to_slot_id",
+            "offer_ttl_secs",
+        ] {
+            assert!(
+                !coordination["properties"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key(external_work_param),
+                "coordination still publishes external-work parameter {external_work_param}"
+            );
+            assert!(
+                factory["properties"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key(external_work_param),
+                "factory does not publish external-work parameter {external_work_param}"
             );
         }
         for messaging in ["message", "summary", "remind_message"] {

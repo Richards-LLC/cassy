@@ -33,23 +33,6 @@ url = "https://api.githubcopilot.com/mcp/"
 bearer_token_env_var = "GITHUB_TOKEN"
 
 # =============================================================================
-# neon — stdio (npx). API key forwarded via env var.
-# Note: .mcp.json passes NEON_API_KEY as a positional arg (${NEON_API_KEY}),
-# but Codex does not expand ${VAR} in TOML args[]. The neon MCP server also
-# accepts the key via the NEON_API_KEY env var, so we forward it that way.
-# Requires: NEON_API_KEY set in the environment.
-# =============================================================================
-[mcp_servers.neon]
-command = "npx"
-args = ["-y", "@neondatabase/mcp-server-neon@0.6.5", "start"]
-env_vars = [
-    "PATH",
-    "HOME",
-    "USER",
-    "NEON_API_KEY",
-]
-
-# =============================================================================
 # playwright — stdio (npx). No auth required; Playwright selects its
 # platform-native persistent profile under the worker's HOME when no explicit
 # user-data directory is supplied.

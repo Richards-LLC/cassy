@@ -69,12 +69,27 @@ pub struct PeerDetail {
 pub enum ClaimsVisibility {
     SameAccount,
     DifferentAccount,
+    /// Project-scoped Cloud reads authorize this teammate's locks (#155).
+    TeamProject,
     Unknown,
+}
+
+impl ClaimsVisibility {
+    pub(crate) fn visible(self) -> bool {
+        matches!(self, Self::SameAccount | Self::TeamProject)
+    }
 }
 
 fn claims_visibility(viewer: Option<&str>, owner: Option<&AgentInfo>) -> ClaimsVisibility {
     match (viewer, owner.and_then(|a| a.user_id.as_deref())) {
         (Some(viewer), Some(owner)) if viewer == owner => ClaimsVisibility::SameAccount,
+        (_, Some(_))
+            if owner
+                .and_then(|a| a.team_id.as_deref())
+                .is_some_and(|id| !id.trim().is_empty()) =>
+        {
+            ClaimsVisibility::TeamProject
+        }
         (Some(_), Some(_)) => ClaimsVisibility::DifferentAccount,
         _ => ClaimsVisibility::Unknown,
     }
@@ -110,6 +125,12 @@ pub struct PeerReport {
     pub canonical_id: Option<String>,
     pub detail: bool,
     pub peers: Vec<PeerDetail>,
+    /// Same-repo supervisors of other accounts that `peers.same_repo_scope =
+    /// own` left out of `peers` (cas-d58d).
+    pub hidden_peers: usize,
+    /// In-flight branches of yours and a peer's that change the same files
+    /// on the way into the same target (cas-a131). Informational only.
+    pub overlaps: Vec<super::peer_merge::BranchOverlap>,
     pub error: Option<String>,
 }
 
@@ -164,6 +185,8 @@ impl PeerReport {
             detail,
             status: "ready".into(),
             peers: Vec::new(),
+            hidden_peers: 0,
+            overlaps: Vec::new(),
             error: None,
         }
     }
@@ -259,7 +282,7 @@ pub fn assemble_peer_details(
                 .collect();
             let mut claims: Vec<_> = locks
                 .iter()
-                .filter(|_| visibility == ClaimsVisibility::SameAccount)
+                .filter(|_| visibility.visible())
                 .filter(|lock| lock.status == LeaseStatus::Active && lock.expires_at > now)
                 .filter(|lock| {
                     agents
@@ -345,8 +368,8 @@ pub fn assemble_peer_details(
         .collect()
 }
 
-/// Fetch full details only when requested. Discovery is repo scoped; locks
-/// remain account-private and are filtered against the discovered owners.
+/// Fetch full details only when requested. Discovery and locks are project
+/// scoped, including teammates, and filtered against the discovered owners.
 /// Missing lock evidence is an error rather than an invented empty claim list.
 pub fn discover_peer_report(
     cas_root: &Path,
@@ -399,6 +422,27 @@ pub fn discover_peer_report(
     let now = Utc::now();
     let mut supervisors = peers::repo_peers(&agents, repo, &aliases, self_id, now);
     peers::exclude_project_agents(cas_root, &mut supervisors)?;
+    // cas-d58d: every peer names its account; `own` keeps only the viewer's.
+    peers::mark_own(&mut supervisors, viewer_user_id);
+    let (mut supervisors, hidden) =
+        peers::apply_same_repo_scope(supervisors, peers::same_repo_scope(cas_root));
+    report.hidden_peers = hidden.len();
+    if let Some(selected) = selected
+        && super::peer_mailbox::resolve_peer_target(&supervisors, selected)
+            .map_err(CasError::Other)?
+            .is_none()
+        && let Some(other) = super::peer_mailbox::resolve_peer_target(&hidden, selected)
+            .map_err(CasError::Other)?
+    {
+        return Err(CasError::Other(format!(
+            "Peer supervisor '{selected}' belongs to {} (another Cassy Cloud account); \
+             peers.same_repo_scope is own, so only your own supervisors are shown",
+            peers::owner_label(other)
+        )));
+    }
+    // cas-a131: same-file overlap between in-flight branches into the same
+    // target, before any narrowing to one selected peer.
+    report.overlaps = in_flight_overlaps(cas_root, &supervisors, &agents, &aliases, now);
     if let Some(selected) = selected {
         let peer = super::peer_mailbox::resolve_peer_target(&supervisors, selected)
             .map_err(CasError::Other)?
@@ -410,17 +454,12 @@ pub fn discover_peer_report(
         supervisors = vec![peer.clone()];
     }
     if detail {
-        // Team discovery can expose another account's agents, but locks are
-        // account-private. Do not query them when no selected peer is visible.
-        let locks = if supervisors.iter().any(|peer| {
-            claims_visibility(
-                viewer_user_id,
-                agents.iter().find(|a| a.id == peer.agent_id),
-            ) == ClaimsVisibility::SameAccount
-        }) {
-            coordinator.list_locks()
-        } else {
+        // #155: the Cloud project visibility rule includes teammates' locks.
+        // An unreadable list is unknown, never an invented empty inventory.
+        let locks = if supervisors.is_empty() {
             Ok(Vec::new())
+        } else {
+            coordinator.list_locks()
         };
         // Awareness must not run the cloud outbox's repair-on-open writer.
         let tasks = crate::store::open_task_store_local(cas_root)?;
@@ -436,7 +475,7 @@ pub fn discover_peer_report(
         if let Err(error) = locks {
             report.status = "partial".into();
             for peer in &mut report.peers {
-                if peer.claims_visibility == ClaimsVisibility::SameAccount {
+                if peer.claims_visibility.visible() {
                     peer.work.claims_status.state = "unavailable".into();
                     peer.work.claims_status.reason = Some(error.to_string());
                     peer.work.tasks_status = peer.work.claims_status.clone();
@@ -482,6 +521,57 @@ pub fn discover_peer_report(
             .collect();
     }
     Ok(report)
+}
+
+/// cas-a131: this project's active worktrees and each listed peer's live
+/// workers, as in-flight branches into their targets, compared file by file.
+/// A peer's target is the branch its supervisor registered.
+fn in_flight_overlaps(
+    cas_root: &Path,
+    supervisors: &[Peer],
+    agents: &[AgentInfo],
+    aliases: &[String],
+    now: DateTime<Utc>,
+) -> Vec<super::peer_merge::BranchOverlap> {
+    use super::peer_merge::{InFlight, OVERLAP_BUDGET, find_overlaps};
+    let Some(repo) = cas_root.parent() else {
+        return Vec::new();
+    };
+    let own: Vec<InFlight> = crate::store::open_worktree_store(cas_root)
+        .ok()
+        .and_then(|store| store.list_active().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|worktree| InFlight { branch: worktree.branch, target: worktree.parent_branch })
+        .collect();
+    if own.is_empty() {
+        return Vec::new();
+    }
+    let mut theirs = Vec::new();
+    for supervisor in supervisors {
+        let Some(target) = supervisor.branch.clone() else {
+            continue;
+        };
+        let owner = agents.iter().find(|a| a.id == supervisor.agent_id);
+        let label = format!(
+            "{}@{} ({})",
+            supervisor.name,
+            supervisor.machine,
+            peers::owner_label(supervisor)
+        );
+        for agent in agents.iter().filter(|agent| {
+            belongs_to_peer(agent, supervisor, owner, aliases)
+                && heartbeat_age(agent, now).is_some_and(|age| age <= peers::PEER_LIVE_SECS)
+        }) {
+            if let Some(branch) = meta(agent, peers::META_BRANCH) {
+                theirs.push((label.clone(), InFlight { branch: branch.to_string(), target: target.clone() }));
+            }
+        }
+    }
+    if theirs.is_empty() {
+        return Vec::new();
+    }
+    find_overlaps(repo, &own, &theirs, std::time::Instant::now() + OVERLAP_BUDGET)
 }
 
 pub fn ascii_terminal() -> bool {
@@ -549,9 +639,20 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
         if report.peers.is_empty() {
             line("  no other supervisors seen in the last 24h".into());
         }
+        for overlap_line in super::peer_merge::render_overlaps(&report.overlaps) {
+            line(overlap_line);
+        }
+        if report.hidden_peers > 0 {
+            line(format!(
+                "  {} supervisor{} of other accounts hidden (peers.same_repo_scope own)",
+                report.hidden_peers,
+                if report.hidden_peers == 1 { "" } else { "s" }
+            ));
+        }
         for detail in &report.peers {
             let peer = &detail.supervisor;
             line(format!("[{}] Owner {}", detail.outcome, detail.owner));
+            line(format!("  Account {}", peers::owner_label(peer)));
             line(format!("  Machine {}", peer.machine));
             line(format!(
                 "  Session {}",
@@ -570,14 +671,23 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                 "  Branch  {}",
                 detail.branch.as_deref().unwrap_or("unknown")
             ));
+            if detail.claims_visibility == ClaimsVisibility::TeamProject {
+                line("  Claims visible (team project)".into());
+                line(format!(
+                    "  Account {}",
+                    detail.user_id.as_deref().unwrap_or("unknown")
+                ));
+            }
             match detail.claims_visibility {
-                ClaimsVisibility::SameAccount if detail.work.claims_status.state == "ready" => {
+                ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject
+                    if detail.work.claims_status.state == "ready" =>
+                {
                     line(format!(
                         "  Claims  {} observed | age since renewal (s)",
                         detail.claims.len()
                     ))
                 }
-                ClaimsVisibility::SameAccount => line(format!(
+                ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject => line(format!(
                     "  Claims {} (inventory unknown)",
                     detail.work.claims_status.state
                 )),
@@ -633,11 +743,17 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                     .collect::<Vec<_>>()
                     .join(", ");
                 let task_label = match detail.claims_visibility {
-                    ClaimsVisibility::SameAccount if detail.work.claims_status.state != "ready" => {
+                    ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject
+                        if detail.work.claims_status.state != "ready" =>
+                    {
                         "unknown"
                     }
-                    ClaimsVisibility::SameAccount if task_ids.is_empty() => "none",
-                    ClaimsVisibility::SameAccount => &task_ids,
+                    ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject
+                        if task_ids.is_empty() =>
+                    {
+                        "none"
+                    }
+                    ClaimsVisibility::SameAccount | ClaimsVisibility::TeamProject => &task_ids,
                     _ => "not visible",
                 };
                 line(format!("      Tasks {task_label}"));

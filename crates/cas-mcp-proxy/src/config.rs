@@ -59,6 +59,10 @@ pub fn violet_credential_value(
 pub struct Config {
     #[serde(default)]
     pub servers: HashMap<String, ServerConfig>,
+    /// cas-b3b4a: stop an upstream unused for this long; it restarts on its
+    /// next call. Unset means 600 seconds; 0 keeps upstreams running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<u64>,
     /// Exact external routes admitted by the production proxy policy.
     ///
     /// An empty list is intentionally fail-closed: configured upstreams may

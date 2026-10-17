@@ -25,14 +25,13 @@ bisection loop; differential run; then a human-in-the-loop script. For that last
 branch, copy and edit [scripts/hitl-loop.template.sh](scripts/hitl-loop.template.sh),
 then run the copy; capture observations and keep sign-in in a human-only step.
 Treat the loop as a product: make it fast, deterministic, and specific. For flakes,
-increase reproduction rate with repeated or stress runs.
+increase reproduction rate with repeated or stress runs; those loops are proof
+artifacts, not suite members.
 
 Completion requires one already-run command whose redacted output proves it is
 red-capable, deterministic (or has a stated high repro rate), fast, and
 agent-runnable (human steps use the structured template). A factory worker runs a targeted Rust loop under `cas-worker` discipline:
-commit the reproducer, select one package and a mandatory named-test `-E`
-filter, then use the capped nextest runner. Commit the fix and rerun that
-filter. The full suite stays at assembly. If the installed runtime denies
+commit the reproducer red, then the fix green on the same named filter. If the installed runtime denies
 this exception, use captured logs, an installed CLI or a script, or hand the
 committed reproducer to the supervisor with the exact denial. If no loop can be built, state
 what was tried and request the reproducing environment, a redacted capture, or
@@ -65,7 +64,8 @@ baseline, then bisect the regression with that measurement before changing code.
 
 ## Phase 5 — Fix and regression
 
-Turn the minimized repro into a failing test only at a seam that exercises the
+Turn the minimized repro into one failing regression per root cause
+([Fewest tests](../cas-tdd/SKILL.md#fewest-tests)), only at a seam that exercises the
 real call-site pattern. If no correct seam exists, record that architectural
 finding. Otherwise: make the regression fail, fix it, make it pass, then rerun
 the original loop.

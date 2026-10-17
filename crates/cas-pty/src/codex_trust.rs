@@ -54,6 +54,10 @@ use std::sync::{Mutex, OnceLock};
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
+/// Native Codex uses seconds. Four times the incident's ~30s hook delay;
+/// Cargo policy validation also has its own much smaller response deadline.
+pub const CODEX_PRE_TOOL_TIMEOUT_SECS: u64 = 120;
+
 /// What [`ensure_project_trusted`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexTrustOutcome {
@@ -324,6 +328,81 @@ fn refresh_owned_hook_state(existing: &str, entry: &HookTrustEntry) -> io::Resul
     Ok(Some(updated))
 }
 
+fn cas_pre_tool_handlers(
+    value: &mut serde_json::Value,
+) -> impl Iterator<Item = &mut serde_json::Value> {
+    value
+        .pointer_mut("/hooks/PreToolUse")
+        .and_then(serde_json::Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .filter_map(|group| {
+            group
+                .get_mut("hooks")
+                .and_then(serde_json::Value::as_array_mut)
+        })
+        .flatten()
+        .filter(|handler| {
+            handler.get("command").and_then(serde_json::Value::as_str) == Some(CAS_CODEX_HOOKS[0].2)
+        })
+}
+
+fn ensure_cas_pre_tool_budget(path: &Path) -> io::Result<bool> {
+    update_codex_file_locked(
+        path,
+        |existing| {
+            let mut value: serde_json::Value =
+                serde_json::from_str(existing).map_err(io::Error::other)?;
+            let mut changed = false;
+            for handler in cas_pre_tool_handlers(&mut value) {
+                // An omitted timeout already inherits Codex's 600-second default.
+                if handler
+                    .get("timeout")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|seconds| seconds < CODEX_PRE_TOOL_TIMEOUT_SECS)
+                {
+                    handler["timeout"] = CODEX_PRE_TOOL_TIMEOUT_SECS.into();
+                    changed = true;
+                }
+            }
+            Ok(changed.then(|| serde_json::to_string_pretty(&value).unwrap() + "\n"))
+        },
+        |read_back| {
+            let mut value: serde_json::Value =
+                serde_json::from_str(read_back).map_err(io::Error::other)?;
+            if cas_pre_tool_handlers(&mut value).any(|handler| {
+                handler
+                    .get("timeout")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|seconds| seconds < CODEX_PRE_TOOL_TIMEOUT_SECS)
+            }) {
+                return Err(io::Error::other("CAS PreToolUse timeout read-back failed"));
+            }
+            Ok(())
+        },
+        |updated| {
+            serde_json::from_str::<serde_json::Value>(updated)
+                .map(|_| ())
+                .map_err(io::Error::other)
+        },
+    )
+}
+
+/// Upgrade/trust only existing CAS-owned handlers, preserving other hooks and
+/// the selected account home. Called for worker user and project config layers.
+pub fn prepare_cas_tool_hooks_in(config: &Path, hooks: &Path) -> io::Result<bool> {
+    let source = match std::fs::read_to_string(hooks) {
+        Ok(source) => source,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut value: serde_json::Value = serde_json::from_str(&source).map_err(io::Error::other)?;
+    if cas_pre_tool_handlers(&mut value).next().is_none() {
+        return Ok(false);
+    }
+    ensure_cas_hooks_trusted_in(config, hooks)
+}
+
 /// Record the current CAS hook definitions as trusted in Codex's user config.
 ///
 /// Codex uses this separate state from project trust: without it the project
@@ -333,6 +412,7 @@ fn refresh_owned_hook_state(existing: &str, entry: &HookTrustEntry) -> io::Resul
 /// definition deliberately receives a new state key only after the generator
 /// has emitted its canonical handler shape.
 pub fn ensure_cas_hooks_trusted_in(config_path: &Path, hooks_path: &Path) -> io::Result<bool> {
+    ensure_cas_pre_tool_budget(hooks_path)?;
     let entries = cas_hook_trust_entries(hooks_path)?;
     let entries_for_write = entries.clone();
     update_codex_config_locked(
@@ -531,6 +611,24 @@ where
     F: FnOnce(&str) -> io::Result<Option<String>>,
     V: FnOnce(&str) -> io::Result<()>,
 {
+    update_codex_file_locked(config_path, mutate, verify, |updated| {
+        toml::from_str::<toml::Value>(updated)
+            .map(|_| ())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+    })
+}
+
+fn update_codex_file_locked<F, V, P>(
+    config_path: &Path,
+    mutate: F,
+    verify: V,
+    parse: P,
+) -> io::Result<bool>
+where
+    F: FnOnce(&str) -> io::Result<Option<String>>,
+    V: FnOnce(&str) -> io::Result<()>,
+    P: FnOnce(&str) -> io::Result<()>,
+{
     let _guard = config_write_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -551,15 +649,7 @@ where
     };
 
     let changed = if let Some(updated) = mutate(&existing)? {
-        toml::from_str::<toml::Value>(&updated).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "CAS Codex config mutation would produce invalid TOML at {}: {error}",
-                    config_path.display()
-                ),
-            )
-        })?;
+        parse(&updated)?;
         let tmp = config_path.with_extension(format!("toml.cas-{}", std::process::id()));
         std::fs::write(&tmp, &updated)?;
         // Rename replaces original metadata; preserve a restrictive config mode.
@@ -883,6 +973,20 @@ mod tests {
 
         assert!(ensure_cas_hooks_trusted_in(&config_path, &hooks_path).unwrap());
         let after_first = std::fs::read_to_string(&config_path).unwrap();
+        let hook_source = std::fs::read_to_string(&hooks_path).unwrap();
+        let hook_value: serde_json::Value = serde_json::from_str(&hook_source).unwrap();
+        assert_eq!(
+            hook_value["hooks"]["PreToolUse"][1]["hooks"][0]["timeout"],
+            CODEX_PRE_TOOL_TIMEOUT_SECS
+        );
+        assert_eq!(
+            hook_value["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "operator hook"
+        );
+        assert_eq!(
+            hook_value["hooks"]["PostToolUse"][0]["hooks"][0]["timeout"],
+            3
+        );
         let entries = cas_hook_trust_entries(&hooks_path).unwrap();
         assert_eq!(
             entries[0].key,
@@ -899,6 +1003,7 @@ mod tests {
 
         assert!(!ensure_cas_hooks_trusted_in(&config_path, &hooks_path).unwrap());
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), after_first);
+        assert_eq!(std::fs::read_to_string(&hooks_path).unwrap(), hook_source);
     }
 
     #[test]

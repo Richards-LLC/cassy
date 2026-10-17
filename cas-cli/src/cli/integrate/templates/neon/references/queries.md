@@ -1,68 +1,48 @@
 # Neon — Common Queries & Branch Routing
 
-Companion reference for the `neon-database` skill. Routing snippets use the
-IDs from `SKILL.md`'s `<!-- keep neon-ids -->` block — keep them in sync.
+Use the IDs from `SKILL.md`'s `<!-- keep neon-ids -->` block.
+Install `neonctl` and authenticate with `neonctl auth` before these commands.
 
-## Branch routing recipes
+## Branch routing and SQL
 
-Default-branch (production) reads:
+Choose the intended branch explicitly; production queries should be read-only.
 
-```
-mcp__neon__run_sql({
-  projectId: "<projectId>",
-  databaseName: "<databaseName>",
-  sql: "SELECT 1;"
-})
+```bash
+neonctl branches list --project-id "<projectId>" --output json
+neonctl connection-string "<branchId>" --project-id "<projectId>" \
+  --database-name "<databaseName>" --psql -- -c "SELECT 1;"
 ```
 
-Non-default branch (staging / dev / preview) — always pass `branchId`:
-
-```
-mcp__neon__run_sql({
-  projectId: "<projectId>",
-  databaseName: "<databaseName>",
-  branchId: "<branchId>",
-  sql: "SELECT 1;"
-})
-```
-
-## Schema introspection
-
-```
-mcp__neon__describe_table_schema({
-  projectId: "<projectId>",
-  databaseName: "<databaseName>",
-  tableName: "users"
-})
-```
+For schema inspection, replace the query with
+`SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = 'public';`.
+For query plans, use `EXPLAIN SELECT ...`; `EXPLAIN ANALYZE` executes the query.
 
 ## Migration (3-step flow)
 
-1. `mcp__neon__prepare_database_migration` — runs `migrationSql` on a temp branch.
-2. Verify on the temp branch with `run_sql` / `describe_table_schema`.
-3. `mcp__neon__complete_database_migration` — promotes the change to the default branch.
-
-Never skip step 2. Never run step 3 directly against production without verifying step 2.
-
-## Slow-query inspection
-
-```
-mcp__neon__list_slow_queries({ projectId: "<projectId>" })
-mcp__neon__explain_sql_statement({
-  projectId: "<projectId>",
-  databaseName: "<databaseName>",
-  sql: "SELECT ..."
-})
-```
+1. Create a disposable branch from the intended parent:
+   `neonctl branches create --project-id "<projectId>" --parent "<branchId>" --name "migration-check" --output json`.
+2. Apply and verify the migration on its returned branch ID:
+   `neonctl connection-string "<tempBranchId>" --project-id "<projectId>" --database-name "<databaseName>" --psql -- -v ON_ERROR_STOP=1 -f migration.sql`.
+   Compare schemas with
+   `neonctl branches schema-diff "<branchId>" "<tempBranchId>" --project-id "<projectId>" --database "<databaseName>"`.
+3. Apply the reviewed migration through the project's deployment process to the
+   intended branch, with explicit approval for production. Creating or comparing
+   branches does not promote SQL changes. Delete the temporary branch afterward.
 
 ## Branch lifecycle
 
-- `mcp__neon__create_branch` — feature branches off a parent branch.
-- `mcp__neon__describe_branch` — confirm a branch still exists (used by `cas integrate neon verify`).
-- `mcp__neon__reset_from_parent` — discard branch changes; return to parent state.
-- `mcp__neon__delete_branch` — clean up after merging.
+```bash
+neonctl branches get "<branchId>" --project-id "<projectId>" --output json
+neonctl branches delete "<tempBranchId>" --project-id "<projectId>"
+```
+
+Only delete disposable branches you created. Resetting a branch discards changes;
+confirm the branch and approval before `neonctl branches reset "<branchId>"
+--parent --project-id "<projectId>"`.
 
 ## Connection strings
 
-Use `mcp__neon__get_connection_string` only when external tools need a URL;
-prefer MCP tool calls for inspection/migration so credentials stay scoped.
+Use `neonctl connection-string "<branchId>" --project-id "<projectId>"
+--database-name "<databaseName>"` when another tool needs a URL. It contains a
+password: do not echo it into shared logs or commit it. Prefer `--psql -- -c ...`
+for queries so the connection URL stays out of captured command output.

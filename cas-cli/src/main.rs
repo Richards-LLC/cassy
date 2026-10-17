@@ -57,6 +57,19 @@ fn main() -> ExitCode {
             }
         };
     }
+    // Native Codex Cargo admission must not wait for Sentry, logging,
+    // telemetry or development-tracer databases before selecting its route.
+    if cli::is_native_codex_pre_tool(&std::env::args().collect::<Vec<_>>()) {
+        return match cli::execute_native_pre_tool_use() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => {
+                let output = cas::hooks::HookOutput::with_pre_tool_permission("deny", "CASSY GUARD UNAVAILABLE: hook processing failed; retry when the host is responsive.");
+                println!("{}", serde_json::to_string(&output).unwrap());
+                ExitCode::SUCCESS
+            }
+        };
+    }
+
     // Reset SIGPIPE to default behavior so broken pipes cause a clean exit
     // instead of panicking with "failed printing to stderr: Broken pipe"
     #[cfg(unix)]
@@ -331,41 +344,6 @@ fn init_logging(cli: &cli::Cli) {
         let log_dir = root.join(&logging_config.log_dir);
         if log_dir.exists() {
             let _ = logging::cleanup_old_logs(&log_dir, logging_config.retention_days);
-        }
-
-        // Clean up obsolete vector/embedding files (semantic search removed)
-        cleanup_vector_files(root);
-    }
-}
-
-/// Clean up obsolete vector and embedding files from previous versions.
-/// Semantic search has been removed, so these files are no longer needed.
-fn cleanup_vector_files(cas_root: &std::path::Path) {
-    use std::fs;
-    use tracing::debug;
-
-    // Files to delete
-    let files_to_delete = ["vectors.hnsw", "vectors.meta.json"];
-
-    for filename in &files_to_delete {
-        let path = cas_root.join(filename);
-        if path.exists() {
-            match fs::remove_file(&path) {
-                Ok(()) => debug!("Removed obsolete file: {}", path.display()),
-                Err(e) => debug!("Failed to remove {}: {}", path.display(), e),
-            }
-        }
-    }
-
-    // Delete models directory
-    let models_dir = cas_root.join("models");
-    if models_dir.exists() && models_dir.is_dir() {
-        match fs::remove_dir_all(&models_dir) {
-            Ok(()) => debug!(
-                "Removed obsolete models directory: {}",
-                models_dir.display()
-            ),
-            Err(e) => debug!("Failed to remove models directory: {}", e),
         }
     }
 }

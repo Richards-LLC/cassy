@@ -1,31 +1,28 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { GhosttyCell, GhosttyColor, GhosttyRow } from "./terminal/ghostty/core";
-import { GHOSTTY_CELL_WIDE } from "./terminal/ghostty/core";
+import { TRANSCRIPT_CELL_WIDE, type TranscriptCell, type TranscriptColor, type TranscriptRow } from "./transcript";
 import { TranscriptView, type TranscriptSource } from "./transcript-view";
 
-const FOREGROUND: GhosttyColor = { r: 201, g: 209, b: 217 };
-const BACKGROUND: GhosttyColor = { r: 13, g: 17, b: 23 };
-const GREEN: GhosttyColor = { r: 63, g: 185, b: 80 };
+const FOREGROUND: TranscriptColor = { r: 201, g: 209, b: 217 };
+const BACKGROUND: TranscriptColor = { r: 13, g: 17, b: 23 };
+const GREEN: TranscriptColor = { r: 63, g: 185, b: 80 };
 
-function cell(text: string, overrides: Partial<GhosttyCell> = {}): GhosttyCell {
+function cell(text: string, overrides: Partial<TranscriptCell> = {}): TranscriptCell {
   return {
     text,
-    wide: GHOSTTY_CELL_WIDE.narrow,
+    wide: TRANSCRIPT_CELL_WIDE.narrow,
     foreground: FOREGROUND,
     background: BACKGROUND,
     bold: false,
     italic: false,
     invisible: false,
     strikethrough: false,
-    overline: false,
     underline: false,
-    selected: false,
     ...overrides,
   };
 }
 
-function row(text: string, overrides: Partial<GhosttyCell> = {}): GhosttyRow {
+function row(text: string, overrides: Partial<TranscriptCell> = {}): TranscriptRow {
   return {
     cells: [...text].map((character) => cell(character, overrides)),
     text,
@@ -41,20 +38,20 @@ function stubGeometry(element: HTMLElement, geometry: { scrollHeight: number; cl
   Object.defineProperty(element, "scrollTop", { configurable: true, writable: true, value: geometry.scrollTop ?? 0 });
 }
 
-function source(rows: GhosttyRow[], overrides: Partial<TranscriptSource> = {}): TranscriptSource & { rowsValue: GhosttyRow[] } {
-  const state: TranscriptSource & { rowsValue: GhosttyRow[] } = {
+function source(rows: TranscriptRow[], overrides: Partial<TranscriptSource> = {}): TranscriptSource & { rowsValue: TranscriptRow[] } {
+  const state: TranscriptSource & { rowsValue: TranscriptRow[] } = {
     rowsValue: rows,
-    rows: (): readonly GhosttyRow[] => state.rowsValue,
+    rows: (): readonly TranscriptRow[] => state.rowsValue,
     theme: () => ({ foreground: FOREGROUND, background: BACKGROUND }),
     hasScrollbackAbove: () => false,
     scrollRows: vi.fn(),
     scrollToBottom: vi.fn(),
     ...overrides,
   };
-  return state as TranscriptSource & { rowsValue: GhosttyRow[] };
+  return state as TranscriptSource & { rowsValue: TranscriptRow[] };
 }
 
-let host: TranscriptSource & { rowsValue: GhosttyRow[] };
+let host: TranscriptSource & { rowsValue: TranscriptRow[] };
 let view: TranscriptView;
 
 beforeEach(() => {

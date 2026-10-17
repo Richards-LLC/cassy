@@ -18,9 +18,8 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The body field that scopes register and claim calls to a project
 /// (petra-stella-cloud#151, cas-f707). Its value is the repo's canonical id.
-/// Production (cloud PR #153) resolves registrations through
-/// `metadata.canonical_id` and ignores this field on claims; it stays as a
-/// harmless explicit scope.
+/// Cloud #155 resolves claim project/team scope from this field or the
+/// registered agent binding; renew and release stay owner-only.
 pub const PROJECT_SCOPE_KEY: &str = "canonical_id";
 
 /// The query parameter that scopes `GET /api/agents` (and other project
@@ -108,6 +107,10 @@ pub struct ClaimResponse {
     pub error: Option<String>,
     #[serde(default)]
     pub owner_agent_id: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
     /// When the holder's lock runs out (409 only).
     #[serde(default)]
     pub expires_at: Option<String>,
@@ -117,6 +120,8 @@ pub struct ClaimResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LockInfo {
     pub id: String,
+    #[serde(default)]
+    pub user_id: Option<String>,
     pub task_id: String,
     pub agent_id: String,
     pub status: String,
@@ -295,6 +300,10 @@ impl CloudCoordinator {
                 branch.to_string(),
             );
         }
+        // cas-d58d: peers label this supervisor with the account it runs as.
+        if let Some(email) = self.config.email.as_deref().map(str::trim).filter(|email| !email.is_empty()) {
+            metadata.insert(crate::cloud::peers::META_OWNER.to_string(), email.to_string());
+        }
         let response = ureq::post(&url)
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token()))
@@ -437,7 +446,11 @@ impl CloudCoordinator {
 
                 Ok(ClaimResult::AlreadyClaimed {
                     task_id: task_id.to_string(),
-                    held_by: claim_resp.owner_agent_id.unwrap_or_default(),
+                    held_by: claim_resp
+                        .owner_agent_id
+                        .or(claim_resp.agent_id)
+                        .unwrap_or_default(),
+                    user_id: claim_resp.user_id.filter(|id| !id.trim().is_empty()),
                     expires_at,
                 })
             }
@@ -517,6 +530,11 @@ impl CloudCoordinator {
 
     /// Get lock for a task
     pub fn get_lock(&self, task_id: &str) -> Result<Option<TaskLease>, CasError> {
+        self.get_lock_record(task_id)
+            .map(|lock| lock.map(|lock| lock_info_to_lease(&lock)))
+    }
+
+    fn get_lock_record(&self, task_id: &str) -> Result<Option<LockInfo>, CasError> {
         let url = format!("{}/api/agents/tasks/{}/lock", self.config.endpoint, task_id);
 
         let response = ureq::get(&url)
@@ -533,7 +551,7 @@ impl CloudCoordinator {
                 let resp: LockResponse = resp
                     .into_json()
                     .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?;
-                Ok(resp.lock.map(|l| lock_info_to_lease(&l)))
+                Ok(resp.lock)
             }
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
@@ -541,6 +559,33 @@ impl CloudCoordinator {
             }
             Err(ureq::Error::Transport(e)) => Err(CasError::Other(format!("Network error: {e}"))),
         }
+    }
+
+    /// The singular route remains account-private in Cloud #155. If it
+    /// has no own lock, read the authorized project list for a teammate.
+    /// The flag excludes foreign locks from account-owned stale recovery.
+    pub(crate) fn get_visible_lock(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<(LockInfo, bool)>, CasError> {
+        let deadline = Instant::now() + self.timeout;
+        if let Some(lock) = self.get_lock_record(task_id)? {
+            return Ok(Some((lock, false)));
+        }
+        if self.canonical_id.is_none() {
+            return Ok(None);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(CasError::Other("peer check budget exhausted".into()));
+        }
+        Ok(self
+            .clone()
+            .with_timeout(left)
+            .list_lock_records()?
+            .into_iter()
+            .find(|lock| lock.task_id == task_id)
+            .map(|lock| (lock, true)))
     }
 
     /// List all agents
@@ -575,9 +620,14 @@ impl CloudCoordinator {
         }
     }
 
-    /// List account-visible active locks. The project hint does not widen
-    /// account visibility; callers still filter owners through repo discovery.
+    /// List project-visible active locks, including teammates (#155).
+    /// Callers still filter owners through authorized repo discovery.
     pub fn list_locks(&self) -> Result<Vec<TaskLease>, CasError> {
+        self.list_lock_records()
+            .map(|locks| locks.iter().map(lock_info_to_lease).collect())
+    }
+
+    fn list_lock_records(&self) -> Result<Vec<LockInfo>, CasError> {
         let url = format!("{}/api/agents/locks", self.config.endpoint);
 
         let request = ureq::get(&url)
@@ -590,7 +640,7 @@ impl CloudCoordinator {
                 let resp: LocksResponse = resp
                     .into_json()
                     .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?;
-                Ok(resp.locks.iter().map(lock_info_to_lease).collect())
+                Ok(resp.locks)
             }
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
@@ -773,7 +823,7 @@ impl CloudCoordinator {
 }
 
 /// Convert LockInfo to TaskLease
-fn lock_info_to_lease(info: &LockInfo) -> TaskLease {
+pub(crate) fn lock_info_to_lease(info: &LockInfo) -> TaskLease {
     use chrono::DateTime;
 
     let expires_at = DateTime::parse_from_rfc3339(&info.expires_at)
@@ -861,6 +911,7 @@ mod tests {
     fn test_lock_info_conversion() {
         let info = LockInfo {
             id: "lock-123".to_string(),
+            user_id: None,
             task_id: "task-456".to_string(),
             agent_id: "agent-789".to_string(),
             status: "active".to_string(),

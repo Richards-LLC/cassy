@@ -123,7 +123,7 @@ things in one transaction.
    idempotent daemon-origin path.
 
 The envelope tells the supervisor what to do:
-`coordination action=spawn_workers lane=taste task_id=<qa_task_id>`.
+`factory action=spawn_workers lane=taste task_id=<qa_task_id>`.
 Assigning an existing idle taste-lane worker also works, provided it is not
 the implementer.
 

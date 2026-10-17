@@ -43,7 +43,7 @@ pub use prompts::{
     check_merge_alert_freshness, check_merge_alert_freshness_for_task, compute_gated_task_ids,
     generate_prompt_at, recipient_worker_cli, revalidate_event_for_delivery_with_context,
     revalidate_event_for_delivery_with_focus, with_response_instructions,
-    worker_now_has_real_assignment, MergeAlertFreshness, Prompt,
+    worker_now_has_real_assignment, MergeAlertEvidence, MergeAlertFreshness, Prompt,
 };
 pub(crate) use prompts::{
     apply_idle_liveness, epic_completion_is_current, idle_worker_liveness,

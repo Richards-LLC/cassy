@@ -2097,8 +2097,16 @@ impl CloudSyncer {
             };
             let remote_updated_at = remote_updated_at
                 .unwrap_or_else(|| remote_entry.last_accessed.unwrap_or(remote_entry.created));
+            let remote_entry = self.prepare_pulled_entry(
+                store, remote_entry, remote_updated_at, current_project_id, None, row_origin.as_deref(),
+            )?;
             let remote_entry_id = remote_entry.id.clone();
-            match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
+            match self.upsert_entry_lww(
+                store,
+                remote_entry,
+                remote_updated_at,
+                &mut result.memory_fold_conflicts,
+            ) {
                 Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_entries += 1;
                     self.note_pulled_authorship(
@@ -2109,7 +2117,9 @@ impl CloudSyncer {
                         current_project_id,
                         &mut result,
                     );
-                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision) {
+                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision)
+                        && id == &remote_entry_id
+                    {
                         let _ = self.queue.record_revision(EntityType::Entry, id, revision);
                     }
                 }
@@ -2695,6 +2705,7 @@ impl CloudSyncer {
         store: &dyn Store,
         entry: Entry,
         remote_updated_at: DateTime<Utc>,
+        fold_conflicts: &mut Vec<String>,
     ) -> Result<UpsertResult, CasError> {
         let local = match store.get(&entry.id) {
             Ok(local) => Some(local),
@@ -2723,13 +2734,13 @@ impl CloudSyncer {
                         }
                         Err(error) => return Err(error.into()),
                     };
-                    self.merge_entry_lww(store, local, entry, remote_updated_at)
+                    self.merge_entry_lww(store, local, entry, remote_updated_at, fold_conflicts)
                 }
                 Err(error) => Err(error.into()),
             };
         };
 
-        self.merge_entry_lww(store, local, entry, remote_updated_at)
+        self.merge_entry_lww(store, local, entry, remote_updated_at, fold_conflicts)
     }
 
     fn merge_entry_lww(
@@ -2738,7 +2749,14 @@ impl CloudSyncer {
         local: Entry,
         remote: Entry,
         remote_updated_at: DateTime<Utc>,
+        fold_conflicts: &mut Vec<String>,
     ) -> Result<UpsertResult, CasError> {
+        if self.preserve_fold_conflict(&local, &remote, remote_updated_at, fold_conflicts)? {
+            return Ok(UpsertResult::Skipped);
+        }
+        // Re-check after the get→add race too: a recovery key must never
+        // overwrite a concurrent insert belonging to another creation.
+        super::entry_identity::verify_recovery_birth(&local, &remote)?;
         let local_time = store.recent_timestamp(&local)?;
         let action = self.resolve_conflict(
             "entry",
@@ -2995,8 +3013,24 @@ impl CloudSyncer {
     ) -> Result<SyncResult, CasError> {
         let start = Instant::now();
 
+        // cas-9b5d: a team-linked store syncs in team scope only, as
+        // `cas cloud sync` has since cas-421e. Cloud keys a team project's
+        // rows by team, so it refuses a personal push from that project as
+        // team_owned_project, and a personal pull never returns teammates'
+        // rows. The daemon used to do both every tick. Prowl's team-linked
+        // stores filled with refused rows, and their team watermark moved only
+        // on a manual sync. Personal rows stay queued and untouched; they push
+        // again only if the project returns to personal scope. A team-only
+        // store still runs the personal push, which retires its personal rows
+        // and sends nothing.
+        let team_id = self.cloud_config.active_team_id();
+
         // Push personal changes first (with sessions).
-        let push_result = self.push_with_sessions(sessions)?;
+        let push_result = if team_id.is_some() && !self.cloud_config.team_only {
+            SyncResult::default()
+        } else {
+            self.push_with_sessions(sessions)?
+        };
 
         // Team-scoped writes are queued separately from personal writes. The
         // automatic daemon enters through this method, so omitting this drain
@@ -3006,26 +3040,39 @@ impl CloudSyncer {
         // Keep team failure isolated from pull, matching `cas cloud sync`:
         // push_team records per-row HTTP failures, while setup/config errors
         // are surfaced in the aggregate result without suppressing pull.
-        let team_push_result = match self.cloud_config.active_team_id() {
-            Some(team_id) => self.push_team(&team_id).unwrap_or_else(|error| SyncResult {
+        let team_push_result = match team_id.as_deref() {
+            Some(team_id) => self.push_team(team_id).unwrap_or_else(|error| SyncResult {
                 errors: vec![format!("Team push failed: {error}")],
                 ..SyncResult::default()
             }),
             None => SyncResult::default(),
         };
 
-        // Then pull
-        let pull_result = self.pull(
-            store,
-            task_store,
-            rule_store,
-            skill_store,
-            spec_store,
-            event_store,
-            prompt_store,
-            file_change_store,
-            commit_link_store,
-        )?;
+        // Then pull: team scope for a team-linked store, else personal.
+        let pull_result = match team_id.as_deref() {
+            Some(team_id) => {
+                let project_id = self.personal_push_project_id()?;
+                self.pull_team(
+                    team_id,
+                    &project_id,
+                    store,
+                    task_store,
+                    rule_store,
+                    skill_store,
+                )?
+            }
+            None => self.pull(
+                store,
+                task_store,
+                rule_store,
+                skill_store,
+                spec_store,
+                event_store,
+                prompt_store,
+                file_change_store,
+                commit_link_store,
+            )?,
+        };
 
         // Combine results
         Ok(SyncResult {
@@ -3075,6 +3122,7 @@ impl CloudSyncer {
             conflicts_resolved_local: pull_result.conflicts_resolved_local,
             conflicts_resolved_remote: pull_result.conflicts_resolved_remote,
             conflicts: pull_result.conflicts,
+            memory_fold_conflicts: pull_result.memory_fold_conflicts,
             errors: [
                 push_result.errors,
                 team_push_result.errors,
@@ -3221,8 +3269,16 @@ impl CloudSyncer {
             };
             let remote_updated_at = remote_updated_at
                 .unwrap_or_else(|| remote_entry.last_accessed.unwrap_or(remote_entry.created));
+            let remote_entry = self.prepare_pulled_entry(
+                store, remote_entry, remote_updated_at, current_project_id, Some(team_id), row_origin.as_deref(),
+            )?;
             let remote_entry_id = remote_entry.id.clone();
-            match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
+            match self.upsert_entry_lww(
+                store,
+                remote_entry,
+                remote_updated_at,
+                &mut result.memory_fold_conflicts,
+            ) {
                 Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_entries += 1;
                     self.note_pulled_authorship(
@@ -3233,7 +3289,9 @@ impl CloudSyncer {
                         current_project_id,
                         &mut result,
                     );
-                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision) {
+                    if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision)
+                        && id == &remote_entry_id
+                    {
                         let _ = self.queue.record_revision(EntityType::Entry, id, revision);
                     }
                 }
@@ -3503,7 +3561,8 @@ mod tests {
             json!({
                 "id": "p-malformed-created",
                 "project_id": "cas-src",
-                "content": "legacy entry without its creation timestamp",
+                "content": "legacy entry with a malformed creation timestamp",
+                "created": 42,
             }),
             "entry",
         )
@@ -3511,7 +3570,7 @@ mod tests {
 
         assert!(error.contains("entry deserialize error"), "{error}");
         assert!(error.contains("id=p-malformed-created"), "{error}");
-        assert!(error.contains("missing field `created`"), "{error}");
+        assert!(error.contains("invalid type"), "{error}");
     }
 
     #[test]

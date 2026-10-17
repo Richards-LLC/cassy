@@ -78,6 +78,7 @@ jobs:
     name: Classify CI diff
     runs-on: ubuntu-latest
     outputs:
+      comparison-base: ${{ steps.classify-diff.outputs.comparison-base }}
       class: ${{ steps.classify-diff.outputs.class }}
       docs-only: ${{ steps.classify-diff.outputs.class == 'docs-only' }}
       rust-unaffected: ${{ steps.classify-diff.outputs.rust-unaffected }}
@@ -94,6 +95,13 @@ jobs:
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           zero-base-ref: origin/${{ github.event.repository.default_branch }}
+
+      # Move the repository scan out of the expensive queue script tier. This
+      # existing admission job covers factory and direct epic pushes plus PRs
+      # (including release branches) before a merge-group can be admitted.
+      - name: Check Violet references before queue admission
+        if: github.event_name != 'merge_group'
+        run: bash scripts/test-no-mecha-references.sh
 
   # Docs-only changes keep the existing branch-protection contexts satisfiable without
   # paying for Rust, web, or Darwin work. The full validation jobs remain the
@@ -117,7 +125,7 @@ jobs:
       - name: Run no-build release gate rows
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/')
         env:
-          BASE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
         run: |
           # The pinned markdownlint-cli2 (root package-lock.json); scripts/markdownlint.py runs it.
@@ -130,7 +138,7 @@ jobs:
 
       - name: Markdown lint
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
@@ -155,7 +163,7 @@ jobs:
 
       - name: Validate release-note drafts
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
@@ -342,7 +350,7 @@ jobs:
       # This cheap step runs even when builds route to the full tier or a PR.
       - name: Run no-build release gate rows
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
         run: |
           # The pinned markdownlint-cli2 (root package-lock.json); scripts/markdownlint.py runs it.
@@ -356,7 +364,7 @@ jobs:
       - name: Detect runner lock fixture changes
         id: runner-lock-diff
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.before }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           runner_base="$BASE_SHA"
@@ -425,7 +433,7 @@ jobs:
           steps.classify-diff.outputs.fast-admission == 'true'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
-          BASE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
           ZIG: ${{ github.workspace }}/.context/zig/zig
@@ -453,7 +461,7 @@ jobs:
           steps.classify-diff.outputs.fast-admission == 'true'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
-          BASE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
         run: scripts/check-scoped-snapshot-tests.sh --base-sha "$BASE_SHA" --zero-base-ref "$ZERO_BASE_REF"
 
@@ -522,9 +530,8 @@ jobs:
         uses: ./.github/actions/classify-required-diff
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-          # A branch's first push carries before=000... even when it is based on
-          # main. Compare the complete branch diff against the protected base;
-          # tags and every other uncertain event still fail closed.
+          # First factory pushes resolve their shared epic parent; unknown
+          # or ambiguous parents fail closed in the common classifier.
           zero-base-ref: origin/${{ github.event.repository.default_branch }}
 
       # Every factory push is already admitted in the fast job, independently
@@ -532,7 +539,7 @@ jobs:
       - name: Run no-build release gate rows
         if: github.event_name != 'push'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
         run: |
           # The pinned markdownlint-cli2 (root package-lock.json); scripts/markdownlint.py runs it.
@@ -553,7 +560,7 @@ jobs:
         id: runner-lock-diff
         if: github.event_name != 'push' && steps.pr-dedupe.outputs.covered != 'true'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.before }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           runner_base="$BASE_SHA"
@@ -619,7 +626,7 @@ jobs:
           && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
           ZIG: ${{ github.workspace }}/.context/zig/zig
@@ -652,7 +659,7 @@ jobs:
           && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
         run: scripts/check-scoped-snapshot-tests.sh --base-sha "$BASE_SHA" --zero-base-ref "$ZERO_BASE_REF"
 
@@ -971,41 +978,6 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      # cas-4427: redundant now that Commander bundles its fonts; removal pending operator approval.
-      # cas-c4b2: the app ships no fonts, so its sans-serif and monospace
-      # stacks resolve to whatever the machine renders. Ubuntu's hosted image
-      # renders DejaVu, which moved the J2, J5, J14 and J15 layouts; the
-      # journeys were written against Noto Sans and IBM Plex Mono
-      # (artifacts cas-c4b2/hosted-diagnosis.md). Install those and make Noto
-      # Sans the generic sans-serif and system-ui face.
-      - name: Install the fonts the journeys are written against
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends fonts-noto-core fonts-ibm-plex
-          mkdir -p "$HOME/.config/fontconfig"
-          cat > "$HOME/.config/fontconfig/fonts.conf" <<'FONTS'
-          <?xml version="1.0"?>
-          <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
-          <fontconfig>
-            <match target="pattern">
-              <test qual="any" name="family"><string>sans-serif</string></test>
-              <edit name="family" mode="prepend_first" binding="strong"><string>Noto Sans</string></edit>
-            </match>
-            <match target="pattern">
-              <test qual="any" name="family"><string>system-ui</string></test>
-              <edit name="family" mode="prepend_first" binding="strong"><string>Noto Sans</string></edit>
-            </match>
-          </fontconfig>
-          FONTS
-          fc-cache -f >/dev/null
-          echo "sans-serif: $(fc-match sans-serif)"
-          echo "IBM Plex Mono faces installed: $(fc-list 'IBM Plex Mono' family | wc -l)"
-          fc-match sans-serif | grep -q 'Noto Sans'
-          # cas-482b: an installation check. fc-match appends sans-serif to
-          # every pattern, so the strong rule above answers Noto Sans for any
-          # family, 'IBM Plex Mono' included (merge_group run 38681851830).
-          test -n "$(fc-list 'IBM Plex Mono' family)"
 
       - name: Run Commander journeys shard ${{ matrix.shard }}/6
         working-directory: hub-web
@@ -1437,7 +1409,7 @@ jobs:
   fast-validation:
     name: Fast Validation
     if: >-
-      always() && needs.ci-diff.outputs.class != 'docs-only'
+      always() && (needs.ci-diff.outputs.class != 'docs-only' || needs.ci-diff.result != 'success')
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'pull_request'
@@ -1472,8 +1444,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Admit protected PR to merge-queue validation
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || needs.ci-diff.result != 'success'
+        env:
+          CI_DIFF: ${{ needs.ci-diff.result }}
         run: |
+          test "$CI_DIFF" = success
           echo "Fast Validation is deferred to the canonical merge-queue tree."
 
       - name: Require every Fast Validation lane to pass

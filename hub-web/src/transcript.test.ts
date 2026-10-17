@@ -1,20 +1,22 @@
 import { describe, expect, it } from "vitest";
-import type { GhosttyCell, GhosttyColor, GhosttyRow } from "./terminal/ghostty/core";
-import { GHOSTTY_CELL_WIDE } from "./terminal/ghostty/core";
 import {
   shouldFollowTail,
   shouldPageScrollback,
   transcriptLineKey,
   transcriptLines,
+  TRANSCRIPT_CELL_WIDE,
+  type TranscriptCell,
+  type TranscriptColor,
+  type TranscriptRow,
 } from "./transcript";
 
-const FOREGROUND: GhosttyColor = { r: 201, g: 209, b: 217 };
-const BACKGROUND: GhosttyColor = { r: 13, g: 17, b: 23 };
-const GREEN: GhosttyColor = { r: 63, g: 185, b: 80 };
+const FOREGROUND: TranscriptColor = { r: 201, g: 209, b: 217 };
+const BACKGROUND: TranscriptColor = { r: 13, g: 17, b: 23 };
+const GREEN: TranscriptColor = { r: 63, g: 185, b: 80 };
 
 interface CellOverrides {
-  readonly foreground?: GhosttyColor;
-  readonly background?: GhosttyColor;
+  readonly foreground?: TranscriptColor;
+  readonly background?: TranscriptColor;
   readonly bold?: boolean;
   readonly italic?: boolean;
   readonly underline?: boolean;
@@ -22,27 +24,25 @@ interface CellOverrides {
   readonly wide?: number;
 }
 
-function cell(text: string, overrides: CellOverrides = {}): GhosttyCell {
+function cell(text: string, overrides: CellOverrides = {}): TranscriptCell {
   return {
     text,
-    wide: overrides.wide ?? GHOSTTY_CELL_WIDE.narrow,
+    wide: overrides.wide ?? TRANSCRIPT_CELL_WIDE.narrow,
     foreground: overrides.foreground ?? FOREGROUND,
     background: overrides.background ?? BACKGROUND,
     bold: overrides.bold ?? false,
     italic: overrides.italic ?? false,
     invisible: false,
     strikethrough: overrides.strikethrough ?? false,
-    overline: false,
     underline: overrides.underline ?? false,
-    selected: false,
   };
 }
 
 /** A row of `cols` cells holding `text`, padded with blanks like the real grid. */
 function row(
   text: string,
-  options: { cols?: number; wrapsToNext?: boolean; isWrapContinuation?: boolean; cells?: readonly GhosttyCell[] } = {},
-): GhosttyRow {
+  options: { cols?: number; wrapsToNext?: boolean; isWrapContinuation?: boolean; cells?: readonly TranscriptCell[] } = {},
+): TranscriptRow {
   const cols = options.cols ?? 20;
   const cells = options.cells ?? [...text].map((character) => cell(character));
   const padded = [...cells];
@@ -102,8 +102,8 @@ describe("transcript logical lines", () => {
 
   it("drops the spacer cell that follows a wide glyph", () => {
     const cells = [
-      cell("字", { wide: GHOSTTY_CELL_WIDE.wide }),
-      cell("", { wide: GHOSTTY_CELL_WIDE.spacerTail }),
+      cell("字", { wide: TRANSCRIPT_CELL_WIDE.wide }),
+      cell("", { wide: TRANSCRIPT_CELL_WIDE.spacerTail }),
       cell("!"),
     ];
     const lines = transcriptLines([row("字 !", { cells, cols: 4 })], theme);

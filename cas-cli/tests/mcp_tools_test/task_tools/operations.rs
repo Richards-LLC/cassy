@@ -3134,7 +3134,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
             reason: None,
             labels: None,
             notes: None,
-            blocked_by: Some(blocker_id.clone()),
+            blocked_by: None,
             design: None,
             acceptance_criteria: None,
             external_ref: None,
@@ -3151,7 +3151,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
 
     let _ = service
         .cas_task_update(Parameters(TaskUpdateRequest {
-            blocked_by: None,
+            blocked_by: Some(blocker_id.clone()),
             depth: None,
             id: blocked_id.clone(),
             title: None,
@@ -3168,7 +3168,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
             proof_targets: None,
             external_ref: None,
             assignee: None,
-            status: Some("blocked".to_string()),
+            status: None,
             epic: None,
             origin_project: None,
             epic_verification_owner: None,
@@ -3230,6 +3230,160 @@ async fn test_close_auto_unblocks_blocked_dependents() {
         text.contains("Status: Open"),
         "Blocked dependent should auto-transition to Open: {text}"
     );
+}
+
+async fn create_task_titled(service: &CasCore, title: &str) -> String {
+    let created = service
+        .cas_task_create(Parameters(make_task_create_req(title)))
+        .await
+        .expect("task create");
+    extract_task_id(&extract_text(created)).expect("task id").to_string()
+}
+
+async fn update_task_json(service: &CasCore, request: serde_json::Value) {
+    let request: TaskUpdateRequest = serde_json::from_value(request).expect("update request");
+    service
+        .cas_task_update(Parameters(request))
+        .await
+        .expect("task update");
+}
+
+async fn task_show_text(service: &CasCore, id: &str) -> String {
+    let show = service
+        .cas_task_show(Parameters(TaskShowRequest { id: id.to_string(), with_deps: false }))
+        .await
+        .expect("task show");
+    extract_text(show)
+}
+
+/// A hold set with status=blocked survives its dependency closing and is
+/// surfaced by that close; a dependency-only block (even with an old blocker
+/// note, or status=blocked while the dependency is unmet) auto-unblocks.
+#[tokio::test]
+async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
+    let cas_dir = temp.path().join(".cas");
+    promote_default_test_agent(&cas_dir);
+    let session_id = format!("test-session-{}", std::process::id());
+    let task_store = open_task_store(&cas_dir).expect("task store");
+    let hold_of = |id: &str| {
+        task_store
+            .get_execution_state(id)
+            .expect("execution state")
+            .and_then(|state| state.get("blocked_hold").cloned())
+    };
+    let blocker_id = create_task_titled(&service, "Decision hold blocker").await;
+    let decision_id = create_task_titled(&service, "Operator-held Slack ownership decision").await;
+    let explicit_id = create_task_titled(&service, "Explicit status hold").await;
+    let legacy_id = create_task_titled(&service, "Old blocker note control").await;
+    let dependency_id = create_task_titled(&service, "Status set while dependency is open").await;
+
+    // Decision hold: a decision note, then status=blocked records who/when/why.
+    let decision_reason = "Wait for the operator to resolve Slack ownership after the peer board ships.";
+    service
+        .cas_task_notes(Parameters(TaskNotesRequest {
+            id: decision_id.clone(),
+            note: "Hold until the operator resolves Slack ownership.".to_string(),
+            note_type: "decision".to_string(),
+            supervisor_override: None,
+            reason: None,
+        }))
+        .await
+        .expect("decision note");
+    update_task_json(&service, serde_json::json!({"id": decision_id, "status": "blocked", "notes": decision_reason})).await;
+    let hold = hold_of(&decision_id).expect("status=blocked persists a structured hold");
+    assert_eq!(hold["reason"], decision_reason);
+    assert_eq!(hold["who"], session_id);
+    chrono::DateTime::parse_from_rfc3339(hold["when"].as_str().expect("hold time"))
+        .expect("hold timestamp should be RFC3339");
+    // Callers cannot forge a hold through state_patch.
+    let forged: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update", "id": decision_id,
+        "state_patch": {"blocked_hold": {"reason": "forged", "who": session_id, "when": "2026-10-16T15:00:00Z"}},
+    }))
+    .expect("forged hold request");
+    assert!(
+        CasService::new(service.clone(), None).task(Parameters(forged)).await.is_err(),
+        "caller-supplied non-null blocked_hold should be rejected"
+    );
+
+    // Explicit status hold, then the dependency is added.
+    update_task_json(&service, serde_json::json!({"id": explicit_id, "status": "blocked", "notes": "Operator hold: wait for Slack ownership to be decided."})).await;
+    // Legacy control: an old blocker note is not a hold.
+    service
+        .cas_task_notes(Parameters(TaskNotesRequest {
+            id: legacy_id.clone(),
+            note: "Old blocker: the earlier API outage was resolved last week.".to_string(),
+            note_type: "blocker".to_string(),
+            supervisor_override: None,
+            reason: None,
+        }))
+        .await
+        .expect("legacy blocker note");
+    for id in [&decision_id, &explicit_id, &legacy_id, &dependency_id] {
+        update_task_json(&service, serde_json::json!({"id": id, "blocked_by": blocker_id})).await;
+    }
+    // Dependency control: status=blocked while the dependency is unmet is not a hold.
+    update_task_json(&service, serde_json::json!({"id": dependency_id, "status": "blocked", "notes": "Leave blocked until the API dependency closes."})).await;
+    assert!(hold_of(&dependency_id).is_none(), "an unmet dependency must not create a non-dependency hold");
+
+    let dispatch = cas_store::create_verification_dispatch(
+        &cas_dir,
+        &blocker_id,
+        &session_id,
+        &session_id,
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    )
+    .expect("create exact supervisor verification dispatch");
+    service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: blocker_id.clone(),
+            status: "approved".to_string(),
+            summary: "approved for close".to_string(),
+            confidence: Some(0.9),
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id),
+        }))
+        .await
+        .expect("verification add should succeed");
+    let close = service
+        .cas_task_close(Parameters(TaskCloseRequest {
+            stranded_branch_override: None,
+            id: blocker_id,
+            reason: Some("peer board shipped".to_string()),
+            supervisor_override: None,
+            legacy_bypass_code_review: None,
+            search_manifest: None,
+            commit_receipt: None,
+        }))
+        .await
+        .expect("blocker close should succeed");
+    let close_text = extract_text(close);
+
+    for (case, id, status, surfaced) in [
+        ("decision hold", &decision_id, "Blocked", Some("operator to resolve Slack ownership")),
+        ("explicit hold", &explicit_id, "Blocked", Some("Operator hold: wait for Slack ownership")),
+        ("old blocker note", &legacy_id, "Open", None),
+        ("status=blocked behind a dependency", &dependency_id, "Open", None),
+    ] {
+        let show = task_show_text(&service, id).await;
+        assert!(show.contains(&format!("Status: {status}")), "{case}: {show}");
+        assert_eq!(
+            surfaced.is_some_and(|reason| close_text.contains(id.as_str()) && close_text.contains(reason)),
+            surfaced.is_some(),
+            "{case}: close surfaces exactly the remaining holds: {close_text}"
+        );
+    }
+    assert!(!close_text.contains("earlier API outage"), "{close_text}");
+    assert!(!close_text.contains("Leave blocked until the API dependency closes"), "{close_text}");
+
+    update_task_json(&service, serde_json::json!({"id": explicit_id, "status": "open"})).await;
+    assert!(hold_of(&explicit_id).is_none(), "status=open removes the structured hold");
 }
 
 #[tokio::test]
@@ -4859,6 +5013,59 @@ async fn transfer_adopt_branch_rebinds_delivery_and_real_commit_guard_cas_38a7()
     let denied = cas::hooks::handle_pre_tool_use(&hook(&source.id), Some(&cas_dir)).unwrap();
     let denied = serde_json::to_value(denied).unwrap();
     assert_eq!(denied.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("deny"), "{denied}");
+}
+
+/// cas-2d20: an isolated worker's registration may carry no clone_path.
+/// Adoption then uses the worker's managed worktree (`.cas/worktrees/<name>`),
+/// binds the per-task branch there, and the commit guard admits it; an
+/// unadopted foreign branch in that worktree is still refused.
+#[tokio::test]
+async fn transfer_adopt_branch_uses_isolated_receivers_managed_worktree_cas_2d20() {
+    let mut env = TestEnvGuard::temp_home();
+    let BranchAdoptionFixture { temp, destination, service, task, receiver, tip, .. } =
+        branch_adoption_fixture(&mut env);
+    let root = temp.path();
+    let cas_dir = root.join(".cas");
+    // Move the receiver's worktree to its managed location and drop the
+    // clone_path from its registration, as an isolated spawn can leave it.
+    branch_transfer_git(root, &["worktree", "remove", "--force", destination.path().to_str().unwrap()]);
+    let managed = cas_dir.join("worktrees").join(&receiver.name);
+    branch_transfer_git(root, &["worktree", "add", managed.to_str().unwrap(), "factory/new-worker"]);
+    let agents = open_agent_store(&cas_dir).unwrap();
+    let mut registered = agents.get(&receiver.id).unwrap();
+    registered.metadata.remove("clone_path");
+    agents.update(&registered).unwrap();
+
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "transfer", "id": task.id, "to_agent": receiver.name, "adopt_branch": true,
+    })).unwrap();
+    service.task(Parameters(request)).await.expect("adoption into the managed worktree");
+    let expected = "factory/new-worker-cas-branch1100";
+    assert_eq!(branch_transfer_git(&managed, &["branch", "--show-current"]), expected);
+    assert_eq!(branch_transfer_git(&managed, &["rev-parse", "HEAD"]), tip);
+    let after = open_task_store(&cas_dir).unwrap().get(&task.id).unwrap();
+    assert_eq!(after.assignee.as_deref(), Some("new-worker"));
+    assert_eq!(after.deliverables.parked_branch.as_deref(), Some(expected));
+
+    env.set("CAS_FACTORY_MODE", "1");
+    env.set("CAS_AGENT_ROLE", "worker");
+    env.set("CAS_CLONE_PATH", &managed);
+    env.set("CAS_AGENT_NAME", &receiver.name);
+    env.set("CAS_AGENT_ID", &receiver.id);
+    let commit = || -> String {
+        let input: cas::hooks::HookInput = serde_json::from_value(serde_json::json!({
+            "session_id": receiver.id, "cwd": managed, "tool_name": "Bash",
+            "tool_input": {"command": "git commit -m continued"},
+        })).unwrap();
+        let output = cas::hooks::handle_pre_tool_use(&input, Some(&cas_dir)).unwrap();
+        serde_json::to_value(output).unwrap()
+            .pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(|v| v.as_str()).unwrap_or("").to_string()
+    };
+    assert_eq!(commit(), "allow", "the adopted branch is the receiver's own");
+    // An unadopted foreign branch in the same worktree stays refused.
+    branch_transfer_git(&managed, &["switch", "-c", "factory/crisp-spider-42-cas-e3dd"]);
+    assert_eq!(commit(), "deny", "a foreign worker's branch is still a misbinding");
 }
 
 // cas-3ed5: supervisor force-transfer (bypass live-worker lease without shutdown)

@@ -952,6 +952,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
     // (key, value to set, value get returns)
     let table: &[(&str, &str, &str)] = &[
         ("factory.artifacts_root", " /mnt/scratch/artifacts ", "/mnt/scratch/artifacts"),
+        ("factory.scratch_root", " /mnt/rewind/cas ", "/mnt/rewind/cas"),
         ("factory.supervisor_only_mcp", " vercel, neon ", "vercel,neon"),
         ("factory.supervisor_only_env", " VERCEL_TOKEN, NEON_API_KEY ", "VERCEL_TOKEN,NEON_API_KEY"),
         ("factory.worker_credential_env", " GITHUB_TOKEN, VERCEL_TOKEN ", "GITHUB_TOKEN,VERCEL_TOKEN"),
@@ -962,6 +963,10 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.note_max_chars", "1800", "1800"),
         ("factory.commander_mirror_enabled", "false", "false"),
         ("factory.max_concurrent_builders", "3", "3"),
+        ("factory.build_guard.max_load_ratio", "2", "2.0"),
+        ("factory.build_guard.max_cpu_pressure_percent", "85.5", "85.5"),
+        ("factory.build_guard.max_memory_pressure_percent", "5.5", "5.5"),
+        ("factory.build_guard.min_available_memory_gib", "4", "4"),
         ("factory.worker_memory_high_gib", "6", "6"),
         ("factory.render_max_fps", "12", "12"),
         ("factory.render_unfocused_fps", "3", "3"),
@@ -973,6 +978,9 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.worker_build_jobs", "6", "6"),
         ("factory.cargo_build_jobs", "5", "5"),
         ("factory.nice_cargo", "false", "false"),
+        ("factory.claude.worker_mcp", "inherit", "inherit"),
+        ("factory.claude.remote_control", "true", "true"),
+        ("factory.claude.fallback_model", " sonnet,haiku ", "sonnet,haiku"),
         ("factory.warn_stale_assignment", "false", "false"),
         ("factory.block_stale_assignment", "false", "false"),
         ("factory.stale_threshold_commits", "3", "3"),
@@ -1091,6 +1099,7 @@ fn serialized_factory_fields_have_registry_entries_cas_f7b9() {
     // deliberately do not serialize and are not runtime settings.
     let factory = FactoryConfig {
         artifacts_root: Some("/mnt/factory-artifacts".into()),
+        scratch_root: Some("/mnt/rewind/cas".into()),
         epic_base_branch: Some("main".into()),
         write_roots: vec!["/mnt/operator-approved".into()],
         ..FactoryConfig::default()
@@ -1473,4 +1482,53 @@ fn unusable_origin_does_not_infer_component_or_parent_cas_f398() {
             .project
             .is_none()
     );
+}
+
+/// Round-trips, defaults and listing live in the table above; this covers
+/// refusals. A refused value keeps the previous one, an empty value clears an
+/// optional key, and persisted TOML is validated like `config set`.
+/// cas-3f93: a relative scratch root would resolve against a spawn's cwd.
+#[test]
+fn factory_claude_and_scratch_root_refuse_invalid_values_cas_569f_940c_3f93() {
+    let mut config = Config::default();
+    for (key, good, bad) in [
+        ("factory.claude.fallback_model", "sonnet", "sonnet\nhaiku"),
+        ("factory.claude.remote_control", "true", "invalid"),
+        ("factory.claude.worker_mcp", "inherit", "all"),
+        ("factory.scratch_root", "/mnt/rewind/cas", "rewind/cas"),
+    ] {
+        config.set(key, good).unwrap();
+        let error = config.set(key, bad).unwrap_err().to_string();
+        assert_eq!(config.get(key).as_deref(), Some(good), "{key} kept after {bad:?}");
+        if key == "factory.scratch_root" {
+            assert!(error.contains("absolute"), "{error}");
+        }
+    }
+    config.set("factory.claude.fallback_model", "").unwrap();
+    config.set("factory.scratch_root", "").unwrap();
+    assert!(config.factory().claude.fallback_model.is_none());
+    assert_eq!(config.factory().scratch_root, None);
+    for invalid in [
+        "[factory.claude]\nfallback_model=\"sonnet\\nhaiku\"",
+        "[factory.claude]\nworker_mcp='all'",
+    ] {
+        assert!(toml::from_str::<Config>(invalid).is_err(), "{invalid}");
+    }
+}
+
+#[test]
+fn cas_2d63_build_guard_rejects_invalid_limits_without_mutating_config() {
+    let mut config = Config::default();
+    for (key, values) in [
+        ("factory.build_guard.max_load_ratio", &["0", "-1", "NaN", "inf"][..]),
+        ("factory.build_guard.max_cpu_pressure_percent", &["-1", "101", "NaN"][..]),
+        ("factory.build_guard.max_memory_pressure_percent", &["-1", "101", "inf"][..]),
+        ("factory.build_guard.min_available_memory_gib", &["-1", "65537"][..]),
+    ] {
+        let before = config.get(key);
+        for value in values {
+            assert!(config.set(key, value).is_err(), "{key}={value}");
+            assert_eq!(config.get(key), before);
+        }
+    }
 }

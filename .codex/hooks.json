@@ -17,7 +17,7 @@
         "hooks": [
           {
             "command": "CAS_HOOK_HARNESS=codex cas hook PreToolUse",
-            "timeout": 3,
+            "timeout": 120,
             "type": "command"
           }
         ],

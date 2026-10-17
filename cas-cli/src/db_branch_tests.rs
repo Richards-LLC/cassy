@@ -518,3 +518,63 @@ fn ledger_paths_reject_path_like_task_ids() {
     assert!(ledger_path(tmp.path(), "").is_err());
     assert!(ledger_path(tmp.path(), "cas-0033").is_ok());
 }
+
+/// cas-b3b4a: branch work through a fake `neonctl`, with the key in the
+/// environment and never in argv.
+#[cfg(unix)]
+#[tokio::test]
+async fn cas_b3b4a_neonctl_backs_branch_calls_without_a_key_in_argv() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("calls.log");
+    let program = dir.path().join("neonctl");
+    std::fs::write(
+        &program,
+        format!(
+            r#"#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+with open({log:?}, "a") as handle:
+    handle.write(json.dumps({{"argv": argv, "key": os.environ.get("NEON_API_KEY")}}) + "\n")
+if argv[:2] == ["branches", "list"]:
+    print(json.dumps([{{"id": "br-main", "name": "main", "default": True}}]))
+elif argv[:2] == ["branches", "create"]:
+    name = argv[argv.index("--name") + 1]
+    print(json.dumps({{"branch": {{"id": "br-new", "name": name, "default": False}}}}))
+elif argv[0] == "connection-string":
+    print("postgresql://user:pass@host/db")
+else:
+    print("{{}}")
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cli = NeonCli { program, api_key: Some("napi_secret".into()) };
+
+    let branches = cli.list_branches("proj").await.unwrap();
+    assert_eq!(branches[0].id, "br-main");
+    assert!(branches[0].is_default);
+    let created = cli.create_branch("proj", "cas-x-1", "br-dev").await.unwrap();
+    assert_eq!(created.id, "br-new");
+    assert_eq!(
+        cli.connection_string("proj", "br-new").await.unwrap(),
+        "postgresql://user:pass@host/db"
+    );
+    cli.delete_branch("proj", "br-new").await.unwrap();
+
+    let calls: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(calls.len(), 4);
+    for call in &calls {
+        assert_eq!(call["key"], "napi_secret", "the key travels in the environment");
+        assert!(!call["argv"].to_string().contains("napi_secret"), "never in argv: {call}");
+    }
+    let create = calls[1]["argv"].to_string();
+    for expected in ["--parent", "br-dev", "--suspend-timeout", "300", "--cu"] {
+        assert!(create.contains(expected), "{expected} missing from {create}");
+    }
+}

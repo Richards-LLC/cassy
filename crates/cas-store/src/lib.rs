@@ -40,6 +40,7 @@ pub mod shared_db;
 pub mod wait_budget;
 
 mod agent_store;
+pub mod communication_slo;
 mod code_index_purge;
 mod code_store;
 mod code_vector_store;
@@ -269,6 +270,7 @@ pub use surfaced_artifact_store::{
 pub use prompt_queue_store::{
     AdmissionOutcome, OperatorCommandAdmission,
     BudgetedSurface, InboxHandoffState, HOOK_SURFACE_BUDGET_CHARS, HOOK_SURFACE_ROW_OVERHEAD_CHARS, HookDrain,
+    NOTICE_DIGEST_KIND,
     fits_hook_surface, hook_surface_cost,
     OPERATOR_CLOUD_SCHEMA_STATEMENTS, OperatorCloudBacklog, OperatorCloudClaim,
     OperatorCloudSettlement, OperatorFeedBinding, OperatorSealedBytes, is_routing_id,

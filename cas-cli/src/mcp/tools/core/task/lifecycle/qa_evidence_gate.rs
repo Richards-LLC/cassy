@@ -786,6 +786,67 @@ mod tests {
     }
 
     #[test]
+    fn api_paths_use_http_evidence_without_visual_bundle_cas_40d5() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        commit_file(repo, "seed.txt", "seed");
+        git(repo, &["checkout", "-q", "-b", "factory/api"]);
+        std::fs::create_dir_all(repo.join("lib")).unwrap();
+        commit_file(repo, "lib/Server.tsx", "export const status = 400;");
+        let head = resolve_branch_sha(repo, "HEAD").unwrap();
+        let mut config = crate::config::Config::default();
+        config.set("qa.api_paths", "app/api/**, lib/**").unwrap();
+        assert_eq!(config.get("qa.api_paths").as_deref(), Some("app/api/**,lib/**"));
+        assert!(config.list().contains(&("qa.api_paths".into(), "app/api/**,lib/**".into())));
+        let cas = crate::store::init_cas_dir(repo).unwrap();
+        config.save(&cas).unwrap();
+        assert_eq!(crate::config::Config::load(&cas).unwrap().get("qa.api_paths"), config.get("qa.api_paths"));
+        let qa = config.qa();
+        let task = Task::new("cas-api".into(), "API status change".into());
+        let mut paths = vec!["app/api/route.ts".into(), "lib/Server.tsx".into()];
+        let reasons = user_facing_reasons(&task, &qa, Some(&paths), &["broad-app-catalog".into()]).reasons;
+        let tier = evidence_tier(&reasons, false);
+        assert_eq!(tier, EvidenceTier::Ledger { terminal_qa: false });
+        assert!(!reasons.is_empty(), "API paths must trigger QA without a demo");
+        let artifacts = repo.join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let transcript = format!(
+            "head_sha: {head}\norigin: http://127.0.0.1:3000\n\
+             | A1 | invalid input | 400 | 400 | PASS | real-build | inline | |\n\
+             request: POST http://127.0.0.1:3000/api/widgets\nstatus: 400\nbody: {{\"error\":\"invalid input\"}}\n"
+        );
+        std::fs::write(artifacts.join("LEDGER.md"), &transcript).unwrap();
+        let ctx = EvidenceContext {
+            task_id: &task.id, task_artifacts_dir: &artifacts, repo,
+            delivered_head: &head, notes: "", deployed_origins: &[],
+        };
+        let missing = run_close_gate_with_write_dir(&ctx, tier, &reasons, &[], &artifacts)
+            .expect_err("the contract comparison is required, even when it has no differences");
+        assert!(missing.contains("contracts.diff"), "{missing}");
+        std::fs::write(artifacts.join("contracts.diff"), "").unwrap();
+        run_close_gate_with_write_dir(&ctx, tier, &reasons, &[], &artifacts)
+            .expect("two API artifacts suffice; no screenshots or bundle manifest");
+        crate::store::open_task_store_local(&cas).unwrap().add(&task).unwrap();
+        let round: cas_types::QaPass = serde_json::from_value(serde_json::json!({
+            "id": "qp-api", "task_id": task.id, "round": 1, "implementer_agent_id": "worker",
+            "branch": "factory/api", "bound_head": head, "state": "claimed",
+            "requested_at": chrono::Utc::now(), "deadline_at": chrono::Utc::now(),
+        })).unwrap();
+        let approved = crate::qa_pass::validate_round_evidence(&cas, &artifacts.join("LEDGER.md"), &round, cas_types::QaVerdict::Approved).unwrap();
+        assert_eq!(approved.0, "api-evidence:");
+        std::fs::write(artifacts.join("LEDGER.md"), transcript.replace("| PASS |", "| FAIL |")).unwrap();
+        crate::qa_pass::validate_round_evidence(&cas, &artifacts.join("LEDGER.md"), &round, cas_types::QaVerdict::Rejected)
+            .expect("an API defect can be rejected without a passing capture or visual bundle");
+        std::fs::write(artifacts.join("LEDGER.md"), transcript.replace("status: 400", "status: missing")).unwrap();
+        assert!(run_close_gate_with_write_dir(&ctx, tier, &reasons, &[], &artifacts).is_err());
+        paths.push("app/page.tsx".into());
+        let mixed = user_facing_reasons(&task, &qa, Some(&paths), &[]).reasons;
+        assert_eq!(evidence_tier(&mixed, false), EvidenceTier::Bundle);
+    }
+
+    #[test]
     fn web_surface_reasons_need_the_bundle_and_demo_only_needs_the_ledger() {
         assert_eq!(evidence_tier(&[], true), EvidenceTier::None);
         assert_eq!(

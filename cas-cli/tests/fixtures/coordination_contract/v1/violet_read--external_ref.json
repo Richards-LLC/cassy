@@ -1,0 +1,199 @@
+{
+  "contract": "cassy.coordination/v1",
+  "surface": "violet_read.external_ref",
+  "method": "MCP",
+  "path": "violet.violet_read",
+  "spec": "§3 §7",
+  "notes": "Authored by Cassy (cas-b512) for violet_ps#50; Cloud owns no Violet tool surface. The hub resolves an external_ref through its authenticated Slack installation and returns verified thread identity plus an opaque identity proof that Cloud checks against the team installation binding. It never fetches an arbitrary URL and never trusts a supplied thread_ts, workspace name or team id. Responses are the tool result object.",
+  "cases": [
+    {
+      "name": "root permalink resolves to the verified thread identity",
+      "request": {
+        "payload": {
+          "external_ref": "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456"
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Verified thread identity for this installation.",
+          "thread_identity": {
+            "provider": "slack",
+            "workspace_id": "T07ABCDEF",
+            "channel_id": "C08COORD01",
+            "root_ts": "1760616000.123456",
+            "message_ts": "1760616000.123456",
+            "is_root": true,
+            "identity_proof": {
+              "kind": "violet_installation",
+              "proof_ref": "0000a1f0-1111-4111-8111-00000000a1f0",
+              "expires_at": "2026-10-16T14:05:00.000Z"
+            }
+          },
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "claim"
+          }
+        }
+      }
+    },
+    {
+      "name": "reply permalink converges on the same root",
+      "request": {
+        "payload": {
+          "external_ref": "https://richards-llc.slack.com/archives/C08COORD01/p1760616042000200?thread_ts=1760616000.123456&cid=C08COORD01"
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Verified thread identity for this installation.",
+          "thread_identity": {
+            "provider": "slack",
+            "workspace_id": "T07ABCDEF",
+            "channel_id": "C08COORD01",
+            "root_ts": "1760616000.123456",
+            "message_ts": "1760616042.000200",
+            "is_root": false,
+            "identity_proof": {
+              "kind": "violet_installation",
+              "proof_ref": "0000a1f1-1111-4111-8111-00000000a1f1",
+              "expires_at": "2026-10-16T14:05:00.000Z"
+            }
+          },
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "claim"
+          }
+        }
+      }
+    },
+    {
+      "name": "a supplied thread_ts is not trusted",
+      "request_rejected_as": "invalid_request",
+      "request": {
+        "payload": {
+          "external_ref": "https://richards-llc.slack.com/archives/C08COORD01/p1760616042000200",
+          "thread_ts": "1760615000.000001"
+        }
+      },
+      "response": {
+        "status": 400,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "invalid_request",
+          "reason": "client_supplied_identity",
+          "guidance": "Pass only the permalink; Violet derives the thread from Slack.",
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "fix_request"
+          }
+        }
+      }
+    },
+    {
+      "name": "an arbitrary URL is never fetched",
+      "request_rejected_as": "invalid_request",
+      "request": {
+        "payload": {
+          "external_ref": "https://example.com/archives/C08COORD01/p1760616000123456"
+        }
+      },
+      "response": {
+        "status": 400,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "invalid_request",
+          "reason": "unsupported_external_ref",
+          "guidance": "Only Slack permalinks of an installed workspace resolve.",
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "fix_request"
+          }
+        }
+      }
+    },
+    {
+      "name": "a workspace this installation does not hold",
+      "request": {
+        "payload": {
+          "external_ref": "https://other-team.slack.com/archives/C09OTHER01/p1760616000123456"
+        }
+      },
+      "response": {
+        "status": 404,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "not_found",
+          "reason": "workspace_not_installed",
+          "guidance": "Violet is not installed in that workspace; no identity is issued.",
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "stop"
+          }
+        }
+      }
+    },
+    {
+      "name": "Slack unreachable",
+      "request": {
+        "payload": {
+          "external_ref": "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456"
+        }
+      },
+      "response": {
+        "status": 503,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "authority_unavailable",
+          "reason": "provider_unavailable",
+          "guidance": "Slack could not confirm the thread; claim nothing and retry later.",
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "retry_later"
+          }
+        }
+      }
+    }
+  ]
+}

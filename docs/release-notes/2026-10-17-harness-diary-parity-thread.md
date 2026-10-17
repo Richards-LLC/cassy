@@ -36,7 +36,7 @@ Source gaps: 2.1.286–2.1.302 release notes are not yet reviewed.
 ## Codex reply
 
 ```text
-• *Hooks* — Was: Cassy guidance said Codex has no session hooks → Now: Codex 0.163.0 ships stable lifecycle hooks (startup, stop with continuation, prompt submit, compaction). Cassy uses only its shell tool hooks, which do run and do block. Wiring them and correcting the stale guidance is planned for 3.64. Whether any Codex hook covers MCP tool calls is not yet measured.
+• *Hooks* — Was: Cassy guidance said Codex has no session hooks → Now: Codex 0.163.0 ships stable lifecycle hooks (startup, stop with continuation, prompt submit, compaction). Cassy uses only its shell tool hooks, which do run and do block. An isolated check on 0.163.0 confirmed that startup context reaches the model and that a tool hook can fire on MCP calls before approval; Cassy's default hooks still match only shell tools. Wiring them and correcting the stale guidance is planned for 3.64.
 
 • *Agents and messaging* — Was: Cassy treats Codex as having no agent catalog → Now: Codex supports custom agents defined in TOML and a `codex queue` command that adds a message to a running session. Cassy uses neither yet. Native Codex roles and queue delivery are 3.64 work; neither is established as the cause of a missed wake.
 

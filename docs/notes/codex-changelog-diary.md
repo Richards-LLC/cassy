@@ -139,8 +139,13 @@ and the official docs [Hooks](https://learn.chatgpt.com/docs/hooks),
   `mcp_tool` handlers. Cassy wires only `PreToolUse` (Bash, apply_patch) and `PostToolUse` (Bash),
   and those do run: Codex rollouts record "Command blocked by PreToolUse hook". Cassy guidance that
   says Codex has no session hooks is stale. → 🔧 **fix in 3.64**: lifecycle wiring and hook trust (cas-d0fe, GH #1280).
-- **MCP tool guard:** whether any Codex hook currently fires for MCP tool calls is
-  **unknown**: not observed, and not shown to be absent. The cas-d0fe canary will measure it. → 👀.
+- **Native canary, 2026-10-17 21:13Z (isolated, cas-d0fe):** on installed 0.163.0 a
+  `SessionStart` hook's context was consumed by the model, and a `PreToolUse` matcher fired for an
+  MCP tool call before approval. Not exercised: `Stop` re-entry and MCP tool execution after the
+  hook; the untrusted-hook control was ambiguous.
+- **MCP tool guard in Cassy's current default:** that canary proves Codex *can* hook MCP calls,
+  but Cassy's generated Codex hooks match only shell tools (Bash, apply_patch), so today's default
+  wiring does not cover MCP calls. → 🔧 **3.64** with the lifecycle wiring (cas-d0fe).
 - **Custom agents exist:** TOML files under `~/.codex/agents/` or `.codex/agents/`
   (`name`, `description`, `developer_instructions`), `/subagents` in the CLI, and
   `multi_agent stable true`. Cassy ships no Codex agents and still declares
@@ -155,7 +160,7 @@ and the official docs [Hooks](https://learn.chatgpt.com/docs/hooks),
   wake. → 🔧 **3.64 investigation**: native queue delivery (cas-353b).
 - **Finish command:** the wrap-up now runs on Codex as a supported skill, `$finish`, from
   `~/.agents/skills/finish`. The original custom prompt (`/prompts:finish`, deprecated by Codex in
-  favour of skills) is kept in both Codex account homes on this host. → ✅.
+  favour of skills) is kept in the current Codex homes on this host. → ✅.
 - **Unchanged:** skills mirror, `cs` MCP key, effort mapping and `--yolo` launch. `memories` is
   stable but off by default, and Cassy does not use it. → ✅.
 

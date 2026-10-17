@@ -4325,6 +4325,7 @@ mod tests {
         assert!(content.ends_with("other-rule\n"));
         assert!(!content.contains("/stale-rendered-file"));
         assert!(content.contains("/.codex/skills/cas-worker/SKILL.md"));
+        assert!(["/.codex/config.toml.cas-lock", "/.codex/hooks.toml.cas-lock"].iter().all(|path| builtin_gitignore_entries(&[SupervisorCli::Codex]).iter().any(|entry| entry == path)));
         assert!(!content.contains("/.codex/agents/"), "Codex installs no .md agents (D6)");
         assert!(!content.contains("/.claude/agents/task-verifier.md"));
     }

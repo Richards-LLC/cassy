@@ -460,14 +460,17 @@ const ROUTINE_CARD_COLUMNS: usize = 76;
 /// by server-stamped facts rather than by the text a sender chose: a
 /// non-waking lifecycle relay (`lifecycle:` source, daemon origin: task
 /// started, ready again or closed) and the supervisor's copy of a peer
-/// message (a registered agent's row whose CAS-built lead names that same
-/// sender). Operator, peer-supervisor, urgent, typed (`kind`) and waking rows
-/// never match, and an unparseable row stays whole. The card keeps the ids and
-/// ends with the command that reads the row in full, which `inbox_poll` serves
-/// whatever the row's transport receipt says.
+/// message (the [`cas_store::PEER_COPY_KIND`] stamp the store writes in the
+/// copy's own enqueue transaction; a worker's direct mail that spells the
+/// copy's lead has no stamp). Operator, peer-supervisor, urgent, otherwise
+/// typed and waking rows never match, and an unparseable row stays whole. The
+/// card keeps the ids and ends with the command that reads the row in full: a
+/// named `inbox_poll` serves it for as long as retention keeps it, acked or
+/// not.
 pub(crate) fn compact_routine_supervisor_body(queued: &cas_store::QueuedPrompt) -> Option<String> {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_SOURCE_PREFIX;
-    if queued.urgent || queued.kind.is_some() || queued.operator.is_some() {
+    let peer_copy = queued.kind.as_deref() == Some(cas_store::PEER_COPY_KIND);
+    if queued.urgent || (queued.kind.is_some() && !peer_copy) || queued.operator.is_some() {
         return None;
     }
     let read = |what: &str| {
@@ -482,7 +485,7 @@ pub(crate) fn compact_routine_supervisor_body(queued: &cas_store::QueuedPrompt) 
                 read("full event")
             )
         }
-        cas_store::QueueOrigin::RegisteredAgent { .. } => {
+        cas_store::QueueOrigin::RegisteredAgent { .. } if peer_copy => {
             let (from, to, body) =
                 crate::mcp::tools::service::agent_search_system::message::parse_peer_copy(
                     &queued.prompt,

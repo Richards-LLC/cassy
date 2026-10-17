@@ -638,12 +638,33 @@ sleep 2
         return command(self.repo, "git", "push", "origin", "HEAD:refs/heads/factory/lane",
                        env=dict(os.environ, CARGO=str(self.repo / "cargo-tripwire"), **env))
 
+    def install_hooks(self, **overrides):
+        # The installer is operator-only. Its fixture must not inherit this
+        # test runner's factory identity or the hook's Git repository variables.
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("CAS_", "GIT_"))}
+        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        env.update(overrides)
+        return command(self.repo, "bash", "scripts/install-git-hooks.sh", env=env)
+
+    def copy_hook_installer(self):
+        self.write("scripts/install-git-hooks.sh", (ROOT / "scripts/install-git-hooks.sh").read_text())
+        for source in (ROOT / ".githooks").glob("*"):
+            self.write(".githooks/" + source.name, source.read_text())
+            (self.repo / ".githooks" / source.name).chmod(source.stat().st_mode)
+
     def test_pre_push_refuses_a_failing_factory_tip_and_logs_an_override_cas_043b(self):
         remote = Path(self.scratch.name) / "remote.git"
         command(self.repo, "git", "init", "-q", "--bare", str(remote))
         command(self.repo, "git", "remote", "add", "origin", str(remote))
-        self.write(".git/hooks/pre-push", '#!/bin/sh\nexec "$(git rev-parse --show-toplevel)/scripts/fast-rows-pre-push.sh" "$@"\n')
-        (self.repo / ".git/hooks/pre-push").chmod(0o755)
+        self.copy_hook_installer()
+        # A renamed checkout may still point at a deleted hooks directory.
+        command(self.repo, "git", "config", "core.hooksPath", str(self.repo / "deleted/hooks"))
+        installed = self.install_hooks()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        config = (self.repo / ".git/config").read_bytes()
+        self.assertEqual(self.install_hooks().returncode, 0)
+        self.assertEqual((self.repo / ".git/config").read_bytes(), config)
         self.write("cas-cli/tests/sample.rs", "// fixed in 9.99.8\n")
         self.commit()
         refused = self.push()
@@ -673,6 +694,29 @@ sleep 2
         missing = self.push(MARKDOWNLINT_CLI2=str(self.repo / "missing-markdownlint"))
         self.assertNotEqual(missing.returncode, 0, missing.stderr)
         self.assertIn("FAIL markdown-lint", missing.stderr)
+
+    def test_hook_installer_preserves_existing_authority_and_refuses_workers_cas_edb0(self):
+        self.copy_hook_installer()
+        self.write("custom/pre-push", "#!/bin/sh\nexit 42\n")
+        (self.repo / "custom/pre-push").chmod(0o755)
+        command(self.repo, "git", "config", "core.hooksPath", "custom")
+        config = (self.repo / ".git/config").read_bytes()
+        for identity in ({}, {"CAS_AGENT_NAME": "worker"}):
+            refused = self.install_hooks(**identity)
+            self.assertNotEqual(refused.returncode, 0, refused.stdout)
+            self.assertEqual((self.repo / ".git/config").read_bytes(), config)
+        self.assertEqual((self.repo / "custom/pre-push").read_text(), "#!/bin/sh\nexit 42\n")
+        # A linked worktree is refused even without factory environment markers.
+        worker = Path(self.scratch.name) / "worker"
+        added = command(self.repo, "git", "worktree", "add", "-q", "-b", "factory/w", str(worker))
+        self.assertEqual(added.returncode, 0, added.stderr)
+        for source in ("scripts", ".githooks"):
+            shutil.copytree(self.repo / source, worker / source, dirs_exist_ok=True)
+        refused = command(worker, "bash", "scripts/install-git-hooks.sh",
+                          env={key: value for key, value in os.environ.items()
+                               if not key.startswith(("CAS_", "GIT_"))})
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        self.assertEqual((self.repo / ".git/config").read_bytes(), config)
 
     def test_builtin_agent_projection_drift_is_refused_cas_7bce(self):
         body = "Verify the task.\n"

@@ -2418,7 +2418,8 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
 #[test]
 fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
-    env.remove("CAS_AGENT_ROLE");
+    // Model the supervisor actor in this isolated handler fixture.
+    env.set("CAS_AGENT_ROLE", "supervisor");
     env.remove("CAS_SKIP_FACTORY_TOOLING");
     let project = cas_6718_drifted_project(env.home());
     let root = project.join(".cas");
@@ -2426,6 +2427,7 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
     let head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
     std::fs::write(project.join("README.md"), "Staged project work\n").unwrap();
     cas_6718_git(&project, &["add", "README.md"]);
+    let staged_readme = cas_6718_git(&project, &["show", ":README.md"]);
     let outside = "Unstaged project instruction.\n\n";
     let claude = project.join("CLAUDE.md");
     std::fs::write(
@@ -2444,6 +2446,10 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
     let receipt: serde_json::Value = output.lines().last().unwrap().parse().unwrap();
     assert_eq!(receipt["managed_files"]["outcome"], "staged");
     assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        cas_6718_git(&project, &["show", ":README.md"]),
+        staged_readme
+    );
     assert!(
         cas_6718_git(&project, &["diff", "--cached", "--name-only"])
             .lines()
@@ -2514,6 +2520,85 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), conflicted);
         assert_eq!(cas_6718_git(&project, &["ls-files", "--stage"]), index);
         std::fs::write(file, original).unwrap();
+    }
+
+    // A refused automatic commit differs from the intentional staging above.
+    // Keep Git/hooks real and preserve their refusal instead of disabling them.
+    #[cfg(unix)]
+    for mode in ["all-projects", "sync"] {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture_home = env.home().join(mode);
+        let project = cas_6718_drifted_project(&fixture_home);
+        let root = project.join(".cas");
+        env.set("CAS_ROOT", &root);
+        env.set("CAS_CLONE_PATH", &project);
+        env.set("CAS_PROJECT_ROOTS", &fixture_home);
+        env.set_current_dir(&project);
+        cas_6718_git(&project, &["branch", "-M", "main"]);
+        let head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+        let readme = project.join("README.md");
+        std::fs::write(&readme, "Unstaged user work survives refusal\n").unwrap();
+        let user_before = std::fs::read(&readme).unwrap();
+        let hook = project.join(".git/hooks/pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\necho 'pre-commit: fixture refuses the managed commit' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let hook_before = std::fs::read(&hook).unwrap();
+        let config_before = std::fs::read(project.join(".git/config")).unwrap();
+        let mut args = update_test_args();
+        args.all_projects = mode == "all-projects";
+        args.sync = mode == "sync";
+        let (result, output) =
+            capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+        assert!(
+            result.is_err(),
+            "{mode}: refused commit must make update incomplete, got success:\n{output}"
+        );
+        let rows = output
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .collect::<Vec<_>>();
+        let managed = rows
+            .iter()
+            .find_map(|row| row.get("managed_files"))
+            .expect("managed-file receipt");
+        assert_eq!(managed["outcome"], "commit_failed", "{output}");
+        assert!(
+            managed["conflicts"].as_array().unwrap().is_empty(),
+            "{output}"
+        );
+        let reason = managed["commit_error"]
+            .as_str()
+            .expect("distinct commit error");
+        assert!(
+            reason.contains("pre-commit: fixture refuses") && reason.contains("--show-origin"),
+            "{reason}"
+        );
+        if mode == "all-projects" {
+            let receipt = rows
+                .iter()
+                .find(|row| row.get("refresh_status").is_some())
+                .unwrap();
+            assert_eq!(receipt["refresh_status"], "refresh_failed", "{output}");
+            assert!(
+                receipt["projects"][0]["skills"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("failed:"),
+                "{output}"
+            );
+        }
+        assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
+        assert!(!cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty());
+        assert_eq!(std::fs::read(&readme).unwrap(), user_before);
+        assert_eq!(std::fs::read(&hook).unwrap(), hook_before);
+        assert_eq!(
+            std::fs::read(project.join(".git/config")).unwrap(),
+            config_before
+        );
     }
 }
 

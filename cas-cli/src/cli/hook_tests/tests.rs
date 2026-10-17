@@ -337,6 +337,7 @@ fn test_configure_codex_updates_existing_entry() {
 command = "cas"
 args = ["old"]
 env = { CAS_LOG = "debug" }
+env_vars = ["OPERATOR_EXTRA", "NODE_COMPILE_CACHE"]
 "#;
     std::fs::write(codex_dir.join("config.toml"), content).unwrap();
 
@@ -349,7 +350,10 @@ env = { CAS_LOG = "debug" }
     // it merges with the project and spawn-injected `cs` layers instead of
     // starting a second `cas serve`.
     assert!(
-        config.get("mcp_servers").and_then(|v| v.get("context7")).is_none(),
+        config
+            .get("mcp_servers")
+            .and_then(|v| v.get("context7"))
+            .is_none(),
         "the non-canonical Cassy key must be removed: {updated}"
     );
     let entry = config
@@ -382,6 +386,29 @@ env = { CAS_LOG = "debug" }
             );
             env
         }))
+    );
+    assert_eq!(
+        entry.get("env_vars"),
+        Some(&toml::Value::Array(
+            [
+                "OPERATOR_EXTRA",
+                "NODE_COMPILE_CACHE",
+                "PWTEST_CACHE_DIR",
+                "PYTEST_DEBUG_TEMPROOT",
+                "V8_COMPILE_CACHE_CACHE_DIR"
+            ]
+            .into_iter()
+            .map(|name| toml::Value::String(name.into()))
+            .collect()
+        ))
+    );
+    assert!(
+        !configure_codex_mcp_server(temp.path()).unwrap(),
+        "cache allowlist must be idempotent"
+    );
+    assert_eq!(
+        std::fs::read_to_string(codex_dir.join("config.toml")).unwrap(),
+        updated
     );
 }
 

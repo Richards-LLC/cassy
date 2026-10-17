@@ -940,6 +940,9 @@ by the hook. The clean-head gate still rejects source changes.
 Capped-run rewrites append to the log even when the command uses `>`, preserving
 earlier attempts and refusals. Slot admission and release records include UTC,
 slot index, process ID and lock root; use those records to audit concurrency.
+`released` is logged immediately before unlock, so an `admitted` record for
+that slot always follows the prior `released` record. Locking and close-on-exec
+behavior are unchanged.
 A reused log's creation time does not identify a later retry's admission time.
 
 Workers may also run exactly

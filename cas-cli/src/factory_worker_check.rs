@@ -221,9 +221,10 @@ impl BuilderSlot {
 
 impl Drop for BuilderSlot {
     fn drop(&mut self) {
-        // Close before recording release, including early error returns.
-        drop(self.file.take());
+        // Record while still locked: another holder's admission must follow
+        // this release record, including on early error returns.
         self.audit("released");
+        drop(self.file.take());
     }
 }
 

@@ -617,4 +617,88 @@ mod tests {
         assert!(!adopted.newly_registered());
         assert_eq!(adopted.adopted_canonical_id(), Some("legacy-slug"));
     }
+
+    const TEAM: &str = "team-1";
+    const PIN: &str = "homeschool-whisper";
+    const PRIMARY: &str = "github.com/richards-llc/homeschool-whisper";
+
+    /// cas-e3d9, measured on prowl: the team lists only the remote-shaped
+    /// primary and the account record has no alias for the bare pin. Team pull
+    /// under the pin then returns 404 project_not_found.
+    async fn cloud_without_pin_alias() -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/teams/{TEAM}/projects")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "projects": [{
+                    "id": "883c5896", "canonical_id": PRIMARY, "name": PIN,
+                    "contributor_count": 2, "memory_count": 9,
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/account/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "projects": [{ "id": "883c5896", "canonical_id": PRIMARY, "aliases": [] }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/teams/{TEAM}/sync/push")))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn ensure_bare_pin(
+        server: &wiremock::MockServer,
+        git_remote: Option<&'static str>,
+    ) -> Result<RegistrationOutcome, RegistrationFailure> {
+        let endpoint = server.uri();
+        tokio::task::spawn_blocking(move || {
+            TeamRegistration::new(&endpoint, "token", TEAM, PIN)
+                .with_pinned_canonical_id(Some(PIN))
+                .with_git_remote(git_remote)
+                .ensure()
+        })
+        .await
+        .unwrap()
+    }
+
+    /// The checkout's own remote is the server's primary, so the client
+    /// adopts that identity instead of claiming the unregistered pin.
+    #[tokio::test]
+    async fn bare_pin_absent_from_server_aliases_adopts_the_primary_its_remote_names() {
+        let server = cloud_without_pin_alias().await;
+        let outcome = ensure_bare_pin(&server, Some(PRIMARY)).await.unwrap();
+        assert_eq!(
+            outcome,
+            RegistrationOutcome::AdoptedExisting {
+                project_uuid: "883c5896".to_string(),
+                canonical_id: PRIMARY.to_string(),
+            }
+        );
+    }
+
+    /// Leaf name alone does not prove the pin is this project, so without a
+    /// matching remote the client fails closed with a named reason.
+    #[tokio::test]
+    async fn bare_pin_absent_from_server_aliases_fails_closed_without_a_matching_remote() {
+        let server = cloud_without_pin_alias().await;
+        let failure = ensure_bare_pin(&server, None).await.unwrap_err();
+        assert!(
+            failure.reason.contains("unregistered_pin_alias")
+                && failure
+                    .reason
+                    .contains(&format!("cas cloud project set {PRIMARY}")),
+            "{failure}"
+        );
+    }
 }

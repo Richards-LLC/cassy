@@ -71,7 +71,7 @@ impl ManagerProbe {
 const SYSTEMD_FORCE_RESTART_SIGNALS: &str = "SIGHUP SIGINT SIGPIPE";
 /// Open-file limit for the supervised hub. launchd's default soft limit of
 /// 256 let Commander bursts exhaust it (EMFILE on accept, cas-6cc6).
-const HUB_FILE_LIMIT: u32 = 8192;
+const HUB_FILE_LIMIT: u64 = 8192;
 // Both findings below point at `cas hub restart`: it stops a detached hub if
 // one is running and (re)starts the installed service.
 pub(crate) const INACTIVE_DETACHED_HUB_WARNING: &str = "service installed but inactive, detached hub running without restart supervision. Fix: run `cas hub restart` to hand the hub back to the service";
@@ -1056,16 +1056,7 @@ fn uninstall(platform: ServicePlatform, cli: &Cli) -> Result<()> {
                     .status();
                 fs::remove_file(&path).context("remove Cassy launchd agent")?;
             }
-            print_report(
-                cli,
-                report(
-                    platform,
-                    false,
-                    Some(ManagerProbe::Observed(false)),
-                    Some(path),
-                    None,
-                )?,
-            )
+            print_report(cli, report(platform, false, Some(ManagerProbe::Observed(false)), Some(path), None)?)
         }
         ServicePlatform::Systemd => {
             let path = systemd_path()?;
@@ -1078,16 +1069,7 @@ fn uninstall(platform: ServicePlatform, cli: &Cli) -> Result<()> {
                 fs::remove_file(&path).context("remove Cassy systemd unit")?;
                 run_manager("systemctl", ["--user", "daemon-reload"], None)?;
             }
-            print_report(
-                cli,
-                report(
-                    platform,
-                    false,
-                    Some(ManagerProbe::Observed(false)),
-                    Some(path),
-                    None,
-                )?,
-            )
+            print_report(cli, report(platform, false, Some(ManagerProbe::Observed(false)), Some(path), None)?)
         }
         ServicePlatform::ManualLinux => print_report(
             cli,
@@ -1533,14 +1515,14 @@ fn launchd_plist(
 "#,
         log_path = xml_escape(&log_path.display().to_string()),
         file_limits = ["SoftResourceLimits", "HardResourceLimits"]
-            .map(launchd_file_limit_block)
+            .map(|key| launchd_file_limit_block(key, HUB_FILE_LIMIT))
             .concat(),
     )
 }
 
-fn launchd_file_limit_block(key: &str) -> String {
+fn launchd_file_limit_block(key: &str, limit: u64) -> String {
     format!(
-        "  <key>{key}</key>\n  <dict>\n    <key>NumberOfFiles</key>\n    <integer>{HUB_FILE_LIMIT}</integer>\n  </dict>\n"
+        "  <key>{key}</key>\n  <dict>\n    <key>NumberOfFiles</key>\n    <integer>{limit}</integer>\n  </dict>\n"
     )
 }
 
@@ -1548,6 +1530,7 @@ fn launchd_file_limit_block(key: &str) -> String {
 /// existing `NumberOfFiles` (an operator's own value) is left alone.
 fn ensure_launchd_file_limits(definition: &str) -> Result<String> {
     let mut definition = definition.to_owned();
+    let mut limit = HUB_FILE_LIMIT;
     for key in ["SoftResourceLimits", "HardResourceLimits"] {
         let marker = format!("<key>{key}</key>");
         let Some(key_start) = definition.find(&marker) else {
@@ -1559,7 +1542,7 @@ fn ensure_launchd_file_limits(definition: &str) -> Result<String> {
             let line_start = definition[..anchor]
                 .rfind('\n')
                 .map_or(0, |newline| newline + 1);
-            definition.insert_str(line_start, &launchd_file_limit_block(key));
+            definition.insert_str(line_start, &launchd_file_limit_block(key, limit));
             continue;
         };
         let after_key = key_start + marker.len();
@@ -1568,7 +1551,7 @@ fn ensure_launchd_file_limits(definition: &str) -> Result<String> {
             definition.replace_range(
                 value_start..value_start + "<dict/>".len(),
                 &format!(
-                    "<dict>\n    <key>NumberOfFiles</key>\n    <integer>{HUB_FILE_LIMIT}</integer>\n  </dict>"
+                    "<dict>\n    <key>NumberOfFiles</key>\n    <integer>{limit}</integer>\n  </dict>"
                 ),
             );
             continue;
@@ -1582,13 +1565,34 @@ fn ensure_launchd_file_limits(definition: &str) -> Result<String> {
             .find("</dict>")
             .map(|offset| dict_start + offset)
             .with_context(|| format!("launchd {key} has an unclosed dict"))?;
-        if !definition[dict_start..dict_end].contains("<key>NumberOfFiles</key>") {
-            let insert_at = definition[..dict_end]
+        if let Some((_, value)) =
+            definition[dict_start..dict_end].split_once("<key>NumberOfFiles</key>")
+        {
+            if key == "SoftResourceLimits" {
+                let value = value
+                    .trim_start()
+                    .strip_prefix("<integer>")
+                    .and_then(|value| value.split_once("</integer>"))
+                    .context("launchd SoftResourceLimits NumberOfFiles has no integer")?
+                    .0;
+                // A missing hard limit must permit the operator's soft limit.
+                limit = limit.max(
+                    value
+                        .trim()
+                        .parse::<u64>()
+                        .context("invalid launchd SoftResourceLimits NumberOfFiles")?,
+                );
+            }
+        } else {
+            // Only consider newlines inside this dict: an inline closing tag
+            // must not place NumberOfFiles before the opening tag.
+            let insert_at = definition[dict_start..dict_end]
                 .rfind('\n')
-                .map_or(dict_end, |newline| newline + 1);
+                .map_or(dict_end, |newline| dict_start + newline + 1);
+            let prefix = if insert_at == dict_end { "\n" } else { "" };
             definition.insert_str(
                 insert_at,
-                &format!("    <key>NumberOfFiles</key>\n    <integer>{HUB_FILE_LIMIT}</integer>\n"),
+                &format!("{prefix}    <key>NumberOfFiles</key>\n    <integer>{limit}</integer>\n"),
             );
         }
     }
@@ -1744,22 +1748,9 @@ exit 0
         let paths = HubRuntimePaths::default_for_user().unwrap();
         assert_eq!(inactive_detached_warning(&paths, None).unwrap(), None);
         write_service_file(&systemd_path().unwrap(), LEGACY_SYSTEMD_UNIT).unwrap();
-        assert_eq!(
-            inactive_detached_warning(&paths, None).unwrap(),
-            Some(MANAGER_UNAVAILABLE_WARNING)
-        );
-        let cli = Cli {
-            json: false,
-            full: false,
-            verbose: false,
-            command: None,
-        };
-        assert!(
-            restart_supervised(&cli, false, 443)
-                .unwrap_err()
-                .to_string()
-                .contains("refusing to launch a detached hub")
-        );
+        assert_eq!(inactive_detached_warning(&paths, None).unwrap(), Some(MANAGER_UNAVAILABLE_WARNING));
+        let cli = Cli { json: false, full: false, verbose: false, command: None };
+        assert!(restart_supervised(&cli, false, 443).unwrap_err().to_string().contains("refusing to launch a detached hub"));
     }
 
     #[test]
@@ -1825,13 +1816,17 @@ exit 0
         let custom = original
             .replace("<integer>8192</integer>", "<integer>16384</integer>")
             .replace(
-                &launchd_file_limit_block("HardResourceLimits").replace("8192", "16384"),
+                &launchd_file_limit_block("HardResourceLimits", HUB_FILE_LIMIT)
+                    .replace("8192", "16384"),
                 "",
             );
         let repaired = rewrite_launchd_publication_flags(&custom, true, 8443).unwrap();
         for key in ["SoftResourceLimits", "HardResourceLimits"] {
             let dict = repaired
                 .split(&format!("<key>{key}</key>"))
+                .nth(1)
+                .unwrap()
+                .split("<dict>")
                 .nth(1)
                 .unwrap()
                 .split("</dict>")
@@ -1891,7 +1886,7 @@ exit 0
                 .into_iter()
                 .fold(repaired.clone(), |plist, key| {
                     plist.replace(
-                        &launchd_file_limit_block(key),
+                        &launchd_file_limit_block(key, HUB_FILE_LIMIT),
                         &format!("  <key>{key}</key>\n  {empty}\n"),
                     )
                 });
@@ -1899,6 +1894,9 @@ exit 0
             for key in ["SoftResourceLimits", "HardResourceLimits"] {
                 let dict = fixed
                     .split(&format!("<key>{key}</key>"))
+                    .nth(1)
+                    .unwrap()
+                    .split("<dict>")
                     .nth(1)
                     .unwrap()
                     .split("</dict>")
@@ -1930,7 +1928,9 @@ exit 0
                     true,
                     8443,
                 ),
-                |plist, limits| plist.replace(&launchd_file_limit_block(limits), ""),
+                |plist, limits| {
+                    plist.replace(&launchd_file_limit_block(limits, HUB_FILE_LIMIT), "")
+                },
             )
             .replace("\n    ", "\n\t\t")
             .replace("\n  ", "\n\t");
@@ -2373,18 +2373,9 @@ exit 0
         assert_eq!(
             service_args(Path::new("/opt/cas/bin/cas"), default_policy, 443),
             vec![
-                "/opt/cas/bin/cas",
-                "hub",
-                "serve",
-                "--bind",
-                "127.0.0.1",
-                "--port",
-                "4173",
-                "--launched-by",
-                "service",
-                "--tailscale-serve",
-                "--tailscale-serve-port",
-                "443"
+                "/opt/cas/bin/cas", "hub", "serve", "--bind", "127.0.0.1",
+                "--port", "4173", "--launched-by", "service",
+                "--tailscale-serve", "--tailscale-serve-port", "443"
             ]
         );
     }

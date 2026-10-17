@@ -18,6 +18,19 @@ async fn cas_b8e8_close_proof_claims_need_a_receipt() {
         "[verification]\nenabled = false\n",
     )
     .unwrap();
+    cas_store::SqliteArtifactStore::open(&root)
+        .unwrap()
+        .record_local(&cas_store::NewArtifact {
+            id: "art-1234abcd".into(),
+            task_id: "cas-proof".into(),
+            name: "receipt.log".into(),
+            mime: "text/plain".into(),
+            size_bytes: 1,
+            sha256: "a".repeat(64),
+        })
+        .unwrap();
+    std::fs::write(root.join("Proof.log"), "PASS\n").unwrap();
+    std::fs::write(env.home().join("Proof.log"), "PASS\n").unwrap();
     let refused = [
         "Supervisor reports the merge-queue journeys passed",
         "Merge queue journeys will pass after this task closes",
@@ -47,12 +60,21 @@ async fn cas_b8e8_close_proof_claims_need_a_receipt() {
         "The test will not run; proof deferred to epic assembly",
         "Supervisor has not verified the tests; proof deferred to epic assembly",
         "Full Rust suite deferred to epic assembly where it will run",
+        "Supervisor reports tests passed; evidence: `.cas/Proof.log`.",
+        "QA reports tests passed (~/Proof.log)",
+    ];
+    let missing = [
+        ("Supervisor reports tests passed art-deadbeef", "art-deadbeef"),
+        ("QA reports tests passed; evidence: .cas/Missing.log", ".cas/Missing.log"),
+        ("QA reports tests passed art-1234abcd .cas/Missing.log", ".cas/Missing.log"),
+        ("QA reports tests passed art-1234abcd art-deadbeef", "art-deadbeef"),
     ];
     let cases = refused
         .iter()
-        .map(|reason| (*reason, true))
-        .chain(accepted.iter().map(|reason| (*reason, false)));
-    for (reason, rejected) in cases {
+        .map(|reason| (*reason, Some("deferred to <stage>")))
+        .chain(missing.iter().map(|(reason, citation)| (*reason, Some(*citation))))
+        .chain(accepted.iter().map(|reason| (*reason, None)));
+    for (reason, rejection) in cases {
         // One project, one fresh task per reason: the same title by design.
         let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
             "action": "create", "title": "Proof claim boundary", "priority": 2,
@@ -86,12 +108,12 @@ async fn cas_b8e8_close_proof_claims_need_a_receipt() {
         let is_error = response.is_error == Some(true);
         let text = extract_text(response);
         let task = store.get(&id).unwrap();
-        if rejected {
+        if let Some(rejection) = rejection {
             assert!(
                 is_error && text.contains("PROOF CLAIM RECEIPT REQUIRED"),
                 "{reason}: {text}"
             );
-            assert!(text.contains("deferred to <stage>"), "{text}");
+            assert!(text.contains(rejection), "{text}");
             assert_eq!(task.status, TaskStatus::InProgress, "{reason}");
             assert!(
                 !task.notes.contains("Closed:"),

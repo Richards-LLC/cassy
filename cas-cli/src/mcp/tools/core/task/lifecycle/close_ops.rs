@@ -30967,6 +30967,54 @@ esac
             DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
     }
 
+    /// cas-90d8 (cas-07c9 shape): the delivered release-notes draft lands in
+    /// a merge, then `release: vX` renames it to the cut date and rewrites
+    /// only its date line. The delivered lines survive at the new path, so a
+    /// receipt naming the merge must not read as DELIVERY CONTENT DROPPED.
+    #[test]
+    fn renamed_delivery_file_keeps_its_content_cas_90d8() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let draft = "docs/release-notes/2026-10-16-v9.99.0-slack.md";
+        let published = "docs/release-notes/2026-10-17-v9.99.0-slack.md";
+        let body = |date: &str| {
+            format!(
+                "# Cassy v9.99.0\n\nRelease date: {date}\n\n- Close gate measures merge tips.\n- Worker checks reuse seeded targets.\n- Slack threads post in order.\n- Commander shows supervisor updates.\n"
+            )
+        };
+        std::fs::create_dir_all(p.join("docs/release-notes")).unwrap();
+        std::fs::write(p.join(draft), body("2026-10-16")).unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-test1: draft v9.99.0 release notes"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "--no-ff", "factory/worker", "-m", "Merge branch 'factory/worker'"]);
+        let anchor = head_sha(p);
+        git(p, &["mv", draft, published]);
+        std::fs::write(p.join(published), body("2026-10-17")).unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "release: v9.99.0"]);
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(anchor.clone());
+        let outcome = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: Some(&anchor),
+                window: None,
+            },
+        );
+        assert!(
+            !matches!(outcome, MergeStateGateOutcome::Reject(_)),
+            "a renamed delivery whose lines survive must not read as dropped: {outcome:?}"
+        );
+    }
+
     /// GH #1160: the final sync anchor comes after two migration renames and
     /// an intentional revert. The old paths are absent at that anchor, but
     /// attribution still measures their earlier task commits as dropped.
@@ -31077,14 +31125,16 @@ esac
             matches!(outcome(&window), MergeStateGateOutcome::Reject(_)),
             "every dropped path needs a covering commit"
         );
+        // cas-90d8: the migration's lines survive both renames, so only the
+        // retired analytics file is dropped and needs the reviewed commit.
         window.supervisor_override_reason = Some(format!(
-            "reviewed-drop: {moved},{renamed},{reverted} -- reviewed migration moves and analytics retirement"
+            "reviewed-drop: {reverted} -- reviewed analytics retirement"
         ));
         let result = outcome(&window);
         assert!(
             matches!(&result, MergeStateGateOutcome::ProceedWithNote(note)
             if note.contains("reviewed delivery content supersession accepted")
-                && note.contains(&moved) && note.contains(&renamed) && note.contains(&reverted)),
+                && note.contains(&reverted)),
             "pre-anchor reviewed supersession must close: {result:?}"
         );
     }

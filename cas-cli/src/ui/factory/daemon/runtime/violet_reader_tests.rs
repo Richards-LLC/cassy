@@ -538,7 +538,9 @@ fn managed_wake_reports_source_age_and_preserves_dedupe_cas_8875() {
     let rows = queue.peek_all(10).unwrap();
     assert_eq!(rows.len(), 2, "the original delivery/recovery keys still dedupe re-observation");
     for row in rows {
+        // pin: source age is trusted agent-facing wake metadata, in seconds.
         assert!(row.prompt.contains("age_secs=432000"), "{}", row.prompt);
+        // pin: the original source occurrence/thread identity must survive formatting.
         assert!(row.prompt.contains(&format!("message_ts={old} thread_ts={old}")), "source identity is unchanged");
         assert_eq!(row.factory_session.as_deref(), Some("fixture-session"));
     }
@@ -570,6 +572,7 @@ fn managed_wake_invalid_future_and_fresh_age_policy_cas_8875() {
         if let Some(age) = expected {
             result.unwrap();
             assert_eq!(rows.len(), 1);
+            // pin: unknown source age must differ textually from a legitimate fresh zero.
             assert!(rows[0].prompt.contains(age), "source={source:?}: {}", rows[0].prompt);
         } else {
             assert_eq!(result.unwrap_err().code, "invalid_target");

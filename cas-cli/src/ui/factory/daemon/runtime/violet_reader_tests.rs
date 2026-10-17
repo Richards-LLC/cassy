@@ -658,4 +658,15 @@ fn managed_claims_leave_bounded_receipts_without_bodies() {
     let kept: Vec<Value> = serde_json::from_slice(&std::fs::read(claim_receipts_path(temp.path())).unwrap()).unwrap();
     assert_eq!(kept.len(), CLAIM_RECEIPTS_KEPT, "the oldest receipt rotates out");
     assert_eq!(kept[0]["at"], "2026-10-17T18:00:01Z");
+
+    // A receipt that cannot be written never changes the tick.
+    let blocked = tempfile::tempdir().unwrap();
+    std::fs::write(blocked.path().join("violet"), "not a directory").unwrap();
+    let cloud = FixtureCloud::new("nothing pending");
+    let (body, typer) = (violet_body(None), PromptQueueTyper(&queue));
+    let quarantine = FileQuarantine(blocked.path().join("violet/quarantine.jsonl"));
+    let io = ReaderIo { body: &body, typer: &typer, quarantine: &quarantine };
+    let report = read_managed_on(&reader, &cloud, REGISTRATION, blocked.path(), &io, at(200));
+    assert!(report.is_some_and(|report| report.errors.is_empty()));
+    assert!(claim_receipts_summary(blocked.path(), at(200)).is_none());
 }

@@ -284,10 +284,13 @@ async fn cas_3f90_busy_event_waits_without_a_held_relay_then_wakes_once() {
     assert!(queue.recipient_receipt(id, "supervisor").unwrap().is_none(), "hook can still take it");
     let report = queue.message_delivery_report(id).unwrap().unwrap();
     assert_eq!(report.pending_reason, Some(cas_store::PendingReason::AwaitingBusyRecipient), "busy inline rows leave selection until their bounded recheck/turn end");
+    let parked_wake_state = queue.wake_gate_state(id).unwrap();
     for _ in 0..3 {
         daemon.process_prompt_queue().await.unwrap();
         nothing_typed_or_relayed(&root, &daemon);
-        assert_eq!(queue.queued_prompt(id).unwrap().unwrap().delivery_attempts, 0);
+        assert_eq!(queue.wake_gate_state(id).unwrap(), parked_wake_state, "parked row is not reconsidered each poll");
+        assert!(queue.recipient_receipt(id, "supervisor").unwrap().is_none(), "busy row keeps no transport claim");
+        assert_eq!(queue.message_delivery_report(id).unwrap().unwrap().pending_reason, Some(cas_store::PendingReason::AwaitingBusyRecipient));
         assert!(!daemon.lifecycle_redelivery_attempts.contains_key(&id), "busy veto spends no cadence");
     }
     // Model the durable recheck becoming due, without a wall-clock sleep.

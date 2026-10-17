@@ -1337,6 +1337,13 @@ fn worker_name_token_matches(token: &str, worker: &str) -> bool {
     token == worker || token.strip_prefix("factory/") == Some(worker)
 }
 
+/// A task-recorded delivery fetched from origin, without claiming a local worker.
+struct RemoteMergeSource {
+    assignee: String,
+    branch: String,
+    anchor: String,
+}
+
 /// Return the worktree owner and source ref for a System-B merge id.
 fn system_b_merge_source(id: &str, task_id: Option<&str>) -> (String, String) {
     let token = id.strip_prefix("factory/").unwrap_or(id);
@@ -2943,6 +2950,105 @@ impl CasCore {
         )))
     }
 
+    /// Resolve a remote-only delivery through task and supervisor authority.
+    /// The real pushed branch is materialized locally for the existing CI/QA
+    /// gates; divergent local refs are never overwritten.
+    fn prepare_remote_merge_source(
+        &self,
+        manager: &crate::worktree::WorktreeManager,
+        task: Option<&cas_types::Task>,
+        id: &str,
+        cleanup: Option<bool>,
+    ) -> Result<Option<RemoteMergeSource>, McpError> {
+        let Some(task) = task.filter(|task| {
+            task.status == cas_types::TaskStatus::AwaitingMerge
+                && task.deliverables.work_target.is_some()
+        }) else {
+            return Ok(None);
+        };
+        let (Some(branch), Some(anchor)) = (
+            task.deliverables.parked_branch.as_deref(),
+            task.deliverables.factory_branch_anchor.as_deref(),
+        ) else {
+            return Ok(None);
+        };
+        let (assignee, canonical_branch) = system_b_merge_source(branch, Some(&task.id));
+        // Live local workers retain their existing merge/dirty-tree policy.
+        if id != anchor && is_git_worktree(&manager.worktree_path_for_worker(&assignee)) {
+            return Ok(None);
+        }
+        let refuse = |detail: String| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!(
+                "REMOTE DELIVERY REFUSED: {detail}. No merge was attempted."
+            )),
+            data: None,
+        };
+        if canonical_branch != branch
+            || !(id == branch || id == assignee || id == format!("origin/{branch}") || id == anchor)
+            || anchor.len() != 40
+            || !anchor.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(refuse(format!(
+                "task {} requires its recorded factory branch {branch} or exact anchor {anchor}",
+                task.id
+            )));
+        }
+        if cleanup == Some(true) {
+            return Err(refuse(
+                "a remote-only delivery has no local worker checkout to clean; use cleanup=false"
+                    .into(),
+            ));
+        }
+        let agents = self.open_agent_store()?;
+        let caller = self
+            .get_agent_id()
+            .ok()
+            .and_then(|id| agents.get(&id).ok())
+            .ok_or_else(|| refuse("an authenticated registered supervisor is required".into()))?;
+        derive_delivery_supervisor_authority(&caller).map_err(|reason| {
+            refuse(format!(
+                "registered supervisor authority required: {reason}"
+            ))
+        })?;
+        authorize_explicit_task_for_system_b_worker(task, &assignee, agents.as_ref())?;
+        let git = manager.git();
+        let pushed_ref = format!("refs/remotes/origin/{branch}");
+        git.fetch_branch(&format!("+refs/heads/{branch}:{pushed_ref}"))
+            .map_err(|error| refuse(format!("cannot fetch recorded origin/{branch}: {error}")))?;
+        if git.resolve_commit(&pushed_ref).as_deref() != Some(anchor) {
+            return Err(refuse(format!(
+                "origin/{branch} does not match task {} anchor {anchor}",
+                task.id
+            )));
+        }
+        let local_ref = format!("refs/heads/{branch}");
+        match git.resolve_commit(&local_ref) {
+            Some(local) if local != anchor => {
+                return Err(refuse(format!(
+                    "local {branch} disagrees with origin and the recorded anchor; reconcile the refs explicitly"
+                )));
+            }
+            None => {
+                git.create_branch_from(branch, anchor).map_err(|error| {
+                    refuse(format!(
+                        "cannot bind local {branch} to its pushed anchor: {error}"
+                    ))
+                })?;
+            }
+            _ => {}
+        }
+        if git.resolve_commit(&local_ref).as_deref() != Some(anchor) {
+            return Err(refuse(format!(
+                "local {branch} moved while resolving the pushed delivery"
+            )));
+        }
+        Ok(Some(RemoteMergeSource {
+            assignee,
+            branch: branch.into(),
+            anchor: anchor.into(),
+        }))
+    }
     /// Merge worktree back to parent
     ///
     /// Resolves `id` against System A first (the `WorktreeStore`-tracked,
@@ -2963,6 +3069,10 @@ impl CasCore {
     /// worker merge to trunk — trunk requires explicit `allow_trunk=true`
     /// (independent of `force`, which only bypasses dirty worktree protection).
     /// The resolved task/target is always surfaced.
+    /// Remote-only deliveries require an explicit task with a WorkTarget,
+    /// parked branch and exact anchor. A registered supervisor may name that
+    /// pushed branch or its full SHA; the normal QA/CI and receipt path remains
+    /// in force, without registering the peer worker or cleaning its checkout.
     ///
     /// `cleanup` (cas-369f) is independent of `force`:
     /// - `force` only allows merging a dirty worktree
@@ -3119,6 +3229,36 @@ impl CasCore {
             .map(|context| context.repo_root.clone())
             .unwrap_or_else(|| cas_root.parent().unwrap_or(&cas_root).to_path_buf());
 
+        let manager_config = WorktreeConfig {
+            enabled: wt_config.enabled,
+            base_path: wt_config.base_path.clone(),
+            branch_prefix: wt_config.branch_prefix.clone(),
+            auto_merge: true, // Force merge for this operation
+            cleanup_on_close: wt_config.cleanup_on_close,
+            promote_entries_on_merge: wt_config.promote_entries_on_merge,
+        };
+
+        let manager = WorktreeManager::new(&cwd, manager_config).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to create worktree manager: {e}")),
+            data: None,
+        })?;
+
+        let system_a = match worktree_store.get(id) {
+            Ok(wt) => Some(wt),
+            Err(_) => worktree_store.get_by_branch(id).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to get worktree: {e}")),
+                data: None,
+            })?,
+        };
+
+        let remote_source = if system_a.is_none() {
+            self.prepare_remote_merge_source(&manager, scoped_task.as_ref(), id, cleanup)?
+        } else {
+            None
+        };
+
         // cas-619f: a user-facing delivery merges only after an independent
         // QA round (reviewed by someone other than the implementer) passed
         // or was waived for the exact tip being merged.
@@ -3144,30 +3284,6 @@ impl CasCore {
             });
         }
 
-        let manager_config = WorktreeConfig {
-            enabled: wt_config.enabled,
-            base_path: wt_config.base_path.clone(),
-            branch_prefix: wt_config.branch_prefix.clone(),
-            auto_merge: true, // Force merge for this operation
-            cleanup_on_close: wt_config.cleanup_on_close,
-            promote_entries_on_merge: wt_config.promote_entries_on_merge,
-        };
-
-        let manager = WorktreeManager::new(&cwd, manager_config).map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to create worktree manager: {e}")),
-            data: None,
-        })?;
-
-        let system_a = match worktree_store.get(id) {
-            Ok(wt) => Some(wt),
-            Err(_) => worktree_store.get_by_branch(id).map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to get worktree: {e}")),
-                data: None,
-            })?,
-        };
-
         let (mut worktree, is_system_b, source_worktree_live, target_reason, trunk_fallback) =
             match system_a {
                 Some(wt) => {
@@ -3177,10 +3293,12 @@ impl CasCore {
                 None => {
                     // A per-task delivery branch shares the worker's worktree
                     // path, but has its own Git ref (GH #1040).
-                    let (assignee, source_branch) = system_b_merge_source(id, task_id);
+                    let (assignee, source_branch) = remote_source.as_ref()
+                        .map(|source| (source.assignee.clone(), source.branch.clone()))
+                        .unwrap_or_else(|| system_b_merge_source(id, task_id));
                     let path = manager.worktree_path_for_worker(&assignee);
                     let source_worktree_live = is_git_worktree(&path);
-                    if !source_worktree_live && transactional_delivery.is_none() {
+                    if !source_worktree_live && remote_source.is_none() && transactional_delivery.is_none() {
                         return Err(McpError {
                             code: ErrorCode::INVALID_PARAMS,
                             message: Cow::from(format!(
@@ -3311,7 +3429,7 @@ impl CasCore {
         // A stale System-A row is not a live worktree. Preserve the legacy
         // no-receipt failure while transactional delivery continues into the
         // immutable receipt/ancestry reconciliation below.
-        if !source_worktree_live && transactional_delivery.is_none() {
+        if !source_worktree_live && remote_source.is_none() && transactional_delivery.is_none() {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(format!(
@@ -3504,7 +3622,7 @@ impl CasCore {
             }
         }
 
-        if !source_worktree_live && !reconciled_delivery {
+        if !source_worktree_live && remote_source.is_none() && !reconciled_delivery {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(format!(
@@ -3525,7 +3643,10 @@ impl CasCore {
 
         // Inspect the delivery range before Git changes the target. Never poll
         // for unfinished CI or let a docs-only tip mask earlier code.
-        let branch_ci_lookup = lookup_branch_ci(&worktree.branch, &worktree.parent_branch, &cwd);
+        let ci_source = remote_source.as_ref()
+            .map(|source| source.anchor.as_str())
+            .unwrap_or(worktree.branch.as_str());
+        let branch_ci_lookup = lookup_branch_ci(ci_source, &worktree.parent_branch, &cwd);
         let ci_prefix = describe_branch_ci_lookup(&worktree.branch, &branch_ci_lookup);
         let branch_ci_state = branch_ci_lookup.state;
         // cas-fd0a: CI state alone admits the merge; the daemon's red-epic
@@ -3620,7 +3741,9 @@ impl CasCore {
         };
         let observed_source_tip = transactional_delivery
             .is_none()
-            .then(|| manager.git().resolve_commit(&worktree.branch))
+            .then(|| remote_source.as_ref()
+                .map(|source| source.anchor.clone())
+                .or_else(|| manager.git().resolve_commit(&worktree.branch)))
             .flatten();
 
         // Carries the target-sync line from inside the merge branch out to the
@@ -3753,7 +3876,9 @@ impl CasCore {
                     });
                 }
             }
-            let merge_result = if let Some(anchor) = dirty_pushed_anchor {
+            let pushed_anchor = remote_source.as_ref().map(|source| source.anchor.as_str())
+                .or(dirty_pushed_anchor);
+            let merge_result = if let Some(anchor) = pushed_anchor {
                 let result = manager.merge_pushed_delivery_preserving_worktree(&mut worktree, anchor);
                 if result.is_ok() {
                     pushed_source_note = format!(

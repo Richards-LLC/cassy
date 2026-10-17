@@ -451,6 +451,159 @@ async fn recovery_request_changes_start_close_binds_final_tip_cas_c6e1() {
     assert_eq!(rounds[0].branch, BRANCH);
 }
 
+/// cas-915b: releasing the implementation lease does not release its delivery
+/// from containment. A lane-CI citation is not evidence of a target merge.
+#[tokio::test]
+async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "note.txt", false);
+    let branch = crate::factory_isolation::worker_task_branch(WORKER, TASK);
+    git(&f.worker_path, &["checkout", "-q", "-b", &branch]);
+    let cas_dir = f.dir.path().join(".cas");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.demo_statement.clear();
+    tasks.update(&task).unwrap();
+    let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    supervisor
+        .cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
+            id: TASK.into(),
+            reason: "Correct the declined delivery before re-parking".into(),
+        }))
+        .await
+        .unwrap();
+    env.set("CAS_AGENT_ROLE", "worker");
+    f.core
+        .cas_task_start_with_options(Parameters(crate::mcp::tools::TaskStartRequest {
+            id: TASK.into(),
+            brief: Some(true),
+            force: None,
+        }))
+        .await
+        .unwrap();
+    // Model the normal commit-hook capture during the new implementation cycle.
+    let mut corrected = tasks.get(TASK).unwrap();
+    assert_eq!(corrected.status, TaskStatus::InProgress);
+    corrected.deliverables.factory_branch_anchor = Some(f.final_tip.clone());
+    corrected.deliverables.parked_branch = Some(branch.clone());
+    tasks.update(&corrected).unwrap();
+    f.core
+        .cas_task_release(Parameters(crate::mcp::tools::TaskReleaseRequest {
+            task_id: TASK.into(),
+            force: None,
+        }))
+        .await
+        .unwrap();
+    assert!(tasks.get(TASK).unwrap().assignee.is_none());
+
+    std::fs::write(f.worker_path.join("note.txt"), "final corrected delivery\n").unwrap();
+    git(&f.worker_path, &["add", "note.txt"]);
+    git(
+        &f.worker_path,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "fix(cas-c6e1-fixture): final correction",
+        ],
+    );
+    let final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    git(
+        f.dir.path(),
+        &[
+            "update-ref",
+            &format!("refs/remotes/origin/{branch}"),
+            &final_tip,
+        ],
+    );
+    assert!(!commit_is_merged_into_parent(
+        f.dir.path(),
+        &final_tip,
+        "main"
+    ));
+    let output = text(f.core.cas_task_close(Parameters(TaskCloseRequest {
+        id: TASK.into(),
+        reason: Some(format!("Lane CI passed for {final_tip}: https://github.com/example/cassy/actions/runs/39049693968 . Re-parking for epic merge.")),
+        commit_receipt: None,
+        supervisor_override: None,
+        stranded_branch_override: None,
+        legacy_bypass_code_review: None,
+        search_manifest: None,
+    })).await.unwrap());
+    let parked = tasks.get(TASK).unwrap();
+    assert!(output.contains("MERGE REQUIRED"), "{output}");
+    assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
+    assert_eq!(
+        parked.deliverables.parked_branch.as_deref(),
+        Some(branch.as_str())
+    );
+    assert_eq!(
+        parked.deliverables.factory_branch_anchor.as_deref(),
+        Some(final_tip.as_str())
+    );
+
+    // Once the actual delivery is integrated, the released task can close.
+    git(
+        f.dir.path(),
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            &branch,
+            "-m",
+            "integrate corrected delivery",
+        ],
+    );
+    git(
+        f.dir.path(),
+        &["update-ref", "refs/remotes/origin/main", "main"],
+    );
+    let mut user_facing = tasks.get(TASK).unwrap();
+    user_facing.demo_statement = "Read the corrected status".into();
+    tasks.update(&user_facing).unwrap();
+    let qa_output = text(
+        f.core
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: TASK.into(),
+                reason: Some("Delivery integrated; review still required".into()),
+                commit_receipt: Some(final_tip.clone()),
+                supervisor_override: None,
+                stranded_branch_override: None,
+                legacy_bypass_code_review: None,
+                search_manifest: None,
+            }))
+            .await
+            .unwrap(),
+    );
+    assert!(qa_output.contains("INDEPENDENT QA REQUIRED"), "{qa_output}");
+    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge);
+    let mut task = tasks.get(TASK).unwrap();
+    task.demo_statement.clear();
+    tasks.update(&task).unwrap();
+    let output = text(
+        f.core
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: TASK.into(),
+                reason: Some("Final corrected delivery merged into target".into()),
+                commit_receipt: Some(final_tip),
+                supervisor_override: None,
+                stranded_branch_override: None,
+                legacy_bypass_code_review: None,
+                search_manifest: None,
+            }))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        tasks.get(TASK).unwrap().status,
+        TaskStatus::Closed,
+        "{output}"
+    );
+}
+
 /// cas-3b81 (GH #1142): a close's cost does not grow with the task's note
 /// history. The timed-out incident tasks were old, with long histories; this
 /// close carries a ~2 MB history of receipts, SHAs and proof lines, takes the

@@ -907,9 +907,14 @@ fn render_partial_thread(out: &mut dyn Write, envelope: &Value) {
     if unconfirmed {
         let _ = writeln!(out, "[FAILED] reply {failed} files not confirmed attached; the thread was posted");
         posted_lines(out, envelope);
-        let channel = str_at(envelope, "/channel/name").unwrap_or("<channel>");
+        // The channel id is bounded where a channel name is not, so the read
+        // command stays within 80 columns on its own line.
+        let channel = str_at(envelope, "/channel/id")
+            .or_else(|| str_at(envelope, "/channel/name"))
+            .unwrap_or("<channel>");
         let root = str_at(envelope, "/posted/0/message_id").unwrap_or("<root>");
-        let _ = writeln!(out, "  -> read it: cas violet read --channel {channel} --thread {root}");
+        let _ = writeln!(out, "  -> read the thread before posting again:");
+        let _ = writeln!(out, "     cas violet read --channel {channel} --thread {root}");
         let _ = writeln!(out, "  -> rerun only with the same --idempotency-key, never a new key");
         return;
     }

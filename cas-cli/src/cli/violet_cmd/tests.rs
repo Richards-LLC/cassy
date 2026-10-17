@@ -531,13 +531,15 @@ fn reply_files_the_receipt_does_not_show_attached_fail_the_run() {
         "--reply-file", a.to_str().unwrap(), "--reply-file", b.to_str().unwrap(),
         "--idempotency-key", "k1251",
     ];
+    // Real-shape ids and a long channel name: the read hint must stay usable at 80 columns.
+    let long_channel = json!({"id": "C09FCTHCQ2U", "name": "release-notes-for-customer-facing-announcements-and-screenshots"});
     let receipt = |files: Value| {
         json!({
-            "ok": true, "schema_version": 1, "kind": "thread", "channel": channel(),
+            "ok": true, "schema_version": 1, "kind": "thread", "channel": long_channel,
             "idempotency_key": "k1251", "failed_index": null, "resume_safe": false,
             "posted": [
-                {"index": 0, "message_id": "9.0", "thread_id": "9.0", "permalink": "https://slack.test/0"},
-                {"index": 1, "message_id": "9.1", "thread_id": "9.0", "permalink": "https://slack.test/1",
+                {"index": 0, "message_id": "1792208267.493989", "thread_id": "1792208267.493989", "permalink": "https://slack.test/0"},
+                {"index": 1, "message_id": "1792208270.846219", "thread_id": "1792208267.493989", "permalink": "https://slack.test/1",
                  "files": files}
             ]
         })
@@ -554,8 +556,8 @@ fn reply_files_the_receipt_does_not_show_attached_fail_the_run() {
         let error = result.unwrap_err();
         assert_eq!(error.code, code, "{files}");
         assert!(!out.contains("[OK]"), "{out}");
-        assert!(out.contains("0 root  9.0") && out.contains("1 reply 9.1"), "{out}");
-        assert!(out.contains("cas violet read --channel cas-internal --thread 9.0"), "{out}");
+        assert!(out.contains("0 root  1792208267.493989") && out.contains("1 reply 1792208270.846219"), "{out}");
+        assert!(out.contains("cas violet read --channel C09FCTHCQ2U --thread 1792208267.493989"), "{out}");
         assert!(out.contains("same --idempotency-key, never a new key"), "{out}");
         let line = format!("✗ {error}");
         assert!(line.contains("reply 1:"), "{line}");
@@ -570,8 +572,8 @@ fn reply_files_the_receipt_does_not_show_attached_fail_the_run() {
         assert_eq!(printed["ok"], false);
         assert_eq!(printed["error"]["code"], code);
         let full = printed["error"]["message"].as_str().unwrap();
-        assert!(full.contains("same --idempotency-key") && full.contains("9.1"), "JSON keeps the whole remedy: {full}");
-        assert_eq!(printed["posted"][1]["message_id"], "9.1");
+        assert!(full.contains("same --idempotency-key") && full.contains("1792208270.846219"), "JSON keeps the whole remedy: {full}");
+        assert_eq!(printed["posted"][1]["message_id"], "1792208270.846219");
         assert_eq!(printed["posted"][1]["files"], files, "returned file ids are kept");
         assert_eq!(hub.calls().len(), 1, "no automatic retry");
     }

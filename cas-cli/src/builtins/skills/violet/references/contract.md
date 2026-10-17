@@ -18,7 +18,7 @@ This is the Cassy-side summary of the hub's `docs/TOOL_CONTRACT.md` (violet_ps,
 | `include_threads` | true |
 | `include_recent_replies_to_older_roots` | true; with `since`, also expands older roots whose latest reply is in the window |
 | `thread_lookback_days` | 7; 1–30, measured before `since` |
-| `include_files` | true |
+| `include_files` | true; when false, every message's `file_ids` is `[]` and `files[]` is empty, whatever is attached |
 | `include_channels` | true for compatibility; pass `false` on every read except directory discovery |
 | `file_id` / `file_ids` | only these files (array ≤ 50); history, enrichment and `messages` are skipped |
 | `message_id` | exactly one root or reply |
@@ -57,7 +57,9 @@ and lets the others expand; re-read it with `thread_id`.
 
 **Skipped files.** A file over `max_file_bytes` or the aggregate budget keeps
 its metadata, omits `content_base64`, and sets `skipped: true` with
-`skip_reason` `exceeds_max_file_bytes` or `exceeds_max_bytes`. The hub streams
+`skip_reason` `exceeds_max_file_bytes` or `exceeds_max_bytes`. A file Slack
+refuses is skipped too, with `skip_reason` `access_denied`, `file_not_found` or
+`file_unreadable` and Slack's code or status in `upstream`. The hub streams
 skipped files up to 16 MiB (16777216 bytes) to fill `sha256`; above that cap,
 or when the stream fails, `skip_reason` is `hash_unavailable` and `sha256` is
 absent. `skipped_files` counts them. To verify an upload, read its `file_id`

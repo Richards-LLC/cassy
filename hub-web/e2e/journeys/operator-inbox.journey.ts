@@ -515,7 +515,13 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
       const requests = ownerInbox.getByRole("region", { name: "Reply requests", exact: true });
       await expect(requests.getByText(/Reader phone.*asks to reply to soundwave · amber-fox-29/)).toBeVisible({ timeout: 15_000 });
       await captureReply(owner, "M03-owner", true);
-      await requests.getByRole("button", { name: /Allow Reader phone/ }).press("Enter");
+      const allow = requests.getByRole("button", { name: /Allow Reader phone/ });
+      const deny = requests.getByRole("button", { name: /Deny Reader phone/ });
+      const allowBox = (await allow.boundingBox())!;
+      const denyBox = (await deny.boundingBox())!;
+      expect(denyBox.x - allowBox.x - allowBox.width).toBeGreaterThanOrEqual(8);
+      expect(await allow.evaluate(el => getComputedStyle(el).background)).not.toBe(await deny.evaluate(el => getComputedStyle(el).background));
+      await allow.press("Enter");
       await expect(ownerInbox.getByText("Replying allowed for Reader phone.", { exact: true })).toBeVisible();
       expect(cloud.devices.get(readerId)!.scopes).toEqual([{ hub_id: HUB, project_id: PROJECT, session_id: sessionId, operations: ["operator_message"] }]);
     });

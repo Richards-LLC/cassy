@@ -5,6 +5,9 @@ CREATE TABLE prompt_queue(id INTEGER PRIMARY KEY,source TEXT,target TEXT,prompt 
 CREATE TABLE prompt_queue_recipient_seen(prompt_id INTEGER,recipient TEXT,seen_at TEXT,source TEXT);
 CREATE TABLE operator_delivery_outbox(event_id TEXT,prompt_id INTEGER,factory_session TEXT,
  payload_snapshot TEXT,created_at TEXT,relay_receipt TEXT,retained_at TEXT);
+CREATE TABLE operator_cloud_outbox(event_id TEXT,account_id TEXT,machine_id TEXT,hub_id TEXT,
+ project_id TEXT,session_id TEXT,created_at TEXT,feed_generation TEXT,key_epoch TEXT,
+ ciphertext TEXT,digest TEXT,receipt_kind TEXT,receipt_at TEXT);
 CREATE TABLE agents(id TEXT,name TEXT,role TEXT,status TEXT DEFAULT 'active',
  registered_at TEXT,last_heartbeat TEXT,factory_session TEXT);
 CREATE TABLE events(id INTEGER PRIMARY KEY,event_type TEXT,entity_id TEXT,metadata TEXT,created_at TEXT);

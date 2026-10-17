@@ -76,24 +76,79 @@ fn cas_7e24_false_abandon_pass_and_breach() {
 #[test]
 fn cas_7e24_operator_receipts_pass_and_breach() {
     let (_temp, _queue, conn) = fixture();
-    assert_eq!(
-        (
-            values(&conn).operator_receipts,
-            values(&conn).operator_events
-        ),
-        (1, 1)
-    );
+    let m = values(&conn);
+    assert_eq!((m.operator_receipts, m.operator_events), (1, 1));
+    assert_eq!(m.operator_unenrolled, Some(0));
+    // cas-5c12 (GH #1261): a local relay_receipt is not the enrolled lane.
     conn.execute(
         "UPDATE operator_delivery_outbox SET relay_receipt=NULL,retained_at=NULL",
         [],
     )
     .unwrap();
+    assert_eq!(values(&conn).breach_count(), 0);
+    // Unenrolled snapshots only: not applicable, never a 0% breach, while the
+    // independent gated-without-outcome breach stays visible.
+    conn.execute("DELETE FROM operator_cloud_outbox", [])
+        .unwrap();
+    conn.execute(
+        "UPDATE prompt_queue SET transport_delivered_at=NULL WHERE id=1",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "DELETE FROM prompt_queue_recipient_seen WHERE prompt_id=1",
+        [],
+    )
+    .unwrap();
     let m = values(&conn);
-    assert_eq!((m.operator_receipts, m.operator_events), (0, 1));
-    assert!(m.lines()[1].starts_with("BREACH"));
+    assert_eq!(
+        (
+            m.operator_receipts,
+            m.operator_events,
+            m.operator_unenrolled
+        ),
+        (0, 0, Some(1))
+    );
+    assert!(
+        m.lines()[1].starts_with("N/A operator relay receipts: not applicable"),
+        "{}",
+        m.lines()[1]
+    );
+    assert!(m.lines()[1].contains("cas hub operator bind"));
+    assert!(m.lines()[4].starts_with("BREACH gated-without-outcome: 1"));
+    assert_eq!(m.breach_count(), 1);
+    // Mixed: an enrolled turn still pending its receipt breaches; the
+    // unenrolled snapshot stays out of the denominator.
+    conn.execute_batch(
+        "INSERT INTO operator_delivery_outbox(event_id,prompt_id,factory_session,payload_snapshot,created_at)
+         VALUES('enrolled-event',2,'fixture-session','{}','2026-01-02T00:01:00Z');
+         INSERT INTO operator_cloud_outbox(event_id,account_id,machine_id,hub_id,project_id,session_id,created_at)
+         VALUES('enrolled-event','acct','machine','hub','project','s_fixture','2026-01-02T00:01:00Z');",
+    )
+    .unwrap();
+    let m = values(&conn);
+    assert_eq!(
+        (
+            m.operator_receipts,
+            m.operator_events,
+            m.operator_unenrolled
+        ),
+        (0, 1, Some(1))
+    );
+    assert!(m.lines()[1].starts_with("BREACH operator relay receipts: 0.0% (0/1"));
+    assert!(m.lines()[1].contains("1 unenrolled excluded"));
+    assert_eq!(m.breach_count(), 2);
     conn.execute("DELETE FROM operator_delivery_outbox", [])
         .unwrap();
     assert!(values(&conn).lines()[1].contains("100.0% (0/0"));
+    // A summary saved before the split is shown as recorded, labelled.
+    let mut legacy = serde_json::to_value(&m).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("operator_unenrolled");
+    let legacy: CommunicationSlos = serde_json::from_value(legacy).unwrap();
+    assert!(legacy.lines()[1].contains("legacy denominator"));
 }
 
 #[test]

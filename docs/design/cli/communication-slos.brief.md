@@ -12,6 +12,11 @@ The body metric counts extra surfaced bodies per (notification, recipient),
 following cas-447d dups.py. A pointer or transport claim is not a body. Repeated
 bookkeeping of one observed wake is not another body. A poll followed by a hook
 that renders the same message is another body, even if recovery was deliberate.
+Operator relay receipts count only enrolled cloud deliveries. Unenrolled local
+snapshots render `N/A ... not applicable` with the `cas hub operator bind` step,
+or `; N unenrolled excluded` beside an enrolled ratio; recorded summaries from
+before that split say `legacy denominator`. A receipt is cloud retention, not
+proof that anyone handled the turn.
 No operator events is vacuously 100% (0/0, labelled no events); nudges with no
 measurable worker exposure breach rather than producing a false zero rate.
 

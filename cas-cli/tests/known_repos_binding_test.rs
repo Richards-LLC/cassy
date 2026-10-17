@@ -122,13 +122,14 @@ fn explicit_binding_cli_recovers_two_live_clones_across_restart() {
         assert_eq!(report["binding_count"], 1);
         let repos = report["repos"].as_array().unwrap();
         assert_eq!(repos.len(), 2);
-        for path in [&clone_a, &clone_b] {
+        // Binding registers/touches the chosen clone once more.
+        for (path, touches) in [(&clone_a, 1), (&clone_b, 2)] {
             let row = repos
                 .iter()
                 .find(|row| row["path"] == path.to_str().unwrap())
                 .unwrap();
             assert_eq!(row["healthy"], true);
-            assert_eq!(row["touch_count"], 1);
+            assert_eq!(row["touch_count"], touches);
         }
     }
     // pin: the status document preserves the selector/root and validated state.

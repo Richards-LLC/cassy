@@ -1,0 +1,33 @@
+Synthetic fixture capture; /tmp/kr-* normalized to /tmp/kr-fixture.
+
+$ cas known-repos list
+1 known repo(s):
+  [ok    ] touch_count=1    /tmp/kr-fixture/repo
+1 explicit binding(s); run `cas known-repos status` for validated details.
+
+$ cas known-repos list --json
+{
+  "repos": [
+    {
+      "path": "/tmp/kr-fixture/repo",
+      "healthy": true,
+      "touch_count": 1
+    }
+  ],
+  "binding_count": 1
+}
+
+$ cas known-repos status
+1 host-local binding(s):
+  [valid] project:qa -> /tmp/kr-fixture/repo
+
+$ cas known-repos status --json
+{
+  "bindings": [
+    {
+      "selector": "project:qa",
+      "repo_root": "/tmp/kr-fixture/repo",
+      "state": "valid"
+    }
+  ]
+}

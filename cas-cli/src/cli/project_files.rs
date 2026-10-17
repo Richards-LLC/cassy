@@ -13,6 +13,8 @@ use crate::builtins::{
     self, BUILTIN_GITIGNORE_BEGIN as IGNORE_BEGIN, BUILTIN_GITIGNORE_END as IGNORE_END,
 };
 
+mod git_lock;
+
 const BEGIN: &str = "<!-- CAS:BEGIN - This section is managed by CAS. Do not edit manually. -->";
 const END: &str = "<!-- CAS:END -->";
 const TRACKED: &[&str] = &[
@@ -63,6 +65,9 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
         .args(args)
         .output()?;
     if !out.status.success() {
+        if let Some(finding) = git_lock::diagnose(root, &String::from_utf8_lossy(&out.stderr)) {
+            bail!("{finding}");
+        }
         bail!(
             "git {}: {}",
             args[0],

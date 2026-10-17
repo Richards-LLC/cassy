@@ -2119,6 +2119,17 @@ file, the default contract is unchanged. The layers are:
 A process that deliberately hides a same-user write from these checks is out
 of reach. A hard boundary needs agents running as a separate Unix user.
 
+## Cloud reader slots
+
+Supervisor registration derives a stable Cloud `factory_id` from the machine id,
+canonical project id and supervisor role, so `/clear` and full relaunches retain
+the reader slot. For a second supervisor on the same repo and machine, set
+`factory.slot_id` to a distinct value and keep it across relaunches. An explicit
+override also lets a successor on another machine address that same slot.
+Without enough identity to derive a slot, registration falls back to
+`CAS_FACTORY_ID`, then the agent's factory session. Local
+`metadata.factory_session` still names the actual launch for fleet routing.
+
 ## Durable task artifacts
 
 `factory.artifacts_root` is the shared parent (default `~/.cas/artifacts`).

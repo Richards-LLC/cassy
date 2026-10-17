@@ -108,6 +108,7 @@ pub(crate) struct VioletReader {
     sessions: HashMap<String, String>,
     /// Set when Cloud says this registration is superseded; no more claims.
     pub(crate) stopped: Option<NamedRefusal>,
+    registration_id: Option<String>,
     managed: bool,
 }
 
@@ -118,6 +119,7 @@ impl VioletReader {
             typed: HashSet::new(),
             sessions: HashMap::new(),
             stopped: None,
+            registration_id: None,
             managed: false,
         }
     }
@@ -138,10 +140,20 @@ impl VioletReader {
 
     /// cas-c186 hook: called at the top of every tick with that tick's
     /// registration, before the `stopped` check.
-    pub(crate) fn begin_registration(&mut self, _registration_id: &str) {}
+    pub(crate) fn begin_registration(&mut self, registration_id: &str) {
+        if self.registration_id.as_deref() != Some(registration_id) {
+            self.registration_id = Some(registration_id.to_string());
+            self.stopped = None;
+        }
+    }
 
     /// cas-c186 hook: Cloud refused a claim, an ack item or a receipt.
-    pub(crate) fn note_refusal(&mut self, _refusal: &NamedRefusal) {}
+    pub(crate) fn note_refusal(&mut self, refusal: &NamedRefusal) {
+        if refusal.code == "not_found" && refusal.reason == "unknown_registration" {
+            self.stopped = Some(refusal.clone());
+            self.managed = true;
+        }
+    }
 
     /// Claim, then walk Cloud's reader order for each leased delivery.
     pub(crate) fn tick(
@@ -214,6 +226,9 @@ impl VioletReader {
                 Err(refusal) => {
                     self.note_refusal(&refusal);
                     report.not_typed.push((delivery.id, refusal));
+                    if self.stopped.is_some() {
+                        break;
+                    }
                 }
             }
         }

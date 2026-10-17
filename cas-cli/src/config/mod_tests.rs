@@ -951,6 +951,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
     );
     // (key, value to set, value get returns)
     let table: &[(&str, &str, &str)] = &[
+        ("factory.slot_id", " second-supervisor ", "second-supervisor"),
         ("factory.artifacts_root", " /mnt/scratch/artifacts ", "/mnt/scratch/artifacts"),
         ("factory.scratch_root", " /mnt/rewind/cas ", "/mnt/rewind/cas"),
         ("factory.supervisor_only_mcp", " vercel, neon ", "vercel,neon"),
@@ -1059,7 +1060,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
     assert_eq!(loaded.get("factory.worker_build_jobs").as_deref(), Some("5"));
 
     // Optional keys clear back to unset with an empty value.
-    for key in ["factory.epic_base_branch"] {
+    for key in ["factory.epic_base_branch", "factory.slot_id"] {
         config.set(key, "").unwrap();
         assert_eq!(config.get(key).as_deref(), Some(""), "{key} cleared");
     }

@@ -4,6 +4,9 @@ use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut ConfigRegistry) {
     // Runtime FactoryConfig fields must also be discoverable and settable.
     for (key, name, description, value_type, default, constraint) in [
+        ("factory.slot_id", "Cloud Supervisor Slot",
+         "Stable Cloud reader slot override for a second supervisor on the same repo and machine. Empty derives the slot from machine id, canonical project id and supervisor role; keep the override across relaunches.",
+         ConfigType::String, "", Constraint::None),
         ("factory.warn_stale_assignment", "Warn on Stale Worker Assignment",
          "Warn when assigning a task to a worker whose worktree is behind its sync target.",
          ConfigType::Bool, "true", Constraint::None),

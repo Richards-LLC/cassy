@@ -15,8 +15,8 @@ use super::*;
 
 type WriterJob = Box<dyn FnOnce() + Send + 'static>;
 
-/// A single writer thread, like the StoreWorker, that records which jobs ran
-/// on it. With `gated`, jobs wait until [`TestWriter::open`].
+/// A single writer thread, like the StoreWorker, that records job entry before
+/// the job can publish completion. With `gated`, jobs wait until [`TestWriter::open`].
 pub(in super::super) struct TestWriter {
     sender: Mutex<mpsc::Sender<(&'static str, WriterJob)>>,
     ran: Arc<Mutex<Vec<(&'static str, String)>>>,
@@ -42,8 +42,8 @@ impl TestWriter {
                         }
                     }
                     let thread = std::thread::current().name().unwrap_or("").to_string();
-                    job();
                     thread_ran.lock().unwrap().push((label, thread));
+                    job();
                 }
             })
             .unwrap();

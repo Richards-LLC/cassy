@@ -631,6 +631,11 @@ impl FactoryApp {
         app
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_supervisor_cli_for_test(&mut self, cli: cas_mux::SupervisorCli) {
+        self.supervisor_cli = cli;
+    }
+
     /// Track a live worker pane the way a finished spawn does, for tests that
     /// drive shutdown against a real PTY process (cas-00d5).
     /// Name a roster worker without a pane, for daemon sweeps that read

@@ -8365,6 +8365,9 @@ impl FactoryDaemon {
         let cas_dir = self.app.cas_dir().to_path_buf();
         self.queue_jobs.settle_injects(&cas_dir);
         self.queue_jobs.apply_completions();
+        // A live mux command still owns its physical receipt. Only orphaned
+        // commands use the existing missing-outcome timeout/retry path.
+        self.queue_jobs.retain_owned_injects(Instant::now(), |row| self.urgent_injects.holds_row(row));
         self.queue_jobs.expire_injects(&cas_dir, Instant::now());
         self.queue_jobs.expire_claims(&cas_dir, Instant::now());
         let raw = if self.queue_jobs.prompt_preparation.has_pending() {
@@ -9939,7 +9942,8 @@ impl FactoryDaemon {
                 if inline_supervisor_body && let Some((_, _, wake_decision, false)) = normal_wake {
                     // No transport admission, cadence spend or attempt: keep the
                     // body surfaceable by the next hook and stop 100ms selection.
-                    self.queue_jobs.release_inject_claim(self.app.cas_dir(), queued.id, &queued.target);
+                    self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token });
                     self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
                         super::prompt_queue_jobs::QueueStamp::WakeDecline { detail: wake_decision.status_detail() });
                     self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,

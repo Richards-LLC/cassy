@@ -1240,6 +1240,16 @@ impl QueueJobs {
         });
     }
 
+    /// A mux command with a live write receipt is not an orphan. Preserve its
+    /// generation/claim while the writer is blocked, without re-typing bytes.
+    pub(crate) fn retain_owned_injects(&mut self, now: Instant, owns: impl Fn(i64) -> bool) {
+        for ((row, _), entry) in &mut self.in_flight.entries {
+            if entry.phase == InjectPhase::AwaitingOutcome && owns(*row) {
+                entry.since = now;
+            }
+        }
+    }
+
     /// Release the claim of every inject with no outcome after the timeout.
     pub(crate) fn expire_injects(&mut self, cas_dir: &Path, now: Instant) -> usize {
         let expired = self.in_flight.expire(now, INJECT_OUTCOME_TIMEOUT);

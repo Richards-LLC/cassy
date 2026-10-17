@@ -2268,9 +2268,21 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
             .any(|g| g["hooks"][0]["command"] == "echo project-codex-hook")
     );
     let first = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+    // A repeated refresh covers the same writers without rewriting identical
+    // content (cas-df15). Seed an old timestamp instead of sleeping.
+    let unchanged = [".claude/settings.json", ".claude/rules/cas/rule-fixture.md"];
+    let stamp = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1000);
+    for path in unchanged {
+        std::fs::OpenOptions::new().write(true).open(project.join(path)).unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(stamp)).unwrap();
+    }
     execute(&args, &update_test_cli(true), Some(&root)).unwrap();
     assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), first);
     assert!(cas_6718_git(&project, &["status", "--porcelain"]).is_empty());
+    for path in unchanged {
+        assert_eq!(std::fs::metadata(project.join(path)).unwrap().modified().unwrap(), stamp,
+            "unchanged refresh rewrote {path}");
+    }
 
     // Permission membership is unchanged when project tooling reorders the allow list.
     let settings = project.join(".claude/settings.json");
@@ -2286,6 +2298,22 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
         0,
         "doctor must compare permission membership, not array order"
     );
+
+    // The no-write fast path must still repair changed authoritative inputs.
+    let config_path = root.join("config.toml");
+    let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&config_path).unwrap().parse().unwrap();
+    config["hooks"]["pre_tool_use"]["timeout"] = toml_edit::value(17);
+    std::fs::write(config_path, config.to_string()).unwrap();
+    let store = crate::store::open_rule_store(&root).unwrap();
+    let mut rule = store.get("rule-fixture").unwrap();
+    rule.content = "Changed authoritative input must still be repaired".into();
+    store.update(&rule).unwrap();
+    execute(&args, &update_test_cli(true), Some(&root)).unwrap();
+    assert!(std::fs::read_to_string(project.join(unchanged[1])).unwrap().contains(&rule.content));
+    let settings: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.join(unchanged[0])).unwrap()).unwrap();
+    assert!(settings["hooks"]["PreToolUse"].as_array().unwrap().iter()
+        .any(|group| group["hooks"][0]["timeout"] == 17));
 }
 
 #[test]

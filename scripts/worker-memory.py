@@ -108,6 +108,9 @@ def estimate(command, cwd=None, depth=0):
         # hub-web's token generators are small single-process file transforms.
         if script in ('generate-tokens.mjs', 'build-cassy-tokens.mjs'):
             return host_memory.GIB
+        # `node --test <files>` runs plain Node test files (no flags).
+        if args[0] == '--test' and args[1:] and not any(arg.startswith('-') for arg in args[1:]):
+            return host_memory.GIB
     if name == 'vitest' and not any(arg == '-w' or arg.startswith(('--watch', '--browser')) for arg in args):
         cap = None
         for index, arg in enumerate(args):

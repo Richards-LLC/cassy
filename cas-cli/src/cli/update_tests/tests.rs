@@ -364,6 +364,8 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
             crate::store::init_cas_dir(&project).unwrap()
         })
         .collect();
+    let non_git = projects.join("non-git");
+    crate::store::init_cas_dir(&non_git).unwrap();
     env.set("CAS_PROJECT_ROOTS", &projects);
     env.set("CAS_ROOT", &roots[0]);
     let old = cas_types::violet_compatibility::violet_compatibility()
@@ -409,6 +411,10 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
         )
     });
     let report = result.unwrap();
+    assert!(
+        !non_git.join(".claude").exists(),
+        "non-Git roots must be skipped"
+    );
     assert_eq!(report.project_count, 2, "{output}");
     assert_eq!(report.failed_count, 0, "{output}");
     for root in &roots {
@@ -1960,4 +1966,265 @@ fn update_names_what_happens_to_running_factories_cas_cef2() {
     assert!(notice.contains("pinned-session keep spawning workers"), "{notice}");
     assert!(notice.contains("older-session started before build pinning and cannot spawn"), "{notice}");
     assert!(notice.contains("9.99.1") && notice.contains("cas factory kill <session>"), "{notice}");
+}
+
+// One real Git repo carries the seven downstream drift shapes from cas-6718.
+fn cas_6718_git(project: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(project)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn cas_6718_drifted_project(home: &Path) -> PathBuf {
+    let project = home.join("drifted");
+    crate::store::init_cas_dir(&project).unwrap();
+    for (path, body) in [
+        (".gitignore", ".cas/\nuser-output/\n"),
+        (
+            "CLAUDE.md",
+            "Project instructions stay.\n\n<!-- CAS:BEGIN - This section is managed by CAS. Do not edit manually. -->\nold Cassy instructions\n<!-- CAS:END -->\n",
+        ),
+        (".claude/settings.json", "{\"theme\":\"project\"}\n"),
+        (
+            ".codex/config.toml",
+            "# Project Codex preferences\nmodel = 'fixture-model'\n",
+        ),
+        (
+            ".claude/skills/cas/SKILL.md",
+            "---\nname: cas\nmanaged_by: cas\n---\nLegacy Cassy skill\n",
+        ),
+        (
+            ".claude/agents/code-reviewer.md",
+            "---\nmanaged_by: cas\n---\nRetired Cassy agent\n",
+        ),
+        (
+            ".claude/workflows/cas-code-review.js",
+            "// managed_by: cas\n// retired\n",
+        ),
+        (
+            ".codex/hooks.json",
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo project-codex-hook"},{"type":"command","command":"cas hook PreToolUse"}]}]}}"#,
+        ),
+        ("README.md", "Project content\n"),
+        (
+            ".claude/skills/cas-personal/SKILL.md",
+            "---\nname: personal-project-skill\n---\nProject-owned skill\n",
+        ),
+    ] {
+        let path = project.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+    let builtin = crate::builtins::BUILTIN_SKILLS
+        .iter()
+        .find(|f| f.path == "skills/cas-tdd/SKILL.md")
+        .unwrap();
+    let path = project.join(".claude").join(builtin.path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, builtin.content).unwrap();
+    // A prior legitimate sync may have refreshed a still-tracked projection.
+    let store = crate::store::open_rule_store(&project.join(".cas")).unwrap();
+    let mut rule = crate::types::Rule::new("rule-fixture".into(), "Previous source content".into());
+    rule.status = crate::types::RuleStatus::Proven;
+    rule.helpful_count = 1;
+    store.add(&rule).unwrap();
+    let syncer = crate::sync::Syncer::with_defaults(&project);
+    syncer.sync_rule(&rule).unwrap();
+    cas_6718_git(&project, &["init", "-q"]);
+    cas_6718_git(
+        &project,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    cas_6718_git(&project, &["config", "user.name", "Fixture"]);
+    cas_6718_git(&project, &["add", "."]);
+    cas_6718_git(&project, &["commit", "-qm", "project baseline"]);
+    rule.content = "Current authoritative source content".into();
+    store.update(&rule).unwrap();
+    syncer.sync_rule(&rule).unwrap();
+    project
+}
+
+#[test]
+fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let project = cas_6718_drifted_project(env.home());
+    let root = project.join(".cas");
+    env.set("CAS_ROOT", &root);
+    let harnesses = crate::cli::project_files::harnesses(&project);
+    assert!(crate::cli::project_files::drift(&project, &harnesses).unwrap() > 0);
+    let mut args = update_test_args();
+    args.sync = true;
+    let original = cas_6718_git(&project, &["status", "--porcelain"]);
+    args.dry_run = true;
+    execute(&args, &update_test_cli(true), Some(&root)).unwrap();
+    assert_eq!(cas_6718_git(&project, &["status", "--porcelain"]), original);
+    args.dry_run = false;
+    execute(&args, &update_test_cli(true), Some(&root)).unwrap();
+    let status = cas_6718_git(&project, &["status", "--porcelain"]);
+    assert!(
+        status.is_empty(),
+        "update left managed drift: {status}\n{}",
+        cas_6718_git(&project, &["diff"])
+    );
+    assert!(cas_6718_git(&project, &["log", "-1", "--format=%s"]).starts_with("chore(cassy):"));
+    for path in [
+        ".claude/skills/cas/SKILL.md",
+        ".claude/skills/cas-tdd/SKILL.md",
+        ".claude/rules/cas/rule-fixture.md",
+        "AGENTS.md",
+    ] {
+        assert!(project.join(path).is_file());
+        assert!(cas_6718_git(&project, &["ls-files", "--", path]).is_empty());
+        cas_6718_git(&project, &["check-ignore", path]);
+    }
+    for path in [
+        ".claude/agents/code-reviewer.md",
+        ".claude/workflows/cas-code-review.js",
+    ] {
+        assert!(!project.join(path).exists());
+        assert!(cas_6718_git(&project, &["ls-files", "--", path]).is_empty());
+    }
+    // pin: user bytes outside the CAS block must survive exactly, including blank lines.
+    assert!(
+        std::fs::read_to_string(project.join("CLAUDE.md"))
+            .unwrap()
+            .starts_with("Project instructions stay.\n\n")
+    );
+    assert_eq!(
+        crate::cli::project_files::drift(&project, &harnesses).unwrap(),
+        0
+    );
+    // pin: project TOML comments outside the managed MCP table must survive.
+    assert!(
+        std::fs::read_to_string(project.join(".codex/config.toml"))
+            .unwrap()
+            .starts_with("# Project Codex preferences\n")
+    );
+    let hooks: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(project.join(".codex/hooks.json")).unwrap()).unwrap();
+    assert!(
+        hooks["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["hooks"][0]["command"] == "echo project-codex-hook")
+    );
+    let first = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+    execute(&args, &update_test_cli(true), Some(&root)).unwrap();
+    assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), first);
+    assert!(cas_6718_git(&project, &["status", "--porcelain"]).is_empty());
+}
+
+#[test]
+fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let project = cas_6718_drifted_project(env.home());
+    let root = project.join(".cas");
+    env.set("CAS_ROOT", &root);
+    let head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+    std::fs::write(project.join("README.md"), "Staged project work\n").unwrap();
+    cas_6718_git(&project, &["add", "README.md"]);
+    let outside = "Unstaged project instruction.\n\n";
+    let claude = project.join("CLAUDE.md");
+    std::fs::write(
+        &claude,
+        format!("{outside}{}", std::fs::read_to_string(&claude).unwrap()),
+    )
+    .unwrap();
+    let command = "echo project-owned-hook";
+    let settings = serde_json::json!({"theme":"project", "hooks":{"PreToolUse":[{"hooks":[{"type":"command", "command":command}]}]}});
+    std::fs::write(project.join(".claude/settings.json"), settings.to_string()).unwrap();
+    let mut args = update_test_args();
+    args.sync = true;
+    let (result, output) =
+        capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+    result.unwrap();
+    let receipt: serde_json::Value = serde_json::from_str(output.lines().last().unwrap()).unwrap();
+    assert_eq!(receipt["managed_files"]["outcome"], "staged");
+    assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
+    assert!(
+        cas_6718_git(&project, &["diff", "--cached", "--name-only"])
+            .lines()
+            .any(|p| p == "README.md")
+    );
+    assert!(
+        std::fs::read_to_string(&claude)
+            .unwrap()
+            .starts_with(outside)
+    );
+    assert!(!cas_6718_git(&project, &["show", ":CLAUDE.md"]).contains(outside));
+    let actual: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(project.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert!(
+        actual["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["hooks"][0]["command"] == command)
+    );
+    assert!(!cas_6718_git(&project, &["show", ":.claude/settings.json"]).contains(command));
+    assert!(
+        project
+            .join(".claude/skills/cas-personal/SKILL.md")
+            .is_file()
+    );
+    // Ignore exceptions and staged edits to owned text are both preflight conflicts.
+    for (path, suffix) in [
+        (".gitignore", "\n!/AGENTS.md\n"),
+        ("CLAUDE.md", "manual managed edit"),
+    ] {
+        let file = project.join(path);
+        let original = std::fs::read_to_string(&file).unwrap();
+        let conflicted = if path == "CLAUDE.md" {
+            original.replace("@AGENTS.md", suffix)
+        } else {
+            format!("{original}{suffix}")
+        };
+        std::fs::write(&file, &conflicted).unwrap();
+        if path == "CLAUDE.md" {
+            cas_6718_git(&project, &["add", path]);
+        }
+        let index = cas_6718_git(&project, &["ls-files", "--stage"]);
+        let (result, output) =
+            capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+        result.unwrap();
+        let receipt: serde_json::Value =
+            serde_json::from_str(output.lines().last().unwrap()).unwrap();
+        assert!(
+            receipt["managed_files"]["conflicts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p == path),
+            "{receipt}"
+        );
+        if path == ".gitignore" {
+            let (result, human) = capture_phase(true, || {
+                execute(&args, &update_test_cli(false), Some(&root))
+            });
+            result.unwrap();
+            assert!(
+                human.starts_with("Managed files: 1 conflicts preserved;"),
+                "{human}"
+            );
+            assert!(!human.contains("[OK] Syncing"), "{human}");
+        }
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), conflicted);
+        assert_eq!(cas_6718_git(&project, &["ls-files", "--stage"]), index);
+        std::fs::write(file, original).unwrap();
+    }
 }

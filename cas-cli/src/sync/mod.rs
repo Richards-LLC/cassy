@@ -142,7 +142,15 @@ impl Syncer {
 
         let filepath = self.target_dir.join(format!("{}.md", rule.id));
 
-        let content = if rule.paths.is_empty() {
+        let content = Self::render_rule(rule);
+
+        fs::write(&filepath, content)?;
+        Ok(true)
+    }
+
+    /// Canonical project projection, also used to recognize legitimate sync drift.
+    pub(crate) fn render_rule(rule: &Rule) -> String {
+        if rule.paths.is_empty() {
             format!("---\nid: {}\n---\n\n{}", rule.id, rule.surfaced_content())
         } else {
             format!(
@@ -151,10 +159,7 @@ impl Syncer {
                 rule.paths,
                 rule.surfaced_content()
             )
-        };
-
-        fs::write(&filepath, content)?;
-        Ok(true)
+        }
     }
 
     /// Sync all proven rules and remove stale files

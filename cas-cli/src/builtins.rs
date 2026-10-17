@@ -3506,7 +3506,7 @@ pub fn ensure_builtin_gitignore(
     project_root: &Path,
     harnesses: &[SupervisorCli],
 ) -> std::io::Result<BuiltinGitignoreReport> {
-    let entries = builtin_gitignore_entries(harnesses);
+    let entries = crate::cli::project_files::ignored_paths(project_root, harnesses);
     if entries.is_empty() {
         return Ok(BuiltinGitignoreReport::default());
     }
@@ -3543,7 +3543,7 @@ fn is_cas_authoring_repo(project_root: &Path) -> bool {
         && project_root.join("cas-cli/src/builtins.rs").is_file()
 }
 
-fn render_builtin_gitignore_block(entries: &[String]) -> String {
+pub(crate) fn render_builtin_gitignore_block(entries: &[String]) -> String {
     let mut block = String::new();
     block.push_str(BUILTIN_GITIGNORE_BEGIN);
     block.push('\n');
@@ -3551,6 +3551,7 @@ fn render_builtin_gitignore_block(entries: &[String]) -> String {
         block.push_str(entry);
         block.push('\n');
     }
+    block.push_str("# Worktree-specific files (generated per worktree)\n# fallow incremental analysis cache (used by the fallow skill)\n");
     block.push_str(BUILTIN_GITIGNORE_END);
     block.push('\n');
     block
@@ -8303,4 +8304,44 @@ This is the body content."#;
             REQUIRED_FACTORY_AGENTS
         );
     }
+}
+
+/// Read-only provenance check used before update changes a dirty managed body.
+pub(crate) fn matches_shipped_project_file(path: &str, bytes: &[u8]) -> bool {
+    let Some((_, relative)) = path.trim_start_matches('.').split_once('/') else {
+        return false;
+    };
+    let hash = file_bytes_hash(bytes);
+    [
+        BUILTIN_AGENTS,
+        BUILTIN_SKILLS,
+        CODEX_BUILTIN_AGENTS,
+        CODEX_BUILTIN_SKILLS,
+        GROK_BUILTIN_AGENTS,
+        GROK_BUILTIN_SKILLS,
+        BUILTIN_WORKFLOWS,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|f| f.path == relative && f.content.as_bytes() == bytes)
+        || is_shipped_builtin_reference_version(relative, &hash)
+}
+
+/// Catalog-managed bodies cannot silently claim an existing project override.
+pub(crate) fn project_managed_body(path: &str) -> bool {
+    let Some((_, relative)) = path.split_once('/') else {
+        return false;
+    };
+    [
+        BUILTIN_AGENTS,
+        BUILTIN_SKILLS,
+        CODEX_BUILTIN_AGENTS,
+        CODEX_BUILTIN_SKILLS,
+        GROK_BUILTIN_AGENTS,
+        GROK_BUILTIN_SKILLS,
+    ]
+    .into_iter()
+    .flatten()
+    .chain(opencode_builtin_skills().iter())
+    .any(|f| f.path == relative && is_managed_by_cas(f.content))
 }

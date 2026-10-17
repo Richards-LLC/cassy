@@ -65,6 +65,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Commander machine-offline notices** — Was: Commander could not tell you a
   machine had gone offline. → Now: an opted-in hub reports its presence, and
   the account's device view shows outages and recoveries.
+- **API QA without screenshots** — Was: a server-only change needed a full
+  visual evidence bundle or a hand-run waiver. → Now: a delivery touching
+  `qa.api_paths` proves itself with a captured HTTP transcript and a diff
+  against the contract fixtures.
 - **Elegant tests, not copious** — Was: the skills pushed for more tests and
   never for fewer. → Now: one short principle (the fewest tests that fail
   without the change) reaches every assignment, task start and review, and
@@ -178,8 +182,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Deployed-cloud inbox journey** — Was: Commander's cloud inbox was proven
   only against a stand-in. → Now: a two-profile journey runs against the
   deployed cloud, including revoke and key rotation.
-- **Leaner fold tests** — Was: the memory-fold tests repeated near-identical
-  cases. → Now: they share one table.
+- **Leaner suites** — Was: this release's new tests repeated near-identical
+  cases. → Now: they are trimmed to one proof per behaviour, about 1,100 fewer
+  test lines, with the memory-fold cases in one shared table.
 
 ### Documentation
 
@@ -191,6 +196,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Internal
 
+- **Commander "Ask to reply", inactive** — Was: a read-only browser saw
+  instructions but no way to ask for reply access. → Now: Commander can
+  request a reply grant in place; the button stays hidden until Cassy Cloud
+  supports the request.
 - **Claim coordination groundwork** — Was: there was no client side for shared
   work claims. → Now: a request journal and claim, status, release and transfer
   actions exist; they stay inactive until the matching Cloud and Violet

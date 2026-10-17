@@ -16,8 +16,11 @@ activation_id pins latest_attempt to this invocation, even under concurrent
 requests. Its settlement and completed reason follow that immutable receipt.
 An already-managed retry preserves its original fence receipt, including any
 historical ADMIN attestations; only the new ordinary invocation must attest no
-consumers. Cloud's published addendum and shared concurrency/ADMIN fixtures
-remain a separate compatibility proof prerequisite.
+consumers. `cloud-receipt-identity-r1.json` is the unchanged JSON block from
+[Cloud's approved addendum](https://github.com/Richards-LLC/petra-stella-cloud/issues/178#issuecomment-6239734244),
+canonical artifact art-2ec9e7fb. The existing completion test consumes all seven
+complete examples (three accepts, four single-invariant rejects). This proves
+parser compatibility with the published design examples, not deployed behavior.
 
 The request target must already contain a Cloud-resolved canonical project.
 The parser preserves exact identities, takes enrolled workspace only from the

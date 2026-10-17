@@ -18,6 +18,33 @@ fn parse(value: &Value, status: u16) -> Result<ReconciliationResponse, WireError
 
 #[test]
 fn completed_requires_matching_original_fence_evidence() {
+    // pin: approved Cloud art-2ec9e7fb publishes these seven complete wire cases.
+    let shared: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/binding_reconciliation/v1/cloud-receipt-identity-r1.json"
+    ))
+    .unwrap();
+    let cases = shared["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 7);
+    let shared_target = ReconciliationRequest::new(
+        "qa-v1-receipt-team",
+        "qa.invalid/v1-receipts",
+        "C0QARECEIPT",
+    )
+    .unwrap();
+    for case in cases {
+        let result =
+            shared_target.parse_response(200, &serde_json::to_vec(&case["response"]).unwrap());
+        match case["expected"].as_str().unwrap() {
+            "accept" => assert!(result.is_ok(), "Cloud example {}: {result:?}", case["name"]),
+            "reject" => assert!(
+                result.is_err(),
+                "Cloud example {} was accepted",
+                case["name"]
+            ),
+            expectation => panic!("unknown Cloud expectation {expectation}"),
+        }
+    }
+
     let original = completed();
     let first = parse(&original, 200).expect("evidenced ordinary activation");
     assert_eq!(first.code, ReconciliationCode::Completed);

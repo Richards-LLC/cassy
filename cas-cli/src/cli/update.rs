@@ -586,6 +586,9 @@ fn binary_phase_remainder(
         bare == format!("Already up to date ({version})")
             || bare == format!("Successfully updated to {version}")
             || line.starts_with("cas update: hub was ")
+            // The "hub not running" finding already carries its remedy.
+            || (hub.is_some_and(|hub| hub.prior_state == "none")
+                && line.starts_with("cas update: hub not running"))
             || hub.is_some_and(|hub| {
                 [hub.transport_warning.as_deref(), hub.remedy.as_deref()]
                     .into_iter()

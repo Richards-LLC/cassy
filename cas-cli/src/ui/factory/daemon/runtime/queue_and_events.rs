@@ -2650,6 +2650,14 @@ pub(crate) struct OperatorReplyRead {
     pub(crate) notice: Option<crate::ui::factory::OperatorNotice>,
 }
 
+/// Retry state for a pending Commander reply. Tokio's monotonic clock lets
+/// the real forwarding path be exercised without wall-clock sleeps.
+#[derive(Debug, Clone)]
+pub(crate) struct OperatorReplyRetry {
+    next_attempt: tokio::time::Instant,
+    delay: std::time::Duration,
+}
+
 /// Read one selected row's [`RowFacts`] on the selecting job's thread.
 fn read_row_facts(
     cas_dir: &std::path::Path,
@@ -2714,6 +2722,7 @@ fn read_operator_replies(
     queue: &dyn cas_store::PromptQueueStore,
     session: &str,
     adopt_notices: bool,
+    deferred: &std::collections::HashSet<i64>,
 ) -> anyhow::Result<Vec<OperatorReplyRead>> {
     // cas-5c2c: adopt this session's owner notices before the replies are
     // read, unless the daemon is shutting down (another daemon adopts them).
@@ -2724,7 +2733,12 @@ fn read_operator_replies(
         tracing::warn!(%error, "operator notice adoption failed; continuing queued replies");
     }
     let mut reads = Vec::new();
-    for queued in queue.peek_operator_replies(session, 10)? {
+    // Deferred rows must not spend a selection write or hide fresh replies
+    // behind the first ten pending rows.
+    for queued in queue.peek_operator_replies(session, 10usize.saturating_add(deferred.len()))? {
+        if deferred.contains(&queued.id) {
+            continue;
+        }
         // `*` is the deliberate v2 fallback when no verified Commander row
         // exists yet. The hub filters nothing for this marker and every
         // authenticated device holding the session lease receives the
@@ -2767,6 +2781,9 @@ fn read_operator_replies(
             payload,
             notice,
         });
+        if reads.len() == 10 {
+            break;
+        }
     }
     Ok(reads)
 }
@@ -2906,6 +2923,7 @@ pub(super) fn run_queue_select(
             queue.as_ref(),
             session,
             request.adopt_operator_notices,
+            &request.deferred_operator_replies,
         ) {
             Ok(replies) => selection.operator_replies = replies,
             Err(error) => tracing::debug!(%error, "operator replies unavailable this selection"),
@@ -7329,6 +7347,11 @@ impl FactoryDaemon {
         } else {
             (Vec::new(), Vec::new())
         };
+        if before.is_none() && !device_id.is_empty() {
+            // Several paired devices share the hub's daemon socket. Each
+            // device requests its first page on Welcome, including reconnects.
+            self.queue_jobs.operator_reply_retries.clear();
+        }
         Ok(crate::ui::factory::DaemonMessage::ConversationHistory {
             request_id,
             messages,
@@ -7367,9 +7390,23 @@ impl FactoryDaemon {
             return Ok(());
         }
         let adopt = !self.shutdown.load(std::sync::atomic::Ordering::SeqCst);
-        let replies = read_operator_replies(self.app.cas_dir(), queue, &self.session_name, adopt)?;
+        let replies = read_operator_replies(
+            self.app.cas_dir(),
+            queue,
+            &self.session_name,
+            adopt,
+            &self.deferred_operator_replies(),
+        )?;
         self.forward_operator_replies(replies);
         Ok(())
+    }
+
+    fn deferred_operator_replies(&self) -> std::collections::HashSet<i64> {
+        let now = tokio::time::Instant::now();
+        self.queue_jobs.operator_reply_retries
+            .iter()
+            .filter_map(|(&id, retry)| (now < retry.next_attempt).then_some(id))
+            .collect()
     }
 
     /// Forward the operator replies `QueueSelect` read and stamped
@@ -7385,6 +7422,21 @@ impl FactoryDaemon {
             notice,
         } in replies
         {
+            let now = tokio::time::Instant::now();
+            let previous = self.queue_jobs.operator_reply_retries.get(&queued.id);
+            if previous.is_some_and(|retry| now < retry.next_attempt) {
+                continue;
+            }
+            let delay = previous.map_or(std::time::Duration::from_secs(1), |retry| {
+                (retry.delay * 2).min(std::time::Duration::from_secs(60))
+            });
+            self.queue_jobs.operator_reply_retries.insert(
+                queued.id,
+                OperatorReplyRetry {
+                    next_attempt: now + delay,
+                    delay,
+                },
+            );
             if let Some(subject) = notice
                 .as_ref()
                 .filter(|notice| !notice.resolved)
@@ -7411,6 +7463,7 @@ impl FactoryDaemon {
                 prompt_id = queued.id,
                 reply_to = ?payload.reply_to,
                 device_id,
+                retry_in_secs = delay.as_secs(),
                 "supervisor reply forwarded to the Commander hub; awaiting paired-device receipt"
             );
         }
@@ -7421,7 +7474,7 @@ impl FactoryDaemon {
     /// transport stage is closed, so a stale or misrouted receipt cannot
     /// consume another device's reply.
     pub(super) fn acknowledge_operator_reply(
-        &self,
+        &mut self,
         notification_id: i64,
         device_id: &str,
     ) -> anyhow::Result<()> {
@@ -7438,6 +7491,18 @@ impl FactoryDaemon {
         if row.processed_at.is_none() {
             queue.mark_transport_delivered(notification_id)?;
         }
+        self.queue_jobs.operator_reply_retries.clear();
+        Ok(())
+    }
+
+    pub(super) fn persist_operator_reply_receipt(
+        &mut self,
+        notification_id: i64,
+        device_id: &str,
+    ) -> anyhow::Result<()> {
+        let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
+        queue.record_operator_reply_persisted(notification_id, &self.session_name, device_id)?;
+        self.queue_jobs.operator_reply_retries.clear();
         Ok(())
     }
 
@@ -8305,6 +8370,7 @@ impl FactoryDaemon {
             dead_workers: self.dead_workers.clone(),
             limit: 10,
             operator_replies: !self.ws_clients.is_empty(),
+            deferred_operator_replies: self.deferred_operator_replies(),
             adopt_operator_notices: !self.shutdown.load(std::sync::atomic::Ordering::SeqCst),
         };
         self.queue_jobs
@@ -12303,9 +12369,15 @@ mod tests {
                 "provision-test",
             )
             .unwrap();
-        let reply = super::read_operator_replies(&root, queue.as_ref(), "provision-test", false)
-            .unwrap()
-            .remove(0);
+        let reply = super::read_operator_replies(
+            &root,
+            queue.as_ref(),
+            "provision-test",
+            false,
+            &Default::default(),
+        )
+        .unwrap()
+        .remove(0);
         let output = Arc::new(Mutex::new(Vec::new()));
         let sink = output.clone();
         let subscriber = tracing_subscriber::fmt()
@@ -12384,7 +12456,18 @@ mod tests {
                 "provision-test",
             )
             .unwrap();
-        daemon.acknowledge_operator_reply(other, "*").unwrap();
+        daemon
+            .persist_operator_reply_receipt(other, "*")
+            .unwrap_err();
+        daemon.forward_operator_replies(vec![reply.clone()]);
+        assert_eq!(
+            log_count(),
+            attempts,
+            "invalid persistence receipt cannot reset retries"
+        );
+        daemon
+            .persist_operator_reply_receipt(other, "paired-device")
+            .unwrap();
         daemon.forward_operator_replies(vec![reply.clone()]);
         attempts += 1;
         assert_eq!(
@@ -12395,8 +12478,24 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         daemon.forward_operator_replies(vec![reply]);
         assert_eq!(log_count(), attempts + 1);
+        assert!(
+            queue
+                .queued_prompt(other)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_some()
+        );
+        daemon.acknowledge_operator_reply(id, "*").unwrap();
+        assert!(
+            queue
+                .queued_prompt(id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_some()
+        );
     }
-
     #[tokio::test]
     async fn cas_5c2c_review_operator_fallback_is_consumed_and_acknowledged() {
         use crate::ui::factory::daemon::WsConnection;

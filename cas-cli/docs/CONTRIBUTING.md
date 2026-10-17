@@ -12,6 +12,12 @@ This key is operator-only and defaults to `true`. It controls automatic
 supervisor reply capture; terminal questions and explicit messages addressed
 to the operator continue to be recorded. Existing conversation history is retained.
 
+Pending Commander replies retry after one second, doubling to a sixty-second
+cap while a paired-device receipt is missing. A valid receipt, a new daemon
+WebSocket connection, or a device's first history-page request resets that retry
+schedule. Each scheduled retry logs its next delay; intervening daemon passes
+neither rebroadcast the reply nor stamp it selected again.
+
 ## Coordination messages and reminders
 
 Worker-idle merge notices wait for completed CI on the delivery's exact tip

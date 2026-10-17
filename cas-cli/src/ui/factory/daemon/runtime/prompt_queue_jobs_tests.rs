@@ -102,6 +102,7 @@ fn request(cas_dir: &Path) -> QueueSelectRequest {
         dead_workers: Default::default(),
         limit: 10,
         operator_replies: false,
+        deferred_operator_replies: Default::default(),
         adopt_operator_notices: false,
     }
 }

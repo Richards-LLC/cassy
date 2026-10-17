@@ -579,11 +579,20 @@ fn recipient_had_delivery(report: Option<&cas_store::MessageDeliveryReport>) -> 
 /// A failed task read is uncertainty, so only a freshly-read task whose
 /// lifecycle occurrence is positively stale may be withheld.
 /// Whether inbox_poll withholds `row` as a stale lifecycle relay.
+///
+/// cas-8cbe: a progress relay (`lifecycle:` source: started, ready again,
+/// closed) asks nothing of the supervisor, and a compacted card names it as
+/// the read-in-full escape. When the reader names it, it is shown whatever
+/// the task did since. Waking relays keep the stale guard even when named.
 pub(crate) fn withhold_lifecycle_at_inbox_pop(
     row: &cas_store::QueuedPrompt,
-    _named: bool,
+    named: bool,
     task: Option<&cas_types::Task>,
 ) -> bool {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_SOURCE_PREFIX;
+    if named && row.source.starts_with(LIFECYCLE_SOURCE_PREFIX) {
+        return false;
+    }
     lifecycle_relay_is_stale_at_inbox_pop(&row.prompt, task)
 }
 
@@ -3252,8 +3261,11 @@ impl CasService {
                     .as_ref()
                     .and_then(|store| store.get(&envelope.task_id).ok())
             });
-            let stale_lifecycle =
-                lifecycle_relay_is_stale_at_inbox_pop(&message.prompt, lifecycle_task.as_ref());
+            let stale_lifecycle = withhold_lifecycle_at_inbox_pop(
+                message,
+                named.contains(&message.id),
+                lifecycle_task.as_ref(),
+            );
             if stale_lifecycle {
                 let task_id = crate::prompt_revalidation::parse_lifecycle_envelope(&message.prompt)
                     .map(|envelope| envelope.task_id)

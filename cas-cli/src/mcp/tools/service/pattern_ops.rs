@@ -750,8 +750,9 @@ impl CasService {
     }
 }
 
-/// Cloud returns the persisted row directly. A successful HTTP write whose
-/// result cannot be decoded is not evidence that the mutation failed.
+/// Cloud returns the persisted row directly or in a legacy pattern wrapper.
+/// An unreadable result after a successful HTTP write does not mean the
+/// mutation failed.
 fn decode_pattern_create_response(response: ureq::Response) -> Result<serde_json::Value, McpError> {
     let status = response.status();
     let reference = response
@@ -781,11 +782,18 @@ fn decode_pattern_create_response(response: ureq::Response) -> Result<serde_json
     let pattern: serde_json::Value = response
         .into_json()
         .map_err(|_| uncertain("the response is not valid JSON"))?;
-    if pattern
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .is_none_or(|id| id.trim().is_empty())
-    {
+    let has_id = |row: &serde_json::Value| {
+        row.is_object()
+            && row.get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+    };
+    let pattern = pattern
+        .get("pattern")
+        .filter(|row| has_id(row))
+        .cloned()
+        .unwrap_or(pattern);
+    if !has_id(&pattern) {
         return Err(uncertain("the response has no pattern ID"));
     }
     Ok(pattern)
@@ -968,6 +976,10 @@ mod tests {
             ),
             (r#"{"accepted":true}"#, false),
             ("not-json", false),
+            (
+                r#"{"pattern":{"id":"pat-fixture-1","content":"Fixture guidance","category":"general","priority":1,"propagation":"all_projects"}}"#,
+                true,
+            ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path().join(".cas");

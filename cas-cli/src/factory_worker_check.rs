@@ -1615,14 +1615,16 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
             .and_then(|value| value.as_str())
             .unwrap();
         assert!(rewritten.contains("factory worker-check"));
-        assert!(rewritten.ends_with("> target/worker-check.log 2>&1 &"));
+        // cas-3d04: backgrounded runs detach instead of keeping the shell `&`.
+        assert!(rewritten.contains("--detach --"), "{rewritten}");
+        assert!(rewritten.ends_with("> target/worker-check.log 2>&1"), "{rewritten}");
         let head = fixture_head(&repo);
         // Execute the admitted shell suffix before invoking the real runner
         // boundary. The Cargo stand-in exits zero and compiles nothing.
         let suffix = rewritten.split_once('>').unwrap().1;
         assert!(
             Command::new("sh")
-                .args(["-c", &format!(": >{suffix} wait")])
+                .args(["-c", &format!(": >{suffix}")])
                 .current_dir(&repo)
                 .status()
                 .unwrap()

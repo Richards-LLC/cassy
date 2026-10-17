@@ -22,7 +22,8 @@ class ScratchTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # Production inventories use physical paths (macOS /var aliases /private/var).
+        self.root = Path(self.temp.name).resolve()
         self.repo = self.root / 'repo'
         self.repo.mkdir()
         self.git('init', '-q')

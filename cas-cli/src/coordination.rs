@@ -2,6 +2,8 @@
 
 pub mod binding_reconciliation;
 pub mod binding_intake;
+pub mod binding_repair;
+mod binding_runtime;
 pub mod external_work;
 
 #[cfg(test)]

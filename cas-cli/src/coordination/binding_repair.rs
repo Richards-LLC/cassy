@@ -1,0 +1,179 @@
+//! One ordinary authenticated invocation: durable gate -> actual local drain ->
+//! submitting -> direct HTTP response -> validated immutable receipt storage.
+use super::{
+    binding_intake::{IntakeJournal, IntakeScope},
+    binding_reconciliation::{ReconciliationCode, ReconciliationRequest, ReconciliationResponse},
+    binding_runtime::RuntimeInventory,
+};
+use serde::Serialize;
+use std::{io::Read, path::Path, time::Duration};
+use uuid::Uuid;
+
+const RECONCILE_PATH: &str = "/api/coordination/bindings/reconcile";
+const RESPONSE_LIMIT: u64 = 1024 * 1024;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairOutcome {
+    Managed,
+    Blocked,
+    Unknown,
+}
+#[derive(Debug, Serialize)]
+pub struct RepairReport {
+    pub channel_id: String,
+    pub operation_id: Uuid,
+    pub activation_id: Option<String>,
+    pub outcome: RepairOutcome,
+    pub response: Option<ReconciliationResponse>,
+    pub error: Option<String>,
+}
+impl RepairReport {
+    fn blocked(scope: &IntakeScope, operation_id: Uuid, error: String) -> Self {
+        Self {
+            channel_id: scope.channel_id.clone(),
+            operation_id,
+            activation_id: None,
+            outcome: RepairOutcome::Blocked,
+            response: None,
+            error: Some(error),
+        }
+    }
+}
+/// The fields/constructor are private to the adapter. A same-tuple parse-valid
+/// body supplied by a caller cannot be attached to another local operation.
+/// Cloud's invocation ID is server allocated, not the local pause UUID.
+pub(super) struct CompletedInvocation {
+    operation_id: Uuid,
+    response: ReconciliationResponse,
+}
+impl CompletedInvocation {
+    pub(super) fn operation_id(&self) -> Uuid {
+        self.operation_id
+    }
+    pub(super) fn response(&self) -> &ReconciliationResponse {
+        &self.response
+    }
+}
+
+pub struct OrdinaryBindingClient {
+    endpoint: String,
+    token: String,
+    agent: ureq::Agent,
+}
+impl OrdinaryBindingClient {
+    pub fn new(endpoint: &str, token: &str) -> Result<Self, String> {
+        let url = url::Url::parse(endpoint).map_err(|_| "invalid Cloud origin")?;
+        let loopback = url.host_str().is_some_and(|host| {
+            host.parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+        });
+        if (url.scheme() != "https" && !(url.scheme() == "http" && loopback))
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || !matches!(url.path(), "" | "/")
+            || token.trim().is_empty()
+            || token.contains(['\r', '\n'])
+        {
+            return Err("Cloud origin/ordinary user credential is unsupported".into());
+        }
+        Ok(Self {
+            endpoint: endpoint.trim_end_matches('/').into(),
+            token: token.into(),
+            agent: ureq::AgentBuilder::new()
+                .redirects(0)
+                .timeout(Duration::from_secs(30))
+                .build(),
+        })
+    }
+    /// No active Cloud registration is created or used. Caller discovery is
+    /// checked against the existing ordinary team-project read, never ensure().
+    pub fn repair(&self, cas_dir: &Path, scope: &IntakeScope) -> Result<RepairReport, String> {
+        let journal = IntakeJournal::new(cas_dir);
+        let state = journal.read()?;
+        let pause = match state
+            .pauses
+            .iter()
+            .rev()
+            .find(|pause| &pause.scope == scope)
+        {
+            Some(pause) => pause.clone(),
+            None => journal.pause(scope.clone(), Uuid::new_v4(), state.generation)?,
+        };
+        let inventory = match RuntimeInventory::discover(cas_dir).and_then(|inventory| {
+            inventory.drain(scope, &pause)?;
+            Ok(inventory)
+        }) {
+            Ok(inventory) => inventory,
+            Err(error) => return Ok(RepairReport::blocked(scope, pause.operation_id, error)),
+        };
+        drop(inventory);
+        if let Err(error) = crate::cloud::TeamRegistration::new(
+            &self.endpoint,
+            &self.token,
+            &scope.team_id,
+            &scope.canonical_project_id,
+        )
+        .with_timeout(Duration::from_secs(20))
+        .verify_registered()
+        {
+            return Ok(RepairReport::blocked(
+                scope,
+                pause.operation_id,
+                error.reason,
+            ));
+        }
+        // RED: the real ordinary invocation is added after the public path test.
+        Ok(RepairReport::blocked(
+            scope,
+            pause.operation_id,
+            "ordinary invocation not implemented".into(),
+        ))
+    }
+    fn invoke(
+        &self,
+        operation_id: Uuid,
+        request: &ReconciliationRequest,
+    ) -> Result<ReconciliationResponse, String> {
+        let response = self
+            .agent
+            .post(&format!("{}{RECONCILE_PATH}", self.endpoint))
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .set("Content-Type", "application/json")
+            .send_json(serde_json::to_value(request).map_err(|e| e.to_string())?);
+        let response = match response {
+            Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+            Err(_) => {
+                return Err("ordinary reconciliation transport uncertain; pause retained".into());
+            }
+        };
+        let status = response.status();
+        if !response.header("Cache-Control").is_some_and(|value| {
+            value
+                .split(',')
+                .any(|directive| directive.trim().eq_ignore_ascii_case("no-store"))
+        }) {
+            return Err(
+                "reconciliation response lacks no-store contract; outcome uncertain".into(),
+            );
+        }
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .take(RESPONSE_LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "reconciliation body incomplete; outcome uncertain")?;
+        if bytes.len() as u64 > RESPONSE_LIMIT {
+            return Err("reconciliation response exceeds byte budget; outcome uncertain".into());
+        }
+        let _ = operation_id; // association is carried into CompletedInvocation below
+        request
+            .parse_response(status, &bytes)
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests;

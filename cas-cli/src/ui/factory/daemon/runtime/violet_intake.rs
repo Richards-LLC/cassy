@@ -44,7 +44,7 @@ impl RuntimeIdentity {
         identity.validate()?;
         Ok(identity)
     }
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.factory_session.is_empty()
             || self.pid == 0
             || self.pid_starttime == 0

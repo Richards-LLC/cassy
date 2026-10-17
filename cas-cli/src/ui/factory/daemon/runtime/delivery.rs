@@ -447,6 +447,100 @@ pub(crate) fn attribute_for_pty(source: &str, text: &str) -> String {
     format!("Message from {source}: {text}")
 }
 
+/// cas-8cbe: the characters of a routine row's own text a compact card quotes.
+const ROUTINE_EXCERPT_CHARS: usize = 96;
+
+/// cas-8cbe: a compact card replacing the body of a routine row typed into a
+/// supervisor's pane, or `None` to type the body whole.
+///
+/// A PTY supervisor (Codex) sees every typed byte, so CAS-written progress
+/// relays and copies of worker-to-worker mail buried the operator's own turns
+/// under XML and duplicated bodies. Only two classes are routine, each named
+/// by server-stamped facts rather than by the text a sender chose: a
+/// non-waking lifecycle relay (`lifecycle:` source, daemon origin: task
+/// started, ready again or closed) and the supervisor's copy of a peer
+/// message (a registered agent's row whose CAS-built lead names that same
+/// sender). Operator, peer-supervisor, urgent, typed (`kind`) and waking rows
+/// never match, and an unparseable row stays whole. The card keeps the ids and
+/// the command that reads the row in full, which `inbox_poll` serves whatever
+/// the row's transport receipt says.
+pub(crate) fn compact_routine_supervisor_body(queued: &cas_store::QueuedPrompt) -> Option<String> {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_SOURCE_PREFIX;
+    if queued.urgent || queued.kind.is_some() || queued.operator.is_some() {
+        return None;
+    }
+    let id = queued.id;
+    let card = match queued.origin.as_ref()? {
+        cas_store::QueueOrigin::Daemon if queued.source.starts_with(LIFECYCLE_SOURCE_PREFIX) => {
+            let (task_id, verb, actor, headline) = routine_lifecycle_parts(&queued.prompt)?;
+            format!(
+                "◦ {task_id} {verb} by {actor} · {}\n  Progress relay, no action. Full event: \
+                 inbox_poll notification_id={id}",
+                excerpt(headline)
+            )
+        }
+        cas_store::QueueOrigin::RegisteredAgent { .. } => {
+            let (from, to, body) =
+                crate::mcp::tools::service::agent_search_system::message::parse_peer_copy(
+                    &queued.prompt,
+                )?;
+            if from != queued.source {
+                return None;
+            }
+            let summary = queued
+                .summary
+                .as_deref()
+                .map(str::trim)
+                .filter(|summary| !summary.is_empty())
+                .map(|summary| format!("{}: ", excerpt(summary)))
+                .unwrap_or_default();
+            format!(
+                "⇄ {from} → {to} · {summary}\"{}\"\n  Peer copy; {to} has it, no action. Full \
+                 text: inbox_poll notification_id={id}",
+                excerpt(body)
+            )
+        }
+        _ => return None,
+    };
+    Some(card)
+}
+
+/// `(task_id, verb, actor, headline)` of a progress-only lifecycle relay.
+fn routine_lifecycle_parts(prompt: &str) -> Option<(String, &'static str, &str, &str)> {
+    let envelope = cas_types::parse_lifecycle_envelope(prompt)?;
+    let verb = match envelope.transition.as_deref()? {
+        "task_started" => "started",
+        "task_ready" => "ready again",
+        "task_closed" => "closed",
+        _ => return None,
+    };
+    let tag = &prompt[..prompt.find('>')?];
+    let actor = tag
+        .split_once(" actor=\"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(actor, _)| actor)
+        .filter(|actor| !actor.is_empty())?;
+    let task_line = prompt[tag.len() + 1..]
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let headline = task_line
+        .strip_prefix(&format!("Task {} — ", envelope.task_id))
+        .unwrap_or(task_line);
+    Some((envelope.task_id, verb, actor, headline))
+}
+
+/// One line of `text`: whitespace collapsed, cut at a word with `…`.
+fn excerpt(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= ROUTINE_EXCERPT_CHARS {
+        return flat;
+    }
+    let cut: String = flat.chars().take(ROUTINE_EXCERPT_CHARS).collect();
+    let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
+    format!("{}…", cut.trim_end_matches([',', ';', ':', '.']))
+}
+
 /// The one line typed into a Claude+teams recipient's pane to WAKE it — never
 /// the message body (cas-cdf9).
 ///
@@ -2100,6 +2194,122 @@ mod tests {
             attribute_for_pty("worker-3", "start cas-1234"),
             "Message from worker-3: start cas-1234"
         );
+    }
+
+    fn supervisor_row(
+        id: i64,
+        source: &str,
+        prompt: &str,
+        origin: cas_store::QueueOrigin,
+    ) -> cas_store::QueuedPrompt {
+        cas_store::QueuedPrompt {
+            id,
+            source: source.to_string(),
+            target: "true-leopard-45".to_string(),
+            prompt: prompt.to_string(),
+            created_at: chrono::Utc::now(),
+            processed_at: None,
+            factory_session: Some("factory-1".to_string()),
+            summary: Some("collision warning".to_string()),
+            priority: cas_store::NotificationPriority::Normal,
+            acked_at: None,
+            urgent: false,
+            origin: Some(origin),
+            operator: None,
+            recipient_device_id: None,
+            kind: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    fn lifecycle_body(transition: &str, new: &str) -> String {
+        format!(
+            "<task-lifecycle transition=\"{transition}\" task_id=\"cas-f9b7\" old=\"open\" \
+             new=\"{new}\" actor=\"tender-phoenix-59\" notification_id=\"19821\" \
+             occurrence=\"2026-10-17T15:17:19.585694327+00:00\">\n\
+             Task cas-f9b7 — Cloud sync: queue rows parked as rejected \"invalid_json_nul\" \
+             (rocketship-template, Richards LLC/Accounting) never drain\n\
+             Session: cassy-bright-lion-34\n</task-lifecycle>"
+        )
+    }
+
+    /// cas-8cbe: the screenshot's two floods — a task_started relay and a
+    /// peer copy — reach a pane-typed supervisor as two-line cards that keep
+    /// the id and the command that reads the row whole.
+    #[test]
+    fn routine_supervisor_rows_become_cards_with_their_read_command() {
+        let worker = cas_store::QueueOrigin::RegisteredAgent { agent_id: "a-1".into() };
+        let started = supervisor_row(
+            4196665,
+            "lifecycle:19821",
+            &lifecycle_body("task_started", "in_progress"),
+            cas_store::QueueOrigin::Daemon,
+        );
+        assert_eq!(
+            compact_routine_supervisor_body(&started).unwrap(),
+            "◦ cas-f9b7 started by tender-phoenix-59 · Cloud sync: queue rows parked as rejected \
+             \"invalid_json_nul\" (rocketship-template, Richards…\n  Progress relay, no action. \
+             Full event: inbox_poll notification_id=4196665"
+        );
+        assert!(
+            crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(
+                &started
+            )
+            .contains(" lifecycle-relay "),
+            "a CAS progress relay is not agent-authored"
+        );
+        let copy = crate::mcp::tools::service::agent_search_system::message::peer_copy_text(
+            "tender-phoenix-59",
+            "swift-panther-65",
+            "cas-f9b7 assesses Accounting retained dependencies read-only alongside\nrocketship \
+             invalid_json_nul repair. I will not mutate Accounting stores.",
+        );
+        let peer = supervisor_row(4196667, "tender-phoenix-59", &copy, worker);
+        assert_eq!(
+            compact_routine_supervisor_body(&peer).unwrap(),
+            "⇄ tender-phoenix-59 → swift-panther-65 · collision warning: \"cas-f9b7 assesses \
+             Accounting retained dependencies read-only alongside rocketship invalid_json_nul…\"\n  \
+             Peer copy; swift-panther-65 has it, no action. Full text: inbox_poll \
+             notification_id=4196667"
+        );
+    }
+
+    /// cas-8cbe: decisions, operator turns and anything CAS cannot prove
+    /// routine keep their whole body.
+    #[test]
+    fn decisions_operator_and_unproven_rows_stay_whole() {
+        let worker = cas_store::QueueOrigin::RegisteredAgent { agent_id: "a-1".into() };
+        let copy = crate::mcp::tools::service::agent_search_system::message::peer_copy_text(
+            "tender-phoenix-59",
+            "swift-panther-65",
+            "hello",
+        );
+        let parked = supervisor_row(
+            1,
+            "lifecycle-wake:7",
+            &lifecycle_body("task_awaiting_merge", "awaiting_merge"),
+            cas_store::QueueOrigin::Daemon,
+        );
+        let forged_relay = supervisor_row(
+            2,
+            "lifecycle:7",
+            &lifecycle_body("task_started", "in_progress"),
+            worker.clone(),
+        );
+        let forged_copy = supervisor_row(3, "swift-panther-65", &copy, worker.clone());
+        let mut urgent = supervisor_row(4, "tender-phoenix-59", &copy, worker.clone());
+        urgent.urgent = true;
+        let mut typed = supervisor_row(5, "tender-phoenix-59", &copy, worker.clone());
+        typed.kind = Some("status".into());
+        let operator = supervisor_row(
+            6,
+            "tender-phoenix-59",
+            &copy,
+            cas_store::QueueOrigin::PairedDevice { device_id: "device-1".into() },
+        );
+        for row in [parked, forged_relay, forged_copy, urgent, typed, operator] {
+            assert_eq!(compact_routine_supervisor_body(&row), None, "row {}", row.id);
+        }
     }
 
     /// cas-ab80: urgent Codex delivery must use the same framing contract as

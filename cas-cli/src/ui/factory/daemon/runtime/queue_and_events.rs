@@ -9007,16 +9007,29 @@ impl FactoryDaemon {
             // last shared delivery boundary. In particular, a task brief that
             // was queued at spawn but reaches the worker after a supervisor
             // reply must read as old spawn boilerplate, not a fresh reassignment.
+            let supervisor_lane = (target == "supervisor" || target == self.app.supervisor_name())
+                .then(|| {
+                    crate::hooks::handlers::handlers_middle::factory_inbox::inbox_lane(
+                        &queued, &supervisor_senders, &supervisor_aliases,
+                    )
+                });
+            // cas-8cbe: a pane-typed supervisor sees routine relays and peer
+            // copies as a compact card naming the read-in-full command.
+            if supervisor_lane == Some(crate::hooks::handlers::handlers_middle::factory_inbox::InboxLane::Ordinary)
+                && super::delivery::choose_channel(
+                    self.app.harness_for(self.app.supervisor_name()),
+                    self.teams.is_some(),
+                ) == super::delivery::DeliveryChannel::Pty
+                && let Some(card) = super::delivery::compact_routine_supervisor_body(&queued)
+            {
+                prompt_with_instructions = card;
+            }
             prompt_with_instructions = format!(
                 "{}\n{}{}\n{}",
                 crate::mcp::tools::service::agent_search_system::message::first_message_provenance(
                     &queued
                 ),
-                if target == "supervisor" || target == self.app.supervisor_name() {
-                    crate::hooks::handlers::handlers_middle::factory_inbox::inbox_lane(
-                        &queued, &supervisor_senders, &supervisor_aliases,
-                    ).label()
-                } else { "" },
+                supervisor_lane.map_or("", |lane| lane.label()),
                 crate::mcp::tools::service::agent_search_system::message::commander_reply_command(
                     &queued,
                 )

@@ -681,9 +681,24 @@ fn cas_cd42_pr_cache_is_bounded_and_corrupt_metadata_is_unavailable() {
 
 #[tokio::test]
 async fn cas_cd42_unavailable_cloud_sections_keep_observation_time_and_no_registry_writes() {
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     let server = MockServer::start().await;
+    let activation = json!({
+        "schema": "cassy.coordination/v1", "code": "completed",
+        "bindings": [
+            {"binding": {"project_id": REPO, "channel_id": "C08MANAGED"}, "strict_activation": "evidenced"},
+            {"binding": {"project_id": REPO, "channel_id": "C08LEGACY"}, "strict_activation": "not_requested"}
+        ],
+        "receipt": {"observed_at": "2026-10-17T12:00:00Z", "next_action": "none"}
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/coordination/bindings/activation"))
+        .and(query_param("registration_id", "viewer"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(activation.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
     let supervisor = agent("remote", "supervisor", "remote-lane", "beta", REPO, 1);
     Mock::given(method("GET"))
         .and(path("/api/agents"))
@@ -713,7 +728,7 @@ async fn cas_cd42_unavailable_cloud_sections_keep_observation_time_and_no_regist
         }
         .save_to_cas_dir(&root)
         .unwrap();
-        let report = discover_peer_report(&root, None, true, None).unwrap();
+        let report = discover_peer_report(&root, Some("viewer"), true, None).unwrap();
         assert!(
             crate::store::open_agent_store(&root)
                 .unwrap()
@@ -727,6 +742,8 @@ async fn cas_cd42_unavailable_cloud_sections_keep_observation_time_and_no_regist
     .await
     .unwrap();
     assert_eq!(report["status"], "partial");
+    assert_eq!(report["activation"], activation, "activation keeps Cloud's receipt verbatim");
+    assert!(text.contains("Slack activation: evidenced 1, not_requested 1"), "{text}");
     assert_eq!(report["peers"][0]["claims_status"]["state"], "unavailable");
     assert!(report["peers"][0]["claims_status"]["observed_at"].is_string());
     assert!(text.starts_with("[WARN] 1 peer supervisor"));

@@ -1,0 +1,21 @@
+→ [1/2] Cassy binary  checking for a newer release
+Binary Update
+  Current version: 3.62.0
+  Target version:  3.62.0
+
+  ✓ Already on the latest version
+cas update: hub not running; start with `cas hub start`
+✓ [1/2] Cassy binary  3.62.0 is current                                    300ms
+✗ [2/2] Projects      1 of 2 failed                                        320ms
+
+  ✗ beta       skills git index lock stale (no writer observed): .git/index.lock
+                      (age 2d)
+    → recheck writers, remove only this lock, then retry
+  ℹ hub               not running
+    → cas hub start
+  ✓ 1 project current · 1 not cloud-linked
+    alpha
+  ✓ user-level store current
+  Cassy 3.62.0 · 2 projects refreshed · 1 failed · 308ms
+  cas update --verbose shows every project and phase output
+✗ 1 of 2 projects not fully refreshed; Cassy 3.62.0 is current

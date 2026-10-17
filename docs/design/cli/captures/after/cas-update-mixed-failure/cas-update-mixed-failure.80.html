@@ -1,0 +1,179 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>terminal-qa · cas-update-mixed-failure · 80 columns</title>
+<body style="margin:24px;background:#f3f1ec;color:#222;font:14px system-ui">
+<h1 style="font:600 18px system-ui;margin:0 0 16px 0">terminal-qa · cas-update-mixed-failure · 80 columns</h1>
+<p style="margin:0 0 16px 0;max-width:80ch">Each block is the same capture rendered on one palette's background with that palette's ANSI table. Anything you cannot read here, a user cannot read either.</p>
+<h2 style="font:600 14px system-ui;margin:0 0 6px 0">dark · 80 columns · exit 1</h2>
+<pre style="background:#1e1e1e;color:#cccccc;width:80ch;padding:12px;margin:0 0 24px 0;overflow-x:auto;font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;border:1px solid #8884"><span style="color:#50c878;font-weight:bold">✓</span> <span style="color:#90939f">[1/2]</span> <span style="color:#cccccc;font-weight:bold">Cassy binary  </span>3.62.0 is current                                     <span style="color:#90939f">1.4s</span>
+<span style="color:#e96c6c;font-weight:bold">✗</span> <span style="color:#90939f">[2/2]</span> <span style="color:#cccccc;font-weight:bold">Projects      </span>2 of 12 failed · user-level store failed · 4 warnin…  <span style="color:#90939f">4.0s</span>
+
+  <span style="color:#e96c6c;font-weight:bold">✗</span> <span style="color:#cccccc;font-weight:bold">gabber-studio          </span> <span style="color:#90939f">skills</span> git index lock stale (no writer observed):
+                                   .git/index.lock (age 15d)
+    <span style="color:#90939f">→</span> recheck writers, remove only this lock, then retry
+  <span style="color:#e96c6c;font-weight:bold">✗</span> <span style="color:#cccccc;font-weight:bold">pulse-card             </span> <span style="color:#90939f">skills</span> git index lock stale (no writer observed):
+                                   .git/index.lock (age 1d)
+    <span style="color:#90939f">→</span> recheck writers, remove only this lock, then retry
+  <span style="color:#e96c6c;font-weight:bold">✗</span> <span style="color:#cccccc;font-weight:bold">user-level store       </span> <span style="color:#90939f">      </span> database is locked
+    <span style="color:#90939f">→</span> retry after the holder exits
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">rocketship-template    </span> <span style="color:#90939f">cloud </span> push incomplete: 2 rejected by cloud
+                                   (invalid_json_nul ×2); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#90939f">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">Richards LLC/Accounting</span> <span style="color:#90939f">cloud </span> push incomplete: 1 rejected by cloud
+                                   (invalid_json_nul ×1); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#90939f">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">Petra Stella/Accounting</span> <span style="color:#90939f">skills</span> 3 managed file conflict(s)
+    <span style="color:#90939f">→</span> cas update --sync --json
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">Documents/Accounting   </span> <span style="color:#90939f">skills</span> 2 managed file conflict(s)
+    <span style="color:#90939f">→</span> cas update --sync --json
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#cccccc;font-weight:bold">hub                    </span> <span style="color:#90939f">serve </span> Tailscale Serve inactive: tailscale is
+                                   stopped; hub remains loopback-only
+    <span style="color:#90939f">→</span> Check `tailscale status`, then run `cas hub restart`.
+  <span style="color:#46aae6;font-weight:bold">ℹ</span> <span style="color:#cccccc;font-weight:bold">~/scratch/old-clone    </span> <span style="color:#90939f">      </span> not refreshed: not a Git project root
+    <span style="color:#90939f">→</span> cas known-repos forget &lt;path&gt;
+  <span style="color:#50c878;font-weight:bold">✓</span> 6 projects current · 3 not cloud-linked
+    <span style="color:#90939f">cassy, pantheon, prospect_path, Penguinz, ai-toolkit, soundwave-config</span>
+  <span style="color:#90939f">Cassy 3.62.0 · 12 projects refreshed · 2 failed · 4.0s</span>
+  <span style="color:#90939f">user-level store failed · 1 skipped</span>
+  <span style="color:#90939f">cas update --verbose shows every project and phase output</span>
+<span style="color:#e96c6c">✗</span> 2 of 12 projects not fully refreshed
+  the user-level store was not refreshed
+  Cassy 3.62.0 is current</pre>
+<h2 style="font:600 14px system-ui;margin:0 0 6px 0">light · 80 columns · exit 1</h2>
+<pre style="background:#ffffff;color:#333333;width:80ch;padding:12px;margin:0 0 24px 0;overflow-x:auto;font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;border:1px solid #8884"><span style="color:#1e964b;font-weight:bold">✓</span> <span style="color:#50525c">[1/2]</span> <span style="color:#333333;font-weight:bold">Cassy binary  </span>3.62.0 is current                                     <span style="color:#50525c">1.4s</span>
+<span style="color:#c83c3c;font-weight:bold">✗</span> <span style="color:#50525c">[2/2]</span> <span style="color:#333333;font-weight:bold">Projects      </span>2 of 12 failed · user-level store failed · 4 warnin…  <span style="color:#50525c">4.0s</span>
+
+  <span style="color:#c83c3c;font-weight:bold">✗</span> <span style="color:#333333;font-weight:bold">gabber-studio          </span> <span style="color:#50525c">skills</span> git index lock stale (no writer observed):
+                                   .git/index.lock (age 15d)
+    <span style="color:#50525c">→</span> recheck writers, remove only this lock, then retry
+  <span style="color:#c83c3c;font-weight:bold">✗</span> <span style="color:#333333;font-weight:bold">pulse-card             </span> <span style="color:#50525c">skills</span> git index lock stale (no writer observed):
+                                   .git/index.lock (age 1d)
+    <span style="color:#50525c">→</span> recheck writers, remove only this lock, then retry
+  <span style="color:#c83c3c;font-weight:bold">✗</span> <span style="color:#333333;font-weight:bold">user-level store       </span> <span style="color:#50525c">      </span> database is locked
+    <span style="color:#50525c">→</span> retry after the holder exits
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">rocketship-template    </span> <span style="color:#50525c">cloud </span> push incomplete: 2 rejected by cloud
+                                   (invalid_json_nul ×2); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#50525c">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">Richards LLC/Accounting</span> <span style="color:#50525c">cloud </span> push incomplete: 1 rejected by cloud
+                                   (invalid_json_nul ×1); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#50525c">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">Petra Stella/Accounting</span> <span style="color:#50525c">skills</span> 3 managed file conflict(s)
+    <span style="color:#50525c">→</span> cas update --sync --json
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">Documents/Accounting   </span> <span style="color:#50525c">skills</span> 2 managed file conflict(s)
+    <span style="color:#50525c">→</span> cas update --sync --json
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#333333;font-weight:bold">hub                    </span> <span style="color:#50525c">serve </span> Tailscale Serve inactive: tailscale is
+                                   stopped; hub remains loopback-only
+    <span style="color:#50525c">→</span> Check `tailscale status`, then run `cas hub restart`.
+  <span style="color:#2882c8;font-weight:bold">ℹ</span> <span style="color:#333333;font-weight:bold">~/scratch/old-clone    </span> <span style="color:#50525c">      </span> not refreshed: not a Git project root
+    <span style="color:#50525c">→</span> cas known-repos forget &lt;path&gt;
+  <span style="color:#1e964b;font-weight:bold">✓</span> 6 projects current · 3 not cloud-linked
+    <span style="color:#50525c">cassy, pantheon, prospect_path, Penguinz, ai-toolkit, soundwave-config</span>
+  <span style="color:#50525c">Cassy 3.62.0 · 12 projects refreshed · 2 failed · 4.0s</span>
+  <span style="color:#50525c">user-level store failed · 1 skipped</span>
+  <span style="color:#50525c">cas update --verbose shows every project and phase output</span>
+<span style="color:#982e2e">✗</span> 2 of 12 projects not fully refreshed
+  the user-level store was not refreshed
+  Cassy 3.62.0 is current</pre>
+<h2 style="font:600 14px system-ui;margin:0 0 6px 0">solarized-dark · 80 columns · exit 1</h2>
+<pre style="background:#002b36;color:#839496;width:80ch;padding:12px;margin:0 0 24px 0;overflow-x:auto;font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;border:1px solid #8884"><span style="color:#50c878;font-weight:bold">✓</span> <span style="color:#90939f">[1/2]</span> <span style="color:#839496;font-weight:bold">Cassy binary  </span>3.62.0 is current                                     <span style="color:#90939f">1.4s</span>
+<span style="color:#e96c6c;font-weight:bold">✗</span> <span style="color:#90939f">[2/2]</span> <span style="color:#839496;font-weight:bold">Projects      </span>2 of 12 failed · user-level store failed · 4 warnin…  <span style="color:#90939f">4.0s</span>
+
+  <span style="color:#e96c6c;font-weight:bold">✗</span> <span style="color:#839496;font-weight:bold">gabber-studio          </span> <span style="color:#90939f">skills</span> git index lock stale (no writer observed):
+                                   .git/index.lock (age 15d)
+    <span style="color:#90939f">→</span> recheck writers, remove only this lock, then retry
+  <span style="color:#e96c6c;font-weight:bold">✗</span> <span style="color:#839496;font-weight:bold">pulse-card             </span> <span style="color:#90939f">skills</span> git index lock stale (no writer observed):
+                                   .git/index.lock (age 1d)
+    <span style="color:#90939f">→</span> recheck writers, remove only this lock, then retry
+  <span style="color:#e96c6c;font-weight:bold">✗</span> <span style="color:#839496;font-weight:bold">user-level store       </span> <span style="color:#90939f">      </span> database is locked
+    <span style="color:#90939f">→</span> retry after the holder exits
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">rocketship-template    </span> <span style="color:#90939f">cloud </span> push incomplete: 2 rejected by cloud
+                                   (invalid_json_nul ×2); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#90939f">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">Richards LLC/Accounting</span> <span style="color:#90939f">cloud </span> push incomplete: 1 rejected by cloud
+                                   (invalid_json_nul ×1); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#90939f">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">Petra Stella/Accounting</span> <span style="color:#90939f">skills</span> 3 managed file conflict(s)
+    <span style="color:#90939f">→</span> cas update --sync --json
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">Documents/Accounting   </span> <span style="color:#90939f">skills</span> 2 managed file conflict(s)
+    <span style="color:#90939f">→</span> cas update --sync --json
+  <span style="color:#f0a03c;font-weight:bold">⚠</span> <span style="color:#839496;font-weight:bold">hub                    </span> <span style="color:#90939f">serve </span> Tailscale Serve inactive: tailscale is
+                                   stopped; hub remains loopback-only
+    <span style="color:#90939f">→</span> Check `tailscale status`, then run `cas hub restart`.
+  <span style="color:#46aae6;font-weight:bold">ℹ</span> <span style="color:#839496;font-weight:bold">~/scratch/old-clone    </span> <span style="color:#90939f">      </span> not refreshed: not a Git project root
+    <span style="color:#90939f">→</span> cas known-repos forget &lt;path&gt;
+  <span style="color:#50c878;font-weight:bold">✓</span> 6 projects current · 3 not cloud-linked
+    <span style="color:#90939f">cassy, pantheon, prospect_path, Penguinz, ai-toolkit, soundwave-config</span>
+  <span style="color:#90939f">Cassy 3.62.0 · 12 projects refreshed · 2 failed · 4.0s</span>
+  <span style="color:#90939f">user-level store failed · 1 skipped</span>
+  <span style="color:#90939f">cas update --verbose shows every project and phase output</span>
+<span style="color:#e96c6c">✗</span> 2 of 12 projects not fully refreshed
+  the user-level store was not refreshed
+  Cassy 3.62.0 is current</pre>
+<h2 style="font:600 14px system-ui;margin:0 0 6px 0">solarized-light · 80 columns · exit 1</h2>
+<pre style="background:#fdf6e3;color:#657b83;width:80ch;padding:12px;margin:0 0 24px 0;overflow-x:auto;font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;border:1px solid #8884"><span style="color:#1e964b;font-weight:bold">✓</span> <span style="color:#50525c">[1/2]</span> <span style="color:#657b83;font-weight:bold">Cassy binary  </span>3.62.0 is current                                     <span style="color:#50525c">1.4s</span>
+<span style="color:#c83c3c;font-weight:bold">✗</span> <span style="color:#50525c">[2/2]</span> <span style="color:#657b83;font-weight:bold">Projects      </span>2 of 12 failed · user-level store failed · 4 warnin…  <span style="color:#50525c">4.0s</span>
+
+  <span style="color:#c83c3c;font-weight:bold">✗</span> <span style="color:#657b83;font-weight:bold">gabber-studio          </span> <span style="color:#50525c">skills</span> git index lock stale (no writer observed):
+                                   .git/index.lock (age 15d)
+    <span style="color:#50525c">→</span> recheck writers, remove only this lock, then retry
+  <span style="color:#c83c3c;font-weight:bold">✗</span> <span style="color:#657b83;font-weight:bold">pulse-card             </span> <span style="color:#50525c">skills</span> git index lock stale (no writer observed):
+                                   .git/index.lock (age 1d)
+    <span style="color:#50525c">→</span> recheck writers, remove only this lock, then retry
+  <span style="color:#c83c3c;font-weight:bold">✗</span> <span style="color:#657b83;font-weight:bold">user-level store       </span> <span style="color:#50525c">      </span> database is locked
+    <span style="color:#50525c">→</span> retry after the holder exits
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">rocketship-template    </span> <span style="color:#50525c">cloud </span> push incomplete: 2 rejected by cloud
+                                   (invalid_json_nul ×2); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#50525c">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">Richards LLC/Accounting</span> <span style="color:#50525c">cloud </span> push incomplete: 1 rejected by cloud
+                                   (invalid_json_nul ×1); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    <span style="color:#50525c">→</span> Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">Petra Stella/Accounting</span> <span style="color:#50525c">skills</span> 3 managed file conflict(s)
+    <span style="color:#50525c">→</span> cas update --sync --json
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">Documents/Accounting   </span> <span style="color:#50525c">skills</span> 2 managed file conflict(s)
+    <span style="color:#50525c">→</span> cas update --sync --json
+  <span style="color:#b07010;font-weight:bold">⚠</span> <span style="color:#657b83;font-weight:bold">hub                    </span> <span style="color:#50525c">serve </span> Tailscale Serve inactive: tailscale is
+                                   stopped; hub remains loopback-only
+    <span style="color:#50525c">→</span> Check `tailscale status`, then run `cas hub restart`.
+  <span style="color:#2882c8;font-weight:bold">ℹ</span> <span style="color:#657b83;font-weight:bold">~/scratch/old-clone    </span> <span style="color:#50525c">      </span> not refreshed: not a Git project root
+    <span style="color:#50525c">→</span> cas known-repos forget &lt;path&gt;
+  <span style="color:#1e964b;font-weight:bold">✓</span> 6 projects current · 3 not cloud-linked
+    <span style="color:#50525c">cassy, pantheon, prospect_path, Penguinz, ai-toolkit, soundwave-config</span>
+  <span style="color:#50525c">Cassy 3.62.0 · 12 projects refreshed · 2 failed · 4.0s</span>
+  <span style="color:#50525c">user-level store failed · 1 skipped</span>
+  <span style="color:#50525c">cas update --verbose shows every project and phase output</span>
+<span style="color:#982e2e">✗</span> 2 of 12 projects not fully refreshed
+  the user-level store was not refreshed
+  Cassy 3.62.0 is current</pre>
+</body>

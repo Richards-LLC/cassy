@@ -1,0 +1,21 @@
+→ [1/2] Cassy binary  checking for a newer release
+Binary Update
+  Current version: 3.62.0
+  Target version:  9.9.9
+
+  This will download and replace the current binary.
+Checking target-arch... x86_64-unknown-linux-gnu
+Checking current version... v3.62.0
+Checking latest released version... v9.9.9 (1 versions available)
+New release found! v3.62.0 --> v9.9.9
+New release is *NOT* compatible
+
+cas release status:
+  * Current exe: "/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-06b0/build/cas"
+  * New exe release: "cas-x86_64-unknown-linux-gnu.tar.gz"
+  * New exe download url: "http://127.0.0.1:36913/asset"
+
+The new release will be downloaded/extracted and the existing binary will be replaced.
+Do you want to continue? [Y/n] n
+✗ [1/2] Cassy binary  update failed                                        566ms
+✗ UpdateError: Update aborted

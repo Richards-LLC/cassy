@@ -1,0 +1,7 @@
+→ [1/2] Cassy binary  checking for a newer release
+  ℹ Cassy 3.62.0 → 9.9.9 is available
+    Download and install it now? [Y/n] y
+✗ [1/2] Cassy binary  update failed                                         2.4s
+✗ could not install Cassy 9.9.9
+  Could not find the required path in the archive: "cas"
+  Cassy 3.62.0 is unchanged; rerun `cas update` to retry

@@ -2,7 +2,7 @@
   "contract": "cassy.coordination/v1",
   "vendored": {
     "source": "Richards-LLC/petra-stella-cloud",
-    "ref": "7f838351aceed13ec3e0a8fc8afd199d110f2212",
+    "ref": "00d0675af62e00734cc22fa533442ac9c4fb64fb",
     "path": "tests/contracts/coordination/v1",
     "note": "Copied byte for byte. Cloud authors these (petra-stella-cloud#161, PR #164); update only by re-vendoring a newer Cloud ref, and a breaking change means a new v2/.",
     "files": {
@@ -19,7 +19,7 @@
       "operations--lookup.json": "e67e7f2515f9a0489099788362997368013ef76101201483d6a81afb64d6ba74",
       "reply_intents--dispatch.json": "4d857cae65f30c2a6ea7487a2a092387010d552a930cd1a4ba2c4ffe0124d4e7",
       "violet_activity--ack_v2.json": "4717b70a40999144f64f5567881589d032ef0b096ba91b3a81b4f155d8420d23",
-      "violet_activity--claim_v2.json": "e6d455308678956af807c2a6685c8fdad12d2f78d71dca1875b0c66ec5162f38"
+      "violet_activity--claim_v2.json": "15de4b0edad3e8c6b682521b25bec290c7f682b2c2becc6f6a0827f1049b3359"
     }
   },
   "authored": {

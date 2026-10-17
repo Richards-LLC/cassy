@@ -39,6 +39,11 @@ pub struct CommunicationSlos {
     pub false_abandon: u64,
     pub operator_events: u64,
     pub operator_receipts: u64,
+    /// Local snapshots with no enrolled audience, excluded from the receipt
+    /// denominator (cas-5c12). `None` marks a summary saved before that split,
+    /// whose operator pair counted every local snapshot; it is shown as recorded.
+    #[serde(default)]
+    pub operator_unenrolled: Option<u64>,
     pub duplicate_body_reads: u64,
     pub director_nudges: u64,
     pub worker_hours: f64,
@@ -103,23 +108,31 @@ impl CommunicationSlos {
         } else {
             "UNKNOWN"
         };
+        let relay = match self.operator_unenrolled {
+            Some(unenrolled) if self.operator_events == 0 && unenrolled > 0 => format!(
+                "N/A operator relay receipts: not applicable, {unenrolled} unenrolled local \
+                 snapshot(s); `cas hub operator bind` enrolls this project (target 100%)"
+            ),
+            unenrolled => format!(
+                "{} operator relay receipts: {receipts:.1}% ({}/{}, target 100%{})",
+                verdict(self.operator_receipts == self.operator_events),
+                self.operator_receipts,
+                self.operator_events,
+                match unenrolled {
+                    None => "; legacy denominator: all local snapshots".to_string(),
+                    Some(0) if self.operator_events == 0 => "; no events".to_string(),
+                    Some(0) => String::new(),
+                    Some(n) => format!("; {n} unenrolled excluded"),
+                }
+            ),
+        };
         vec![
             format!(
                 "{} false-abandon: {} (target 0)",
                 verdict(self.false_abandon == 0),
                 self.false_abandon
             ),
-            format!(
-                "{} operator relay receipts: {receipts:.1}% ({}/{}, target 100%{})",
-                verdict(self.operator_receipts == self.operator_events),
-                self.operator_receipts,
-                self.operator_events,
-                if self.operator_events == 0 {
-                    "; no events"
-                } else {
-                    ""
-                }
-            ),
+            relay,
             format!(
                 "{duplicate_outcome} duplicate body reads: {} (target 0)",
                 self.duplicate_body_reads
@@ -166,6 +179,7 @@ fn measure(conn: &Connection, session: &str, now: &str) -> Result<CommunicationS
             false_abandon: row.get::<_, i64>("false_abandon")? as u64,
             operator_events: row.get::<_, i64>("operator_events")? as u64,
             operator_receipts: row.get::<_, i64>("operator_receipts")? as u64,
+            operator_unenrolled: Some(row.get::<_, i64>("operator_unenrolled")? as u64),
             duplicate_body_reads: row.get::<_, i64>("duplicate_body_reads")? as u64,
             director_nudges: row.get::<_, i64>("director_nudges")? as u64,
             worker_hours: row.get("worker_hours")?,

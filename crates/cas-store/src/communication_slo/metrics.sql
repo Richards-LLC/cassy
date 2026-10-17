@@ -27,9 +27,19 @@ SELECT
       WHERE (highest_stage='abandoned' OR last_pending_reason='abandoned_unknown_target')
         AND last_pending_reason IS NOT 'recipient_ended_unread'
         AND EXISTS(SELECT 1 FROM surfaced s WHERE s.prompt_id=p.id)) false_abandon,
-    (SELECT COUNT(*) FROM operator_delivery_outbox WHERE factory_session=?1) operator_events,
-    (SELECT COUNT(*) FROM operator_delivery_outbox WHERE factory_session=?1
-      AND relay_receipt IS NOT NULL AND length(trim(relay_receipt))>0) operator_receipts,
+    -- cas-5c12: only the enrolled cloud lane owes a relay receipt. Its row is
+    -- written with the local snapshot while a binding is active and is deleted
+    -- only with that snapshot, so a local row without one was never enrolled.
+    -- A receipt proves the cloud retained the event, not that anyone read it;
+    -- an expired tombstone is not retention.
+    (SELECT COUNT(*) FROM operator_cloud_outbox c JOIN operator_delivery_outbox o
+      ON o.event_id=c.event_id WHERE o.factory_session=?1) operator_events,
+    (SELECT COUNT(*) FROM operator_cloud_outbox c JOIN operator_delivery_outbox o
+      ON o.event_id=c.event_id WHERE o.factory_session=?1
+      AND c.receipt_kind IN ('stored','duplicate')) operator_receipts,
+    (SELECT COUNT(*) FROM operator_delivery_outbox o WHERE o.factory_session=?1
+      AND NOT EXISTS(SELECT 1 FROM operator_cloud_outbox c WHERE c.event_id=o.event_id))
+      operator_unenrolled,
     (SELECT COALESCE(SUM(o.body_count-1),0) FROM communication_body_observations o
       JOIN messages p ON p.id=o.prompt_id) duplicate_body_reads,
     (SELECT COUNT(*) FROM messages WHERE source='director' AND kind='worker_stall_nudge') director_nudges,

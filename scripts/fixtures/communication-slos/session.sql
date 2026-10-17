@@ -20,3 +20,9 @@ INSERT INTO operator_delivery_outbox(event_id,prompt_id,factory_session,payload_
                                    created_at,relay_receipt,retained_at)
 VALUES('fixture-event',1,'fixture-session','{}','2026-01-02T00:00:01Z',
        'fixture-receipt','2026-01-02T00:00:02Z');
+-- Enrolled lane (cas-5c12): the cloud stored the same event.
+INSERT INTO operator_cloud_outbox(event_id,account_id,machine_id,hub_id,project_id,session_id,
+                                  created_at,feed_generation,key_epoch,ciphertext,digest,
+                                  receipt_kind,receipt_at)
+VALUES('fixture-event','acct','machine','hub','project','s_fixture','2026-01-02T00:00:01Z',
+       'g1','e1','sealed','digest','stored','2026-01-02T00:00:03Z');

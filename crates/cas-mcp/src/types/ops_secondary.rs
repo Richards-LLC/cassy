@@ -1006,7 +1006,7 @@ pub struct CoordinationRequest {
     pub request_id: Option<String>,
 
     /// External-work claim resource; accept_claim instead uses handoff_id.
-    #[schemars(description = "release/transfer/renew_claim, reply_intent: external-work resource id")]
+    #[schemars(description = "release/transfer/renew_claim, reply_intent: claim resource id")]
     #[serde(default)]
     pub resource_id: Option<String>,
 
@@ -1041,14 +1041,14 @@ pub struct CoordinationRequest {
     /// A reminder linked to this task is quarantined when it closes unless
     /// `cross_session=true` explicitly keeps it.
     #[schemars(
-        description = "Task ID. loop_start/worktree_create: the loop's or worktree's task. spawn_workers: pre-assign to the single spawned worker; an open task_id also authorizes a spawn without an active EPIC. server_start: owning task; server_list: owner filter. remind: bind stale-context cleanup (close quarantines it unless cross_session=true). message with merge_request=true: the parked merge delivery."
+        description = "Task ID. loop_start/worktree_create: the loop's or worktree's task. spawn_workers: pre-assign to the one spawned worker; an open task_id also authorizes a spawn without an active EPIC. server_start: owning task; server_list: owner filter. remind: bind stale-context cleanup (close quarantines it unless cross_session=true). message with merge_request=true: the parked merge delivery."
     )]
     #[serde(default)]
     pub task_id: Option<String>,
 
     /// Factory delivery route for spawn_workers/focus_epic.
     #[schemars(
-        description = "Factory delivery mode: 'push_branch' (default) or 'local_merge' (supervisor merges local worker branches)"
+        description = "Delivery mode: 'push_branch' (default) or 'local_merge' (supervisor merges local worker branches)"
     )]
     #[serde(default)]
     pub delivery_mode: Option<String>,

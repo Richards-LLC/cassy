@@ -2793,3 +2793,33 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
     assert_eq!(receipt["projects"][0]["retired_toml"]["status"], "unchanged");
     assert!(!project.join(".cas/.cas").exists());
 }
+
+/// Different valid TOML spellings must retire the same ignored values without
+/// treating a '#' inside a secret as a comment to preserve.
+#[test]
+fn cas_4585_retirement_preserves_dotted_inline_and_multiline_config() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    for raw in [
+        "factory.merge_sweep = [\n 'fixture#secret', # keep array comment\n]\nfactory.merge_sweep_timeout_secs = 17\nfactory.strict_cli = false # keep active comment\ncode_review.owner = 'worker'\ncode_review.future_owner = '#keep'\njev.deep.endpoint = 'fixture#secret'\n",
+        "factory = { strict_cli = false, merge_sweep = true, future_policy = 'keep', merge_sweep_env = { TOKEN = 'fixture#secret' }, merge_sweep_timeout_secs = 17 } # keep active comment\ncode_review = { owner = 'worker', future_owner = '#keep' }\njev = { endpoint = 'fixture#secret' } # keep integration comment\n",
+    ] {
+        std::fs::write(&path, raw).unwrap();
+        let before: crate::config::Config = toml::from_str(raw).unwrap();
+        let plan = crate::config::retire_config(directory.path(), true);
+        assert_eq!(plan.status, "planned", "{plan:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        let receipt = crate::config::retire_config(directory.path(), false);
+        assert_eq!(receipt.status, "repaired", "{receipt:?}");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("fixture#secret"), "retired string leaked into preserved comments");
+        for comment in raw.lines().filter_map(|line| line.find("# keep").map(|at| &line[at..])) {
+            assert!(after.contains(comment), "lost {comment}");
+        }
+        let current: crate::config::Config = toml::from_str(&after).unwrap();
+        assert_eq!(serde_json::to_value(before).unwrap(), serde_json::to_value(current).unwrap());
+        let doc: toml::Value = toml::from_str(&after).unwrap();
+        assert_eq!(doc["code_review"]["future_owner"].as_str(), Some("#keep"));
+        assert_eq!(crate::config::retire_config(directory.path(), false).status, "unchanged");
+    }
+}

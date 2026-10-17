@@ -2581,9 +2581,18 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
     args.refresh_receipt = Some(home.join("refresh.json"));
     let cli = update_test_cli(false);
     let run = || {
-        refresh_all_projects_with_user_refresh(&args, &cli, Some(&root), None, None, None, || {
-            refresh_user_level_store_with_builtins(&args, &cli, || Ok(()))
-        })
+        let (result, output) = capture_phase(true, || {
+            // The real binary first reads config to decide crash-reporting
+            // policy, then startup logging, then project discovery.
+            let _enabled = crate::sentry::is_sentry_enabled();
+            crate::config::Config::load(&root).unwrap();
+            refresh_all_projects_with_user_refresh(&args, &cli, Some(&root), None, None, None, || {
+                refresh_user_level_store_with_builtins(&args, &cli, || Ok(()))
+            })
+        });
+        #[cfg(unix)]
+        assert!(!output.contains("ignored and dropped on the next save") && !output.contains("[jev] config section is retired"), "raw startup notice escaped structured maintenance: {output}");
+        result
     };
     let report = run().unwrap();
     let sweep = report.sweep.as_ref().unwrap();

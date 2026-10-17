@@ -1,6 +1,7 @@
 # 2026-10-17 — Harness diary parity audit — #cas-internal thread
 
-Channel: `#cas-internal` (`C0B44GUKDK2`). Draft for the diary merge: one parent
+Channel: `#cas-internal` (`C0B44GUKDK2`). Draft for the diary merge (named `-thread.md`
+because the release-notes gate lints every `*-slack.md` as a four-body runtime release draft): one parent
 plus three replies ordered Grok, Claude, Codex. Diary-only: no runtime release is
 claimed. Not posted; append `## POSTED` only after publication returns the four
 message IDs and permalinks.
@@ -35,11 +36,11 @@ Source gaps: 2.1.286–2.1.302 release notes are not yet reviewed.
 ## Codex reply
 
 ```text
-• *Hooks* — Was: Cassy guidance said Codex has no session hooks → Now: Codex 0.163.0 ships stable lifecycle hooks (startup, stop with continuation, prompt submit, compaction). Cassy uses only its shell tool hooks, which do run and do block. Correcting the stale guidance is planned for 3.64. Whether Codex hooks can guard MCP tool calls is still unverified.
+• *Hooks* — Was: Cassy guidance said Codex has no session hooks → Now: Codex 0.163.0 ships stable lifecycle hooks (startup, stop with continuation, prompt submit, compaction). Cassy uses only its shell tool hooks, which do run and do block. Wiring them and correcting the stale guidance is planned for 3.64. Whether any Codex hook covers MCP tool calls is not yet measured.
 
-• *Agents and messaging* — Was: Cassy treats Codex as having no agent catalog → Now: Codex supports custom agents defined in TOML and a `codex queue` command that adds a message to a running session. Cassy uses neither yet; both are follow-up candidates, and neither is established as the cause of a missed wake.
+• *Agents and messaging* — Was: Cassy treats Codex as having no agent catalog → Now: Codex supports custom agents defined in TOML and a `codex queue` command that adds a message to a running session. Cassy uses neither yet. Native Codex roles and queue delivery are 3.64 work; neither is established as the cause of a missed wake.
 
-• *Finish and validation* — Was: the finish command was assumed equivalent → Now: on Codex it is a custom prompt, a feature Codex has deprecated in favour of skills, so it should move to a skill. The 0.156.0 pin stands; 0.163.0 has an installed-capability review, not a live matrix.
+• *Finish and validation* — Was: on Codex the wrap-up was only a custom prompt, a feature Codex has deprecated → Now: it also runs as the supported `$finish` skill. The 0.156.0 pin stands; 0.163.0 has an installed-capability review, not a live matrix.
 
 Source gaps: release notes for 0.159.3–0.163.0 (seven stables) are not yet reviewed.
 ```

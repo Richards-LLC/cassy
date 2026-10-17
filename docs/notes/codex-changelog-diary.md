@@ -138,29 +138,30 @@ and the official docs [Hooks](https://learn.chatgpt.com/docs/hooks),
   `Pre/PostCompact`, `SubagentStart/Stop`, `SessionEnd` and `Interrupt`, with `command` and
   `mcp_tool` handlers. Cassy wires only `PreToolUse` (Bash, apply_patch) and `PostToolUse` (Bash),
   and those do run: Codex rollouts record "Command blocked by PreToolUse hook". Cassy guidance that
-  says Codex has no session hooks is stale. → 🔧 **fix in 3.64** (the Codex no-hooks guidance correction, GH #1280).
-- **MCP tool guard:** whether a Codex `PreToolUse` matcher fires for MCP tool calls is
-  **unverified**. Until a canary proves it, Cassy's Slack and other MCP write guards on Codex rely
-  on skill guidance, not a hook. → 👀.
+  says Codex has no session hooks is stale. → 🔧 **fix in 3.64**: lifecycle wiring and hook trust (cas-d0fe, GH #1280).
+- **MCP tool guard:** whether any Codex hook currently fires for MCP tool calls is
+  **unknown**: not observed, and not shown to be absent. The cas-d0fe canary will measure it. → 👀.
 - **Custom agents exist:** TOML files under `~/.codex/agents/` or `.codex/agents/`
   (`name`, `description`, `developer_instructions`), `/subagents` in the CLI, and
   `multi_agent stable true`. Cassy ships no Codex agents and still declares
   `supports_subagents: false` (and `supports_hooks: false`) for Codex. That flag also decides
   whether task/epic verification is required, so changing it is a behaviour change, not a doc
   fix. Correction to the touchpoint above: Cassy does **not** mirror `.md` agents to
-  `.codex/agents/`. → 👀 follow-up candidate; a Codex verifier agent is unexercised.
+  `.codex/agents/`. → 🔧 **3.64**: backend capability flags and native Codex roles (cas-6c54); a
+  Codex verifier agent is unexercised until then.
 - **`codex queue --thread <id> --message <text>`** queues a message into an existing session via
   the app-server daemon. Cassy delivers to Codex panes by PTY bracketed paste instead. This is a
   candidate for reliable turn admission; it is **not** established as the cause of any missed
-  wake. → 👀.
-- **`/prompts:finish`:** the user finish command lives in `~/.codex/prompts/finish.md`
-  (byte-identical to the Claude command). Codex has deprecated custom prompts in favour of skills;
-  it works while prompts remain supported. → 👀.
+  wake. → 🔧 **3.64 investigation**: native queue delivery (cas-353b).
+- **Finish command:** the wrap-up now runs on Codex as a supported skill, `$finish`, from
+  `~/.agents/skills/finish`. The original custom prompt (`/prompts:finish`, deprecated by Codex in
+  favour of skills) is kept in both Codex account homes on this host. → ✅.
 - **Unchanged:** skills mirror, `cs` MCP key, effort mapping and `--yolo` launch. `memories` is
   stable but off by default, and Cassy does not use it. → ✅.
 
 Source gap: release notes for 0.159.3, 0.160.0, 0.160.1, 0.161.0, 0.162.0, 0.162.1 and 0.163.0
-are not yet reviewed here.
+are not yet reviewed here; the official-docs and release-window research (cas-9ca1) feeds a
+follow-up diary entry. None of this is a 3.63 dependency.
 
 ### 0.159.2 — Windows background-process console suppression
 

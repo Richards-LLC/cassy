@@ -185,16 +185,17 @@ as the reference side of a Claude↔Codex parity check. Nothing here was run liv
   `PreToolUse` and `PostToolUse` for Claude. Claude remains the reference for startup context,
   stop handling and compaction. → 🟢.
 - **MCP tool guard:** Claude `PreToolUse` hooks match MCP tools, so Cassy's MCP write guards
-  (for example the Violet-only Slack write rule) are enforced by hook, not only by guidance. Codex
-  parity for this is unverified. → 🟢 for Claude.
+  (for example the Violet-only Slack write rule) are enforced by hook. Whether Codex hooks cover
+  MCP calls is unknown. → 🟢 for Claude.
 - **Agents:** Cassy ships `.md` agents (task verifier and others), and the CLI also accepts
   `--agents`; `claude agents` lists background sessions. → 🟢.
 - **Background sessions:** `--bg/--background` starts or continues a session in the background.
   Cassy does not use it; workers run in factory panes. → ✅ no action.
-- **User finish command:** `~/.claude/commands/finish.md`; Codex runs the same text as a
-  deprecated custom prompt and Grok as a skill. → ✅.
+- **User finish command:** `~/.claude/commands/finish.md`. Codex runs the same wrap-up as the
+  `$finish` skill, and Grok as a skill. → ✅.
 
-Source gap: changelog sections for 2.1.286–2.1.302 are not yet reviewed here.
+Source gap: changelog sections for 2.1.286–2.1.302 are not yet reviewed here; the official
+changelog research (cas-f1ca) feeds a follow-up diary entry. None of this is a 3.63 dependency.
 
 ### 2.1.285 — hook completion/cancellation · deferred MCP · background command deadlines
 

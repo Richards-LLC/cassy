@@ -1796,10 +1796,11 @@ fn refresh_phase_result_counts_projects_and_receipt_keeps_count_grammar() {
 #[test]
 fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() {
     let _output_lock = update_output_lock();
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../docs/design/cli/fixtures/cas-update-partial-refresh.json");
-    let mut fixture: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(source).unwrap()).unwrap();
+    let mut fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../docs/design/cli/fixtures/cas-update-partial-refresh.json"
+    )))
+    .unwrap();
     fixture["refresh_ms"] = 0.into();
     fixture["binary"]["elapsed_ms"] = 0.into();
     fixture["binary"]["current"] = "9.99.1".into();

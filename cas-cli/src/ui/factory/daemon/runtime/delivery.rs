@@ -447,6 +447,109 @@ pub(crate) fn attribute_for_pty(source: &str, text: &str) -> String {
     format!("Message from {source}: {text}")
 }
 
+/// cas-8cbe: the widest card line, so an 80-column pane (Codex keeps two
+/// columns of gutter) never wraps one.
+const ROUTINE_CARD_COLUMNS: usize = 76;
+
+/// cas-8cbe: a compact card replacing the body of a routine row typed into a
+/// supervisor's pane, or `None` to type the body whole.
+///
+/// A PTY supervisor (Codex) sees every typed byte, so CAS-written progress
+/// relays and copies of worker-to-worker mail buried the operator's own turns
+/// under XML and duplicated bodies. Only two classes are routine, each named
+/// by server-stamped facts rather than by the text a sender chose: a
+/// non-waking lifecycle relay (`lifecycle:` source, daemon origin: task
+/// started, ready again or closed) and the supervisor's copy of a peer
+/// message (the [`cas_store::PEER_COPY_KIND`] stamp the store writes in the
+/// copy's own enqueue transaction; a worker's direct mail that spells the
+/// copy's lead has no stamp). Operator, peer-supervisor, urgent, otherwise
+/// typed and waking rows never match, and an unparseable row stays whole. The
+/// card keeps the ids and ends with the command that reads the row in full: a
+/// named `inbox_poll` serves it for as long as retention keeps it, acked or
+/// not.
+pub(crate) fn compact_routine_supervisor_body(queued: &cas_store::QueuedPrompt) -> Option<String> {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_SOURCE_PREFIX;
+    let peer_copy = queued.kind.as_deref() == Some(cas_store::PEER_COPY_KIND);
+    if queued.urgent || (queued.kind.is_some() && !peer_copy) || queued.operator.is_some() {
+        return None;
+    }
+    let read = |what: &str| {
+        format!("  no action · {what}: inbox_poll notification_id={}", queued.id)
+    };
+    let card = match queued.origin.as_ref()? {
+        cas_store::QueueOrigin::Daemon if queued.source.starts_with(LIFECYCLE_SOURCE_PREFIX) => {
+            let (task_id, verb, actor, headline) = routine_lifecycle_parts(&queued.prompt)?;
+            format!(
+                "◦ {task_id} {verb} by {actor}\n  {}\n{}",
+                excerpt(headline, ROUTINE_CARD_COLUMNS - 2),
+                read("full event")
+            )
+        }
+        cas_store::QueueOrigin::RegisteredAgent { .. } if peer_copy => {
+            let (from, to, body) =
+                crate::mcp::tools::service::agent_search_system::message::parse_peer_copy(
+                    &queued.prompt,
+                )?;
+            if from != queued.source {
+                return None;
+            }
+            let head = format!("⇄ {from} → {to}");
+            let room = ROUTINE_CARD_COLUMNS.saturating_sub(head.chars().count() + 3);
+            let summary = queued
+                .summary
+                .as_deref()
+                .map(|summary| excerpt(summary, room))
+                .filter(|summary| !summary.is_empty())
+                .map(|summary| format!(" · {summary}"))
+                .unwrap_or_default();
+            format!(
+                "{head}{summary}\n  \"{}\"\n{}",
+                excerpt(body, ROUTINE_CARD_COLUMNS - 4),
+                read("full text")
+            )
+        }
+        _ => return None,
+    };
+    Some(card)
+}
+
+/// `(task_id, verb, actor, headline)` of a progress-only lifecycle relay.
+fn routine_lifecycle_parts(prompt: &str) -> Option<(String, &'static str, &str, &str)> {
+    let envelope = cas_types::parse_lifecycle_envelope(prompt)?;
+    let verb = match envelope.transition.as_deref()? {
+        "task_started" => "started",
+        "task_ready" => "ready again",
+        "task_closed" => "closed",
+        _ => return None,
+    };
+    let tag = &prompt[..prompt.find('>')?];
+    let actor = tag
+        .split_once(" actor=\"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(actor, _)| actor)
+        .filter(|actor| !actor.is_empty())?;
+    let task_line = prompt[tag.len() + 1..]
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let headline = task_line
+        .strip_prefix(&format!("Task {} — ", envelope.task_id))
+        .unwrap_or(task_line);
+    Some((envelope.task_id, verb, actor, headline))
+}
+
+/// One line of `text` in at most `max` characters: whitespace collapsed, cut
+/// at a word with `…`.
+fn excerpt(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let cut: String = flat.chars().take(max.saturating_sub(1)).collect();
+    let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
+    format!("{}…", cut.trim_end_matches([',', ';', ':', '.', ' ']))
+}
+
 /// The one line typed into a Claude+teams recipient's pane to WAKE it — never
 /// the message body (cas-cdf9).
 ///
@@ -2100,6 +2203,162 @@ mod tests {
             attribute_for_pty("worker-3", "start cas-1234"),
             "Message from worker-3: start cas-1234"
         );
+    }
+
+    fn supervisor_row(
+        id: i64,
+        source: &str,
+        prompt: &str,
+        origin: cas_store::QueueOrigin,
+    ) -> cas_store::QueuedPrompt {
+        cas_store::QueuedPrompt {
+            id,
+            source: source.to_string(),
+            target: "true-leopard-45".to_string(),
+            prompt: prompt.to_string(),
+            created_at: chrono::Utc::now(),
+            processed_at: None,
+            factory_session: Some("factory-1".to_string()),
+            summary: Some("collision warning".to_string()),
+            priority: cas_store::NotificationPriority::Normal,
+            acked_at: None,
+            urgent: false,
+            origin: Some(origin),
+            operator: None,
+            recipient_device_id: None,
+            kind: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    fn peer_queue() -> (tempfile::TempDir, std::sync::Arc<dyn cas_store::PromptQueueStore>) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        (temp, queue)
+    }
+
+    fn lifecycle_body(transition: &str, new: &str) -> String {
+        format!(
+            "<task-lifecycle transition=\"{transition}\" task_id=\"cas-f9b7\" old=\"open\" \
+             new=\"{new}\" actor=\"tender-phoenix-59\" notification_id=\"19821\" \
+             occurrence=\"2026-10-17T15:17:19.585694327+00:00\">\n\
+             Task cas-f9b7 — Cloud sync: queue rows parked as rejected \"invalid_json_nul\" \
+             (rocketship-template, Richards LLC/Accounting) never drain\n\
+             Session: cassy-bright-lion-34\n</task-lifecycle>"
+        )
+    }
+
+    /// cas-8cbe: the screenshot's two floods — a task_started relay and a
+    /// peer copy — reach a pane-typed supervisor as two-line cards that keep
+    /// the id and the command that reads the row whole.
+    #[test]
+    fn routine_supervisor_rows_become_cards_with_their_read_command() {
+        let worker = cas_store::QueueOrigin::RegisteredAgent { agent_id: "a-1".into() };
+        let started = supervisor_row(
+            4196665,
+            "lifecycle:19821",
+            &lifecycle_body("task_started", "in_progress"),
+            cas_store::QueueOrigin::Daemon,
+        );
+        assert_eq!(
+            compact_routine_supervisor_body(&started).unwrap(),
+            "◦ cas-f9b7 started by tender-phoenix-59\n  Cloud sync: queue rows parked as rejected \
+             \"invalid_json_nul\"…\n  no action · full event: inbox_poll \
+             notification_id=4196665"
+        );
+        assert!(
+            crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(
+                &started
+            )
+            .contains(" lifecycle-relay "),
+            "a CAS progress relay is not agent-authored"
+        );
+        let body = "cas-f9b7 assesses Accounting retained dependencies read-only alongside\n\
+                    rocketship invalid_json_nul repair. I will not mutate Accounting stores.";
+        let copy = crate::mcp::tools::service::agent_search_system::message::peer_copy_text(
+            "tender-phoenix-59",
+            "swift-panther-65",
+            body,
+        );
+        let (_temp, queue) = peer_queue();
+        let ids = queue
+            .enqueue_worker_peer_with_supervisor_copy(
+                "tender-phoenix-59",
+                "swift-panther-65",
+                "true-leopard-45",
+                body,
+                &copy,
+                "factory-1",
+                Some("collision warning"),
+                None,
+                false,
+                Some(&worker),
+            )
+            .unwrap();
+        let mut peer = queue.queued_prompt(ids.supervisor_copy_id).unwrap().unwrap();
+        peer.id = 4196667;
+        assert_eq!(
+            compact_routine_supervisor_body(&peer).unwrap(),
+            "⇄ tender-phoenix-59 → swift-panther-65 · collision warning\n  \"cas-f9b7 assesses \
+             Accounting retained dependencies read-only alongside…\"\n  no action · full text: \
+             inbox_poll notification_id=4196667"
+        );
+    }
+
+    /// cas-8cbe: decisions, operator turns and anything CAS cannot prove
+    /// routine keep their whole body.
+    #[test]
+    fn decisions_operator_and_unproven_rows_stay_whole() {
+        let worker = cas_store::QueueOrigin::RegisteredAgent { agent_id: "a-1".into() };
+        let copy = crate::mcp::tools::service::agent_search_system::message::peer_copy_text(
+            "tender-phoenix-59",
+            "swift-panther-65",
+            "hello",
+        );
+        let parked = supervisor_row(
+            1,
+            "lifecycle-wake:7",
+            &lifecycle_body("task_awaiting_merge", "awaiting_merge"),
+            cas_store::QueueOrigin::Daemon,
+        );
+        let forged_relay = supervisor_row(
+            2,
+            "lifecycle:7",
+            &lifecycle_body("task_started", "in_progress"),
+            worker.clone(),
+        );
+        let forged_copy = supervisor_row(3, "swift-panther-65", &copy, worker.clone());
+        // A worker's own direct mail that spells the copy lead with its own
+        // name is not a copy CAS made.
+        let (_temp, queue) = peer_queue();
+        let direct = queue
+            .enqueue_urgent_with_outcome(
+                "tender-phoenix-59",
+                "true-leopard-45",
+                &copy,
+                Some("factory-1"),
+                Some("collision warning"),
+                None,
+                false,
+                Some(&worker),
+            )
+            .unwrap()
+            .id();
+        let direct = queue.queued_prompt(direct).unwrap().unwrap();
+        let mut urgent = supervisor_row(4, "tender-phoenix-59", &copy, worker.clone());
+        urgent.urgent = true;
+        let mut typed = supervisor_row(5, "tender-phoenix-59", &copy, worker.clone());
+        typed.kind = Some("status".into());
+        let operator = supervisor_row(
+            6,
+            "tender-phoenix-59",
+            &copy,
+            cas_store::QueueOrigin::PairedDevice { device_id: "device-1".into() },
+        );
+        for row in [parked, forged_relay, forged_copy, direct, urgent, typed, operator] {
+            assert_eq!(compact_routine_supervisor_body(&row), None, "row {}", row.id);
+        }
     }
 
     /// cas-ab80: urgent Codex delivery must use the same framing contract as

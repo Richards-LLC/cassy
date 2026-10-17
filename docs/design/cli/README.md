@@ -17,6 +17,7 @@ and a before/after capture set under `captures/`.
 | `cas artifact show` | [cas-artifact.brief.md](cas-artifact.brief.md) | — | [captures/after/cas-artifact-show](captures/after/cas-artifact-show/report.md) |
 | `cas factory status` | [cas-factory-status.brief.md](cas-factory-status.brief.md) | [captures/before/cas-factory-status](captures/before/cas-factory-status/report.md) | [captures/after/cas-factory-status](captures/after/cas-factory-status/report.md) |
 | `cas` error renderer | [cas-error.brief.md](cas-error.brief.md) | — | [captures/after/cas-error-renderer](captures/after/cas-error-renderer/report.md) |
+| Supervisor pane routine cards (Codex PTY) | [supervisor-routine-cards.brief.md](supervisor-routine-cards.brief.md) | [captures/before/supervisor-routine-cards](captures/before/supervisor-routine-cards/codex-pane-80.txt) | [captures/after/supervisor-routine-cards](captures/after/supervisor-routine-cards/codex-pane-80.txt) |
 
 Each capture directory keeps the 80-column `.html` that stacks the four palettes (open it in a
 browser to see the light and dark renders side by side), the ANSI-stripped 80-column dark and

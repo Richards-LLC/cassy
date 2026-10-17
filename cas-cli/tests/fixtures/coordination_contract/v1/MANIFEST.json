@@ -9,6 +9,7 @@
       "activity--observe.json": "9ed03cda538a370920a579d2c59c9803372a7055f824a490854322a80c62c6f9",
       "deliveries--rebind.json": "41756be568a848f27d7d6cb761fa55048f494a9d6037401144a1ef2f7814b4db",
       "deliveries--receipts.json": "9a941eedca0c9cda754099d986cfc11b14b0d90b8d3506e3d244e9ec094e0f3e",
+      "deliveries--recover.json": "42eecad5645a474c8ac113a1df68166b92a77e251b2cbf68ec91e238731cce6f",
       "external_work--claim.json": "437bf9b122e5e3d4d4d9aecd3908d59bee82b3abc52da6e3985cc39f87e1f587",
       "external_work--complete.json": "e48e9a564ceaa3c47f90adc4e25abf8b667415075c9903b6410f00fbaaef2822",
       "external_work--handoff_offer.json": "6bafb66dac87191a75a2dd3e07a951e81442b180ddc9b9e9b62e183bf6c44872",

@@ -491,6 +491,7 @@ fn factory_req(action: &str) -> FactoryRequest {
         reason: None,
         dry_run: None,
         artifacts: None,
+        reclaim_unknown_target: None,
         // allow_trunk is CoordinationRequest/worktree_merge only — not FactoryRequest
         clear: None,
         branch: None,
@@ -596,6 +597,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         orphans: None,
         dry_run: None,
         artifacts: None,
+        reclaim_unknown_target: None,
         command: None,
         cwd: None,
         port: None,
@@ -7151,6 +7153,7 @@ fn coord_msg(
         orphans: None,
         dry_run: None,
         artifacts: None,
+        reclaim_unknown_target: None,
         command: None,
         cwd: None,
         port: None,

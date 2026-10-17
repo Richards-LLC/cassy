@@ -294,6 +294,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         orphans: None,
         dry_run: None,
         artifacts: None,
+        reclaim_unknown_target: None,
         command: None,
         cwd: None,
         port: None,

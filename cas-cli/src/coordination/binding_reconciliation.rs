@@ -546,10 +546,12 @@ fn uuid(value: &str) -> bool {
 
 fn utc_timestamp(value: &str, legacy_receipt: bool) -> bool {
     use chrono::SecondsFormat;
-    chrono::DateTime::parse_from_rfc3339(value).is_ok_and(|time| {
-        time.to_rfc3339_opts(SecondsFormat::Millis, true) == value
-            || (legacy_receipt && time.to_rfc3339_opts(SecondsFormat::Secs, true) == value)
-    })
+    // `use_z` only abbreviates zero offsets; it does not reject other zones.
+    value.ends_with('Z')
+        && chrono::DateTime::parse_from_rfc3339(value).is_ok_and(|time| {
+            time.to_rfc3339_opts(SecondsFormat::Millis, true) == value
+                || (legacy_receipt && time.to_rfc3339_opts(SecondsFormat::Secs, true) == value)
+        })
 }
 
 #[cfg(test)]

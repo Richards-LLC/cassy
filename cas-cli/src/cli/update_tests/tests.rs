@@ -892,6 +892,7 @@ fn update_banner_reports_projects_failures_and_skipped_unregistered_stores() {
     let banner = update_banner_text(&RefreshReport {
         project_count: 29,
         failed_count: 1,
+        failed_projects: 1,
         skipped_unregistered: 2,
         elapsed: std::time::Duration::from_secs(3),
         ..Default::default()

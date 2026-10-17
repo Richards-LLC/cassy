@@ -210,8 +210,9 @@ describe("operator inbox controller", () => {
     });
     const seen: number[] = [];
     inbox.subscribe((snapshot) => seen.push(snapshot.events.length));
-    expect(await inbox.runOnce()).toBe(5000);
+    const delay = await inbox.runOnce();
     expect(seen.at(-1)).toBe(1);
+    expect(delay).toBe(5000);
     expect(inbox.current().kind).toBe("ready");
     expect((await inbox.snapshot()).replyGrants!.supported).toBe(false);
     expect(store.identity).toBe(trusted);

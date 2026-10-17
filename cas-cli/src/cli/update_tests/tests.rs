@@ -1773,19 +1773,31 @@ fn refresh_phase_result_counts_projects_and_receipt_keeps_count_grammar() {
     let clean = refresh_phase_result(&Ok(report));
     assert_eq!((clean.verdict, clean.text.as_str()), (Verdict::Ok, "all 2 refreshed"));
 
+    // cas-0aa5 QA F02: a failed user-level store is host state, never one
+    // of the projects in "N of M".
     let failed = RefreshReport {
         project_count: 3,
-        failed_count: 1,
+        failed_count: 2,
+        failed_projects: 1,
+        user_level_failed: true,
         warned_count: 1,
         skipped_unregistered: 2,
         elapsed: std::time::Duration::from_secs(4),
         ..Default::default()
     };
     let receipt = update_banner_text(&failed);
-    let failed = refresh_phase_result(&Err(RefreshFailed(failed).into()));
+    let error: anyhow::Error = RefreshFailed(failed).into();
+    assert_eq!(
+        error.to_string(),
+        "1 of 3 projects not fully refreshed; the user-level store was not refreshed"
+    );
+    let failed = refresh_phase_result(&Err(error));
     assert_eq!(failed.verdict, Verdict::Error);
-    assert_eq!(failed.text, "1 of 3 failed · 1 warning · 2 skipped");
-    assert!(receipt.contains("1 failed · 2 skipped"), "{receipt}");
+    assert_eq!(
+        failed.text,
+        "1 of 3 failed · user-level store failed · 1 warning · 2 skipped"
+    );
+    assert!(receipt.contains("2 failed · 2 skipped"), "{receipt}");
 }
 
 /// cas-0aa5: the operator's 3.62 `cas update -y` transcript, replayed from
@@ -1835,7 +1847,14 @@ fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() 
         "{output}"
     );
     assert_eq!(output.matches("recheck writers, remove only this lock").count(), 2, "{output}");
-    assert!(output.contains("cas cloud queue --retry"), "{output}");
+    // cas-0aa5 QA F01: the reason-specific next step (cas-7c6b) is the
+    // remedy, never the blanket retry it overrides.
+    assert!(
+        output.contains("→ Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184")
+            && output.contains("`cas cloud queue --retry --retry-reason invalid_json_nul`"),
+        "{output}"
+    );
+    assert!(!output.contains("→ cas cloud queue --retry\n"), "{output}");
     for raw in ["Checking target-arch", "Managed files: 3 conflicts", "Retained intentionally"] {
         assert!(!output.contains(raw), "raw phase output {raw:?} leaked:\n{output}");
     }

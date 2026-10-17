@@ -775,7 +775,12 @@ impl ProjectRefreshReceipt {
 #[derive(Default)]
 struct RefreshReport {
     project_count: usize,
+    /// Failed projects plus a failed user-level store: the receipt's count.
     failed_count: usize,
+    /// Failed projects only, the numerator of "N of M projects".
+    failed_projects: usize,
+    /// The user-level store failed; it is host state, never a project.
+    user_level_failed: bool,
     /// Projects with a warned phase and none failed.
     warned_count: usize,
     /// Scan or registry roots excluded from refresh. Counted in the banner so
@@ -1456,6 +1461,8 @@ fn finish_project_refresh(
     let report = RefreshReport {
         project_count: receipts.len(),
         failed_count,
+        failed_projects: receipts.iter().filter(|receipt| receipt.failed()).count(),
+        user_level_failed: user_level.failed(),
         warned_count: receipts
             .iter()
             .filter(|receipt| !receipt.failed() && receipt.warned())
@@ -1478,11 +1485,18 @@ struct RefreshFailed(RefreshReport);
 
 impl std::fmt::Display for RefreshFailed {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "{} of {} projects not fully refreshed",
-            self.0.failed_count, self.0.project_count
-        )
+        let report = &self.0;
+        let projects = (report.failed_projects > 0).then(|| {
+            format!(
+                "{} of {} projects not fully refreshed",
+                report.failed_projects, report.project_count
+            )
+        });
+        let user = report
+            .user_level_failed
+            .then(|| "the user-level store was not refreshed".to_owned());
+        let parts = projects.into_iter().chain(user).collect::<Vec<_>>();
+        write!(formatter, "{}", parts.join("; "))
     }
 }
 
@@ -1505,13 +1519,18 @@ fn refresh_phase_result(result: &anyhow::Result<RefreshReport>) -> live::PhaseRe
         };
     };
     let total = report.project_count;
-    let mut text = if report.failed_count > 0 {
-        format!("{} of {total} failed", report.failed_count)
+    let mut text = if report.failed_projects > 0 {
+        format!("{} of {total} failed", report.failed_projects)
+    } else if report.user_level_failed {
+        "user-level store failed".to_owned()
     } else if total == 1 {
         "1 project refreshed".to_owned()
     } else {
         format!("all {total} refreshed")
     };
+    if report.failed_projects > 0 && report.user_level_failed {
+        text.push_str(" · user-level store failed");
+    }
     if report.warned_count > 0 {
         text.push_str(&format!(
             " · {} {}",

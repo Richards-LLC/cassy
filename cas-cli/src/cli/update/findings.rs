@@ -229,23 +229,51 @@ fn cloud_cause(output: &str) -> Option<(String, Option<String>)> {
             .or_else(|| line.strip_prefix("Pull incomplete · ").map(|rest| ("pull incomplete", rest)))
     })?;
     let (what, rest) = line;
-    let mut remedy = None;
-    let mut parts: Vec<&str> = Vec::new();
+    let mut generic = None;
+    let mut specific = None;
+    let mut parts: Vec<String> = Vec::new();
     for part in rest.split(" · ") {
         if let Some(command) = part.strip_prefix("run ") {
-            remedy = Some(command.trim().to_owned());
+            generic = Some(command.trim().to_owned());
             continue;
         }
-        // "invalid_json_nul: row body contains…" explains a reason the
-        // count already named; the explanation stays under --verbose.
+        if part == "queued rows remain" {
+            continue;
+        }
         let explains_named_reason = part
             .split_once(": ")
             .is_some_and(|(reason, _)| parts.iter().any(|seen| seen.contains(reason)));
-        if part != "queued rows remain" && !explains_named_reason {
-            parts.push(part);
+        if !explains_named_reason {
+            parts.push(part.to_owned());
+            continue;
+        }
+        // An explanation that only restates a reason the count already
+        // named stays under --verbose. One that says what to do instead
+        // (a link or a command, cas-7c6b) is the finding's real remedy, and
+        // the generic retry it overrides must not be offered.
+        if let Some((cause, next)) = guidance(part) {
+            parts.extend(cause);
+            specific = Some(next);
         }
     }
-    Some((format!("{what}: {}", parts.join("; ")), remedy))
+    Some((format!("{what}: {}", parts.join("; ")), specific.or(generic)))
+}
+
+/// Split an explanation of a named reason into what it adds to the cause
+/// and what to do, when it says what to do (a link or a backtick command).
+fn guidance(part: &str) -> Option<(Option<String>, String)> {
+    let actionable = |text: &str| text.contains('`') || text.contains("://");
+    let (_, explanation) = part.split_once(": ")?;
+    if !actionable(explanation) {
+        return None;
+    }
+    Some(match explanation.rsplit_once(". ") {
+        Some((cause, next)) if actionable(next) && !actionable(cause) => (
+            Some(part[..part.len() - explanation.len()].to_owned() + cause.trim()),
+            next.trim().trim_end_matches('.').to_owned(),
+        ),
+        _ => (None, explanation.trim().trim_end_matches('.').to_owned()),
+    })
 }
 
 /// The remedy a detail ends with, as the command itself when it is one.

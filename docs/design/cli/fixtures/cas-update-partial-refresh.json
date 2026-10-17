@@ -1,5 +1,5 @@
 {
- "provenance": "RECONSTRUCTED, not a verbatim capture: the operator's 2026-10-17 update-ai run of `cas update -y` on installed 3.62.0 (task cas-0aa5). No raw transcript was saved. Rebuilt from the task description, cas-7c9b (two stale .git/index.lock failures, gabber-studio 2026-10-02 and pulse-card 2026-10-16), cas-f9b7 (invalid_json_nul rows in rocketship-template and Richards LLC/Accounting), cas-9815/cas-6718 (managed-file conflicts), and the hub's Tailscale Serve inactive warning. Phase output strings are the ones the shipping code prints.",
+ "provenance": "RECONSTRUCTED, not a verbatim capture: the operator's 2026-10-17 update-ai run of `cas update -y` on installed 3.62.0 (task cas-0aa5). No raw transcript was saved. Rebuilt from the task description, cas-7c9b (two stale .git/index.lock failures, gabber-studio 2026-10-02 and pulse-card 2026-10-16), cas-f9b7 (invalid_json_nul rows in rocketship-template and Richards LLC/Accounting, with the cas-7c6b diagnostic text), cas-9815/cas-6718 (managed-file conflicts), and the hub's Tailscale Serve inactive warning. Phase output strings are the ones the shipping code prints.",
  "binary": {
   "current": "3.62.0",
   "latest": "3.62.0",
@@ -86,7 +86,7 @@
    "cloud_sync": "warning: 3 pushed; 2 queued",
    "output": {
     "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n",
-    "cloud_sync": "[WARN] Push incomplete · 2 rejected by cloud (invalid_json_nul ×2) · invalid_json_nul: row body contains a NUL byte · queued rows remain · run cas cloud queue --retry\nRetained intentionally: retention ×14\n"
+    "cloud_sync": "[WARN] Push incomplete · 2 rejected by cloud (invalid_json_nul ×2) · invalid_json_nul: PostgreSQL jsonb cannot store U+0000; payload retained unchanged. Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for lossless roundtrip support, then `cas cloud queue --retry --retry-reason invalid_json_nul` · queued rows remain · run cas cloud queue --retry\nRetained intentionally: retention ×14\n"
    }
   },
   {
@@ -98,7 +98,7 @@
    "cloud_sync": "warning: 1 queued",
    "output": {
     "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n",
-    "cloud_sync": "[WARN] Push incomplete · 1 rejected by cloud (invalid_json_nul ×1) · invalid_json_nul: row body contains a NUL byte · queued rows remain · run cas cloud queue --retry\nRetained intentionally: retention ×14\n"
+    "cloud_sync": "[WARN] Push incomplete · 1 rejected by cloud (invalid_json_nul ×1) · invalid_json_nul: PostgreSQL jsonb cannot store U+0000; payload retained unchanged. Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for lossless roundtrip support, then `cas cloud queue --retry --retry-reason invalid_json_nul` · queued rows remain · run cas cloud queue --retry\nRetained intentionally: retention ×14\n"
    }
   },
   {

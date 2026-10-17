@@ -99,6 +99,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- **`cas update` keeps projects in step with Git** — Was: update installed
+  Cassy's files but left Git behind: managed skills still committed, retired
+  files still tracked, the `.gitignore` block never committed and generated
+  files untracked. → Now: every project is reconciled in one dedicated
+  `chore(cassy): reconcile managed project files` commit, never pushed; your
+  own edits are never staged, existing staged work is kept, a conflict is
+  reported and left untouched, and `cas doctor` flags any remaining drift.
 - **Lighter `cas serve`** — Was: each long-lived `cas serve` grew to 500–900
   MB, and every one launched its own Neon MCP server. → Now: allocator arenas
   are bounded and freed memory is returned while idle (an idle serve measured

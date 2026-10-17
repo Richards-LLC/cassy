@@ -732,7 +732,7 @@ async fn long_transcript_recycle(register_replacement: bool) {
             .unwrap();
         assert_eq!(old_registration.status, cas_types::AgentStatus::Shutdown);
         let mut held = tasks.get("cas-recycled-held").unwrap();
-        held.notes = Some("Replacement is waiting to register".into());
+        held.notes = "Replacement is waiting to register".into();
         tasks.update(&held).unwrap();
 
         // Drive the actual async read -> apply -> store-worker dispatch in

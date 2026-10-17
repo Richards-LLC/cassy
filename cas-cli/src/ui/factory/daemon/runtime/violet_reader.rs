@@ -479,9 +479,23 @@ pub(crate) fn read_managed(
 ) -> Option<PollReport> {
     let token = cloud.token.as_deref().map(str::trim).filter(|token| !token.is_empty())?;
     let port = HttpCloudCoordinationPort::new(cloud.endpoint.clone(), token);
-    let mut reader = reader.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let body = super::violet_body::VioletBodySource(|args| super::violet_body::read(cas_dir, registration_id, factory_session, args));
-    let outcome = reader.tick(&port, registration_id, &body, &PromptQueueTyper(queue), now);
+    read_managed_on(reader, &port, registration_id, cas_dir, &body, &PromptQueueTyper(queue), now)
+}
+
+/// [`read_managed`] against any port, body source and typer.
+fn read_managed_on(
+    reader: &Mutex<VioletReader>,
+    port: &dyn CloudCoordinationPort,
+    registration_id: &str,
+    cas_dir: &std::path::Path,
+    body: &dyn BodySource,
+    typer: &dyn SessionTyper,
+    now: DateTime<Utc>,
+) -> Option<PollReport> {
+    let _ = cas_dir;
+    let mut reader = reader.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let outcome = reader.tick(port, registration_id, body, typer, now);
     if !reader.managed() {
         return None;
     }
@@ -495,6 +509,19 @@ pub(crate) fn read_managed(
         ClaimOutcome::Unmanaged => {}
     }
     Some(report)
+}
+
+/// cas-6ace: claim receipts kept, newest last.
+const CLAIM_RECEIPTS_KEPT: usize = 20;
+
+fn claim_receipts_path(cas_dir: &std::path::Path) -> std::path::PathBuf {
+    cas_dir.join("violet").join("claim-receipts.json")
+}
+
+/// cas-6ace: the doctor line for the last claim receipts.
+pub(crate) fn claim_receipts_summary(cas_dir: &std::path::Path, now: DateTime<Utc>) -> Option<(bool, String)> {
+    let _ = (cas_dir, now);
+    None
 }
 
 #[cfg(test)]

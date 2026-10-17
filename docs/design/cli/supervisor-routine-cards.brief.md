@@ -10,33 +10,36 @@ the typed payload.
 | First two lines | The `[cas #N …]` header names the sender class and id, then one glyph line says what happened: `◦ cas-f9b7 started by tender-phoenix-59` or `⇄ worker-a → worker-b · <summary>`. |
 | Scannable | Routine rows are three lines at most, under 76 columns, with a glyph per class (`◦` for a progress relay, `⇄` for a peer copy). Operator turns stay whole, as do peer-supervisor mail, blockers, merge requests and verification events. |
 | Readable | One gist line (the task title, or the start of the peer message, cut at a word with `…`) and a last line naming the escape: `no action · full text: inbox_poll notification_id=N`. |
-| Machine output | The queue row is unchanged. `inbox_poll notification_id=N` returns the full body whatever its receipt says, and ids, ack, `in_reply_to` and wake authority are unchanged. |
+| Machine output | The queue row keeps its body, ids, ack, `in_reply_to` and wake authority; a peer copy also carries `kind=worker_peer_copy`. `inbox_poll notification_id=N` returns the full body for as long as retention keeps the row, whether or not it was acked, and after its task has moved on. |
 | Omitted | The `<task-lifecycle>` XML, the occurrence stamp and the session line of progress relays, plus the body of a peer copy past its first line. All of it is one `inbox_poll` away. |
 
 Routine means one of two classes, each identified by server-stamped facts:
 
 - a non-waking lifecycle relay (task started, ready again, closed): source `lifecycle:` plus
   daemon origin;
-- the supervisor's copy of worker-to-worker mail: registered-agent origin, plus a lead built by
-  CAS that names the same sender.
+- the supervisor's copy of worker-to-worker mail: the `worker_peer_copy` kind the store writes
+  in the same transaction that queues the recipient's row. No request field can set `kind` on
+  a non-operator row, so a worker's direct mail that copies the lead text has no stamp and is
+  typed whole.
 
-A row that is urgent, typed (`kind`), operator-stamped, outside the ordinary lane or
+A row that is urgent, otherwise typed (`kind`), operator-stamped, outside the ordinary lane or
 unparseable is typed whole. Progress relays are now labelled `lifecycle-relay`; before this
 change they were labelled `agent-authored`.
 
 ## What CAS does not own
 
-The `• Called cs.coordination({…})` cells are Codex's own MCP tool-call rendering. Codex 0.163.0's
-`[tui]` table (`animations`, `show_tooltips`, `raw_output_mode`, `status_line`, `keymap`, …) has
-no setting that collapses tool-call arguments by default. The supported controls are
-interactive:
+The `• Called cs.coordination({…})` blocks are drawn by Codex itself whenever the supervisor
+calls a tool. CAS never types them, so this change cannot shorten them.
 
-- `tui.keymap.global.focus_activity` ("Focus transcript activity groups to expand or collapse
-  their details").
-- `toggle_raw_output`, which gives selection-friendly text and does not collapse anything.
+Codex 0.163.0 has no setting that hides or shortens those blocks by default. Its `[tui]`
+settings cover animations, tooltips, raw output mode, the status line and key bindings. Two
+keys help by hand, and neither collapses tool calls automatically:
 
-This change leaves `~/.codex/config.toml` alone, so tool-call noise remains until Codex adds a
-default.
+- `focus_activity` lets you step through activity groups and expand or collapse each one;
+- `toggle_raw_output` switches to plain text for copying.
+
+`~/.codex/config.toml` is unchanged. Tool-call blocks stay as long as Codex lacks such a
+setting.
 
 ## Critique
 

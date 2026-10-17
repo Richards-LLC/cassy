@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.63.0] - 2026-10-17
+
 ### Fixed — sessions start and messages stay readable
 
 - **Startup without typing** — Was: a fresh Codex or Claude session could sit

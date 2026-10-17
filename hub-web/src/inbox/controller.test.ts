@@ -179,15 +179,34 @@ describe("operator inbox controller", () => {
     expect((await controller(cloud, store).load()).kind).toBe("ready");
   });
 
-  it("replays history with no hub involved and notifies subscribers", async () => {
+  it.each([undefined, `${PAGE_ORIGIN}/`])("replays history and disables reply upgrades when grants/me origin is %s", async (origin) => {
     const cloud = new OperatorCloudDouble();
+    cloud.replyGrants.enabled = true;
     await cloud.appendSessionEvent({ hubId: "h", projectId: "p", sessionId: "s", plaintext: { type: "cas.operator.turn", v: 1, snapshot: { prompt_id: 1 } } });
-    const inbox = controller(cloud);
+    const store = new MemoryInboxStore();
+    const inbox = controller(cloud, store);
     await signIn(cloud, inbox);
+    await inbox.refreshReplyGrants();
+    expect((await inbox.snapshot()).replyGrants!.supported).toBe(true);
+    const trusted = store.identity;
+    const original = inbox.client.request.bind(inbox.client);
+    vi.spyOn(inbox.client, "request").mockImplementation(async options => {
+      const response = await original(options);
+      if (options.path === "/api/operator/grants/me") {
+        const grant = { ...(response.grant as Record<string, unknown>) };
+        if (origin === undefined) delete grant.origin;
+        else grant.origin = origin;
+        return { ...response, grant };
+      }
+      return response;
+    });
     const seen: number[] = [];
     inbox.subscribe((snapshot) => seen.push(snapshot.events.length));
     expect(await inbox.runOnce()).toBe(5000);
     expect(seen.at(-1)).toBe(1);
+    expect(inbox.current().kind).toBe("ready");
+    expect((await inbox.snapshot()).replyGrants!.supported).toBe(false);
+    expect(store.identity).toBe(trusted);
   });
 
   it("wipes this profile's inbox when the device is revoked", async () => {

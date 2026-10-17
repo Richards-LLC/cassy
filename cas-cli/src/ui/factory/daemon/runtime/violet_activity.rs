@@ -2048,6 +2048,8 @@ pub(crate) struct VioletWakeRuntime {
     pub cas_dir: PathBuf,
     pub factory_session: String,
     pub supervisor_name: String,
+    /// cas-146e: the v2 reader for managed bindings.
+    pub reader: std::sync::Mutex<super::violet_reader::VioletReader>,
     stopping: std::sync::atomic::AtomicBool,
 }
 
@@ -2097,6 +2099,7 @@ impl VioletWakeRuntime {
             cas_dir: cas_dir.to_path_buf(),
             factory_session: factory_session.to_string(),
             supervisor_name: supervisor_name.to_string(),
+            reader: std::sync::Mutex::new(super::violet_reader::VioletReader::new(factory_session)),
             stopping: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -2130,7 +2133,15 @@ impl VioletWakeRuntime {
             let _ = state.end_session(now);
             return (PollReport::default(), Vec::new(), None);
         }
-        let report = state.poll_once(&relay, queue.as_ref(), presence.is_some(), now);
+        // cas-146e: a managed binding is read through v2 only; its legacy
+        // claim and channel sweep stay off.
+        let managed = presence.as_ref().and_then(|supervisor| {
+            super::violet_reader::read_managed(&self.reader, &cloud, &supervisor.agent_id, queue.as_ref(), now)
+        });
+        let report = match managed {
+            Some(ref report) => report.clone(),
+            None => state.poll_once(&relay, queue.as_ref(), presence.is_some(), now),
+        };
         // Shutdown never waits for this tick's HTTP calls. The in-flight tick
         // owns the deferred stop and must finish it before releasing state.
         if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
@@ -2144,7 +2155,7 @@ impl VioletWakeRuntime {
             tracing::info!(channels = ?stopped, "Violet channel watches stopped after 1 h idle");
         }
         // Sweeps run only with a live supervisor to read the result.
-        let sweeps = if presence.is_some() { state.due_sweeps(now) } else { Vec::new() };
+        let sweeps = if presence.is_some() && managed.is_none() { state.due_sweeps(now) } else { Vec::new() };
         (report, sweeps, presence)
     }
 

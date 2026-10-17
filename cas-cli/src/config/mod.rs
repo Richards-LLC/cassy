@@ -275,6 +275,7 @@ impl Config {
 }
 
 mod access;
+pub(crate) use access::{ConfigRetirement, retire_config};
 pub use access::{
     get_telemetry_consent, global_cas_dir, load_global_config, prompt_telemetry_consent,
     save_global_config, set_telemetry_consent,

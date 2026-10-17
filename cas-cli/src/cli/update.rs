@@ -110,7 +110,9 @@ fn report_builtin_sync(
             fmt.success(&format!("{location}: built-ins up to date"))?;
         }
         for file in &result.pruned_files {
-            fmt.write_raw(&format!("    - {location}/{file} (no longer shipped; removed)"))?;
+            fmt.write_raw(&format!(
+                "    - {location}/{file} (no longer shipped; removed)"
+            ))?;
             fmt.newline()?;
         }
 
@@ -562,8 +564,14 @@ fn run_full_update(
     if hub_proof.action == "failed" {
         anyhow::bail!(
             "hub recovery failed after one retry: {}; {}",
-            hub_proof.failure.as_deref().unwrap_or("unknown verification error"),
-            hub_proof.remedy.as_deref().unwrap_or("Run `cas hub restart --force`."),
+            hub_proof
+                .failure
+                .as_deref()
+                .unwrap_or("unknown verification error"),
+            hub_proof
+                .remedy
+                .as_deref()
+                .unwrap_or("Run `cas hub restart --force`."),
         );
     }
 
@@ -622,7 +630,9 @@ fn combined_update_receipt(
         "binary_updated": updated,
         "version": version,
     });
-    if let (Some(target), Some(refresh)) = (receipt.as_object_mut(), refresh.and_then(|r| r.as_object())) {
+    if let (Some(target), Some(refresh)) =
+        (receipt.as_object_mut(), refresh.and_then(|r| r.as_object()))
+    {
         for (key, value) in refresh {
             target.insert(key.clone(), value.clone());
         }
@@ -776,6 +786,7 @@ struct ProjectRefreshReceipt {
     /// exactly like any other project, then registered so the next run finds
     /// it without scanning.
     unregistered: bool,
+    retired_toml: Option<crate::config::ConfigRetirement>,
     migration: ProjectPhase,
     search_index: ProjectPhase,
     skills: ProjectPhase,
@@ -1471,7 +1482,25 @@ fn refresh_all_projects_with_user_refresh(
     // Account registrations must converge before project proxies choose their
     // bearer. Keep this phase advisory and run it once for the whole update.
     live::set_activity("user-level store");
-    let (user_level, user_details, user_documents) = capture_phase_documents(cli, user_refresh);
+    let mut user_retired_toml = Vec::new();
+    let mut user_roots = BTreeSet::new();
+    for root in [
+        user_level_store_root(),
+        crate::config::global_cas_dir().ok(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let root = root.canonicalize().unwrap_or(root);
+        if user_roots.insert(root.clone()) {
+            user_retired_toml.push(crate::config::retire_config(&root, args.dry_run));
+        }
+    }
+    let (mut user_level, user_details, user_documents) =
+        capture_phase_documents(cli, user_refresh);
+    for maintenance in &user_retired_toml {
+        user_level = with_config_retirement(user_level, maintenance);
+    }
 
     let names = findings::display_names(discovery.projects.iter().map(PathBuf::as_path));
     for (index, project) in discovery.projects.iter().enumerate() {
@@ -1485,6 +1514,9 @@ fn refresh_all_projects_with_user_refresh(
         let cas_root = project.join(".cas");
         let mut details = String::new();
         let mut documents: Vec<(&'static str, Vec<serde_json::Value>)> = Vec::new();
+        // Remove ignored TOML before migrations and managed-file readers load
+        // config. Ownership/discovery is unchanged; never initialize a store.
+        let retired_toml = crate::config::retire_config(&cas_root, args.dry_run);
 
         // Run each phase independently. A malformed database must be visible
         // in the receipt, but must not leave another project stale.
@@ -1542,6 +1574,7 @@ fn refresh_all_projects_with_user_refresh(
             phase_details.push((cloud.is_ok(), output));
             (search_index, skills, membership, cloud)
         };
+        let skills = with_config_retirement(skills, &retired_toml);
 
         // Registration is what makes discovery converge: a project the scan had
         // to find this time is in the registry for every later run, and for
@@ -1554,6 +1587,7 @@ fn refresh_all_projects_with_user_refresh(
         receipts.push(ProjectRefreshReceipt {
             project,
             unregistered,
+            retired_toml: Some(retired_toml),
             migration,
             search_index,
             skills,
@@ -1573,6 +1607,7 @@ fn refresh_all_projects_with_user_refresh(
             user_level,
             user_details,
             user_documents,
+            user_retired_toml,
             skipped_unregistered: discovery.skipped_unregistered,
         },
         hub_transport_error,
@@ -1582,6 +1617,39 @@ fn refresh_all_projects_with_user_refresh(
     )
 }
 
+/// Keep an existing phase failure and its remedy when maintenance also fails.
+/// Success adds only a small receipt detail, never a spurious finding.
+fn with_config_retirement(
+    phase: ProjectPhase,
+    maintenance: &crate::config::ConfigRetirement,
+) -> ProjectPhase {
+    let detail = match maintenance.status {
+        "repaired" => format!("{} retired TOML entries removed", maintenance.removed.len()),
+        "planned" => format!(
+            "{} retired TOML entries would be removed",
+            maintenance.removed.len()
+        ),
+        "failed" => format!(
+            "config {}: {}; check `{}` and rerun `cas update`",
+            maintenance.path.display(),
+            maintenance.error.as_deref().unwrap_or("cleanup failed"),
+            maintenance.path.display()
+        ),
+        _ => return phase,
+    };
+    let detail = format!("{}; {detail}", phase.detail());
+    if phase.failed() || maintenance.status == "failed" {
+        ProjectPhase::Failed(detail)
+    } else {
+        match phase {
+            ProjectPhase::Warning(_) => ProjectPhase::Warning(detail),
+            ProjectPhase::Skipped(_) => ProjectPhase::Skipped(detail),
+            ProjectPhase::Planned(_) => ProjectPhase::Planned(detail),
+            _ => ProjectPhase::Ok(detail),
+        }
+    }
+}
+
 /// Everything one sweep learned, before any of it is printed.
 struct RefreshResults {
     receipts: Vec<ProjectRefreshReceipt>,
@@ -1589,6 +1657,7 @@ struct RefreshResults {
     user_details: String,
     /// `--json`: what the user-level phase printed, nested into the receipt.
     user_documents: Vec<serde_json::Value>,
+    user_retired_toml: Vec<crate::config::ConfigRetirement>,
     skipped_unregistered: Vec<SkippedProject>,
 }
 
@@ -1608,6 +1677,7 @@ fn finish_project_refresh(
         user_level,
         user_details,
         user_documents,
+        user_retired_toml,
         skipped_unregistered,
     } = results;
     let failed_count = receipts.iter().filter(|receipt| receipt.failed()).count()
@@ -1629,6 +1699,12 @@ fn finish_project_refresh(
             .partition(|document| document.get("schema_status").is_some());
         receipt["user_level_store"]["phase_documents"] =
             serde_json::json!({ "migration": migration, "builtins": builtins });
+    }
+    if !user_retired_toml.is_empty() {
+        receipt["user_level_store"]["retired_toml"] = serde_json::to_value(&user_retired_toml)?;
+    }
+    if cli.json {
+        println!("{receipt}");
     }
     if let Some(path) = &args.refresh_receipt {
         write_refresh_receipt(path, &receipt)?;
@@ -1725,7 +1801,9 @@ fn binary_exit_reason(failed: &RefreshFailed, version: &str, updated: bool) -> S
 fn refresh_report(result: &anyhow::Result<RefreshReport>) -> Option<&RefreshReport> {
     match result {
         Ok(report) => Some(report),
-        Err(error) => error.downcast_ref::<RefreshFailed>().map(|failed| &failed.0),
+        Err(error) => error
+            .downcast_ref::<RefreshFailed>()
+            .map(|failed| &failed.0),
     }
 }
 
@@ -1754,7 +1832,11 @@ fn refresh_phase_result(result: &anyhow::Result<RefreshReport>) -> live::PhaseRe
         text.push_str(&format!(
             " · {} {}",
             report.warned_count,
-            if report.warned_count == 1 { "warning" } else { "warnings" }
+            if report.warned_count == 1 {
+                "warning"
+            } else {
+                "warnings"
+            }
         ));
     }
     if report.skipped_unregistered > 0 {
@@ -1814,7 +1896,11 @@ fn print_sweep(fmt: &mut Formatter<'_>, report: &RefreshReport, verbose: bool) -
         fmt.receipt(&line)?;
     }
     if !verbose
-        && (shortened || report.sweep.as_ref().is_some_and(|sweep| !sweep.findings.is_empty()))
+        && (shortened
+            || report
+                .sweep
+                .as_ref()
+                .is_some_and(|sweep| !sweep.findings.is_empty()))
     {
         fmt.write_raw("  ")?;
         fmt.receipt("cas update --verbose shows every project and phase output")?;
@@ -2261,7 +2347,7 @@ fn project_refresh_receipt_json(
     let projects = receipts
         .iter()
         .map(|receipt| {
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "project": receipt.project,
                 "store": receipt.project.join(".cas"),
                 "registered": !receipt.unregistered,
@@ -2270,7 +2356,11 @@ fn project_refresh_receipt_json(
                 "skills": receipt.skills.summary(),
                 "membership": receipt.membership.summary(),
                 "cloud_sync": receipt.cloud.summary(),
-            })
+            });
+            if let Some(maintenance) = &receipt.retired_toml {
+                value["retired_toml"] = serde_json::json!(maintenance);
+            }
+            value
         })
         .zip(receipts)
         .map(|(mut project, receipt)| {
@@ -2405,7 +2495,7 @@ fn render_project_refresh_summary(
     // The user-level store is host state, so it gets a named line of its own
     // rather than a project row it would otherwise be miscounted in.
     let _ = writeln!(
-            out,
+        out,
         "  [{}] user-level store: {}",
         user_level.status_label().trim_matches(['[', ']']),
         user_level.detail()
@@ -2490,10 +2580,9 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery 
     let mut skipped_by_path = BTreeMap::new();
     for repo in known.into_iter().filter(|repo| repo.healthy) {
         let path = canonical_path(&repo.path);
-        if let Some(skip) = crate::store::known_repos::registry_skip_for_known_roots(
-            &path,
-            &known_roots,
-        ) {
+        if let Some(skip) =
+            crate::store::known_repos::registry_skip_for_known_roots(&path, &known_roots)
+        {
             skipped_by_path.insert(path, skip.reason());
         } else {
             registered.insert(path);
@@ -2549,10 +2638,9 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery 
     {
         let project = canonical_path(project);
         if project.join(".cas/cas.db").is_file() {
-            if let Some(skip) = crate::store::known_repos::registry_skip_for_known_roots(
-                &project,
-                &known_roots,
-            ) {
+            if let Some(skip) =
+                crate::store::known_repos::registry_skip_for_known_roots(&project, &known_roots)
+            {
                 skipped_by_path.insert(project, skip.reason());
             } else {
                 projects.insert(project);
@@ -2577,7 +2665,8 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery 
     let mut keep = BTreeSet::new();
     for project in preferred {
         if crate::store::known_repos::project_inode_key(&project)
-            .is_some_and(|inode| !seen_inodes.insert(inode)) {
+            .is_some_and(|inode| !seen_inodes.insert(inode))
+        {
             unregistered.remove(&project);
             skipped_by_path.insert(project, "duplicate project directory".to_string());
         } else {
@@ -3675,7 +3764,11 @@ fn render_check_report(fmt: &mut Formatter<'_>, view: &CheckView<'_>) -> io::Res
             Verdict::Warning,
             format!(
                 "{pending} {} pending",
-                if pending == 1 { "migration" } else { "migrations" }
+                if pending == 1 {
+                    "migration"
+                } else {
+                    "migrations"
+                }
             ),
             format!(
                 "Cassy {} {dot} schema v{applied} {arrow} v{latest}",
@@ -4195,10 +4288,15 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
     // The hub goes first so it picks up the new binary immediately rather than
     // waiting behind a full refresh. Its verification is drawn from data in
     // the findings; anything else it printed still reaches the operator.
-    let (hub_restart, hub_output) =
-        capture_phase(!cli.json, || super::hub::restart_stale_hub(current_version, cli));
+    let (hub_restart, hub_output) = capture_phase(!cli.json, || {
+        super::hub::restart_stale_hub(current_version, cli)
+    });
     let hub_restart = hub_restart?;
-    print_indented(&binary_phase_remainder(&hub_output, current_version, Some(&hub_restart)))?;
+    print_indented(&binary_phase_remainder(
+        &hub_output,
+        current_version,
+        Some(&hub_restart),
+    ))?;
 
     // These are the phases that must not run in the pre-update image. To the
     // operator they are phase 2 of the update the parent started.
@@ -4219,8 +4317,14 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
     if hub_proof.action == "failed" {
         anyhow::bail!(
             "hub recovery failed after one retry: {}; {}",
-            hub_proof.failure.as_deref().unwrap_or("unknown verification error"),
-            hub_proof.remedy.as_deref().unwrap_or("Run `cas hub restart --force`."),
+            hub_proof
+                .failure
+                .as_deref()
+                .unwrap_or("unknown verification error"),
+            hub_proof
+                .remedy
+                .as_deref()
+                .unwrap_or("Run `cas hub restart --force`."),
         );
     }
     Ok(())
@@ -4580,7 +4684,10 @@ fn refresh_failed_without_receipt(
 /// `<binary> --version` reduced to the bare semver, or None when it cannot be
 /// asked.
 fn reported_binary_version(binary: &Path) -> Option<String> {
-    let output = std::process::Command::new(binary).arg("--version").output().ok()?;
+    let output = std::process::Command::new(binary)
+        .arg("--version")
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -4779,7 +4886,11 @@ impl UpdateStepTracker {
             true,
             f,
             |result| live::PhaseResult {
-                verdict: if result.is_ok() { Verdict::Ok } else { Verdict::Error },
+                verdict: if result.is_ok() {
+                    Verdict::Ok
+                } else {
+                    Verdict::Error
+                },
                 text: if result.is_ok() { "done" } else { "failed" }.to_owned(),
             },
             |_, output| output.to_owned(),
@@ -4811,18 +4922,15 @@ impl UpdateStepTracker {
             print_phase_line(None, &counter, label, doing, None)?;
         }
         let (value, output) = if capture {
-            let live_line = animate
-                .then(terminal_handle)
-                .flatten()
-                .map(|terminal| {
-                    live::LiveLine::start(
-                        terminal,
-                        mode,
-                        counter.clone(),
-                        label.to_owned(),
-                        doing.to_owned(),
-                    )
-                });
+            let live_line = animate.then(terminal_handle).flatten().map(|terminal| {
+                live::LiveLine::start(
+                    terminal,
+                    mode,
+                    counter.clone(),
+                    label.to_owned(),
+                    doing.to_owned(),
+                )
+            });
             let (value, output) = capture_phase(true, f);
             if let Some(line) = live_line {
                 line.finish();

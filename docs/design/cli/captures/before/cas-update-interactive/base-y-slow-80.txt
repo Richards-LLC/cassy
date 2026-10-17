@@ -1,0 +1,22 @@
+→       [1/2] Cassy binary  checking for a newer release
+Binary Update
+  Current version: 3.62.0
+  Target version:  9.9.9
+
+  This will download and replace the current binary.
+Checking target-arch... x86_64-unknown-linux-gnu
+Checking current version... v3.62.0
+Checking latest released version... v9.9.9 (1 versions available)
+New release found! v3.62.0 --> v9.9.9
+New release is *NOT* compatible
+
+cas release status:
+  * Current exe: "/mnt/rewind/cas/scratch/qa70a8r2/bin/base"
+  * New exe release: "cas-x86_64-unknown-linux-gnu.tar.gz"
+  * New exe download url: "http://127.0.0.1:41637/asset"
+
+The new release will be downloaded/extracted and the existing binary will be replaced.
+Do you want to continue? [Y/n] y
+Downloading...
+[00:00:01] [========================================] 256.00 KiB/256.00 KiB (0s) Done                                                                           Extracting archive... [ERROR] [1/2] Cassy binary  update failed                                   2.4s
+[ERROR] UpdateError: Could not find the required path in the archive: "cas"

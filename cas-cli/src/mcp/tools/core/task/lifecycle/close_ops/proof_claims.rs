@@ -5,6 +5,7 @@
 //! proposed close reason is inspected; historical notes are not new assertions.
 
 use regex::Regex;
+use std::path::Path;
 use std::sync::OnceLock;
 
 struct Grammar {
@@ -44,34 +45,103 @@ fn grammar() -> &'static Grammar {
 /// of future proof. Explicit deferral is accepted without claiming it passed.
 /// A citation-only following clause may supply the receipt; another claim's
 /// receipt cannot silently stand in for this one.
-pub(super) fn has_unreceipted_claim(reason: &str) -> bool {
+pub(super) fn validate_claims(
+    reason: &str,
+    cas_root: &Path,
+    receipt_root: &Path,
+) -> Result<(), String> {
     let g = grammar();
-    let lower = reason.to_ascii_lowercase();
+    // Keep the original spelling for case-sensitive filesystem citations.
     let clauses: Vec<_> = g
         .clauses
-        .split(&lower)
+        .split(reason)
         .filter(|s| !s.trim().is_empty())
         .collect();
-    clauses.iter().enumerate().any(|(index, clause)| {
+    for (index, clause) in clauses.iter().enumerate() {
+        let lower = clause.to_ascii_lowercase();
         // Remove only the negated assertion, not other positive assertions
         // in the same clause ("tests passed, build not verified").
-        let assertion = g.negated.replace_all(clause, "");
+        let assertion = g.negated.replace_all(&lower, "");
         if !g.proof.is_match(&assertion) {
-            return false;
+            continue;
         }
         let completed = g.passed.is_match(&assertion);
         let future =
             g.future.is_match(&assertion) && (completed || g.execution.is_match(&assertion));
         let claim = (completed && g.external.is_match(&assertion)) || future;
-        if !claim || (!completed && clause.contains("deferred to ")) {
-            return false;
+        if !claim || (!completed && lower.contains("deferred to ")) {
+            continue;
         }
-        let adjacent_receipt = clauses.get(index + 1).is_some_and(|next| {
-            g.receipt_heading.is_match(next)
-                && g.receipt.is_match(next)
-                && !g.passed.is_match(next)
-                && !g.future.is_match(next)
+        let adjacent_receipt = clauses.get(index + 1).filter(|next| {
+            let lower = next.to_ascii_lowercase();
+            (g.receipt_heading.is_match(&lower) || !local_paths(next).is_empty())
+                && (g.receipt.is_match(next) || !local_paths(next).is_empty())
+                && !g.passed.is_match(&lower)
+                && !g.future.is_match(&lower)
         });
-        !g.receipt.is_match(clause) && !adjacent_receipt
-    })
+        let mut receipted = false;
+        for cited in std::iter::once(*clause).chain(adjacent_receipt.copied()) {
+            let paths = local_paths(cited);
+            receipted |= g.receipt.is_match(cited) || !paths.is_empty();
+            // Run IDs/actions URLs retain their existing semantics: close
+            // performs no network check. Every local citation must resolve,
+            // even when another citation in the same claim is valid.
+            for id in g
+                .receipt
+                .find_iter(cited)
+                .map(|m| m.as_str())
+                .filter(|id| id.starts_with("art-"))
+            {
+                let found = cas_store::SqliteArtifactStore::open(cas_root)
+                    .and_then(|store| store.get(id))
+                    .map_err(|error| receipt_error(id, &error.to_string()))?;
+                if found.is_none() {
+                    return Err(receipt_error(id, "no artifact record in this project"));
+                }
+            }
+            for path in paths {
+                let expanded = crate::qa_evidence::expand_home(path);
+                if !receipt_root.join(expanded).is_file() {
+                    return Err(receipt_error(path, "no file at the cited path"));
+                }
+            }
+        }
+        if !receipted {
+            return Err("PROOF CLAIM RECEIPT REQUIRED\nCite a run id, artifact id or local receipt path beside each third-party or future proof claim.\nIf it has not run, write \"deferred to <stage>\" instead of claiming a pass.".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn receipt_error(citation: &str, detail: &str) -> String {
+    format!(
+        "PROOF CLAIM RECEIPT REQUIRED\nCannot resolve receipt `{citation}`: {detail}.\nCite an existing receipt, or write \"deferred to <stage>\" if it has not run."
+    )
+}
+
+/// Qualified local paths, optionally backtick-quoted (including spaces).
+/// Bare test counts and remote run URLs are not filesystem citations.
+fn local_paths(clause: &str) -> Vec<&str> {
+    let mut paths = Vec::new();
+    for (index, segment) in clause.split('`').enumerate() {
+        let tokens: Vec<_> = if index % 2 == 1 {
+            vec![segment]
+        } else {
+            segment.split_whitespace().collect()
+        };
+        for token in tokens {
+            let path = super::strip_path_punctuation(token);
+            if !path.contains("://")
+                && !path.starts_with("/actions/runs/")
+                && (path.starts_with('/')
+                    || path.starts_with("~/")
+                    || path.starts_with("./")
+                    || path.starts_with("../")
+                    || (path.contains('/') && Path::new(path).extension().is_some()))
+            {
+                paths.push(path);
+            }
+        }
+    }
+    paths
 }

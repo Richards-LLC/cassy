@@ -64,15 +64,31 @@ async fn cas_b8e8_close_proof_claims_need_a_receipt() {
         "QA reports tests passed (~/Proof.log)",
     ];
     let missing = [
-        ("Supervisor reports tests passed art-deadbeef", "art-deadbeef"),
-        ("QA reports tests passed; evidence: .cas/Missing.log", ".cas/Missing.log"),
-        ("QA reports tests passed art-1234abcd .cas/Missing.log", ".cas/Missing.log"),
-        ("QA reports tests passed art-1234abcd art-deadbeef", "art-deadbeef"),
+        (
+            "Supervisor reports tests passed art-deadbeef",
+            "art-deadbeef",
+        ),
+        (
+            "QA reports tests passed; evidence: .cas/Missing.log",
+            ".cas/Missing.log",
+        ),
+        (
+            "QA reports tests passed art-1234abcd .cas/Missing.log",
+            ".cas/Missing.log",
+        ),
+        (
+            "QA reports tests passed art-1234abcd art-deadbeef",
+            "art-deadbeef",
+        ),
     ];
     let cases = refused
         .iter()
         .map(|reason| (*reason, Some("deferred to <stage>")))
-        .chain(missing.iter().map(|(reason, citation)| (*reason, Some(*citation))))
+        .chain(
+            missing
+                .iter()
+                .map(|(reason, citation)| (*reason, Some(*citation))),
+        )
         .chain(accepted.iter().map(|reason| (*reason, None)));
     for (reason, rejection) in cases {
         // One project, one fresh task per reason: the same title by design.

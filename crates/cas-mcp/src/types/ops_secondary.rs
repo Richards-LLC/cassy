@@ -744,7 +744,7 @@ pub struct FactoryRequest {
     pub dry_run: Option<bool>,
 
     /// Explicitly opt into deleting durable task artifacts.
-    #[schemars(description = "gc_cleanup: artifact deletion (off by default); force=true dry_run=false plus retention checks.")]
+    #[schemars(description = "gc_cleanup: opt-in; force=true dry_run=false; retention applies.")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub artifacts: Option<bool>,
 
@@ -1442,13 +1442,13 @@ pub struct CoordinationRequest {
 
     /// Preview cleanup without making changes.
     #[schemars(
-        description = "Preview cleanup without making changes (worktree_cleanup; gc_cleanup target caches default to preview unless explicitly false)"
+        description = "Preview cleanup; gc_cleanup defaults to true."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub dry_run: Option<bool>,
 
     /// Explicitly opt into deleting durable task artifacts.
-    #[schemars(description = "gc_cleanup: artifact deletion (off by default); force=true dry_run=false plus retention checks.")]
+    #[schemars(description = "gc_cleanup: opt-in; force=true dry_run=false; retention applies.")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub artifacts: Option<bool>,
 

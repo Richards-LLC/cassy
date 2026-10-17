@@ -10,9 +10,6 @@ use std::thread;
 use crate::cli::Cli;
 use crate::ui::components::{Formatter, OutputMode, Verdict};
 
-#[path = "cost_probe.rs"]
-mod cost_probe;
-
 #[cfg(feature = "mcp-proxy")]
 fn cas_8235_fixture() -> crate::test_support::TestEnvGuard {
     let mut env = crate::test_support::TestEnvGuard::temp_home();

@@ -391,37 +391,57 @@ fn ensure_cas_pre_tool_budget(path: &Path) -> io::Result<bool> {
 /// Upgrade/trust only existing CAS-owned handlers, preserving other hooks and
 /// the selected account home. Called for worker user and project config layers.
 pub fn prepare_cas_tool_hooks_in(config: &Path, hooks: &Path) -> io::Result<bool> {
+    prepare_cas_tool_hooks(config, hooks, true)
+}
+
+/// `upgrade_budget=false` trusts the file as it stands and never writes it.
+fn prepare_cas_tool_hooks(config: &Path, hooks: &Path, upgrade_budget: bool) -> io::Result<bool> {
     let source = match std::fs::read_to_string(hooks) {
         Ok(source) => source,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    let mut value: serde_json::Value = serde_json::from_str(&source).map_err(io::Error::other)?;
+    let mut value: serde_json::Value = serde_json::from_str(&source).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "codex_hooks_json_invalid: {} does not parse as JSON ({error}); Codex would load \
+                 it for this worker, so fix or remove it before spawning",
+                hooks.display()
+            ),
+        )
+    })?;
     if cas_pre_tool_handlers(&mut value).next().is_none() {
         return Ok(false);
     }
-    ensure_cas_hooks_trusted_in(config, hooks)
+    if upgrade_budget {
+        ensure_cas_pre_tool_budget(hooks)?;
+    }
+    register_cas_hook_trust(config, hooks)
 }
 
-/// Every project `hooks.json` Codex may load for a session started in `cwd`.
+/// Trust every project `hooks.json` Codex may load for a session in `cwd`.
 ///
 /// Codex 0.156 and earlier read `<cwd>/.codex/hooks.json`. Codex 0.162 instead
 /// resolves a linked git worktree to its main checkout and loads
 /// `<main checkout>/.codex/hooks.json`, keyed by that path (cas-4984). Observed
 /// with `codex app-server` `hooks/list` on codex-cli 0.162.1: for a linked
 /// worktree cwd it listed only the main checkout's file, with the same hashes
-/// CAS computes. A trust entry keyed by the worktree's own file therefore left
-/// both CAS hooks "untrusted" and parked the worker on "Hooks need review".
-/// Trusting both paths covers both schemes; the extra state entry is inert.
-pub fn codex_project_hooks_paths(cwd: &Path) -> Vec<PathBuf> {
-    let mut paths = vec![cwd.join(".codex/hooks.json")];
+/// CAS computes. Both are trusted; the state entry Codex ignores is inert.
+///
+/// The main checkout lies outside the worker's worktree and its hooks file is
+/// usually tracked, so it is trusted exactly as it stands and never rewritten
+/// (cas-6591); only the worktree copy receives the PreToolUse budget upgrade.
+pub fn prepare_codex_project_hooks_in(config: &Path, cwd: &Path) -> io::Result<()> {
+    let own = cwd.join(".codex/hooks.json");
+    prepare_cas_tool_hooks(config, &own, true)?;
     if let Some(main) = linked_worktree_main_checkout(cwd) {
         let main_hooks = main.join(".codex/hooks.json");
-        if !paths.contains(&main_hooks) {
-            paths.push(main_hooks);
+        if main_hooks != own {
+            prepare_cas_tool_hooks(config, &main_hooks, false)?;
         }
     }
-    paths
+    Ok(())
 }
 
 /// The main checkout of the linked git worktree containing `cwd`, if any.
@@ -469,6 +489,12 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 /// has emitted its canonical handler shape.
 pub fn ensure_cas_hooks_trusted_in(config_path: &Path, hooks_path: &Path) -> io::Result<bool> {
     ensure_cas_pre_tool_budget(hooks_path)?;
+    register_cas_hook_trust(config_path, hooks_path)
+}
+
+/// Record the CAS handlers in `hooks_path` as trusted, hashing the file as it
+/// stands; never writes the hooks file.
+fn register_cas_hook_trust(config_path: &Path, hooks_path: &Path) -> io::Result<bool> {
     let entries = cas_hook_trust_entries(hooks_path)?;
     let entries_for_write = entries.clone();
     update_codex_config_locked(
@@ -1079,6 +1105,8 @@ mod tests {
     fn linked_worktree_trusts_the_main_checkout_hooks_codex_0_162_loads() {
         // cas-4984: codex-cli 0.162.1 `hooks/list` for a linked worktree cwd
         // listed only `<main checkout>/.codex/hooks.json`, with these hashes.
+        // cas-6591: that file is the operator's, so it is trusted as it stands
+        // (PreToolUse timeout 3, below the budget) and never rewritten.
         let dir = TempDir::new();
         let main = dir.join("main");
         let linked = dir.join("linked");
@@ -1091,27 +1119,16 @@ mod tests {
         )
         .unwrap();
         std::fs::create_dir_all(main.join(".codex")).unwrap();
-        std::fs::write(
-            main.join(".codex/hooks.json"),
-            r#"{"hooks":{
-  "PostToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"cas hook PostToolUse","timeout":3}]}],
-  "PreToolUse":[{"matcher":"^(Bash|apply_patch)$","hooks":[{"type":"command","command":"CAS_HOOK_HARNESS=codex cas hook PreToolUse","timeout":120}]}]
-}}"#,
-        )
-        .unwrap();
-
-        let paths = codex_project_hooks_paths(&linked);
         let main_hooks = main.join(".codex/hooks.json");
-        assert_eq!(
-            paths,
-            vec![linked.join(".codex/hooks.json"), main_hooks.clone()]
-        );
-        assert_eq!(codex_project_hooks_paths(&main), vec![main_hooks.clone()]);
+        let main_source = r#"{"hooks":{
+  "PostToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"cas hook PostToolUse","timeout":3}]}],
+  "PreToolUse":[{"matcher":"^(Bash|apply_patch)$","hooks":[{"type":"command","command":"CAS_HOOK_HARNESS=codex cas hook PreToolUse","timeout":3}]}]
+}}"#;
+        std::fs::write(&main_hooks, main_source).unwrap();
 
         let config_path = dir.join("config.toml");
-        for hooks in &paths {
-            prepare_cas_tool_hooks_in(&config_path, hooks).unwrap();
-        }
+        prepare_codex_project_hooks_in(&config_path, &linked).unwrap();
+        assert_eq!(std::fs::read_to_string(&main_hooks).unwrap(), main_source);
         let config: toml::Value =
             toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         let trusted = |event: &str| {
@@ -1123,11 +1140,24 @@ mod tests {
         };
         assert_eq!(
             trusted("pre_tool_use"),
-            "sha256:06a6a2b38e68da7193b1f3d10f21ca73dde9bc974cd5020e0164fd23d5af0253"
+            "sha256:725839709913b8c520d286f566e183db235e9ac27833034bb4da5a019f54ba06"
         );
         assert_eq!(
             trusted("post_tool_use"),
             "sha256:94c125201a0019ec158d7abb96cd3fc0d8282bb499aa506f202ce794748cdb2b"
+        );
+
+        // cas-6591: an unparseable main-checkout file is a named failure.
+        std::fs::write(&main_hooks, "{ not json").unwrap();
+        let error = prepare_codex_project_hooks_in(&config_path, &linked).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.starts_with("codex_hooks_json_invalid: "),
+            "{message}"
+        );
+        assert!(
+            message.contains(&main_hooks.display().to_string()),
+            "{message}"
         );
     }
 

@@ -657,21 +657,31 @@ pub(crate) fn execute(cas_root: &Path, args: &[String]) -> Result<()> {
 /// process's stdout (the shell's log redirect), never the harness pipe.
 #[cfg(unix)]
 pub(crate) fn execute_detached(cas_root: &Path, args: &[String]) -> Result<()> {
-    if targeted_test(args).is_none() && check_packages(args).is_none() {
+    if !allowed_args(args) {
         bail!("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed");
     }
-    let mut command = Command::new(std::env::current_exe()?);
-    command
-        .args(["factory", "worker-check", "--cas-root"])
-        .arg(cas_root)
-        .arg("--")
-        .args(args);
+    let command = detached_runner_command(&std::env::current_exe()?, cas_root, args);
     let child = spawn_detached(command).context("starting the detached worker-check runner")?;
     println!(
         "worker-check: detached pid {} in its own session; this log receives its output and receipt",
         child.id()
     );
     Ok(())
+}
+
+/// The detached runner, ending its log with `worker-check: EXIT <code>` so a
+/// refused or failed run is distinguishable from one still running (cas-6591).
+#[cfg(unix)]
+fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String]) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", r#""$0" "$@"; echo "worker-check: EXIT $?""#])
+        .arg(executable)
+        .args(["factory", "worker-check", "--cas-root"])
+        .arg(cas_root)
+        .arg("--")
+        .args(args);
+    command
 }
 
 /// Spawn `command` as a new session leader with stdin closed and both output
@@ -970,6 +980,20 @@ mod tests {
         assert_eq!(sid, pid, "detached runner must be a session leader");
         assert_eq!(pgid, pid, "detached runner must lead its own process group");
         assert_ne!(pgid, caller_pgid, "a kill of the caller's group must not reach it");
+    }
+
+    /// cas-6591: the detached log ends with the runner's exit status, so a
+    /// refused run cannot pass for one still in progress.
+    #[cfg(unix)]
+    #[test]
+    fn detached_runner_log_ends_with_the_runner_exit_code() {
+        // `false` stands in for a runner that refuses: it exits 1.
+        let args = vec!["-p".to_string(), "cas".into(), "--lib".into()];
+        let output = detached_runner_command(Path::new("false"), Path::new("/cas-root"), &args)
+            .output()
+            .unwrap();
+        let log = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(log, "worker-check: EXIT 1\n");
     }
 
     #[cfg(unix)]

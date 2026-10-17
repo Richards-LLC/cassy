@@ -141,7 +141,7 @@ fn reader_walks_cloud_order_and_types_a_redelivered_id_once() {
     let mut reader = VioletReader::new("factory-session");
     for registration in [REGISTRATION, "successor-registration"] {
         cloud.registration_id = registration;
-        let outcome = reader.tick(&cloud, registration, &Body, &Typer(&cloud), Utc::now());
+        let outcome = reader.tick(&cloud, registration, &violet_body(None), &Typer(&cloud), Utc::now());
         assert!(matches!(outcome, ClaimOutcome::Read(_)));
     }
     assert_eq!(

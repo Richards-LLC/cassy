@@ -1031,6 +1031,7 @@ fn post_swap_mode_is_a_terminal_update_path() {
         post_swap: true,
         from: Some("3.7.7".to_owned()),
         refresh_receipt: None,
+        render_fixture: None,
     };
     let cli = Cli {
         json: true,
@@ -1567,6 +1568,7 @@ fn update_test_args() -> UpdateArgs {
         post_swap: false,
         from: None,
         refresh_receipt: None,
+        render_fixture: None,
     }
 }
 

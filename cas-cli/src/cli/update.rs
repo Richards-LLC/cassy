@@ -38,6 +38,7 @@ use crate::ui::components::table::Column as TableColumn;
 use crate::ui::components::{Border, Formatter, OutputMode, Renderable, Table, Verdict, Width};
 use crate::ui::theme::{ActiveTheme, Icons};
 
+mod fixture;
 mod preview;
 
 fn report_modified_builtin_references(
@@ -212,6 +213,11 @@ pub struct UpdateArgs {
     /// File where a post-swap refresh writes its machine-readable receipt.
     #[arg(long = "refresh-receipt", hide = true, requires = "post_swap")]
     pub refresh_receipt: Option<PathBuf>,
+
+    /// Replay a recorded update fixture through the human renderer, for
+    /// terminal review captures. Reads no store and changes nothing.
+    #[arg(long = "render-fixture", hide = true, value_name = "JSON")]
+    pub render_fixture: Option<PathBuf>,
 }
 
 /// cas-49c0: which `cas update` mode a run asked for, for the worker scope.
@@ -303,6 +309,11 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // binary, otherwise every update would recursively launch updates.
     if args.post_swap {
         return execute_post_swap(args, cli, current_version);
+    }
+
+    // A review replay touches no store, binary or hub, so it runs anywhere.
+    if let Some(fixture) = &args.render_fixture {
+        return fixture::render(fixture, args, cli);
     }
 
     // A sync preview must stop before both filesystem writers and Git repair.
@@ -403,12 +414,27 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     }
 
     // Full update: binary + every local project's migration/sync/cloud state.
+    run_full_update(
+        cli,
+        || {
+            let outcome = perform_update(args, current_version, cli)?;
+            let hub_restart = super::hub::restart_stale_hub(&outcome.version, cli)?;
+            Ok((outcome, hub_restart))
+        },
+        |error, hub| refresh_all_projects(args, cli, cas_root, error, Some(hub), None),
+    )
+}
+
+/// The full update after its two seams: the binary phase and the project
+/// refresh. `--render-fixture` replays recorded data through the same path,
+/// so a review capture shows exactly what an operator would see.
+fn run_full_update(
+    cli: &Cli,
+    binary: impl FnOnce() -> anyhow::Result<(BinaryUpdateOutcome, super::hub::HubRestartOutcome)>,
+    refresh: impl FnOnce(Option<&str>, &super::hub::HubRestartOutcome) -> anyhow::Result<RefreshReport>,
+) -> anyhow::Result<()> {
     let mut steps = UpdateStepTracker::new(2, !cli.json);
-    let (outcome, hub_restart) = steps.run("Updating Cassy binary", || {
-        let outcome = perform_update(args, current_version, cli)?;
-        let hub_restart = super::hub::restart_stale_hub(&outcome.version, cli)?;
-        Ok((outcome, hub_restart))
-    })?;
+    let (outcome, hub_restart) = steps.run("Updating Cassy binary", binary)?;
     if !cli.json {
         let mut out = io::stdout();
         let theme = ActiveTheme::default();
@@ -450,9 +476,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     let hub_proof = hub_restart.clone();
     let (report, hub_transport_error) = refresh_after_hub_restart(hub_restart, |error| {
-        steps.run("Refreshing all local Cassy projects", || {
-            refresh_all_projects(args, cli, cas_root, error, Some(&hub_proof), None)
-        })
+        steps.run("Refreshing all local Cassy projects", || refresh(error, &hub_proof))
     })?;
 
     if !cli.json {
@@ -1253,11 +1277,52 @@ fn refresh_all_projects_with_user_refresh(
         });
     }
 
+    finish_project_refresh(
+        args,
+        cli,
+        RefreshResults {
+            receipts,
+            user_level,
+            user_details,
+            skipped_unregistered: discovery.skipped_unregistered,
+        },
+        hub_transport_error,
+        hub_restart,
+        first_launch_ms,
+        started_at,
+    )
+}
+
+/// Everything one sweep learned, before any of it is printed.
+struct RefreshResults {
+    receipts: Vec<ProjectRefreshReceipt>,
+    user_level: ProjectPhase,
+    user_details: String,
+    skipped_unregistered: Vec<SkippedProject>,
+}
+
+/// Report a finished sweep: the summary (or the JSON receipt), the receipt
+/// file, and the exit verdict. Shared by the real sweep and the review replay.
+fn finish_project_refresh(
+    args: &UpdateArgs,
+    cli: &Cli,
+    results: RefreshResults,
+    hub_transport_error: Option<&str>,
+    hub_restart: Option<&super::hub::HubRestartOutcome>,
+    first_launch_ms: Option<u64>,
+    started_at: Instant,
+) -> anyhow::Result<RefreshReport> {
+    let RefreshResults {
+        receipts,
+        user_level,
+        user_details,
+        skipped_unregistered,
+    } = results;
     print_project_refresh_summary(
         &receipts,
         &user_level,
         &user_details,
-        &discovery.skipped_unregistered,
+        &skipped_unregistered,
         cli,
         hub_transport_error,
         hub_restart,
@@ -1270,7 +1335,7 @@ fn refresh_all_projects_with_user_refresh(
         project_refresh_receipt_json(
             &receipts,
             &user_level,
-            &discovery.skipped_unregistered,
+            &skipped_unregistered,
             hub_transport_error,
             hub_restart,
         ),
@@ -1287,7 +1352,7 @@ fn refresh_all_projects_with_user_refresh(
     Ok(RefreshReport {
         project_count: receipts.len(),
         failed_count,
-        skipped_unregistered: discovery.skipped_unregistered.len(),
+        skipped_unregistered: skipped_unregistered.len(),
         elapsed: started_at.elapsed(),
     })
 }
@@ -3447,49 +3512,44 @@ fn perform_update(
         });
     }
 
+    let (updated, version) = match &status {
+        Status::UpToDate(v) => (false, v.trim_start_matches('v').to_owned()),
+        Status::Updated(v) => (true, v.trim_start_matches('v').to_owned()),
+    };
+    print_binary_status(updated, &version, &running_factory_sessions())?;
+    Ok(BinaryUpdateOutcome {
+        version,
+        updated,
+        post_install_refresh,
+    })
+}
+
+/// The human result of the binary phase. Shared with `--render-fixture`.
+fn print_binary_status(
+    updated: bool,
+    version: &str,
+    factory_sessions: &[(String, bool)],
+) -> io::Result<()> {
     let mut out = io::stdout();
     let theme = ActiveTheme::default();
     let mut fmt = Formatter::stdout(&mut out, theme);
-
-    let binary_was_updated = matches!(status, Status::Updated(_));
-    let installed_version = match status {
-        Status::UpToDate(v) => {
-            fmt.newline()?;
-            fmt.write_raw("  ")?;
-            fmt.success(&format!(
-                "Already up to date ({})",
-                v.trim_start_matches('v')
-            ))?;
-            v.trim_start_matches('v').to_owned()
-        }
-        Status::Updated(v) => {
-            fmt.newline()?;
-            fmt.write_raw("  ")?;
-            fmt.success(&format!(
-                "Successfully updated to {}",
-                v.trim_start_matches('v')
-            ))?;
-            fmt.newline()?;
-            fmt.write_raw("  Run ")?;
-            fmt.write_accent("cas changelog")?;
-            fmt.write_raw(" to see what's new")?;
-            fmt.newline()?;
-            if let Some(notice) =
-                running_factory_update_notice(&running_factory_sessions(), v.trim_start_matches('v'))
-            {
-                fmt.write_raw("  ")?;
-                fmt.warning(&notice)?;
-                fmt.newline()?;
-            }
-            v.trim_start_matches('v').to_owned()
-        }
-    };
-
-    Ok(BinaryUpdateOutcome {
-        version: installed_version,
-        updated: binary_was_updated,
-        post_install_refresh,
-    })
+    fmt.newline()?;
+    fmt.write_raw("  ")?;
+    if !updated {
+        return fmt.success(&format!("Already up to date ({version})"));
+    }
+    fmt.success(&format!("Successfully updated to {version}"))?;
+    fmt.newline()?;
+    fmt.write_raw("  Run ")?;
+    fmt.write_accent("cas changelog")?;
+    fmt.write_raw(" to see what's new")?;
+    fmt.newline()?;
+    if let Some(notice) = running_factory_update_notice(factory_sessions, version) {
+        fmt.write_raw("  ")?;
+        fmt.warning(&notice)?;
+        fmt.newline()?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

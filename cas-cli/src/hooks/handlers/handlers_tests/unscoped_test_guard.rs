@@ -262,8 +262,11 @@ fn targeted_nextest_rewrite_preserves_filter_literals_and_workspace_guard() {
                 "{rewritten}"
             );
             let expected = command.strip_prefix("cargo ").unwrap();
+            // pin: Filter literals survive unchanged while retry logs append.
+            let expected = expected.strip_suffix(" &").unwrap_or(expected)
+                .replace(" > target/tests.log", " >> target/tests.log");
             assert!(
-                rewritten.contains(expected.strip_suffix(" &").unwrap_or(expected)),
+                rewritten.contains(&expected),
                 "{rewritten}"
             );
         }

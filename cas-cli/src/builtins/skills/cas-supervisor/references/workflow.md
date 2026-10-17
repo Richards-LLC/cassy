@@ -192,8 +192,9 @@ factory action=worktree_merge id=<worker> task_id=<task-id>
 
 `worktree_merge` admits a lane on its CI state and the merge preflight's
 conflict and dirt checks. It runs no local release rows and needs no compile
-receipt: lane CI runs the fast checks once, and the merge queue is the Rust
-compile and suite proof. Rust merges still use the detached venue's
+receipt. The worker's pre-push hook runs the fast rows once; park has already
+read their receipt and a test receipt in each changed crate. The merge queue
+is the Rust compile and suite proof. Rust merges still use the detached venue's
 clean-target-checkout rule; commit or stash target-checkout dirt first.
 
 ### Wall-clock is a resource

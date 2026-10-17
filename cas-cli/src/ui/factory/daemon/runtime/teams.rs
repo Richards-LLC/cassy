@@ -1995,6 +1995,13 @@ while read local_ref local_sha remote_ref remote_sha; do
   refs=\"$refs$local_ref $local_sha $remote_ref $remote_sha
 \"
 done
+# cas-eac2 (operator D2): the repository's no-build fast rows run here, once,
+# and lane CI no longer repeats them for factory pushes. The gate reuses a
+# same-tip PASS receipt or runs the rows, and a missing tool fails the push.
+fast_rows=\"$(git rev-parse --show-toplevel 2>/dev/null)/scripts/fast-rows-pre-push.sh\"
+if [ -x \"$fast_rows\" ]; then
+  printf '%s' \"$refs\" | \"$fast_rows\" \"$@\" || exit 1
+fi
 exit 0
 ";
 
@@ -2269,9 +2276,8 @@ exit 0
         let push_hook_path = private_hooks_dir.join("pre-push");
         let installed_push_guard = std::fs::read_to_string(&push_hook_path).unwrap_or_default();
         if installed_push_guard.contains("Cassy factory worker push guard") {
-            // Refresh any installed guard in place, keeping its chain. cas-38e7:
-            // this also drops the retired fast-rows delegation (cas-043b) from
-            // guards installed by earlier builds.
+            // Refresh any installed guard in place, keeping its chain, so a
+            // guard from a cas-38e7 build regains the fast-rows delegation.
             let chained = private_hooks_dir.join("pre-push-project-hook");
             if chained.exists() {
                 let existing = std::fs::read_to_string(&chained)?;
@@ -4685,12 +4691,11 @@ mod tests {
             .output();
     }
 
-    /// cas-38e7: the worker push guard no longer runs the repository's
-    /// fast-rows gate. A guard installed by an earlier build (which delegated
-    /// to scripts/fast-rows-pre-push.sh) is refreshed in place, and a push of
-    /// the worker's own branch succeeds even when that script would refuse.
+    /// cas-eac2 (operator D2): a worker push runs the repository's fast-rows
+    /// gate with git's ref lines, and its refusal stops the push. A guard
+    /// installed by a cas-38e7 build (no delegation) is refreshed in place.
     #[test]
-    fn worker_push_no_longer_runs_the_fast_rows_gate_cas_38e7() {
+    fn worker_push_runs_the_repository_fast_rows_gate_cas_eac2() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = make_git_repo_for_hook_test();
         let repo = tmp.path();
@@ -4700,11 +4705,11 @@ mod tests {
         };
         let gate = repo.join("scripts/fast-rows-pre-push.sh");
         std::fs::create_dir_all(gate.parent().unwrap()).unwrap();
-        std::fs::write(&gate, "#!/bin/sh\ntouch \"$(git rev-parse --git-common-dir)/gate-ran\"\n\
+        std::fs::write(&gate, "#!/bin/sh\ncat > \"$(git rev-parse --git-common-dir)/gate-stdin\"\n\
             echo 'FIX version-literals: fixture refusal' >&2\nexit 1\n").unwrap();
         std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(git(repo, &["add", "scripts"]).status.success());
-        assert!(git(repo, &["commit", "-qm", "ship the retired push gate"]).status.success());
+        assert!(git(repo, &["commit", "-qm", "ship the push gate"]).status.success());
         let remote = repo.join("remote.git");
         assert!(git(repo, &["init", "-q", "--bare", &remote.to_string_lossy()]).status.success());
         git(repo, &["remote", "add", "origin", &remote.to_string_lossy()]);
@@ -4714,21 +4719,13 @@ mod tests {
         ));
         assert!(git(repo, &["worktree", "add", "-q", "-b", "factory/w", &wt.to_string_lossy(), "main"]).status.success());
 
-        // A guard from an earlier build that still delegates to the gate.
+        // A guard from a cas-38e7 build, without the delegation.
         TeamsManager::install_worker_pre_commit_hook(&wt).unwrap();
         let hooks = git(&wt, &["rev-parse", "--path-format=absolute", "--git-path", "hooks"]);
         let pre_push = std::path::PathBuf::from(String::from_utf8_lossy(&hooks.stdout).trim()).join("pre-push");
-        std::fs::write(
-            &pre_push,
-            "#!/bin/sh\n# Cassy factory worker push guard (old)\n\
-             fast_rows=\"$(git rev-parse --show-toplevel)/scripts/fast-rows-pre-push.sh\"\n\
-             \"$fast_rows\" || exit 1\nexit 0\n",
-        )
-        .unwrap();
+        std::fs::write(&pre_push, "#!/bin/sh\n# Cassy factory worker push guard (old)\nexit 0\n").unwrap();
         TeamsManager::install_worker_pre_commit_hook(&wt).unwrap();
-        let installed = std::fs::read_to_string(&pre_push).unwrap();
-        assert_eq!(installed, TeamsManager::WORKER_PRE_PUSH_HOOK);
-        assert!(!installed.contains("fast-rows-pre-push.sh"), "{installed}");
+        assert_eq!(std::fs::read_to_string(&pre_push).unwrap(), TeamsManager::WORKER_PRE_PUSH_HOOK);
 
         let push = std::process::Command::new("git")
             .args(["push", "origin", "factory/w"])
@@ -4739,11 +4736,12 @@ mod tests {
             .current_dir(&wt)
             .output()
             .unwrap();
-        assert!(push.status.success(), "{}", String::from_utf8_lossy(&push.stderr));
-        assert!(!repo.join(".git/gate-ran").exists(), "the retired fast-rows gate must not run");
+        assert!(!push.status.success());
+        assert!(String::from_utf8_lossy(&push.stderr).contains("FIX version-literals: fixture refusal"));
         let tip = String::from_utf8_lossy(&git(&wt, &["rev-parse", "HEAD"]).stdout).trim().to_string();
-        let pushed = git(&remote, &["rev-parse", "--verify", "-q", "refs/heads/factory/w"]);
-        assert_eq!(String::from_utf8_lossy(&pushed.stdout).trim(), tip);
+        let stdin = std::fs::read_to_string(repo.join(".git/gate-stdin")).unwrap();
+        assert!(stdin.contains(&format!("refs/heads/factory/w {tip} refs/heads/factory/w ")), "{stdin}");
+        assert!(git(&remote, &["rev-parse", "--verify", "-q", "refs/heads/factory/w"]).stdout.is_empty());
         let _ = git(repo, &["worktree", "remove", "--force", &wt.to_string_lossy()]);
     }
 

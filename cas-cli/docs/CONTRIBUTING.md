@@ -973,12 +973,20 @@ fallbacks for standalone runs; pushing the worker branch never clears it.
 Failed retries invalidate that scope's receipt; close imports all matching
 exact-delivery receipts. Targeted receipts complement full-suite assembly proof.
 
-Lane CI runs the project's fast checks once for each lane. The merge queue is
-the final-tree integration gate and the only gate to `main`; its required
-checks, including the Rust suite, run once on the exact merged tree. Commander
-journeys run there only when `hub-web/` product inputs change. Do not add
-lane-merge compile or fast-row checks, park receipts, or a separate assembly
-journey run. The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
+Each check runs once (operator decisions D1–D3, cas-eac2). A factory worker's
+pre-push hook runs the no-build fast rows (`scripts/fast-rows-pre-push.sh`) and
+writes a PASS receipt for the pushed tip; a missing tool fails the push. Lane CI
+runs no fast rows and no broad Rust tests for factory pushes. Park reads, and
+never runs, the exact-tip receipts: the fast-rows PASS and a capped test PASS in
+every workspace crate whose sources or tests changed. A receipt in another
+crate does not count, and a missing receipt is refused with its fix. Pull
+requests without worker receipts keep the lane fast rows and the targeted
+`ci-test-impact.py` fallback. The merge queue is the final-tree integration gate
+and the only gate to `main`; its required checks, including the Rust suite, run
+once on the exact merged tree. Commander journeys run there only when `hub-web/`
+product inputs change. Do not add lane-merge compile checks, park re-runs or a
+separate assembly journey run. If more than two merge-queue ejections per epic
+follow from this, revert the D1 routing as one policy change. The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
 epic close gate accepts a local `ASSEMBLY_PROOF`, it covers the Rust build and
 suite only; it does not replace the queue's path to `main` or require a
 journey receipt.
@@ -997,10 +1005,12 @@ cancels the build and Rust suite rows still running. The short `--fast-rows`
 lane checks run only `ci-script-tests-changed`: the tier entries whose script
 or subject (`scripts/<stem>.*` for `scripts/test-<stem>.*`) the lane changed.
 Entries that take over 20 seconds alone are reported as deferred to the full
-row.
+row. A changed `hub-web/package.json` runs the one named worker-memory weight
+assertion (0.001 s) rather than the full worker-memory suite.
 
-Fast rows include the no-build checks below. Lane CI selects each row when its
-inputs change; the merge queue runs its required fast-row job on the final tree:
+Fast rows include the no-build checks below. The factory pre-push hook, or lane
+CI for a pull request, selects each row when its inputs change; the merge queue
+runs its required fast-row job on the final tree:
 
 - `journey-catalog`: `journeys-for-diff.py --check`, so every catalog step
   still matches a `test.step` title in its journey spec.

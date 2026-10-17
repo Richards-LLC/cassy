@@ -136,27 +136,34 @@ fn fixture(env: &mut TestEnvGuard) -> Fixture {
     }
 }
 
-/// AC1: before this fix the delivery parked (and later passed verification)
-/// with `widget::gear` undeclared, and only a supervisor could repair it.
+/// cas-eac2 (D1): lane CI no longer runs broad Rust for factory pushes, so a
+/// delivery changing `widget` without a worker test receipt there at the
+/// exact tip is refused at park. Widening proof_targets (the cas-d6eb
+/// remedy) does not substitute for the test, and a receipt in `widget` parks.
 #[tokio::test]
-async fn park_tells_the_worker_which_modules_to_declare_while_it_still_can_cas_d6eb() {
+async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);
     let close = serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"});
 
     let refused = call(&f.worker, close.clone()).await;
-    assert!(refused.contains("PROOF SCOPE INCOMPLETE"), "{refused}");
-    assert!(refused.contains("covers: gear."), "{refused}");
-    assert!(!refused.contains("MERGE REQUIRED"), "{refused}");
-    assert_eq!(f.task().status, TaskStatus::InProgress, "the scope is still the worker's to fix");
+    assert!(refused.contains("FOCUSED PROOF REQUIRED"), "{refused}");
+    assert!(refused.contains("receipt at"), "{refused}");
+    assert!(refused.contains(": widget."), "{refused}");
+    assert_eq!(f.task().status, TaskStatus::InProgress, "the proof is still the worker's to run");
 
-    // The worker follows the refusal's own command, and the delivery parks.
-    let widened = call(
+    call(
         &f.worker,
         serde_json::json!({"action": "update", "id": ID, "proof_targets": "unrelated,gear"}),
     )
     .await;
-    assert_eq!(f.task().proof_targets, ["unrelated", "gear"], "{widened}");
+    let widened = call(&f.worker, close.clone()).await;
+    assert!(widened.contains("FOCUSED PROOF REQUIRED"), "{widened}");
+
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
+    );
     let parked = call(&f.worker, close).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);

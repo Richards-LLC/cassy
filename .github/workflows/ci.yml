@@ -122,21 +122,12 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      - name: Run no-build release gate rows
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/')
-        env:
-          BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base || github.event.before }}
-          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
-        run: |
-          # The pinned markdownlint-cli2 (root package-lock.json); scripts/markdownlint.py runs it.
-          npm ci --no-audit --no-fund
-          comparison_base="$BASE_SHA"
-          if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]]; then
-            comparison_base="$ZERO_BASE_REF"
-          fi
-          ./scripts/release-gate.sh --fast-rows --base "$comparison_base"
-
+      # cas-eac2 (operator D2): a factory worker's pre-push hook runs the
+      # no-build fast rows, including Markdown lint and release-note drafts,
+      # and park reads its receipt for the exact tip. Lane CI does not repeat
+      # them for factory pushes; PRs and other pushes keep these copies.
       - name: Markdown lint
+        if: github.event_name != 'push' || !startsWith(github.ref, 'refs/heads/factory/')
         env:
           BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
@@ -162,6 +153,7 @@ jobs:
           fi
 
       - name: Validate release-note drafts
+        if: github.event_name != 'push' || !startsWith(github.ref, 'refs/heads/factory/')
         env:
           BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
@@ -347,19 +339,9 @@ jobs:
           base-sha: ${{ github.event.before }}
           zero-base-ref: origin/${{ github.event.repository.default_branch }}
 
-      # This cheap step runs even when builds route to the full tier or a PR.
-      - name: Run no-build release gate rows
-        env:
-          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.before }}
-          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
-        run: |
-          # The pinned markdownlint-cli2 (root package-lock.json); scripts/markdownlint.py runs it.
-          npm ci --no-audit --no-fund
-          comparison_base="$BASE_SHA"
-          if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]]; then
-            comparison_base="$ZERO_BASE_REF"
-          fi
-          ./scripts/release-gate.sh --fast-rows --base "$comparison_base"
+      # cas-eac2 (operator D2): the no-build fast rows run in the factory
+      # worker's pre-push hook (scripts/fast-rows-pre-push.sh), and park reads
+      # their receipt for the exact tip, so this lane does not repeat them.
 
       - name: Detect runner lock fixture changes
         id: runner-lock-diff
@@ -415,64 +397,16 @@ jobs:
           npm test
           npm run build
 
-      - uses: ./.github/actions/setup-rust-linux
-        if: >-
-          steps.classify-diff.outputs.fast-admission == 'true'
-          && steps.classify-diff.outputs.rust-unaffected != 'true'
-        with:
-          cache-key: scoped-validation-fast
-
-      - name: Install nextest
-        if: >-
-          steps.classify-diff.outputs.fast-admission == 'true'
-          && steps.classify-diff.outputs.rust-unaffected != 'true'
-        uses: taiki-e/install-action@nextest
-
-      - name: Run change-scoped tests with impact evidence
-        if: >-
-          steps.classify-diff.outputs.fast-admission == 'true'
-          && steps.classify-diff.outputs.rust-unaffected != 'true'
-        env:
-          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.before }}
-          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
-          GH_TOKEN: ${{ github.token }}
-          ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: |
-          if [[ -f scripts/cas-test-targets.py ]]; then
-            python3 scripts/cas-test-targets.py cas-cli --check
-          fi
-          if [[ -x scripts/ci-test-impact.py ]]; then
-            python3 scripts/ci-test-impact.py history
-            python3 scripts/ci-test-impact.py run
-          else
-            scripts/run-verified-tests.sh nextest run --workspace --no-fail-fast
-          fi
-
-      - name: Publish CI impact evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-test-impact-${{ github.run_id }}-scoped-fast
-          path: target/ci-impact/
-          if-no-files-found: ignore
-
-      - name: Test snapshot-pinned CLI output surfaces
-        if: >-
-          steps.classify-diff.outputs.fast-admission == 'true'
-          && steps.classify-diff.outputs.rust-unaffected != 'true'
-        env:
-          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.before }}
-          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
-        run: scripts/check-scoped-snapshot-tests.sh --base-sha "$BASE_SHA" --zero-base-ref "$ZERO_BASE_REF"
-
-      - name: Report sccache stats
-        if: always()
-        run: |
-          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
-            ./scripts/ci-sccache-summary.sh "Scoped Validation (fast)"
-          else
-            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
-          fi
+      # cas-eac2 (operator D1): factory pushes run no broad Rust here. The
+      # worker's focused tests prove each changed crate, and park refuses a
+      # tip without those receipts. The merge queue runs the full suite on the
+      # final tree.
+      - name: Report Rust test ownership
+        if: steps.classify-diff.outputs.rust-unaffected != 'true'
+        run: >-
+          echo "No Rust tests ran here: worker focused-test receipts at this
+          SHA (checked at park) and the merge-queue full suite own them."
+          >> "$GITHUB_STEP_SUMMARY"
 
   scoped-validation:
     name: Scoped Validation (factory/PR)
@@ -534,8 +468,8 @@ jobs:
           # or ambiguous parents fail closed in the common classifier.
           zero-base-ref: origin/${{ github.event.repository.default_branch }}
 
-      # Every factory push is already admitted in the fast job, independently
-      # of build routing and PR deduplication. This copy serves scoped PRs.
+      # Factory pushes ran these rows in the worker's pre-push hook (cas-eac2).
+      # This copy serves scoped PRs, which have no such receipt.
       - name: Run no-build release gate rows
         if: github.event_name != 'push'
         env:
@@ -607,23 +541,20 @@ jobs:
 
       - uses: ./.github/actions/setup-rust-linux
         if: >-
-          steps.pr-dedupe.outputs.covered != 'true'
-          && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
+          github.event_name != 'push'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         with:
           cache-key: scoped-validation
 
       - name: Install nextest
         if: >-
-          steps.pr-dedupe.outputs.covered != 'true'
-          && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
+          github.event_name != 'push'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: taiki-e/install-action@nextest
 
       - name: Run change-scoped tests with impact evidence
         if: >-
-          steps.pr-dedupe.outputs.covered != 'true'
-          && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
+          github.event_name != 'push'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
@@ -649,14 +580,16 @@ jobs:
           path: target/ci-impact/
           if-no-files-found: ignore
 
+      # cas-eac2 (operator D1): the Rust steps above and this router are the
+      # targeted fallback for PRs, which have no worker receipts. Factory
+      # pushes run no broad Rust (see Scoped Validation (fast)).
       # cas-ad65: import selection alone cannot prove snapshot input coverage. Route only their committed CLI-output input surfaces here;
       # PRs #649/#650 and PR #657 run 33435790948 reached the queue before
       # stale doctor_snapshot output was exercised. This remains one small
       # target within Scoped Validation, never a new CI lane.
       - name: Test snapshot-pinned CLI output surfaces
         if: >-
-          steps.pr-dedupe.outputs.covered != 'true'
-          && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
+          github.event_name != 'push'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
@@ -665,7 +598,7 @@ jobs:
 
       - name: Report why no Rust work ran
         if: >-
-          steps.pr-dedupe.outputs.covered == 'true'
+          github.event_name == 'push'
           || steps.classify-diff.outputs.rust-unaffected == 'true'
         env:
           PR_COVERED: ${{ steps.pr-dedupe.outputs.covered }}
@@ -673,6 +606,8 @@ jobs:
         run: |
           if [[ "$PR_COVERED" == "true" ]]; then
             echo "Skipped: a pull request event is validating this exact head SHA." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            echo "Skipped: factory push; worker focused-test receipts (checked at park) and the merge-queue full suite own Rust." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Skipped: diff class '$DIFF_CLASS' is Rust-unaffected." >> "$GITHUB_STEP_SUMMARY"
           fi

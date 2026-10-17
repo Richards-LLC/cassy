@@ -645,6 +645,16 @@ async fn long_transcript_recycle(register_replacement: bool) {
 
     let mut daemon = daemon(&cas_dir);
     register_idle_worker(&cas_dir, NAME);
+    let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+    if register_replacement {
+        let mut held = cas_types::Task::new(
+            "cas-recycled-held".into(),
+            "Resume after recycle".into(),
+        );
+        held.assignee = Some(NAME.into());
+        held.status = cas_types::TaskStatus::InProgress;
+        tasks.add(&held).unwrap();
+    }
     let old = idle_worker_pane(NAME, cas_mux::SupervisorCli::Codex);
     let old_pid = old.process_group_id().unwrap();
     daemon.app.adopt_worker_pane_for_test(old);
@@ -707,6 +717,12 @@ async fn long_transcript_recycle(register_replacement: bool) {
     }
 
     if register_replacement {
+        let replacement_pid = daemon.app.mux.pane_process_group_id(NAME).unwrap();
+        assert_ne!(replacement_pid, old_pid, "recycle started a new process");
+        // The old registration is now retired, while the new process has not
+        // registered yet. The real refresh used to queue a name-only forced
+        // shutdown here, which later killed this replacement (cas-5037).
+        daemon.app.refresh_data().unwrap();
         let mut replacement = cas_types::Agent::new("replacement-session".into(), NAME.into());
         replacement.role = cas_types::AgentRole::Worker;
         replacement.factory_session = Some(SESSION.into());
@@ -714,6 +730,17 @@ async fn long_transcript_recycle(register_replacement: bool) {
             .unwrap()
             .register(&replacement)
             .unwrap();
+        daemon.enqueue_spawn_requests().unwrap();
+        daemon.process_pending_spawns().await;
+        assert_eq!(
+            daemon.app.mux.pane_process_group_id(NAME),
+            Some(replacement_pid),
+            "a teardown of the retired session must never stop its replacement"
+        );
+        assert!(crate::mcp::daemon::pid_alive(replacement_pid));
+        let held = tasks.get("cas-recycled-held").unwrap();
+        assert_eq!(held.status, cas_types::TaskStatus::InProgress);
+        assert_eq!(held.assignee.as_deref(), Some(NAME));
     } else {
         // Expire verification without sleeping through the registration timeout.
         daemon

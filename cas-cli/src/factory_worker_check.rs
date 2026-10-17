@@ -2195,6 +2195,7 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
         const CHILD: &str = "CAS_WORKER_CAP_PROCESS_FIXTURE";
         const NAME: &str = "factory_worker_check::tests::concurrent_processes_respect_cap_and_audit_slot_lifetime";
         if let Some(input) = std::env::var_os(CHILD) {
+            println!(); // Separate machine-readable lines from libtest's test-name prefix.
             let paths: Vec<PathBuf> = serde_json::from_str(&input.to_string_lossy()).unwrap();
             let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"]
                 .map(str::to_string);

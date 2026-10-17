@@ -12,6 +12,24 @@ use cas_store::{SpawnLifecycleState, SpawnQueueStore};
 const SESSION: &str = "provision-test";
 const REPLACEMENT_STARTUP: &str = "REPLACEMENT CODEX: startup reached";
 
+/// macOS has no /proc discovery. Keep that OS boundary deterministic on CI
+/// while retaining real PID checks, registry reads, PTYs and queue consumers.
+struct EmptyProcessTable;
+
+impl crate::cli::factory::wedged::ProcessTable for EmptyProcessTable {
+    fn pids(&self) -> Vec<u32> {
+        Vec::new()
+    }
+
+    fn cmdline(&self, _pid: u32) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn environ(&self, _pid: u32) -> Option<Vec<u8>> {
+        None
+    }
+}
+
 fn idle_worker_pane(name: &str, harness: cas_mux::SupervisorCli) -> cas_mux::Pane {
     let pty = cas_mux::Pty::spawn(
         name,
@@ -735,43 +753,12 @@ async fn long_transcript_recycle(register_replacement: bool) {
         held.notes = "Replacement is waiting to register".into();
         tasks.update(&held).unwrap();
 
-        // Temporary cas-5037 diagnostic: distinguish a missing teardown
-        // from a shutdown that ran and preserved the replacement.
-        let agents = open_agent_store(&cas_dir).unwrap().list(None).unwrap();
-        let liveness: Vec<_> = agents
-            .iter()
-            .map(|agent| {
-                (
-                    &agent.id,
-                    &agent.name,
-                    agent.status,
-                    agent.pid,
-                    agent.ppid,
-                    crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(
-                        agent,
-                    ),
-                )
-            })
-            .collect();
-        let discovered_pid = crate::cli::factory::wedged::find_worker_pid(
-            &crate::cli::factory::wedged::RealProcessTable,
-            NAME,
-        );
-        let keep = crate::mcp::tools::service::agent_liveness::should_keep_worker_pane(
-            NAME,
-            agents.iter(),
-        );
-        eprintln!(
-            "cas-5037 pre-refresh: os={}, old_pid={old_pid}, replacement_pid={replacement_pid}, discovered_pid={discovered_pid:?}, keep={keep}, registry={liveness:?}, request={:?}",
-            std::env::consts::OS,
-            daemon.app.director_refresh_request(),
-        );
-
         // Drive the actual async read -> apply -> store-worker dispatch in
         // lifecycle.rs, rather than the synchronous refresh shortcut.
         daemon.queue_jobs =
             super::prompt_queue_jobs::QueueJobs::start(cas_dir.clone(), daemon.app.project_scope());
-        let mut refresh = super::director_refresh::DirectorRefresh::new();
+        let mut refresh = super::director_refresh::DirectorRefresh::new()
+            .with_process_table(|| Box::new(EmptyProcessTable));
         let store_worker = super::store_worker::StoreWorker::start();
         let progress = super::loop_watchdog::LoopProgress::new();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -781,11 +768,6 @@ async fn long_transcript_recycle(register_replacement: bool) {
                 .director_refresh_pass(&mut refresh, due, &store_worker, &progress)
                 .await
             {
-                eprintln!(
-                    "cas-5037 async snapshot returned: roster={:?}, store_pending={}",
-                    daemon.app.worker_names(),
-                    store_worker.pending(),
-                );
                 break;
             }
             due = false;
@@ -808,13 +790,6 @@ async fn long_transcript_recycle(register_replacement: bool) {
             .filter(|request| request.action == cas_store::SpawnAction::Shutdown)
             .map(|request| request.id)
             .collect();
-        eprintln!("cas-5037 queued forced shutdowns: {controls:?}");
-        assert!(
-            !controls.is_empty(),
-            "cas-5037 DIAGNOSTIC: phantom shutdown never enqueued; os={}, discovered_pid={discovered_pid:?}, replacement_pid={replacement_pid}, keep={keep}, registry={liveness:?}, roster={:?}",
-            std::env::consts::OS,
-            daemon.app.worker_names(),
-        );
         let mut replacement = cas_types::Agent::new("replacement-session".into(), NAME.into());
         replacement.role = cas_types::AgentRole::Worker;
         replacement.factory_session = Some(SESSION.into());

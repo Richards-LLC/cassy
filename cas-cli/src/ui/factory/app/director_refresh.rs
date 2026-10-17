@@ -113,6 +113,14 @@ enum DirectorLoad {
 impl DirectorRefreshRequest {
     /// Read the store (and git when due). Runs on any thread.
     pub(crate) fn read(&self, stores: Option<&DirectorStores>) -> DirectorRefreshLoad {
+        self.read_with_process_table(stores, &crate::cli::factory::wedged::RealProcessTable)
+    }
+
+    pub(crate) fn read_with_process_table(
+        &self,
+        stores: Option<&DirectorStores>,
+        process_table: &dyn crate::cli::factory::wedged::ProcessTable,
+    ) -> DirectorRefreshLoad {
         let fingerprint = CasDbFingerprint::from_cas_dir(&self.cas_dir);
         let db_changed = self.previous_fingerprint != Some(fingerprint);
         let director = if db_changed {
@@ -161,9 +169,10 @@ impl DirectorRefreshRequest {
                 self.worker_names
                     .iter()
                     .filter(|name| {
-                        !crate::mcp::tools::service::agent_liveness::should_keep_worker_pane(
+                        !crate::mcp::tools::service::agent_liveness::should_keep_worker_pane_with_table(
                             name,
                             agents.iter(),
+                            process_table,
                         )
                     })
                     .cloned()

@@ -130,8 +130,10 @@ def plan(root, base, zero, history):
                 return full(result, "shared build/test policy changed")
             owners = [name for name, (member, _) in crates.items() if path.startswith(member + "/")]
             if not owners:
-                # Markdown outside embedded source is not compiled input.
-                if path.endswith(".md") or path.startswith("docs/"):
+                # Markdown outside embedded source is not compiled input, nor
+                # are Commander package scripts (cas-eac2: the script tier
+                # owns them through one named worker-memory assertion).
+                if path.endswith(".md") or path.startswith("docs/") or path == "hub-web/package.json":
                     continue
                 return full(result, "unmapped changed path: " + path)
             changes[owners[0]].append(path)

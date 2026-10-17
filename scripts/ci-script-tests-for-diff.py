@@ -6,7 +6,8 @@ minutes, so merge admission runs only the entries whose subject changed:
 
 - `scripts/test-<stem>.*` itself changed, or
 - a file named `scripts/<stem>.*` changed (e.g. `scripts/check-foo.py`, its
-  fixture `scripts/check-foo.json`), for the test `scripts/test-<stem>.*`.
+  fixture `scripts/check-foo.json`), for the test `scripts/test-<stem>.*`, or
+- a non-script input in NAMED changed, for its one named assertion.
 
 Entries in HEAVY take longer than lane admission's budget allows (about 90 s
 for every fast row together). They are reported as deferred to the full
@@ -36,6 +37,13 @@ HEAVY = {
     "scripts/test-fast-release-rows.py": 70,
     "scripts/test-worker-memory.py": 21,
 }
+# cas-eac2: hub-web/package.json scripts set worker-memory admission weights.
+# cas-2077 changed one and first failed in the merge queue (4 GiB != 2 GiB);
+# this one assertion pins that contract in 0.001 s. The full suite stays HEAVY.
+NAMED = {
+    "hub-web/package.json": "python3 scripts/test-worker-memory.py "
+                            "AdmissionTests.test_cas_4cb9_weights_follow_shell_and_actual_package_scripts",
+}
 
 
 def tier_commands(repo: Path) -> list[str]:
@@ -63,7 +71,7 @@ def test_script(command: str) -> str | None:
 
 
 def changed_paths(repo: Path, base: str) -> list[str]:
-    out = subprocess.run(["git", "-C", str(repo), "diff", "--name-only", base, "--", "scripts"],
+    out = subprocess.run(["git", "-C", str(repo), "diff", "--name-only", base, "--", "scripts", *NAMED],
                          capture_output=True, text=True)
     if out.returncode:
         raise ValueError(f"cannot diff scripts against {base}: {out.stderr.strip()}")
@@ -85,7 +93,7 @@ def select(commands: list[str], changed: list[str]) -> list[tuple[str, str]]:
         subject = stem(test).removeprefix("test-")
         if test in changed or subject in changed_stems or stem(test) in changed_stems:
             selected.append((test, command))
-    return selected
+    return selected + [(path, NAMED[path]) for path in sorted(NAMED) if path in changed]
 
 
 def main() -> int:

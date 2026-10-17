@@ -218,6 +218,7 @@ test-ci-tiers:
 	cd .. && python3 scripts/test-proof-target.py
 	cd .. && python3 scripts/test-assembly-memory.py
 	cd .. && python3 scripts/test-worker-memory.py
+	cd .. && python3 scripts/test-ci-script-tests-for-diff.py
 	cd .. && python3 scripts/test-release-scratch.py
 	cd .. && python3 scripts/test-release-env.py
 	cd .. && python3 scripts/test-release-test-env.py

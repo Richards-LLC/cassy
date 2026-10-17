@@ -675,7 +675,7 @@ fn configure_claude_hooks_at(
 
     // Load hook config from .cas/config.toml (or defaults)
     let hook_config = if cas_dir.exists() {
-        Config::load(&cas_dir)
+        Config::load_with_notice_root(&cas_dir, &permission_root.join(".cas"))
             .map(|c| c.hooks())
             .unwrap_or_default()
     } else {

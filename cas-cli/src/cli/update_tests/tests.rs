@@ -1151,15 +1151,43 @@ fn post_swap_refresh_spawn_failure_has_a_distinct_receipt_status() {
 #[cfg(unix)]
 #[test]
 fn post_swap_refresh_failure_preserves_the_child_receipt_and_failed_project() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
+    let root = temp_dir.path().join(".cas");
+    std::fs::create_dir(&root).unwrap();
+    let original = "[factory]\nmerge_sweep = true\n";
+    std::fs::write(root.join("config.toml"), original).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set_current_dir(temp_dir.path());
     let installed_binary = temp_dir.path().join("cas-failed-refresh");
+    std::fs::write(installed_binary.with_extension("receipt"), serde_json::to_vec(&serde_json::json!({
+        "refresh_binary_version": "9.9.9-stub",
+        "projects": [{"project": "/tmp/failed-project", "cloud_sync": "FAILED: cloud sync: registration missing"}],
+        "user_level_store": {"status": "FAILED: config is read-only; run cas update", "retired_toml": [{
+            "path": root.join("config.toml"), "status": "failed", "error": "config is read-only"
+        }]},
+        "skipped_unregistered": []
+    })).unwrap()).unwrap();
     write_stub_binary(
         &installed_binary,
-        "#!/bin/sh\nprintf '%s' '{\"refresh_binary_version\":\"9.9.9-stub\",\"projects\":[{\"project\":\"/tmp/failed-project\",\"cloud_sync\":\"FAILED: cloud sync: registration missing\"}],\"user_level_store\":{\"status\":\"ok\"},\"skipped_unregistered\":[]}'\nprintf '%s' 'cloud refresh failed' >&2\nexit 1\n",
+        "#!/bin/sh\ncat \"$0.receipt\"\nprintf '%s' 'cloud refresh failed' >&2\nexit 1\n",
     );
 
-    let error = run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
-        .expect_err("a failed child refresh must remain an error");
+    let (result, output) = capture_phase(true, || {
+        let cli = crate::cli::try_parse_from_with_wordmark(["cas", "update"]).unwrap();
+        let _scope = crate::cli::startup_config_notices(&cli);
+        crate::config::Config::load(&root).unwrap();
+        run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
+    });
+    assert!(
+        !output.contains("remain ignored"),
+        "failed child receipt was reported twice: {output}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("config.toml")).unwrap(),
+        original
+    );
+    let error = result.expect_err("a failed child refresh must remain an error");
     let failure = error
         .downcast_ref::<PostSwapRefreshFailure>()
         .expect("a child refresh failure should preserve structured failure data");
@@ -2579,6 +2607,7 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
     let global = crate::config::global_cas_dir().unwrap();
     std::fs::create_dir_all(&global).unwrap();
     env.set("CAS_ROOT", &root);
+    env.set_current_dir(&project);
     env.set("CAS_PROJECT_ROOTS", &projects);
     let legacy = concat!(
         "# operator introduction\n",
@@ -2745,7 +2774,7 @@ fn cas_4585_retired_notices_survive_nested_failure_and_other_modes() {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
-            .contains("2 retired config entries remain ignored"),
+            .contains("retired config settings remain ignored"),
         "{output}"
     );
     assert!(
@@ -2797,6 +2826,7 @@ fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
     std::fs::set_permissions(&readonly_config, permissions).unwrap();
     let root = healthy.join(".cas");
     env.set("CAS_ROOT", &root);
+    env.set_current_dir(&healthy);
     env.set("CAS_PROJECT_ROOTS", &projects);
     let invalid = "[factory\nmerge_sweep = true\n";
     for directory in [&host, &broken.join(".cas")] {
@@ -2818,15 +2848,17 @@ fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
     let mut args = update_test_args();
     args.all_projects = true;
     args.refresh_receipt = Some(home.join("refresh.json"));
-    let (result, output) = capture_phase(true, || refresh_all_projects_with_user_refresh(
-        &args,
-        &update_test_cli(false),
-        Some(&root),
-        None,
-        None,
-        None,
-        || ProjectPhase::Failed("builtin repair failed; run `cas update --user`".into()),
-    ));
+    let (result, output) = capture_phase(true, || {
+        refresh_all_projects_with_user_refresh(
+            &args,
+            &update_test_cli(false),
+            Some(&root),
+            None,
+            None,
+            None,
+            || ProjectPhase::Failed("builtin repair failed; run `cas update --user`".into()),
+        )
+    });
     assert!(result.is_err());
     let report = refresh_report(&result).unwrap();
     assert_eq!(report.failed_projects, 2);
@@ -2837,10 +2869,15 @@ fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
     let rendered = render_plain_at(80, |fmt| findings::print(fmt, sweep).map(|_| ()));
     assert!(rendered.contains("builtin repair failed"));
     assert!(
-        !output.contains("retired config entries remain ignored"),
+        !output.contains("retired config entries remain ignored")
+            && !output.contains("retired config settings remain ignored"),
         "receipted config failures must not replay duplicate or projection findings: {output}"
     );
-    assert_eq!(rendered.matches("config is read-only").count(), 1, "{rendered}");
+    assert_eq!(
+        rendered.matches("config is read-only").count(),
+        1,
+        "{rendered}"
+    );
     assert!(
         rendered.contains("cas update --user"),
         "existing phase remedy lost: {rendered}"
@@ -2855,7 +2892,10 @@ fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
     assert_eq!(receipt["config_maintenance"]["failed"], 3);
     assert_eq!(receipt["config_maintenance"]["repaired"], 2);
     assert!(
-        !receipt["user_builtins"].as_str().unwrap().contains("retired TOML entries removed"),
+        !receipt["user_builtins"]
+            .as_str()
+            .unwrap()
+            .contains("retired TOML entries removed"),
         "another file's successful cleanup leaked into failure prose: {receipt}"
     );
     assert_eq!(std::fs::read_to_string(&readonly_config).unwrap(), retired);

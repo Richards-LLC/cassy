@@ -1,0 +1,10 @@
+#!/bin/sh
+# Cassy main-checkout pre-push: reuse the repository's factory-ref fast rows.
+# Worker branch ownership guards are installed separately by cas factory.
+root=$(git rev-parse --show-toplevel) || exit 1
+gate="$root/scripts/fast-rows-pre-push.sh"
+if [ ! -x "$gate" ]; then
+    echo "pre-push: missing executable $gate; restore the tracked hook source" >&2
+    exit 1
+fi
+exec "$gate" "$@"

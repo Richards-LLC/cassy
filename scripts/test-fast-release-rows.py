@@ -649,6 +649,7 @@ sleep 2
 
     def copy_hook_installer(self):
         self.write("scripts/install-git-hooks.sh", (ROOT / "scripts/install-git-hooks.sh").read_text())
+        (self.repo / "scripts/release-gate.sh").chmod((ROOT / "scripts/release-gate.sh").stat().st_mode)
         for source in (ROOT / ".githooks").glob("*"):
             self.write(".githooks/" + source.name, source.read_text())
             (self.repo / ".githooks" / source.name).chmod(source.stat().st_mode)
@@ -658,13 +659,23 @@ sleep 2
         command(self.repo, "git", "init", "-q", "--bare", str(remote))
         command(self.repo, "git", "remote", "add", "origin", str(remote))
         self.copy_hook_installer()
+        self.commit()
         # A renamed checkout may still point at a deleted hooks directory.
         command(self.repo, "git", "config", "core.hooksPath", str(self.repo / "deleted/hooks"))
+        command(self.repo, "git", "config", "extensions.worktreeConfig", "true")
+        worker = Path(self.scratch.name) / "worker"
+        self.assertEqual(command(self.repo, "git", "worktree", "add", "-q", "-b", "factory/w", str(worker)).returncode, 0)
+        command(worker, "git", "config", "--worktree", "core.hooksPath", "private-worker-hooks")
+        private_config = self.repo / ".git/worktrees/worker/config.worktree"
+        private_before = private_config.read_bytes()
+        shared_before = (self.repo / ".git/config").read_bytes()
         installed = self.install_hooks()
         self.assertEqual(installed.returncode, 0, installed.stderr)
-        config = (self.repo / ".git/config").read_bytes()
+        self.assertEqual(private_config.read_bytes(), private_before)
+        self.assertEqual((self.repo / ".git/config").read_bytes(), shared_before)
+        config = (self.repo / ".git/config.worktree").read_bytes()
         self.assertEqual(self.install_hooks().returncode, 0)
-        self.assertEqual((self.repo / ".git/config").read_bytes(), config)
+        self.assertEqual((self.repo / ".git/config.worktree").read_bytes(), config)
         self.write("cas-cli/tests/sample.rs", "// fixed in 9.99.8\n")
         self.commit()
         refused = self.push()
@@ -697,13 +708,15 @@ sleep 2
 
     def test_hook_installer_preserves_existing_authority_and_refuses_workers_cas_edb0(self):
         self.copy_hook_installer()
+        self.commit()
         self.write("custom/pre-push", "#!/bin/sh\nexit 42\n")
         (self.repo / "custom/pre-push").chmod(0o755)
         command(self.repo, "git", "config", "core.hooksPath", "custom")
         config = (self.repo / ".git/config").read_bytes()
-        for identity in ({}, {"CAS_AGENT_NAME": "worker"}):
+        for identity, cause in (({}, "existing hook authority"), ({"CAS_AGENT_NAME": "worker"}, "factory invocation")):
             refused = self.install_hooks(**identity)
             self.assertNotEqual(refused.returncode, 0, refused.stdout)
+            self.assertIn(cause, refused.stderr)
             self.assertEqual((self.repo / ".git/config").read_bytes(), config)
         self.assertEqual((self.repo / "custom/pre-push").read_text(), "#!/bin/sh\nexit 42\n")
         # A linked worktree is refused even without factory environment markers.
@@ -716,6 +729,7 @@ sleep 2
                           env={key: value for key, value in os.environ.items()
                                if not key.startswith(("CAS_", "GIT_"))})
         self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        self.assertIn("linked worktree", refused.stderr)
         self.assertEqual((self.repo / ".git/config").read_bytes(), config)
 
     def test_builtin_agent_projection_drift_is_refused_cas_7bce(self):

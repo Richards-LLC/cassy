@@ -6330,7 +6330,7 @@ mod tests {
         assert!(
             check
                 .message
-                .contains("cas config set cloud.team_only true"),
+                .contains("not proof of an equivalent remote copy"),
             "{}",
             check.message
         );

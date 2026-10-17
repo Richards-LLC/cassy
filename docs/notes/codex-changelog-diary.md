@@ -33,15 +33,14 @@ verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
   `mcp__cs` tools, initialized disposable `CAS_ROOT`, worktree discovery fixtures, and interrupt /
   resume recovery. The typed receipt is
   `crates/cas-pty/conformance/codex-cli-0.156.0-2026-09-23.json`.
-- **Locally installed:** **0.159.2** (`codex-cli 0.159.2`, checked 2026-09-30).
-- **Latest stable:** **0.159.2** (2026-09-29), confirmed through the official GitHub Releases
-  API on 2026-09-30. New stable entries are **0.156.1, 0.157.0, 0.157.1, 0.158.0,
-  0.159.0, 0.159.1, and 0.159.2**. Current 0.160/0.161 alpha notes were skimmed; they remain
-  untracked under this diary's stable-only policy.
-- **Gap:** the local/latest stable is seven published releases beyond the validated **0.156.0**
-  pin. Source review is not live conformance: approval/stdin behavior, background-server startup,
-  MCP discovery, hooks, worktrees and interrupt/resume still need a fresh installed-version matrix.
-  The 0.157.1 release explicitly has no attributable highlights; it is a named source gap below.
+- **Locally installed:** **0.163.0** (`codex-cli 0.163.0`, checked 2026-10-17).
+- **Latest stable:** **0.163.0** (2026-10-15, GitHub "Latest"), confirmed through the official
+  GitHub Releases API on 2026-10-17. The stables published after the last reviewed 0.159.2 are
+  **0.159.3, 0.160.0, 0.160.1, 0.161.0, 0.162.0, 0.162.1 and 0.163.0**. Their per-release notes
+  are **not yet triaged** in this diary (named source gap below); 0.164.0 alphas are untracked.
+- **Gap:** the installed stable is fourteen releases beyond the validated **0.156.0** pin. The
+  2026-10-17 parity audit below checks installed capability (`codex features list`, `--help`,
+  official docs) against Cassy's wiring; it is not a live conformance receipt.
 - **Historical proof:** the complete isolated 0.156.0 matrix passed with `--yolo`, `xhigh` effort, direct-only `mcp__cs` tools,
   initialized disposable `CAS_ROOT`, worktree discovery fixtures, code-mode coexistence, and
   interrupt/resume recovery. The typed receipt records the live run and the scoped factory parity
@@ -87,6 +86,8 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
 
 | Codex version | Headline | Cassy verdict | Pointer |
 | --- | --- | --- | --- |
+| 0.163.0 (installed) | 2026-10-17 parity audit: lifecycle hooks, custom agents and `codex queue` exist; Cassy wires only shell hooks | 👀 / 🔧 3.64 | this doc |
+| 0.159.3–0.163.0 | Seven stables not yet triaged | ⏭ source gap | [releases](https://github.com/openai/codex/releases) |
 | 0.159.2 | Windows background-process console suppression | ⏭ n/a | [release](https://github.com/openai/codex/releases/tag/rust-v0.159.2) |
 | 0.159.1 | GPT-6.1 Sol default in bundled/Bedrock catalogs | ✅ / 👀 | [release](https://github.com/openai/codex/releases/tag/rust-v0.159.1) |
 | 0.159.0 | Opt-in instant interrupt · deny preservation · MCP/command process launches | 👀 / ✅ | [release](https://github.com/openai/codex/releases/tag/rust-v0.159.0) |
@@ -124,6 +125,48 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
 ---
 
 ## Entries
+
+### 2026-10-17 — installed 0.163.0 parity audit (not a release entry)
+
+Audited 2026-10-17 against installed `codex-cli 0.163.0`, `codex features list`, `codex --help`
+and the official docs [Hooks](https://learn.chatgpt.com/docs/hooks),
+[Subagents / custom agents](https://learn.chatgpt.com/docs/agent-configuration/subagents) and
+[Custom prompts](https://developers.openai.com/codex/custom-prompts). Nothing here was run live.
+
+- **Lifecycle hooks are a stable Codex capability** (`hooks stable true`). The documented events
+  include `SessionStart`, `Stop` (with a continuation decision), `UserPromptSubmit`,
+  `Pre/PostCompact`, `SubagentStart/Stop`, `SessionEnd` and `Interrupt`, with `command` and
+  `mcp_tool` handlers. Cassy wires only `PreToolUse` (Bash, apply_patch) and `PostToolUse` (Bash),
+  and those do run: Codex rollouts record "Command blocked by PreToolUse hook". Cassy guidance that
+  says Codex has no session hooks is stale. → 🔧 **fix in 3.64**: lifecycle wiring and hook trust (cas-d0fe, GH #1280).
+- **Native canary, 2026-10-17 21:13Z (isolated, cas-d0fe):** on installed 0.163.0 a
+  `SessionStart` hook's context was consumed by the model, and a `PreToolUse` matcher fired for an
+  MCP tool call before approval. Not exercised: `Stop` re-entry and MCP tool execution after the
+  hook; the untrusted-hook control was ambiguous.
+- **MCP tool guard in Cassy's current default:** that canary proves Codex *can* hook MCP calls,
+  but Cassy's generated Codex hooks match only shell tools (Bash, apply_patch), so today's default
+  wiring does not cover MCP calls. → 🔧 **3.64** with the lifecycle wiring (cas-d0fe).
+- **Custom agents exist:** TOML files under `~/.codex/agents/` or `.codex/agents/`
+  (`name`, `description`, `developer_instructions`), `/subagents` in the CLI, and
+  `multi_agent stable true`. Cassy ships no Codex agents and still declares
+  `supports_subagents: false` (and `supports_hooks: false`) for Codex. That flag also decides
+  whether task/epic verification is required, so changing it is a behaviour change, not a doc
+  fix. Correction to the touchpoint above: Cassy does **not** mirror `.md` agents to
+  `.codex/agents/`. → 🔧 **3.64**: backend capability flags and native Codex roles (cas-6c54); a
+  Codex verifier agent is unexercised until then.
+- **`codex queue --thread <id> --message <text>`** queues a message into an existing session via
+  the app-server daemon. Cassy delivers to Codex panes by PTY bracketed paste instead. This is a
+  candidate for reliable turn admission; it is **not** established as the cause of any missed
+  wake. → 🔧 **3.64 investigation**: native queue delivery (cas-353b).
+- **Finish command:** the wrap-up now runs on Codex as a supported skill, `$finish`, from
+  `~/.agents/skills/finish`. The original custom prompt (`/prompts:finish`, deprecated by Codex in
+  favour of skills) is kept in the current Codex homes on this host. → ✅.
+- **Unchanged:** skills mirror, `cs` MCP key, effort mapping and `--yolo` launch. `memories` is
+  stable but off by default, and Cassy does not use it. → ✅.
+
+Source gap: release notes for 0.159.3, 0.160.0, 0.160.1, 0.161.0, 0.162.0, 0.162.1 and 0.163.0
+are not yet reviewed here; the official-docs and release-window research (cas-9ca1) feeds a
+follow-up diary entry. None of this is a 3.63 dependency.
 
 ### 0.159.2 — Windows background-process console suppression
 

@@ -975,8 +975,10 @@ exact-delivery receipts. Targeted receipts complement full-suite assembly proof.
 
 Each check runs once (operator decisions D1–D3, cas-eac2). A factory worker's
 pre-push hook runs the no-build fast rows (`scripts/fast-rows-pre-push.sh`) and
-writes a PASS receipt for the pushed tip; a missing tool fails the push. Lane CI
-runs no fast rows and no broad Rust tests for factory pushes. Park reads, and
+writes a PASS receipt for the pushed tip; a missing tool fails the push. With
+the repository variable `CAS_LANE_SLIM` set to `true`, lane CI runs no fast rows
+and no broad Rust tests for factory pushes; unset (the default) the lanes run as
+before, so the switch waits for a runtime with these guards. Park reads, and
 never runs, the exact-tip receipts: the fast-rows PASS and a capped test PASS in
 every workspace crate whose sources or tests changed. A receipt in another
 crate does not count, and a missing receipt is refused with its fix. Pull
@@ -986,7 +988,7 @@ and the only gate to `main`; its required checks, including the Rust suite, run
 once on the exact merged tree. Commander journeys run there only when `hub-web/`
 product inputs change. Do not add lane-merge compile checks, park re-runs or a
 separate assembly journey run. If more than two merge-queue ejections per epic
-follow from this, revert the D1 routing as one policy change. The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
+follow from this, unset `CAS_LANE_SLIM`: that one setting is the D1 rollback. The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
 epic close gate accepts a local `ASSEMBLY_PROOF`, it covers the Rust build and
 suite only; it does not replace the queue's path to `main` or require a
 journey receipt.

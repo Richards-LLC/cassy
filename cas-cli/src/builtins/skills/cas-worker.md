@@ -36,7 +36,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    round after that), unless `delivery_mode=local_merge`: every push to a
    factory branch starts a CI run. Where the project ships
    `scripts/fast-rows-pre-push.sh`, the push hook runs its no-build fast rows
-   (a missing tool fails the push), and lane CI runs no broad Rust tests. Park
+   (a missing tool fails the push), so lane CI may skip them and broad Rust tests. Park
    only reads receipts: the fast-rows PASS and a capped test PASS in each
    changed crate, both at the exact tip. Add milestone `note_type=progress` notes.
 4. Before close, invoke [`verify-before-claim`](../verify-before-claim/SKILL.md)

@@ -403,6 +403,62 @@ pub fn prepare_cas_tool_hooks_in(config: &Path, hooks: &Path) -> io::Result<bool
     ensure_cas_hooks_trusted_in(config, hooks)
 }
 
+/// Every project `hooks.json` Codex may load for a session started in `cwd`.
+///
+/// Codex 0.156 and earlier read `<cwd>/.codex/hooks.json`. Codex 0.162 instead
+/// resolves a linked git worktree to its main checkout and loads
+/// `<main checkout>/.codex/hooks.json`, keyed by that path (cas-4984). Observed
+/// with `codex app-server` `hooks/list` on codex-cli 0.162.1: for a linked
+/// worktree cwd it listed only the main checkout's file, with the same hashes
+/// CAS computes. A trust entry keyed by the worktree's own file therefore left
+/// both CAS hooks "untrusted" and parked the worker on "Hooks need review".
+/// Trusting both paths covers both schemes; the extra state entry is inert.
+pub fn codex_project_hooks_paths(cwd: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![cwd.join(".codex/hooks.json")];
+    if let Some(main) = linked_worktree_main_checkout(cwd) {
+        let main_hooks = main.join(".codex/hooks.json");
+        if !paths.contains(&main_hooks) {
+            paths.push(main_hooks);
+        }
+    }
+    paths
+}
+
+/// The main checkout of the linked git worktree containing `cwd`, if any.
+///
+/// A linked worktree's `.git` is a file `gitdir: <repo>/.git/worktrees/<name>`
+/// whose `commondir` names the shared `.git`; the main checkout is its parent.
+/// Read from the files directly so trust preparation needs no `git` binary.
+fn linked_worktree_main_checkout(cwd: &Path) -> Option<PathBuf> {
+    let dot_git = cwd
+        .ancestors()
+        .map(|dir| dir.join(".git"))
+        .find(|p| p.exists())?;
+    if dot_git.is_dir() {
+        return None;
+    }
+    let pointer = std::fs::read_to_string(&dot_git).ok()?;
+    let gitdir = Path::new(pointer.trim().strip_prefix("gitdir:")?.trim());
+    let gitdir = dot_git.parent()?.join(gitdir);
+    let commondir = std::fs::read_to_string(gitdir.join("commondir")).ok()?;
+    let common = normalize_lexically(&gitdir.join(commondir.trim()));
+    (common.file_name()? == ".git").then(|| common.parent().map(Path::to_path_buf))?
+}
+
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Record the current CAS hook definitions as trusted in Codex's user config.
 ///
 /// Codex uses this separate state from project trust: without it the project
@@ -794,6 +850,19 @@ pub const CODEX_TRUST_TIMEOUT_HINT: &str = "This worker runs cli=codex: Codex re
      it is missing, the daemon log records why the write was skipped (unparseable config, or the \
      entry already existed with another trust_level).";
 
+/// Lower-case pane text of Codex's interactive hook-trust review screen
+/// ("Hooks need review: N hooks are new or changed").
+pub const CODEX_HOOK_REVIEW_MARKER: &str = "hooks need review";
+
+/// Named spawn failure for a Codex pane parked on that screen (cas-4984). CAS
+/// wrote hook trust before launch, so reaching it means this Codex version keys
+/// or hashes hook trust in a way CAS does not recognize.
+pub const CODEX_HOOK_REVIEW_FAILURE: &str = "codex_hook_trust_unrecognized: Codex parked on its \
+     \"Hooks need review\" prompt although CAS pre-trusted the worker's hooks, so this Codex \
+     version keys or hashes hook trust differently. Run `codex app-server` hooks/list in the \
+     worker cwd and compare each hook's key and currentHash with the [hooks.state] entries in \
+     $CODEX_HOME/config.toml, or pin the validated Codex version.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1004,6 +1073,62 @@ mod tests {
         assert!(!ensure_cas_hooks_trusted_in(&config_path, &hooks_path).unwrap());
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), after_first);
         assert_eq!(std::fs::read_to_string(&hooks_path).unwrap(), hook_source);
+    }
+
+    #[test]
+    fn linked_worktree_trusts_the_main_checkout_hooks_codex_0_162_loads() {
+        // cas-4984: codex-cli 0.162.1 `hooks/list` for a linked worktree cwd
+        // listed only `<main checkout>/.codex/hooks.json`, with these hashes.
+        let dir = TempDir::new();
+        let main = dir.join("main");
+        let linked = dir.join("linked");
+        std::fs::create_dir_all(main.join(".git/worktrees/w")).unwrap();
+        std::fs::write(main.join(".git/worktrees/w/commondir"), "../..\n").unwrap();
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", main.join(".git/worktrees/w").display()),
+        )
+        .unwrap();
+        std::fs::create_dir_all(main.join(".codex")).unwrap();
+        std::fs::write(
+            main.join(".codex/hooks.json"),
+            r#"{"hooks":{
+  "PostToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"cas hook PostToolUse","timeout":3}]}],
+  "PreToolUse":[{"matcher":"^(Bash|apply_patch)$","hooks":[{"type":"command","command":"CAS_HOOK_HARNESS=codex cas hook PreToolUse","timeout":120}]}]
+}}"#,
+        )
+        .unwrap();
+
+        let paths = codex_project_hooks_paths(&linked);
+        let main_hooks = main.join(".codex/hooks.json");
+        assert_eq!(
+            paths,
+            vec![linked.join(".codex/hooks.json"), main_hooks.clone()]
+        );
+        assert_eq!(codex_project_hooks_paths(&main), vec![main_hooks.clone()]);
+
+        let config_path = dir.join("config.toml");
+        for hooks in &paths {
+            prepare_cas_tool_hooks_in(&config_path, hooks).unwrap();
+        }
+        let config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let trusted = |event: &str| {
+            config["hooks"]["state"][format!("{}:{event}:0:0", main_hooks.display()).as_str()]
+                ["trusted_hash"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            trusted("pre_tool_use"),
+            "sha256:06a6a2b38e68da7193b1f3d10f21ca73dde9bc974cd5020e0164fd23d5af0253"
+        );
+        assert_eq!(
+            trusted("post_tool_use"),
+            "sha256:94c125201a0019ec158d7abb96cd3fc0d8282bb499aa506f202ce794748cdb2b"
+        );
     }
 
     #[test]

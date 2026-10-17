@@ -137,7 +137,11 @@ impl Backend for Codex {
         {
             let config = home.join("config.toml");
             cas_pty::prepare_cas_tool_hooks_in(&config, &home.join("hooks.json"))?;
-            cas_pty::prepare_cas_tool_hooks_in(&config, &cwd.join(".codex/hooks.json"))?;
+            // Codex 0.162 loads a linked worktree's hooks from its main
+            // checkout; trust every file a supported version may load.
+            for hooks in cas_pty::codex_project_hooks_paths(cwd) {
+                cas_pty::prepare_cas_tool_hooks_in(&config, &hooks)?;
+            }
         }
         Ok(())
     }

@@ -1728,6 +1728,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
                 .unwrap()
                 .success()
         );
+        // pin: a retry must preserve the complete prior refusal receipt byte-for-byte.
         assert_eq!(std::fs::read_to_string(repo.join("target/worker-check.log")).unwrap(), prior_refusal,
             "a retry's admitted shell redirect must preserve the earlier refusal receipt");
         assert_eq!(clean_head(&repo).unwrap(), head);

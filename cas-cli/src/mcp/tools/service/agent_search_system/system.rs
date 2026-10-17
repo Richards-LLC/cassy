@@ -476,6 +476,15 @@ impl CasService {
         &self,
         req: SystemRequest,
     ) -> Result<CallToolResult, McpError> {
+        self.report_cas_bug_with_transport(req, &GhBugFilingTransport)
+            .await
+    }
+
+    async fn report_cas_bug_with_transport<T: BugFilingTransport>(
+        &self,
+        req: SystemRequest,
+        transport: &T,
+    ) -> Result<CallToolResult, McpError> {
         let title = req.title.ok_or_else(|| {
             Self::error(ErrorCode::INVALID_PARAMS, "title required for bug report")
         })?;
@@ -540,17 +549,19 @@ impl CasService {
             Err(warning) => ("unassigned".to_string(), Some(warning)),
         };
         let filing_result = resolve_issue_repo(&self.inner.cas_root).and_then(|repo| {
-            file_bug_report(&GhBugFilingTransport, &repo, &title, &body)
-                .map_err(|message| message.to_string())
+            file_bug_report(transport, &repo, &title, &body).map_err(|message| message.to_string())
         });
         let outcome = match filing_result {
             Ok(outcome) => outcome,
             Err(error) => {
                 let failure_reason =
                     filing_failure_reason(&error, task_identity_warning.as_deref());
-                let artifacts_root = crate::config::project_factory_artifacts_root(&self.inner.cas_root, &crate::config::resolved_factory_artifacts_root(
-                    self.inner.load_config().factory().artifacts_root.as_deref(),
-                ));
+                let artifacts_root = crate::config::project_factory_artifacts_root(
+                    &self.inner.cas_root,
+                    &crate::config::resolved_factory_artifacts_root(
+                        self.inner.load_config().factory().artifacts_root.as_deref(),
+                    ),
+                );
                 let path = stage_unfiled_bug_report(
                     &artifacts_root,
                     &task_id,
@@ -934,20 +945,27 @@ mod tests {
         label_result: Result<(), String>,
         issue_url: String,
         labels_seen: std::cell::RefCell<Vec<String>>,
+        repos_seen: std::cell::RefCell<Vec<String>>,
+        reports_seen: std::cell::RefCell<Vec<(String, String)>>,
     }
 
     impl BugFilingTransport for FakeTransport {
-        fn ensure_agent_reported_label(&self, _repo: &str) -> Result<(), String> {
+        fn ensure_agent_reported_label(&self, repo: &str) -> Result<(), String> {
+            self.repos_seen.borrow_mut().push(repo.to_string());
             self.label_result.clone()
         }
 
         fn create_issue(
             &self,
-            _repo: &str,
-            _title: &str,
-            _body: &str,
+            repo: &str,
+            title: &str,
+            body: &str,
             labels: &[&str],
         ) -> Result<String, String> {
+            self.repos_seen.borrow_mut().push(repo.to_string());
+            self.reports_seen
+                .borrow_mut()
+                .push((title.to_string(), body.to_string()));
             self.labels_seen
                 .borrow_mut()
                 .extend(labels.iter().map(|label| (*label).to_string()));
@@ -978,7 +996,9 @@ mod tests {
         let transport = FakeTransport {
             label_result: Err("permission denied".to_string()),
             issue_url: "https://github.com/example/cassy/issues/1".to_string(),
-            labels_seen: std::cell::RefCell::new(Vec::new()),
+            labels_seen: Default::default(),
+            repos_seen: Default::default(),
+            reports_seen: Default::default(),
         };
 
         let outcome = file_bug_report(&transport, "example/cassy", "title", "body")
@@ -999,7 +1019,9 @@ mod tests {
         let transport = FakeTransport {
             label_result: Ok(()),
             issue_url: "https://github.com/example/cassy/issues/2".to_string(),
-            labels_seen: std::cell::RefCell::new(Vec::new()),
+            labels_seen: Default::default(),
+            repos_seen: Default::default(),
+            reports_seen: Default::default(),
         };
 
         let outcome = file_bug_report(&transport, "example/cassy", "title", "body")
@@ -1022,38 +1044,144 @@ mod tests {
         );
     }
 
-    #[test]
-    fn configured_issue_repo_is_the_only_filing_target() {
-        let temp = tempfile::tempdir().expect("temporary config directory");
-        let mut config = crate::config::Config::default();
-        config
-            .set("issues.repo", "example/project")
-            .expect("repo setting should be valid");
-        config
-            .save(temp.path())
-            .expect("project config should be saved");
-
-        assert_eq!(
-            resolve_issue_repo(temp.path()).expect("configured repo should resolve"),
-            "example/project"
-        );
+    fn report_service(root: &std::path::Path) -> super::CasService {
+        let core = crate::mcp::server::CasCore::with_daemon(root.to_path_buf(), None, None);
+        super::CasService::new(
+            core,
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        )
     }
 
-    #[test]
-    fn cassy_component_repo_is_filing_fallback_when_project_repo_is_unset() {
-        let temp = tempfile::tempdir().expect("temporary config directory");
-        let mut config = crate::config::Config::default();
-        config
-            .set("issues.components.cassy", "example/cassy")
-            .expect("component repo should be valid");
-        config
-            .save(temp.path())
-            .expect("project config should be saved");
+    fn report_request(home: &std::path::Path) -> super::SystemRequest {
+        serde_json::from_value(serde_json::json!({
+            "action": "report_cas_bug",
+            "title": format!("Cassy failure in {}", home.display()),
+            "description": "Reproducer with ghp_private-token-value",
+            "expected": "successful routing",
+            "actual": "wrong tracker"
+        }))
+        .unwrap()
+    }
 
-        assert_eq!(
-            resolve_issue_repo(temp.path()).expect("Cassy component should resolve"),
-            "example/cassy"
-        );
+    fn response_text(result: &super::CallToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn recording_transport() -> FakeTransport {
+        FakeTransport {
+            label_result: Ok(()),
+            issue_url: "https://github.com/example/cassy/issues/1".into(),
+            labels_seen: Default::default(),
+            repos_seen: Default::default(),
+            reports_seen: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_issue_repo_routes_report_through_transport() {
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        env.set("GH_TOKEN", "ghp_private-token-value");
+        for (project, component, expected) in [
+            (
+                Some("example/project"),
+                Some(" example/cassy "),
+                "example/cassy",
+            ),
+            (Some("example/project"), None, "example/project"),
+            (Some("example/project"), Some("   "), "example/project"),
+            (None, Some("example/cassy"), "example/cassy"),
+            (None, None, "Richards-LLC/cassy"),
+            (
+                Some("invalid/project/extra"),
+                Some("example/cassy"),
+                "example/cassy",
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut config = crate::config::Config::default();
+            if let Some(repo) = project {
+                config.set("issues.repo", repo).unwrap();
+            }
+            if let Some(repo) = component {
+                config.set("issues.components.cassy", repo).unwrap();
+            }
+            config.save(temp.path()).unwrap();
+            let transport = recording_transport();
+            let result = report_service(temp.path())
+                .report_cas_bug_with_transport(report_request(env.home()), &transport)
+                .await
+                .unwrap();
+            assert!(response_text(&result).contains("Bug report created:"));
+            assert_eq!(
+                &*transport.repos_seen.borrow(),
+                &[expected, expected],
+                "both label and issue destinations for project={project:?}, component={component:?}"
+            );
+            let reports = transport.reports_seen.borrow();
+            assert_eq!(reports.len(), 1);
+            assert!(reports[0].0.contains('~'));
+            assert!(!reports[0].0.contains(&env.home().display().to_string()));
+            assert!(!reports[0].1.contains("ghp_private-token-value"));
+            assert!(reports[0].1.contains("successful routing"));
+            assert!(reports[0].1.contains("wrong tracker"));
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_selected_issue_repo_stages_report_without_transport() {
+        let env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for (project, component, selected_key) in [
+            (
+                "example/project",
+                Some("bad/repo/extra"),
+                "issues.components.cassy",
+            ),
+            ("bad --repo injected/name", None, "issues.repo"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut config = crate::config::Config::default();
+            config.set("issues.repo", project).unwrap();
+            if let Some(repo) = component {
+                config.set("issues.components.cassy", repo).unwrap();
+            }
+            config
+                .set(
+                    "factory.artifacts_root",
+                    temp.path().join("artifacts").to_str().unwrap(),
+                )
+                .unwrap();
+            config.save(temp.path()).unwrap();
+            let transport = recording_transport();
+            let result = report_service(temp.path())
+                .report_cas_bug_with_transport(report_request(env.home()), &transport)
+                .await
+                .unwrap();
+            let text = response_text(&result);
+            assert!(text.contains("Bug report was not filed."), "{text}");
+            assert!(
+                text.contains(&format!("cas config set {selected_key} owner/name")),
+                "{text}"
+            );
+            assert!(
+                transport.repos_seen.borrow().is_empty(),
+                "invalid destination must never reach GitHub"
+            );
+            let path = text
+                .lines()
+                .find_map(|line| line.strip_prefix("Staged report: "))
+                .unwrap();
+            assert!(std::path::Path::new(path).starts_with(temp.path()));
+            let staged = std::fs::read_to_string(path).unwrap();
+            assert!(staged.contains("automatic GitHub filing did not complete"));
+            assert!(staged.contains(selected_key));
+            assert!(staged.contains("Cassy failure in ~"));
+        }
     }
 
     #[test]

@@ -1785,19 +1785,39 @@ fn refresh_phase_result_counts_projects_and_receipt_keeps_count_grammar() {
         elapsed: std::time::Duration::from_secs(4),
         ..Default::default()
     };
+    // cas-06b0: the human receipt counts projects too, and names the store.
     let receipt = update_banner_text(&failed);
-    let error: anyhow::Error = RefreshFailed(failed).into();
-    assert_eq!(
-        error.to_string(),
-        "1 of 3 projects not fully refreshed; the user-level store was not refreshed"
+    assert!(
+        receipt.contains("3 projects refreshed · 1 failed · user-level store failed · 2 skipped"),
+        "{receipt}"
     );
+    let user_only = update_banner_text(&RefreshReport {
+        project_count: 12,
+        failed_count: 1,
+        user_level_failed: true,
+        ..Default::default()
+    });
+    assert!(user_only.contains("12 projects refreshed · 0 failed · user-level store failed"), "{user_only}");
+    // cas-06b0: a mixed failure's exit reason breaks between clauses, so no
+    // line passes 80 columns beside the error mark.
+    let mixed = RefreshFailed(RefreshReport {
+        project_count: 12,
+        failed_count: 3,
+        failed_projects: 2,
+        user_level_failed: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        binary_exit_reason(&mixed, "9.99.1", false),
+        "2 of 12 projects not fully refreshed\n  the user-level store was not refreshed\n  Cassy 9.99.1 is current"
+    );
+    let error: anyhow::Error = RefreshFailed(failed).into();
     let failed = refresh_phase_result(&Err(error));
     assert_eq!(failed.verdict, Verdict::Error);
     assert_eq!(
         failed.text,
         "1 of 3 failed · user-level store failed · 1 warning · 2 skipped"
     );
-    assert!(receipt.contains("2 failed · 2 skipped"), "{receipt}");
 }
 
 /// cas-0aa5: the operator's 3.62 `cas update -y` transcript, replayed from

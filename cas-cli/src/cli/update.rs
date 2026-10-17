@@ -520,11 +520,7 @@ fn run_full_update(
         // Name the binary's state beside the refresh failure, so a current
         // binary never reads as a failed update.
         return Err(match error.downcast_ref::<RefreshFailed>() {
-            Some(failed) => anyhow::anyhow!(
-                "{failed}; Cassy {} is {}",
-                outcome.version,
-                if outcome.updated { "installed" } else { "current" }
-            ),
+            Some(failed) => anyhow::anyhow!(binary_exit_reason(failed, &outcome.version, outcome.updated)),
             None => error,
         });
     }
@@ -1131,19 +1127,41 @@ fn render_project_phase_details(
     strip_repeated_warning_lines(&selected, warnings, project, verbose, true)
 }
 
+/// The human receipt. "N failed" counts projects, as "N projects refreshed"
+/// does; the user-level store is host state and is named on its own
+/// (cas-06b0). `--json` keeps its own counts.
 fn update_banner_text(report: &RefreshReport) -> String {
+    let user = if report.user_level_failed {
+        " · user-level store failed"
+    } else {
+        ""
+    };
     let skipped = if report.skipped_unregistered > 0 {
         format!(" · {} skipped", report.skipped_unregistered)
     } else {
         String::new()
     };
     format!(
-        "Cassy {} · {} projects refreshed · {} failed{skipped} · {}",
+        "Cassy {} · {} projects refreshed · {} failed{user}{skipped} · {}",
         env!("CARGO_PKG_VERSION"),
         report.project_count,
-        report.failed_count,
+        report.failed_projects,
         format_elapsed(report.elapsed)
     )
+}
+
+/// One exit reason from its clauses: on one line when it fits beside the
+/// error mark in 80 columns, otherwise one clause per line under the first
+/// (cas-06b0), so a terminal never wraps it mid-clause.
+fn exit_reason(clauses: &[String]) -> String {
+    // `[ERROR] ` is the widest mark the error renderer puts before it.
+    const LINE: usize = 80 - "[ERROR] ".len();
+    let joined = clauses.join("; ");
+    if joined.chars().count() <= LINE {
+        joined
+    } else {
+        clauses.join("\n  ")
+    }
 }
 
 fn capture_phase<T>(enabled: bool, operation: impl FnOnce() -> T) -> (T, String) {
@@ -1486,6 +1504,14 @@ struct RefreshFailed(RefreshReport);
 impl std::fmt::Display for RefreshFailed {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let report = &self.0;
+        write!(formatter, "{}", exit_reason(&self.clauses()))
+    }
+}
+
+impl RefreshFailed {
+    /// What was left behind, one clause each: projects, then the host store.
+    fn clauses(&self) -> Vec<String> {
+        let report = &self.0;
         let projects = (report.failed_projects > 0).then(|| {
             format!(
                 "{} of {} projects not fully refreshed",
@@ -1495,12 +1521,21 @@ impl std::fmt::Display for RefreshFailed {
         let user = report
             .user_level_failed
             .then(|| "the user-level store was not refreshed".to_owned());
-        let parts = projects.into_iter().chain(user).collect::<Vec<_>>();
-        write!(formatter, "{}", parts.join("; "))
+        projects.into_iter().chain(user).collect()
     }
 }
 
 impl std::error::Error for RefreshFailed {}
+
+/// A failed refresh's exit reason, ending with the binary's own state.
+fn binary_exit_reason(failed: &RefreshFailed, version: &str, updated: bool) -> String {
+    let mut clauses = failed.clauses();
+    clauses.push(format!(
+        "Cassy {version} is {}",
+        if updated { "installed" } else { "current" }
+    ));
+    exit_reason(&clauses)
+}
 
 /// The report behind a refresh result, whether or not it failed.
 fn refresh_report(result: &anyhow::Result<RefreshReport>) -> Option<&RefreshReport> {

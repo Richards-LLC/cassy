@@ -337,9 +337,27 @@ These reads never save the inferred value. Raw `Config::get`/`list`, editing,
 serialization and `config diff` retain stored values. Legacy `report_cas_bug`,
 automatic issue triage and release-report GitHub intake retain their explicit
 configuration contracts; they do not infer a project target from origin.
-`report_cas_bug` continues using its explicit legacy override or the Cassy
-component repository. Only project initialization may persist a discovered
-origin; routine reads and updates do not backfill it.
+`report_cas_bug` uses effective `issues.components.cassy`, including the
+compiled Cassy repository (`Richards-LLC/cassy`) when that component is absent.
+For example, `issues.repo = "example/downstream"` alone still files Cassy bugs
+in `Richards-LLC/cassy`, agreeing with `cas config get issues.components.cassy`.
+The checkout's inferred origin is never a Cassy filing target.
+
+Legacy opt-out: a raw, explicitly blank or whitespace-only
+`[issues.components] cassy` value in config.toml permits a nonblank stored
+`issues.repo` fallback. If the project override is also blank or absent, the
+compiled Cassy default applies. This opt-out differs from clearing the component
+with `cas config set issues.components.cassy ""`, which removes the raw override
+and restores the default. Configure a nonblank component explicitly for a fork.
+
+It validates the selected destination as `owner/name` before any GitHub call;
+an invalid selected value never falls through to another tracker. Instead the
+report is durably staged under the task's artifacts directory and the response
+names the selected key and `cas config set <key> owner/name` remedy. Correct
+that setting before retrying; a staged report has not been filed. Existing
+credential failures and label degradation retain their filing behavior.
+Only project initialization may persist a discovered origin; routine reads
+and updates do not backfill it.
 
 ## Canonical install path
 

@@ -185,8 +185,10 @@ as the reference side of a Claude↔Codex parity check. Nothing here was run liv
   `PreToolUse` and `PostToolUse` for Claude. Claude remains the reference for startup context,
   stop handling and compaction. → 🟢.
 - **MCP tool guard:** Claude `PreToolUse` hooks match MCP tools, so Cassy's MCP write guards
-  (for example the Violet-only Slack write rule) are enforced by hook. Whether Codex hooks cover
-  MCP calls is unknown. → 🟢 for Claude.
+  (for example the Violet-only Slack write rule) are enforced by hook. On Codex, an isolated
+  canary on 2026-10-17 21:13Z proved a `PreToolUse` matcher can fire for MCP calls, but Cassy's
+  default Codex hooks match only shell tools, and MCP execution after the hook was not exercised.
+  → 🟢 for Claude.
 - **Agents:** Cassy ships `.md` agents (task verifier and others), and the CLI also accepts
   `--agents`; `claude agents` lists background sessions. → 🟢.
 - **Background sessions:** `--bg/--background` starts or continues a session in the background.

@@ -3980,9 +3980,11 @@ fn install_error(error: &self_update::errors::Error, current: &str, target: &str
         Some((kind, rest)) if kind.ends_with("Error") && !kind.contains(' ') => rest.to_owned(),
         _ => text,
     };
-    anyhow::anyhow!(
-        "could not install Cassy {target}: {cause}; Cassy {current} is unchanged, so rerun `cas update` to retry"
-    )
+    // One clause per line when the reason passes 80 columns (exit_reason).
+    anyhow::anyhow!(exit_reason(&[
+        format!("could not install Cassy {target}: {cause}"),
+        format!("Cassy {current} is unchanged; rerun `cas update` to retry"),
+    ]))
 }
 
 /// Ask before replacing the binary: `Enter` or `y` installs, anything else

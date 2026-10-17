@@ -1980,6 +1980,13 @@ impl ProxyChannelReader {
         Ok(Self { engine: std::sync::Arc::new(engine), caller })
     }
 
+    /// Original Violet receipt for one exact target. Body selection and
+    /// identity validation belong to the managed reader's BodySource.
+    pub(crate) async fn read_target(&self, args: serde_json::Value) -> Result<serde_json::Value, String> {
+        self.engine.call_tool(&self.caller, cmcp_core::config::VIOLET_SERVER, "violet_read", args.as_object().cloned())
+            .await.map_err(|_| "Violet target read failed".to_string())
+    }
+
     pub(crate) async fn read(&self, request: &SweepRequest) -> Result<SweepRead, String> {
         let mut slices = Vec::new();
         let mut cursor: Option<String> = None;
@@ -2136,7 +2143,7 @@ impl VioletWakeRuntime {
         // cas-146e: a managed binding is read through v2 only; its legacy
         // claim and channel sweep stay off.
         let managed = presence.as_ref().and_then(|supervisor| {
-            super::violet_reader::read_managed(&self.reader, &cloud, &supervisor.agent_id, queue.as_ref(), now)
+            super::violet_reader::read_managed(&self.reader, &cloud, &supervisor.agent_id, &self.cas_dir, &self.factory_session, queue.as_ref(), now)
         });
         let report = match managed {
             Some(ref report) => report.clone(),

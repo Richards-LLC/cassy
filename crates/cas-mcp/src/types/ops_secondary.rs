@@ -1442,7 +1442,7 @@ pub struct CoordinationRequest {
 
     /// Preview cleanup without making changes.
     #[schemars(
-        description = "Preview cleanup; gc_cleanup defaults to true."
+        description = "Preview cleanup; gc_cleanup caches default to true."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub dry_run: Option<bool>,

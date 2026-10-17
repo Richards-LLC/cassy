@@ -139,7 +139,12 @@ pub(crate) fn queued_message_provenance_at(
         "spawn-boilerplate"
     } else if message.source.eq_ignore_ascii_case("director") {
         "director-generated"
-    } else if message.source.starts_with("lifecycle-wake:") {
+    } else if message.source.starts_with("lifecycle-wake:")
+        || message.source.starts_with("lifecycle:")
+    {
+        // cas-8cbe: the non-waking progress relays (started/ready/closed) are
+        // CAS-written too; labelling them agent-authored misread them as a
+        // worker talking.
         "lifecycle-relay"
     } else if message.origin == Some(cas_store::QueueOrigin::Daemon)
         && let Some(peer) = crate::cloud::peer_mailbox::parse_envelope(&message.prompt)
@@ -166,6 +171,21 @@ pub(crate) fn queued_message_provenance_at(
         age_secs,
         delivery,
     )
+}
+
+/// cas-8cbe: the lead of the supervisor's copy of a worker-to-worker message.
+const PEER_COPY_LEAD: &str = "Peer worker message copy — from ";
+
+/// The text of the supervisor's copy of a worker peer message.
+pub(crate) fn peer_copy_text(from: &str, to: &str, message: &str) -> String {
+    format!("{PEER_COPY_LEAD}{from} to {to}.\n\n{message}")
+}
+
+/// `(from, to, body)` of a supervisor peer copy built by [`peer_copy_text`].
+pub(crate) fn parse_peer_copy(prompt: &str) -> Option<(&str, &str, &str)> {
+    let (header, body) = prompt.strip_prefix(PEER_COPY_LEAD)?.split_once(".\n\n")?;
+    let (from, to) = header.split_once(" to ")?;
+    Some((from, to, body))
 }
 
 /// A successful shared delivery claim is the first handoff for this recipient.
@@ -2547,11 +2567,9 @@ impl CasService {
                     agent_id: agent.id.clone(),
                 });
         let enqueue_started = std::time::Instant::now();
-        let peer_copy_message = peer_supervisor_copy.as_ref().map(|_| {
-            format!(
-                "Peer worker message copy — from {display_name} to {resolved_target}.\n\n{message}"
-            )
-        });
+        let peer_copy_message = peer_supervisor_copy
+            .as_ref()
+            .map(|_| peer_copy_text(&display_name, &resolved_target, &message));
         let (message_id, duplicate_suppressed, supervisor_copy_id) =
             if let Some(supervisor) = peer_supervisor_copy.as_deref() {
                 let session = factory_session

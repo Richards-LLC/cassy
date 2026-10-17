@@ -17,24 +17,25 @@ macOS: compile-checked and launch-tested; suite runs on Linux.
    the draft path; write the Slack draft there per
    `docs/release-notes/RUBRIC.md` and `docs/RELEASE_SLACK_RUBRIC.md`, or keep
    it anywhere and pass `--notes <file>` (`{{VERSION}}` becomes the version).
-   Fixture versions in code and tests use `9.99.x`.
+   Commit the regenerated `.claude/CODEMAP.md` and the previous release's
+   report there too; no docs PR follows. Fixture versions use `9.99.x`.
 2. Run `scripts/release.sh` in the background with a log; it stays up until
    the PR merges. It merges `main` in when the branch is behind, bumps the
    release crates and `Cargo.lock`, promotes `[Unreleased]` to the dated
    section, names the draft, commits `release: vX.Y.Z`, pushes, opens the PR
    and enables auto-merge. `--no-watch` stops after auto-merge. A hotfix is a
-   branch from `main` released with `scripts/release.sh --hotfix` (next patch
-   version), through the same queue and workflow.
+   branch from `main` released with `scripts/release.sh --hotfix` (next
+   patch), through the same queue.
 3. If another release lands first, the command merges it, takes the next
-   version and re-enables auto-merge on its own. Exit 4 is a code conflict with
+   version and re-enables auto-merge. Exit 4 is a code conflict with
    `main`: resolve it on the branch, push, rerun. Exit 3 means the queue
    ejected the PR: one repair cycle (run every remaining failing check in one
    batch, fix, push), then rerun the command. A second ejection goes to the
    operator as a P0.
 4. The merge queue runs the required checks; Commander journey shards run
-   only for `hub-web/` product inputs. The same queue run starts the Release
-   Prebuild (Linux `release-fast`, macOS ARM64 without LTO) at enqueue; it is
-   not required. Wait with `remind_event=ci_completed` and, for the landing,
+   only for `hub-web/` product inputs. The same run starts the optional
+   Release Prebuild (Linux `release-fast`, macOS ARM64 without LTO). Wait with
+   `remind_event=ci_completed` and, for the landing,
    `remind_event=branch_contained_in`, both `cross_session=true`; supervisors
    monitor CI and workers never poll CI.
 5. Landing on `main` starts `release.yml` with no agent: it adopts the queue
@@ -43,17 +44,16 @@ macOS: compile-checked and launch-tested; suite runs on Linux.
    GitHub release, and dispatches the install-path proof. The host installs
    within a minute through the `cassy-install-on-publish` timer (set it up
    once per host with `scripts/install-on-publish.sh --install`), and the
-   release notes then print the one timer: PR opened to installed. Confirm
-   with `cas --version`.
+   notes print one timer, PR opened to installed; confirm: `cas --version`.
 6. Off the clock: fill the draft checksums with
    `release-published-receipt.sh --write-draft`, post through the Violet hub
    (`cas-release-notes`; never a personal Slack route), and publish the report
    (`cas-release-report`).
 7. Recovery: if `release.yml` fails after landing, fix the cause on `main`,
    then `gh workflow run release.yml -f dry_run=false`; it never replaces an
-   existing release. A dry run of the whole path for any branch:
+   existing release. Whole-path dry run for any branch:
    `gh workflow run release-prebuild.yml --ref <branch>`, then
-   `gh workflow run release.yml --ref <branch>` (a throwaway prerelease,
-   deleted at the end).
+   `gh workflow run release.yml --ref <branch>` (a deleted throwaway
+   prerelease).
 8. Close the epic only after the merge and a stranded-branch inspection;
    `stranded_branch_override` requires supervisor proof.

@@ -647,6 +647,11 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
         result = subprocess.run(command, env=self.env, text=True, capture_output=True, check=True)
         report = json.loads(result.stdout)
         self.assertEqual(report['caches'][0]['retained_bytes'], 2345)
+        self.assertGreaterEqual(report['caches'][0]['newest_write_unix_secs'],
+                                int((target / 'output').stat().st_mtime))
+        self.assertIn('--adopt-legacy-cache', report['caches'][0]['remediation'])
+        self.assertIn('quiet window', report['caches'][0]['remediation'])
+        self.assertEqual(report['caches'][0]['reclaimable_bytes'], 0)
         self.assertGreaterEqual(report['retained_bytes'], 2345)
         self.assertEqual(before, sorted(str(path.relative_to(self.root)) for path in self.root.rglob('*')))
         self.assertEqual(scratch.select_cache(target), target.with_name('assembly-target-leased-v1'))

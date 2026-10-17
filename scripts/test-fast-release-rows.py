@@ -711,6 +711,7 @@ sleep 2
         self.commit()
         self.write("custom/pre-push", "#!/bin/sh\nexit 42\n")
         (self.repo / "custom/pre-push").chmod(0o755)
+        hook_before = (self.repo / "custom/pre-push").read_bytes()
         command(self.repo, "git", "config", "core.hooksPath", "custom")
         config = (self.repo / ".git/config").read_bytes()
         for identity, cause in (({}, "existing hook authority"), ({"CAS_AGENT_NAME": "worker"}, "factory invocation")):
@@ -718,7 +719,7 @@ sleep 2
             self.assertNotEqual(refused.returncode, 0, refused.stdout)
             self.assertIn(cause, refused.stderr)
             self.assertEqual((self.repo / ".git/config").read_bytes(), config)
-        self.assertEqual((self.repo / "custom/pre-push").read_text(), "#!/bin/sh\nexit 42\n")
+        self.assertEqual((self.repo / "custom/pre-push").read_bytes(), hook_before)
         # A linked worktree is refused even without factory environment markers.
         worker = Path(self.scratch.name) / "worker"
         added = command(self.repo, "git", "worktree", "add", "-q", "-b", "factory/w", str(worker))

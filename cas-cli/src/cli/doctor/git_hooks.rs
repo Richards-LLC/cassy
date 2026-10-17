@@ -158,7 +158,7 @@ mod tests {
                     .as_str()
                     .unwrap()
                     .contains(missing.to_str().unwrap()),
-                "{json}"
+                "{json:?}"
             );
             let remedy = json[0]["remediation"].as_str().unwrap();
             assert!(

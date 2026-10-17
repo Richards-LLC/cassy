@@ -2286,8 +2286,9 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
 
     // Permission membership is unchanged when project tooling reorders the allow list.
     let settings = project.join(".claude/settings.json");
+    let original_settings = std::fs::read(&settings).unwrap();
     let mut value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        serde_json::from_slice(&original_settings).unwrap();
     value["permissions"]["allow"]
         .as_array_mut()
         .unwrap()
@@ -2300,6 +2301,7 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     );
 
     // The no-write fast path must still repair changed authoritative inputs.
+    std::fs::write(project.join(".claude/settings.json"), original_settings).unwrap();
     let config_path = root.join("config.toml");
     let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&config_path).unwrap().parse().unwrap();
     config["hooks"]["pre_tool_use"]["timeout"] = toml_edit::value(17);

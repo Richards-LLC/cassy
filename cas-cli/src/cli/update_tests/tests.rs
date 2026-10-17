@@ -2665,3 +2665,79 @@ fn cas_9815_update_distinguishes_old_shipped_skill_from_user_delta() {
         }
     }
 }
+
+/// cas-4585: exercise the native update sweep with physical cwd, HOME and
+/// registry confined to the fixture. Git, SQLite and managed-file refresh
+/// remain real; only the unrelated user builtin/network phase is inert.
+#[test]
+fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.set_current_dir(&home);
+    env.set("XDG_CONFIG_HOME", home.join(".config"));
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let projects = home.join("projects");
+    let project = cas_6718_drifted_project(&projects);
+    let root = project.join(".cas");
+    let host = crate::store::init_cas_dir(&home).unwrap();
+    let global = home.join(".config/cas");
+    std::fs::create_dir_all(&global).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_PROJECT_ROOTS", &projects);
+    let legacy = concat!(
+        "# operator introduction\n",
+        "[factory] # factory header\n",
+        "# preserve retirement rationale\n",
+        "merge_sweep = true # preserve inline note\n",
+        "merge_sweep_timeout_secs = 17\n",
+        "strict_cli = false # active explicit override\n",
+        "future_policy = 'keep me'\n",
+        "[factory.merge_sweep_env] # former environment\n",
+        "TOKEN = 'fixture-only-token'\n",
+        "[code_review]\nowner = 'worker'\nfuture_owner = 'keep this too'\n",
+        "[jev] # old integration\nendpoint = 'fixture-only-endpoint'\n",
+        "[project]\ncanonical_id = 'retirement-fixture'\n",
+    );
+    for dir in [&root, &host, &global] {
+        std::fs::write(dir.join("config.toml"), legacy).unwrap();
+    }
+    let before: crate::config::Config = toml::from_str(legacy).unwrap();
+    let mut args = update_test_args();
+    args.all_projects = true;
+    args.refresh_receipt = Some(home.join("refresh.json"));
+    let cli = update_test_cli(true);
+    let run = || refresh_all_projects_with_user_refresh(
+        &args, &cli, Some(&root), None, None, None,
+        || refresh_user_level_store_with_builtins(&args, &cli, || Ok(())),
+    );
+    run().unwrap();
+    let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+    assert_eq!(receipt["projects"].as_array().unwrap().len(), 1);
+    for dir in [&root, &host, &global] {
+        let raw = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let parsed: toml::Value = toml::from_str(&raw).unwrap();
+        assert!(parsed["factory"].get("merge_sweep").is_none(), "update must retire the ignored sweep key");
+        assert!(parsed["factory"].get("merge_sweep_env").is_none());
+        assert!(parsed.get("jev").is_none());
+        assert!(parsed["code_review"].get("owner").is_none());
+        assert_eq!(parsed["code_review"]["future_owner"].as_str(), Some("keep this too"));
+        for comment in ["operator introduction", "factory header", "retirement rationale", "inline note", "active explicit override", "former environment", "old integration"] {
+            assert!(raw.contains(comment), "lost operator comment {comment}");
+        }
+        let after: crate::config::Config = toml::from_str(&raw).unwrap();
+        assert_eq!(serde_json::to_value(&before).unwrap(), serde_json::to_value(after).unwrap());
+    }
+    let backup = receipt["projects"][0]["retired_toml"]["backup"].as_str().unwrap();
+    assert_eq!(std::fs::read_to_string(backup).unwrap(), legacy);
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(backup).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    let original = std::fs::metadata(root.join("config.toml")).unwrap().modified().unwrap();
+    run().unwrap();
+    assert_eq!(std::fs::metadata(root.join("config.toml")).unwrap().modified().unwrap(), original);
+    let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+    assert_eq!(receipt["projects"][0]["retired_toml"]["status"], "unchanged");
+    assert!(!project.join(".cas/.cas").exists());
+}

@@ -1618,6 +1618,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
             disabled: false,
             pressure: Default::default(),
             limits: Default::default(),
+            disk: None,
         };
         assert_eq!(snapshot.admission_violations(false).len(), 1, "independent checks stay load-gated");
         assert!(snapshot.violations()[0].contains("exceeds 32 CPUs"));

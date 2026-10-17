@@ -175,7 +175,15 @@ pub fn capacity_status(
     repo_root: &Path,
     policy: TargetCachePolicy,
 ) -> io::Result<FilesystemCapacity> {
-    let (total_bytes, available_bytes) = filesystem_capacity(repo_root)?;
+    capacity_status_with(repo_root, policy, crate::fs_space::fs_space)
+}
+
+pub(crate) fn capacity_status_with(
+    root: &Path,
+    policy: TargetCachePolicy,
+    probe: impl FnOnce(&Path) -> io::Result<crate::fs_space::FsSpace>,
+) -> io::Result<FilesystemCapacity> {
+    let (total_bytes, available_bytes) = filesystem_capacity_from_space(probe(root)?);
     Ok(capacity_from_bytes(total_bytes, available_bytes, policy))
 }
 
@@ -1165,7 +1173,7 @@ fn capacity_from_bytes(
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn filesystem_capacity(path: &Path) -> io::Result<(u64, u64)> {
     crate::fs_space::fs_space(path).map(filesystem_capacity_from_space)
 }
@@ -1174,7 +1182,7 @@ fn filesystem_capacity_from_space(space: crate::fs_space::FsSpace) -> (u64, u64)
     (space.total_bytes, space.available_bytes)
 }
 
-#[cfg(not(unix))]
+#[cfg(all(test, not(unix)))]
 fn filesystem_capacity(_path: &Path) -> io::Result<(u64, u64)> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

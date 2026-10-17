@@ -902,7 +902,17 @@ block an otherwise healthy host. Missing or malformed CPU PSI falls back to
 one-minute load divided by CPU count. Missing memory probes remain unknown.
 Memory pressure and the memory floor are rechecked even when a proof continuation
 carries its earlier CPU admission. Swap usage alone is not a refusal signal;
-PSI measures time lost to contention. Non-Linux hosts retain unavailable probes.
+PSI measures time lost to contention. macOS reads one-minute load with `getloadavg`
+and estimates available memory from free plus inactive pages via `host_statistics64`;
+PSI stays unavailable there.
+
+Spawn and capped Cargo admission also probe the target/scratch filesystem using
+the target-cache capacity policy. They reserve an estimated 10 GiB of growth for
+each live and requested builder and refuse when that would reach
+`factory.target_cache_high_watermark_percent` (85% by default). Occupied capped
+builder-slot locks count on macOS as well as Linux. No-code spawns reserve no
+target growth. Disk headroom is rechecked on proof continuations, and a failed
+capacity probe refuses admission until the target volume can be inspected.
 
 | Config key | Default | Meaning |
 | --- | --- | --- |

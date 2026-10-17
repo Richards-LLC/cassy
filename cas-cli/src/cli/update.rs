@@ -4468,13 +4468,7 @@ fn run_post_swap_refresh(
                 )
                 .into());
             };
-            verify_refresh_binary_version(
-                child_receipt
-                    .get("refresh_binary_version")
-                    .and_then(|v| v.as_str()),
-                installed_version,
-                installed_binary,
-            )?;
+            verify_child_refresh_receipt(&child_receipt, installed_version, installed_binary)?;
             let message =
                 post_swap_refresh_failed_hint(installed_version, status, "", Some(&child_receipt));
             return Err(PostSwapRefreshFailure::new(
@@ -4486,13 +4480,7 @@ fn run_post_swap_refresh(
         // The child inherited stdio, so use its side-channel receipt when
         // available; retain the version probe for older installed children.
         if let Some(child_receipt) = read_refresh_receipt(&receipt_path) {
-            verify_refresh_binary_version(
-                child_receipt
-                    .get("refresh_binary_version")
-                    .and_then(|v| v.as_str()),
-                installed_version,
-                installed_binary,
-            )?;
+            verify_child_refresh_receipt(&child_receipt, installed_version, installed_binary)?;
         } else {
             verify_refresh_binary_version(
                 reported_binary_version(installed_binary).as_deref(),
@@ -4532,13 +4520,7 @@ fn run_post_swap_refresh(
             )
             .into());
         };
-        verify_refresh_binary_version(
-            child_receipt
-                .get("refresh_binary_version")
-                .and_then(|v| v.as_str()),
-            installed_version,
-            installed_binary,
-        )?;
+        verify_child_refresh_receipt(&child_receipt, installed_version, installed_binary)?;
         let message = post_swap_refresh_failed_hint(
             installed_version,
             output.status,
@@ -4564,13 +4546,7 @@ fn run_post_swap_refresh(
                 stdout.trim()
             )
         })?;
-    verify_refresh_binary_version(
-        receipt
-            .get("refresh_binary_version")
-            .and_then(|v| v.as_str()),
-        installed_version,
-        installed_binary,
-    )?;
+    verify_child_refresh_receipt(&receipt, installed_version, installed_binary)?;
     Ok(receipt)
 }
 
@@ -4790,6 +4766,53 @@ fn post_swap_rerun_hint(installed_version: &str, installed_binary: &Path) -> Str
          (the installed binary at {} could not perform the post-install phases)",
         installed_binary.display()
     )
+}
+
+/// The parent's startup reads precede the child process's repair. Resolve
+/// only maintenance paths the verified child actually represented; failed or
+/// missing receipts leave their notices for the parent's final replay.
+fn verify_child_refresh_receipt(
+    receipt: &serde_json::Value,
+    installed_version: &str,
+    installed_binary: &Path,
+) -> anyhow::Result<()> {
+    verify_refresh_binary_version(
+        receipt
+            .get("refresh_binary_version")
+            .and_then(|v| v.as_str()),
+        installed_version,
+        installed_binary,
+    )?;
+    let projects = receipt
+        .get("projects")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|project| project.get("retired_toml"));
+    let user = receipt
+        .pointer("/user_level_store/retired_toml")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten();
+    for maintenance in projects.chain(user) {
+        if !matches!(
+            maintenance.get("status").and_then(|v| v.as_str()),
+            Some("repaired" | "unchanged" | "missing" | "planned")
+        ) {
+            continue;
+        }
+        if let Some(path) = maintenance
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(Path::new)
+            && path.is_absolute()
+            && path.file_name() == Some(std::ffi::OsStr::new("config.toml"))
+            && let Some(root) = path.parent()
+        {
+            crate::config::represented_retired_config(root);
+        }
+    }
+    Ok(())
 }
 
 /// The child must be the binary we just installed. A version it does not

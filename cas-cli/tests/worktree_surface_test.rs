@@ -1957,6 +1957,7 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
 #[tokio::test]
 async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
     let mut env = test_env();
+    let fixture_cwd = std::env::current_dir().unwrap();
     for exact_sha in [false, true] {
         let repo = GitRepo::new();
         let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
@@ -2149,6 +2150,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
                 .iter()
                 .all(|agent| agent.name != "peer-worker")
         );
+        env.set_current_dir(&fixture_cwd);
     }
 }
 

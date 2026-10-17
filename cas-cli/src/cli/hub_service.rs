@@ -1730,10 +1730,28 @@ exit 0
             ),
             "",
         );
+        // A plist installed before cas-6cc6 has no file limits either.
+        let old = ["SoftResourceLimits", "HardResourceLimits"]
+            .into_iter()
+            .fold(old, |plist, limits| {
+                plist.replace(
+                    &format!(
+                        "  <key>{limits}</key>\n  <dict>\n    <key>NumberOfFiles</key>\n    <integer>8192</integer>\n  </dict>\n"
+                    ),
+                    "",
+                )
+            });
+        assert!(!old.contains("NumberOfFiles"));
         let repaired = rewrite_launchd_publication_flags(&old, true, 8443).unwrap();
         assert!(repaired.contains(LAUNCHD_CLI_PATH));
         assert!(repaired.contains("<key>TERM</key>\n    <string>dumb</string>"));
         assert!(repaired.contains("<string>--tailscale-serve</string>"));
+        assert_eq!(repaired.matches("<key>NumberOfFiles</key>").count(), 2, "{repaired}");
+        assert_eq!(
+            rewrite_launchd_publication_flags(&repaired, true, 8443).unwrap(),
+            repaired,
+            "a current plist must not count as stale"
+        );
     }
 
     #[test]
@@ -1978,6 +1996,14 @@ exit 0
             None,
             "upgrade is idempotent"
         );
+        // A unit from before cas-6cc6 already has the restart policy but no
+        // file limit, so it is stale too.
+        let current = systemd_unit(Path::new("/opt/cas/bin/cas"), true, 8443);
+        let pre_limit = current.replace("LimitNOFILE=8192\n", "");
+        assert_eq!(
+            upgrade_systemd_restart_policy(&pre_limit).as_deref(),
+            Some(current.as_str())
+        );
         assert_eq!(
             upgrade_systemd_restart_policy(&systemd_unit(
                 Path::new("/opt/cas/bin/cas"),
@@ -2036,6 +2062,16 @@ exit 0
         // KeepAlive=true relaunches on every exit, signal deaths included; it
         // is launchd's equivalent of the systemd force-restart list.
         assert!(plist.contains("<key>KeepAlive</key>\n  <true/>"), "{plist}");
+        // launchd's default soft limit of 256 files let the hub hit EMFILE
+        // under Commander bursts (cas-6cc6).
+        for limits in ["SoftResourceLimits", "HardResourceLimits"] {
+            assert!(
+                plist.contains(&format!(
+                    "<key>{limits}</key>\n  <dict>\n    <key>NumberOfFiles</key>\n    <integer>8192</integer>\n  </dict>"
+                )),
+                "{plist}"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

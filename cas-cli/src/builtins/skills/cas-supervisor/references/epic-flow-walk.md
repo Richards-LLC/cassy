@@ -5,17 +5,23 @@ Run one pass per epic when any child has a non-empty `demo_statement`:
 1. Use `task action=dep_list id=<epic-id>` to enumerate ParentChild children;
    fetch each with `task action=show`. Include closed children. Record every
    non-empty demo with its child ID; if none exist, skip the walk.
-2. Assemble the final epic tip in its dedicated worktree. Launch the release
-   gate detached using the project's release procedure **before** dispatching
-   QA. Record the gate receipt and schedule its reminder immediately; neither
-   QA availability nor completion may block the gate launch or monitoring.
+2. Assemble the final epic tip in its dedicated worktree. Give the walk a
+   binary of that tip, because the evidence agent cannot compile behind the
+   worker build guard. Either build it yourself and place it at
+   `<artifacts_root>/<project-key>/<epic-id>/candidate/`, or sequence the
+   binary cells after publish against the installed release whose `--version`
+   names the tip. Record its path, `--version` and SHA-256 for the ledger.
+   Launch the release gate detached using the project's release procedure
+   **before** dispatching QA. Record the gate receipt and schedule its
+   reminder immediately; neither QA availability nor completion may block the
+   gate launch or monitoring.
 3. Inspect `<artifacts_root>/<project-key>/<epic-id>/LEDGER.md` (`[factory] artifacts_root`) and epic notes before spawning.
    If a pass is running or complete, resume its recorded agent or consume its
    receipt; never spawn a duplicate on a gate retry or supervisor restart.
    Otherwise initialize that ledger with status `running`, epic tip, worktree,
-   gate receipt, start/deadline, and all child demos. Spawn exactly one
-   verifier-class evidence agent against that assembled build, concurrently
-   with the gate, and record its agent ID in the ledger. This is evidence
+   binary source, gate receipt, start/deadline, and all child demos. Spawn
+   exactly one verifier-class evidence agent against that assembled build,
+   concurrently with the gate, and record its agent ID in the ledger. This is evidence
    collection, not a close verdict: use a separate evidence-agent prompt with
    the procedure below, not the sealed task-verifier close dispatch.
 4. Give the agent `cas-qa-craft` and the epic ledger context. Override its task

@@ -356,6 +356,35 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
     assert!(!decide(&WakeSender::Daemon, &format!("relayed: {prompt}")).allowed);
     let fyi = render_prompt(&peer_message("pm-fyi", false));
     assert!(!decide(&WakeSender::Daemon, &fyi).allowed);
+    for (kind, reply, allowed) in [
+        ("ask", false, true),
+        ("blocker", false, true),
+        ("answer", false, false),
+        ("answer", true, true),
+    ] {
+        let mut message = peer_message("pm-policy", reply);
+        message.body = crate::cloud::peer_mailbox::attach_message_intent(
+            &message.body, Some(kind), false,
+        );
+        assert_eq!(
+            decide(&WakeSender::Daemon, &render_prompt(&message)).allowed,
+            allowed,
+            "Cloud peer {kind}, reply={reply}"
+        );
+    }
+    // pin: every shipped supervisor contract must describe the real peer wake policy above.
+    let peer_policy = "Authenticated local peer supervisors may wake each other. Via Cloud, kind=ask/blocker or replies with nonempty in_reply_to may wake; kind=answer alone and peer FYIs stay inbox-only. Busy panes, in-flight tools and drafts defer wakes.";
+    for harness in ["claude", "codex", "grok", "opencode"] {
+        let surface = cas_pty::rendered_contract_surface(harness, cas_pty::ContractRole::Supervisor);
+        assert!(surface.contains(peer_policy), "{harness} supervisor omits peer wake policy");
+    }
+    for (name, surface) in [
+        ("cas-supervisor", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/builtins/skills/cas-supervisor.md"))),
+        ("workflow", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/builtins/skills/cas-supervisor/references/workflow.md"))),
+        ("Codex coordination", cas_core::hooks::context::coordination::CODEX_WORKER_COORDINATION_NOTE),
+    ] {
+        assert!(surface.contains(peer_policy), "{name} omits peer wake policy");
+    }
     let quoted = crate::prompt_revalidation::attach_blocker_envelope(&fyi, "quoted-worker", None);
     assert!(
         !decide(&WakeSender::Daemon, &quoted).allowed,

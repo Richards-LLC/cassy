@@ -1201,6 +1201,24 @@ mod tests {
             "sha256:94c125201a0019ec158d7abb96cd3fc0d8282bb499aa506f202ce794748cdb2b"
         );
 
+        // Identical tracked files stay current even when the worker needs a
+        // local timeout upgrade. Trust the unchanged main file as it stands.
+        let short_budget = CURRENT_HOOKS.replace("\"timeout\":120", "\"timeout\":3");
+        std::fs::write(&main_hooks, &short_budget).unwrap();
+        let own_hooks = linked.join(".codex/hooks.json");
+        std::fs::write(&own_hooks, &short_budget).unwrap();
+        prepare_codex_project_hooks_in(&config_path, &linked).unwrap();
+        assert_eq!(std::fs::read_to_string(&main_hooks).unwrap(), short_budget);
+        let own: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&own_hooks).unwrap()).unwrap();
+        assert_eq!(own["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"], 120);
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        for path in [&main_hooks, &own_hooks] {
+            for entry in cas_hook_trust_entries(path).unwrap() {
+                assert!(hook_state_is_trusted(&config, &entry).unwrap());
+            }
+        }
+
         // cas-6591: an unparseable main-checkout file is a named failure.
         std::fs::write(&main_hooks, "{ not json").unwrap();
         let message = prepare_codex_project_hooks_in(&config_path, &linked)
@@ -1244,6 +1262,34 @@ mod tests {
             "{message}"
         );
         assert_eq!(std::fs::read_to_string(&main_hooks).unwrap(), stale);
+        let config = std::fs::read_to_string(&config_path).unwrap_or_default();
+        assert!(
+            !config.contains(&main_hooks.display().to_string()),
+            "{config}"
+        );
+
+        // A malformed CAS definition must identify its cause, rather than
+        // prescribing a checkout update for an ordinary stale body.
+        let mut broken: serde_json::Value = serde_json::from_str(CURRENT_HOOKS).unwrap();
+        broken["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .remove("PostToolUse");
+        let broken = serde_json::to_string(&broken).unwrap();
+        std::fs::write(&main_hooks, &broken).unwrap();
+        let error = prepare_codex_project_hooks_in(&config_path, &linked).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let message = error.to_string();
+        assert!(message.starts_with("codex_hooks_invalid: "), "{message}");
+        assert!(
+            message.contains("missing CAS PostToolUse hook groups"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&main_hooks.display().to_string()),
+            "{message}"
+        );
+        assert_eq!(std::fs::read_to_string(&main_hooks).unwrap(), broken);
         let config = std::fs::read_to_string(&config_path).unwrap_or_default();
         assert!(
             !config.contains(&main_hooks.display().to_string()),

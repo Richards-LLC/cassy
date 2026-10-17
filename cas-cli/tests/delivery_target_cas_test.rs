@@ -504,6 +504,137 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
     assert_eq!(task_store.get(&task.id).unwrap().risk, [cas::types::TaskRisk::None]);
 }
 
+/// cas-eda0: a parked delivery that `worktree_merge` lands with green CI is
+/// closed by Cassy once its verdict approves: no worker re-close, the parked
+/// close reason and the merge SHA are recorded, and the worker hears once.
+/// A rejected verdict or a red-CI override merge never closes it.
+#[tokio::test]
+async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
+    // (row, CI conclusion, verdict recorded after merge, Cassy closes)
+    for (row, conclusion, verdict, closes) in [
+        ("green-approved", "success", Some("approved"), true),
+        ("green-rejected", "success", Some("rejected"), false),
+        ("red-override", "failure", None, false),
+    ] {
+        let mut env = TestEnvGuard::temp_home();
+        let repo = GitRepo::new();
+        let slug = format!("eda0-{row}");
+        run_git(
+            &["remote", "add", "origin", &format!("git@github.com:org/{slug}.git")],
+            &repo.root,
+        );
+        let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+        let gh = ci_check_run::ci_concluded(&cas_root, conclusion);
+        env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
+        std::fs::write(cas_root.join("config.toml"), "[worktrees]\nenabled = false\n")
+            .expect("write config");
+        let worker = slug.clone();
+        let worker_id = format!("{slug}-worker-session");
+        let supervisor_id = format!("{slug}-supervisor-session");
+        let session = format!("{slug}-factory");
+        register_delivery_agent(&cas_root, &worker_id, &worker, AgentRole::Worker, &session);
+        register_delivery_agent(
+            &cas_root,
+            &supervisor_id,
+            &format!("{slug}-supervisor"),
+            AgentRole::Supervisor,
+            &session,
+        );
+        let worker_path = cas_root.join("worktrees").join(&worker);
+        repo.add_worktree(&worker_path, &format!("factory/{worker}"));
+        std::fs::write(worker_path.join("delivered.txt"), "parked delivery\n").unwrap();
+        run_git(&["add", "delivered.txt"], &worker_path);
+        run_git(&["commit", "-m", "parked delivery"], &worker_path);
+
+        let task_store = open_task_store(&cas_root).unwrap();
+        let mut task = Task::new(format!("cas-eda0-{row}"), "Parked delivery".to_string());
+        task.task_type = TaskType::Task;
+        task.status = TaskStatus::InProgress;
+        task.depth = TaskDepth::Deep;
+        task.assignee = Some(worker.clone());
+        task.risk = vec![cas::types::TaskRisk::None];
+        task_store.add(&task).unwrap();
+
+        // The worker's own close parks the delivery and keeps its reason.
+        let parked_reason = format!("PASS: delivered.txt for {row}");
+        env.set("CAS_AGENT_ROLE", "worker");
+        let park = get_text(
+            &delivery_service(&cas_root, &worker_id)
+                .task(Parameters(task_req(serde_json::json!({
+                    "action": "close", "id": task.id, "reason": parked_reason,
+                }))))
+                .await
+                .expect("worker close"),
+        );
+        let parked = task_store.get(&task.id).unwrap();
+        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{row}: {park}");
+
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let supervisor = delivery_service(&cas_root, &supervisor_id);
+        let mut merge = coord_req("worktree_merge");
+        merge.id = Some(format!("factory/{worker}"));
+        merge.task_id = Some(task.id.clone());
+        merge.allow_trunk = Some(true);
+        merge.cleanup = Some(false);
+        if conclusion == "failure" {
+            merge.supervisor_override = Some(true);
+            merge.reason = Some("red run reviewed".to_string());
+        }
+        let merged = get_text(&supervisor.coordination(Parameters(merge)).await.expect("merge"));
+        let merge_sha = git_stdout(&repo.root, &["rev-parse", "main"]);
+        let after_merge = task_store.get(&task.id).unwrap();
+        assert_eq!(after_merge.status, TaskStatus::AwaitingMerge, "{row}: {merged}");
+
+        if let Some(verdict) = verdict {
+            assert_eq!(
+                after_merge.deliverables.green_merge_commit.as_deref(),
+                Some(merge_sha.as_str()),
+                "{row}: {merged}"
+            );
+            let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{row}: Cassy's close dispatches verification: {merged}"));
+            let recorded = get_text(
+                &supervisor
+                    .verification(Parameters(verification_req(serde_json::json!({
+                        "action": "add", "task_id": task.id, "status": verdict,
+                        "summary": format!("{verdict} {row}"), "confidence": 1.0,
+                        "dispatch_id": dispatch.id,
+                    }))))
+                    .await
+                    .expect("verdict"),
+            );
+            let task = task_store.get(&task.id).unwrap();
+            assert_eq!(task.status == TaskStatus::Closed, closes, "{row}: {recorded}");
+            if closes {
+                assert_eq!(task.close_reason.as_deref(), Some(parked_reason.as_str()));
+                assert_eq!(task.deliverables.green_merge_commit.as_deref(), Some(merge_sha.as_str()));
+            }
+        } else {
+            assert_eq!(after_merge.deliverables.green_merge_commit, None, "{row}: {merged}");
+        }
+
+        let worker_prompts: Vec<String> = cas::store::open_prompt_queue_store(&cas_root)
+            .unwrap()
+            .peek_all(50)
+            .unwrap()
+            .into_iter()
+            .filter(|prompt| prompt.target == worker)
+            .map(|prompt| prompt.prompt)
+            .collect();
+        let expected = usize::from(closes);
+        assert_eq!(
+            worker_prompts.iter().filter(|p| p.contains("Cassy merged it")).count(),
+            expected,
+            "{row}: the worker hears exactly once, only when Cassy closed: {worker_prompts:?}"
+        );
+        assert!(
+            !closes || !worker_prompts.iter().any(|p| p.contains("Retry task close")),
+            "{row}: no worker close retry once Cassy closed: {worker_prompts:?}"
+        );
+    }
+}
+
 // =============================================================================
 // Regressions
 // =============================================================================

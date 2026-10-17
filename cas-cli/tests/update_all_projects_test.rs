@@ -249,16 +249,34 @@ fn all_projects_runs_migrations_against_the_user_level_store() {
         .success();
     let output = String::from_utf8_lossy(&update.get_output().stdout);
 
-    let user_store = home.join(".cas").to_string_lossy().into_owned();
-    let migrated_user_store = output
+    // cas-be05: --json prints exactly one document, the refresh receipt, and
+    // what each phase printed is nested in it rather than printed beside it.
+    let documents = output
         .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .any(|value| {
-            value.get("schema_status").is_some() && value["store"].as_str() == Some(&user_store)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|error| panic!("stdout is not JSON documents ({error}):\n{output}"));
+    assert_eq!(documents.len(), 1, "--json must print one document:\n{output}");
+    let receipt = &documents[0];
+    assert!(receipt.get("refresh_binary_version").is_some(), "{receipt}");
+    let user_store = home.join(".cas").to_string_lossy().into_owned();
+    let migrated_user_store = receipt["user_level_store"]["phase_documents"]["migration"]
+        .as_array()
+        .is_some_and(|documents| {
+            documents.iter().any(|value| {
+                value.get("schema_status").is_some() && value["store"].as_str() == Some(&user_store)
+            })
         });
     assert!(
         migrated_user_store,
-        "no schema_status receipt names the user-level store {user_store}:\n{output}"
+        "no nested schema_status document names the user-level store {user_store}:\n{output}"
+    );
+    assert!(
+        receipt["projects"][0]["phase_documents"]["migration"]
+            .as_array()
+            .is_some_and(|documents| !documents.is_empty()),
+        "each project's migration document is nested under its phase:\n{output}"
     );
     assert!(
         !output.contains(&format!("\"project\":\"{}\"", home.to_string_lossy())),

@@ -1802,6 +1802,8 @@ fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() 
         serde_json::from_str(&std::fs::read_to_string(source).unwrap()).unwrap();
     fixture["refresh_ms"] = 0.into();
     fixture["binary"]["elapsed_ms"] = 0.into();
+    fixture["binary"]["current"] = "9.99.1".into();
+    fixture["binary"]["latest"] = "9.99.1".into();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fixture.json");
     std::fs::write(&path, fixture.to_string()).unwrap();
@@ -1816,7 +1818,7 @@ fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() 
     let error = result.expect_err("a partial refresh must still exit nonzero");
     assert_eq!(
         error.to_string(),
-        "2 of 12 projects not fully refreshed; Cassy 3.62.0 is current"
+        "2 of 12 projects not fully refreshed; Cassy 9.99.1 is current"
     );
     let results = output
         .lines()
@@ -1824,7 +1826,7 @@ fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() 
         .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
         .collect::<Vec<_>>();
     assert!(
-        results[0].starts_with("[OK] [1/2] Cassy binary 3.62.0 is current"),
+        results[0].starts_with("[OK] [1/2] Cassy binary 9.99.1 is current"),
         "{output}"
     );
     assert!(

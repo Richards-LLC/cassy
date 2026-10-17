@@ -2167,6 +2167,37 @@ fn prompt_queue_read_failure(error: &str) -> &'static str {
     }
 }
 
+fn schema_check(cas_root: &Path) -> Check {
+    match check_migrations(cas_root) {
+        Ok(status) => {
+            if status.has_pending() {
+                Check {
+                    name: "schema".to_string(),
+                    status: CheckStatus::Warning,
+                    message: format!(
+                        "v{} ({} migration(s) pending). Run 'cas update --schema-only'",
+                        status.current_version,
+                        status.pending_count()
+                    ),
+                }
+            } else {
+                Check {
+                    name: "schema".to_string(),
+                    status: CheckStatus::Ok,
+                    message: format!("v{} (up to date)", status.current_version),
+                }
+            }
+        }
+        Err(e) => {
+            Check {
+                name: "schema".to_string(),
+                status: CheckStatus::Error,
+                message: format!("Cannot check migrations: {e}"),
+            }
+        }
+    }
+}
+
 fn supervisor_relay_check(cas_root: &Path) -> Check {
     if prompt_queue_absent(cas_root) {
         return Check {
@@ -2466,34 +2497,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     recorder.mark("store and database", &checks);
     // Check 3: Schema migrations
-    match check_migrations(&cas_root) {
-        Ok(status) => {
-            if status.has_pending() {
-                checks.push(Check {
-                    name: "schema".to_string(),
-                    status: CheckStatus::Warning,
-                    message: format!(
-                        "v{} ({} migration(s) pending). Run 'cas update --schema-only'",
-                        status.current_version,
-                        status.pending_count()
-                    ),
-                });
-            } else {
-                checks.push(Check {
-                    name: "schema".to_string(),
-                    status: CheckStatus::Ok,
-                    message: format!("v{} (up to date)", status.current_version),
-                });
-            }
-        }
-        Err(e) => {
-            checks.push(Check {
-                name: "schema".to_string(),
-                status: CheckStatus::Error,
-                message: format!("Cannot check migrations: {e}"),
-            });
-        }
-    }
+    checks.push(schema_check(&cas_root));
 
     recorder.mark("schema migrations", &checks);
     // Check 3a: Undelivered supervisor lifecycle relays (cas-7787, GH #160).
@@ -6379,16 +6383,37 @@ mod tests {
         // A queue that exists but can't be read is still a warning, said
         // without SQL error text: here an older queue missing the columns the
         // checks read.
-        let temp = TempDir::new().unwrap();
-        let db = temp.path().join("cas.db");
-        rusqlite::Connection::open(&db)
-            .unwrap()
-            .execute_batch("CREATE TABLE prompt_queue(id INTEGER PRIMARY KEY);")
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("legacy");
+        fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        let db = root.join("cas.db");
+        // A complete numbered ledger must not conceal an old lazy queue.
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE prompt_queue (
+            id INTEGER PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,
+            prompt TEXT NOT NULL, created_at TEXT NOT NULL, processed_at TEXT,
+            factory_session TEXT, summary TEXT, acked_at TEXT, acked_via TEXT
+        );
+        INSERT INTO prompt_queue VALUES
+          (91,'supervisor','worker','retained message','2026-01-01',NULL,
+           'legacy-session','retained summary','2026-01-02','inferred_from_reply');
+        CREATE INDEX legacy_queue_source ON prompt_queue(source);
+        CREATE TRIGGER legacy_queue_preserve BEFORE DELETE ON prompt_queue
+          BEGIN SELECT RAISE(IGNORE); END;")
             .unwrap();
-        let before = fs::read(&db).unwrap();
+        let before = get_schema_summary(&root).unwrap().tables.into_iter()
+            .map(|t| (t.name,t.columns,t.row_count)).collect::<Vec<_>>();
+        let schema = schema_check(&root);
+        assert!(matches!(schema.status, CheckStatus::Warning), "{}", schema.message);
+        for column in ["kind", "highest_stage", "delivery_attempts"] {
+            assert!(schema.message.contains(column), "missing {column}: {}", schema.message);
+        }
+        assert!(!schema.message.contains("up to date"), "{}", schema.message);
+        assert!(schema.message.contains("cas update --schema-only"), "{}", schema.message);
         for check in [
-            supervisor_relay_check(temp.path()),
-            delivery_retries_check(temp.path()),
+            supervisor_relay_check(&root),
+            delivery_retries_check(&root),
         ] {
             assert!(
                 matches!(check.status, CheckStatus::Warning),
@@ -6404,7 +6429,24 @@ mod tests {
                 assert!(!check.message.contains(sql), "{}", check.message);
             }
         }
-        assert_eq!(fs::read(&db).unwrap(), before);
+        assert_eq!(get_schema_summary(&root).unwrap().tables.into_iter()
+            .map(|t| (t.name,t.columns,t.row_count)).collect::<Vec<_>>(), before);
+        // Repair is explicit and runs the actual numbered migration path.
+        let result = crate::migration::run_migrations(&root, false).unwrap();
+        assert!(result.errors.is_empty(), "{result:?}");
+        assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
+        for check in [supervisor_relay_check(&root), delivery_retries_check(&root)] {
+            assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+        }
+        cas_store::communication_slo::read_session(&root, "legacy-session", chrono::Utc::now())
+            .expect("communication query must measure after supported repair");
+        let row: (String, Option<String>, Option<String>, Option<String>) = conn.query_row(
+            "SELECT prompt,acked_at,acked_via,highest_stage FROM prompt_queue WHERE id=91", [],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        assert_eq!(row, ("retained message".into(), Some("2026-01-02".into()),
+            Some("inferred_from_reply".into()), None), "repair must not demote historical receipts");
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('legacy_queue_source','legacy_queue_preserve')", [], |r|r.get::<_,i64>(0)).unwrap(),2);
+        assert_eq!(crate::migration::run_migrations(&root, false).unwrap().applied_count,0);
         assert_eq!(
             prompt_queue_read_failure("database is locked"),
             "the database is in use by another process; run cas doctor again in a moment"

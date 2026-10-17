@@ -5,35 +5,78 @@ use cas_store::wait_budget;
 /// owes. Inline queue fixtures cannot reproduce this production lane boundary.
 #[tokio::test]
 async fn codex_reminder_and_peer_reply_survive_async_claim_cas_353b() {
-    use super::super::prompt_queue_jobs::tests::{jobs_on, TestWriter};
+    use super::super::prompt_queue_jobs::tests::{TestWriter, jobs_on};
     for (kind, source, prompt) in [
-        ("reminder", "test-supervisor", "Reminder #266: Check the pending reply."),
-        ("peer-reply", "peer:remote@soundwave", "<cas-peer-message v=\"1\" id=\"reply\" from=\"remote\" from_agent=\"remote-id\" machine=\"soundwave\" repo=\"cloud\" in_reply_to=\"request\"/>\nActionable reply."),
+        (
+            "reminder",
+            "test-supervisor",
+            "Reminder #266: Check the pending reply.",
+        ),
+        (
+            "peer-reply",
+            "peer:remote@soundwave",
+            "<cas-peer-message v=\"1\" id=\"reply\" from=\"remote\" from_agent=\"remote-id\" machine=\"soundwave\" repo=\"cloud\" in_reply_to=\"request\"/>\nActionable reply.",
+        ),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
         let captured = temp.path().join("submitted-input");
         let mut daemon = super::super::provisioning_tests::daemon(&root);
-        daemon.app.set_supervisor_cli_for_test(cas_mux::SupervisorCli::Codex);
+        daemon
+            .app
+            .set_supervisor_cli_for_test(cas_mux::SupervisorCli::Codex);
         let name = daemon.app.supervisor_name().to_string();
-        let pty = cas_mux::Pty::spawn(&name, cas_mux::PtyConfig {
-            command: "sh".into(),
-            args: vec!["-c".into(), "stty raw -echo; printf ready; cat > \"$1\"".into(), "fixture".into(), captured.to_str().unwrap().into()],
-            cwd: Some(temp.path().to_path_buf()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
-        }).unwrap();
-        let mut pane = cas_mux::Pane::with_pty(&name, cas_mux::PaneKind::Supervisor,
-            pty, 24, 80, cas_mux::SupervisorCli::Codex).unwrap();
+        let pty = cas_mux::Pty::spawn(
+            &name,
+            cas_mux::PtyConfig {
+                command: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "stty raw -echo; printf ready; cat > \"$1\"".into(),
+                    "fixture".into(),
+                    captured.to_str().unwrap().into(),
+                ],
+                cwd: Some(temp.path().to_path_buf()),
+                env: vec![],
+                env_remove: vec![],
+                rows: 24,
+                cols: 80,
+            },
+        )
+        .unwrap();
+        let mut pane = cas_mux::Pane::with_pty(
+            &name,
+            cas_mux::PaneKind::Supervisor,
+            pty,
+            24,
+            80,
+            cas_mux::SupervisorCli::Codex,
+        )
+        .unwrap();
         pane.backdate_spawn_for_test(Duration::from_secs(6));
         daemon.app.mux.add_pane(pane);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !daemon.app.mux.pane_ready_for_injection(&name) {
             let _ = daemon.app.mux.poll_batch();
-            assert!(Instant::now() < deadline, "fixture pane must announce readiness");
+            assert!(
+                Instant::now() < deadline,
+                "fixture pane must announce readiness"
+            );
             tokio::task::yield_now().await;
         }
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
-        queue.enqueue_idempotent(source, &name, prompt, Some(&daemon.session_name), None, None,
-            kind, Some(&cas_store::QueueOrigin::Daemon)).unwrap();
+        queue
+            .enqueue_idempotent(
+                source,
+                &name,
+                prompt,
+                Some(&daemon.session_name),
+                None,
+                None,
+                kind,
+                Some(&cas_store::QueueOrigin::Daemon),
+            )
+            .unwrap();
         let id = queue.peek_all(10).unwrap()[0].id;
         // Hold the real writer so this pass cannot accidentally complete its
         // own claim inline, as the old queue fixtures did.
@@ -44,19 +87,45 @@ async fn codex_reminder_and_peer_reply_survive_async_claim_cas_353b() {
             assert!(Instant::now() < deadline, "{kind}: claim must be submitted");
             tokio::task::yield_now().await;
         }
-        let spent = daemon.lifecycle_redelivery_counts.get(&id).copied().unwrap_or(0);
+        let spent = daemon
+            .lifecycle_redelivery_counts
+            .get(&id)
+            .copied()
+            .unwrap_or(0);
         writer.open(); // Also release the fixture thread on a failing assertion.
-        assert_eq!(spent, 0, "{kind}: claim-only pass delivered no bytes and must spend no wake budget");
+        assert_eq!(
+            spent, 0,
+            "{kind}: claim-only pass delivered no bytes and must spend no wake budget"
+        );
         assert!(std::fs::read(&captured).unwrap_or_default().is_empty());
-        while !std::fs::read(&captured).unwrap_or_default().ends_with(b"\r") {
+        while !std::fs::read(&captured)
+            .unwrap_or_default()
+            .ends_with(b"\r")
+        {
             daemon.process_prompt_queue().await.unwrap();
-            assert!(Instant::now() < deadline, "{kind}: completed claim must reach PTY submit without waiting a cadence interval");
+            assert!(
+                Instant::now() < deadline,
+                "{kind}: completed claim must reach PTY submit without waiting a cadence interval"
+            );
             tokio::task::yield_now().await;
         }
         let bytes = std::fs::read(&captured).unwrap();
-        assert!(bytes.windows(prompt.len()).any(|part| part == prompt.as_bytes()), "{kind}: original body must reach PTY");
-        assert_eq!(daemon.lifecycle_redelivery_counts[&id], 1, "{kind}: actual transport spends one wake");
-        assert!(daemon.queue_jobs.drain_for_shutdown(&root, Duration::from_secs(3)));
+        // pin: transport must preserve the caller's original body byte for byte.
+        assert!(
+            bytes
+                .windows(prompt.len())
+                .any(|part| part == prompt.as_bytes()),
+            "{kind}: original body must reach PTY"
+        );
+        assert_eq!(
+            daemon.lifecycle_redelivery_counts[&id], 1,
+            "{kind}: actual transport spends one wake"
+        );
+        assert!(
+            daemon
+                .queue_jobs
+                .drain_for_shutdown(&root, Duration::from_secs(3))
+        );
     }
 }
 

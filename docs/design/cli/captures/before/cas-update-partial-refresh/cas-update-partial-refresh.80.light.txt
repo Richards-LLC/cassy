@@ -1,0 +1,55 @@
+→ [1/2] Updating Cassy binaryChecking target-arch... x86_64-unknown-linux-gnu
+Checking current version... v3.62.0
+Checking latest released version... v3.62.0 (1 versions compatible)
+
+  ✓ Already up to date (3.62.0)
+cas update: hub was running → verified at loopback (Tailscale Serve inactive)
+cas update: Tailscale Serve inactive: tailscale is stopped; hub remains loopback-only
+cas update: Check `tailscale status`, then run `cas hub restart`.
+ ✓ 1.7s
+
+→ [2/2] Refreshing all local Cassy projects  project               migr  index  skills  member  cloud  note                
+  Petrastella/cassy     ✓     ✓      ✓       ✓       ✓      migration           
+  Petrastella/pantheon  ✓     ✓      ✓       ✓       ✓      migration           
+  Petrastella/prospec…  ✓     ✓      ✓       –       –      not cloud-linked    
+  Petrastella/gabber-…  ✓     ✓      ✗       ✓       ✓      skills: git index l…
+  Petrastella/gabber-studio details:
+      [OK] .claude: built-ins up to date
+      [OK] Updated .gitignore with Cassy-managed builtin paths
+    [ERROR] skills: skills: git index lock stale (no writer observed): .git/index.lock (age 15d); recheck writers, remove only this lock, then retry
+  Petrastella/pulse-c…  ✓     ✓      ✗       –       –      skills: git index l…
+  Petrastella/pulse-card details:
+      [OK] .claude: built-ins up to date
+      [OK] Updated .gitignore with Cassy-managed builtin paths
+    [ERROR] skills: skills: git index lock stale (no writer observed): .git/index.lock (age 1d); recheck writers, remove only this lock, then retry
+    [SKIP] member: not cloud-linked
+    [SKIP] cloud: not cloud-linked
+  Petrastella/rockets…  ✓     ✓      ✓       ✓       ⚠      3 pushed; 2 queued  
+  Petrastella/rocketship-template details:
+    [WARN] Push incomplete · 2 rejected by cloud (invalid_json_nul ×2) · invalid_json_nul: row body contains a NUL byte · queued rows remain · run cas cloud queue --retry
+    Retained intentionally: retention ×14
+  Richards LLC/Accoun…  ✓     ✓      ✓       ✓       ⚠      1 queued            
+  Richards LLC/Accounting details:
+    [WARN] Push incomplete · 1 rejected by cloud (invalid_json_nul ×1) · invalid_json_nul: row body contains a NUL byte · queued rows remain · run cas cloud queue --retry
+    Retained intentionally: retention ×14
+  Petra Stella/Accoun…  ✓     ✓      ⚠       ✓       ✓      3 managed file conf…
+  Petra Stella/Accounting details:
+      [OK] .claude: built-ins up to date
+      [OK] .codex: built-ins up to date
+    Managed files: 3 conflicts preserved; cas update --sync --json for paths
+  Documents/Accounting  ✓     ✓      ⚠       –       –      2 managed file conf…
+  Documents/Accounting details:
+      [OK] .claude: built-ins up to date
+      [OK] .codex: built-ins up to date
+    Managed files: 2 conflicts preserved; cas update --sync --json for paths
+    [SKIP] member: not cloud-linked
+    [SKIP] cloud: not cloud-linked
+  pippenz/Penguinz      ✓     ✓      ✓       ✓       ✓      migration           
+  pippenz/ai-toolkit    ✓     ✓      ✓       –       –      not cloud-linked    
+  pippenz/soundwave-c…  ✓     ✓      ✓       –       –      not cloud-linked    
+  [OK] user-level store: migrated /home/pippenz/.cas; built-ins current
+  not refreshed (skipped_unregistered): 1 — use `cas known-repos forget <path>` for stale registry rows; intentional projects can be registered explicitly
+    ! /home/pippenz/scratch/old-clone — not a Git project root
+[WARN] Push incomplete; queued rows remain (2 projects)
+ ✗ 4.3s
+✗ one or more projects were not fully refreshed; see the per-project phase summary above

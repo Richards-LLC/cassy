@@ -1,0 +1,25 @@
+→ [1/2] Updating Cassy binaryChecking target-arch... x86_64-unknown-linux-gnu
+Checking current version... v3.62.0
+Checking latest released version... v3.62.0 (1 versions compatible)
+
+  ✓ Already up to date (3.62.0)
+cas update: hub was running → verified at https://soundwave.tailf5a734.ts.net
+ ✓ 1.7s
+
+→ [2/2] Refreshing all local Cassy projects  project                     migr  index  skills  member  cloud  note          
+  Petrastella/cassy           ✓     ✓      ✓       ✓       ✓      migration     
+  Petrastella/pantheon        ✓     ✓      ✓       ✓       ✓      migration     
+  Petrastella/prospect_path   ✓     ✓      ✓       –       –      not cloud-lin…
+  Petrastella/gabber-studio   ✓     ✓      ✓       ✓       ✓      migration     
+  Petrastella/pulse-card      ✓     ✓      ✓       –       –      not cloud-lin…
+  Petrastella/rocketship-te…  ✓     ✓      ✓       ✓       ✓      migration     
+  Richards LLC/Accounting     ✓     ✓      ✓       ✓       ✓      migration     
+  Petra Stella/Accounting     ✓     ✓      ✓       ✓       ✓      migration     
+  Documents/Accounting        ✓     ✓      ✓       –       –      not cloud-lin…
+  pippenz/Penguinz            ✓     ✓      ✓       ✓       ✓      migration     
+  pippenz/ai-toolkit          ✓     ✓      ✓       –       –      not cloud-lin…
+  pippenz/soundwave-config    ✓     ✓      ✓       –       –      not cloud-lin…
+  [OK] user-level store: migrated /home/pippenz/.cas; built-ins current
+ ✓ 4.3s
+
+✓ complete · Cassy 3.62.0 · 12 projects refreshed · 0 failed · 4.1s

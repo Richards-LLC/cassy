@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use serde::Deserialize;
 
+use super::findings::display_names;
+use super::live::set_activity;
 use super::{
     BinaryUpdateOutcome, ProjectPhase, ProjectRefreshReceipt, RefreshResults, SkippedProject,
     UpdateArgs, finish_project_refresh, print_binary_status, run_full_update, update_interactivity,
@@ -138,13 +140,15 @@ pub(super) fn render(path: &Path, args: &UpdateArgs, cli: &Cli) -> anyhow::Resul
         .collect();
     let binary = &fixture.binary;
     let hub = &fixture.hub;
+    let interactive = update_interactivity(args, cli, io::stdin().is_terminal()).show_output;
     run_full_update(
         cli,
+        interactive,
         || {
             let started = Instant::now();
             // What self_update prints for this release check, when the
             // update's interactivity lets it print at all.
-            if update_interactivity(args, cli, io::stdin().is_terminal()).show_output {
+            if interactive {
                 println!("Checking target-arch... {}", binary.target);
                 println!("Checking current version... v{}", binary.current);
                 print!("Checking latest released version... ");
@@ -157,37 +161,41 @@ pub(super) fn render(path: &Path, args: &UpdateArgs, cli: &Cli) -> anyhow::Resul
             if !cli.json {
                 print_binary_status(updated, &binary.latest, &[])?;
             }
+            Ok(BinaryUpdateOutcome {
+                version: binary.latest.clone(),
+                updated,
+                post_install_refresh: None,
+                pending_post_swap: None,
+            })
+        },
+        |_| anyhow::bail!("a fixture never swaps the binary"),
+        |_| {
             if !cli.json {
                 print!("{}", hub.stdout);
                 eprint!("{}", hub.stderr);
             }
-            Ok((
-                BinaryUpdateOutcome {
-                    version: binary.latest.clone(),
-                    updated,
-                    post_install_refresh: None,
-                },
-                HubRestartOutcome {
-                    transport_error: hub.transport_error.clone(),
-                    previous_version: Some(binary.current.clone()),
-                    current_version: Some(binary.latest.clone()),
-                    service_managed: hub.service_managed,
-                    prior_state: hub.prior_state.clone(),
-                    action: hub.action.clone(),
-                    verified: hub.verified,
-                    loopback_verified: hub.verified,
-                    transport_verified: hub.transport_warning.as_ref().map(|_| false),
-                    transport_warning: hub.transport_warning.clone(),
-                    remedy: hub.remedy.clone(),
-                    ..HubRestartOutcome::default()
-                },
-            ))
+            Ok(HubRestartOutcome {
+                transport_error: hub.transport_error.clone(),
+                previous_version: Some(binary.current.clone()),
+                current_version: Some(binary.latest.clone()),
+                service_managed: hub.service_managed,
+                prior_state: hub.prior_state.clone(),
+                action: hub.action.clone(),
+                verified: hub.verified,
+                loopback_verified: hub.verified,
+                transport_verified: hub.transport_warning.as_ref().map(|_| false),
+                transport_warning: hub.transport_warning.clone(),
+                remedy: hub.remedy.clone(),
+                ..HubRestartOutcome::default()
+            })
         },
         |error, hub_restart| {
             let started_at = Instant::now();
             let per_project =
                 Duration::from_millis(fixture.refresh_ms) / (receipts.len().max(1) as u32);
-            for _ in &receipts {
+            let names = display_names(receipts.iter().map(|receipt| receipt.project.as_path()));
+            for (index, name) in names.iter().enumerate() {
+                set_activity(format!("{} of {} · {name}", index + 1, names.len()));
                 pause(per_project);
             }
             finish_project_refresh(

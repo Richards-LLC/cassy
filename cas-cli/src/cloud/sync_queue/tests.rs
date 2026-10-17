@@ -11,7 +11,8 @@ fn create_test_queue() -> (TempDir, SyncQueue) {
 
 #[test]
 fn cas_8095_purge_removes_only_rejected_team_owned_personal_rows() {
-    let (_temp, queue) = create_test_queue();
+    let (temp, queue) = create_test_queue();
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let payload = r#"{"id":"duplicate","scope":"project","origin_project":"p","title":"same"}"#;
     for (id, content) in [
         ("absent", "unacknowledged"),
@@ -268,6 +269,7 @@ fn queued_user_prompts_are_dropped_across_personal_and_team_scopes() {
 #[test]
 fn team_only_neutralizes_project_copies_without_deleting_personal_rows() {
     let (temp, queue) = create_test_queue();
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     for (kind, id, payload) in [
         (
             EntityType::Task,

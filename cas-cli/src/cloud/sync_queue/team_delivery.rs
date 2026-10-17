@@ -99,14 +99,14 @@ fn remove_with_receipt(conn: &Connection, id: i64) -> Result<(), CasError> {
 }
 
 impl SyncQueue {
-    /// Persist equivalent-delivery proof before consuming an acknowledged team
-    /// snapshot. Caller must have an itemized inserted/updated response for the
-    /// exact transmitted value. LWW and aggregate acknowledgements never call
-    /// this method. Any transformation of the queued JSON fails closed.
     pub(crate) fn personal_delivery_snapshots(&self) -> Result<Vec<QueuedSync>, CasError> {
         personal_rows(&self.conn.lock().unwrap())
     }
 
+    /// Persist equivalent-delivery proof before consuming an acknowledged team
+    /// snapshot. Caller must have an itemized inserted/updated response for the
+    /// exact transmitted value. LWW and aggregate acknowledgements never call
+    /// this method. Any transformation of the queued JSON fails closed.
     pub(crate) fn acknowledge_team_write(
         &self,
         item: &QueuedSync,

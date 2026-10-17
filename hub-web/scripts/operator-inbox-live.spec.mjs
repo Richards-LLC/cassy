@@ -118,6 +118,7 @@ test("cas-2077 deployed Cloud: reply upgrade, stopped hub replay, one offline ad
     const beforeUpgrade = await storage(phone);
     await expect(mobile.getByRole("button", { name: "Queue reply", exact: true })).toHaveCount(0);
     await mobile.getByRole("button", { name: "Ask to reply", exact: true }).press("Enter");
+    // pin: reviewed pending copy distinguishes waiting for owner approval from permission to reply.
     await expect(mobile.getByText("Waiting for the account owner to allow replies. Your messages stay here.", { exact: true })).toBeVisible();
     await capture(phone, "A01", "The read-only phone asks without signing out; pending grants no reply permission.");
     await context.setOffline(false);

@@ -18506,6 +18506,35 @@ mod supervisor_decision_wake_tests {
         let in_flight = repainting_pane(ToolCallEvidence::InFlight);
         assert!(!FactoryDaemon::self_reminder_wake(WORKER, SUPERVISOR, WAITING, in_flight).unwrap().allowed);
     }
+
+    /// cas-cd3f: the startup brief a `cas claude` launch queues wakes the new
+    /// supervisor, whose harness has not taken a turn, a fresh heartbeat and
+    /// a repainting pane notwithstanding. Drives the real enqueue.
+    #[test]
+    fn cas_cd3f_startup_brief_wakes_a_freshly_launched_supervisor() {
+        use crate::store::detect::open_prompt_queue_store;
+        let tmp = tempfile::tempdir().unwrap();
+        crate::ui::factory::queue_supervisor_intro_prompt(
+            tmp.path(), SUPERVISOR, cas_mux::SupervisorCli::Claude, &[], None, None,
+        );
+        let queue = open_prompt_queue_store(tmp.path()).unwrap();
+        let row = queue.peek_for_targets(&[SUPERVISOR], None, 10).unwrap().remove(0);
+        let sender = FactoryDaemon::wake_sender_from_origin(row.origin.as_ref(), None);
+        let decide = |pane| {
+            FactoryDaemon::supervisor_wake_decision(
+                &data(), SUPERVISOR, SUPERVISOR, &sender, &row.source, &row.prompt, pane,
+                chrono::Utc::now(),
+            )
+        };
+        let fresh = repainting_pane(ToolCallEvidence::Unknown);
+        let decision = decide(fresh);
+        assert!(decision.allowed, "{}", decision.reason);
+        // An operator draft, a pane not yet ready and a tool call in flight
+        // still hold it.
+        assert!(!decide(PaneWakeState { composer_dirty: true, ..fresh }).allowed);
+        assert!(!decide(PaneWakeState { ready_for_injection: false, ..fresh }).allowed);
+        assert!(!decide(repainting_pane(ToolCallEvidence::InFlight)).allowed);
+    }
 }
 
 /// cas-913c: notification 3539008. The supervisor's message reached

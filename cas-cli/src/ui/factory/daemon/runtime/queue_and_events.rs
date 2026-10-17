@@ -635,6 +635,29 @@ fn boot_model_error_detail(cli: cas_mux::SupervisorCli, pane_tail: Option<&str>)
     ))
 }
 
+/// cas-4984: a Codex pane parked on its interactive hook-trust review never
+/// registers. Fail the spawn with the named reason as soon as the screen shows
+/// instead of waiting out the generic registration timeout.
+fn boot_hook_review_detail(cli: cas_mux::SupervisorCli, pane_tail: Option<&str>) -> Option<String> {
+    let tail = pane_tail.filter(|tail| !tail.trim().is_empty())?;
+    // Codex's TUI skips blank cells with cursor moves, which the plain-text
+    // pane drops, so the words arrive unspaced: compare without whitespace.
+    let squash = |text: &str| -> String {
+        text.chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase()
+    };
+    (cli == cas_mux::SupervisorCli::Codex
+        && squash(tail).contains(&squash(cas_pty::CODEX_HOOK_REVIEW_MARKER)))
+    .then(|| {
+        format!(
+            "{}\n\nLast worker pane output:\n{tail}",
+            cas_pty::CODEX_HOOK_REVIEW_FAILURE
+        )
+    })
+}
+
 fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_some_and(|last| now.saturating_duration_since(last) >= PROMPT_POISON_SWEEP_INTERVAL)
 }
@@ -6009,7 +6032,10 @@ impl FactoryDaemon {
                 if let Some(detail) = boot_model_error_detail(
                     self.app.harness_for(worker),
                     pane_tail.as_deref(),
-                ) {
+                )
+                .or_else(|| {
+                    boot_hook_review_detail(self.app.harness_for(worker), pane_tail.as_deref())
+                }) {
                     return Some((worker.clone(), VerificationAction::Failed(detail)));
                 }
 
@@ -12382,7 +12408,7 @@ mod tests {
     }
     use super::{
         LIFECYCLE_MAX_RENUDGE_ATTEMPTS, WORKER_DEATH_TAIL_MAX_CHARS, append_spawn_audit, append_spawn_audit_line,
-        boot_model_error_detail, cancel_targeted_in_flight_spawn, deliver_worker_task_brief,
+        boot_hook_review_detail, boot_model_error_detail, cancel_targeted_in_flight_spawn, deliver_worker_task_brief,
         describe_pending_spawn, enqueue_preassign_failure_lifecycle_relay,
         enqueue_spawn_cancelled_notice, enqueue_spawn_outcome_notice, ensure_worker_preassignment,
         is_exact_agent_name_match, matches_event_filter, preassign_failure_reason,
@@ -17716,6 +17742,17 @@ mod tests {
         assert!(detail.contains("selected model"), "{detail}");
         assert!(detail.contains("opus-5"), "{detail}");
         assert!(boot_model_error_detail(cas_mux::SupervisorCli::Codex, Some(tail)).is_none());
+    }
+
+    #[test]
+    fn codex_hook_review_prompt_fails_boot_with_named_reason() {
+        // Pane text as captured: Codex moves the cursor over blank cells.
+        let tail = "Hooksneed review: 2 hooks are new or changed\n1. Review hooks\n2. Trust all";
+        let detail = boot_hook_review_detail(cas_mux::SupervisorCli::Codex, Some(tail))
+            .expect("a parked hook review must fail the spawn, not time out");
+        assert!(detail.starts_with("codex_hook_trust_unrecognized:"), "{detail}");
+        assert!(detail.contains("2 hooks are new or changed"), "{detail}");
+        assert!(boot_hook_review_detail(cas_mux::SupervisorCli::Claude, Some(tail)).is_none());
     }
 
     // -----------------------------------------------------------------------

@@ -7,7 +7,7 @@
 //! phase lines, summaries and the exit verdict all run the shipping code.
 //! Nothing is read from or written to a store, the binary or the hub.
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -18,7 +18,7 @@ use super::findings::display_names;
 use super::live::set_activity;
 use super::{
     BinaryUpdateOutcome, ProjectPhase, ProjectRefreshReceipt, RefreshResults, SkippedProject,
-    UpdateArgs, finish_project_refresh, print_binary_status, run_full_update, update_interactivity,
+    UpdateArgs, binary_notes, finish_project_refresh, run_full_update, update_interactivity,
 };
 use crate::cli::Cli;
 use crate::cli::hub::HubRestartOutcome;
@@ -46,6 +46,8 @@ struct Fixture {
 struct BinaryFixture {
     current: String,
     latest: String,
+    /// The target triple self_update reported; recorded, not rendered.
+    #[allow(dead_code)]
     target: String,
     #[serde(default)]
     elapsed_ms: u64,
@@ -140,32 +142,21 @@ pub(super) fn render(path: &Path, args: &UpdateArgs, cli: &Cli) -> anyhow::Resul
         .collect();
     let binary = &fixture.binary;
     let hub = &fixture.hub;
-    let interactive = update_interactivity(args, cli, io::stdin().is_terminal()).show_output;
+    let interactive = !update_interactivity(args, cli, io::stdin().is_terminal()).no_confirm;
     run_full_update(
         cli,
         interactive,
         || {
-            let started = Instant::now();
-            // What self_update prints for this release check, when the
-            // update's interactivity lets it print at all.
-            if interactive {
-                println!("Checking target-arch... {}", binary.target);
-                println!("Checking current version... v{}", binary.current);
-                print!("Checking latest released version... ");
-                io::stdout().flush()?;
-                pause(Duration::from_millis(binary.elapsed_ms / 2));
-                println!("v{} (1 versions compatible)", binary.latest);
-            }
-            pause(Duration::from_millis(binary.elapsed_ms).saturating_sub(started.elapsed()));
+            // The release check prints nothing of its own (cas-70a8); the
+            // phase line carries it.
+            pause(Duration::from_millis(binary.elapsed_ms));
             let updated = binary.latest != binary.current;
-            if !cli.json {
-                print_binary_status(updated, &binary.latest, &[])?;
-            }
             Ok(BinaryUpdateOutcome {
                 version: binary.latest.clone(),
                 updated,
                 post_install_refresh: None,
                 pending_post_swap: None,
+                notes: binary_notes(updated, &binary.latest, &[]),
             })
         },
         |_| anyhow::bail!("a fixture never swaps the binary"),

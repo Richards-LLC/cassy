@@ -413,7 +413,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // Full update: binary + every local project's migration/sync/cloud state.
     run_full_update(
         cli,
-        update_interactivity(args, cli, io::stdin().is_terminal()).show_output,
+        !update_interactivity(args, cli, io::stdin().is_terminal()).no_confirm,
         || perform_update(args, current_version, cli),
         |pending| finish_post_swap(pending, current_version),
         |version| super::hub::restart_stale_hub(version, cli),
@@ -442,19 +442,25 @@ fn run_full_update(
         || {
             let outcome = binary()?;
             // After a swap the hub follows the installed binary's refresh,
-            // as it always has (cas-91ba).
-            let hub_restart = match outcome.pending_post_swap {
-                Some(_) => None,
-                None => Some(hub(&outcome.version)?),
+            // as it always has (cas-91ba). A phase that could not hold its
+            // output (it may prompt) still holds the hub's, which its
+            // findings already say (cas-70a8).
+            let (hub_restart, hub_output) = match outcome.pending_post_swap {
+                Some(_) => (None, String::new()),
+                None => {
+                    let (restart, output) =
+                        capture_phase(interactive && !cli.json, || hub(&outcome.version));
+                    (Some(restart?), output)
+                }
             };
-            Ok((outcome, hub_restart))
+            Ok((outcome, hub_restart, hub_output))
         },
         |result| match result {
-            Ok((outcome, _)) if outcome.updated => live::PhaseResult {
+            Ok((outcome, _, _)) if outcome.updated => live::PhaseResult {
                 verdict: Verdict::Ok,
                 text: format!("updated to {}", outcome.version),
             },
-            Ok((outcome, _)) => live::PhaseResult {
+            Ok((outcome, _, _)) => live::PhaseResult {
                 verdict: Verdict::Ok,
                 text: format!("{} is current", outcome.version),
             },
@@ -464,18 +470,31 @@ fn run_full_update(
             },
         },
         |result, output| match result {
-            Ok((outcome, hub_restart)) => {
-                binary_phase_remainder(output, &outcome.version, hub_restart.as_ref())
+            Ok((outcome, hub_restart, hub_output)) => {
+                let mut kept = outcome
+                    .notes
+                    .iter()
+                    .map(|note| format!("{note}\n"))
+                    .collect::<String>();
+                kept.push_str(&binary_phase_remainder(
+                    &format!("{output}{hub_output}"),
+                    &outcome.version,
+                    hub_restart.as_ref(),
+                ));
+                kept
             }
             Err(_) => output.to_owned(),
         },
-    )?;
+    )
+    .map(|(outcome, hub_restart, _)| (outcome, hub_restart))?;
 
     // cas-91ba: after a swap the installed binary runs the remaining phases
     // itself, on this terminal, as phase 2 of this run.
     if let Some(pending) = &outcome.pending_post_swap {
         post_swap(pending)?;
-        hub(&outcome.version)?;
+        let (restart, output) = capture_phase(!cli.json, || hub(&outcome.version));
+        let restart = restart?;
+        print_indented(&binary_phase_remainder(&output, &outcome.version, Some(&restart)))?;
         return Ok(());
     }
     let hub_restart = hub_restart.unwrap_or_default();
@@ -1162,6 +1181,42 @@ fn update_banner_text(report: &RefreshReport) -> String {
     )
 }
 
+/// The receipt laid out for `width` cells (cas-70a8). The count grammar
+/// scripts grep (`Cassy X · N projects refreshed · F failed`) always stays on
+/// one line. The elapsed time is never left alone on a line: when the full
+/// receipt does not fit, it goes beside the counts if there is room and is
+/// otherwise dropped, because the phase line above already shows it. The
+/// user-level store and skipped counts follow on their own line.
+fn receipt_lines(report: &RefreshReport, width: usize) -> Vec<String> {
+    let full = update_banner_text(report);
+    if full.chars().count() <= width {
+        return vec![full];
+    }
+    let core = format!(
+        "Cassy {} · {} projects refreshed · {} failed",
+        env!("CARGO_PKG_VERSION"),
+        report.project_count,
+        report.failed_projects
+    );
+    let mut extras = Vec::new();
+    if report.user_level_failed {
+        extras.push("user-level store failed".to_owned());
+    }
+    if report.skipped_unregistered > 0 {
+        extras.push(format!("{} skipped", report.skipped_unregistered));
+    }
+    let elapsed = format_elapsed(report.elapsed);
+    let joined = std::iter::once(core.clone()).chain(extras.iter().cloned()).collect::<Vec<_>>();
+    if joined.join(" · ").chars().count() <= width {
+        return vec![joined.join(" · ")];
+    }
+    let with_time = format!("{core} · {elapsed}");
+    let first = if with_time.chars().count() <= width { with_time } else { core };
+    std::iter::once(first)
+        .chain((!extras.is_empty()).then(|| extras.join(" · ")))
+        .collect()
+}
+
 /// One exit reason from its clauses: on one line when it fits beside the
 /// error mark in 80 columns, otherwise one clause per line under the first
 /// (cas-06b0), so a terminal never wraps it mid-clause.
@@ -1744,22 +1799,10 @@ fn print_sweep(fmt: &mut Formatter<'_>, report: &RefreshReport, verbose: bool) -
         Some(sweep) => findings::print(fmt, sweep)?,
         None => false,
     };
-    // The receipt wraps between its fields, never inside one.
-    let width = usize::from(fmt.width()).clamp(40, 100) - 2;
-    let mut line = String::new();
-    for field in update_banner_text(report).split(" · ") {
-        if !line.is_empty() && line.chars().count() + 3 + field.chars().count() > width {
-            fmt.write_raw("  ")?;
-            fmt.receipt(&line)?;
-            line.clear();
-        }
-        if !line.is_empty() {
-            line.push_str(" · ");
-        }
-        line.push_str(field);
+    for line in receipt_lines(report, usize::from(fmt.width()).clamp(40, 100) - 2) {
+        fmt.write_raw("  ")?;
+        fmt.receipt(&line)?;
     }
-    fmt.write_raw("  ")?;
-    fmt.receipt(&line)?;
     if !verbose
         && (shortened || report.sweep.as_ref().is_some_and(|sweep| !sweep.findings.is_empty()))
     {
@@ -3817,34 +3860,20 @@ fn perform_update(
         .map(|v| v.trim_start_matches('v').to_string())
         .unwrap_or_else(|| latest.version.trim_start_matches('v').to_string());
 
-    if !args.yes && !cli.json {
-        let mut out = io::stdout();
-        let theme = ActiveTheme::default();
-        let mut fmt = Formatter::stdout(&mut out, theme);
-
-        fmt.subheading("Binary Update")?;
-        fmt.write_raw("  Current version: ")?;
-        fmt.write_accent(current_version)?;
-        fmt.newline()?;
-        fmt.write_raw("  Target version:  ")?;
-        fmt.write_accent(&target_version)?;
-        fmt.newline()?;
-
+    // cas-70a8: the confirmation is CAS's own, in the phase's grammar.
+    // self_update's prompt came with an unwrapped release-status block, and
+    // its release check printed chatter around the phase line.
+    if !update_interactivity(args, cli, io::stdin().is_terminal()).no_confirm {
         if !is_newer(&target_version, current_version) && args.version.is_none() {
-            fmt.newline()?;
-            fmt.write_raw("  ")?;
-            fmt.success("Already on the latest version")?;
             return Ok(BinaryUpdateOutcome {
                 version: current_version.to_owned(),
                 updated: false,
                 post_install_refresh: None,
                 pending_post_swap: None,
+                notes: Vec::new(),
             });
         }
-
-        fmt.newline()?;
-        fmt.write_raw("  This will download and replace the current binary.")?;
-        fmt.newline()?;
+        confirm_install(current_version, &target_version)?;
     }
 
     // Perform the update
@@ -3909,6 +3938,7 @@ fn perform_update(
             updated,
             post_install_refresh,
             pending_post_swap: None,
+            notes: Vec::new(),
         });
     }
 
@@ -3916,41 +3946,47 @@ fn perform_update(
         Status::UpToDate(v) => (false, v.trim_start_matches('v').to_owned()),
         Status::Updated(v) => (true, v.trim_start_matches('v').to_owned()),
     };
-    print_binary_status(updated, &version, &running_factory_sessions())?;
+    let notes = binary_notes(updated, &version, &running_factory_sessions());
     Ok(BinaryUpdateOutcome {
         version,
         updated,
         post_install_refresh,
         pending_post_swap,
+        notes,
     })
 }
 
-/// The human result of the binary phase. Shared with `--render-fixture`.
-fn print_binary_status(
-    updated: bool,
-    version: &str,
-    factory_sessions: &[(String, bool)],
-) -> io::Result<()> {
+/// Ask before replacing the binary: `Enter` or `y` installs, anything else
+/// keeps the current binary, as self_update's own prompt did.
+fn confirm_install(current: &str, target: &str) -> anyhow::Result<()> {
     let mut out = io::stdout();
-    let theme = ActiveTheme::default();
-    let mut fmt = Formatter::stdout(&mut out, theme);
-    fmt.newline()?;
+    let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+    let arrow = Icons::arrow_right(fmt.unicode());
     fmt.write_raw("  ")?;
+    fmt.mark(Verdict::Info)?;
+    fmt.write_raw(" ")?;
+    fmt.write_text(&format!("Cassy {current} {arrow} {target} is available"))?;
+    fmt.newline()?;
+    fmt.write_raw("    Download and install it now? [Y/n] ")?;
+    fmt.flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    let answer = answer.trim().to_ascii_lowercase();
+    if answer.is_empty() || answer == "y" || answer == "yes" {
+        return Ok(());
+    }
+    anyhow::bail!("update cancelled; Cassy {current} is unchanged")
+}
+
+/// What the binary phase adds below its result line: where to read about
+/// the release, and what happens to running factories.
+fn binary_notes(updated: bool, version: &str, factory_sessions: &[(String, bool)]) -> Vec<String> {
     if !updated {
-        return fmt.success(&format!("Already up to date ({version})"));
+        return Vec::new();
     }
-    fmt.success(&format!("Successfully updated to {version}"))?;
-    fmt.newline()?;
-    fmt.write_raw("  Run ")?;
-    fmt.write_accent("cas changelog")?;
-    fmt.write_raw(" to see what's new")?;
-    fmt.newline()?;
-    if let Some(notice) = running_factory_update_notice(factory_sessions, version) {
-        fmt.write_raw("  ")?;
-        fmt.warning(&notice)?;
-        fmt.newline()?;
-    }
-    Ok(())
+    let mut notes = vec!["cas changelog shows what's new".to_owned()];
+    notes.extend(running_factory_update_notice(factory_sessions, version));
+    notes
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -3967,11 +4003,13 @@ fn update_interactivity(
 ) -> UpdateInteractivity {
     let silent = cli.json || !stdin_is_terminal;
     let no_confirm = args.yes || silent;
-    // cas-0aa5: a run that cannot prompt draws its own phase line, so the
-    // release check's chatter would only interleave with it.
+    // cas-0aa5 / cas-70a8: the phase line says what self_update's chatter
+    // said, and the confirmation is CAS's own (`confirm_install`), so the
+    // release check never prints. A run that asks first keeps the download
+    // bar: nothing else draws on its terminal then.
     UpdateInteractivity {
         no_confirm,
-        show_output: !no_confirm,
+        show_output: false,
         show_download_progress: !no_confirm,
     }
 }
@@ -3997,7 +4035,8 @@ fn configure_updater(
         .current_version(current_version)
         .show_download_progress(interactivity.show_download_progress)
         .show_output(interactivity.show_output)
-        .no_confirm(interactivity.no_confirm);
+        // perform_update has already asked (confirm_install) when it must.
+        .no_confirm(true);
     if let Some(token) = github_auth_token() {
         updater.auth_token(&token);
     }
@@ -4037,6 +4076,8 @@ struct BinaryUpdateOutcome {
     /// Human mode: the swap happened and the installed binary still has to
     /// run the remaining phases on this terminal, after the binary phase line.
     pending_post_swap: Option<PendingPostSwap>,
+    /// Lines for below the binary phase's result, in human mode.
+    notes: Vec<String>,
 }
 
 /// The installed binary that must run the post-swap phases.

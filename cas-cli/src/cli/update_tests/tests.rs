@@ -1656,9 +1656,11 @@ fn tty_update_without_yes_keeps_confirmation_and_human_output_enabled() {
 
     assert_eq!(
         update_interactivity(&args, &cli, true),
+        // cas-70a8: CAS asks itself (confirm_install), so self_update never
+        // prints its release chatter or its own prompt around the phase line.
         UpdateInteractivity {
             no_confirm: false,
-            show_output: true,
+            show_output: false,
             show_download_progress: true,
         }
     );
@@ -1856,6 +1858,24 @@ fn refresh_phase_result_counts_projects_and_receipt_keeps_count_grammar() {
     assert_eq!(
         binary_exit_reason(&mixed, "9.99.1", false),
         "2 of 12 projects not fully refreshed\n  the user-level store was not refreshed\n  Cassy 9.99.1 is current"
+    );
+    // cas-70a8: at 80 columns the elapsed time never sits alone on a line,
+    // and the count grammar stays whole on the first.
+    let wide = RefreshReport {
+        project_count: 12,
+        failed_count: 3,
+        failed_projects: 2,
+        user_level_failed: true,
+        skipped_unregistered: 1,
+        elapsed: std::time::Duration::from_millis(4000),
+        ..Default::default()
+    };
+    assert_eq!(
+        receipt_lines(&wide, 78),
+        vec![
+            format!("Cassy {} · 12 projects refreshed · 2 failed · 4.0s", env!("CARGO_PKG_VERSION")),
+            "user-level store failed · 1 skipped".to_owned(),
+        ]
     );
     let error: anyhow::Error = RefreshFailed(failed).into();
     let failed = refresh_phase_result(&Err(error));

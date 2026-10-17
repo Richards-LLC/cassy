@@ -1533,18 +1533,15 @@ fn ensure_launchd_file_limits(definition: &str) -> Result<String> {
     for key in ["SoftResourceLimits", "HardResourceLimits"] {
         let marker = format!("<key>{key}</key>");
         let Some(key_start) = definition.find(&marker) else {
-            ensure!(
-                definition.contains("  <key>EnvironmentVariables</key>"),
-                "launchd plist has no EnvironmentVariables to place {key} before"
-            );
-            definition = definition.replacen(
-                "  <key>EnvironmentVariables</key>",
-                &format!(
-                    "{}  <key>EnvironmentVariables</key>",
-                    launchd_file_limit_block(key)
-                ),
-                1,
-            );
+            // Insert on its own line before EnvironmentVariables, whatever the
+            // file's indentation (plutil writes tabs).
+            let anchor = definition
+                .find("<key>EnvironmentVariables</key>")
+                .context("launchd plist has no EnvironmentVariables to place file limits before")?;
+            let line_start = definition[..anchor]
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1);
+            definition.insert_str(line_start, &launchd_file_limit_block(key));
             continue;
         };
         let after_key = key_start + marker.len();

@@ -1767,11 +1767,15 @@ impl CloudSyncer {
             )?;
             return Ok(UpsertResult::Updated);
         }
-        // Both an intervening local mutation and a delivery transaction win
+        // Local mutations, live execution leases and delivery transactions win
         // atomically in the store. Preserve the rejected row in the same
         // conflict journal used by the terminal guard; do not bump task time.
         let current = store.get(&remote.id)?;
-        self.record_task_lifecycle_conflict(&current, remote, "local_mutation_or_delivery")?;
+        self.record_task_lifecycle_conflict(
+            &current,
+            remote,
+            "local_mutation_or_delivery_or_live_execution",
+        )?;
         Ok(UpsertResult::Skipped)
     }
 

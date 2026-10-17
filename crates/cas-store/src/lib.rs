@@ -702,7 +702,9 @@ pub trait TaskStore: Send + Sync {
 
     /// Apply a replicated row only if the expected local clock still matches.
     /// Lifecycle changes are also refused while a local delivery transaction
-    /// owns the task. `None` means no mutation (no events, receipts or clock
+    /// owns the task. An active execution lease protects InProgress from
+    /// replicated Open or nonterminal assignee replacement/clearing.
+    /// `None` means no mutation (no events, receipts or clock
     /// bump). Successful writes use the ordinary store-owned clock.
     ///
     /// This sync-only path does not stage an outbound sync intent. Stores that

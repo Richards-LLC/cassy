@@ -1000,6 +1000,16 @@ fn sync_update_preserves_live_execution_lease_cas_c4a52() {
     task.assignee = None;
     store.update(&task).unwrap();
     assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Open);
+    // Releasing the lease also allows a fresh replicated reset afterward.
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some(owner.name.clone());
+    store.update(&task).unwrap();
+    agents.release_lease(&task.id, &owner.id).unwrap();
+    let expected = store.get(&task.id).unwrap();
+    let mut remote = expected.clone();
+    remote.status = TaskStatus::Open;
+    remote.assignee = None;
+    assert!(store.update_from_sync(&remote, &expected).unwrap().is_some());
 }
 
 #[test]

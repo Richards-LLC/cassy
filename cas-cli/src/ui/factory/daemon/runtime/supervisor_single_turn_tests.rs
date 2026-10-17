@@ -224,7 +224,8 @@ async fn cas_3f90_bounded_event_has_one_body_turn_and_no_relay_copy() {
         session_id: "single-turn-supervisor".into(),
         cwd: root.path().to_string_lossy().into_owned(),
         hook_event_name: "UserPromptSubmit".into(),
-        user_prompt: Some(typed.trim_end_matches('\r').into()),
+        user_prompt: Some(format!("<pasted_content id=\"1\">{}</pasted_content>",
+            typed.trim_end_matches('\r').trim_start_matches("\x1b[200~").trim_end_matches("\x1b[201~"))),
         agent_role: Some("supervisor".into()),
         ..Default::default()
     };
@@ -270,7 +271,8 @@ async fn cas_3f90_busy_event_waits_without_a_held_relay_then_wakes_once() {
     }
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (root, mut daemon) = fixture().await;
-    let id = event(&daemon, BODY);
+    let body = BODY.replace("review the lane.", &format!("review the lane.{}", " detail".repeat(180)));
+    let id = event(&daemon, &body);
     let name = daemon.app.supervisor_name().to_string();
     daemon.pane_silent_since.insert(name.clone(), Instant::now());
     daemon.process_prompt_queue().await.unwrap();
@@ -279,10 +281,23 @@ async fn cas_3f90_busy_event_waits_without_a_held_relay_then_wakes_once() {
     assert!(queue.deferred_inbox_state(id).unwrap().is_none(), "no Teams handoff occurred");
     nothing_typed_or_relayed(&root, &daemon);
     assert!(queue.recipient_receipt(id, "supervisor").unwrap().is_none(), "hook can still take it");
+    let report = queue.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(report.pending_reason, Some(cas_store::PendingReason::AwaitingBusyRecipient), "busy inline rows leave selection until their bounded recheck/turn end");
+    for _ in 0..3 {
+        daemon.process_prompt_queue().await.unwrap();
+        nothing_typed_or_relayed(&root, &daemon);
+        assert_eq!(queue.queued_prompt(id).unwrap().unwrap().delivery_attempts, 0);
+        assert!(!daemon.lifecycle_redelivery_attempts.contains_key(&id), "busy veto spends no cadence");
+    }
+    // Model the durable recheck becoming due, without a wall-clock sleep.
+    rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db")).unwrap()
+        .execute("UPDATE prompt_queue SET next_attempt_at = NULL WHERE id = ?1", [id]).unwrap();
     daemon.pane_silent_since.insert(name, Instant::now() - Duration::from_secs(600));
-    daemon.lifecycle_redelivery_attempts.remove(&id);
     daemon.process_prompt_queue().await.unwrap();
-    typed_once(&root, &daemon, BODY).await;
+    let typed = typed_once(&root, &daemon, &body).await;
+    assert_eq!(typed.matches(&format!("[cas #{id} ")).count(), 1);
+    assert!(typed.starts_with("\x1b[200~"), "Claude receives one explicit paste, including the envelope");
+    assert!(typed.ends_with("\x1b[201~\r"));
 }
 
 #[tokio::test(flavor = "current_thread")]

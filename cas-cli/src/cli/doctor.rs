@@ -5791,8 +5791,16 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         .collect::<Vec<_>>()
         .join(", ");
     let registration_conflicts = cloud_queue_registration_conflicts(&conn);
-    let remediation = "Run `cas cloud queue --retry`, then `cas cloud push` to deliver pending work; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately.";
     let rejections = cloud_queue_rejections(&conn);
+    let remediation = if rejections.is_empty()
+        || rejections
+            .iter()
+            .any(|(reason, _)| crate::cloud::push_rejection_is_retryable(reason))
+    {
+        "Run `cas cloud queue --retry`, then `cas cloud push` to deliver pending work; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately."
+    } else {
+        "Run `cas cloud push` to deliver other pending work; resolve the rejection-specific blockers below before retrying their rows; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately."
+    };
 
     if !registration_conflicts.is_empty() {
         let parked = registration_conflicts

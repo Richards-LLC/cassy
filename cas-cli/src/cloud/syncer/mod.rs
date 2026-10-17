@@ -1050,24 +1050,27 @@ impl PushRowResult {
     /// Unknown rejection reasons remain parked: losing a diagnostic row is
     /// worse than requiring an operator to explicitly requeue it.
     pub(crate) fn rejection_is_retryable(&self) -> bool {
-        let Some(reason) = self.reason.as_deref() else {
-            return false;
-        };
-        matches!(
-            reason.to_ascii_lowercase().as_str(),
-            // A stale base revision is a lost race, not a bad row: the next
-            // cycle pulls the winning state and retries from a valid base.
-            "revision_conflict"
-                | "retryable"
-                | "temporary"
-                | "transient"
-                | "server_error"
-                | "internal_error"
-                | "service_unavailable"
-                | "rate_limited"
-                | "timeout"
-        )
+        self.reason.as_deref().is_some_and(push_rejection_is_retryable)
     }
+}
+
+/// Share the queue's retry policy with operator advice so parked rejections
+/// never receive an immediate retry instruction from another surface.
+pub(crate) fn push_rejection_is_retryable(reason: &str) -> bool {
+    matches!(
+        reason.to_ascii_lowercase().as_str(),
+        // A stale base revision is a lost race, not a bad row: the next
+        // cycle pulls the winning state and retries from a valid base.
+        "revision_conflict"
+            | "retryable"
+            | "temporary"
+            | "transient"
+            | "server_error"
+            | "internal_error"
+            | "service_unavailable"
+            | "rate_limited"
+            | "timeout"
+    )
 }
 
 /// The operator-facing next step for one cloud rejection reason.

@@ -3489,7 +3489,13 @@ pub(crate) fn render_sync_summary(
                     if parts.is_empty() {
                         parts.push("queued rows remain".to_string());
                     }
-                    parts.push("run cas cloud queue --retry".to_string());
+                    if reasons.is_empty()
+                        || reasons
+                            .iter()
+                            .any(|(reason, _)| crate::cloud::push_rejection_is_retryable(reason))
+                    {
+                        parts.push("run cas cloud queue --retry".to_string());
+                    }
                     fmt.warning(&format!("Push incomplete · {}", parts.join(" · ")))?;
                 }
                 // cas-25c1: never let a clean team receipt stand alone over a

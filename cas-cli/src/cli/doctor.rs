@@ -9329,28 +9329,31 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let cas_root = temp.path().join("accounting/.cas");
         fs::create_dir_all(&cas_root).unwrap();
-
         let known = vec![
             crate::cloud::LocalRootIdentity {
-                project_root: "/home/u/client-one/accounting".into(),
+                project_root: temp.path().join("client-one/accounting"),
                 canonical_id: "accounting".to_string(),
                 git_remote: Some("github.com/client-one/accounting".to_string()),
             },
             crate::cloud::LocalRootIdentity {
-                project_root: "/home/u/client-two/accounting".into(),
+                project_root: temp.path().join("client-two/accounting"),
                 canonical_id: "accounting".to_string(),
                 git_remote: Some("gitlab.com/client-two/accounting".to_string()),
             },
         ];
+        for root in &known {
+            let cas = root.project_root.join(".cas");
+            fs::create_dir_all(&cas).unwrap();
+            fs::write(cas.join("config.toml"), "[project]\ncanonical_id = \"accounting\"\n").unwrap();
+        }
         let checks = canonical_id_checks(&cas_root, Ok(known));
         let collision = checks
             .iter()
             .find(|c| c.name == "canonical id collision")
-            .expect("collision row must be present");
+            .expect("shared explicit pins still require identity review");
         assert!(matches!(collision.status, CheckStatus::Warning));
-        assert!(collision.message.contains("client-one/accounting"));
-        assert!(collision.message.contains("client-two/accounting"));
-        assert!(collision.message.contains("cas cloud project set"));
+        assert!(collision.message.contains("unverified"), "{}", collision.message);
+        assert!(!collision.message.contains("cas cloud project set"), "{}", collision.message);
     }
 
     #[test]

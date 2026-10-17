@@ -254,7 +254,7 @@ mod m275_events_type_created_index;
 mod m276_qa_batch_receipts;
 mod m277_communication_slos;
 mod m278_external_work_request_journal;
-pub(super) mod m279_prompt_queue_health_schema;
+pub mod m279_prompt_queue_health_schema;
 pub(crate) use m262_tasks_normalize_proof_targets::normalize_legacy_proof_targets;
 
 /// All migrations in order. IDs must be sequential and never reused.

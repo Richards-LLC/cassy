@@ -1389,6 +1389,7 @@ async fn pull_team_task_and_dependency_fixtures_with_pull_count(
         task_dependencies,
         pull_count,
         None,
+        None,
     )
     .await
 }
@@ -1401,6 +1402,7 @@ async fn pull_team_fixtures_with_delivery(
     task_dependencies: Vec<serde_json::Value>,
     pull_count: usize,
     delivery_state: Option<cas_types::WorkerDeliveryState>,
+    live_owner: Option<cas_types::Agent>,
 ) -> (
     tempfile::TempDir,
     SyncResult,
@@ -1451,6 +1453,30 @@ async fn pull_team_fixtures_with_delivery(
             local_task.origin_project = Some(project_id.to_string());
         }
         task_store.add(&local_task).unwrap();
+    }
+    if let Some(owner) = live_owner {
+        use cas_store::{AgentStore, SupervisorQueueStore};
+        let agents = cas_store::SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        agents.register(&owner).unwrap();
+        let local = task_store.list(None).unwrap().into_iter().next().unwrap();
+        assert!(matches!(
+            agents.try_claim(&local.id, &owner.id, 600, None).unwrap(),
+            cas_types::ClaimResult::Success { .. }
+        ));
+        let lifecycle = cas_store::SqliteSupervisorQueueStore::open(temp.path()).unwrap();
+        lifecycle.init().unwrap();
+        lifecycle
+            .notify_idempotent(
+                "owner-supervisor",
+                "task_lifecycle",
+                &serde_json::json!({"task_id": local.id, "transition": "task_started",
+                "old_status": "open", "new_status": "in_progress", "actor": owner.id})
+                .to_string(),
+                cas_store::NotificationPriority::Normal,
+                "live-owner-started",
+            )
+            .unwrap();
     }
     if let Some(state) = delivery_state {
         let local = task_store.list(None).unwrap().into_iter().next().unwrap();
@@ -1844,26 +1870,101 @@ async fn team_pull_tied_or_stale_lifecycle_fields_keep_local_evidence() {
 }
 
 #[tokio::test]
+async fn team_pull_preserves_live_started_owner_cas_c4a52() {
+    use cas_store::SupervisorQueueStore;
+    // A foreign machine can upload an old Open copy with a newer whole-row
+    // clock. Neither clock order authorizes undoing a live worker's start.
+    for offset in [-1, 60] {
+        let project = "live-owner";
+        let owner = cas_types::Agent::new("live-worker-id".into(), "live-worker".into());
+        let mut local = Task::new("cas-c4a52-live".into(), "started work".into());
+        local.status = TaskStatus::InProgress;
+        local.assignee = Some(owner.name.clone());
+        local.updated_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+        let mut raw = team_task_fixture(
+            &local.id,
+            TaskStatus::Open,
+            project,
+            project,
+            local.updated_at + chrono::Duration::seconds(offset),
+        );
+        raw["assignee"] = serde_json::json!("dead-foreign-worker");
+        raw["revision"] = serde_json::json!(9999);
+        let (temp, result, store, queue) = pull_team_fixtures_with_delivery(
+            project,
+            vec![raw],
+            vec![local.clone()],
+            Vec::new(),
+            Vec::new(),
+            1,
+            None,
+            Some(owner),
+        )
+        .await;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let retained = store.get(&local.id).unwrap();
+        assert_eq!(
+            retained.status,
+            TaskStatus::InProgress,
+            "clock offset {offset}"
+        );
+        assert_eq!(retained.assignee, local.assignee);
+        assert_eq!(retained.updated_at, local.updated_at);
+        assert!(result.task_status_transitions.is_empty());
+        assert_eq!(result.pulled_tasks, 0);
+        assert_eq!(
+            queue.list_conflicts(10).unwrap()[0].strategy,
+            "task_lifecycle_guard"
+        );
+        let lifecycle = cas_store::SqliteSupervisorQueueStore::open(temp.path()).unwrap();
+        let started = lifecycle
+            .get_by_transition_key("live-owner-started")
+            .unwrap()
+            .unwrap();
+        assert_eq!(started.event_type, "task_lifecycle");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&started.payload).unwrap()["transition"],
+            "task_started"
+        );
+    }
+}
+
+#[tokio::test]
 async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
     for (before, after) in [
         (TaskStatus::Open, TaskStatus::InProgress),
         (TaskStatus::InProgress, TaskStatus::Closed),
+        (TaskStatus::InProgress, TaskStatus::Cancelled),
         (TaskStatus::Blocked, TaskStatus::InProgress),
         (TaskStatus::AwaitingMerge, TaskStatus::InProgress),
     ] {
         let project = "fresh-owner";
         let mut local = Task::new("cas-86eb-fresh".into(), "fresh lifecycle".into());
         local.status = before;
+        let owner = cas_types::Agent::new("live-worker-id".into(), "live-worker".into());
+        local.assignee = Some(owner.name.clone());
         local.updated_at = chrono::Utc::now() - chrono::Duration::minutes(2);
-        let raw = team_task_fixture(
+        let mut raw = team_task_fixture(
             &local.id,
             after,
             project,
             project,
             local.updated_at + chrono::Duration::minutes(1),
         );
-        let (_temp, result, store, _queue) =
-            pull_team_task_fixtures(project, vec![raw], Some(local.clone())).await;
+        if !matches!(after, TaskStatus::Closed | TaskStatus::Cancelled) {
+            raw["assignee"] = serde_json::json!(local.assignee);
+        }
+        let (_temp, result, store, _queue) = pull_team_fixtures_with_delivery(
+            project,
+            vec![raw],
+            vec![local.clone()],
+            Vec::new(),
+            Vec::new(),
+            1,
+            None,
+            Some(owner),
+        )
+        .await;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.pulled_tasks, 1);
         assert_eq!(store.get(&local.id).unwrap().status, after);
@@ -1894,6 +1995,7 @@ async fn team_pull_delivery_transaction_rejects_even_newer_lifecycle_row() {
         Vec::new(),
         1,
         Some(cas_types::WorkerDeliveryState::AwaitingMerge),
+        None,
     )
     .await;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
@@ -1941,6 +2043,7 @@ async fn team_pull_authorized_reopen_requires_fresh_row_even_with_reopen_note() 
             Vec::new(),
             1,
             Some(cas_types::WorkerDeliveryState::Delivered),
+            None,
         )
         .await;
         assert!(result.errors.is_empty(), "{:?}", result.errors);

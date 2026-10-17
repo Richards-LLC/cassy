@@ -946,6 +946,73 @@ fn add_sync_test_delivery(
 }
 
 #[test]
+fn sync_update_preserves_live_execution_lease_cas_c4a52() {
+    use crate::{AgentStore, SqliteAgentStore};
+    let (temp, store) = create_test_store();
+    let owner = cas_types::Agent::new("live-worker-id".into(), "live-worker".into());
+    let agents = SqliteAgentStore::open(temp.path()).unwrap();
+    agents.init().unwrap();
+    agents.register(&owner).unwrap();
+    let mut task = Task::new("cas-c4a52-atomic".into(), "started work".into());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some(owner.name.clone());
+    store.add(&task).unwrap();
+    let expected = store.get(&task.id).unwrap();
+    // Claim after the pull's snapshot: lease renewal/claim need not change
+    // the task clock, so the check must share the sync write transaction.
+    assert!(matches!(
+        agents.try_claim(&task.id, &owner.id, 600, None).unwrap(),
+        cas_types::ClaimResult::Success { .. }
+    ));
+    for (status, assignee) in [
+        (TaskStatus::Open, Some(owner.name.clone())),
+        (TaskStatus::InProgress, Some("dead-worker".into())),
+        (TaskStatus::InProgress, None),
+    ] {
+        let mut remote = expected.clone();
+        remote.status = status;
+        remote.assignee = assignee;
+        assert_eq!(store.update_from_sync(&remote, &expected).unwrap(), None);
+        let retained = store.get(&task.id).unwrap();
+        assert!(retained.lifecycle_matches(&expected));
+        assert_eq!(retained.updated_at, expected.updated_at);
+    }
+    // Body sync is allowed, as are the owner's terminal updates.
+    let mut remote = expected.clone();
+    remote.description = "new context".into();
+    assert!(
+        store
+            .update_from_sync(&remote, &expected)
+            .unwrap()
+            .is_some()
+    );
+    let expected = store.get(&task.id).unwrap();
+    remote.status = TaskStatus::Closed;
+    remote.assignee = None;
+    assert!(
+        store
+            .update_from_sync(&remote, &expected)
+            .unwrap()
+            .is_some()
+    );
+    // Local release/reset is still authorized and is not a replicated write.
+    task.status = TaskStatus::Open;
+    task.assignee = None;
+    store.update(&task).unwrap();
+    assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Open);
+    // Releasing the lease also allows a fresh replicated reset afterward.
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some(owner.name.clone());
+    store.update(&task).unwrap();
+    agents.release_lease(&task.id, &owner.id).unwrap();
+    let expected = store.get(&task.id).unwrap();
+    let mut remote = expected.clone();
+    remote.status = TaskStatus::Open;
+    remote.assignee = None;
+    assert!(store.update_from_sync(&remote, &expected).unwrap().is_some());
+}
+
+#[test]
 fn sync_update_checks_delivery_authority_before_task_projection() {
     let (temp, store) = create_test_store();
     let task = Task::new(

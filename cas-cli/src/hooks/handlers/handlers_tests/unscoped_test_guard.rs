@@ -194,6 +194,7 @@ fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
                 "{rewritten}"
             );
             let args = command.strip_prefix("cargo check ").unwrap();
+            let args = args.strip_suffix(" &").unwrap_or(args);
             assert!(rewritten.contains(&format!("-- {args}")), "{rewritten}");
             if command.ends_with('&') {
                 // cas-3d04: detached runner, never a shell `&` job.
@@ -259,8 +260,9 @@ fn targeted_nextest_rewrite_preserves_filter_literals_and_workspace_guard() {
                 rewritten.contains("factory worker-check --cas-root"),
                 "{rewritten}"
             );
+            let expected = command.strip_prefix("cargo ").unwrap();
             assert!(
-                rewritten.contains(command.strip_prefix("cargo ").unwrap()),
+                rewritten.contains(expected.strip_suffix(" &").unwrap_or(expected)),
                 "{rewritten}"
             );
         }

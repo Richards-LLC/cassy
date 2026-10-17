@@ -4449,6 +4449,13 @@ fn team_registration_metadata_key(team_id: &str, canonical_id: &str) -> String {
     format!("team_project_registered_v2_{team_id}_{canonical_id}")
 }
 
+/// The pre-v2 key for the same team and project. It is never read again, and
+/// purge-foreign keeps it because it names the current project, so the v2
+/// write removes it.
+fn legacy_team_registration_metadata_key(team_id: &str, canonical_id: &str) -> String {
+    format!("team_project_registered_{team_id}_{canonical_id}")
+}
+
 /// Ensure this project is registered with the active team before the sync
 /// reports success (cas-c117).
 ///
@@ -4549,7 +4556,15 @@ fn ensure_team_project_registration_with_output(
             };
             if let Some(q) = queue.as_ref() {
                 let effective_cache_key = team_registration_metadata_key(&team_id, &effective_id);
-                let _ = q.set_metadata(&effective_cache_key, &chrono::Utc::now().to_rfc3339());
+                if q
+                    .set_metadata(&effective_cache_key, &chrono::Utc::now().to_rfc3339())
+                    .is_ok()
+                {
+                    let _ = q.delete_metadata(&legacy_team_registration_metadata_key(
+                        &team_id,
+                        &effective_id,
+                    ));
+                }
             }
             if emit_output {
                 report_team_registration(cli, &team_id, &effective_id, &outcome)?;

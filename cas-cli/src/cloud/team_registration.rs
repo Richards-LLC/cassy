@@ -286,8 +286,25 @@ impl<'a> TeamRegistration<'a> {
     /// read-only path so an invalid destination is rejected before the local
     /// task or its sync queue changes.
     pub fn verify_registered(&self) -> Result<(), RegistrationFailure> {
-        if let Some(Listed::Registered(_)) = self.lookup(self.canonical_id)? {
-            return Ok(());
+        match self.lookup(self.canonical_id)? {
+            Some(Listed::Registered(_)) => return Ok(()),
+            // Read-only: name the fix that `ensure` would apply by adopting.
+            Some(Listed::UnderPrimary { canonical_id, .. }) => {
+                let pin = canonical_project_id(self.canonical_id)
+                    .unwrap_or_else(|| self.canonical_id.trim().to_string());
+                return Err(RegistrationFailure {
+                    reason: self.unregistered_pin_alias_reason(
+                        &pin,
+                        &canonical_id,
+                        &format!("`cas cloud project set {canonical_id}`"),
+                    ),
+                    interaction: format!(
+                        "GET {} -> 200 lists \"{canonical_id}\" but not \"{pin}\"",
+                        self.projects_url()
+                    ),
+                });
+            }
+            None => {}
         }
 
         Err(RegistrationFailure {
@@ -551,14 +568,7 @@ impl<'a> TeamRegistration<'a> {
             _ => "`cas cloud project set <primary>` with this repository's primary".to_string(),
         };
         Err(RegistrationFailure {
-            reason: format!(
-                "Pinned project id '{pin}' is not registered with team {} on {} \
-                 (unregistered_pin_alias): the team lists {primaries}, whose server aliases do \
-                 not include '{pin}', so team pulls under '{pin}' would fail with \
-                 project_not_found. If this checkout is that repository, pin its cloud primary \
-                 with {fix}; otherwise ask the cloud owner to register '{pin}' as an alias.",
-                self.team_id, self.endpoint
-            ),
+            reason: self.unregistered_pin_alias_reason(pin, &primaries, &fix),
             interaction: format!(
                 "GET {} -> 200 lists {primaries} but not \"{pin}\"; GET {account_url} -> {}; \
                  git remote: {}",
@@ -574,6 +584,17 @@ impl<'a> TeamRegistration<'a> {
                 remote.as_deref().unwrap_or("<absent>"),
             ),
         })
+    }
+
+    fn unregistered_pin_alias_reason(&self, pin: &str, primaries: &str, fix: &str) -> String {
+        format!(
+            "Pinned project id '{pin}' is not registered with team {} on {} \
+             (unregistered_pin_alias): the team lists {primaries}, whose server aliases do \
+             not include '{pin}', so team pulls under '{pin}' would fail with \
+             project_not_found. If this checkout is that repository, pin its cloud primary \
+             with {fix}; otherwise ask the cloud owner to register '{pin}' as an alias.",
+            self.team_id, self.endpoint
+        )
     }
 
     /// `POST /api/teams/{teamId}/sync/push` with no rows — the server's

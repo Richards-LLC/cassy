@@ -68,8 +68,8 @@ fn completed_requires_matching_original_fence_evidence() {
         ),
         ("/settled/migrated", json!(-1)),
         (
-            "/latest_attempt/attempted_at",
-            json!("2026-10-17T18:00:00+01:00"),
+            "/binding/activated_at",
+            json!("2026-10-17T18:00:00.000+01:00"),
         ),
         (
             "/latest_attempt/id",

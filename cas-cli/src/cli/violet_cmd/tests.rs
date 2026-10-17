@@ -546,6 +546,7 @@ fn reply_files_the_receipt_does_not_show_attached_fail_the_run() {
     for (files, code) in [
         (json!([]), "thread_files_unconfirmed"),
         (json!([attached("F1")]), "thread_files_unconfirmed"),
+        (json!([attached("F1"), attached("F1")]), "thread_files_unconfirmed"),
         (json!([attached("F1"), {"file_id": "F2", "name": "b.png", "state": "uploaded"}]), "uploaded_not_attached"),
     ] {
         let hub = ScriptedHub::with(vec![receipt(files.clone())]);
@@ -596,6 +597,22 @@ fn an_external_thread_uploads_first_and_sends_only_metadata() {
     assert_eq!(reply_file["size_bytes"], big.len());
     assert!(reply_file.get("content").is_none());
     assert_eq!(hub.uploads()[0].1, sha(&big));
+
+    // A success-shaped receipt that omits the reply's files is refused, and
+    // the refusal still names the upload Slack began.
+    let hub = ScriptedHub::with(vec![
+        json!({"ok": true, "kind": "file_external", "step": "begin",
+               "upload_url": "https://files.slack.test/u/F8", "file_id": "F8"}),
+        json!({"ok": true, "kind": "thread", "channel": channel(), "failed_index": null, "posted": [
+            {"index": 0, "message_id": "2.0", "thread_id": "2.0", "permalink": "https://slack.test/0"},
+            {"index": 1, "message_id": "2.1", "thread_id": "2.0", "permalink": "https://slack.test/1"}
+        ]}),
+    ]);
+    let mut live = hub.clone();
+    let error = post_thread(&mut live, "cas-internal", "root", "k2", &replies).unwrap_err();
+    assert_eq!(error.code, "thread_files_unconfirmed");
+    assert_eq!(error.file_ids, ["F8"], "the begun upload is kept");
+    assert_eq!(error.to_json()["uploads_begun"], json!(["F8"]));
 }
 
 // ---------------------------------------------------------------------------

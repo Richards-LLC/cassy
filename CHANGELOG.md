@@ -7,6 +7,216 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.62.0] - 2026-10-17
+
+### Added
+
+- **Serve memory in `gc_report`** — Was: nothing showed how much memory each
+  session's `cas serve` held. → Now: `factory action=gc_report` lists each
+  registered local session's serve memory (RSS) and a total, on Linux and
+  macOS, counting each process once and skipping recycled or other-machine
+  processes. A shared serve and macOS allocator changes were measured and
+  deferred.
+
+### Changed
+
+- **Slack messages in Cloud-managed channels** — Was: Cassy found new Slack
+  messages by sweeping each channel itself, the supervisor then read each one
+  through Violet, and `/clear` or a relaunch moved the supervisor to a new
+  Cassy Cloud slot. → Now: in channels Cassy Cloud manages, the supervisor
+  claims each message from Cloud, which records it before it is typed, so one
+  session never types it twice; the text is read through Violet and checked
+  against the claimed thread, or nothing is typed. The slot survives `/clear`
+  and relaunches (`factory.slot_id` sets a separate one), a replaced session
+  stops taking messages, a new session resumes unread ones and shows a
+  one-line recovery notice for any the old one may have seen, and `cas peers`
+  shows Slack activation. Other channels keep the sweep.
+
+- **Merged deliveries close themselves** — Was: after a supervisor merged a
+  parked delivery, its worker had to close it again, and again after an
+  approved verdict. → Now: a delivery merged with green CI is closed by Cassy
+  with the worker's parked close reason once verification approves, and the
+  worker is told once. Red-CI override merges, rejected verdicts and QA-held
+  deliveries still wait, and a worker close that races Cassy's reports the
+  close already made.
+
+- **Commander "Ask to reply" is on** — Was: a read-only Commander browser had
+  no way to ask for reply access, and the request was tested only against a
+  stand-in for Cassy Cloud. → Now: Cassy Cloud supports it, so the button
+  appears with no setting; a live check shows a read-only phone asking, the
+  owner allowing, and the same phone replying without signing out, changing
+  keys or losing history. Allow and Deny sit apart, with Allow as the primary
+  button.
+
+### Fixed
+
+- **New supervisor sessions start on their own** — Was: since 3.61.0, a new
+  `cas claude` supervisor opened and sat idle, its startup brief queued until
+  you typed something. → Now: the brief starts the first turn by itself; it
+  still waits while you are typing, the pane is not ready or a tool call is
+  pending.
+
+- **Reminders wake idle workers** — Was: a reminder a worker set for itself
+  fired but did not wake the worker once its turn had ended, and waited until
+  something else started a turn (over two minutes when measured). → Now: a
+  fired self-reminder wakes a worker that is waiting for input, unless someone
+  is typing in its pane or a tool call is in flight.
+
+- **Commander after a hub hiccup** — Was: when the hub ran out of open files
+  (macOS starts it with 256), its credential store failed and answered a bare
+  401, which Commander read as a revoked pairing, so every message failed with
+  "Browser storage could not keep this message"; each status reload also
+  opened fresh database handles. → Now: an internal store failure answers a
+  retryable 503 (`auth_store_unavailable`), a reasonless 401 asks to re-pair
+  but never revokes, a stale block clears once the hub accepts the browser
+  again, and the composer names a refused pairing apart from a real storage
+  error. `cas hub serve` raises its open-file limit to 8192 (or the hard
+  limit), its launchd and systemd service files set the same limit (an
+  installed file without one is updated on restart or update, keeping your own
+  value), `cas hub status` shows usage against it, and status reads reuse one
+  task store per project.
+
+- **Commander inbox keeps updating** — Was: if Cassy Cloud's grant check
+  omitted or reformatted the page origin, Commander's inbox stopped loading
+  new messages without any error. → Now: messages keep arriving; only the
+  reply-access offer is withheld for that response.
+
+- **Commander reply retries back off** — Was: a supervisor reply waiting for a
+  paired device's receipt was re-sent to the Commander hub about every 100 ms
+  forever, and each attempt was logged. → Now: retries start at 1 second and
+  double up to 60 seconds, reset on a receipt or a device reconnecting, and
+  each retry is logged once with its next delay.
+
+- **Codex 0.162 workers start, and your checkout stays untouched** — Was:
+  Codex 0.162.1 workers stopped at "Hooks need review" and failed after the
+  60-second registration timeout, because Codex loads the main checkout's
+  `.codex/hooks.json`, which Cassy had not trusted; Cassy also rewrote that
+  file and could trust stale Cassy hooks in it. → Now: Cassy trusts the main
+  checkout's hooks only when its Cassy hooks match the worker's and never
+  rewrites the file. A stale file stops the spawn with
+  `codex_main_checkout_hooks_stale` and the `git -C <main> pull` fix, an
+  unreadable one is named by path, and an unregistered worker stuck on the
+  review screen fails at once with `codex_hook_trust_unrecognized`.
+
+- **Background test runs on Codex workers** — Was: a backgrounded capped test
+  or check on a Codex worker was killed when its shell exited, leaving an
+  empty log while the call reported success. → Now: it runs detached in its
+  own session, its log ends with `worker-check: EXIT <code>`, and a background
+  run without a log file is refused.
+
+- **Named tests keep your git on macOS** — Was: capped test runs dropped any
+  PATH folder holding `cas`, `codex` or `claude`, so on Homebrew Macs tests
+  silently used Apple's older git. → Now: only those programs are hidden, and
+  every other tool in that folder keeps its place.
+
+- **`cas update` refreshes old Cassy skills** — Was: a project holding an
+  older Cassy-written skill, such as `cas-worker` or `cas-supervisor`, kept it
+  as a managed-file conflict, so the project ran stale skills. → Now: any
+  skill text Cassy has shipped is recognised as Cassy's and updated, only your
+  own edits are kept as conflicts, and Codex's `.cas-lock` files are in
+  Cassy's managed ignore entries.
+
+- **Journey recordings no longer fill the disk** — Was: every Commander
+  journey run kept its Playwright trace and video forever (784 GB on one
+  machine), and `cas worktree sweep` judged against a stale ref, calling
+  merged worktrees unmerged. → Now: `gc_cleanup` with `force=true` deletes
+  `trace.zip` and `.webm` files of tasks closed at least 24 hours, keeping
+  screenshots and receipts; the sweep fetches origin first, prints the ref and
+  commit it compared with and classifies nothing if the fetch fails;
+  `gc_report` lists checkouts whose Git directory is gone.
+
+- **Cited proof must exist** — Was: a close reason citing an artifact id or
+  receipt file for a proof claim passed on its pattern alone, so a made-up
+  citation was accepted (GH #1235). → Now: close checks each cited `art-…` id
+  against the project's artifact store and each local receipt path on disk,
+  and refuses a missing one by name; run ids and Actions URLs keep their
+  existing offline check.
+
+- **Holds survive unmet dependencies** — Was: blocking a task that still
+  waited on another task recorded no hold, so it was released as soon as that
+  dependency closed (GH #1234). → Now: an explicit block is always recorded as
+  a hold, and closing the dependency leaves the task held.
+
+- **Close records the rebased commit** — Was: after a rebase, closing a task
+  could record the older pre-rebase commit as the delivery. → Now: close
+  records the rebased, pushed tip when it carries every change of the older
+  commit and adds only that task's own commits.
+
+- **Close gate follows renamed files** — Was: when a later commit renamed a
+  delivered file, such as `release.sh` re-dating a release-notes draft, the
+  close gate reported DELIVERY CONTENT DROPPED although every line survived at
+  the new path. → Now: it follows the rename (up to eight in a row) and checks
+  the new path; a delete beside an unrelated add, or a rename made inside a
+  merge, still counts as dropped.
+
+- **Verdicts record first time** — Was: the task verifier was told to leave
+  out the verification dispatch id, so a verifier started by a supervisor was
+  refused unless the id was passed by hand. → Now: `task action=show` prints a
+  `Verification dispatch:` line, and the verifier passes that id.
+
+- **Held workers stay quiet** — Was: a held worker with a delivery waiting
+  still got a "pending delivery" idle relay about once a minute until it was
+  released. → Now: a hold silences every worker-idle relay, including those
+  repeats.
+
+- **Whitespace-only UI edits** — Was: with older Git (Apple Git 2.50.1 on
+  macOS), a commit that only changed whitespace in a UI file, such as a `.vue`
+  template, counted as a UI change needing QA evidence (GH #1027, #1037). →
+  Now: each listed file is confirmed with a whitespace-blind check from the
+  repository root, for both delivery and range checks.
+
+- **Team projects with a bare name** — Was: a project pinned to a bare name
+  was reported as registered with its team because a listed project shared its
+  repository name, the next team pull failed with `project_not_found`, and an
+  old-format cache entry stayed forever. → Now: a bare pin counts only when
+  Cassy Cloud records it as an alias, a checkout whose Git remote is the
+  listed project adopts that project, and anything else stops with
+  `unregistered_pin_alias` and the `cas cloud project set <primary>` fix;
+  earlier cached confirmations are checked again and the old entry is removed.
+
+- **Release script reruns after a queue repair** — Was: rerunning
+  `scripts/release.sh` after the merge queue rejected a release tried to
+  commit it again and exited 1 silently, and refused the `--notes` path the
+  first run had renamed. → Now: a rerun finds the existing release commit,
+  pushes, updates the pull request and re-enables auto-merge; it accepts the
+  original notes path, and a failing command prints its line and exit code.
+
+- **Release report links and timing** — Was: the report's release PR and
+  GitHub release showed as `<https://…>` text with no link in the HTML or PDF,
+  and a latency measured with `release-latency-receipt.sh --run-dir` was never
+  found, so its timing rows were written by hand. → Now: both are links, and
+  `cas release report --latency-receipt <path>` reads that measurement; a
+  receipt for another release is refused.
+
+### Tests
+
+- **Flake fix** — Was: a prompt-queue jobs test could see a job finish before
+  its start was recorded and fail intermittently. → Now: the test writer
+  records the start first, so the test is deterministic.
+
+- **Worktree tests on any default branch** — Was: two worktree Git tests
+  failed on machines whose Git default branch is `main`. → Now: their fixture
+  repositories always start on `master`.
+
+- **Leaner suites** — Was: later deliveries added repeated test setup, and a
+  one-off live presence probe against the deployed cloud stayed in the tree. →
+  Now: the probe and its scripts are removed and shared setup is reused, about
+  400 fewer test lines.
+
+### Documentation
+
+- **Delivery CI cost map** — Was: nobody had measured where a delivery's CI
+  time went. → Now: `docs/analysis/2026-10-17-lane-ci/` times 30 delivered
+  changes (median 16.9 minutes), shows broad Rust tests dominate even the fast
+  row, and proposes leaving that proof to the merge queue (modelled at 2.5
+  minutes). It is a proposal only; no CI behaviour changed.
+
+- **3.61.0 release report** — Was: the published release lacked its standalone
+  report bundle, and its Slack draft had no measured digests or timing. → Now:
+  its Markdown, brief, HTML, PDF and visual QA receipt are under
+  `docs/release-reports/`, and the draft records measured digests, timing and
+  links to the posted threads.
+
 ## [3.61.0] - 2026-10-17
 
 ### Added

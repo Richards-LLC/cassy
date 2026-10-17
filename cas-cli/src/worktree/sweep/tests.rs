@@ -71,7 +71,43 @@ fn sweep_clean_merged_worktree_removes_it() {
     let temp = TempDir::new().unwrap();
     let repo = bootstrap_repo(&temp);
     let wt = add_worktree(&repo, "worker1");
-    // No commits on the worktree branch — it's trivially merged with main.
+    // The origin advances after the local fetch; local main stays stale.
+    let origin = temp.path().join("origin");
+    fs::create_dir_all(&origin).unwrap();
+    git_ok(&origin, &["init", "--bare", "-q", "-b", "main"]);
+    git_ok(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git_ok(&repo, &["push", "-q", "origin", "main"]);
+    git_ok(&repo, &["fetch", "-q", "origin"]);
+    fs::write(wt.join("merged.txt"), "merged upstream").unwrap();
+    git_ok(&wt, &["add", "merged.txt"]);
+    git_ok(&wt, &["commit", "-q", "-m", "merged upstream"]);
+    // Push from an independent clone so this repo's origin/main is stale too.
+    let publisher = temp.path().join("publisher");
+    git_ok(
+        temp.path(),
+        &[
+            "clone",
+            "-q",
+            repo.to_str().unwrap(),
+            publisher.to_str().unwrap(),
+        ],
+    );
+    git_ok(
+        &publisher,
+        &[
+            "push",
+            "-q",
+            origin.to_str().unwrap(),
+            "origin/factory/worker1:refs/heads/main",
+        ],
+    );
+    let merged_commit = String::from_utf8(git(&wt, &["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_string();
 
     let report = sweep_one_repo(&repo, SweepOptions::default());
 
@@ -82,6 +118,26 @@ fn sweep_clean_merged_worktree_removes_it() {
     ));
     assert!(!wt.exists(), "worktree dir must be gone");
     assert!(report.prune_ran, "prune must run when worktrees existed");
+    assert_eq!(
+        report.comparison,
+        Some(("origin/main".into(), merged_commit))
+    );
+    // Failed fetches must preserve worktrees and name the failure, never
+    // silently fall back to the stale local main.
+    let retained = add_worktree(&repo, "fetch-failed");
+    git_ok(
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            temp.path().join("missing-origin").to_str().unwrap(),
+        ],
+    );
+    let failed = sweep_one_repo(&repo, SweepOptions::default());
+    assert!(failed.repo_error.unwrap().contains("origin fetch failed"));
+    assert!(failed.worktrees.is_empty());
+    assert!(retained.exists());
 }
 
 /// GH #529: pnpm's package entries are symlinks. If the primary checkout has
@@ -312,18 +368,13 @@ fn unknown_parent_branch_produces_error_not_silent_delete() {
     // Without a resolvable parent branch, sweep MUST refuse to classify
     // and MUST NOT remove the worktree (committed work would be lost).
     let report = sweep_one_repo(&repo, SweepOptions::default());
-    assert_eq!(report.worktrees.len(), 1);
-    match &report.worktrees[0].disposition {
-        Disposition::Error { reason } => {
-            assert!(
-                reason.contains("parent branch"),
-                "expected parent-branch error, got {reason}"
-            );
-        }
-        other => panic!(
-            "expected Error(parent branch), got {other:?} — worktree with committed work was classified as something else"
-        ),
-    }
+    assert!(report.worktrees.is_empty(), "no worktree may be classified");
+    assert!(
+        report
+            .repo_error
+            .as_deref()
+            .is_some_and(|error| error.contains("comparison ref"))
+    );
     assert!(
         wt.exists(),
         "worktree with committed work must NOT be removed"

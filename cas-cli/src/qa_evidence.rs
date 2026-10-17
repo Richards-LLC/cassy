@@ -2163,14 +2163,47 @@ pub fn delivery_range(repo: &Path, head: &str, target: &str) -> Option<(String, 
 /// Reviewable paths changed over a range; deletions and whitespace-only
 /// changes cannot require a UI evidence bundle.
 pub fn range_paths(repo: &Path, from: &str, to: &str) -> Option<Vec<String>> {
-    Some(
-        git(repo, &["diff", "-w", "--diff-filter=ACMRT", "--name-only", from, to])?
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-    )
+    content_paths(repo, from, to).ok()
+}
+
+/// Paths `from..to` adds, copies, modifies, renames or retypes beyond
+/// whitespace (GH #1027/#1037).
+///
+/// cas-aa97: older Git (measured: Apple Git 2.50.1, which the capped test
+/// runner resolves on macOS) ignores `-w` for `--name-only` and lists
+/// whitespace-only edits. `--quiet` honours `-w` on every build, so each
+/// listed path is confirmed with it.
+pub(crate) fn content_paths(repo: &Path, from: &str, to: &str) -> Result<Vec<String>, String> {
+    let listing = Command::new("git")
+        .args(["diff", "-w", "--diff-filter=ACMRT", "--name-only", "-z", from, to, "--"])
+        .current_dir(repo)
+        .output()
+        .map_err(|error| format!("git diff failed to start: {error}"))?;
+    if !listing.status.success() {
+        return Err(format!(
+            "git diff {from} {to} failed: {}",
+            String::from_utf8_lossy(&listing.stderr).trim()
+        ));
+    }
+    let mut paths = Vec::new();
+    for path in String::from_utf8_lossy(&listing.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+    {
+        let probe = Command::new("git")
+            .args(["diff", "-w", "--quiet", "--diff-filter=ACMRT", from, to, "--"])
+            // `--name-only` paths are top-relative; so is this pathspec (cas-833c).
+            .arg(format!(":(top,literal){path}"))
+            .current_dir(repo)
+            .status()
+            .map_err(|error| format!("git diff failed to start: {error}"))?;
+        match probe.code() {
+            Some(0) => {}
+            Some(1) => paths.push(path.to_string()),
+            _ => return Err(format!("git diff -w --quiet {from} {to} -- {path} failed: {probe}")),
+        }
+    }
+    Ok(paths)
 }
 
 /// What the implementer must show for a user-facing delivery.

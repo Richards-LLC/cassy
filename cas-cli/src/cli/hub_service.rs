@@ -69,6 +69,9 @@ impl ManagerProbe {
 /// deliver it and both mean "stay stopped". A hub killed by SIGPIPE on
 /// soundwave (2026-09-26) sat dead for hours because of this gap (cas-621ec).
 const SYSTEMD_FORCE_RESTART_SIGNALS: &str = "SIGHUP SIGINT SIGPIPE";
+/// Open-file limit for the supervised hub. launchd's default soft limit of
+/// 256 let Commander bursts exhaust it (EMFILE on accept, cas-6cc6).
+const HUB_FILE_LIMIT: u32 = 8192;
 // Both findings below point at `cas hub restart`: it stops a detached hub if
 // one is running and (re)starts the installed service.
 pub(crate) const INACTIVE_DETACHED_HUB_WARNING: &str = "service installed but inactive, detached hub running without restart supervision. Fix: run `cas hub restart` to hand the hub back to the service";
@@ -505,7 +508,7 @@ fn rewrite_launchd_publication_flags(
         array,
         &definition[array_end..]
     );
-    ensure_launchd_cli_environment(&rewritten)
+    ensure_launchd_file_limits(&ensure_launchd_cli_environment(&rewritten)?)
 }
 
 fn ensure_launchd_cli_environment(definition: &str) -> Result<String> {
@@ -737,18 +740,24 @@ fn service_https_port(definition: &str) -> u16 {
 
 /// Bring an installed unit's restart policy up to the current template
 /// (cas-621ec) without touching anything else in it: binary, ports,
-/// publication flags and any operator edits survive. Returns `None` when the
-/// unit already carries the policy, or has no `[Service]` section to amend.
+/// publication flags and any operator edits survive. It also adds the hub's
+/// `LimitNOFILE` when absent (cas-6cc6). Returns `None` when the unit already
+/// carries both, or has no `[Service]` section to amend.
 fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
     let desired = format!("RestartForceExitStatus={SYSTEMD_FORCE_RESTART_SIGNALS}");
-    if definition.lines().any(|line| line.trim() == desired) {
+    let has_policy = definition.lines().any(|line| line.trim() == desired);
+    // An operator's own LimitNOFILE is kept; only its absence is stale (cas-6cc6).
+    let has_limit = definition
+        .lines()
+        .any(|line| line.trim_start().starts_with("LimitNOFILE="));
+    if has_policy && has_limit {
         return None;
     }
     let mut lines = Vec::new();
-    let mut inserted = false;
+    let mut inserted = has_policy;
     for line in definition.lines() {
         // Replace, rather than duplicate, a stale force-restart list.
-        if line.trim_start().starts_with("RestartForceExitStatus=") {
+        if !has_policy && line.trim_start().starts_with("RestartForceExitStatus=") {
             continue;
         }
         lines.push(line.to_owned());
@@ -759,8 +768,22 @@ fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
     }
     if !inserted {
         let service = lines.iter().position(|line| line.trim() == "[Service]")?;
-        lines.insert(service + 1, desired);
+        lines.insert(service + 1, desired.clone());
         lines.insert(service + 1, "Restart=on-failure".to_owned());
+    }
+    if !has_limit {
+        // Before the log lines, as in the template, so operator lines after
+        // RestartSec stay adjacent.
+        let at = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with("StandardOutput="))
+            .or_else(|| {
+                lines
+                    .iter()
+                    .position(|line| line.trim() == desired)
+                    .map(|index| index + 1)
+            })?;
+        lines.insert(at, format!("LimitNOFILE={HUB_FILE_LIMIT}"));
     }
     let mut upgraded = lines.join("\n");
     if definition.ends_with('\n') {
@@ -1476,7 +1499,7 @@ fn launchd_plist(
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <key>EnvironmentVariables</key>
+{file_limits}  <key>EnvironmentVariables</key>
   <dict>
 {isolated_home}    <key>PATH</key>
     <string>{LAUNCHD_CLI_PATH}</string>
@@ -1490,8 +1513,68 @@ fn launchd_plist(
 </dict>
 </plist>
 "#,
-        log_path = xml_escape(&log_path.display().to_string())
+        log_path = xml_escape(&log_path.display().to_string()),
+        file_limits = ["SoftResourceLimits", "HardResourceLimits"]
+            .map(launchd_file_limit_block)
+            .concat(),
     )
+}
+
+fn launchd_file_limit_block(key: &str) -> String {
+    format!(
+        "  <key>{key}</key>\n  <dict>\n    <key>NumberOfFiles</key>\n    <integer>{HUB_FILE_LIMIT}</integer>\n  </dict>\n"
+    )
+}
+
+/// Give an installed plist that predates cas-6cc6 the hub's file limits. An
+/// existing `NumberOfFiles` (an operator's own value) is left alone.
+fn ensure_launchd_file_limits(definition: &str) -> Result<String> {
+    let mut definition = definition.to_owned();
+    for key in ["SoftResourceLimits", "HardResourceLimits"] {
+        let marker = format!("<key>{key}</key>");
+        let Some(key_start) = definition.find(&marker) else {
+            // Insert on its own line before EnvironmentVariables, whatever the
+            // file's indentation (plutil writes tabs).
+            let anchor = definition
+                .find("<key>EnvironmentVariables</key>")
+                .context("launchd plist has no EnvironmentVariables to place file limits before")?;
+            let line_start = definition[..anchor]
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1);
+            definition.insert_str(line_start, &launchd_file_limit_block(key));
+            continue;
+        };
+        let after_key = key_start + marker.len();
+        let value_start = definition.len() - definition[after_key..].trim_start().len();
+        if definition[value_start..].starts_with("<dict/>") {
+            definition.replace_range(
+                value_start..value_start + "<dict/>".len(),
+                &format!(
+                    "<dict>\n    <key>NumberOfFiles</key>\n    <integer>{HUB_FILE_LIMIT}</integer>\n  </dict>"
+                ),
+            );
+            continue;
+        }
+        ensure!(
+            definition[value_start..].starts_with("<dict>"),
+            "launchd {key} has no dict"
+        );
+        let dict_start = value_start + "<dict>".len();
+        let dict_end = definition[dict_start..]
+            .find("</dict>")
+            .map(|offset| dict_start + offset)
+            .with_context(|| format!("launchd {key} has an unclosed dict"))?;
+        if !definition[dict_start..dict_end].contains("<key>NumberOfFiles</key>") {
+            let insert_at = definition[..dict_end]
+                .rfind('\n')
+                .map_or(dict_end, |newline| newline + 1);
+            definition.insert_str(
+                insert_at,
+                &format!("    <key>NumberOfFiles</key>\n    <integer>{HUB_FILE_LIMIT}</integer>\n"),
+            );
+        }
+    }
+    Ok(definition)
 }
 
 fn systemd_unit(binary: &Path, tailscale_serve: bool, tailscale_port: u16) -> String {
@@ -1501,7 +1584,7 @@ fn systemd_unit(binary: &Path, tailscale_serve: bool, tailscale_port: u16) -> St
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "[Unit]\nDescription=Cassy Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartForceExitStatus={SYSTEMD_FORCE_RESTART_SIGNALS}\nRestartSec=3\nStandardOutput=append:%h/.cas/hub/hub.log\nStandardError=append:%h/.cas/hub/hub.log\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Cassy Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartForceExitStatus={SYSTEMD_FORCE_RESTART_SIGNALS}\nRestartSec=3\nLimitNOFILE={HUB_FILE_LIMIT}\nStandardOutput=append:%h/.cas/hub/hub.log\nStandardError=append:%h/.cas/hub/hub.log\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 
@@ -1730,10 +1813,53 @@ exit 0
             ),
             "",
         );
+        // A plist installed before cas-6cc6 has no file limits either.
+        let old = ["SoftResourceLimits", "HardResourceLimits"]
+            .into_iter()
+            .fold(old, |plist, limits| {
+                plist.replace(
+                    &format!(
+                        "  <key>{limits}</key>\n  <dict>\n    <key>NumberOfFiles</key>\n    <integer>8192</integer>\n  </dict>\n"
+                    ),
+                    "",
+                )
+            });
+        assert!(!old.contains("NumberOfFiles"));
         let repaired = rewrite_launchd_publication_flags(&old, true, 8443).unwrap();
         assert!(repaired.contains(LAUNCHD_CLI_PATH));
         assert!(repaired.contains("<key>TERM</key>\n    <string>dumb</string>"));
         assert!(repaired.contains("<string>--tailscale-serve</string>"));
+        assert_eq!(
+            repaired.matches("<key>NumberOfFiles</key>").count(),
+            2,
+            "{repaired}"
+        );
+        assert_eq!(
+            rewrite_launchd_publication_flags(&repaired, true, 8443).unwrap(),
+            repaired,
+            "a current plist must not count as stale"
+        );
+        // plutil and PlistBuddy save tab-indented plists, as on prowl.
+        let tabbed = ["SoftResourceLimits", "HardResourceLimits"]
+            .into_iter()
+            .fold(
+                launchd_plist(
+                    Path::new("/opt/cas/bin/cas"),
+                    Path::new("/Users/test/.cas/hub/hub.log"),
+                    true,
+                    8443,
+                ),
+                |plist, limits| plist.replace(&launchd_file_limit_block(limits), ""),
+            )
+            .replace("\n    ", "\n\t\t")
+            .replace("\n  ", "\n\t");
+        assert!(!tabbed.contains("NumberOfFiles") && !tabbed.contains("\n  <key>"));
+        let repaired = rewrite_launchd_publication_flags(&tabbed, true, 8443).unwrap();
+        assert_eq!(
+            repaired.matches("<key>NumberOfFiles</key>").count(),
+            2,
+            "{repaired}"
+        );
     }
 
     #[test]
@@ -1978,6 +2104,14 @@ exit 0
             None,
             "upgrade is idempotent"
         );
+        // A unit from before cas-6cc6 already has the restart policy but no
+        // file limit, so it is stale too.
+        let current = systemd_unit(Path::new("/opt/cas/bin/cas"), true, 8443);
+        let pre_limit = current.replace("LimitNOFILE=8192\n", "");
+        assert_eq!(
+            upgrade_systemd_restart_policy(&pre_limit).as_deref(),
+            Some(current.as_str())
+        );
         assert_eq!(
             upgrade_systemd_restart_policy(&systemd_unit(
                 Path::new("/opt/cas/bin/cas"),
@@ -2036,6 +2170,16 @@ exit 0
         // KeepAlive=true relaunches on every exit, signal deaths included; it
         // is launchd's equivalent of the systemd force-restart list.
         assert!(plist.contains("<key>KeepAlive</key>\n  <true/>"), "{plist}");
+        // launchd's default soft limit of 256 files let the hub hit EMFILE
+        // under Commander bursts (cas-6cc6).
+        for limits in ["SoftResourceLimits", "HardResourceLimits"] {
+            assert!(
+                plist.contains(&format!(
+                    "<key>{limits}</key>\n  <dict>\n    <key>NumberOfFiles</key>\n    <integer>8192</integer>\n  </dict>"
+                )),
+                "{plist}"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -2302,6 +2446,7 @@ exit 1
             tailscale_cli: None,
             tailscale_serve_target: None,
             transport_warning: None,
+            nofile_limit: None,
         };
         let new_record_path = fixture.path().join("new-process.json");
         fs::write(&new_record_path, serde_json::to_vec(&new_record).unwrap()).unwrap();
@@ -2355,6 +2500,7 @@ exit 1
             tailscale_cli: None,
             tailscale_serve_target: None,
             transport_warning: None,
+            nofile_limit: None,
         };
         fs::write(
             hub_root.join("process.json"),

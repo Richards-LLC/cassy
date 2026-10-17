@@ -630,6 +630,10 @@ impl BuildGuardConfig {
 /// Factory mode configuration for supervisor task assignment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactoryConfig {
+    /// Stable Cloud reader slot override. Unset derives a supervisor slot
+    /// from machine + canonical project, independent of launch/session ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_id: Option<String>,
     /// Claude launch options shared by initial, dynamic and recycled agents.
     #[serde(default)]
     pub claude: cas_types::factory_claude::FactoryClaudeConfig,
@@ -1064,6 +1068,7 @@ fn default_render_unfocused_fps() -> u32 {
 impl Default for FactoryConfig {
     fn default() -> Self {
         Self {
+            slot_id: None,
             worker_policy: Default::default(),
             claude: Default::default(),
             worker_denied_clis: default_worker_denied_clis(),

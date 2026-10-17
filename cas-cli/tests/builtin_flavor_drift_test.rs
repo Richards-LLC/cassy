@@ -90,8 +90,8 @@ const TAILORED: &[Tailored] = &[Tailored {
 const ALLOWED_MISSING_TWIN: &[(&str, &str, &str)] = &[(
     "skills/cas-supervisor-checklist/SKILL.md",
     "codex",
-    "Codex ships the renamed no-hooks variant skills/cas-codex-supervisor-checklist instead \
-     (cas-59ee): Codex has no SessionStart hook banner.",
+    "Codex ships the renamed twin skills/cas-codex-supervisor-checklist instead (cas-59ee), \
+     which covers Codex hook trust and explicit tool calls (cas-d0fe).",
 ), (
     "agents/task-verifier.md",
     "codex",

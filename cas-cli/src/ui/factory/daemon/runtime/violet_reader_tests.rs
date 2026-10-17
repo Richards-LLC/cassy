@@ -95,8 +95,8 @@ impl BodySource for Body {
 
 struct Typer<'a>(&'a FixtureCloud);
 impl SessionTyper for Typer<'_> {
-    fn type_into(&self, session: &str, delivery_id: &str, body: &str) -> Result<(), NamedRefusal> {
-        self.0.push(format!("typed {delivery_id} into {session}: {body}"));
+    fn type_into(&self, session: &str, delivery: &ClaimedDelivery, body: &str) -> Result<(), NamedRefusal> {
+        self.0.push(format!("typed {} into {session}: {body}", delivery.id));
         Ok(())
     }
 }

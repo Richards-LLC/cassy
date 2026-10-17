@@ -8222,7 +8222,7 @@ mod team_cmd_tests {
         );
         assert!(
             compact.contains(
-                "`cas config set cloud.team_only true`, then `cas cloud queue --purge-team-owned`"
+                "ownership is policy, not proof of an equivalent remote copy"
             ),
             "{compact}"
         );

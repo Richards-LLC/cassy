@@ -230,19 +230,44 @@ team-eligible project tasks, dependencies, memories, rules, and skills keep
 their existing personal plus team queue behavior. With the opt-in enabled,
 those project rows use only the team queue. Global rows and private memories
 remain in the personal queue. `cas cloud push` and `cas cloud sync` avoid a
-personal project push, and queued personal copies of project rows are removed
-locally before sync. Cloud rows are never deleted by this cleanup. Without
+personal project push. Existing personal transport is retained until an exact,
+itemized team write is acknowledged; changing the setting alone never removes
+it. Cloud rows are never deleted by this cleanup. Without
 an active team, sync refuses and `cas doctor` reports an error.
 The personal push API requires a project identity, so global and private rows
 from a team-only root remain queued rather than re-registering its retired
 personal project. `cas cloud status` and `cas doctor` show the held count.
 
 Standalone push/pull, the daemon cycle, and MCP startup use the same team-only
-scope policy. To remove stale personal outbox rows rejected by the server with
-`team_owned_project`, run `cas cloud queue --purge-team-owned`. It removes only
-personal rows with that exact structured rejection, keeps local entities and
-team queue rows, and makes no cloud calls. `--json` reports the purged count,
-scope and reason. This cleanup does not backfill or delete remote cloud data.
+scope policy. A `team_owned_project` rejection establishes project policy, not
+remote entity presence or payload equivalence. Keep legacy or mixed rejection
+groups until their delivery is proven; keeping team-only off remains a safe
+operational workaround while investigating them.
+
+Preview exact IDs with `cas cloud queue --purge-team-owned --dry-run --json`.
+The response lists each ID, its eligibility and reason without printing payloads.
+Cleanup requires an explicit selection, for example
+`cas cloud queue --purge-team-owned --ids 12,18`. Only selected personal rows
+with the exact structured rejection **and** a matching durable team delivery
+receipt are removed. Missing/differing/legacy proof retains the row; unscoped
+cleanup is refused. Local entities and team rows survive, and this command
+makes no cloud calls, backfills, promotions or remote deletes. An old verified
+server copy without a locally recorded equivalent acknowledgment remains
+unproven to this command.
+
+Receipt version 1 uses existing `sync_metadata` keys
+`team_delivery_ack:<personal-queue-id>`. The receipt binds the canonical project,
+team, entity, operation, queue creation snapshot and SHA-256 of the entire
+serialized transmitted JSON; it stores no private payload. Only itemized
+`inserted`/`updated` responses can certify it. Aggregate counts, `skipped_lww`,
+deletes, canonical remaps, transformed payloads and uncertain results cannot.
+Before HTTP, the team pusher captures the personal snapshots; after HTTP it
+persists proof and consumes only the exact acknowledged team snapshot in one
+transaction. Preview and cleanup in `cloud/sync_queue/team_delivery.rs` are the
+receipt authority readers. Cleanup revalidates under the same transaction that
+deletes the matching personal row and receipt. A crash before cleanup leaves
+proof durable; a changed/reused row or different routing cannot reuse it.
+Ambiguous receipts have no age-based deletion authority.
 
 `duplicate_of_other_project` means the same row already lives under another
 Cloud project identity. The rejection names that owning project. If both

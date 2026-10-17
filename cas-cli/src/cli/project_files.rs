@@ -774,6 +774,20 @@ fn owned_fragment(path: &str, bytes: &[u8]) -> Result<String> {
     Ok(serde_json::Value::Object(owned).to_string())
 }
 
+// Doctor compares permission membership; repair retains its existing byte/order semantics.
+fn drift_fragment(path: &str, bytes: &[u8]) -> Result<String> {
+    let fragment = owned_fragment(path, bytes)?;
+    if path != ".claude/settings.json" {
+        return Ok(fragment);
+    }
+    let mut owned: serde_json::Value = serde_json::from_str(&fragment)?;
+    if let Some(allow) = owned.get_mut("allow").and_then(|v| v.as_array_mut()) {
+        allow.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        allow.dedup();
+    }
+    Ok(owned.to_string())
+}
+
 pub(crate) fn drift(root: &Path, harnesses: &[SupervisorCli]) -> Result<usize> {
     let Some(plan) = Reconcile::begin(root, harnesses)? else {
         return Ok(0);
@@ -816,7 +830,7 @@ pub(crate) fn drift(root: &Path, harnesses: &[SupervisorCli]) -> Result<usize> {
         };
         let committed = git(root, &["show", &format!("HEAD:{path}")]).unwrap_or_default();
         if !ignored(path, &paths)
-            && owned_fragment(path, bytes)? != owned_fragment(path, &committed)?
+            && drift_fragment(path, bytes)? != drift_fragment(path, &committed)?
         {
             count += 1;
         }

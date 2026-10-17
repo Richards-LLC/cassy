@@ -2,6 +2,9 @@
 //!
 //! File locks serialize short admission/policy decisions, never network work.
 //! The daemon lifecycle separately drains work admitted before the pause.
+use super::binding_reconciliation::{
+    ReconciliationCode, ReconciliationRequest, ReconciliationResponse,
+};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -41,12 +44,34 @@ pub struct PauseRecord {
     pub generation: u64,
 }
 
+/// A missing classification never downgrades a positive managed observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChannelDisposition {
+    Unknown,
+    Managed {
+        completion: Box<ReconciliationResponse>,
+    },
+    LegacyAllowed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelPolicy {
+    pub scope: IntakeScope,
+    pub disposition: ChannelDisposition,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IntakeState {
     pub schema_version: u32,
     pub generation: u64,
     pub pauses: Vec<PauseRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policies: Vec<ChannelPolicy>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conservative_unclassified: bool,
 }
 
 impl Default for IntakeState {
@@ -55,7 +80,26 @@ impl Default for IntakeState {
             schema_version: 1,
             generation: 0,
             pauses: Vec::new(),
+            policies: Vec::new(),
+            conservative_unclassified: false,
         }
+    }
+}
+
+impl IntakeState {
+    pub fn channel_legacy_allowed(&self, channel: &str) -> bool {
+        if let Some(policy) = self
+            .policies
+            .iter()
+            .find(|policy| policy.scope.channel_id == channel)
+        {
+            return matches!(policy.disposition, ChannelDisposition::LegacyAllowed);
+        }
+        !self.conservative_unclassified
+            && !self
+                .pauses
+                .iter()
+                .any(|pause| pause.scope.channel_id == channel)
     }
 }
 
@@ -109,6 +153,28 @@ impl IntakeJournal {
         }
         Ok(state)
     }
+    fn write_locked(&self, state: &IntakeState) -> Result<(), String> {
+        let mut temporary =
+            tempfile::NamedTempFile::new_in(&self.directory).map_err(|e| e.to_string())?;
+        serde_json::to_writer(&mut temporary, &state).map_err(|e| e.to_string())?;
+        temporary.flush().map_err(|e| e.to_string())?;
+        temporary.as_file().sync_all().map_err(|e| e.to_string())?;
+        temporary.persist(self.path()).map_err(|e| e.to_string())?;
+        // Persist the rename and newly created journal ancestors before ACK.
+        for directory in [
+            Some(self.directory.as_path()),
+            self.directory.parent(),
+            self.directory.parent().and_then(Path::parent),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            File::open(directory)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
     pub fn read(&self) -> Result<IntakeState, String> {
         let _lock = self.lock()?;
         self.read_locked()
@@ -118,6 +184,61 @@ impl IntakeJournal {
     pub fn legacy_allowed(&self) -> Result<bool, String> {
         Ok(self.read()?.pauses.is_empty())
     }
+    /// Must be durable before the first ordinary POST byte can leave. There is
+    /// deliberately no negative-GET/refusal/timer API that clears uncertainty.
+    pub fn mark_submitting(&self, operation_id: Uuid) -> Result<(), String> {
+        let _lock = self.lock()?;
+        let state = self.read_locked()?;
+        if !state
+            .pauses
+            .iter()
+            .any(|pause| pause.operation_id == operation_id)
+        {
+            return Err("submission requires an existing durable pause".into());
+        }
+        Ok(())
+    }
+
+    pub fn store_completed(
+        &self,
+        operation_id: Uuid,
+        response: &ReconciliationResponse,
+    ) -> Result<(), String> {
+        let _lock = self.lock()?;
+        let mut state = self.read_locked()?;
+        let scope = state
+            .pauses
+            .iter()
+            .find(|pause| pause.operation_id == operation_id)
+            .ok_or("completion requires its original pause")?
+            .scope
+            .clone();
+        let request = ReconciliationRequest::new(
+            &scope.team_id,
+            &scope.canonical_project_id,
+            &scope.channel_id,
+        )
+        .map_err(|e| e.to_string())?;
+        let bytes = serde_json::to_vec(response).map_err(|e| e.to_string())?;
+        let response = request
+            .parse_response(200, &bytes)
+            .map_err(|e| e.to_string())?;
+        if response.code != ReconciliationCode::Completed {
+            return Err("only strict evidenced completion permits managed handoff".into());
+        }
+        state
+            .policies
+            .retain(|policy| policy.scope.channel_id != scope.channel_id);
+        state.policies.push(ChannelPolicy {
+            scope,
+            disposition: ChannelDisposition::Managed {
+                completion: Box::new(response),
+            },
+        });
+        state.conservative_unclassified = true;
+        self.write_locked(&state)
+    }
+
     pub fn pause(
         &self,
         scope: IntakeScope,
@@ -150,25 +271,7 @@ impl IntakeJournal {
             generation: state.generation,
         };
         state.pauses.push(pause.clone());
-        let mut temporary =
-            tempfile::NamedTempFile::new_in(&self.directory).map_err(|e| e.to_string())?;
-        serde_json::to_writer(&mut temporary, &state).map_err(|e| e.to_string())?;
-        temporary.flush().map_err(|e| e.to_string())?;
-        temporary.as_file().sync_all().map_err(|e| e.to_string())?;
-        temporary.persist(self.path()).map_err(|e| e.to_string())?;
-        // Persist the rename and newly created journal ancestors before ACK.
-        for directory in [
-            Some(self.directory.as_path()),
-            self.directory.parent(),
-            self.directory.parent().and_then(Path::parent),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            File::open(directory)
-                .and_then(|f| f.sync_all())
-                .map_err(|e| e.to_string())?;
-        }
+        self.write_locked(&state)?;
         Ok(pause)
     }
 }
@@ -208,5 +311,67 @@ mod tests {
             assert!(journal.legacy_allowed().is_err());
             assert_eq!(fs::read(journal.path()).unwrap(), invalid);
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn cas_9021_unknown_survives_restart_until_identical_evidenced_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = IntakeJournal::new(temp.path());
+        let scope = IntakeScope {
+            team_id: Uuid::new_v4().to_string(),
+            canonical_project_id: "github.com/example/project".into(),
+            channel_id: "C0123456789".into(),
+        };
+        let operation = Uuid::new_v4();
+        journal.pause(scope.clone(), operation, 0).unwrap();
+        journal.mark_submitting(operation).unwrap();
+        let restarted = IntakeJournal::new(temp.path());
+        assert!(
+            matches!(
+                restarted
+                    .read()
+                    .unwrap()
+                    .policies
+                    .first()
+                    .map(|p| &p.disposition),
+                Some(ChannelDisposition::Unknown)
+            ),
+            "an uncertain POST must survive restart"
+        );
+        assert!(!restarted.legacy_allowed().unwrap());
+        let mut body: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/binding_reconciliation/v1/completed.json"
+        ))
+        .unwrap();
+        body["scope"]["team_id"] = scope.team_id.clone().into();
+        body["binding"]["team_id"] = scope.team_id.clone().into();
+        let request = ReconciliationRequest::new(
+            &scope.team_id,
+            &scope.canonical_project_id,
+            &scope.channel_id,
+        )
+        .unwrap();
+        let completed = request
+            .parse_response(200, &serde_json::to_vec(&body).unwrap())
+            .unwrap();
+        restarted.store_completed(operation, &completed).unwrap();
+        let evidence = std::fs::read(restarted.path()).unwrap();
+        restarted.mark_submitting(operation).unwrap();
+        assert_eq!(
+            std::fs::read(restarted.path()).unwrap(),
+            evidence,
+            "a later retry cannot downgrade prior managed evidence"
+        );
+        let state = restarted.read().unwrap();
+        assert!(!state.channel_legacy_allowed(&scope.channel_id));
+        assert!(!state.channel_legacy_allowed("CUNCLASSIFIED"));
+        let mut foreign = completed.clone();
+        foreign.binding.as_mut().unwrap().workspace_id = "T9999999999".into();
+        assert!(restarted.store_completed(operation, &foreign).is_err());
+        assert_eq!(std::fs::read(restarted.path()).unwrap(), evidence);
     }
 }

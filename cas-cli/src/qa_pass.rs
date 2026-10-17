@@ -760,13 +760,15 @@ pub fn delivery_content_paths(repo: &Path, base: &str, head: &str) -> Result<Vec
     }
     let mut paths = Vec::new();
     for commit in String::from_utf8_lossy(&commits.stdout).lines() {
+        let parent = format!("{commit}^");
         let diff = Command::new("git")
             .args([
                 "diff",
                 "-w",
                 "--diff-filter=ACMRT",
                 "--name-only",
-                &format!("{commit}^"),
+                "-z",
+                &parent,
                 commit,
                 "--",
             ])
@@ -779,11 +781,25 @@ pub fn delivery_content_paths(repo: &Path, base: &str, head: &str) -> Result<Vec
                 String::from_utf8_lossy(&diff.stderr).trim()
             ));
         }
-        paths.extend(
-            String::from_utf8_lossy(&diff.stdout)
-                .lines()
-                .map(str::to_string),
-        );
+        // cas-aa97: older Git (measured: Apple Git 2.50.1) ignores `-w` for
+        // `--name-only` and lists whitespace-only edits. `--quiet` honours
+        // `-w` on every build, so confirm each listed path with it.
+        for path in String::from_utf8_lossy(&diff.stdout)
+            .split('\0')
+            .filter(|path| !path.is_empty())
+        {
+            let probe = Command::new("git")
+                .args(["diff", "-w", "--quiet", "--diff-filter=ACMRT", &parent, commit, "--"])
+                .arg(format!(":(literal){path}"))
+                .current_dir(repo)
+                .status()
+                .map_err(|error| format!("git diff failed to start: {error}"))?;
+            match probe.code() {
+                Some(0) => {}
+                Some(1) => paths.push(path.to_string()),
+                _ => return Err(format!("git diff -w --quiet {commit} -- {path} failed: {probe}")),
+            }
+        }
     }
     paths.sort();
     paths.dedup();

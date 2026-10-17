@@ -1671,6 +1671,8 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
             agent_role: Some("worker".into()),
             ..Default::default()
         };
+        let prior_refusal = "Waiting for build admission: max_concurrent_builders=2 slots are occupied.\n";
+        std::fs::write(repo.join("target/worker-check.log"), prior_refusal).unwrap();
         let output = crate::hooks::handlers::handle_pre_tool_use(&request, Some(&root)).unwrap();
         let value = serde_json::to_value(output).unwrap();
         let rewritten = value
@@ -1680,7 +1682,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
         assert!(rewritten.contains("factory worker-check"));
         // cas-3d04: backgrounded runs detach instead of keeping the shell `&`.
         assert!(rewritten.contains("--detach --"), "{rewritten}");
-        assert!(rewritten.ends_with("> target/worker-check.log 2>&1"), "{rewritten}");
+        assert!(rewritten.ends_with(">> target/worker-check.log 2>&1"), "{rewritten}");
         let head = fixture_head(&repo);
         // Execute the admitted shell suffix before invoking the real runner
         // boundary. The Cargo stand-in exits zero and compiles nothing.
@@ -1693,7 +1695,8 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
                 .unwrap()
                 .success()
         );
-        assert!(repo.join("target/worker-check.log").exists());
+        assert_eq!(std::fs::read_to_string(repo.join("target/worker-check.log")).unwrap(), prior_refusal,
+            "a retry's admitted shell redirect must preserve the earlier refusal receipt");
         assert_eq!(clean_head(&repo).unwrap(), head);
         let fake = dir.path().join("fake-cargo");
         std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();

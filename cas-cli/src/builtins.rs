@@ -7401,10 +7401,10 @@ This is the body content."#;
         );
     }
 
-    /// Audit D6 (cas-6b97): Codex ignores `.md` agents, so its sync installs
-    /// none and prunes the inert managed copies earlier versions installed.
+    /// Codex loads a native verifier while preserving overrides and pruning
+    /// the inert managed Markdown copies earlier versions installed.
     #[test]
-    fn test_sync_all_codex_builtins_installs_no_md_agents_and_prunes_old_ones() {
+    fn test_sync_all_codex_builtins_installs_native_verifier_and_preserves_overrides() {
         use tempfile::tempdir;
 
         let temp = tempdir().unwrap();
@@ -7422,7 +7422,15 @@ This is the body content."#;
 
         let result = sync_all_codex_builtins(&codex_dir).unwrap();
 
-        assert_eq!(result.agents_updated, 0, "Codex has no agent catalog");
+        assert_eq!(result.agents_updated, 1);
+        let native = agents.join("task-verifier.toml");
+        let shipped = std::fs::read_to_string(&native).unwrap();
+        let role: toml::Value = toml::from_str(&shipped).unwrap();
+        assert_eq!(role["name"].as_str(), Some("task-verifier"));
+        assert!(role["developer_instructions"].as_str().unwrap().contains(
+            include_str!("builtins/agents/task-verifier.body.md")
+        ));
+        assert_eq!(sync_all_codex_builtins(&codex_dir).unwrap().agents_updated, 0);
         assert!(result.skills_updated > 0);
         assert_eq!(
             result.pruned_files,
@@ -7432,8 +7440,27 @@ This is the body content."#;
             ]
         );
         assert!(agents.join("reviewer.toml").is_file(), "user TOML agents are untouched");
-        assert!(CODEX_BUILTIN_AGENTS.is_empty());
-        assert!(required_factory_agents_for(SupervisorCli::Codex).is_empty());
+        assert!(required_factory_agents_for(SupervisorCli::Codex).contains(&"agents/task-verifier.toml"));
+
+        let custom = "name = \"task-verifier\"\ndescription = \"Local review\"\ndeveloper_instructions = \"Report evidence only.\"\n";
+        std::fs::write(&native, custom).unwrap();
+        sync_all_codex_builtins(&codex_dir).unwrap();
+        assert_eq!(std::fs::read_to_string(&native).unwrap(), custom);
+        assert!(preview_all_codex_builtins(&codex_dir).unwrap().iter().all(|change| change.path != "agents/task-verifier.toml"));
+        let parity = install_parity_for_harness(SupervisorCli::Codex, &codex_dir);
+        assert!(parity.local_edits.contains(&"agents/task-verifier.toml".to_string()));
+        assert!(!parity.stale.contains(&"agents/task-verifier.toml".to_string()));
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&native).unwrap();
+            let external = temp.path().join("user-role.toml");
+            std::fs::write(&external, &shipped).unwrap();
+            std::os::unix::fs::symlink(&external, &native).unwrap();
+            sync_all_codex_builtins(&codex_dir).unwrap();
+            assert!(native.is_symlink());
+            assert_eq!(std::fs::read_to_string(&external).unwrap(), shipped);
+        }
     }
 
     /// cas-2c61, audit D1: a Codex worker following a skill that spells

@@ -43,6 +43,8 @@ impl TestWriter {
                     }
                     let thread = std::thread::current().name().unwrap_or("").to_string();
                     job();
+                    // RED control only: expose completion before the fixture's observer log.
+                    std::thread::sleep(Duration::from_millis(250));
                     thread_ran.lock().unwrap().push((label, thread));
                 }
             })

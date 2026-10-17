@@ -59,6 +59,12 @@ pub(crate) fn agent_process_is_alive_with_table(agent: &Agent, table: &dyn Proce
     ) {
         return true;
     }
+    // Retirement ends this registration's authority over its display name.
+    // Only its own registered process/fingerprinted parent can still prove
+    // it alive; a same-name process can belong to the next harness session.
+    if agent.status == AgentStatus::Shutdown {
+        return false;
+    }
     crate::cli::factory::wedged::find_worker_pid(table, &agent.name).is_some()
 }
 

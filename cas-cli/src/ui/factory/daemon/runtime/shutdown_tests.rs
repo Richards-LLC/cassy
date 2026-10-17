@@ -652,6 +652,36 @@ fn shutdown_module_and_env_policy_pass_without_local_harnesses_cas_c1a2() {
     }
 }
 
+async fn consume_queued_shutdowns(daemon: &mut FactoryDaemon) -> Vec<i64> {
+    let cas_dir = daemon.app.cas_dir().to_path_buf();
+    let controls: Vec<_> = open_spawn_queue_store(&cas_dir)
+        .unwrap()
+        .peek(100)
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.action == cas_store::SpawnAction::Shutdown)
+        .map(|request| request.id)
+        .collect();
+    // The real job lanes poll ingress asynchronously: do not mistake a
+    // submitted-but-unconsumed shutdown for a surviving replacement.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while controls.iter().any(|id| {
+        !matches!(
+            shutdown_row_state(&cas_dir, *id).0.as_deref(),
+            Some("stopped" | "failed")
+        )
+    }) {
+        daemon.enqueue_spawn_requests().unwrap();
+        daemon.process_pending_spawns().await;
+        assert!(
+            Instant::now() < deadline,
+            "shutdown controls never consumed: {controls:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    controls
+}
+
 async fn long_transcript_recycle(register_replacement: bool) {
     const NAME: &str = "long-history-codex";
     const OLD: &str = "OLD SESSION TRANSCRIPT: prior delivery\r\n";
@@ -681,6 +711,7 @@ async fn long_transcript_recycle(register_replacement: bool) {
     let old = idle_worker_pane(NAME, cas_mux::SupervisorCli::Codex);
     let old_pid = old.process_group_id().unwrap();
     daemon.app.adopt_worker_pane_for_test(old);
+    let old_generation = daemon.app.phantom_worker_target(NAME);
     daemon.buffer_pane_output(NAME, OLD.repeat(4_000).as_bytes());
     daemon.buffer_pane_output("unrelated-worker", b"unrelated live output");
     assert!(
@@ -782,38 +813,20 @@ async fn long_transcript_recycle(register_replacement: bool) {
             "phantom dispatch never completed"
         );
         store_worker.drain(Duration::from_secs(5));
-        let queue = open_spawn_queue_store(&cas_dir).unwrap();
-        let controls: Vec<_> = queue
-            .peek(100)
-            .unwrap()
-            .into_iter()
-            .filter(|request| request.action == cas_store::SpawnAction::Shutdown)
-            .map(|request| request.id)
-            .collect();
-        let mut replacement = cas_types::Agent::new("replacement-session".into(), NAME.into());
+        let session = daemon.app.mux.get(NAME).unwrap().harness_session_id().unwrap();
+        let mut replacement = cas_types::Agent::new(session, NAME.into());
         replacement.role = cas_types::AgentRole::Worker;
         replacement.factory_session = Some(SESSION.into());
         open_agent_store(&cas_dir)
             .unwrap()
             .register(&replacement)
             .unwrap();
-        // The real job lanes poll ingress asynchronously: do not mistake a
-        // submitted-but-unconsumed shutdown for a surviving replacement.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while controls.iter().any(|id| {
-            !matches!(
-                shutdown_row_state(&cas_dir, *id).0.as_deref(),
-                Some("stopped" | "failed")
-            )
-        }) {
-            daemon.enqueue_spawn_requests().unwrap();
-            daemon.process_pending_spawns().await;
-            assert!(
-                Instant::now() < deadline,
-                "shutdown controls never consumed: {controls:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        // A delayed store-worker callback for the retired generation must
+        // also remain harmless after same-name registration.
+        crate::ui::factory::app::queue_phantom_worker_teardowns(
+            &cas_dir, SESSION, &[old_generation],
+        );
+        let controls = consume_queued_shutdowns(&mut daemon).await;
         let held = tasks.get("cas-recycled-held").unwrap();
         assert_eq!(
             daemon.app.mux.pane_process_group_id(NAME),
@@ -854,7 +867,24 @@ async fn long_transcript_recycle(register_replacement: bool) {
             output.len() < 2_000,
             "the short new output is not padded with old history"
         );
-        daemon.app.shutdown_worker_for_recycle(NAME).await.unwrap();
+        // A teardown of this actual generation must still reap it and
+        // release its binding; generation checks are not a blanket bypass.
+        let target = daemon.app.phantom_worker_target(NAME);
+        let replacement_pid = target.process_group_id.unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        let mut retired = agents
+            .get(target.harness_session_id.as_deref().unwrap())
+            .unwrap();
+        retired.status = cas_types::AgentStatus::Shutdown;
+        agents.update(&retired).unwrap();
+        crate::ui::factory::app::queue_phantom_worker_teardowns(&cas_dir, SESSION, &[target]);
+        consume_queued_shutdowns(&mut daemon).await;
+        assert!(daemon.app.mux.pane_process_group_id(NAME).is_none());
+        assert!(!crate::mcp::daemon::pid_alive(replacement_pid));
+        assert_eq!(
+            tasks.get("cas-recycled-held").unwrap().status,
+            cas_types::TaskStatus::Open,
+        );
     } else {
         assert_eq!(
             state.as_deref(),

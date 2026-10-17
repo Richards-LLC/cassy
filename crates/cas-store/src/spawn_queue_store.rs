@@ -186,7 +186,9 @@ pub struct SpawnRequest {
     ///
     /// `Some(json)` carries a `WorkerSpec`-compatible JSON object.  Callers
     /// in `cas-cli` (which depend on `cas-mux`) deserialise this into a
-    /// `WorkerSpec` at consumption time.  `None` means "use session default".
+    /// `WorkerSpec` at consumption time. `None` means "use session default".
+    /// For a daemon-scoped shutdown it instead carries the observed process
+    /// generation; operator shutdowns leave this column empty.
     pub worker_spec: Option<String>,
     /// Factory session that owns this request.
     ///
@@ -327,6 +329,16 @@ pub trait SpawnQueueStore: Send + Sync {
         count: Option<i32>,
         worker_names: &[String],
         force: bool,
+        factory_session: Option<&str>,
+    ) -> Result<i64>;
+
+    /// Queue a daemon teardown bound to one observed process generation.
+    /// The daemon owns this opaque JSON, stored in the otherwise-unused
+    /// shutdown `worker_spec` column. Ordinary operator shutdowns stay unscoped.
+    fn enqueue_scoped_shutdown(
+        &self,
+        worker_name: &str,
+        generation_json: &str,
         factory_session: Option<&str>,
     ) -> Result<i64>;
 
@@ -602,6 +614,26 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             force,
             false,
             None,
+            factory_session,
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn enqueue_scoped_shutdown(
+        &self,
+        worker_name: &str,
+        generation_json: &str,
+        factory_session: Option<&str>,
+    ) -> Result<i64> {
+        self.enqueue(
+            SpawnAction::Shutdown,
+            None,
+            &[worker_name.to_string()],
+            true,
+            false,
+            Some(generation_json),
             factory_session,
             None,
             None,

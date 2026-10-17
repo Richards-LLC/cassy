@@ -27,7 +27,7 @@ use cas_factory::SourceChangesInfo;
 
 use super::delivery_evidence::{CiStatusRequest, GitEvidenceMap, ParkedFactsMap, StallEvidenceRequest};
 use super::{
-    CasDbFingerprint, FactoryApp, SessionEpicFocus, SessionProgressRead,
+    CasDbFingerprint, FactoryApp, PhantomWorkerTarget, SessionEpicFocus, SessionProgressRead,
     merge_director_data_preserving_git, preferred_epic_focus_from_session_metadata_named,
     session_progress_named, unfiltered_snapshot_from,
 };
@@ -70,7 +70,7 @@ pub(crate) struct DirectorRefreshRequest {
     focus_session: Option<String>,
     /// The worker panes, whose registry liveness (a `/proc` check per
     /// agent) a full read classifies (cas-4491f).
-    worker_names: Vec<String>,
+    worker_targets: Vec<PhantomWorkerTarget>,
 }
 
 /// The result of a director refresh read.
@@ -92,7 +92,7 @@ pub(crate) struct DirectorRefreshLoad {
     /// With a full read: the worker panes whose registry rows are all
     /// non-live (cas-e98e), classified here because liveness checks each
     /// agent's process.
-    phantom_workers: Option<Vec<String>>,
+    phantom_workers: Option<Vec<PhantomWorkerTarget>>,
 }
 
 impl DirectorRefreshLoad {
@@ -166,15 +166,9 @@ impl DirectorRefreshRequest {
         };
         let phantom_workers = match (&director, all_agents.as_deref()) {
             (DirectorLoad::Loaded(Ok(_)), Some(agents)) => Some(
-                self.worker_names
+                self.worker_targets
                     .iter()
-                    .filter(|name| {
-                        !crate::mcp::tools::service::agent_liveness::should_keep_worker_pane_with_table(
-                            name,
-                            agents.iter(),
-                            process_table,
-                        )
-                    })
+                    .filter(|target| !target.should_keep_with_table(agents, process_table))
                     .cloned()
                     .collect(),
             ),
@@ -606,7 +600,8 @@ impl FactoryApp {
             session: self.factory_session.clone(),
             transcript_paths: self.event_detector.stall_transcript_paths(),
             focus_session: std::env::var("CAS_FACTORY_SESSION").ok(),
-            worker_names: self.worker_names.clone(),
+            worker_targets: self.worker_names.iter()
+                .map(|name| self.phantom_worker_target(name)).collect(),
         }
     }
 

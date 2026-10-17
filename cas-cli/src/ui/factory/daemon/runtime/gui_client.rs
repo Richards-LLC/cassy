@@ -457,6 +457,7 @@ impl FactoryDaemon {
                     count: Some(count),
                     names,
                     force: false,
+                    expected_generation: None,
                 });
             }
             ClientMessage::Inject {

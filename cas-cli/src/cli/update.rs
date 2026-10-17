@@ -464,9 +464,15 @@ fn run_full_update(
                 verdict: Verdict::Ok,
                 text: format!("{} is current", outcome.version),
             },
-            Err(_) => live::PhaseResult {
-                verdict: Verdict::Error,
-                text: "update failed".to_owned(),
+            Err(error) => match error.downcast_ref::<UpdateCancelled>() {
+                Some(UpdateCancelled(current)) => live::PhaseResult {
+                    verdict: Verdict::Warning,
+                    text: format!("cancelled · {current} unchanged"),
+                },
+                None => live::PhaseResult {
+                    verdict: Verdict::Error,
+                    text: "update failed".to_owned(),
+                },
             },
         },
         |result, output| match result {
@@ -3839,8 +3845,20 @@ fn confirm_install(current: &str, target: &str) -> anyhow::Result<()> {
     if answer.is_empty() || answer == "y" || answer == "yes" {
         return Ok(());
     }
-    anyhow::bail!("update cancelled; Cassy {current} is unchanged")
+    Err(UpdateCancelled(current.to_owned()).into())
 }
+
+/// The operator declined the install; the current binary is untouched.
+#[derive(Debug)]
+struct UpdateCancelled(String);
+
+impl std::fmt::Display for UpdateCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "update cancelled; Cassy {} is unchanged", self.0)
+    }
+}
+
+impl std::error::Error for UpdateCancelled {}
 
 /// What the binary phase adds below its result line: where to read about
 /// the release, and what happens to running factories.

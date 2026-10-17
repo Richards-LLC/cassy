@@ -1052,6 +1052,9 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
             for name in ["cas", "codex", "claude"] {
                 fake_cargo(&bin.path().join(name), "exit 0");
             }
+            // cas-1c4b: a tool sharing a directory with the harness binaries
+            // (git beside codex/claude in /opt/homebrew/bin) must stay visible.
+            fake_cargo(&bin.path().join("cas-1c4b-beside-harness-tool"), "exit 0");
             let original = std::env::var_os("PATH").unwrap();
             let path = std::env::join_paths(
                 [bin.path().to_path_buf(), tools.path().to_path_buf()]
@@ -1084,6 +1087,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
     command -v rustc > /dev/null || exit 24
     command -v git > /dev/null || exit 25
     command -v cas-a9fc-downstream-tool > /dev/null || exit 26
+    command -v cas-1c4b-beside-harness-tool > /dev/null || exit 27
     printf '%s\n' "$PATH" > target/selected-path
     printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         );

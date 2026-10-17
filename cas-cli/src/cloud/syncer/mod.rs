@@ -1097,6 +1097,9 @@ pub fn push_reason_hint(reason: &str) -> &'static str {
         "revision_conflict" | "invalid_revision" => {
             "the cloud holds a newer revision; run `cas cloud pull`, then `cas cloud queue --retry`"
         }
+        "invalid_json_nul" => {
+            "PostgreSQL jsonb cannot store U+0000; payload retained unchanged. Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for lossless roundtrip support, then `cas cloud queue --retry --retry-reason invalid_json_nul`"
+        }
         "version_gate" => {
             "this build is below the cloud's minimum client version; upgrade cas — the rows requeue themselves on the first push after the upgrade"
         }

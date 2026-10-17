@@ -267,14 +267,18 @@ async function replySetup() {
   return { cloud, enroll };
 }
 
+async function signedInReplyPair() {
+  const { cloud, enroll } = await replySetup();
+  const reader = await enroll("reader");
+  const owner = await enroll("owner", true);
+  await reader.inbox.runOnce();
+  await owner.inbox.runOnce();
+  return { cloud, reader, owner };
+}
+
 describe("Cloud reply grant upgrades (proposal #174)", () => {
-
-
-
   it("owner approves one request, reader can queue a reply without enrolling again", async () => {
-    const { cloud, enroll } = await replySetup();
-    const reader = await enroll("reader"); const owner = await enroll("owner", true);
-    await reader.inbox.runOnce(); await owner.inbox.runOnce();
+    const { cloud, reader, owner } = await signedInReplyPair();
     await cloud.appendSessionEvent({ ...target, plaintext: { message: "retained" } });
     await reader.inbox.runOnce();
     const before = reader.store.identity!;
@@ -296,12 +300,8 @@ describe("Cloud reply grant upgrades (proposal #174)", () => {
     expect(cloud.devices.size).toBe(2);
   });
 
-
-
   it("retries lost create and approval responses with identical bodies and no second upgrade", async () => {
-    const { cloud, enroll } = await replySetup();
-    const reader = await enroll("reader"); const owner = await enroll("owner", true);
-    await reader.inbox.runOnce(); await owner.inbox.runOnce();
+    const { cloud, reader, owner } = await signedInReplyPair();
     for (const inbox of [reader.inbox, owner.inbox]) {
       const original = inbox.client.request.bind(inbox.client); let dropped = false;
       vi.spyOn(inbox.client, "request").mockImplementation(async options => {
@@ -322,9 +322,7 @@ describe("Cloud reply grant upgrades (proposal #174)", () => {
   });
 
   it("refuses an unrelated concurrent grant change without removing permissions", async () => {
-    const { cloud, enroll } = await replySetup();
-    const reader = await enroll("reader"); const owner = await enroll("owner", true);
-    await reader.inbox.runOnce(); await owner.inbox.runOnce();
+    const { cloud, reader, owner } = await signedInReplyPair();
     const request = await reader.inbox.askToReply(target);
     await owner.inbox.runOnce();
     const device = cloud.devices.get(reader.store.identity!.deviceId)!;
@@ -364,5 +362,4 @@ describe("Cloud reply grant upgrades (proposal #174)", () => {
     expect(store.identity).toBeNull(); expect(inbox.client.credential).toBeNull();
     expect(inbox.current().kind).toBe("signed_out");
   });
-
 });

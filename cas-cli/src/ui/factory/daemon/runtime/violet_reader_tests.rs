@@ -304,7 +304,16 @@ fn successor_recovers_each_admission_once_and_never_retypes_an_uncertain_ask() {
 }
 
 fn tick_as(reader: &mut VioletReader, cloud: &FixtureCloud) -> ClaimOutcome {
-    reader.tick(cloud, cloud.registration_id, &Body, &Typer(cloud), Utc::now())
+    reader.tick(cloud, cloud.registration_id, &AnyTarget, &Typer(cloud), Utc::now())
+}
+
+/// Recovery resumes targets other than `violet_body`'s one fixture message;
+/// the fetch itself is covered by the Violet adapter tests.
+struct AnyTarget;
+impl BodySource for AnyTarget {
+    fn fetch_body(&self, target: &Value) -> Result<String, NamedRefusal> {
+        Ok(format!("body for {}", target["message_ts"].as_str().unwrap()))
+    }
 }
 
 /// `409 strict_activation_required` is a named refusal on a managed binding;

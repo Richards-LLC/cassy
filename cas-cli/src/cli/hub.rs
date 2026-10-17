@@ -3410,6 +3410,28 @@ mod tests {
             .remedy
             .as_deref()
             .is_some_and(|remedy| remedy.contains("cas hub restart --tailscale-serve")));
+        assert!(
+            render_transport_status(&report)
+                .starts_with("Tailscale Serve: FAIL - route target differs from the live hub shim\n"),
+            "{}",
+            render_transport_status(&report)
+        );
+
+        // GH #1258: after a reboot the route still names the recorded target,
+        // but no live hub owns a shim behind it. Equal targets are not a
+        // mismatch; the shim is missing.
+        let orphaned = classify_tailscale_serve(
+            Some(&live),
+            false,
+            Some(&receipt),
+            &[("/".to_owned(), "http://127.0.0.1:43813".to_owned())],
+        );
+        assert_eq!(
+            render_transport_status(&orphaned),
+            "Tailscale Serve: FAIL - the hub owns no live Serve shim for its route\n  \
+             route: http://127.0.0.1:43813\n  \
+             remedy: Run `cas hub restart --tailscale-serve` to republish the route."
+        );
     }
 
     #[test]

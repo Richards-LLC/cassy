@@ -42,9 +42,10 @@ dependency, verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
   `grok-build-1.0.5-2026-08-25` and `grok-build-0.2.114-2026-07-30` receipts
   remain historical evidence.
 - **2026-09-23 operator decision:** Defer the audit gaps for MCP discovery health, busy-worker message delivery, compaction survival, consent popups, background liveness, and memory; these are not tracked.
-- **Locally installed stable:** **1.0.44** (`grok 1.0.44 (5b807183dd79) [stable]`,
-  checked 2026-09-30). This is the newest stable observed on this host; the
-  public changelog does not establish a global latest 1.0.x version.
+- **Locally installed stable:** **1.0.62** (`grok 1.0.62 (1474f9cbdd91) [stable]`,
+  checked 2026-10-17). The previous diary check recorded 1.0.44, so **1.0.45–1.0.62** are new
+  installs on this host. The local `~/.grok/CHANGELOG.md` still ends at **1.0.40**, so these
+  releases have no attributable notes here; the public xAI page was not rechecked in this audit.
 - **Latest release-note evidence:** today's local `~/.grok/CHANGELOG.md` has
   versioned sections for **1.0.35–1.0.40**, backfilled below. The earlier local
   snapshot supplied **1.0.6–1.0.13**. The companion `~/.grok/CHANGELOG.json`
@@ -135,6 +136,7 @@ At minimum, `PtyConfig::grok` sets:
 
 | Grok version | Headline | Cassy verdict | Pointer |
 | --- | --- | --- | --- |
+| 1.0.62 (installed) | 2026-10-17 parity audit: hooks and subagents wired; 1.0.45–1.0.62 lack local notes | — (source gap) | this doc |
 | 1.0.44 | Installed stable; no attributable release notes | — (source gap) | this doc |
 | 1.0.43 | No attributable release notes | — (source gap) | this doc |
 | 1.0.42 | No attributable release notes | — (source gap) | this doc |
@@ -199,6 +201,21 @@ At minimum, `PtyConfig::grok` sets:
 ---
 
 ## Entries
+
+### 2026-10-17 — installed 1.0.62 snapshot (not a release entry)
+
+Recorded 2026-10-17 for the shared three-harness parity snapshot; nothing was run live.
+
+- **Installed:** `grok 1.0.62 (1474f9cbdd91) [stable]`. Cassy still declares Grok
+  `supports_hooks: true` and `supports_subagents: true`; its MCP prefix is `cas__`. No Cassy launch
+  or wiring change is required by this snapshot. → ✅.
+- **User finish command:** `~/.grok/skills/finish` provides the same wrap-up as the Claude command
+  and the Codex prompt. → ✅.
+- **Validation:** the **1.0.40** pin stands; 1.0.41–1.0.62 are unvalidated. The 2026-09-23
+  deferral of the MCP discovery, busy-delivery, compaction, consent, background and memory audit
+  gaps remains in force. → 👀.
+
+Source gap: no attributable release notes for 1.0.45–1.0.62 (the local changelog ends at 1.0.40).
 
 ### 1.0.44 — installed stable; release-note source gap
 

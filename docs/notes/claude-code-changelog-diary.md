@@ -45,17 +45,20 @@ When a new Claude Code version ships:
 - **Cassy validated against:** Claude Code **2.1.280**, with the complete isolated
   factory matrix recorded in
   `crates/cas-pty/conformance/claude-code-2.1.280-2026-09-23.json`.
-- **Locally installed:** **2.1.285** (`2.1.285 (Claude Code)`, checked 2026-09-30).
-- **Latest reviewed:** **2.1.285** in Anthropic's official changelog. Every section
-  from **2.1.281–2.1.285** is present; this interval has no source gaps.
-- **Gap:** the installed version is five patches beyond the validated pin. This
-  sweep reviews upstream notes and Cassy's launch/hook/MCP code; it does not
-  establish a new live conformance receipt.
+- **Locally installed:** **2.1.302** (`2.1.302 (Claude Code)`, checked 2026-10-17); npm
+  `@anthropic-ai/claude-code` reports the same version as latest.
+- **Latest reviewed:** **2.1.285**. The changelog sections for **2.1.286–2.1.302** are **not yet
+  triaged** in this diary (named source gap below).
+- **Gap:** the installed version is 22 patches beyond the validated **2.1.280** pin. The
+  2026-10-17 parity audit below compares Claude and Codex wiring; it does not establish a new
+  live conformance receipt.
 
 ## Index
 
 | CC version | Headline | Cassy verdict | Pointer |
 | ------------ | ---------- | ------------- | --------- |
+| 2.1.302 (installed) | 2026-10-17 Claude↔Codex parity audit: Claude remains the fully wired reference | 🟢 / 👀 | this doc |
+| 2.1.286–2.1.302 | Seventeen releases not yet triaged | ⏭ source gap | [changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md) |
 | 2.1.285 | Hook completion/cancellation · deferred MCP · background command deadlines | 🟢 / ✅ / 👀 | this doc |
 | 2.1.284 | MCP resume/startup waits · elicitation blocking · auto-mode default | 🟢 / ✅ | this doc |
 | 2.1.283 | MCP progress/cleanup · config-write errors · prompt-file composition | 🟢 / ✅ | this doc |
@@ -172,6 +175,26 @@ When a new Claude Code version ships:
 ---
 
 ## Entries
+
+### 2026-10-17 — installed 2.1.302 parity audit (not a release entry)
+
+Audited 2026-10-17 against installed `2.1.302 (Claude Code)`, `claude --help` and Cassy's wiring,
+as the reference side of a Claude↔Codex parity check. Nothing here was run live.
+
+- **Lifecycle hooks:** Cassy wires `SessionStart`, `Stop`, `UserPromptSubmit`, `PreCompact`,
+  `PreToolUse` and `PostToolUse` for Claude. Claude remains the reference for startup context,
+  stop handling and compaction. → 🟢.
+- **MCP tool guard:** Claude `PreToolUse` hooks match MCP tools, so Cassy's MCP write guards
+  (for example the Violet-only Slack write rule) are enforced by hook, not only by guidance. Codex
+  parity for this is unverified. → 🟢 for Claude.
+- **Agents:** Cassy ships `.md` agents (task verifier and others), and the CLI also accepts
+  `--agents`; `claude agents` lists background sessions. → 🟢.
+- **Background sessions:** `--bg/--background` starts or continues a session in the background.
+  Cassy does not use it; workers run in factory panes. → ✅ no action.
+- **User finish command:** `~/.claude/commands/finish.md`; Codex runs the same text as a
+  deprecated custom prompt and Grok as a skill. → ✅.
+
+Source gap: changelog sections for 2.1.286–2.1.302 are not yet reviewed here.
 
 ### 2.1.285 — hook completion/cancellation · deferred MCP · background command deadlines
 

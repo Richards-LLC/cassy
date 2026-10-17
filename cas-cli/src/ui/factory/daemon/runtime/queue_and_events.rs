@@ -4783,6 +4783,7 @@ impl FactoryDaemon {
     }
 
     fn forget_row_delivery_state(&mut self, row_id: i64) {
+        self.queue_jobs.inline_parked.remove(&row_id);
         self.stall_nudge_gate_checks.remove(&row_id);
         self.lifecycle_redelivery_attempts.remove(&row_id);
         self.lifecycle_redelivery_counts.remove(&row_id);
@@ -8341,11 +8342,48 @@ impl FactoryDaemon {
             .insert(target.to_string(), Instant::now());
     }
 
+    /// Re-offer a parked inline row only when the pane becomes input-ready
+    /// or a newer turn completion arrives. No queue/store work is repeated
+    /// on the 100ms busy polls; ParkBusy's existing deadline survives restart.
+    fn retry_ready_inline_rows(&mut self) {
+        let now = chrono::Utc::now();
+        let recheck = chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap();
+        let ready: Vec<_> = self.queue_jobs.inline_parked.iter().filter_map(|(id, (row, declined))| {
+            if now - *declined >= recheck {
+                return Some((*id, row.target.clone(), false)); // durable recheck is due
+            }
+            let pane = if row.target == "supervisor" { self.app.supervisor_name() } else { &row.target };
+            if self.app.mux.pane_inject_busy(pane)
+                || self.app.mux.get(pane).is_none_or(|pane| pane.is_composer_dirty()) {
+                return None;
+            }
+            let state = self.prepared_pane_wake_state(pane);
+            let turn_ended = wake_retry_due_to_turn_end(Some(*declined), self.prepared_turn_completion_after(pane, *declined));
+            let wake = Self::delivery_wake_decision(
+                self.app.director_data(), pane, self.app.supervisor_name(),
+                &self.wake_sender_for(row.origin.as_ref()), &row.source, &row.prompt, state, now,
+            );
+            (turn_ended || wake.allowed).then(|| (*id, row.target.clone(), true))
+        }).collect();
+        for (id, target, reoffer) in ready {
+            self.queue_jobs.inline_parked.remove(&id);
+            if reoffer {
+                self.queue_jobs.stamp(self.app.cas_dir(), id, &target,
+                    super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                        detail: "recipient became input-ready; rechecking parked inline wake".into(),
+                        recheck_at: now,
+                    });
+            }
+        }
+    }
+
     /// Process prompt queue
     pub(super) async fn process_prompt_queue(&mut self) -> anyhow::Result<()> {
         // cas-786a6: urgent injects whose pane has settled type their payload
         // and apply their outcome; none is awaited inline.
         self.advance_urgent_injects().await;
+        self.refresh_pane_quiet_samples();
+        self.retry_ready_inline_rows();
         let Some(selection) = self.next_queue_selection() else {
             return Ok(());
         };
@@ -9951,6 +9989,7 @@ impl FactoryDaemon {
                             detail: wake_decision.status_detail(),
                             recheck_at: chrono::Utc::now() + chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap(),
                         });
+                    self.queue_jobs.inline_parked.insert(queued.id, (queued.clone(), chrono::Utc::now()));
                     tracing::info!(target: "cas::coordination", stage = "inline_wake_parked",
                         message_id = queued.id, target_agent = %pane_target, reason = wake_decision.reason,
                         "inline body parked until recipient turn end or bounded recheck");
@@ -20571,6 +20610,8 @@ mod stall_nudge_rework_tests {
         let queue = open_prompt_queue_store(&cas_dir).unwrap();
         let ordinary = queue.enqueue("supervisor", "worker-a", "ordinary next").unwrap();
         daemon.process_prompt_queue().await.unwrap();
+        assert!(queue.queued_prompt(ordinary).unwrap().unwrap().processed_at.is_none(), "payload enqueue is not Delivered");
+        super::super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
         assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none());
         let row = queue.queued_prompt(ordinary).unwrap().unwrap();
         assert!(row.processed_at.is_some(), "one unreadable nudge task must not abandon later rows");

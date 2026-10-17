@@ -1084,6 +1084,19 @@ fn post_swap_refresh_runs_on_the_installed_binary_and_reports_its_version() {
     assert!(args.contains("--post-swap"), "{args}");
     assert!(args.contains("3.15.1"), "{args}");
     assert!(args.contains("--json"), "{args}");
+
+    // cas-be05: a child from before the one-document receipt prints each
+    // phase's document first; the parent still takes the refresh receipt.
+    let old_child = temp_dir.path().join("cas-old");
+    write_stub_binary(
+        &old_child,
+        "#!/bin/sh\n\
+         printf '%s\\n' '{\"store\":\"/x/.cas\",\"schema_status\":\"current\"}'\n\
+         printf '%s\\n' '{\"refresh_binary_version\":\"9.9.8-old\",\"projects\":[],\"skipped_unregistered\":[]}'\n",
+    );
+    let receipt = run_post_swap_refresh(&old_child, "3.15.1", "9.9.8-old", true)
+        .expect("a multi-document child still yields its refresh receipt");
+    assert_eq!(receipt["refresh_binary_version"], "9.9.8-old", "{receipt}");
 }
 
 #[cfg(unix)]

@@ -421,6 +421,64 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     )
 }
 
+/// Called with the parsed command before Sentry/logging read configuration.
+/// No writes occur here: the native sweep owns both repair and its receipt.
+pub fn startup_config_notices(cli: &Cli) -> impl Drop + use<> {
+    struct Scope {
+        _notices: Option<crate::config::RetiredNoticeScope>,
+    }
+    impl Drop for Scope {
+        fn drop(&mut self) {}
+    }
+    let native = matches!(&cli.command, Some(crate::cli::Commands::Update(args))
+        if args.post_swap || (args.render_fixture.is_none() && !(args.sync && args.dry_run)
+            && matches!(UpdateMode::of(args), UpdateMode::Full | UpdateMode::AllProjects)));
+    Scope {
+        _notices: native.then(|| {
+            crate::config::RetiredNoticeScope::begin(replay_retired_config_notices, cli.verbose)
+        }),
+    }
+}
+
+fn replay_retired_config_notices(notices: Vec<crate::config::RetiredConfigNotice>, verbose: bool) {
+    let findings = notices
+        .iter()
+        .map(|notice| findings::Finding {
+            verdict: Verdict::Warning,
+            who: vec![notice.path.display().to_string()],
+            phase: "config",
+            cause: format!(
+                "{} retired config entries remain ignored",
+                notice.keys.len()
+            ),
+            remedy: Some("check the config.toml above; rerun `cas update`".into()),
+        })
+        .collect();
+    let sweep = findings::SweepFindings {
+        findings,
+        healthy: Vec::new(),
+        unlinked: 0,
+        user_level_current: false,
+        project_count: 0,
+        config: findings::ConfigCleanup::default(),
+    };
+    let mut stderr = io::stderr();
+    let mut fmt = Formatter::stdout(&mut stderr, ActiveTheme::default());
+    if let Ok(shortened) = findings::print(&mut fmt, &sweep) {
+        if verbose {
+            for notice in notices {
+                let _ = fmt.write_raw(&format!(
+                    "  config: {}\n  retired: {}\n",
+                    notice.path.display(),
+                    notice.keys.into_iter().collect::<Vec<_>>().join(", ")
+                ));
+            }
+        } else if shortened {
+            let _ = fmt.receipt("cas update --verbose shows full config paths");
+        }
+    }
+}
+
 /// The full update after its seams: the binary phase, the post-swap child,
 /// the hub and the project refresh. `--render-fixture` replays recorded data
 /// through the same path, so a review capture shows what an operator sees.
@@ -1339,6 +1397,8 @@ fn refresh_all_projects_with_user_refresh(
     first_launch_ms: Option<u64>,
     user_refresh: impl FnOnce() -> ProjectPhase,
 ) -> anyhow::Result<RefreshReport> {
+    let _notices =
+        crate::config::RetiredNoticeScope::begin(replay_retired_config_notices, cli.verbose);
     let started_at = Instant::now();
     let mut discovery = discover_local_projects(current_cas_root);
     for project in std::mem::take(&mut discovery.projects) {
@@ -1369,7 +1429,19 @@ fn refresh_all_projects_with_user_refresh(
     }
     let (mut user_level, user_details) = capture_phase(!cli.json, user_refresh);
     for maintenance in &user_retired_toml {
-        let label = dirs::home_dir().and_then(|home| maintenance.path.strip_prefix(home).ok().map(|path| format!("~/{}", path.display())))
+        if maintenance.status != "failed" {
+            if let Some(root) = maintenance.path.parent() {
+                crate::config::represented_retired_config(root);
+            }
+        }
+        let label = dirs::home_dir()
+            .and_then(|home| {
+                maintenance
+                    .path
+                    .strip_prefix(home)
+                    .ok()
+                    .map(|path| format!("~/{}", path.display()))
+            })
             .unwrap_or_else(|| maintenance.path.display().to_string());
         user_level = with_config_retirement(user_level, maintenance, &label);
     }
@@ -1388,6 +1460,9 @@ fn refresh_all_projects_with_user_refresh(
         // Remove ignored TOML before migrations and managed-file readers load
         // config. Ownership/discovery is unchanged; never initialize a store.
         let retired_toml = crate::config::retire_config(&cas_root, args.dry_run);
+        if retired_toml.status != "failed" {
+            crate::config::represented_retired_config(&cas_root);
+        }
 
         // Run each phase independently. A malformed database must be visible
         // in the receipt, but must not leave another project stale.

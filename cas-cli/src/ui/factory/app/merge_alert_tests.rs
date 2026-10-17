@@ -228,7 +228,8 @@ fn cas_e48d_target_merged_during_ci_probe_suppresses_relay() {
         &f.app.cas_dir.join("gh-fixture"),
         &format!(
             "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; else git --git-dir='{}' update-ref refs/heads/epic/test '{}' && cat .cas/ci.json; fi\n",
-            f.remote.path().display(), tip,
+            f.remote.path().display(),
+            tip,
         ),
     );
 

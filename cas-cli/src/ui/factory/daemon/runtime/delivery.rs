@@ -2268,8 +2268,8 @@ mod tests {
         assert_eq!(
             compact_routine_supervisor_body(&peer).unwrap(),
             "⇄ tender-phoenix-59 → swift-panther-65 · collision warning: \"cas-f9b7 assesses \
-             Accounting retained dependencies read-only alongside rocketship invalid_json_nul…\"\n  \
-             Peer copy; swift-panther-65 has it, no action. Full text: inbox_poll \
+             Accounting retained dependencies read-only alongside rocketship…\"\n  Peer copy; \
+             swift-panther-65 has it, no action. Full text: inbox_poll \
              notification_id=4196667"
         );
     }

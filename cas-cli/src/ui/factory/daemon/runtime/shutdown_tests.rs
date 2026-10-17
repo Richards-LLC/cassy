@@ -647,10 +647,15 @@ async fn long_transcript_recycle(register_replacement: bool) {
     register_idle_worker(&cas_dir, NAME);
     let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
     if register_replacement {
-        let mut held = cas_types::Task::new(
-            "cas-recycled-held".into(),
-            "Resume after recycle".into(),
-        );
+        // The daemon fixture otherwise has no factory session and refuses
+        // phantom teardown before it can ever enqueue the shutdown.
+        daemon.app.set_factory_session_name_for_test(SESSION);
+        let agents = open_agent_store(&cas_dir).unwrap();
+        let mut old_registration = agents.get(&format!("agent-{NAME}")).unwrap();
+        old_registration.factory_session = Some(SESSION.into());
+        agents.update(&old_registration).unwrap();
+        let mut held =
+            cas_types::Task::new("cas-recycled-held".into(), "Resume after recycle".into());
         held.assignee = Some(NAME.into());
         held.status = cas_types::TaskStatus::InProgress;
         tasks.add(&held).unwrap();
@@ -719,10 +724,53 @@ async fn long_transcript_recycle(register_replacement: bool) {
     if register_replacement {
         let replacement_pid = daemon.app.mux.pane_process_group_id(NAME).unwrap();
         assert_ne!(replacement_pid, old_pid, "recycle started a new process");
-        // The old registration is now retired, while the new process has not
-        // registered yet. The real refresh used to queue a name-only forced
-        // shutdown here, which later killed this replacement (cas-5037).
-        daemon.app.refresh_data().unwrap();
+        // The old registration is retired, but the replacement has not
+        // registered. A write makes this a changed-DB director snapshot.
+        let old_registration = open_agent_store(&cas_dir)
+            .unwrap()
+            .get(&format!("agent-{NAME}"))
+            .unwrap();
+        assert_eq!(old_registration.status, cas_types::AgentStatus::Shutdown);
+        let mut held = tasks.get("cas-recycled-held").unwrap();
+        held.notes = Some("Replacement is waiting to register".into());
+        tasks.update(&held).unwrap();
+
+        // Drive the actual async read -> apply -> store-worker dispatch in
+        // lifecycle.rs, rather than the synchronous refresh shortcut.
+        daemon.queue_jobs =
+            super::prompt_queue_jobs::QueueJobs::start(cas_dir.clone(), daemon.app.project_scope());
+        let mut refresh = super::director_refresh::DirectorRefresh::new();
+        let store_worker = super::store_worker::StoreWorker::start();
+        let progress = super::loop_watchdog::LoopProgress::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut due = true;
+        loop {
+            if daemon
+                .director_refresh_pass(&mut refresh, due, &store_worker, &progress)
+                .await
+            {
+                break;
+            }
+            due = false;
+            assert!(
+                Instant::now() < deadline,
+                "async director snapshot never applied"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            store_worker.wait_idle(Duration::from_secs(5)),
+            "phantom dispatch never completed"
+        );
+        store_worker.drain(Duration::from_secs(5));
+        let queue = open_spawn_queue_store(&cas_dir).unwrap();
+        let controls: Vec<_> = queue
+            .peek(100)
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.action == cas_store::SpawnAction::Shutdown)
+            .map(|request| request.id)
+            .collect();
         let mut replacement = cas_types::Agent::new("replacement-session".into(), NAME.into());
         replacement.role = cas_types::AgentRole::Worker;
         replacement.factory_session = Some(SESSION.into());
@@ -730,12 +778,30 @@ async fn long_transcript_recycle(register_replacement: bool) {
             .unwrap()
             .register(&replacement)
             .unwrap();
-        daemon.enqueue_spawn_requests().unwrap();
-        daemon.process_pending_spawns().await;
+        // The real job lanes poll ingress asynchronously: do not mistake a
+        // submitted-but-unconsumed shutdown for a surviving replacement.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while controls.iter().any(|id| {
+            !matches!(
+                shutdown_row_state(&cas_dir, *id).0.as_deref(),
+                Some("stopped" | "failed")
+            )
+        }) {
+            daemon.enqueue_spawn_requests().unwrap();
+            daemon.process_pending_spawns().await;
+            assert!(
+                Instant::now() < deadline,
+                "shutdown controls never consumed: {controls:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let held = tasks.get("cas-recycled-held").unwrap();
         assert_eq!(
             daemon.app.mux.pane_process_group_id(NAME),
             Some(replacement_pid),
-            "a teardown of the retired session must never stop its replacement"
+            "retired-session shutdown must preserve replacement; controls={controls:?}, task={:?}/{:?}",
+            held.status,
+            held.assignee,
         );
         assert!(crate::mcp::daemon::pid_alive(replacement_pid));
         let held = tasks.get("cas-recycled-held").unwrap();

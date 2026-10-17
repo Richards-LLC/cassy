@@ -2446,16 +2446,23 @@ fn render_transport_status(report: &HubTransportReport) -> String {
             "Tailscale Serve: FAIL - {}",
             report.message.trim_start_matches("hub machine lock: ")
         )]
+    } else if report.message.ends_with(NO_LIVE_SHIM) {
+        // GH #1258: a route left behind with no live shim is missing, even
+        // when it still names the recorded target.
+        vec!["Tailscale Serve: FAIL - the hub owns no live Serve shim for its route".to_owned()]
     } else if report.expected_target.is_some() && report.actual_target.is_some() {
         vec!["Tailscale Serve: FAIL - route target differs from the live hub shim".to_owned()]
     } else {
         vec!["Tailscale Serve: FAIL - CAS ownership receipt is missing".to_owned()]
     };
-    if let Some(expected) = &report.expected_target {
-        lines.push(format!("  expected: {expected}"));
-    }
-    if let Some(actual) = &report.actual_target {
-        lines.push(format!("  actual: {actual}"));
+    match (&report.expected_target, &report.actual_target) {
+        (Some(expected), Some(actual)) if expected == actual => {
+            lines.push(format!("  route: {expected}"));
+        }
+        (expected, actual) => {
+            lines.extend(expected.iter().map(|expected| format!("  expected: {expected}")));
+            lines.extend(actual.iter().map(|actual| format!("  actual: {actual}")));
+        }
     }
     if let Some(remedy) = &report.remedy {
         lines.push(format!("  remedy: {remedy}"));
@@ -3117,6 +3124,10 @@ pub(crate) fn hub_transport_report(
     classify_tailscale_serve(record, live, Some(&receipt), &handlers)
 }
 
+/// GH #1258: how a missing-shim failure ends its message, so the status
+/// headline names the missing shim rather than a target mismatch.
+const NO_LIVE_SHIM: &str = "the current hub does not own a live Serve shim";
+
 fn classify_tailscale_serve(
     record: Option<&HubProcessRecord>,
     live: bool,
@@ -3141,7 +3152,7 @@ fn classify_tailscale_serve(
     {
         return HubTransportReport::fail(
             format!(
-                "CAS-created Tailscale Serve route targets {}, but the current hub does not own a live Serve shim",
+                "CAS-created Tailscale Serve route targets {}, but {NO_LIVE_SHIM}",
                 actual.as_deref().unwrap_or("no handler")
             ),
             Some(expected),

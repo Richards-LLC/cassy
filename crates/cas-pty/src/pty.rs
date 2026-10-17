@@ -451,6 +451,16 @@ pub struct PtyConfig {
     pub cols: u16,
 }
 
+/// Tool-owned cache paths allowed through Codex's restricted Cassy MCP child
+/// environment. Keep this exact list shared with managed Codex configuration;
+/// no credential or account variables are included.
+pub const TOOL_CACHE_ENV: &[&str] = &[
+    "NODE_COMPILE_CACHE",
+    "PWTEST_CACHE_DIR",
+    "PYTEST_DEBUG_TEMPROOT",
+    "V8_COMPILE_CACHE_CACHE_DIR",
+];
+
 /// Operator credentials that never cross the factory worker boundary through
 /// inherited environment state. A task-scoped provider or proxy grant is
 /// explicit only when the factory builder adds authenticated grant metadata;
@@ -987,6 +997,32 @@ fn push_codex_machine_credential_env(args: &mut Vec<String>) {
 }
 
 impl PtyConfig {
+    /// Mirror only the effective pane values, after launch policy has removed
+    /// denied variables. Literal overrides leave operator `cs.env_vars` intact;
+    /// constructor-time snapshots could reintroduce values denied later by mux.
+    fn forward_codex_tool_caches(&mut self) {
+        for &name in TOOL_CACHE_ENV {
+            if self.env_remove.iter().any(|removed| removed == name) {
+                continue;
+            }
+            let value = self
+                .env
+                .iter()
+                .rev()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+                .or_else(|| std::env::var(name).ok());
+            if let Some(value) = value {
+                let value = serde_json::to_string(&value)
+                    .expect("serializing a cache path string cannot fail");
+                self.args.extend([
+                    "-c".to_string(),
+                    format!("mcp_servers.cs.env.{name}={value}"),
+                ]);
+            }
+        }
+    }
+
     /// Executable behind the optional `nice` wrapper, without inspecting harness
     /// arguments such as `--model`. Accept short/long adjustment options and `--`;
     /// an incomplete or unknown wrapper option leaves the command as `nice`.
@@ -2473,6 +2509,9 @@ impl Pty {
         config.hydrate_violet_environment();
         let id = id.into();
         let is_codex = config.effective_command() == "codex";
+        if is_codex {
+            config.forward_codex_tool_caches();
+        }
 
         // cas-bbc2 preflight: a Codex agent's CAS MCP server is spawn-injected as
         // `mcp_servers.cs.command=cas`, but Codex can only launch it if the `cas`
@@ -4326,7 +4365,6 @@ mod tests {
             }
         }
     }
-
 
     #[tokio::test]
     async fn test_pty_config_codex_pins_cas_mcp_server_to_factory_root() {

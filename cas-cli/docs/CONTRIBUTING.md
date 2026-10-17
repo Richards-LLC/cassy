@@ -714,6 +714,38 @@ denied, with the conflict named in the same warning. An operation needing an
 unavailable credential then fails visibly; one missing token does not stop the
 fleet. Supervisors keep their own credentials and configuration.
 
+### Tool-cache paths in Codex children
+
+Cassy forwards these four tool-owned variables through Codex's restricted
+`cas serve` MCP environment: `NODE_COMPILE_CACHE`, `PWTEST_CACHE_DIR`,
+`PYTEST_DEBUG_TEMPROOT`, and `V8_COMPILE_CACHE_CACHE_DIR`. Servers started through
+that MCP process inherit them. Export the desired paths before starting the
+factory or its owning daemon, for example:
+
+```sh
+export NODE_COMPILE_CACHE="$HOME/.cache/node-compile"
+export PWTEST_CACHE_DIR="$HOME/.cache/playwright-tests"
+export PYTEST_DEBUG_TEMPROOT="$HOME/.cache/pytest-temp"
+export V8_COMPILE_CACHE_CACHE_DIR="$HOME/.cache/v8-compile"
+```
+
+Factory spawns forward the final pane values, including explicit overrides;
+`supervisor_only_env` removals still win. Changing a shell or user-manager
+environment does not change an already running process's environment. Cassy
+does not read these paths back from shell profiles or the user manager.
+
+`cas init` and `cas update` also append these names to the managed
+`mcp_servers.cs.env_vars` array in Codex configuration, preserving existing
+entries and explicit `cs.env` settings. Only names are stored there, so each
+Codex launch reads its own environment. An unset variable adds no value or
+default; an explicitly configured MCP value retains its existing behavior.
+No other cache, credential, or account variables gain passthrough.
+
+The forwarding policy uses Codex configuration on supported factory platforms;
+it does not depend on systemd. Paths, spaces and Unicode are forwarded without
+expansion or rewriting. The consuming tool determines platform support, cache
+creation and cleanup. Cassy does not migrate existing caches or restart servers.
+
 ## Testing
 
 ### Duplicate-task warnings

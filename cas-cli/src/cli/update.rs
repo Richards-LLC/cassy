@@ -448,10 +448,9 @@ fn replay_retired_config_notices(notices: Vec<crate::config::RetiredConfigNotice
             verdict: Verdict::Warning,
             who: vec![notice.path.display().to_string()],
             phase: "config",
-            cause: format!(
-                "{} retired config entries remain ignored",
-                notice.keys.len()
-            ),
+            // This is an unresolved read, not a maintenance inventory.
+            // Only the retirement receipt can count all supported entries.
+            cause: "retired config settings remain ignored".into(),
             remedy: Some("check the config.toml above; rerun `cas update`".into()),
         })
         .collect();
@@ -1546,11 +1545,6 @@ fn refresh_all_projects_with_user_refresh(
     let (mut user_level, user_details, user_documents) =
         capture_phase_documents(cli, user_refresh);
     for maintenance in &user_retired_toml {
-        if maintenance.status != "failed" {
-            if let Some(root) = maintenance.path.parent() {
-                crate::config::represented_retired_config(root);
-            }
-        }
         let label = dirs::home_dir()
             .and_then(|home| {
                 maintenance
@@ -1561,6 +1555,10 @@ fn refresh_all_projects_with_user_refresh(
             })
             .unwrap_or_else(|| maintenance.path.display().to_string());
         user_level = with_config_retirement(user_level, maintenance, &label);
+        // Failure is represented too: its cause/remedy is now in the phase.
+        if let Some(root) = maintenance.path.parent() {
+            crate::config::represented_retired_config(root);
+        }
     }
 
     let names = findings::display_names(discovery.projects.iter().map(PathBuf::as_path));
@@ -1578,9 +1576,6 @@ fn refresh_all_projects_with_user_refresh(
         // Remove ignored TOML before migrations and managed-file readers load
         // config. Ownership/discovery is unchanged; never initialize a store.
         let retired_toml = crate::config::retire_config(&cas_root, args.dry_run);
-        if retired_toml.status != "failed" {
-            crate::config::represented_retired_config(&cas_root);
-        }
 
         // Run each phase independently. A malformed database must be visible
         // in the receipt, but must not leave another project stale.
@@ -1639,6 +1634,7 @@ fn refresh_all_projects_with_user_refresh(
             (search_index, skills, membership, cloud)
         };
         let skills = with_config_retirement(skills, &retired_toml, ".cas/config.toml");
+        crate::config::represented_retired_config(&cas_root);
 
         // Registration is what makes discovery converge: a project the scan had
         // to find this time is in the registry for every later run, and for
@@ -1682,15 +1678,15 @@ fn refresh_all_projects_with_user_refresh(
 }
 
 /// Keep an existing phase failure and its remedy when maintenance also fails.
-/// Success adds only a small receipt detail, never a spurious finding.
+/// Successful repair counts belong to the aggregate receipt, not another
+/// file's failure prose. Keep unrelated failures and their remedies.
 fn with_config_retirement(
     phase: ProjectPhase,
     maintenance: &crate::config::ConfigRetirement,
     label: &str,
 ) -> ProjectPhase {
     let detail = match maintenance.status {
-        "repaired" => format!("{} retired TOML entries removed", maintenance.removed.len()),
-        "planned" => format!(
+        "planned" if !phase.failed() => format!(
             "{} retired TOML entries would be removed",
             maintenance.removed.len()
         ),
@@ -1700,7 +1696,11 @@ fn with_config_retirement(
         ),
         _ => return phase,
     };
-    let detail = format!("{}; {detail}", phase.detail());
+    let detail = if maintenance.status == "failed" && phase.is_ok() {
+        detail
+    } else {
+        format!("{}; {detail}", phase.detail())
+    };
     if phase.failed() || maintenance.status == "failed" {
         ProjectPhase::Failed(detail)
     } else {
@@ -4769,8 +4769,8 @@ fn post_swap_rerun_hint(installed_version: &str, installed_binary: &Path) -> Str
 }
 
 /// The parent's startup reads precede the child process's repair. Resolve
-/// only maintenance paths the verified child actually represented; failed or
-/// missing receipts leave their notices for the parent's final replay.
+/// only maintenance paths the verified child actually represented, including
+/// reported failures. Absent/unverified receipts leave notices for final replay.
 fn verify_child_refresh_receipt(
     receipt: &serde_json::Value,
     installed_version: &str,
@@ -4795,10 +4795,12 @@ fn verify_child_refresh_receipt(
         .into_iter()
         .flatten();
     for maintenance in projects.chain(user) {
-        if !matches!(
-            maintenance.get("status").and_then(|v| v.as_str()),
-            Some("repaired" | "unchanged" | "missing" | "planned")
-        ) {
+        let represented = match maintenance.get("status").and_then(|v| v.as_str()) {
+            Some("repaired" | "unchanged" | "missing" | "planned") => true,
+            Some("failed") => maintenance.get("error").and_then(|v| v.as_str()).is_some(),
+            _ => false,
+        };
+        if !represented {
             continue;
         }
         if let Some(path) = maintenance

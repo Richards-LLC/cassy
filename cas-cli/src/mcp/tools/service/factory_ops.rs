@@ -7531,6 +7531,23 @@ fn eligible_artifact_tasks(
         }
     }
     Ok(eligible)
+ }
+
+fn trace_retention_eligible(task: &cas_types::Task, _now: chrono::DateTime<chrono::Utc>) -> bool {
+    task.status == cas_types::TaskStatus::Closed
+}
+
+fn factory_trace_cleanup(
+    _root: &std::path::Path,
+    _tasks: &[cas_types::Task],
+    _authorized: bool,
+    _now: chrono::DateTime<chrono::Utc>,
+) -> std::io::Result<(usize, u64)> {
+    Ok((0, 0))
+}
+
+fn missing_gitdir_checkouts(_cas_root: &std::path::Path) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+    Vec::new()
 }
 
 fn factory_artifact_cleanup(
@@ -19426,6 +19443,63 @@ mod sync_safety_tests {
 #[cfg(test)]
 mod artifact_project_scope_tests {
     use super::*;
+
+    #[test]
+    fn trace_retention_preserves_open_recent_and_durable_evidence_cas_1a7a8() {
+        use cas_types::{Task, TaskStatus};
+        use chrono::{Duration, TimeZone, Utc};
+        let now = Utc.with_ymd_and_hms(2026, 10, 17, 12, 0, 0).unwrap();
+        for (status, age_hours, authorized, delete) in [
+            (TaskStatus::Open, Some(48), true, false),
+            (TaskStatus::InProgress, Some(48), true, false),
+            (TaskStatus::Closed, None, true, false),
+            (TaskStatus::Closed, Some(-1), true, false),
+            (TaskStatus::Closed, Some(23), true, false),
+            (TaskStatus::Closed, Some(24), false, false),
+            (TaskStatus::Closed, Some(24), true, true),
+            (TaskStatus::Closed, Some(48), true, true),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path().join("cas-abcd/nested");
+            std::fs::create_dir_all(&dir).unwrap();
+            for name in ["trace.zip", "video.webm", "screenshot.png", "LEDGER.md", "receipt.json", "other.zip"] {
+                std::fs::write(dir.join(name), b"proof").unwrap();
+            }
+            let mut task = Task::new("cas-abcd".into(), "retention".into());
+            task.status = status;
+            task.closed_at = age_hours.map(|hours| now - Duration::hours(hours));
+            let report = factory_trace_cleanup(temp.path(), &[task], authorized, now).unwrap();
+            for name in ["trace.zip", "video.webm"] {
+                assert_eq!(dir.join(name).exists(), !delete, "{status:?} {age_hours:?} authorized={authorized}: {name}");
+            }
+            for name in ["screenshot.png", "LEDGER.md", "receipt.json", "other.zip"] {
+                assert!(dir.join(name).is_file(), "durable {name} must survive");
+            }
+            if delete {
+                assert_eq!(report, (2, 10));
+            }
+        }
+    }
+
+    #[test]
+    fn reports_only_checkouts_with_missing_gitdir_cas_1a7a8() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = temp.path().join(".cas");
+        for (name, target) in [("orphan", "../deleted/worktrees/orphan"), ("healthy", "../gitdir")] {
+            let checkout = cas_root.join(name);
+            std::fs::create_dir_all(&checkout).unwrap();
+            std::fs::write(checkout.join(".git"), format!("gitdir: {target}\n")).unwrap();
+        }
+        std::fs::create_dir_all(cas_root.join("gitdir")).unwrap();
+        let nested = cas_root.join("worktrees/orphan");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join(".git"), "gitdir: /missing-cas-1a7a8\n").unwrap();
+        let found = missing_gitdir_checkouts(&cas_root);
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().any(|(path, _)| path == &cas_root.join("orphan")));
+        assert!(found.iter().any(|(path, _)| path == &nested));
+        assert!(cas_root.join("orphan/.git").is_file(), "report is read-only");
+    }
 
     #[test]
     fn cleanup_never_claims_another_projects_same_task_or_legacy_evidence_cas_6ebf() {

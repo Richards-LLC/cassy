@@ -71,7 +71,20 @@ fn sweep_clean_merged_worktree_removes_it() {
     let temp = TempDir::new().unwrap();
     let repo = bootstrap_repo(&temp);
     let wt = add_worktree(&repo, "worker1");
-    // No commits on the worktree branch — it's trivially merged with main.
+    // The origin advances after the local fetch; local main stays stale.
+    let origin = temp.path().join("origin");
+    fs::create_dir_all(&origin).unwrap();
+    git_ok(&origin, &["init", "--bare", "-q", "-b", "main"]);
+    git_ok(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git_ok(&repo, &["push", "-q", "origin", "main"]);
+    git_ok(&repo, &["fetch", "-q", "origin"]);
+    fs::write(wt.join("merged.txt"), "merged upstream").unwrap();
+    git_ok(&wt, &["add", "merged.txt"]);
+    git_ok(&wt, &["commit", "-q", "-m", "merged upstream"]);
+    // Push from an independent clone so this repo's origin/main is stale too.
+    let publisher = temp.path().join("publisher");
+    git_ok(temp.path(), &["clone", "-q", repo.to_str().unwrap(), publisher.to_str().unwrap()]);
+    git_ok(&publisher, &["push", "-q", origin.to_str().unwrap(), "origin/factory/worker1:refs/heads/main"]);
 
     let report = sweep_one_repo(&repo, SweepOptions::default());
 

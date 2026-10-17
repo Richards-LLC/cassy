@@ -59,7 +59,7 @@ describe("operator inbox view (cas-9b7d QA round 1)", () => {
     inbox.render();
     expect(inbox.dialog.textContent).toContain("Loading inbox history");
     expect(inbox.dialog.textContent).not.toContain("No messages yet");
-    snapshot.replay = { kind: "unavailable", reason: "Inbox history is unavailable from Cassy Cloud. Retrying." };
+    snapshot.replay = { kind: "unavailable", reason: "Fixture history source unavailable" };
     inbox.render();
     expect(inbox.dialog.textContent).toContain(snapshot.replay.reason);
     expect(inbox.dialog.textContent).not.toContain("No messages yet");

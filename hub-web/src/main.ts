@@ -775,7 +775,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (!conversationPersistenceBlocked.has(machine.id)) catalogCache.save(machine.id, items);
       // An authenticated catalog read proves the hub accepts this credential:
       // a stale revocation block on it stops fencing the journal (cas-2904).
-      void sendJournal.readmit(deliveryScope(machine, "readmit"), credentialFence(machine)).then((cleared) => { if (cleared) sendJournal.onChange?.(); });
+      readmitCredential(machines.get(machine.id) ?? machine);
       const ttl = freshnessThresholdSecs !== undefined && Number.isFinite(freshnessThresholdSecs) && freshnessThresholdSecs > 0 ? freshnessThresholdSecs * 1000 : Infinity;
       catalogExpiresAt.set(machine.id, Date.now() + ttl);
       window.clearTimeout(catalogExpiryTimers.get(machine.id));
@@ -3181,6 +3181,15 @@ sendJournal.onChange = () => {
     updateConversationViews(); renderConversationList();
   }).catch(() => { /* a later broadcast retries; no storage failure grants dispatch */ });
 };
+
+/** Once per credential per page: the hub accepted it, so a stale block clears (cas-2904). */
+const readmittedCredentials = new Set<string>();
+function readmitCredential(machine: StoredMachine): void {
+  const fence = credentialFence(machine), key = JSON.stringify([machine.id, fence.credentialId, fence.generation]);
+  if (readmittedCredentials.has(key)) return;
+  readmittedCredentials.add(key);
+  void sendJournal.readmit(deliveryScope(machine, "readmit"), fence).then((cleared) => { if (cleared) sendJournal.onChange?.(); });
+}
 
 /** The composer says which refusal it was, never storage for a fence (cas-2904). */
 function journalRefusal(result: "too-long" | "blocked" | "not-saved", machine: StoredMachine): string {

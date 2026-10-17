@@ -645,6 +645,7 @@ mod tests {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::TempDir::new().unwrap();
         let stores = DirectorStores::open(dir.path()).unwrap();
+        stores.agent_store.init().unwrap();
         let now = Utc::now();
         let machine = Agent::get_or_generate_machine_id();
         for (name, session, host, role) in [

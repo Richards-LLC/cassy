@@ -79,7 +79,7 @@ impl CasCore {
             return CassyMergeClose::NotEligible;
         };
         let reason = task.deliverables.parked_close_reason.clone().unwrap_or_else(|| {
-            format!("Merged at {merge_commit} with green CI; closed by Cassy after merge.")
+            format!("Merged at {merge_commit}; closed by Cassy after the merge.")
         });
         let request = TaskCloseRequest {
             stranded_branch_override: None,

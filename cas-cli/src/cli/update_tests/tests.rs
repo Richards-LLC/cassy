@@ -2251,7 +2251,7 @@ fn cas_9815_update_distinguishes_old_shipped_skill_from_user_delta() {
     env.remove("CAS_SKIP_FACTORY_TOOLING");
     // Exact flat-source blob dce50663ef7eb3cb5d8c0dd2dc237f741d8c99e8,
     // also observed read-only in Penguinz after a previous Cassy sync.
-    let old = include_str!("../../tests/fixtures/managed-files/cas-worker-pre-3.61.md");
+    let old = include_str!("../../../tests/fixtures/managed-files/cas-worker-pre-3.61.md");
     let path = ".claude/skills/cas-worker/SKILL.md";
     let current = crate::builtins::BUILTIN_SKILLS
         .iter()

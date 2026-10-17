@@ -58,7 +58,7 @@ Other supervisors on this repo: [peers](references/reference.md#peer-supervisors
 
 Use `cas-codex-supervisor-checklist` on Codex, `cas-supervisor-checklist` elsewhere. Dispatch with `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; assign idle live workers with `update`, then end the turn.
 
-For mixed harnesses and explicit model controls, see [worker controls](references/reference.md#worker-controls).
+For mixed harnesses and explicit `cli=`/`model=`/`effort=` controls, see [worker controls](references/reference.md#worker-controls).
 
 ## On-demand references
 

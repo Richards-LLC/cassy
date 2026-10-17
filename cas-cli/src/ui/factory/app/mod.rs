@@ -2618,6 +2618,12 @@ impl FactoryApp {
         self.unfiltered_director_data = data;
     }
 
+    /// Launch the supervisor under `cli` (tests: a Codex supervisor).
+    #[cfg(test)]
+    pub(crate) fn set_supervisor_cli_for_test(&mut self, cli: cas_mux::SupervisorCli) {
+        self.supervisor_cli = cli;
+    }
+
     pub fn director_data(&self) -> &DirectorData {
         &self.director_data
     }

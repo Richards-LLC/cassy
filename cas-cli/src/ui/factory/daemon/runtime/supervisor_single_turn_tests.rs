@@ -128,6 +128,20 @@ fn lifecycle_body(daemon: &FactoryDaemon, status: cas_types::TaskStatus, transit
     )
 }
 
+/// Advance only already-admitted write commands, never select another row.
+/// A queued payload is deliberately not a completed transport handoff.
+pub(super) async fn settle_injected_writes(daemon: &mut FactoryDaemon) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while daemon.app.mux.has_pending_injects() {
+            daemon.advance_urgent_injects().await;
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("admitted payload and submit writes must complete");
+    let cas = daemon.app.cas_dir().to_path_buf();
+    daemon.queue_jobs.settle_injects(&cas);
+    daemon.queue_jobs.apply_completions();
+}
+
 /// The supervisor PTY received exactly one submitted turn containing `needle`
 /// and no Teams relay was written.
 pub(super) async fn typed_once(root: &tempfile::TempDir, daemon: &mut FactoryDaemon, needle: &str) -> String {
@@ -293,9 +307,7 @@ async fn cas_3f90_busy_event_waits_without_a_held_relay_then_wakes_once() {
         assert_eq!(queue.message_delivery_report(id).unwrap().unwrap().pending_reason, Some(cas_store::PendingReason::AwaitingBusyRecipient));
         assert!(!daemon.lifecycle_redelivery_attempts.contains_key(&id), "busy veto spends no cadence");
     }
-    // Model the durable recheck becoming due, without a wall-clock sleep.
-    rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db")).unwrap()
-        .execute("UPDATE prompt_queue SET next_attempt_at = NULL WHERE id = ?1", [id]).unwrap();
+    // An input-ready transition re-offers the durable park before its timeout.
     daemon.pane_silent_since.insert(name, Instant::now() - Duration::from_secs(600));
     daemon.process_prompt_queue().await.unwrap();
     assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none(), "enqueue alone cannot finish the row");

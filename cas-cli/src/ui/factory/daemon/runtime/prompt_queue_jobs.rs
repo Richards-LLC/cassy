@@ -875,6 +875,9 @@ pub(crate) enum Admission {
 pub(crate) struct QueueJobs {
     /// Commander transport scheduling stays on the existing controller pass.
     pub(crate) operator_reply_retries: HashMap<i64, super::queue_and_events::OperatorReplyRetry>,
+    /// Durable ParkBusy rows awaiting an input-ready/turn-end edge. The
+    /// existing durable recheck remains the fallback after daemon restart.
+    pub(crate) inline_parked: HashMap<i64, (cas_store::QueuedPrompt, chrono::DateTime<chrono::Utc>)>,
     pub(crate) spawn_ingress: super::queue_control_jobs::SpawnIngress,
     pub(crate) prompt_preparation: super::queue_control_jobs::PromptPreparation,
     pub(crate) normal_probe_jobs: super::delivery_probe_jobs::NormalProbeJobs,
@@ -975,6 +978,7 @@ impl QueueJobs {
     fn with_exec(exec: Exec) -> Self {
         Self {
             operator_reply_retries: HashMap::new(),
+            inline_parked: HashMap::new(),
             spawn_ingress: Default::default(),
             prompt_preparation: Default::default(),
             normal_probe_jobs: Default::default(),

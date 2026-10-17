@@ -662,8 +662,8 @@ mod tests {
     #[test]
     fn matrix_codex_codex() {
         let p = verification_policy(SupervisorCli::Codex, SupervisorCli::Codex);
-        assert!(!p.task_required());
-        assert!(!p.epic_required());
+        assert!(p.task_required());
+        assert!(p.epic_required());
     }
 
     #[test]

@@ -132,6 +132,7 @@ enum PendingSpawn {
         count: Option<usize>,
         names: Vec<String>,
         force: bool,
+        expected_generation: Option<super::app::PhantomWorkerTarget>,
     },
     /// Respawn a crashed worker
     Respawn(String),

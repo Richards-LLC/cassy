@@ -1,0 +1,7 @@
+→       [1/2] Cassy binary  checking for a newer release
+[ERROR] [1/2] Cassy binary  update failed                                    2ms
+
+--- stderr ---
+[ERROR] could not install Cassy 9.9.9
+  Could not find the required path in the archive: "cas"
+  Cassy 3.62.0 is unchanged; rerun `cas update` to retry

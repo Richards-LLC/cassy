@@ -265,6 +265,34 @@ impl SqliteTaskStore {
                 {
                     return Ok(None);
                 }
+                // A replica can upload a stale Open/assignee with a newer
+                // whole-row clock. That clock does not authorize undoing a
+                // live local start. Check lease authority in this transaction:
+                // claiming/renewing a lease need not change the task clock.
+                // Terminal owner updates and ordinary local reset/release
+                // writes remain permitted.
+                if expected.status == TaskStatus::InProgress
+                    && !task.is_terminal()
+                    && (task.status == TaskStatus::Open || task.assignee != expected.assignee)
+                {
+                    let expires_at: Option<String> = tx
+                        .query_row(
+                            "SELECT l.expires_at FROM task_leases l
+                             JOIN agents a ON a.id = l.agent_id
+                             WHERE l.task_id = ?1 AND l.status = 'active'
+                               AND (a.id = ?2 OR a.name = ?2)",
+                            params![task.id, expected.assignee.as_deref()],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if expires_at
+                        .as_deref()
+                        .and_then(Self::parse_datetime)
+                        .is_some_and(|expires| expires > Utc::now())
+                    {
+                        return Ok(None);
+                    }
+                }
             }
 
             // cas-ec74: read the clock ONCE and return that same instant. The

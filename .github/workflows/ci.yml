@@ -123,7 +123,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Run no-build release gate rows
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/')
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && vars.CAS_LANE_SLIM != 'true'
         env:
           BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
@@ -137,6 +137,7 @@ jobs:
           ./scripts/release-gate.sh --fast-rows --base "$comparison_base"
 
       - name: Markdown lint
+        if: vars.CAS_LANE_SLIM != 'true' || github.event_name != 'push' || !startsWith(github.ref, 'refs/heads/factory/')
         env:
           BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
@@ -162,6 +163,7 @@ jobs:
           fi
 
       - name: Validate release-note drafts
+        if: vars.CAS_LANE_SLIM != 'true' || github.event_name != 'push' || !startsWith(github.ref, 'refs/heads/factory/')
         env:
           BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
@@ -317,6 +319,11 @@ jobs:
   # into epic branches by a supervisor `git merge --no-ff` with no PR, so this
   # push lane is the only validation those commits ever get; removing it would
   # create a merge path with no validation at all.
+  # cas-eac2 (operator D1, D2): repository variable CAS_LANE_SLIM, off by
+  # default. Off, lanes run as before. 'true' drops the no-build fast rows and
+  # broad Rust tests from factory pushes, because the 3.63+ worker pre-push hook
+  # runs the rows and park reads exact-tip fast-rows and focused-test receipts.
+  # PRs are unaffected, and unsetting the variable is the one-setting rollback.
   # Factory pushes under the small-delta policy use the mapped proof surface
   # only. The release train can accept this exact job, or a supervisor's
   # equivalent --proof receipt, without waiting for the full scoped lane.
@@ -349,6 +356,7 @@ jobs:
 
       # This cheap step runs even when builds route to the full tier or a PR.
       - name: Run no-build release gate rows
+        if: vars.CAS_LANE_SLIM != 'true'
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
@@ -419,6 +427,7 @@ jobs:
         if: >-
           steps.classify-diff.outputs.fast-admission == 'true'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && vars.CAS_LANE_SLIM != 'true'
         with:
           cache-key: scoped-validation-fast
 
@@ -426,12 +435,14 @@ jobs:
         if: >-
           steps.classify-diff.outputs.fast-admission == 'true'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && vars.CAS_LANE_SLIM != 'true'
         uses: taiki-e/install-action@nextest
 
       - name: Run change-scoped tests with impact evidence
         if: >-
           steps.classify-diff.outputs.fast-admission == 'true'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && vars.CAS_LANE_SLIM != 'true'
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
@@ -460,10 +471,20 @@ jobs:
         if: >-
           steps.classify-diff.outputs.fast-admission == 'true'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && vars.CAS_LANE_SLIM != 'true'
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
         run: scripts/check-scoped-snapshot-tests.sh --base-sha "$BASE_SHA" --zero-base-ref "$ZERO_BASE_REF"
+
+      - name: Report Rust test ownership
+        if: >-
+          vars.CAS_LANE_SLIM == 'true'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
+        run: >-
+          echo "No Rust tests ran here: worker focused-test receipts at this
+          SHA (checked at park) and the merge-queue full suite own them."
+          >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report sccache stats
         if: always()
@@ -610,6 +631,7 @@ jobs:
           steps.pr-dedupe.outputs.covered != 'true'
           && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
           && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && (github.event_name != 'push' || vars.CAS_LANE_SLIM != 'true')
         with:
           cache-key: scoped-validation
 
@@ -618,6 +640,7 @@ jobs:
           steps.pr-dedupe.outputs.covered != 'true'
           && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
           && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && (github.event_name != 'push' || vars.CAS_LANE_SLIM != 'true')
         uses: taiki-e/install-action@nextest
 
       - name: Run change-scoped tests with impact evidence
@@ -625,6 +648,7 @@ jobs:
           steps.pr-dedupe.outputs.covered != 'true'
           && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
           && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && (github.event_name != 'push' || vars.CAS_LANE_SLIM != 'true')
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
@@ -658,6 +682,7 @@ jobs:
           steps.pr-dedupe.outputs.covered != 'true'
           && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
           && steps.classify-diff.outputs.rust-unaffected != 'true'
+          && (github.event_name != 'push' || vars.CAS_LANE_SLIM != 'true')
         env:
           BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
@@ -667,12 +692,16 @@ jobs:
         if: >-
           steps.pr-dedupe.outputs.covered == 'true'
           || steps.classify-diff.outputs.rust-unaffected == 'true'
+          || (github.event_name == 'push' && vars.CAS_LANE_SLIM == 'true')
         env:
           PR_COVERED: ${{ steps.pr-dedupe.outputs.covered }}
           DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
+          LANE_SLIM: ${{ vars.CAS_LANE_SLIM }}
         run: |
           if [[ "$PR_COVERED" == "true" ]]; then
             echo "Skipped: a pull request event is validating this exact head SHA." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$LANE_SLIM" == "true" && "$GITHUB_EVENT_NAME" == "push" ]]; then
+            echo "Skipped: CAS_LANE_SLIM; worker focused-test receipts (checked at park) and the merge-queue full suite own Rust." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Skipped: diff class '$DIFF_CLASS' is Rust-unaffected." >> "$GITHUB_STEP_SUMMARY"
           fi

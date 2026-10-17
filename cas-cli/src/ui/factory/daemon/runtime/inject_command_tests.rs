@@ -9,14 +9,14 @@ use crate::ui::factory::daemon::FactoryDaemon;
 const WORKER: &str = "worker-a";
 const SESSION: &str = "provision-test";
 
-/// A Claude worker pane running `cat`, past its injection grace period
+/// A raw, non-echoing Claude stand-in running `cat`, past its injection grace period
 /// (backdated, not slept: review L4).
 pub(super) async fn ready_claude_worker(daemon: &mut FactoryDaemon) {
     ready_claude_worker_named(daemon, WORKER).await;
 }
 
 pub(super) async fn ready_claude_worker_named(daemon: &mut FactoryDaemon, name: &str) {
-    ready_claude_worker_running(daemon, name, "printf ready; exec cat").await;
+    ready_claude_worker_running(daemon, name, "stty raw -echo; printf ready; exec cat").await;
 }
 
 /// A ready Claude worker pane running `script` (it must print something).

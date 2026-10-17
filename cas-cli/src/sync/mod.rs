@@ -48,6 +48,13 @@ use std::path::{Path, PathBuf};
 use crate::error::CasError;
 use crate::types::{Rule, RuleStatus, Scope};
 
+fn write_rule_if_changed(path: &Path, content: &str) -> Result<(), CasError> {
+    if !fs::read(path).is_ok_and(|existing| existing == content.as_bytes()) {
+        fs::write(path, content)?;
+    }
+    Ok(())
+}
+
 /// Syncs rules to Claude Code
 pub struct Syncer {
     /// Target directory for project rules
@@ -144,7 +151,7 @@ impl Syncer {
 
         let content = Self::render_rule(rule);
 
-        fs::write(&filepath, content)?;
+        write_rule_if_changed(&filepath, &content)?;
         Ok(true)
     }
 
@@ -294,7 +301,7 @@ impl Syncer {
             )
         };
 
-        fs::write(&filepath, content)?;
+        write_rule_if_changed(&filepath, &content)?;
         Ok(true)
     }
 
@@ -356,7 +363,7 @@ impl Syncer {
                     )
                 };
 
-                fs::write(&filepath, content)?;
+                write_rule_if_changed(&filepath, &content)?;
                 report.synced += 1;
                 report.synced_ids.push(rule.id.clone());
             }

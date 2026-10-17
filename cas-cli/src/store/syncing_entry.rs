@@ -74,11 +74,7 @@ impl SyncingEntryStore {
         };
 
         // Personal enqueue is best-effort (historical behaviour).
-        if self.team_only && eligible_for_team_entry(entry) {
-            let _ = self
-                .queue
-                .drop_personal_queued_push_for(EntityType::Entry, &entry.id);
-        } else {
+        if !(self.team_only && eligible_for_team_entry(entry)) {
             let _ = self.queue.enqueue(
                 EntityType::Entry,
                 &entry.id,
@@ -106,11 +102,7 @@ impl SyncingEntryStore {
     }
 
     fn queue_delete(&self, id: &str, team_eligible: bool) {
-        if self.team_only && team_eligible {
-            let _ = self
-                .queue
-                .drop_personal_queued_push_for(EntityType::Entry, id);
-        } else {
+        if !(self.team_only && team_eligible) {
             let _ = self
                 .queue
                 .enqueue(EntityType::Entry, id, SyncOperation::Delete, None);
@@ -574,17 +566,20 @@ mod tests {
     }
 
     #[test]
-    fn team_only_update_removes_the_older_personal_copy() {
+    fn team_only_update_retains_the_older_personal_copy() {
         let (temp, mut store) = create_team_store(None);
         let queue = SyncQueue::open(temp.path()).unwrap();
         let mut entry = Entry::new("switching-entry".to_string(), "before".to_string());
         store.add(&entry).unwrap();
         assert_eq!(queue_counts(&queue), (1, 1));
 
+        let original_personal = queue.pending(10, 5).unwrap().remove(0).payload;
         store.team_only = true;
         entry.content = "after".to_string();
         store.update(&entry).unwrap();
-        assert_eq!(queue_counts(&queue), (0, 1));
+        assert_eq!(queue_counts(&queue), (1, 1));
+        assert_eq!(queue.pending(10, 5).unwrap().remove(0).payload, original_personal,
+            "routing changes must preserve the original mutation payload");
     }
 
     #[test]

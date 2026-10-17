@@ -230,19 +230,44 @@ team-eligible project tasks, dependencies, memories, rules, and skills keep
 their existing personal plus team queue behavior. With the opt-in enabled,
 those project rows use only the team queue. Global rows and private memories
 remain in the personal queue. `cas cloud push` and `cas cloud sync` avoid a
-personal project push, and queued personal copies of project rows are removed
-locally before sync. Cloud rows are never deleted by this cleanup. Without
+personal project push. Existing personal transport is retained until an exact,
+itemized team write is acknowledged; changing the setting alone never removes
+it. Cloud rows are never deleted by this cleanup. Without
 an active team, sync refuses and `cas doctor` reports an error.
 The personal push API requires a project identity, so global and private rows
 from a team-only root remain queued rather than re-registering its retired
 personal project. `cas cloud status` and `cas doctor` show the held count.
 
 Standalone push/pull, the daemon cycle, and MCP startup use the same team-only
-scope policy. To remove stale personal outbox rows rejected by the server with
-`team_owned_project`, run `cas cloud queue --purge-team-owned`. It removes only
-personal rows with that exact structured rejection, keeps local entities and
-team queue rows, and makes no cloud calls. `--json` reports the purged count,
-scope and reason. This cleanup does not backfill or delete remote cloud data.
+scope policy. A `team_owned_project` rejection establishes project policy, not
+remote entity presence or payload equivalence. Keep legacy or mixed rejection
+groups until their delivery is proven; keeping team-only off remains a safe
+operational workaround while investigating them.
+
+Preview exact IDs with `cas cloud queue --purge-team-owned --dry-run --json`.
+The response lists each ID, its eligibility and reason without printing payloads.
+Cleanup requires an explicit selection, for example
+`cas cloud queue --purge-team-owned --ids 12,18`. Only selected personal rows
+with the exact structured rejection **and** a matching durable team delivery
+receipt are removed. Missing/differing/legacy proof retains the row; unscoped
+cleanup is refused. Local entities and team rows survive, and this command
+makes no cloud calls, backfills, promotions or remote deletes. An old verified
+server copy without a locally recorded equivalent acknowledgment remains
+unproven to this command.
+
+Receipt version 1 uses existing `sync_metadata` keys
+`team_delivery_ack:<personal-queue-id>`. The receipt binds the canonical project,
+team, entity, operation, queue creation snapshot and SHA-256 of the entire
+serialized transmitted JSON; it stores no private payload. Only itemized
+`inserted`/`updated` responses can certify it. Aggregate counts, `skipped_lww`,
+deletes, canonical remaps, transformed payloads and uncertain results cannot.
+Before HTTP, the team pusher captures the personal snapshots; after HTTP it
+persists proof and consumes only the exact acknowledged team snapshot in one
+transaction. Preview and cleanup in `cloud/sync_queue/team_delivery.rs` are the
+receipt authority readers. Cleanup revalidates under the same transaction that
+deletes the matching personal row and receipt. A crash before cleanup leaves
+proof durable; a changed/reused row or different routing cannot reuse it.
+Ambiguous receipts have no age-based deletion authority.
 
 `duplicate_of_other_project` means the same row already lives under another
 Cloud project identity. The rejection names that owning project. If both
@@ -840,6 +865,63 @@ shipped commands live in `docs/design/cli/`.
 
 Dev dependencies include: `insta` (snapshot testing), `wiremock` (HTTP mocking), `rstest` (parametrized tests), `proptest` (property-based), `criterion` (benchmarks), `cas-tui-test` (TUI testing).
 
+## Git hook authority and checkout moves
+
+`cas doctor` reports an effective configured `core.hooksPath` whose directory
+is missing. Git resolves the path from the checkout root, including relative
+paths and worktree overrides. When doctor runs in a worker sharing the main
+checkout's store, it reports the main checkout and active worker separately.
+This finding is read-only, including under `--fix`; a stale host-registry entry
+is a separate diagnostic.
+
+Before repairing a moved checkout, run these **in each affected checkout**:
+
+```bash
+git config --show-origin --show-scope --get core.hooksPath
+git rev-parse --path-format=absolute --git-path hooks
+```
+
+Review the old configuration and any existing hook files, and save a backup
+before changing authority. Never unset `core.hooksPath` to make a warning go
+away, or point the main checkout at a worker's `hooks-cas-guard` directory.
+Dependency-generated hooks such as `.husky/_` belong to that project's setup;
+doctor does not install dependencies or disable them.
+
+For this repository's **main checkout**, an operator outside a factory session
+can run `bash scripts/install-git-hooks.sh` after reviewing the source. It uses
+the committed executable `.githooks/pre-push` and existing
+`scripts/fast-rows-pre-push.sh`. It refuses factory identities, linked worktrees,
+uncommitted/missing source and existing executable hook authority. A reviewed
+repair of an existing authority requires preserving/backing it up separately;
+the installer never overwrites it. Repeating the same owned installation is
+safe. With `extensions.worktreeConfig` enabled it writes the main checkout's
+`--worktree` override, preserving the shared setting and worker overrides.
+There is no repository pre-commit or Clippy policy installed by this script.
+
+The main pre-push delegate enforces the existing no-build fast rows for pushes
+to `factory/*`; other refs pass through. Receipts live under
+`<git-common-dir>/cas/fast-rows/<tip>.pass`. Only an exact-tip PASS is reusable;
+a failing row or missing tool refuses the push. This source is not a worker
+ownership guard.
+
+**Workers need their own private guards.** Factory spawn and reuse call
+`TeamsManager::install_worker_pre_commit_hook`, which installs the commit guard
+and refreshes an older push guard in `<worker-git-dir>/hooks-cas-guard`, retaining
+its existing project-hook chain and `--worktree` scope. Installing a new Cassy
+binary alone does not refresh already running workers. The supervisor must
+coordinate a safe spawn/reuse after the new runtime is active, then inspect the
+effective worker pre-push hook for delegation and prove a rejected push against
+a disposable remote. Existing 3.62 private guards may still enforce ownership
+while lacking the fast-row delegate; inspect them rather than assuming absence.
+Do not copy those guards into the main checkout. A hook-install warning during
+spawn/reuse means enforcement is not proven.
+
+At park, `receipt_scope::park_refusal` reads the exact-tip fast-row receipt and
+passing capped test receipts for every changed Rust crate. Missing fast rows
+produce `FAST ROWS REQUIRED`; missing crate tests produce `FOCUSED PROOF
+REQUIRED`. Park executes neither checks nor tests. Hook restoration does not
+waive these refusals or the merge queue's final-tree proof.
+
 ## Build, assembly and CI policy
 
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.
@@ -902,7 +984,17 @@ block an otherwise healthy host. Missing or malformed CPU PSI falls back to
 one-minute load divided by CPU count. Missing memory probes remain unknown.
 Memory pressure and the memory floor are rechecked even when a proof continuation
 carries its earlier CPU admission. Swap usage alone is not a refusal signal;
-PSI measures time lost to contention. Non-Linux hosts retain unavailable probes.
+PSI measures time lost to contention. macOS reads one-minute load with `getloadavg`
+and estimates available memory from free plus inactive pages via `host_statistics64`;
+PSI stays unavailable there.
+
+Spawn and capped Cargo admission also probe the target/scratch filesystem using
+the target-cache capacity policy. They reserve an estimated 10 GiB of growth for
+each live and requested builder and refuse when that would reach
+`factory.target_cache_high_watermark_percent` (85% by default). Occupied capped
+builder-slot locks count on macOS as well as Linux. No-code spawns reserve no
+target growth. Disk headroom is rechecked on proof continuations, and a failed
+capacity probe refuses admission until the target volume can be inspected.
 
 | Config key | Default | Meaning |
 | --- | --- | --- |
@@ -937,6 +1029,13 @@ Shell redirection opens logs before the runner checks that commit. Use a
 Git-ignored `target/worker-check.log` or the task's artifacts directory; create
 the parent directory first. In-repo logs that Git does not ignore are refused
 by the hook. The clean-head gate still rejects source changes.
+Capped-run rewrites append to the log even when the command uses `>`, preserving
+earlier attempts and refusals. Slot admission and release records include UTC,
+slot index, process ID and lock root; use those records to audit concurrency.
+`released` is logged immediately before unlock, so an `admitted` record for
+that slot always follows the prior `released` record. Locking and close-on-exec
+behavior are unchanged.
+A reused log's creation time does not identify a later retry's admission time.
 
 Workers may also run exactly
 `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`.
@@ -992,12 +1091,22 @@ fallbacks for standalone runs; pushing the worker branch never clears it.
 Failed retries invalidate that scope's receipt; close imports all matching
 exact-delivery receipts. Targeted receipts complement full-suite assembly proof.
 
-Lane CI runs the project's fast checks once for each lane. The merge queue is
-the final-tree integration gate and the only gate to `main`; its required
-checks, including the Rust suite, run once on the exact merged tree. Commander
-journeys run there only when `hub-web/` product inputs change. Do not add
-lane-merge compile or fast-row checks, park receipts, or a separate assembly
-journey run. The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
+Each check runs once (operator decisions D1–D3, cas-eac2). A factory worker's
+pre-push hook runs the no-build fast rows (`scripts/fast-rows-pre-push.sh`) and
+writes a PASS receipt for the pushed tip; a missing tool fails the push. With
+the repository variable `CAS_LANE_SLIM` set to `true`, lane CI runs no fast rows
+and no broad Rust tests for factory pushes; unset (the default) the lanes run as
+before, so the switch waits for a runtime with these guards. Park reads, and
+never runs, the exact-tip receipts: the fast-rows PASS and a capped test PASS in
+every workspace crate whose sources or tests changed. A receipt in another
+crate does not count, and a missing receipt is refused with its fix. Pull
+requests without worker receipts keep the lane fast rows and the targeted
+`ci-test-impact.py` fallback. The merge queue is the final-tree integration gate
+and the only gate to `main`; its required checks, including the Rust suite, run
+once on the exact merged tree. Commander journeys run there only when `hub-web/`
+product inputs change. Do not add lane-merge compile checks, park re-runs or a
+separate assembly journey run. If more than two merge-queue ejections per epic
+follow from this, unset `CAS_LANE_SLIM`: that one setting is the D1 rollback. The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
 epic close gate accepts a local `ASSEMBLY_PROOF`, it covers the Rust build and
 suite only; it does not replace the queue's path to `main` or require a
 journey receipt.
@@ -1016,10 +1125,12 @@ cancels the build and Rust suite rows still running. The short `--fast-rows`
 lane checks run only `ci-script-tests-changed`: the tier entries whose script
 or subject (`scripts/<stem>.*` for `scripts/test-<stem>.*`) the lane changed.
 Entries that take over 20 seconds alone are reported as deferred to the full
-row.
+row. A changed `hub-web/package.json` runs the one named worker-memory weight
+assertion (0.001 s) rather than the full worker-memory suite.
 
-Fast rows include the no-build checks below. Lane CI selects each row when its
-inputs change; the merge queue runs its required fast-row job on the final tree:
+Fast rows include the no-build checks below. The factory pre-push hook, or lane
+CI for a pull request, selects each row when its inputs change; the merge queue
+runs its required fast-row job on the final tree:
 
 - `journey-catalog`: `journeys-for-diff.py --check`, so every catalog step
   still matches a `test.step` title in its journey spec.
@@ -1449,6 +1560,14 @@ without walking every artifact again. Output includes per-target `scan_ms` (JSON
 previews and interrupted quarantines keep conservative opaque-process handling;
 legacy targets are never adopted into the lifetime-owner registry.
 
+Under filesystem pressure, a registered dead worker with nonempty, entirely
+terminal task ownership loses its warm-cache reservation. Cleanup rechecks that
+ownership and holds the lane, Cargo and lifetime locks; recent writes, live
+users and uncertain evidence still preserve the cache. Missing-gitdir checkouts
+are measured with newest-write timestamps and manual-review guidance, but are
+never adopted or selected automatically.
+
+
 Assembly and release scratch uses an owner record, PID start-time identity and
 an inherited lifetime flock. TERM, INT and HUP stop and reap child groups before
 cleanup; the parent allows 20 seconds for a nested guard's 5-second escalation.
@@ -1516,6 +1635,11 @@ dry_run=false` reaps processes and eligible caches. It also removes only
 the owning task is closed for at least 24 hours. Missing close dates, open tasks,
 unknown task directories and symlinks are preserved; screenshots, ledgers and
 JSON/Markdown receipts stay in place. The cleanup reports files and bytes reclaimed.
+The report also measures sibling artifact namespaces, including renamed project
+keys, legacy bare task directories and shared builds, and flags `DerivedData`
+and `target` build outputs stored as evidence. These sibling roots remain
+review-only even when artifact deletion is enabled for the current project.
+
 Deleting whole task artifact directories additionally requires `artifacts=true`.
 Only tasks closed at least seven days ago are eligible; missing close dates,
 references from open tasks or tasks updated within seven days (including notes),

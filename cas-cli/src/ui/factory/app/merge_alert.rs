@@ -124,7 +124,15 @@ pub(super) fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> O
     };
     let tip = evidence.factory_tip.clone();
     let ci = crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(&tip, repo);
-    // Never attach another tip's CI if the worker pushed during the probe.
+    // cas-e48d: the target can gain this delivery while GitHub answers the
+    // CI probe. Refresh containment too, so a completed-CI relay cannot quote
+    // the pre-CI target. This remains one bounded exact-target check on the
+    // external lane; an unavailable target defers the demand.
+    let MergeAlertFreshness::Fresh(evidence) = check_merge_alert_freshness(event, data, repo)
+    else {
+        return None;
+    };
+    // Never attach another tip's CI if the worker pushed during either probe.
     let current = crate::git_evidence::resolve_ref_commit_sha(repo, &evidence.factory_branch)
         .or_else(|| {
             crate::git_evidence::resolve_ref_commit_sha(
@@ -132,5 +140,5 @@ pub(super) fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> O
                 &format!("origin/{}", evidence.factory_branch),
             )
         })?;
-    (tip == current).then_some(Ready { evidence, tip, ci })
+    (tip == evidence.factory_tip && tip == current).then_some(Ready { evidence, tip, ci })
 }

@@ -8,7 +8,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use crate::cli::Cli;
-use crate::ui::components::{Formatter, OutputMode};
+use crate::ui::components::{Formatter, OutputMode, Verdict};
 
 #[cfg(feature = "mcp-proxy")]
 fn cas_8235_fixture() -> crate::test_support::TestEnvGuard {
@@ -514,6 +514,7 @@ fn project_table_plain_uses_phase_glyphs_and_compact_project_names() {
     let receipts = vec![ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Warning("busy".to_owned()),
         skills: ProjectPhase::Skipped("not installed".to_owned()),
@@ -545,6 +546,7 @@ fn project_table_phase_headers_are_not_truncated_at_supported_widths() {
             "/home/alice/projects/a-project-with-a-deliberately-long-name/another-project",
         ),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Ok("up to date".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -579,6 +581,7 @@ fn non_ok_phase_details_include_phase_summary_when_capture_is_empty() {
     let receipt = ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Ok("up to date".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -608,6 +611,7 @@ fn cloud_warning_summary_stays_under_the_non_ok_project_row() {
     let receipt = ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Ok("up to date".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -892,25 +896,25 @@ fn update_banner_reports_projects_failures_and_skipped_unregistered_stores() {
     let banner = update_banner_text(&RefreshReport {
         project_count: 29,
         failed_count: 1,
+        failed_projects: 1,
         skipped_unregistered: 2,
         elapsed: std::time::Duration::from_secs(3),
+        ..Default::default()
     });
 
     assert!(banner.contains("29 projects refreshed"), "banner: {banner}");
     assert!(banner.contains("1 failed"), "banner: {banner}");
-    assert!(
-        banner.contains("2 unregistered store(s) not refreshed"),
-        "banner: {banner}"
-    );
+    assert!(banner.contains("2 skipped"), "banner: {banner}");
 
     let clean = update_banner_text(&RefreshReport {
         project_count: 29,
         failed_count: 0,
         skipped_unregistered: 0,
         elapsed: std::time::Duration::from_secs(3),
+        ..Default::default()
     });
     assert!(
-        !clean.contains("unregistered"),
+        !clean.contains("skipped"),
         "a clean run stays quiet: {clean}"
     );
 }
@@ -1031,6 +1035,7 @@ fn post_swap_mode_is_a_terminal_update_path() {
         post_swap: true,
         from: Some("3.7.7".to_owned()),
         refresh_receipt: None,
+        render_fixture: None,
     };
     let cli = Cli {
         json: true,
@@ -1057,18 +1062,40 @@ fn write_stub_binary(path: &Path, body: &str) {
 #[cfg(unix)]
 #[test]
 fn post_swap_refresh_runs_on_the_installed_binary_and_reports_its_version() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
     let installed_binary = temp_dir.path().join("cas-new");
+    let root = installed_binary.with_extension("root");
+    std::fs::create_dir(&root).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set_current_dir(temp_dir.path());
+    std::fs::write(root.join("config.toml"), "[factory]\nmerge_sweep = true\n").unwrap();
+    std::fs::write(installed_binary.with_extension("receipt"), serde_json::json!({
+        "refresh_binary_version": "9.9.9-stub", "projects": [{
+            "store": root, "retired_toml": {
+                "path": root.join("config.toml"), "status": "repaired", "removed": ["factory.merge_sweep"]
+            }
+        }], "user_level_store": {"status":"ok"}, "skipped_unregistered": []
+    }).to_string()).unwrap();
     // The stub stands in for the freshly installed binary: it records its argv
-    // and prints the refresh receipt the real child would print.
+    // and replaces its fixture config before returning a maintenance receipt.
     write_stub_binary(
         &installed_binary,
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n\
-         printf '%s' '{\"refresh_binary_version\":\"9.9.9-stub\",\"projects\":[],\"user_level_store\":{\"status\":\"ok\"},\"skipped_unregistered\":[]}'\n",
+         printf '[factory]\\n' > \"$0.root/config.toml\"\ncat \"$0.receipt\"\n",
     );
 
-    let receipt = run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
-        .expect("the post-swap refresh must run the installed binary");
+    let (receipt, output) = capture_phase(true, || {
+        let cli = crate::cli::try_parse_from_with_wordmark(["cas", "update", "--yes"]).unwrap();
+        let _parent_notices = crate::cli::startup_config_notices(&cli);
+        crate::config::Config::load(&root).unwrap();
+        run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
+            .expect("the post-swap refresh must run the installed binary")
+    });
+    assert!(
+        !output.contains("retired config entries remain ignored"),
+        "parent replayed an entry repaired by its verified child: {output}"
+    );
 
     assert_eq!(
         receipt["refresh_binary_version"], "9.9.9-stub",
@@ -1124,15 +1151,43 @@ fn post_swap_refresh_spawn_failure_has_a_distinct_receipt_status() {
 #[cfg(unix)]
 #[test]
 fn post_swap_refresh_failure_preserves_the_child_receipt_and_failed_project() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
+    let root = temp_dir.path().join(".cas");
+    std::fs::create_dir(&root).unwrap();
+    let original = "[factory]\nmerge_sweep = true\n";
+    std::fs::write(root.join("config.toml"), original).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set_current_dir(temp_dir.path());
     let installed_binary = temp_dir.path().join("cas-failed-refresh");
+    std::fs::write(installed_binary.with_extension("receipt"), serde_json::to_vec(&serde_json::json!({
+        "refresh_binary_version": "9.9.9-stub",
+        "projects": [{"project": "/tmp/failed-project", "cloud_sync": "FAILED: cloud sync: registration missing"}],
+        "user_level_store": {"status": "FAILED: config is read-only; run cas update", "retired_toml": [{
+            "path": root.join("config.toml"), "status": "failed", "error": "config is read-only"
+        }]},
+        "skipped_unregistered": []
+    })).unwrap()).unwrap();
     write_stub_binary(
         &installed_binary,
-        "#!/bin/sh\nprintf '%s' '{\"refresh_binary_version\":\"9.9.9-stub\",\"projects\":[{\"project\":\"/tmp/failed-project\",\"cloud_sync\":\"FAILED: cloud sync: registration missing\"}],\"user_level_store\":{\"status\":\"ok\"},\"skipped_unregistered\":[]}'\nprintf '%s' 'cloud refresh failed' >&2\nexit 1\n",
+        "#!/bin/sh\ncat \"$0.receipt\"\nprintf '%s' 'cloud refresh failed' >&2\nexit 1\n",
     );
 
-    let error = run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
-        .expect_err("a failed child refresh must remain an error");
+    let (result, output) = capture_phase(true, || {
+        let cli = crate::cli::try_parse_from_with_wordmark(["cas", "update"]).unwrap();
+        let _scope = crate::cli::startup_config_notices(&cli);
+        crate::config::Config::load(&root).unwrap();
+        run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", true)
+    });
+    assert!(
+        !output.contains("remain ignored"),
+        "failed child receipt was reported twice: {output}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("config.toml")).unwrap(),
+        original
+    );
+    let error = result.expect_err("a failed child refresh must remain an error");
     let failure = error
         .downcast_ref::<PostSwapRefreshFailure>()
         .expect("a child refresh failure should preserve structured failure data");
@@ -1249,6 +1304,7 @@ fn refresh_receipt_records_partial_failure_before_refresh_returns_error() {
     let receipts = vec![ProjectRefreshReceipt {
         project: PathBuf::from("/tmp/failed-project"),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Ok("migration".to_owned()),
         search_index: ProjectPhase::Ok("no stray root".to_owned()),
         skills: ProjectPhase::Ok("skills".to_owned()),
@@ -1443,11 +1499,21 @@ fn failed_serve_publication_still_refreshes_projects_and_reports_update_error() 
         failed_count: 0,
         skipped_unregistered: 0,
         elapsed: std::time::Duration::from_millis(5),
+        ..Default::default()
     };
-    let banner = render_plain_at(160, |fmt| {
-        print_update_banner_with_formatter(fmt, &report, Some(transport_error))
-    });
-    assert!(banner.contains("[ERROR] hub transport"), "{banner}");
+    let sweep = crate::cli::update::findings::collect(
+        &[],
+        &ProjectPhase::Ok("up to date".to_owned()),
+        &[],
+        None,
+        Some(transport_error),
+    );
+    let report = RefreshReport {
+        sweep: Some(sweep),
+        ..report
+    };
+    let banner = render_plain_at(160, |fmt| print_sweep(fmt, &report, false));
+    assert!(banner.contains("[ERROR] hub"), "{banner}");
     assert!(banner.contains("cas hub restart --tailscale-serve"), "{banner}");
 }
 
@@ -1567,6 +1633,7 @@ fn update_test_args() -> UpdateArgs {
         post_swap: false,
         from: None,
         refresh_receipt: None,
+        render_fixture: None,
     }
 }
 
@@ -1599,11 +1666,24 @@ fn tty_update_without_yes_keeps_confirmation_and_human_output_enabled() {
 
     assert_eq!(
         update_interactivity(&args, &cli, true),
+        // cas-70a8: CAS asks itself (confirm_install), so self_update never
+        // prints its release chatter or its own prompt around the phase line.
         UpdateInteractivity {
             no_confirm: false,
-            show_output: true,
-            show_download_progress: true,
+            show_output: false,
+            show_download_progress: false,
         }
+    );
+    // cas-70a8 QA: a failed install names the cause without self_update's
+    // type prefix, and says the current binary is untouched.
+    let error = install_error(
+        &self_update::errors::Error::Network("Download request failed with status: 500".into()),
+        "3.17.1",
+        "9.9.9",
+    );
+    assert_eq!(
+        error.to_string(),
+        "could not install Cassy 9.9.9\n  Download request failed with status: 500\n  Cassy 3.17.1 is unchanged; rerun `cas update` to retry"
     );
 }
 
@@ -1750,35 +1830,142 @@ fn check_report_leads_with_the_verdict_and_names_one_remedy() {
     }
 }
 
-/// cas-4df0: the refresh banner is a verdict line whose detail keeps the
-/// exact count grammar that scripts and the integration tests grep for.
+/// cas-4df0 / cas-0aa5: the sweep's phase line names converged and failed
+/// projects, and its receipt keeps the count grammar scripts grep for.
 #[test]
-fn refresh_banner_is_a_verdict_line_with_the_count_grammar_as_detail() {
+fn refresh_phase_result_counts_projects_and_receipt_keeps_count_grammar() {
     let report = RefreshReport {
         project_count: 2,
-        failed_count: 0,
-        skipped_unregistered: 0,
         elapsed: std::time::Duration::from_millis(1200),
+        ..Default::default()
     };
-    let banner = render_plain_at(80, |fmt| print_update_banner_with_formatter(fmt, &report, None));
-    assert!(
-        banner.starts_with(&format!(
-            "[OK] complete · Cassy {} · 2 projects refreshed · 0 failed",
-            env!("CARGO_PKG_VERSION")
-        )),
-        "{banner}"
-    );
+    let clean = refresh_phase_result(&Ok(report));
+    assert_eq!((clean.verdict, clean.text.as_str()), (Verdict::Ok, "all 2 refreshed"));
 
+    // cas-0aa5 QA F02: a failed user-level store is host state, never one
+    // of the projects in "N of M".
     let failed = RefreshReport {
         project_count: 3,
-        failed_count: 1,
+        failed_count: 2,
+        failed_projects: 1,
+        user_level_failed: true,
+        warned_count: 1,
         skipped_unregistered: 2,
         elapsed: std::time::Duration::from_secs(4),
+        ..Default::default()
     };
-    let banner =
-        render_plain_at(80, |fmt| print_update_banner_with_formatter(fmt, &failed, None));
-    assert!(banner.starts_with("[ERROR] 1 project failed · "), "{banner}");
-    assert!(banner.contains("2 unregistered store(s) not refreshed"), "{banner}");
+    // cas-06b0: the human receipt counts projects too, and names the store.
+    let receipt = update_banner_text(&failed);
+    assert!(
+        receipt.contains("3 projects refreshed · 1 failed · user-level store failed · 2 skipped"),
+        "{receipt}"
+    );
+    let user_only = update_banner_text(&RefreshReport {
+        project_count: 12,
+        failed_count: 1,
+        user_level_failed: true,
+        ..Default::default()
+    });
+    assert!(user_only.contains("12 projects refreshed · 0 failed · user-level store failed"), "{user_only}");
+    // cas-06b0: a mixed failure's exit reason breaks between clauses, so no
+    // line passes 80 columns beside the error mark.
+    let mixed = RefreshFailed(RefreshReport {
+        project_count: 12,
+        failed_count: 3,
+        failed_projects: 2,
+        user_level_failed: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        binary_exit_reason(&mixed, "9.99.1", false),
+        "2 of 12 projects not fully refreshed\n  the user-level store was not refreshed\n  Cassy 9.99.1 is current"
+    );
+    // cas-70a8: at 80 columns the elapsed time never sits alone on a line,
+    // and the count grammar stays whole on the first.
+    let wide = RefreshReport {
+        project_count: 12,
+        failed_count: 3,
+        failed_projects: 2,
+        user_level_failed: true,
+        skipped_unregistered: 1,
+        elapsed: std::time::Duration::from_millis(4000),
+        ..Default::default()
+    };
+    assert_eq!(
+        receipt_lines(&wide, 78),
+        vec![
+            format!("Cassy {} · 12 projects refreshed · 2 failed · 4.0s", env!("CARGO_PKG_VERSION")),
+            "user-level store failed · 1 skipped".to_owned(),
+        ]
+    );
+    let error: anyhow::Error = RefreshFailed(failed).into();
+    let failed = refresh_phase_result(&Err(error));
+    assert_eq!(failed.verdict, Verdict::Error);
+    assert_eq!(
+        failed.text,
+        "1 of 3 failed · user-level store failed · 1 warning · 2 skipped"
+    );
+}
+
+/// cas-0aa5: the operator's 3.62 `cas update -y` transcript, replayed from
+/// its reconstructed fixture through the real phases and renderer. The
+/// binary verdict and the refresh verdict are the first two results; each
+/// failure is one finding with one remedy; raw phase output stays out.
+#[cfg(unix)]
+#[test]
+fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() {
+    let _output_lock = update_output_lock();
+    let mut fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../docs/design/cli/fixtures/cas-update-partial-refresh.json"
+    )))
+    .unwrap();
+    fixture["refresh_ms"] = 0.into();
+    fixture["binary"]["elapsed_ms"] = 0.into();
+    fixture["binary"]["current"] = "9.99.1".into();
+    fixture["binary"]["latest"] = "9.99.1".into();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fixture.json");
+    std::fs::write(&path, fixture.to_string()).unwrap();
+    let mut args = update_test_args();
+    args.version = None;
+    args.yes = true;
+
+    let (result, output) = capture_phase(true, || {
+        crate::cli::update::fixture::render(&path, &args, &update_test_cli(false))
+    });
+
+    let error = result.expect_err("a partial refresh must still exit nonzero");
+    assert_eq!(
+        error.to_string(),
+        "2 of 12 projects not fully refreshed; Cassy 9.99.1 is current"
+    );
+    let results = output
+        .lines()
+        .filter(|line| line.starts_with('['))
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>();
+    assert!(
+        results[0].starts_with("[OK] [1/2] Cassy binary 9.99.1 is current"),
+        "{output}"
+    );
+    assert!(
+        results[1].starts_with("[ERROR] [2/2] Projects 2 of 12 failed · 4 warnings · 1 skipped"),
+        "{output}"
+    );
+    assert_eq!(output.matches("recheck writers, remove only this lock").count(), 2, "{output}");
+    // cas-0aa5 QA F01: the reason-specific next step (cas-7c6b) is the
+    // remedy, never the blanket retry it overrides.
+    assert!(
+        output.contains("→ Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184")
+            && output.contains("`cas cloud queue --retry --retry-reason invalid_json_nul`"),
+        "{output}"
+    );
+    assert!(!output.contains("→ cas cloud queue --retry\n"), "{output}");
+    for raw in ["Checking target-arch", "Managed files: 3 conflicts", "Retained intentionally"] {
+        assert!(!output.contains(raw), "raw phase output {raw:?} leaked:\n{output}");
+    }
+    assert!(output.lines().all(|line| line.chars().count() <= 80), "{output}");
 }
 
 #[test]
@@ -1873,6 +2060,7 @@ fn skipped_phases_print_no_details_block_snapshot_cas_8030() {
     let unlinked = ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/notes"),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Ok("up to date".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -1888,6 +2076,7 @@ fn skipped_phases_print_no_details_block_snapshot_cas_8030() {
     let warned = ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Ok("v248".to_owned()),
         search_index: ProjectPhase::Warning("index busy".to_owned()),
         skills: ProjectPhase::Ok("up to date".to_owned()),
@@ -1929,6 +2118,7 @@ fn dry_run_planned_phases_keep_their_details_block_cas_937a() {
     let planned = ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/first"),
         unregistered: false,
+        retired_toml: None,
         migration: ProjectPhase::Planned("would apply 2 migrations".to_owned()),
         search_index: ProjectPhase::Skipped("dry run".to_owned()),
         skills: ProjectPhase::Skipped("dry run".to_owned()),
@@ -2053,6 +2243,70 @@ fn cas_6718_drifted_project(home: &Path) -> PathBuf {
     project
 }
 
+#[cfg(unix)]
+#[test]
+fn skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, SystemTime};
+
+    let child_case = std::env::var("CAS7C9B_LOCK_CASE").ok();
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let probes = env.home().join("probes");
+    std::fs::create_dir(&probes).unwrap();
+    // Control only the external process-inspection boundary. Git and the
+    // complete skills refresh remain real, including the actual lock error.
+    for (case, seconds, ps, lsof, expected) in [
+        ("recent", 10, "echo sh", "exit 1", "busy"),
+        ("abandoned", 172800, "echo sh", "exit 1", "stale (no writer observed)"),
+        ("held", 172800, "echo sh", "echo p42", "busy"),
+        ("git_running", 172800, "echo git", "exit 1", "busy"),
+        ("uncertain", 172800, "echo sh", "echo denied >&2; exit 1", "unknown ownership"),
+    ] {
+        if child_case.as_deref() != Some(case) {
+            if child_case.is_some() {
+                continue;
+            }
+            for (name, body) in [("ps", ps), ("lsof", lsof)] {
+                let path = probes.join(name);
+                std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let test = "cli::update::tests::skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b";
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test])
+                .env("CAS7C9B_LOCK_CASE", case)
+                .env("PATH", format!("{}:{}", probes.display(), std::env::var("PATH").unwrap()))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{case}: {}", String::from_utf8_lossy(&output.stderr));
+            crate::test_child::assert_passed(&String::from_utf8_lossy(&output.stdout), test);
+            continue;
+        }
+        let project = cas_6718_drifted_project(&env.home().join(case));
+        let root = project.join(".cas");
+        env.set("CAS_ROOT", &root);
+        let index = std::fs::read(project.join(".git/index")).unwrap();
+        let lock_path = project.join(".git/index.lock");
+        let lock = std::fs::File::create(&lock_path).unwrap();
+        lock.set_times(std::fs::FileTimes::new().set_modified(
+            SystemTime::now() - Duration::from_secs(seconds),
+        )).unwrap();
+        drop(lock);
+        let phase = refresh_project_files(&update_test_cli(true), &root, false);
+        let ProjectPhase::Failed(finding) = phase else {
+            panic!("{case}: locked skills refresh must fail: {phase:?}");
+        };
+        assert!(finding.contains(&format!("git index lock {expected}")), "{case}: {finding}");
+        assert!(finding.contains(".git/index.lock") && finding.contains("age "), "{finding}");
+        assert!(finding.contains("retry") && !finding.contains("Another git process"), "{finding}");
+        assert_eq!(finding.contains("remove"), case == "abandoned", "{finding}");
+        assert!(lock_path.exists(), "update must never remove the lock");
+        assert_eq!(std::fs::read(project.join(".git/index")).unwrap(), index);
+    }
+}
+
 #[test]
 fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -2121,14 +2375,27 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
             .any(|g| g["hooks"][0]["command"] == "echo project-codex-hook")
     );
     let first = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+    // A repeated refresh covers the same writers without rewriting identical
+    // content (cas-df15). Seed an old timestamp instead of sleeping.
+    let unchanged = [".claude/settings.json", ".claude/rules/cas/rule-fixture.md"];
+    let stamp = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1000);
+    for path in unchanged {
+        std::fs::OpenOptions::new().write(true).open(project.join(path)).unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(stamp)).unwrap();
+    }
     execute(&args, &update_test_cli(true), Some(&root)).unwrap();
     assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), first);
     assert!(cas_6718_git(&project, &["status", "--porcelain"]).is_empty());
+    for path in unchanged {
+        assert_eq!(std::fs::metadata(project.join(path)).unwrap().modified().unwrap(), stamp,
+            "unchanged refresh rewrote {path}");
+    }
 
     // Permission membership is unchanged when project tooling reorders the allow list.
     let settings = project.join(".claude/settings.json");
+    let original_settings = std::fs::read(&settings).unwrap();
     let mut value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        serde_json::from_slice(&original_settings).unwrap();
     value["permissions"]["allow"]
         .as_array_mut()
         .unwrap()
@@ -2139,12 +2406,30 @@ fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
         0,
         "doctor must compare permission membership, not array order"
     );
+
+    // The no-write fast path must still repair changed authoritative inputs.
+    std::fs::write(project.join(".claude/settings.json"), original_settings).unwrap();
+    let config_path = root.join("config.toml");
+    let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&config_path).unwrap().parse().unwrap();
+    config["hooks"]["pre_tool_use"]["timeout"] = toml_edit::value(17);
+    std::fs::write(config_path, config.to_string()).unwrap();
+    let store = crate::store::open_rule_store(&root).unwrap();
+    let mut rule = store.get("rule-fixture").unwrap();
+    rule.content = "Changed authoritative input must still be repaired".into();
+    store.update(&rule).unwrap();
+    execute(&args, &update_test_cli(true), Some(&root)).unwrap();
+    assert!(std::fs::read_to_string(project.join(unchanged[1])).unwrap().contains(&rule.content));
+    let settings: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.join(unchanged[0])).unwrap()).unwrap();
+    assert!(settings["hooks"]["PreToolUse"].as_array().unwrap().iter()
+        .any(|group| group["hooks"][0]["timeout"] == 17));
 }
 
 #[test]
 fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
-    env.remove("CAS_AGENT_ROLE");
+    // Model the supervisor actor in this isolated handler fixture.
+    env.set("CAS_AGENT_ROLE", "supervisor");
     env.remove("CAS_SKIP_FACTORY_TOOLING");
     let project = cas_6718_drifted_project(env.home());
     let root = project.join(".cas");
@@ -2152,6 +2437,7 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
     let head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
     std::fs::write(project.join("README.md"), "Staged project work\n").unwrap();
     cas_6718_git(&project, &["add", "README.md"]);
+    let staged_readme = cas_6718_git(&project, &["show", ":README.md"]);
     let outside = "Unstaged project instruction.\n\n";
     let claude = project.join("CLAUDE.md");
     std::fs::write(
@@ -2170,6 +2456,10 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
     let receipt: serde_json::Value = output.lines().last().unwrap().parse().unwrap();
     assert_eq!(receipt["managed_files"]["outcome"], "staged");
     assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        cas_6718_git(&project, &["show", ":README.md"]),
+        staged_readme
+    );
     assert!(
         cas_6718_git(&project, &["diff", "--cached", "--name-only"])
             .lines()
@@ -2241,6 +2531,91 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         assert_eq!(cas_6718_git(&project, &["ls-files", "--stage"]), index);
         std::fs::write(file, original).unwrap();
     }
+
+    // A refused automatic commit differs from the intentional staging above.
+    // Keep Git/hooks real and preserve their refusal instead of disabling them.
+    // Native discovery deliberately rejects /tmp and artifact roots.
+    let host = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    env.set("HOME", host.path());
+    env.set("XDG_CONFIG_HOME", host.path().join(".config"));
+    env.set("CAS_CREDENTIALS_FILE", host.path().join("credentials.env"));
+    #[cfg(unix)]
+    for mode in ["all-projects", "sync", "worker-sync"] {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture_home = host.path().join(mode);
+        let project = cas_6718_drifted_project(&fixture_home);
+        let root = project.join(".cas");
+        env.set("CAS_ROOT", &root);
+        env.set("CAS_CLONE_PATH", &project);
+        env.set("CAS_AGENT_ROLE", if mode == "worker-sync" { "worker" } else { "supervisor" });
+        env.set("CAS_PROJECT_ROOTS", &fixture_home);
+        env.set_current_dir(&project);
+        cas_6718_git(&project, &["branch", "-M", "main"]);
+        let head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+        let readme = project.join("README.md");
+        std::fs::write(&readme, "Unstaged user work survives refusal\n").unwrap();
+        let user_before = std::fs::read(&readme).unwrap();
+        let hook = project.join(".git/hooks/pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\necho 'pre-commit: fixture refuses the managed commit' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let hook_before = std::fs::read(&hook).unwrap();
+        let config_before = std::fs::read(project.join(".git/config")).unwrap();
+        let mut args = update_test_args();
+        args.all_projects = mode == "all-projects";
+        args.sync = mode != "all-projects";
+        let (result, output) =
+            capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+        assert!(
+            result.is_err(),
+            "{mode}: refused commit must make update incomplete, got success:\n{output}"
+        );
+        let rows = output
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .collect::<Vec<_>>();
+        let managed = rows
+            .iter()
+            .find_map(|row| row.get("managed_files"))
+            .expect("managed-file receipt");
+        assert_eq!(managed["outcome"], "commit_failed", "{output}");
+        assert!(
+            managed["conflicts"].as_array().unwrap().is_empty(),
+            "{output}"
+        );
+        let reason = managed["commit_error"]
+            .as_str()
+            .expect("distinct commit error");
+        assert!(
+            reason.contains("pre-commit: fixture refuses") && reason.contains("--show-origin"),
+            "{reason}"
+        );
+        if mode == "all-projects" {
+            let receipt = rows
+                .iter()
+                .find(|row| row.get("refresh_status").is_some())
+                .unwrap();
+            assert_eq!(receipt["refresh_status"], "refresh_failed", "{output}");
+            assert!(
+                receipt["projects"][0]["skills"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("FAILED:"),
+                "{output}"
+            );
+        }
+        assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
+        assert!(!cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty());
+        assert_eq!(std::fs::read(&readme).unwrap(), user_before);
+        assert_eq!(std::fs::read(&hook).unwrap(), hook_before);
+        assert_eq!(
+            std::fs::read(project.join(".git/config")).unwrap(),
+            config_before
+        );
+    }
 }
 
 #[test]
@@ -2298,5 +2673,396 @@ fn cas_9815_update_distinguishes_old_shipped_skill_from_user_delta() {
             assert!(cas_6718_git(&project, &["status", "--porcelain"]).is_empty());
             assert!(cas_6718_git(&project, &["ls-files", "--", path]).is_empty());
         }
+    }
+}
+
+/// cas-4585: exercise the native update sweep with physical cwd, HOME and
+/// registry confined to the fixture. Git, SQLite and managed-file refresh
+/// remain real; only the unrelated user builtin/network phase is inert.
+#[test]
+fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    // Host-wide discovery excludes /tmp, so use its existing sanctioned
+    // fixture parent rather than weakening project eligibility.
+    let fixture_home = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    let home = fixture_home.path().canonicalize().unwrap();
+    env.set("HOME", &home);
+    env.set_current_dir(&home);
+    env.set("XDG_CONFIG_HOME", home.join(".config"));
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let projects = home.join("projects");
+    let project = cas_6718_drifted_project(&projects);
+    let root = project.join(".cas");
+    let host = crate::store::init_cas_dir(&home).unwrap();
+    let global = crate::config::global_cas_dir().unwrap();
+    std::fs::create_dir_all(&global).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set_current_dir(&project);
+    env.set("CAS_PROJECT_ROOTS", &projects);
+    let legacy = concat!(
+        "# operator introduction\n",
+        "[factory] # factory header\n",
+        "# preserve retirement rationale\n",
+        "merge_sweep = true # preserve inline note\n",
+        "merge_sweep_timeout_secs = 17\n",
+        "strict_cli = false # active explicit override\n",
+        "future_policy = 'keep me'\n",
+        "[factory.merge_sweep_env] # former environment\n",
+        "TOKEN = 'fixture-only-token'\n",
+        "[code_review]\nowner = 'worker'\nfuture_owner = 'keep this too'\n",
+        "[jev] # old integration\nendpoint = 'fixture-only-endpoint'\n",
+        "[project]\ncanonical_id = 'retirement-fixture'\n",
+    );
+    for dir in [&root, &host, &global] {
+        std::fs::write(dir.join("config.toml"), legacy).unwrap();
+    }
+    let before: crate::config::Config = toml::from_str(legacy).unwrap();
+    let mut args = update_test_args();
+    args.all_projects = true;
+    args.refresh_receipt = Some(home.join("refresh.json"));
+    let cli = update_test_cli(false);
+    let run = || {
+        let (result, output) = capture_phase(true, || {
+            let startup =
+                crate::cli::try_parse_from_with_wordmark(["cas", "update", "--all-projects"])
+                    .unwrap();
+            let _notices = crate::cli::startup_config_notices(&startup);
+            // The real binary first reads config to decide crash-reporting
+            // policy, then startup logging, then project discovery.
+            let _enabled = crate::sentry::is_sentry_enabled();
+            crate::config::Config::load(&root).unwrap();
+            refresh_all_projects_with_user_refresh(
+                &args,
+                &cli,
+                Some(&root),
+                None,
+                None,
+                None,
+                || refresh_user_level_store_with_builtins(&args, &cli, || Ok(())),
+            )
+        });
+        #[cfg(unix)]
+        assert!(
+            !output.contains("ignored and dropped on the next save")
+                && !output.contains("[jev] config section is retired"),
+            "raw startup notice escaped structured maintenance: {output}"
+        );
+        result
+    };
+    let report = run().unwrap();
+    let sweep = report.sweep.as_ref().unwrap();
+    assert_eq!(sweep.config.repaired, 3);
+    assert_eq!(sweep.config.entries_removed, 15);
+    let rendered = render_plain_at(80, |fmt| findings::print(fmt, sweep).map(|_| ()));
+    assert!(rendered.contains("15 retired entries removed in 3 files"), "{rendered}");
+    let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+    assert_eq!(receipt["projects"].as_array().unwrap().len(), 1);
+    for dir in [&root, &host, &global] {
+        let raw = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let parsed: toml::Value = toml::from_str(&raw).unwrap();
+        assert!(parsed["factory"].get("merge_sweep").is_none(), "update must retire the ignored sweep key");
+        assert!(parsed["factory"].get("merge_sweep_env").is_none());
+        assert!(parsed.get("jev").is_none());
+        assert!(parsed["code_review"].get("owner").is_none());
+        assert_eq!(parsed["code_review"]["future_owner"].as_str(), Some("keep this too"));
+        for comment in ["operator introduction", "factory header", "retirement rationale", "inline note", "active explicit override", "former environment", "old integration"] {
+            assert!(raw.contains(comment), "lost operator comment {comment}");
+        }
+        let after: crate::config::Config = toml::from_str(&raw).unwrap();
+        assert_eq!(serde_json::to_value(&before).unwrap(), serde_json::to_value(after).unwrap());
+    }
+    let backup = receipt["projects"][0]["retired_toml"]["backup"].as_str().unwrap();
+    assert_eq!(std::fs::read_to_string(backup).unwrap(), legacy);
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(backup).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    let original = std::fs::metadata(root.join("config.toml"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    // Current read-only configs need no write eligibility, including during
+    // a real native repeat across project, host and global stores.
+    for dir in [&root, &host, &global] {
+        let path = dir.join("config.toml");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+    }
+    let repeat = run().unwrap();
+    assert_eq!(repeat.sweep.as_ref().unwrap().config.repaired, 0);
+    assert_eq!(
+        std::fs::metadata(root.join("config.toml"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        original
+    );
+    let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        receipt["projects"][0]["retired_toml"]["status"],
+        "unchanged"
+    );
+    assert!(!project.join(".cas/.cas").exists());
+
+    // Planning a retired read-only config must also leave it untouched and
+    // create neither a config lock nor a before-copy directory.
+    let preview = home.join("readonly-preview");
+    std::fs::create_dir(&preview).unwrap();
+    let path = preview.join("config.toml");
+    std::fs::write(&path, legacy).unwrap();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(crate::config::retire_config(&preview, true).status, "planned");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    assert_eq!(std::fs::read_dir(&preview).unwrap().count(), 1);
+}
+
+#[test]
+#[cfg(unix)]
+fn cas_4585_retired_notices_survive_nested_failure_and_other_modes() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.set_current_dir(&home);
+    let root = home.join(".cas");
+    std::fs::create_dir_all(&root).unwrap();
+    env.set("CAS_ROOT", &root);
+    let path = root.join("config.toml");
+    let original = "[factory]\nmerge_sweep = true\n[jev]\nendpoint = 'fixture-only'\n";
+    std::fs::write(&path, original).unwrap();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    let startup =
+        crate::cli::try_parse_from_with_wordmark(["cas", "update", "--all-projects"]).unwrap();
+    let projection = tempfile::tempdir().unwrap();
+    std::fs::create_dir(projection.path().join(".cas")).unwrap();
+    std::fs::write(projection.path().join(".cas/config.toml"), original).unwrap();
+    let (_, output) = capture_phase(true, || {
+        let _outer = crate::cli::startup_config_notices(&startup);
+        let _enabled = crate::sentry::is_sentry_enabled();
+        let (_, nested) = capture_phase(true, || {
+            let _inner = crate::cli::startup_config_notices(&startup);
+            crate::config::Config::load(&root).unwrap();
+        });
+        assert!(
+            nested.is_empty(),
+            "nested scope drained its caller's notices: {nested}"
+        );
+        // The real index-side hook projection must attribute its copied
+        // config to the owning project, never a disposable temp directory.
+        crate::cli::hook::configure_claude_hooks_for_index(projection.path(), &home).unwrap();
+        assert_eq!(crate::config::retire_config(&root, false).status, "failed");
+        // A refused or failed maintenance does not resolve this file. Scope
+        // exit replays it even if the command never reaches a final receipt.
+    });
+    assert!(
+        output
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("retired config settings remain ignored"),
+        "{output}"
+    );
+    assert!(
+        !output.contains(&projection.path().display().to_string()),
+        "temporary projection became an operator finding: {output}"
+    );
+    assert!(!output.contains("ignored and dropped on the next save"));
+    assert!(
+        output.lines().all(|line| line.chars().count() <= 80),
+        "{output}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    // --check is not native maintenance: its ordinary config diagnostic is
+    // neither hidden nor consumed by the earlier updater scope.
+    let check = crate::cli::try_parse_from_with_wordmark(["cas", "update", "--check"]).unwrap();
+    let (_, ordinary) = capture_phase(true, || {
+        let _scope = crate::cli::startup_config_notices(&check);
+        crate::config::Config::load(&root).unwrap();
+    });
+    assert!(
+        ordinary.contains("ignored and dropped on the next save"),
+        "{ordinary}"
+    );
+}
+
+#[test]
+fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let fixture_home = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    let home = fixture_home.path().canonicalize().unwrap();
+    env.set("HOME", &home);
+    env.set_current_dir(&home);
+    env.set("XDG_CONFIG_HOME", home.join(".config"));
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let projects = home.join("projects");
+    let healthy = cas_6718_drifted_project(&projects.join("healthy"));
+    let broken = cas_6718_drifted_project(&projects.join("broken"));
+    let readonly = cas_6718_drifted_project(&projects.join("readonly"));
+    let host = crate::store::init_cas_dir(&home).unwrap();
+    let global = crate::config::global_cas_dir().unwrap();
+    std::fs::create_dir_all(&global).unwrap();
+    let retired = "[factory]\nmerge_sweep = true\n[jev]\nendpoint = 'fixture-only'\n[code_review]\nowner = 'worker'\n";
+    std::fs::write(global.join("config.toml"), retired).unwrap();
+    let readonly_config = readonly.join(".cas/config.toml");
+    std::fs::write(&readonly_config, retired).unwrap();
+    let mut permissions = std::fs::metadata(&readonly_config).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&readonly_config, permissions).unwrap();
+    let root = healthy.join(".cas");
+    env.set("CAS_ROOT", &root);
+    env.set_current_dir(&healthy);
+    env.set("CAS_PROJECT_ROOTS", &projects);
+    let invalid = "[factory\nmerge_sweep = true\n";
+    for directory in [&host, &broken.join(".cas")] {
+        std::fs::write(directory.join("config.toml"), invalid).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        // Ambiguous ownership is an inaccessible cleanup target even though
+        // an ordinary config reader can follow it. Never replace its link.
+        let linked = broken.join(".cas/config.toml");
+        std::fs::remove_file(&linked).unwrap();
+        std::os::unix::fs::symlink(host.join("config.toml"), linked).unwrap();
+    }
+    std::fs::write(
+        root.join("config.toml"),
+        "[factory]\nmerge_sweep = true\nstrict_cli = false\n",
+    )
+    .unwrap();
+    let mut args = update_test_args();
+    args.all_projects = true;
+    args.refresh_receipt = Some(home.join("refresh.json"));
+    let (result, output) = capture_phase(true, || {
+        refresh_all_projects_with_user_refresh(
+            &args,
+            &update_test_cli(false),
+            Some(&root),
+            None,
+            None,
+            None,
+            || ProjectPhase::Failed("builtin repair failed; run `cas update --user`".into()),
+        )
+    });
+    assert!(result.is_err());
+    let report = refresh_report(&result).unwrap();
+    assert_eq!(report.failed_projects, 2);
+    assert!(report.user_level_failed);
+    let sweep = report.sweep.as_ref().unwrap();
+    assert_eq!(sweep.config.repaired, 2);
+    assert_eq!(sweep.config.failed, 3);
+    let rendered = render_plain_at(80, |fmt| findings::print(fmt, sweep).map(|_| ()));
+    assert!(rendered.contains("builtin repair failed"));
+    assert!(
+        !output.contains("retired config entries remain ignored")
+            && !output.contains("retired config settings remain ignored"),
+        "receipted config failures must not replay duplicate or projection findings: {output}"
+    );
+    assert_eq!(
+        rendered.matches("config is read-only").count(),
+        1,
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("cas update --user"),
+        "existing phase remedy lost: {rendered}"
+    );
+    assert!(
+        sweep
+            .findings
+            .iter()
+            .any(|finding| finding.cause.contains("repair config before updating"))
+    );
+    let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+    assert_eq!(receipt["config_maintenance"]["failed"], 3);
+    assert_eq!(receipt["config_maintenance"]["repaired"], 2);
+    assert!(
+        !receipt["user_builtins"]
+            .as_str()
+            .unwrap()
+            .contains("retired TOML entries removed"),
+        "another file's successful cleanup leaked into failure prose: {receipt}"
+    );
+    assert_eq!(std::fs::read_to_string(&readonly_config).unwrap(), retired);
+    for directory in [&host, &broken.join(".cas")] {
+        assert_eq!(
+            std::fs::read_to_string(directory.join("config.toml")).unwrap(),
+            invalid
+        );
+        assert!(!directory.join("config-retirement-backups").exists());
+    }
+    #[cfg(unix)]
+    assert!(
+        std::fs::symlink_metadata(broken.join(".cas/config.toml"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        !std::fs::read_to_string(root.join("config.toml"))
+            .unwrap()
+            .contains("merge_sweep")
+    );
+}
+
+/// Different valid TOML spellings must retire the same ignored values without
+/// treating a '#' inside a secret as a comment to preserve.
+#[test]
+fn cas_4585_retirement_preserves_dotted_inline_and_multiline_config() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    assert_eq!(
+        crate::config::retire_config(directory.path(), false).status,
+        "missing"
+    );
+    std::fs::write(&path, "[factory]\nstrict_cli = false\n").unwrap();
+    assert_eq!(
+        crate::config::retire_config(directory.path(), false).status,
+        "unchanged"
+    );
+    assert_eq!(
+        std::fs::read_dir(directory.path()).unwrap().count(),
+        1,
+        "a current config must not create locks or backups"
+    );
+    for raw in [
+        "factory.merge_sweep = [\n 'fixture#secret', # keep array comment\n]\nfactory.merge_sweep_timeout_secs = 17\nfactory.strict_cli = false # keep active comment\ncode_review.owner = 'worker'\ncode_review.future_owner = '#keep'\njev.deep.endpoint = 'fixture#secret'\n",
+        "factory = { strict_cli = false, merge_sweep = true, future_policy = 'keep', merge_sweep_env = { TOKEN = 'fixture#secret' }, merge_sweep_timeout_secs = 17 } # keep active comment\ncode_review = { owner = 'worker', future_owner = '#keep' }\njev = { endpoint = 'fixture#secret' } # keep integration comment\n",
+    ] {
+        std::fs::write(&path, raw).unwrap();
+        let before: crate::config::Config = toml::from_str(raw).unwrap();
+        let plan = crate::config::retire_config(directory.path(), true);
+        assert_eq!(plan.status, "planned", "{plan:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        let receipt = crate::config::retire_config(directory.path(), false);
+        assert_eq!(receipt.status, "repaired", "{receipt:?}");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !after.contains("fixture#secret"),
+            "retired string leaked into preserved comments"
+        );
+        for comment in raw
+            .lines()
+            .filter_map(|line| line.find("# keep").map(|at| &line[at..]))
+        {
+            assert!(after.contains(comment), "lost {comment}");
+        }
+        let current: crate::config::Config = toml::from_str(&after).unwrap();
+        assert_eq!(
+            serde_json::to_value(before).unwrap(),
+            serde_json::to_value(current).unwrap()
+        );
+        let doc: toml::Value = toml::from_str(&after).unwrap();
+        assert_eq!(doc["code_review"]["future_owner"].as_str(), Some("#keep"));
+        assert_eq!(
+            crate::config::retire_config(directory.path(), false).status,
+            "unchanged"
+        );
     }
 }

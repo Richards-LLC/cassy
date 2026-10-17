@@ -1204,15 +1204,15 @@ impl CasCore {
             return QaCloseGate::Clear;
         };
         let qa = config.qa();
-        let Some(implementer) = task.assignee.as_deref() else {
-            return QaCloseGate::Clear;
-        };
         if !qa.independent_pass {
             return QaCloseGate::Clear;
         }
         let classification_target = freshest_target_ref(repo, target_branch);
         let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
-        let branch = super::close_ops::close_measured_factory_branch(repo, task, implementer);
+        let branch = task.assignee.as_deref().map(|implementer| {
+            super::close_ops::close_measured_factory_branch(repo, task, implementer)
+        }).or_else(|| super::close_ops::task_delivery_branch(repo, task))
+            .unwrap_or_else(|| "HEAD".into());
         // A commit the task itself stands behind: the parked anchor or the
         // close's receipt.
         let recorded_head = task
@@ -1305,6 +1305,14 @@ impl CasCore {
         } else if !crate::qa_pass::gate_applies(task, &qa, &passes) {
             return QaCloseGate::Clear;
         }
+
+        // A released implementation still owes its independent review.
+        // Restore a named implementer before opening or waiving a round so
+        // the reviewer cannot accidentally be the author of the delivery.
+        let Some(implementer) = task.assignee.as_deref() else {
+            return QaCloseGate::Refuse(format!(
+                "INDEPENDENT QA REQUIRED: released task {} has a user-facing delivery without a covering QA pass. Restore its implementer assignment, then request independent QA or a supervisor waiver for the delivered commit.", task.id));
+        };
 
         if let Some(reason) = supervisor_waiver.map(str::trim).filter(|r| !r.is_empty()) {
             let Some(head) = head.as_deref() else {

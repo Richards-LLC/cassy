@@ -10,8 +10,13 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::config::{BuildGuardConfig, FactoryConfig};
+use crate::factory_target_cache::{FilesystemCapacity, TargetCachePolicy};
 
-/// Linux PSI stall percentages and reclaimable memory; missing probes stay unknown.
+// The largest observed first-run target was 8.6 GiB (cas-94ed). Reserve growth
+// per live/requested lane; the configurable target-cache watermark stays free.
+const ESTIMATED_LANE_GROWTH_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+/// Linux PSI stall percentages and reclaimable memory, with native macOS memory.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct HostPressure {
     cpu_some_avg10: Option<f64>,
@@ -82,15 +87,46 @@ pub(crate) struct BuildGuardSnapshot {
     pub disabled: bool,
     pub pressure: HostPressure,
     pub limits: BuildGuardConfig,
+    pub disk: Option<Result<FilesystemCapacity, String>>,
 }
 
 impl BuildGuardSnapshot {
+    fn with_disk_probe(
+        mut self,
+        cas_root: &Path,
+        config: &FactoryConfig,
+        probe: impl FnOnce(&Path, TargetCachePolicy) -> std::io::Result<FilesystemCapacity>,
+    ) -> Self {
+        let target = cas_types::factory_scratch::parse_scratch_root(config.scratch_root.as_deref())
+            .unwrap_or_else(|| cas_root.to_path_buf());
+        // A scratch root may not have been created when spawn is admitted.
+        let existing = target
+            .ancestors()
+            .find(|path| path.exists())
+            .unwrap_or(&target);
+        self.disk = Some(
+            probe(existing, TargetCachePolicy::from(config)).map_err(|error| {
+                format!(
+                    "disk capacity unavailable for {}: {error}",
+                    existing.display()
+                )
+            }),
+        );
+        self
+    }
+
     fn with_host(mut self, proc_root: &Path, config: &FactoryConfig) -> Self {
         self.load_1m = std::fs::read_to_string(proc_root.join("loadavg"))
             .ok()
             .and_then(|text| text.split_whitespace().next()?.parse::<f64>().ok())
             .filter(|load| load.is_finite() && *load >= 0.0);
         self.pressure = HostPressure::read(proc_root);
+        #[cfg(target_os = "macos")]
+        if proc_root == Path::new("/proc") {
+            // Injected proc fixtures must not accidentally sample the host.
+            self.load_1m = macos_load_1m();
+            self.pressure.available_memory_bytes = macos_available_memory();
+        }
         self.limits = config.build_guard.effective();
         self
     }
@@ -103,12 +139,36 @@ impl BuildGuardSnapshot {
     /// [`Self::violations`], optionally carrying the earlier CPU admission
     /// (cas-f616). A lane proof's second capped step carries its first
     /// step's admission: the load that step raised must not refuse its own
-    /// continuation. Memory pressure and the builder cap are never waived.
+    /// continuation. Disk, memory pressure and the builder cap are never waived.
     pub(crate) fn admission_violations(&self, load_admitted: bool) -> Vec<String> {
         if self.disabled {
             return Vec::new();
         }
         let mut violations = Vec::new();
+        if self.requested_builders > 0 {
+            match &self.disk {
+                Some(Ok(disk)) => {
+                    let lanes = self
+                        .live_cargo_workers
+                        .saturating_add(self.requested_builders);
+                    let growth = ESTIMATED_LANE_GROWTH_BYTES.saturating_mul(lanes as u64);
+                    let available = disk.available_bytes.saturating_sub(growth);
+                    let reserve = (u128::from(disk.total_bytes)
+                        * u128::from(100 - disk.high_watermark_percent))
+                        / 100;
+                    if disk.pressure || u128::from(available) <= reserve {
+                        violations.push(format!(
+                            "disk {:.2}GiB available; estimated {} lane(s) x 10GiB growth would reach the {}% high watermark; free target caches before retrying",
+                            disk.available_bytes as f64 / 1024_f64.powi(3),
+                            lanes,
+                            disk.high_watermark_percent,
+                        ));
+                    }
+                }
+                Some(Err(error)) => violations.push(format!("disk probe failed: {error}")),
+                None => {}
+            }
+        }
         if !load_admitted {
             if let Some(cpu) = self.pressure.cpu_some_avg10 {
                 if cpu > self.limits.max_cpu_pressure_percent {
@@ -160,6 +220,11 @@ impl BuildGuardSnapshot {
 
     pub(crate) fn refusal_message(&self) -> String {
         let violations = self.violations();
+        if let Some(disk) = violations.iter().find(|reason| reason.starts_with("disk ")) {
+            return format!(
+                "Waiting for build admission: {disk}.\nRetry the same spawn_workers request after restoring disk headroom."
+            );
+        }
         let retry = if violations
             .iter()
             .any(|violation| violation.contains("max_concurrent_builders="))
@@ -275,6 +340,7 @@ fn evaluate_with_builders(
         disabled: false,
         pressure: HostPressure::default(),
         limits: BuildGuardConfig::default(),
+        disk: None,
     }
 }
 
@@ -337,6 +403,57 @@ pub(crate) fn inspect_for_task(
         task,
     )
     .with_host(Path::new("/proc"), config)
+    .with_disk_probe(
+        cas_root,
+        config,
+        crate::factory_target_cache::capacity_status,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_load_1m() -> Option<f64> {
+    let mut load = 0.0;
+    // SAFETY: getloadavg may write exactly one double into this valid pointer.
+    (unsafe { libc::getloadavg(&mut load, 1) } == 1)
+        .then_some(load)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)] // libc exposes Mach host statistics, but deprecates mach_task_self.
+fn macos_available_memory() -> Option<u64> {
+    unsafe extern "C" {
+        fn mach_port_deallocate(
+            task: libc::mach_port_t,
+            name: libc::mach_port_t,
+        ) -> libc::kern_return_t;
+    }
+    let mut stats = std::mem::MaybeUninit::<libc::vm_statistics64>::zeroed();
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    // SAFETY: Mach returns a host send right owned by this call. The zeroed
+    // buffer is correctly sized for HOST_VM_INFO64; count is its integer count.
+    let status = unsafe {
+        let host = libc::mach_host_self();
+        let status = libc::host_statistics64(
+            host,
+            libc::HOST_VM_INFO64,
+            stats.as_mut_ptr().cast(),
+            &mut count,
+        );
+        mach_port_deallocate(libc::mach_task_self(), host);
+        status
+    };
+    if status != libc::KERN_SUCCESS || count < 3 {
+        return None;
+    }
+    // SAFETY: the buffer was zeroed and a successful call populated the first
+    // fields. Free pages already include speculative pages (vm_statistics.h).
+    let stats = unsafe { stats.assume_init() };
+    // SAFETY: sysconf has no pointer parameters or side effects on Rust memory.
+    let page_size = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).ok()?;
+    // Inactive pages are reclaimable. Do not add speculative or purgeable
+    // pages again: those overlap free/active/inactive counts.
+    (u64::from(stats.free_count) + u64::from(stats.inactive_count)).checked_mul(page_size)
 }
 
 fn build_guard_disabled_override() -> bool {
@@ -390,7 +507,7 @@ fn format_load(load: Option<f64>) -> String {
 /// would overstate builder concurrency. Read failures are ignored: an
 /// unverifiable process must not turn a soft guard into a deadlock.
 #[cfg(target_os = "linux")]
-fn live_cargo_worker_count(cas_root: &Path) -> usize {
+fn proc_cargo_worker_count(cas_root: &Path) -> usize {
     let worktrees = cas_root.join("worktrees");
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return 0;
@@ -422,13 +539,124 @@ fn live_cargo_worker_count(cas_root: &Path) -> usize {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn live_cargo_worker_count(_cas_root: &Path) -> usize {
+fn proc_cargo_worker_count(_cas_root: &Path) -> usize {
     0
+}
+
+fn live_cargo_worker_count(cas_root: &Path) -> usize {
+    use fs2::FileExt;
+    // OS slot locks are the portable source of live capped builders. Empty
+    // lock files survive a run; only an occupied lock reserves target growth.
+    let occupied = std::fs::read_dir(cas_root.join("worker-check-slots"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.strip_prefix("slot-")
+                .and_then(|name| name.strip_suffix(".lock"))
+                .is_some_and(|index| index.parse::<usize>().is_ok())
+        })
+        .filter(|entry| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(entry.path())
+                .is_ok_and(|file| match file.try_lock_exclusive() {
+                    Ok(()) => false, // Closing this descriptor releases the probe lock.
+                    Err(error) => error.kind() == std::io::ErrorKind::WouldBlock,
+                })
+        })
+        .count();
+    occupied.max(proc_cargo_worker_count(cas_root))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cas_94ed_disk_admission_projects_target_growth_on_scratch_volume() {
+        use fs2::FileExt;
+        let root = tempfile::tempdir().unwrap();
+        let slots = root.path().join("worker-check-slots");
+        std::fs::create_dir(&slots).unwrap();
+        let slot = std::fs::File::create(slots.join("slot-0.lock")).unwrap();
+        slot.lock_exclusive().unwrap();
+        let live = live_cargo_worker_count(root.path());
+        assert_eq!(live, 1, "portable occupied slots must reserve disk growth");
+        let config = FactoryConfig {
+            scratch_root: Some(root.path().join("future/targets").display().to_string()),
+            ..FactoryConfig::default()
+        };
+        let gib = 1024_u64.pow(3);
+        for (available_gib, refused) in [(40, false), (30, true), (10, true)] {
+            let snapshot = evaluate(32, Some(1.0), live, 1, 4).with_disk_probe(
+                Path::new("/wrong-repository-volume"),
+                &config,
+                |path, policy| {
+                    assert_eq!(path, root.path(), "probe the actual scratch volume");
+                    crate::factory_target_cache::capacity_status_with(path, policy, |_| {
+                        Ok(crate::fs_space::FsSpace {
+                            total_bytes: 100 * gib,
+                            available_bytes: available_gib * gib,
+                            free_bytes: available_gib * gib,
+                        })
+                    })
+                },
+            );
+            for continuation in [false, true] {
+                let violations = snapshot.admission_violations(continuation);
+                assert_eq!(
+                    violations.iter().any(|v| v.starts_with("disk ")),
+                    refused,
+                    "{available_gib}GiB: {violations:?}"
+                );
+            }
+            if refused {
+                assert!(
+                    snapshot
+                        .refusal_message()
+                        .contains("Waiting for build admission: disk ")
+                );
+            }
+            let no_build = BuildGuardSnapshot {
+                requested_builders: 0,
+                ..snapshot
+            };
+            assert!(
+                no_build.violations().is_empty(),
+                "no-code work consumes no target growth"
+            );
+        }
+        drop(slot);
+        assert_eq!(
+            live_cargo_worker_count(root.path()),
+            0,
+            "stale slot files are not live builders"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cas_94ed_macos_native_host_probes_are_available() {
+        let snapshot =
+            evaluate(32, None, 0, 1, 4).with_host(Path::new("/proc"), &FactoryConfig::default());
+        assert!(
+            snapshot
+                .load_1m
+                .is_some_and(|load| load.is_finite() && load >= 0.0),
+            "{snapshot:?}"
+        );
+        assert!(
+            snapshot
+                .pressure
+                .available_memory_bytes
+                .is_some_and(|bytes| bytes > 0),
+            "{snapshot:?}"
+        );
+    }
 
     fn fake_proc(load: f64, cpu: &str, memory: &str, available_kib: u64) -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();

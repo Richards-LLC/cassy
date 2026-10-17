@@ -28,6 +28,7 @@ mod backlog_hygiene;
 mod idle_sync;
 mod slack_transport;
 mod communication;
+mod git_hooks;
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
@@ -274,6 +275,7 @@ impl CheckGroup {
             | "mcp upstream reachability"
             | "sync target"
             | "models"
+            | "git hooks path"
             | "sessionstart budget" => Self::Config,
             "issue repositories" | "shipped issues" => Self::Config,
             "integrations" | "violet" | "violet wake" | "github origin" => Self::Integrations,
@@ -2429,6 +2431,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     recorder.mark("host checks", &checks);
     if let Some(check) = github_origin_check(project_root) { checks.push(check); }
     recorder.mark("GitHub origin", &checks);
+    checks.extend(git_hooks::checks(project_root));
+    recorder.mark("Git hooks path", &checks); // doctor-snapshot: no default row (core.hooksPath unset)
     checks.push(managed_file_drift_check(project_root));
     recorder.mark("managed file drift", &checks);
     checks.push(prompt_hook_check(&cas_root));
@@ -6285,7 +6289,7 @@ mod tests {
         assert!(
             check
                 .message
-                .contains("cas config set cloud.team_only true"),
+                .contains("not proof of an equivalent remote copy"),
             "{}",
             check.message
         );

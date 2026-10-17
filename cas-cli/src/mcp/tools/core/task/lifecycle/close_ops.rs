@@ -2580,6 +2580,17 @@ fn has_recorded_code_delivery(task: &Task) -> bool {
         || !delivery.historical_factory_branch_anchors.is_empty()
 }
 
+/// Releasing a lease retires its assignee, not its recorded delivery.
+/// A legacy worktree_id alone only locates the checkout for dirty-work and
+/// methodology checks; it does not identify a recorded factory delivery.
+fn has_delivery_to_measure(task: &Task) -> bool {
+    task.assignee.is_some()
+        || has_recorded_code_delivery(task)
+        || task.deliverables.parked_branch.is_some()
+        || !task.deliverables.handoff_branches.is_empty()
+        || task.deliverables.integration_batch.is_some()
+}
+
 /// Select one tip for the path, proof-base and snapshot consumers of close.
 fn close_task_delivery_tip(
     task: &Task,
@@ -6411,13 +6422,21 @@ impl CasCore {
         recorded: &str,
         tip: Option<&str>,
     ) -> bool {
-        let (Some(branch), Some(tip), Some(assignee)) =
-            (measured_branch, tip, task.assignee.as_deref())
-        else {
+        let (Some(branch), Some(tip)) = (measured_branch, tip) else {
             return false;
         };
         let branch = branch.strip_prefix("origin/").unwrap_or(branch);
-        if branch != crate::factory_isolation::worker_task_branch(assignee, &task.id) {
+        let own_task_branch = match task.assignee.as_deref() {
+            Some(assignee) => branch == crate::factory_isolation::worker_task_branch(assignee, &task.id),
+            // A released per-task branch still identifies the task. Keep the
+            // recorded-branch and per-task-shape checks: a plain shared lane
+            // must never advance its prior task's anchor to later work.
+            None => task_delivery_branch_candidates(task).iter().any(|known| known == branch)
+                && branch.strip_prefix("factory/")
+                    .and_then(|name| name.strip_suffix(&format!("-{}", task.id)))
+                    .is_some_and(|holder| !holder.is_empty()),
+        };
+        if !own_task_branch {
             return false;
         }
         let Ok(others) = task_store.list(None) else {
@@ -6853,7 +6872,7 @@ impl CasCore {
         task: &Task,
         declared_repo_context: Option<&super::super::repo_context::RepoContext>,
     ) -> Result<(), TaskLifecycleGateError> {
-        if task.task_type == TaskType::Epic || task.assignee.is_none() {
+        if task.task_type == TaskType::Epic || !has_delivery_to_measure(task) {
             return Ok(());
         }
 
@@ -8050,7 +8069,7 @@ impl CasCore {
         // merge queue runs the journeys once.
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
-            && task.assignee.is_some()
+            && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
             && (close_repo_verified || worker_worktree_path.is_some())
         {
             let evidence_repo = if close_repo_verified {
@@ -8086,7 +8105,13 @@ impl CasCore {
                     ),
                 );
             }
-            let qa_receipt = squash_anchor.as_deref().or(delivery_receipt);
+            let released_head = task.assignee.is_none().then(|| {
+                super::qa_evidence_gate::delivered_head(
+                    &task, &evidence_repo, &resolved_parent_branch, delivery_receipt,
+                )
+            }).flatten();
+            let qa_receipt = squash_anchor.as_deref().or(delivery_receipt)
+                .or(released_head.as_deref());
             let attributed_paths = commit_receipt_window.as_ref().and_then(|window| {
                 task_attribution::qa_paths(
                     &evidence_repo,
@@ -8124,7 +8149,7 @@ impl CasCore {
 
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
-            && task.assignee.is_some()
+            && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
             && (close_repo_verified || worker_worktree_path.is_some())
         {
             match run_factory_branch_merge_gate_for_delivery(
@@ -8158,18 +8183,16 @@ impl CasCore {
                     // the working tree nor the index) so the parked state and
                     // this refusal both name the real situation instead of
                     // reading as "done, pending a formality" either way.
-                    let conflict_check = task
-                        .assignee
-                        .as_deref()
-                        .map(|assignee| {
-                            factory_branch_merge_conflict_paths(
-                                &close_project_root,
-                                &resolved_parent_branch,
-                                &recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(
-                                    &close_project_root, &task, assignee)),
-                            )
-                        })
-                        .unwrap_or_else(|| Ok(Vec::new()));
+                    let measured_branch = recovery_branch.clone().or_else(|| {
+                        task.assignee.as_deref().map(|assignee| {
+                            close_measured_factory_branch(&close_project_root, &task, assignee)
+                        }).or_else(|| task_delivery_branch(&close_project_root, &task))
+                    });
+                    let conflict_check = measured_branch.as_deref().map(|branch| {
+                        factory_branch_merge_conflict_paths(
+                            &close_project_root, &resolved_parent_branch, branch,
+                        )
+                    }).unwrap_or_else(|| Ok(Vec::new()));
                     let (conflict_paths, conflict_check_error) =
                         classify_merge_conflict_preflight(conflict_check);
                     // cas-7308a: an unavailable preflight is not evidence that
@@ -8207,34 +8230,28 @@ impl CasCore {
                     // transitions into `AwaitingMerge`; once it's already
                     // parked, a retry gets the same rejection message unless
                     // a new branch tip requires the delivery anchor to move.
-                    let anchor = task.assignee.as_deref().and_then(|assignee| {
-                        resolve_branch_sha(
-                            &close_project_root,
-                            &recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(&close_project_root, &task, assignee)),
-                        )
-                    });
+                    let anchor = measured_branch.as_deref()
+                        .and_then(|branch| resolve_branch_sha(&close_project_root, branch));
                     // cas-44e93: the merge reads the pushed branch, so a
                     // commit origin lacks can never be the delivery anchor.
-                    if let Some(assignee) = task.assignee.as_deref()
+                    if let Some(branch) = measured_branch.as_deref()
                         && let Some(tip) = anchor.as_deref()
                     {
-                        let branch = recovery_branch.clone().unwrap_or_else(|| {
-                            close_measured_factory_branch(&close_project_root, &task, assignee)
-                        });
                         if let Some(pushed) = unpushed_delivery_tip(
                             &close_project_root,
-                            &branch,
+                            branch,
                             tip,
                             task.delivery_mode,
                         ) {
                             return Ok(Self::tool_error(unpushed_delivery_tip_refusal(
-                                &branch, tip, &pushed,
+                                branch, tip, &pushed,
                             )));
                         }
                     }
-                    // cas-d6eb: the blast-radius module check, made while the
-                    // worker can still widen proof_targets (parking locks the
-                    // scope; after verification only a supervisor fix could).
+                    // cas-eac2: fast-rows and focused-test receipts at this
+                    // exact tip, read (never run) while the worker can still
+                    // fix them; cas-d6eb: the blast-radius module check before
+                    // parking locks the proof scope.
                     if task.status != TaskStatus::AwaitingMerge
                         && let Some(tip) = anchor.as_deref()
                         && let Some(paths) = commit_receipt_window.as_ref().and_then(|window| {
@@ -8246,6 +8263,7 @@ impl CasCore {
                             &task,
                             &paths,
                             tip,
+                            &resolved_parent_branch,
                         )
                     {
                         return Ok(Self::tool_error(refusal));
@@ -8257,9 +8275,6 @@ impl CasCore {
                         // task's own commits only, the tip is the delivery:
                         // advance first, so the park, its QA round and its
                         // merge request all name the tip.
-                        let measured_branch = task.assignee.as_deref().map(|assignee| {
-                            recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(&close_project_root, &task, assignee))
-                        });
                         let parking = self.advance_commit_time_anchor_before_park(
                             task_store.as_ref(),
                             &task,
@@ -8279,9 +8294,7 @@ impl CasCore {
                             &msg,
                             anchor.clone(),
                             merge_conflicted,
-                            task.assignee.as_deref().map(|assignee| {
-                                recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(&close_project_root, &task, assignee))
-                            }),
+                            measured_branch.clone(),
                             req.reason.as_deref(),
                         );
                     } else {
@@ -13991,9 +14004,9 @@ pub(crate) fn task_changed_hands(task: &Task) -> bool {
 /// order: the assignee's branch, the commit-time `parked_branch`, recorded
 /// handoff branches (most recent first), then branches named by transfer
 /// audit notes — each checked locally, then as `origin/<branch>`. Returns
-/// `None` when the task has no assignee or none of them resolves.
+/// `None` when none of the recorded candidates resolves. A released task
+/// retains its recorded delivery even though it no longer has an assignee.
 pub(crate) fn task_delivery_branch(repo_path: &std::path::Path, task: &Task) -> Option<String> {
-    task.assignee.as_deref()?;
     let unique = task_delivery_branch_candidates(task);
     unique
         .iter()
@@ -14322,17 +14335,15 @@ pub(crate) fn task_without_own_commits_judged(
     {
         return false;
     }
-    let Some(assignee) = task.assignee.as_deref() else {
-        return true;
-    };
     // GH #1177: allocating a per-task branch does not create a delivery.
     // It may still contain only inherited foreign work, including the commit
     // an earlier false park recorded as this no-code task's anchor. Judge its
     // history by the same ownership rules as the plain and handoff lanes.
-    let lanes = worker_task_branch_ref(repo_path, assignee, &task.id)
-        .into_iter()
-        .chain(std::iter::once(format!("factory/{assignee}")))
-        .chain(delivery.parked_branch.clone())
+    let lanes = task.assignee.as_deref().into_iter().flat_map(|assignee| {
+        worker_task_branch_ref(repo_path, assignee, &task.id)
+            .into_iter()
+            .chain(std::iter::once(format!("factory/{assignee}")))
+    }).chain(delivery.parked_branch.clone())
         .chain(delivery.handoff_branches.iter().cloned());
     for lane in lanes {
         let lane = lane.strip_prefix("origin/").unwrap_or(&lane).to_string();
@@ -14404,16 +14415,19 @@ fn run_factory_branch_merge_gate_for_delivery(
     if task.task_type == TaskType::Epic {
         return MergeStateGateOutcome::Proceed;
     }
-    let Some(assignee) = task.assignee.as_deref() else {
+    if !has_delivery_to_measure(task) && attribution.receipt.is_none() {
         return MergeStateGateOutcome::Proceed;
-    };
+    }
+    let assignee = task.assignee.as_deref();
     // cas-cf64 (P3, option-injection hardening): reject leading-`-`
     // assignee/parent-branch names before they ever reach a git shell-out.
     // `count_unmerged_factory_commits`/`fetch_parent_branch_best_effort`
     // also fail closed on this independently (defense in depth for other
     // callers), but doing it here first gives a clear, actionable error
     // instead of a confusing "u32::MAX commits not merged" message.
-    if !is_safe_git_refname(assignee) || !is_safe_git_refname(parent_branch) {
+    if assignee.is_some_and(|name| !is_safe_git_refname(name))
+        || !is_safe_git_refname(parent_branch)
+    {
         return MergeStateGateOutcome::Reject(format!(
             "⚠️ INVALID BRANCH NAME\n\n\
              task close rejected: the assignee ({assignee:?}) or resolved parent \
@@ -14447,7 +14461,8 @@ fn run_factory_branch_merge_gate_for_delivery(
     if validated_recovery_branch.is_none()
         && no_code_task_without_own_commits(repo_path, task, parent_branch, attribution.receipt)
     {
-        let lane = format!("factory/{assignee}");
+        let lane = assignee.map(|name| format!("factory/{name}"))
+            .unwrap_or_else(|| "recorded delivery".into());
         let lane_state = if git_ref_exists(repo_path, &lane)
             || git_ref_exists(repo_path, &format!("origin/{lane}"))
         {
@@ -14477,7 +14492,15 @@ fn run_factory_branch_merge_gate_for_delivery(
             .and_then(|window| validate_task_commit_receipt(repo_path, receipt, parent_branch, window))
     });
     let factory_branch = match validated_recovery_branch.map(str::to_string)
-        .map(Ok).unwrap_or_else(|| resolve_close_delivery_branch(repo_path, task, assignee)) {
+        .map(Ok).unwrap_or_else(|| match assignee {
+            Some(assignee) => resolve_close_delivery_branch(repo_path, task, assignee),
+            None => task_delivery_branch(repo_path, task)
+                .or_else(|| task_delivery_branch_candidates(task).into_iter().next())
+                .or_else(|| task.deliverables.factory_branch_anchor.clone()
+                    .filter(|anchor| is_safe_git_refname(anchor)))
+                .ok_or_else(|| format!(
+                    "DELIVERY BRANCH UNRESOLVED: released task {} retains code evidence but no recorded delivery branch or active anchor. Restore its delivery branch or retry with a validated integrated commit_receipt.", task.id)),
+        }) {
         Ok(branch) => branch,
         Err(reason) => match (attribution.receipt, receipt_validation.as_ref()) {
             (Some(receipt), Some(Err(receipt_reason))) => {
@@ -14485,7 +14508,9 @@ fn run_factory_branch_merge_gate_for_delivery(
                     repo_path, &task.id, receipt, parent_branch, receipt_reason,
                 ));
             }
-            (_, Some(Ok(_))) => crate::factory_isolation::worker_task_branch(assignee, &task.id),
+            (_, Some(Ok(_))) => assignee
+                .map(|assignee| crate::factory_isolation::worker_task_branch(assignee, &task.id))
+                .unwrap_or_else(|| attribution.receipt.expect("validated receipt").to_string()),
             _ => return MergeStateGateOutcome::Unresolved(reason),
         },
     };
@@ -14565,6 +14590,7 @@ fn run_factory_branch_merge_gate_for_delivery(
         && task_changed_hands(task)
         && branch_ref.is_none()
         && task.deliverables.factory_branch_anchor.is_none()
+        && (assignee.is_some() || !has_recorded_code_delivery(task))
         && task.execution_note.as_deref() != Some("no-code")
         && attribution.receipt.is_none()
     {
@@ -14611,6 +14637,7 @@ fn run_factory_branch_merge_gate_for_delivery(
         // The receipt is not integration proof: later proof/verification
         // gates still bind the delivery to that worktree's current head.
         if !origin_remote_configured(repo_path)
+            && assignee.is_some()
             && task.deliverables.factory_branch_anchor.is_none()
             && task.execution_note.as_deref() != Some("no-code")
         {

@@ -270,7 +270,7 @@ pub use surfaced_artifact_store::{
 pub use prompt_queue_store::{
     AdmissionOutcome, OperatorCommandAdmission,
     BudgetedSurface, InboxHandoffState, HOOK_SURFACE_BUDGET_CHARS, HOOK_SURFACE_ROW_OVERHEAD_CHARS, HookDrain,
-    NOTICE_DIGEST_KIND,
+    NOTICE_DIGEST_KIND, PEER_COPY_KIND,
     fits_hook_surface, hook_surface_cost,
     OPERATOR_CLOUD_SCHEMA_STATEMENTS, OperatorCloudBacklog, OperatorCloudClaim,
     OperatorCloudSettlement, OperatorFeedBinding, OperatorSealedBytes, is_routing_id,
@@ -702,7 +702,9 @@ pub trait TaskStore: Send + Sync {
 
     /// Apply a replicated row only if the expected local clock still matches.
     /// Lifecycle changes are also refused while a local delivery transaction
-    /// owns the task. `None` means no mutation (no events, receipts or clock
+    /// owns the task. An active execution lease protects InProgress from
+    /// replicated Open or nonterminal assignee replacement/clearing.
+    /// `None` means no mutation (no events, receipts or clock
     /// bump). Successful writes use the ordinary store-owned clock.
     ///
     /// This sync-only path does not stage an outbound sync intent. Stores that

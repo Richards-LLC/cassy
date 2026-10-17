@@ -1080,7 +1080,7 @@ pub struct FactoryApp {
     session_focus: Option<SessionEpicFocus>,
     /// cas-4491f: non-live worker panes whose teardown requests wait to be
     /// queued off the loop ([`Self::take_phantom_teardowns`]).
-    pending_phantom_teardowns: Vec<String>,
+    pending_phantom_teardowns: Vec<PhantomWorkerTarget>,
     /// cas-5e72: the daemon writes session metadata (the epic focus, a
     /// removed worker's hold) off the loop. Set, a focus change only records
     /// its write ([`Self::take_epic_focus_write`]) and a hold clear goes to
@@ -1978,11 +1978,17 @@ impl FactoryApp {
     /// The snapshot job classified `phantoms` (cas-4491f: the liveness check
     /// reads `/proc`, so not here). Their teardown requests are queued off
     /// the loop ([`Self::take_phantom_teardowns`]).
-    pub(super) fn reconcile_phantom_worker_panes_from(&mut self, phantoms: Vec<String>) {
+    pub(super) fn reconcile_phantom_worker_panes_from(
+        &mut self,
+        phantoms: Vec<PhantomWorkerTarget>,
+    ) {
         // A pane closed since the job read is no longer anyone's to drop.
-        let to_drop: Vec<String> = phantoms
+        let to_drop: Vec<PhantomWorkerTarget> = phantoms
             .into_iter()
-            .filter(|name| self.worker_names.contains(name))
+            .filter(|target| {
+                self.worker_names.contains(&target.name)
+                    && self.phantom_worker_target(&target.name) == *target
+            })
             .collect();
 
         if to_drop.is_empty() {
@@ -1996,9 +2002,22 @@ impl FactoryApp {
         self.pending_phantom_teardowns = to_drop;
     }
 
+    pub(crate) fn phantom_worker_target(&self, name: &str) -> PhantomWorkerTarget {
+        PhantomWorkerTarget {
+            name: name.to_string(),
+            process_group_id: self.mux.pane_process_group_id(name),
+            harness_session_id: self
+                .mux
+                .get(name)
+                .and_then(|pane| pane.harness_session_id()),
+        }
+    }
+
     /// Phantom worker panes waiting for their teardown requests:
     /// `(cas_dir, factory_session, workers)`.
-    pub(crate) fn take_phantom_teardowns(&mut self) -> Option<(PathBuf, String, Vec<String>)> {
+    pub(crate) fn take_phantom_teardowns(
+        &mut self,
+    ) -> Option<(PathBuf, String, Vec<PhantomWorkerTarget>)> {
         if self.pending_phantom_teardowns.is_empty() {
             return None;
         }
@@ -2438,6 +2457,27 @@ impl FactoryApp {
         &self.supervisor_name
     }
 
+    /// The launch profile and cwd used to diagnose a Codex registration timeout.
+    pub(crate) fn worker_codex_trust_paths(&self, target: &str) -> Option<(PathBuf, PathBuf)> {
+        if self.harness_for(target) != cas_mux::SupervisorCli::Codex {
+            return None;
+        }
+        let home = self
+            .mux
+            .effective_worker_spec(target, None)
+            .config_dir
+            .filter(|home| !home.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(cas_pty::codex_home)?;
+        let cwd = self
+            .worktree_manager
+            .as_ref()
+            .and_then(|manager| manager.get_worker(target))
+            .map(|worker| worker.path.clone())
+            .unwrap_or_else(|| self.project_dir.clone());
+        Some((home.join("config.toml"), cwd))
+    }
+
     /// Resolve a delivery target name to the harness (CLI) it is running.
     ///
     /// This is the source of truth for *recipient-aware* message routing
@@ -2616,6 +2656,12 @@ impl FactoryApp {
     pub(crate) fn set_director_data_for_test(&mut self, data: DirectorData) {
         self.director_data = data.clone();
         self.unfiltered_director_data = data;
+    }
+
+    /// Launch the supervisor under `cli` (tests: a Codex supervisor).
+    #[cfg(test)]
+    pub(crate) fn set_supervisor_cli_for_test(&mut self, cli: cas_mux::SupervisorCli) {
+        self.supervisor_cli = cli;
     }
 
     pub fn director_data(&self) -> &DirectorData {
@@ -3424,20 +3470,56 @@ pub(crate) fn supervisor_progress_from_session_metadata_named(
     ))
 }
 
+/// The pane observed by a snapshot, never a name to resolve after a relaunch.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PhantomWorkerTarget {
+    pub(crate) name: String,
+    pub(crate) process_group_id: Option<u32>,
+    pub(crate) harness_session_id: Option<String>,
+}
+
+impl PhantomWorkerTarget {
+    pub(crate) fn should_keep(&self, agents: &[cas_types::Agent]) -> bool {
+        self.should_keep_with_table(agents, &crate::cli::factory::wedged::RealProcessTable)
+    }
+
+    pub(crate) fn should_keep_with_table(
+        &self,
+        agents: &[cas_types::Agent],
+        table: &dyn crate::cli::factory::wedged::ProcessTable,
+    ) -> bool {
+        crate::mcp::tools::service::agent_liveness::should_keep_worker_pane_with_table(
+            &self.name,
+            agents.iter().filter(|agent| {
+                self.harness_session_id.as_deref().is_none_or(|session| {
+                    agent.id == session || agent.cc_session_id.as_deref() == Some(session)
+                })
+            }),
+            table,
+        )
+    }
+}
+
 /// Queue a forced shutdown for each phantom worker pane (cas-e98e, cas-ca69)
 /// unless one is already queued. Spawn-queue reads and writes, so the daemon
 /// runs it on its store worker (cas-4491f).
 pub(crate) fn queue_phantom_worker_teardowns(
     cas_dir: &std::path::Path,
     factory_session: &str,
-    to_drop: &[String],
+    to_drop: &[PhantomWorkerTarget],
 ) {
     let Ok(queue) = crate::store::open_spawn_queue_store(cas_dir) else {
         tracing::warn!(workers = ?to_drop, "stale worker panes retained: shutdown queue unavailable");
         return;
     };
     let queued = queue.peek(512).unwrap_or_default();
-    for name in to_drop {
+    for target in to_drop {
+        // No observed process means there is nothing safe to signal.
+        if target.process_group_id.is_none() {
+            continue;
+        }
+        let name = &target.name;
         if queued.iter().any(|request| {
             request.action == cas_store::SpawnAction::Shutdown
                 && request.factory_session.as_deref() == Some(factory_session)
@@ -3445,7 +3527,10 @@ pub(crate) fn queue_phantom_worker_teardowns(
         }) {
             continue;
         }
-        match queue.enqueue_shutdown(None, std::slice::from_ref(name), true, Some(factory_session)) {
+        let Ok(generation) = serde_json::to_string(target) else {
+            continue;
+        };
+        match queue.enqueue_scoped_shutdown(name, &generation, Some(factory_session)) {
             Ok(request_id) => {
                 tracing::warn!(worker = %name, request_id, "cas-ca69: non-live worker pane retained until forced shutdown reaps its process tree")
             }
@@ -4921,7 +5006,7 @@ mod tests {
             "session mappings came from the job's agents"
         );
         let (_, queued_for, workers) = app.take_phantom_teardowns().expect("a phantom pane");
-        assert_eq!((queued_for.as_str(), workers), (session, vec!["gone-worker".to_string()]));
+        assert_eq!((queued_for.as_str(), workers.into_iter().map(|target| target.name).collect::<Vec<_>>()), (session, vec!["gone-worker".to_string()]));
     }
 
     /// cas-728b simplify pass: hoisted from two near-identical PTY scaffolds

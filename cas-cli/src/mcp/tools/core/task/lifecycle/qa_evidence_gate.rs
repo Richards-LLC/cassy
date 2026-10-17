@@ -50,12 +50,12 @@ pub(crate) fn delivered_head(
     {
         return Some(receipt);
     }
-    if let Some(assignee) = task.assignee.as_deref()
-        // cas-73b8: the per-task branch when the worker used one.
-        && let Some(tip) = resolve_branch_sha(
-            repo,
-            &super::close_ops::close_measured_factory_branch(repo, task, assignee),
-        )
+    // The durable branch remains the delivery after a lease release clears
+    // the assignee; the closing checkout's HEAD may be the target itself.
+    let branch = task.assignee.as_deref().map(|assignee| {
+        super::close_ops::close_measured_factory_branch(repo, task, assignee)
+    }).or_else(|| super::close_ops::task_delivery_branch(repo, task));
+    if let Some(tip) = branch.as_deref().and_then(|branch| resolve_branch_sha(repo, branch))
     {
         let merged = !target_branch.is_empty()
             && Command::new("git")

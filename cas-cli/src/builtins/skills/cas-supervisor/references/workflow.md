@@ -154,7 +154,7 @@ factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5
 
 Workers from previous sessions are gone. Stale DB records are not live processes.
 
-1. **Check for a stale binary** — run `cas factory preflight`. If it reports a stale Cassy binary, stop and ask the operator to rebuild and reconnect MCP ([preflight.md](preflight.md)). If a "fixed" bug reappears, this is the first thing to check.
+1. **Check deployment evidence** — call `system action=preflight` from connected MCP; otherwise run `cas --json factory preflight`. Follow the structured findings and `factory_blocked` decision in [preflight.md](preflight.md). Missing source comparison alone does not require rebuilding or reconnecting healthy MCP. If a "fixed" bug reappears, check this evidence first.
 2. Spawn fresh workers
 3. Confirm they are live: `factory action=worker_status summary_mode=true`
 4. Assign open tasks to the new workers
@@ -192,8 +192,10 @@ factory action=worktree_merge id=<worker> task_id=<task-id>
 
 `worktree_merge` admits a lane on its CI state and the merge preflight's
 conflict and dirt checks. It runs no local release rows and needs no compile
-receipt: lane CI runs the fast checks once, and the merge queue is the Rust
-compile and suite proof. Rust merges still use the detached venue's
+receipt. The worker's pre-push hook runs the fast rows; park has already read
+their receipt and a test receipt in each changed crate, and `CAS_LANE_SLIM=true`
+drops the lane copies. The merge queue
+is the Rust compile and suite proof. Rust merges still use the detached venue's
 clean-target-checkout rule; commit or stash target-checkout dirt first.
 
 ### Wall-clock is a resource

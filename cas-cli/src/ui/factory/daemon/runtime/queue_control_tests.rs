@@ -588,7 +588,9 @@ fn dequeued_fixture() -> (tempfile::TempDir, FactoryDaemon, i64) {
         .unwrap();
     daemon.enqueue_spawn_requests().unwrap();
     writer.open();
-    settle_until(|| !writer.ran().is_empty());
+    // cas-c4b3: ran() records job entry before poll commits processed_at.
+    // Wait for the durable dequeue, without collecting its result on control.
+    settle_until(|| queue.peek(10).unwrap().is_empty());
     assert!(
         queue.peek(10).unwrap().is_empty(),
         "fixture must cross the destructive poll"

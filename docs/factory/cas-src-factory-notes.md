@@ -84,6 +84,32 @@ Phase 4's full final-tree gate for cross-task integration is the merge queue run
 This combined-tip check addresses the regressions found in
 <https://github.com/Richards-LLC/cassy/issues/759>.
 
+## For `cas-supervisor/references/epic-flow-walk.md` and `cas-qa-craft` — exact-tip binaries
+
+Workers, independent QA reviewers and flow-walk agents cannot compile `cas`:
+the worker hook refuses Rust builds (cas-4cbb). In cas-src, a `real-build` row
+that drives the binary cites one of these sources:
+
+- **Supervisor candidate, before merge.** Build the exact SHA with `cargo build
+  --profile release-fast` in a detached checkout under
+  `.cas/merge-sweeps/<id>-candidate`. Copy the binary to
+  `<artifacts_root>/<project-key>/<id>/candidate/cas`, with the build log
+  beside it as `build-candidate.log`. Its `--version` must print the short
+  SHA, for example `cas 3.62.0 (8a41668 2026-10-17)`. Record `sha256sum`. Run
+  it from scratch projects and sessions only; never install it or restart
+  production with it.
+- **Release prebuild archive, release queue entries only.**
+  `release-prebuild.yml` builds the Linux `release-fast` and macOS archives
+  for a merge-queue entry that changes the release version, or when
+  `release.yml` calls it; ordinary queue entries build nothing.
+  `scripts/find-release-prebuild.sh <sha>` prints `found=` and `run-id=` for a
+  successful run whose head commit or tree equals `<sha>`. Download it with
+  `gh run download <run-id> -n cas-x86_64-unknown-linux-gnu`. The artifacts
+  expire after 14 days.
+- **Installed release, after publish.** Valid once the revision is published
+  and `cas --version` names it; `scripts/release-published-receipt.sh vX.Y.Z`
+  supplies the published digests. It never stands in for unmerged source.
+
 ## From `cas-supervisor/references/filing-cas-bugs.md` — cas-src routing and receipts
 
 - **Project bug or feature:** `issues.repo` — the current project's own issue

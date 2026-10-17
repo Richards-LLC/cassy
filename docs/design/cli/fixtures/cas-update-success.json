@@ -1,0 +1,153 @@
+{
+ "provenance": "Synthetic success counterpart of cas-update-partial-refresh.json: the same twelve projects, every phase current, hub verified on its public Tailscale URL.",
+ "binary": {
+  "current": "3.62.0",
+  "latest": "3.62.0",
+  "target": "x86_64-unknown-linux-gnu",
+  "elapsed_ms": 1400
+ },
+ "hub": {
+  "prior_state": "running",
+  "action": "verified",
+  "verified": true,
+  "service_managed": true,
+  "stdout": "cas update: hub was running → verified at https://soundwave.tailf5a734.ts.net\n"
+ },
+ "refresh_ms": 4000,
+ "user_level": "ok: migrated /home/pippenz/.cas; built-ins current",
+ "projects": [
+  {
+   "project": "/home/pippenz/Petrastella/cassy",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "ok: membership current",
+   "cloud_sync": "ok: up to date",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Petrastella/pantheon",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "ok: membership current",
+   "cloud_sync": "ok: up to date",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Petrastella/prospect_path",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "skipped: not cloud-linked",
+   "cloud_sync": "skipped: not cloud-linked",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Petrastella/gabber-studio",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "ok: membership current",
+   "cloud_sync": "ok: up to date",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Petrastella/pulse-card",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "skipped: not cloud-linked",
+   "cloud_sync": "skipped: not cloud-linked",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Petrastella/rocketship-template",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "ok: membership current",
+   "cloud_sync": "ok: up to date",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Richards LLC/Accounting",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "ok: membership current",
+   "cloud_sync": "ok: up to date",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Petra Stella/Accounting",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "ok: membership current",
+   "cloud_sync": "ok: up to date",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Documents/Accounting",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "skipped: not cloud-linked",
+   "cloud_sync": "skipped: not cloud-linked",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/Penguinz",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "ok: membership current",
+   "cloud_sync": "ok: up to date",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/ai-toolkit",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "skipped: not cloud-linked",
+   "cloud_sync": "skipped: not cloud-linked",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  },
+  {
+   "project": "/home/pippenz/soundwave-config",
+   "migration": "ok: migration",
+   "search_index": "ok: no stray root",
+   "skills": "ok: skills; managed files current",
+   "membership": "skipped: not cloud-linked",
+   "cloud_sync": "skipped: not cloud-linked",
+   "output": {
+    "skills": "  [OK] .claude: built-ins up to date\n  [OK] .codex: built-ins up to date\nManaged files: current (0 untracked, 0 staged)\n"
+   }
+  }
+ ],
+ "skipped_unregistered": []
+}

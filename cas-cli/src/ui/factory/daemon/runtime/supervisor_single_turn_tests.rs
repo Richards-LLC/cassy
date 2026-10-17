@@ -31,6 +31,11 @@ pub(super) fn fixture_child(test: &str) -> bool {
 }
 
 pub(super) async fn fixture() -> (tempfile::TempDir, FactoryDaemon) {
+    fixture_for(cas_mux::SupervisorCli::Claude).await
+}
+
+/// [`fixture`] with the supervisor launched under `cli`.
+pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempDir, FactoryDaemon) {
     let root = tempfile::tempdir().unwrap();
     let cas = crate::store::init_cas_dir(root.path()).unwrap();
     let mut daemon = super::provisioning_tests::daemon(&cas);
@@ -71,10 +76,11 @@ pub(super) async fn fixture() -> (tempfile::TempDir, FactoryDaemon) {
             pty,
             24,
             80,
-            cas_mux::SupervisorCli::Claude,
+            cli,
         )
         .unwrap(),
     );
+    daemon.app.set_supervisor_cli_for_test(cli);
     let teams = super::teams::TeamsManager::new(&daemon.session_name);
     teams
         .init_team_config(&[], root.path(), &Default::default(), "single-sup")
@@ -122,10 +128,25 @@ fn lifecycle_body(daemon: &FactoryDaemon, status: cas_types::TaskStatus, transit
     )
 }
 
+/// Advance only already-admitted write commands, never select another row.
+/// A queued payload is deliberately not a completed transport handoff.
+pub(super) async fn settle_injected_writes(daemon: &mut FactoryDaemon) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while daemon.app.mux.has_pending_injects() {
+            daemon.advance_urgent_injects().await;
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("admitted payload and submit writes must complete");
+    let cas = daemon.app.cas_dir().to_path_buf();
+    daemon.queue_jobs.settle_injects(&cas);
+    daemon.queue_jobs.apply_completions();
+}
+
 /// The supervisor PTY received exactly one submitted turn containing `needle`
 /// and no Teams relay was written.
-pub(super) async fn typed_once(root: &tempfile::TempDir, daemon: &FactoryDaemon, needle: &str) -> String {
+pub(super) async fn typed_once(root: &tempfile::TempDir, daemon: &mut FactoryDaemon, needle: &str) -> String {
     tokio::time::sleep(Duration::from_millis(200)).await;
+    daemon.process_prompt_queue().await.unwrap();
     let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
     assert!(typed.contains(needle), "{typed:?}");
     assert_eq!(typed.matches('\r').count(), 1, "one PTY submit: {typed:?}");
@@ -149,6 +170,40 @@ pub(super) fn teams_messages(daemon: &FactoryDaemon) -> Vec<serde_json::Value> {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|_| "[]".into())).unwrap()
 }
 
+/// cas-979e: on the daemon's job lanes a fresh claim comes back a pass after
+/// it is submitted. A fresh Codex supervisor's startup brief must be typed on
+/// that pass, not held by the re-nudge cadence its claim-only pass reserved.
+#[tokio::test(flavor = "current_thread")]
+async fn cas_979e_codex_startup_brief_is_typed_once_on_job_lanes() {
+    if !fixture_child("cas_979e_codex_startup_brief_is_typed_once_on_job_lanes") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
+    let cas = daemon.app.cas_dir().to_path_buf();
+    daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(
+        cas.clone(),
+        daemon.app.project_scope(),
+    );
+    daemon.queue_jobs.store(&cas).unwrap();
+    let name = daemon.app.supervisor_name().to_string();
+    // The real launch enqueue (init.rs), as `cas codex` runs it.
+    crate::ui::factory::queue_supervisor_intro_prompt(
+        &cas, &name, cas_mux::SupervisorCli::Codex, &[], None, None,
+    );
+    let needle = "Codex supervisor startup";
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        daemon.app.mux.flush_deferred_injections().await;
+        daemon.process_prompt_queue().await.unwrap();
+        if std::fs::read_to_string(root.path().join("input")).unwrap().contains(needle) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    typed_once(&root, &mut daemon, needle).await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn cas_3f90_bounded_event_has_one_body_turn_and_no_relay_copy() {
     if !fixture_child("cas_3f90_bounded_event_has_one_body_turn_and_no_relay_copy") {
@@ -158,7 +213,7 @@ async fn cas_3f90_bounded_event_has_one_body_turn_and_no_relay_copy() {
     let (root, mut daemon) = fixture().await;
     let id = event(&daemon, BODY);
     daemon.process_prompt_queue().await.unwrap();
-    let typed = typed_once(&root, &daemon, BODY).await;
+    let typed = typed_once(&root, &mut daemon, BODY).await;
     assert!(typed.contains(&format!("[cas #{id} ")), "row identity must survive: {typed:?}");
     let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
     let receipt = || queue.message_delivery_report(id).unwrap().unwrap().recipient_receipt;
@@ -184,7 +239,8 @@ async fn cas_3f90_bounded_event_has_one_body_turn_and_no_relay_copy() {
         session_id: "single-turn-supervisor".into(),
         cwd: root.path().to_string_lossy().into_owned(),
         hook_event_name: "UserPromptSubmit".into(),
-        user_prompt: Some(typed.trim_end_matches('\r').into()),
+        user_prompt: Some(format!("<pasted_content id=\"1\">{}</pasted_content>",
+            typed.trim_end_matches('\r').trim_start_matches("\x1b[200~").trim_end_matches("\x1b[201~"))),
         agent_role: Some("supervisor".into()),
         ..Default::default()
     };
@@ -230,7 +286,8 @@ async fn cas_3f90_busy_event_waits_without_a_held_relay_then_wakes_once() {
     }
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (root, mut daemon) = fixture().await;
-    let id = event(&daemon, BODY);
+    let body = BODY.replace("review the lane.", &format!("review the lane.{}", " detail".repeat(180)));
+    let id = event(&daemon, &body);
     let name = daemon.app.supervisor_name().to_string();
     daemon.pane_silent_since.insert(name.clone(), Instant::now());
     daemon.process_prompt_queue().await.unwrap();
@@ -239,10 +296,25 @@ async fn cas_3f90_busy_event_waits_without_a_held_relay_then_wakes_once() {
     assert!(queue.deferred_inbox_state(id).unwrap().is_none(), "no Teams handoff occurred");
     nothing_typed_or_relayed(&root, &daemon);
     assert!(queue.recipient_receipt(id, "supervisor").unwrap().is_none(), "hook can still take it");
+    let report = queue.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(report.pending_reason, Some(cas_store::PendingReason::AwaitingBusyRecipient), "busy inline rows leave selection until their bounded recheck/turn end");
+    let parked_wake_state = queue.wake_gate_state(id).unwrap();
+    for _ in 0..3 {
+        daemon.process_prompt_queue().await.unwrap();
+        nothing_typed_or_relayed(&root, &daemon);
+        assert_eq!(queue.wake_gate_state(id).unwrap(), parked_wake_state, "parked row is not reconsidered each poll");
+        assert!(queue.recipient_receipt(id, "supervisor").unwrap().is_none(), "busy row keeps no transport claim");
+        assert_eq!(queue.message_delivery_report(id).unwrap().unwrap().pending_reason, Some(cas_store::PendingReason::AwaitingBusyRecipient));
+        assert!(!daemon.lifecycle_redelivery_attempts.contains_key(&id), "busy veto spends no cadence");
+    }
+    // An input-ready transition re-offers the durable park before its timeout.
     daemon.pane_silent_since.insert(name, Instant::now() - Duration::from_secs(600));
-    daemon.lifecycle_redelivery_attempts.remove(&id);
     daemon.process_prompt_queue().await.unwrap();
-    typed_once(&root, &daemon, BODY).await;
+    assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none(), "enqueue alone cannot finish the row");
+    let typed = typed_once(&root, &mut daemon, &body).await;
+    assert_eq!(typed.matches(&format!("[cas #{id} ")).count(), 1);
+    assert!(typed.starts_with("\x1b[200~"), "Claude receives one explicit paste, including the envelope");
+    assert!(typed.ends_with("\x1b[201~\r"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -306,7 +378,7 @@ async fn cas_3f90_lifecycle_action_has_one_submit_and_no_duplicate_relay() {
     let body = lifecycle_body(&daemon, cas_types::TaskStatus::Blocked, "task_blocked", "in_progress", 124, "Need a decision before proceeding.");
     let id = enqueue(&daemon, "lifecycle-wake:124", &body, cas_store::QueueOrigin::Daemon);
     daemon.process_prompt_queue().await.unwrap();
-    typed_once(&root, &daemon, &body).await;
+    typed_once(&root, &mut daemon, &body).await;
     let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
     assert_eq!(queue.message_delivery_report(id).unwrap().unwrap().wake_attempt, cas_store::WakeAttempt::Fired);
 }
@@ -330,7 +402,7 @@ async fn cas_3f90_quiet_batch_does_not_starve_a_later_action() {
     daemon.process_prompt_queue().await.unwrap();
     nothing_typed_or_relayed(&root, &daemon);
     daemon.process_prompt_queue().await.unwrap();
-    typed_once(&root, &daemon, BODY).await;
+    typed_once(&root, &mut daemon, BODY).await;
     assert!(queue.queued_prompt(action).unwrap().unwrap().processed_at.is_some());
     let quiet = queue.surface_unseen_for_recipient("supervisor", Some(&daemon.session_name), 20).unwrap();
     assert_eq!(quiet.len(), 12, "parking spends no wake budget or read receipt");
@@ -349,6 +421,6 @@ async fn cas_3f90_inline_peer_retains_the_shared_inbox_label() {
     let body = "Please coordinate this delivery with me.";
     enqueue(&daemon, &peer.name, body, cas_store::QueueOrigin::RegisteredAgent { agent_id: peer.id.clone() });
     daemon.process_prompt_queue().await.unwrap();
-    let typed = typed_once(&root, &daemon, body).await;
+    let typed = typed_once(&root, &mut daemon, body).await;
     assert!(typed.contains("[peer supervisor]"), "{typed:?}");
 }

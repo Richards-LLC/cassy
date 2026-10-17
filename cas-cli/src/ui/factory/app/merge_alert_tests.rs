@@ -217,6 +217,34 @@ fn cas_9efb_live_target_suppresses_relay_with_origin_prefixed_target() {
     );
 }
 
+/// cas-e48d: CI can finish after the integration target has moved, while
+/// the worker tip remains unchanged. Exercise the real delivery-read path;
+/// only the GitHub response is replaced, using a real bare Git remote.
+#[test]
+fn cas_e48d_target_merged_during_ci_probe_suppresses_relay() {
+    let mut f = Fixture::new();
+    let tip = git(f.repo.path(), &["rev-parse", "factory/merge-w"]);
+    crate::test_paths::warm_stub(
+        &f.app.cas_dir.join("gh-fixture"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; else git --git-dir='{}' update-ref refs/heads/epic/test '{}' && cat .cas/ci.json; fi\n",
+            f.remote.path().display(),
+            tip,
+        ),
+    );
+
+    let prompts = f.relay();
+    assert_eq!(
+        git(f.remote.path(), &["rev-parse", "epic/test"]),
+        tip,
+        "precondition: the merge was pushed while GitHub completed the CI probe"
+    );
+    assert!(
+        prompts.is_empty(),
+        "CI completion must not emit a merge demand against the pre-CI target: {prompts:?}"
+    );
+}
+
 #[test]
 fn cas_9efb_relay_dedupes_task_tip_ci_despite_unrelated_target_move() {
     let mut f = Fixture::new();

@@ -71,7 +71,7 @@ impl ManagerProbe {
 const SYSTEMD_FORCE_RESTART_SIGNALS: &str = "SIGHUP SIGINT SIGPIPE";
 /// Open-file limit for the supervised hub. launchd's default soft limit of
 /// 256 let Commander bursts exhaust it (EMFILE on accept, cas-6cc6).
-const HUB_FILE_LIMIT: u32 = 8192;
+const HUB_FILE_LIMIT: u64 = 8192;
 // Both findings below point at `cas hub restart`: it stops a detached hub if
 // one is running and (re)starts the installed service.
 pub(crate) const INACTIVE_DETACHED_HUB_WARNING: &str = "service installed but inactive, detached hub running without restart supervision. Fix: run `cas hub restart` to hand the hub back to the service";
@@ -1515,14 +1515,14 @@ fn launchd_plist(
 "#,
         log_path = xml_escape(&log_path.display().to_string()),
         file_limits = ["SoftResourceLimits", "HardResourceLimits"]
-            .map(launchd_file_limit_block)
+            .map(|key| launchd_file_limit_block(key, HUB_FILE_LIMIT))
             .concat(),
     )
 }
 
-fn launchd_file_limit_block(key: &str) -> String {
+fn launchd_file_limit_block(key: &str, limit: u64) -> String {
     format!(
-        "  <key>{key}</key>\n  <dict>\n    <key>NumberOfFiles</key>\n    <integer>{HUB_FILE_LIMIT}</integer>\n  </dict>\n"
+        "  <key>{key}</key>\n  <dict>\n    <key>NumberOfFiles</key>\n    <integer>{limit}</integer>\n  </dict>\n"
     )
 }
 
@@ -1530,6 +1530,7 @@ fn launchd_file_limit_block(key: &str) -> String {
 /// existing `NumberOfFiles` (an operator's own value) is left alone.
 fn ensure_launchd_file_limits(definition: &str) -> Result<String> {
     let mut definition = definition.to_owned();
+    let mut limit = HUB_FILE_LIMIT;
     for key in ["SoftResourceLimits", "HardResourceLimits"] {
         let marker = format!("<key>{key}</key>");
         let Some(key_start) = definition.find(&marker) else {
@@ -1541,7 +1542,7 @@ fn ensure_launchd_file_limits(definition: &str) -> Result<String> {
             let line_start = definition[..anchor]
                 .rfind('\n')
                 .map_or(0, |newline| newline + 1);
-            definition.insert_str(line_start, &launchd_file_limit_block(key));
+            definition.insert_str(line_start, &launchd_file_limit_block(key, limit));
             continue;
         };
         let after_key = key_start + marker.len();
@@ -1550,7 +1551,7 @@ fn ensure_launchd_file_limits(definition: &str) -> Result<String> {
             definition.replace_range(
                 value_start..value_start + "<dict/>".len(),
                 &format!(
-                    "<dict>\n    <key>NumberOfFiles</key>\n    <integer>{HUB_FILE_LIMIT}</integer>\n  </dict>"
+                    "<dict>\n    <key>NumberOfFiles</key>\n    <integer>{limit}</integer>\n  </dict>"
                 ),
             );
             continue;
@@ -1564,13 +1565,34 @@ fn ensure_launchd_file_limits(definition: &str) -> Result<String> {
             .find("</dict>")
             .map(|offset| dict_start + offset)
             .with_context(|| format!("launchd {key} has an unclosed dict"))?;
-        if !definition[dict_start..dict_end].contains("<key>NumberOfFiles</key>") {
-            let insert_at = definition[..dict_end]
+        if let Some((_, value)) =
+            definition[dict_start..dict_end].split_once("<key>NumberOfFiles</key>")
+        {
+            if key == "SoftResourceLimits" {
+                let value = value
+                    .trim_start()
+                    .strip_prefix("<integer>")
+                    .and_then(|value| value.split_once("</integer>"))
+                    .context("launchd SoftResourceLimits NumberOfFiles has no integer")?
+                    .0;
+                // A missing hard limit must permit the operator's soft limit.
+                limit = limit.max(
+                    value
+                        .trim()
+                        .parse::<u64>()
+                        .context("invalid launchd SoftResourceLimits NumberOfFiles")?,
+                );
+            }
+        } else {
+            // Only consider newlines inside this dict: an inline closing tag
+            // must not place NumberOfFiles before the opening tag.
+            let insert_at = definition[dict_start..dict_end]
                 .rfind('\n')
-                .map_or(dict_end, |newline| newline + 1);
+                .map_or(dict_end, |newline| dict_start + newline + 1);
+            let prefix = if insert_at == dict_end { "\n" } else { "" };
             definition.insert_str(
                 insert_at,
-                &format!("    <key>NumberOfFiles</key>\n    <integer>{HUB_FILE_LIMIT}</integer>\n"),
+                &format!("{prefix}    <key>NumberOfFiles</key>\n    <integer>{limit}</integer>\n"),
             );
         }
     }
@@ -1791,6 +1813,31 @@ exit 0
             rewrite_launchd_publication_flags(&disabled, true, 8443).unwrap(),
             enabled
         );
+        let custom = original
+            .replace("<integer>8192</integer>", "<integer>16384</integer>")
+            .replace(
+                &launchd_file_limit_block("HardResourceLimits", HUB_FILE_LIMIT)
+                    .replace("8192", "16384"),
+                "",
+            );
+        let repaired = rewrite_launchd_publication_flags(&custom, true, 8443).unwrap();
+        for key in ["SoftResourceLimits", "HardResourceLimits"] {
+            let dict = repaired
+                .split(&format!("<key>{key}</key>"))
+                .nth(1)
+                .unwrap()
+                .split("<dict>")
+                .nth(1)
+                .unwrap()
+                .split("</dict>")
+                .next()
+                .unwrap();
+            assert!(dict.contains("<integer>16384</integer>"), "{key}: {dict}");
+        }
+        assert_eq!(
+            rewrite_launchd_publication_flags(&repaired, true, 8443).unwrap(),
+            repaired
+        );
     }
 
     #[test]
@@ -1834,6 +1881,38 @@ exit 0
             2,
             "{repaired}"
         );
+        for empty in ["<dict/>", "<dict></dict>", "<dict> </dict>"] {
+            let existing = ["SoftResourceLimits", "HardResourceLimits"]
+                .into_iter()
+                .fold(repaired.clone(), |plist, key| {
+                    plist.replace(
+                        &launchd_file_limit_block(key, HUB_FILE_LIMIT),
+                        &format!("  <key>{key}</key>\n  {empty}\n"),
+                    )
+                });
+            let fixed = rewrite_launchd_publication_flags(&existing, true, 8443).unwrap();
+            for key in ["SoftResourceLimits", "HardResourceLimits"] {
+                let dict = fixed
+                    .split(&format!("<key>{key}</key>"))
+                    .nth(1)
+                    .unwrap()
+                    .split("<dict>")
+                    .nth(1)
+                    .unwrap()
+                    .split("</dict>")
+                    .next()
+                    .unwrap();
+                assert!(
+                    dict.contains("<key>NumberOfFiles</key>"),
+                    "{empty}: {key}: {dict}"
+                );
+                assert!(dict.contains("<integer>8192</integer>"), "{dict}");
+            }
+            assert_eq!(
+                rewrite_launchd_publication_flags(&fixed, true, 8443).unwrap(),
+                fixed
+            );
+        }
         assert_eq!(
             rewrite_launchd_publication_flags(&repaired, true, 8443).unwrap(),
             repaired,
@@ -1849,7 +1928,9 @@ exit 0
                     true,
                     8443,
                 ),
-                |plist, limits| plist.replace(&launchd_file_limit_block(limits), ""),
+                |plist, limits| {
+                    plist.replace(&launchd_file_limit_block(limits, HUB_FILE_LIMIT), "")
+                },
             )
             .replace("\n    ", "\n\t\t")
             .replace("\n  ", "\n\t");

@@ -300,7 +300,9 @@ mod cases {
 
         // Unrelated modes never touch mouse state.
         let mut other = Pane::director("other", 24, 80).expect("create pane");
-        other.feed(b"\x1b[?25h\x1b[?2004h\x1b[?1004h\x1b[?1049h").unwrap();
+        other
+            .feed(b"\x1b[?25h\x1b[?2004h\x1b[?1004h\x1b[?1049h")
+            .unwrap();
         assert!(!other.wants_sgr_mouse_clicks());
     }
 
@@ -365,7 +367,10 @@ mod cases {
         // A complete sequence should NOT be kept — it ends with h/l.
         let data = b"\x1b[?1049h";
         let partial = Pane::trailing_dec_partial(data);
-        assert!(partial.is_empty(), "complete sequence must not be carried: {partial:?}");
+        assert!(
+            partial.is_empty(),
+            "complete sequence must not be carried: {partial:?}"
+        );
     }
 
     #[test]
@@ -415,12 +420,7 @@ mod cases {
 
         // Split start + body with CR/LF + split end — director has no PTY so write
         // fails, but submit marking runs before write.
-        let chunks: &[&[u8]] = &[
-            b"\x1b[20",
-            b"0~line1\nline2\r",
-            b"\x1b[201",
-            b"~",
-        ];
+        let chunks: &[&[u8]] = &[b"\x1b[20", b"0~line1\nline2\r", b"\x1b[201", b"~"];
         rt.block_on(async {
             for chunk in chunks {
                 let _ = pane
@@ -591,7 +591,12 @@ mod cases {
     fn test_hyperlink_gate_detects_introducer_split_across_many_feeds() {
         let mut pane = Pane::director("osc8-split", 4, 40).expect("create pane");
         assert!(!pane.has_hyperlinks());
-        for chunk in [b"\x1b".as_ref(), b"]".as_ref(), b"8".as_ref(), b";".as_ref()] {
+        for chunk in [
+            b"\x1b".as_ref(),
+            b"]".as_ref(),
+            b"8".as_ref(),
+            b";".as_ref(),
+        ] {
             pane.feed(chunk).expect("feed chunk");
         }
         assert!(
@@ -601,7 +606,12 @@ mod cases {
 
         // Non-link control sequences never set the flag.
         let mut plain = Pane::director("osc8-plain", 4, 40).expect("create pane");
-        for chunk in [b"\x1b".as_ref(), b"[".as_ref(), b"1m".as_ref(), b"hi".as_ref()] {
+        for chunk in [
+            b"\x1b".as_ref(),
+            b"[".as_ref(),
+            b"1m".as_ref(),
+            b"hi".as_ref(),
+        ] {
             plain.feed(chunk).expect("feed chunk");
         }
         assert!(!plain.has_hyperlinks());
@@ -679,5 +689,51 @@ mod cases {
             "the line-discipline echo alone grows pane output by the payload size, \
              which is why byte growth cannot prove that a turn started"
         );
+    }
+    #[tokio::test]
+    async fn cas_0df9_inject_receipt_waits_for_payload_and_submit() {
+        let pty = crate::pty::Pty::spawn(
+            "cas-0df9-receipt",
+            crate::pty::PtyConfig {
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), "exec cat >/dev/null".into()],
+                cwd: Some(std::env::temp_dir()),
+                env: vec![],
+                env_remove: vec![],
+                rows: 24,
+                cols: 80,
+            },
+        )
+        .unwrap();
+        let pane = Pane::with_pty(
+            "cas-0df9-receipt",
+            PaneKind::Worker,
+            pty,
+            24,
+            80,
+            SupervisorCli::Claude,
+        )
+        .unwrap();
+        let gate = crate::submit_gate::SubmitGate::new();
+        crate::submit_gate::hold_next_submit(pane.id(), gate.clone());
+        let receipt = pane
+            .inject_prompt_tracked("[cas #42 peer-supervisor] complete body")
+            .unwrap();
+        pane.input_drained_for_test();
+        assert!(
+            receipt.result().is_none(),
+            "written payload without a submit is not Delivered"
+        );
+        gate.open();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while receipt.result().is_none() && tokio::time::Instant::now() < deadline {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            receipt.result(),
+            Some(Ok(())),
+            "both physical writes completed"
+        );
+        assert!(!pane.inject_submit_pending());
     }
 }

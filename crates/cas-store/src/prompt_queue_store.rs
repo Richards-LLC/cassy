@@ -257,6 +257,12 @@ pub fn fits_hook_surface(prompt: &str) -> bool {
 /// one as a single digest line instead. `inbox_poll` still reads them whole.
 pub const NOTICE_DIGEST_KIND: &str = "notice_digest";
 
+/// cas-8cbe: the `kind` CAS stamps on the supervisor's copy of a worker
+/// peer message, in the same transaction as the recipient's row. No request
+/// field reaches `kind` on a non-operator row, so it proves the row is a copy
+/// CAS made rather than mail that spells the copy's lead.
+pub const PEER_COPY_KIND: &str = "worker_peer_copy";
+
 /// cas-bf890: the predicate for [`NOTICE_DIGEST_KIND`] rows over an unaliased
 /// `prompt_queue`, for the daemon's selection.
 const NOT_NOTICE_DIGEST_SQL: &str = "AND NOT (COALESCE(origin_kind, '') = 'daemon' \
@@ -4641,6 +4647,7 @@ fn recipient_action_satisfies_alarm_on_conn(conn: &Connection, prompt_id: i64) -
         )?)
     };
     let mut action = String::new();
+    let mut lifecycle_tasks = None;
     if exists("agents")? {
         let mut evidence = vec![
             "EXISTS (SELECT 1 FROM prompt_queue outbound
@@ -4667,21 +4674,65 @@ fn recipient_action_satisfies_alarm_on_conn(conn: &Connection, prompt_id: i64) -
                     .into(),
             );
         }
-        action = format!("OR (q.transport_delivered_at IS NOT NULL AND EXISTS (
+        if exists("supervisor_queue")? {
+            // A parked worker may re-close without holding a lease. The
+            // lifecycle outbox still records its successful action (cas-6d5c).
+            // Bind that evidence to tasks named in this message; unrelated
+            // work must not retire an actionable request's alarm.
+            let text: Option<String> = conn
+                .query_row(
+                    "SELECT prompt FROM prompt_queue WHERE id=?",
+                    [prompt_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let mut tasks = text
+                .as_deref()
+                .unwrap_or_default()
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                .filter(|token| token.starts_with("cas-") && token.len() > 4)
+                .collect::<Vec<_>>();
+            tasks.sort_unstable();
+            tasks.dedup();
+            if !tasks.is_empty() {
+                lifecycle_tasks = Some(serde_json::to_string(&tasks)?);
+                evidence.push(
+                    "EXISTS (SELECT 1 FROM supervisor_queue lifecycle
+                    WHERE lifecycle.event_type = 'task_lifecycle'
+                      AND json_valid(lifecycle.payload)
+                      AND json_extract(lifecycle.payload, '$.factory_session') = q.factory_session
+                      AND json_extract(lifecycle.payload, '$.actor') IN (recipient.id, recipient.name)
+                      AND json_extract(lifecycle.payload, '$.transition') IN
+                          ('task_started', 'task_awaiting_merge', 'task_closed')
+                      AND json_extract(lifecycle.payload, '$.task_id') IN (SELECT value FROM json_each(?2))
+                      AND julianday(lifecycle.created_at) > julianday(q.transport_delivered_at))"
+                        .into(),
+                );
+            }
+        }
+        action = format!(
+            "OR (q.transport_delivered_at IS NOT NULL AND EXISTS (
             SELECT 1 FROM agents recipient
              WHERE recipient.factory_session = q.factory_session
                AND recipient.role = 'worker' AND recipient.name = q.target
-               AND ({})))", evidence.join(" OR "));
+               AND ({})))",
+            evidence.join(" OR ")
+        );
+    }
+    let mut bindings: Vec<&dyn rusqlite::ToSql> = vec![&prompt_id];
+    if let Some(tasks) = &lifecycle_tasks {
+        bindings.push(tasks);
     }
     Ok(conn.query_row(
         &format!(
-            "SELECT EXISTS(SELECT 1 FROM prompt_queue q WHERE q.id = ?
+            "SELECT EXISTS(SELECT 1 FROM prompt_queue q WHERE q.id = ?1
             AND (lower(q.source) = lower(q.target) {action}))"
         ),
-        [prompt_id],
+        rusqlite::params_from_iter(bindings),
         |row| row.get(0),
     )?)
 }
+
 /// cas-e829: a Commander turn (`target = 'operator'`) belongs to the session
 /// that wrote it. Live delivery and history both select on
 /// `factory_session`, so a row without one could never be delivered and
@@ -5508,9 +5559,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let origin_kind = origin.map(QueueOrigin::kind_str);
             let origin_agent_id = origin.and_then(QueueOrigin::agent_id);
             tx.execute(
-                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent, origin_agent_id, origin_kind) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-                params![source, supervisor, supervisor_copy, now_text, factory_session, summary, priority, origin_agent_id, origin_kind],
+                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent, origin_agent_id, origin_kind, kind) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                params![source, supervisor, supervisor_copy, now_text, factory_session, summary, priority, origin_agent_id, origin_kind, PEER_COPY_KIND],
             )?;
             let supervisor_copy_id = tx.last_insert_rowid();
             tx.execute(
@@ -8982,8 +9033,17 @@ impl SqlitePromptQueueStore {
             // terminally quarantined as dropped/suppressed/abandoned — neither
             // is actionable content, and both read as live instructions to the
             // worker that receives them.
-            let stale_cutoff =
-                (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
+            // cas-8cbe: a named read is the recipient asking for one row it
+            // was told about (a compacted card's read-in-full escape), not an
+            // automatic surfacing. It serves the row for as long as retention
+            // keeps it, acked or not.
+            let named_read = matches!(transport, TransportEligibility::NamedRead);
+            let stale_cutoff = if named_read {
+                String::new()
+            } else {
+                (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339()
+            };
+            let explicit_ack_sql = if named_read { "" } else { UNSURFACED_UNLESS_EXPLICIT_ACK_SQL };
             let deliverable_sql = format!(
                 "AND q.created_at >= ?
                  AND (q.highest_stage IS NULL
@@ -9107,7 +9167,7 @@ impl SqlitePromptQueueStore {
                            ON seen.prompt_id = q.id AND seen.recipient = ?
                          WHERE 1 = 1
                            {receipt_sql}
-                           {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
+                           {explicit_ack_sql}
                            {deliverable_sql}
                            {daemon_nudge_sql}
                            {digest_sql}
@@ -9154,7 +9214,7 @@ impl SqlitePromptQueueStore {
                            ON seen.prompt_id = q.id AND seen.recipient = ?
                          WHERE 1 = 1
                            {receipt_sql}
-                           {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
+                           {explicit_ack_sql}
                            {deliverable_sql}
                            {daemon_nudge_sql}
                            {digest_sql}
@@ -13581,6 +13641,40 @@ mod tests {
         assert!(read.recipient_receipt.is_some_and(SurfacingSource::is_surfaced));
         assert!(SurfacingSource::HookSurfaced.is_surfaced());
         assert!(SurfacingSource::ObservedWake.is_surfaced());
+    }
+
+    /// cas-8cbe: `inbox_poll notification_id=N` is the read-in-full escape a
+    /// compacted supervisor card names, so the named read serves the row
+    /// after the automatic-surfacing stale TTL and after an explicit ack.
+    #[test]
+    fn named_read_serves_a_retained_row_past_the_stale_ttl_and_after_ack() {
+        let (_temp, store) = create_test_store();
+        let aged = store
+            .enqueue_with_session("worker-a", "sup", "aged body", "factory-a")
+            .unwrap();
+        let acked = store
+            .enqueue_with_session("worker-a", "sup", "acked body", "factory-a")
+            .unwrap();
+        store.ack(acked).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            let two_days_ago = (Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                params![two_days_ago, aged],
+            )
+            .unwrap();
+        }
+        assert!(
+            store.poll_unseen_for_recipient("sup", Some("factory-a"), 10).unwrap().is_empty(),
+            "an unnamed poll still skips both"
+        );
+        let read = store
+            .poll_named_for_recipient("sup", Some("factory-a"), &[aged, acked])
+            .unwrap();
+        let mut ids = read.iter().map(|row| row.id).collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![aged, acked]);
     }
 
     /// Communication contract v2, P1.3 (cas-f7b0): a row that reached the

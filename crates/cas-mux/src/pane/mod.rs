@@ -91,21 +91,41 @@ enum ComposerEscapeState {
     ControlSequence,
 }
 
-/// Whether an injected payload reached the PTY (cas-786a6 review L1).
+/// Physical completion of an injected payload AND its submit CR.
+/// This says nothing about whether the harness started a turn.
 #[derive(Debug, Clone, Default)]
-pub struct PayloadWrite(std::sync::Arc<std::sync::Mutex<Option<std::result::Result<(), String>>>>);
+pub struct PayloadWrite(std::sync::Arc<std::sync::Mutex<InjectWriteState>>);
 
-impl PayloadWrite {
-    fn finish(&self, result: std::result::Result<(), String>) {
-        *self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
-    }
-
-    /// `None` while the bytes wait in the pane's input queue.
-    pub fn result(&self) -> Option<std::result::Result<(), String>> {
-        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
-    }
+#[derive(Debug, Default)]
+struct InjectWriteState {
+    payload: Option<std::result::Result<(), String>>,
+    submit: Option<std::result::Result<(), String>>,
 }
 
+impl PayloadWrite {
+    fn payload_finished(&self, result: std::result::Result<(), String>) {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).payload = Some(result);
+    }
+
+    fn submit_finished(&self, result: std::result::Result<(), String>) {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).submit = Some(result);
+    }
+
+    /// Pending until both writes finish; either physical failure is reported.
+    pub fn result(&self) -> Option<std::result::Result<(), String>> {
+        let state = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(Err(error)) = &state.payload {
+            return Some(Err(format!("payload write failed: {error}")));
+        }
+        if let Some(Err(error)) = &state.submit {
+            return Some(Err(format!("submit write failed: {error}")));
+        }
+        match (&state.payload, &state.submit) {
+            (Some(Ok(())), Some(Ok(()))) => Some(Ok(())),
+            _ => None,
+        }
+    }
+}
 
 /// A pane in the multiplexer
 pub struct Pane {
@@ -1323,7 +1343,7 @@ impl Pane {
     /// consumes the trailing CR as the paste terminator and leaves the whole
     /// message sitting in the composer as an unsubmitted draft — see
     /// [`crate::harness::HarnessCapabilities::requires_bracketed_paste_injection`]
-    /// for the live measurements. Claude and Grok payloads are unchanged.
+    /// for the measurements. Claude also uses explicit paste (cas-0df9).
     ///
     /// This is the single choke point for BOTH injection paths — normal
     /// (`Mux::inject`) and urgent (`Mux::interrupt_and_inject`, which calls
@@ -1347,7 +1367,9 @@ impl Pane {
                 let written = receipt.clone();
                 pty.input().write_then(
                     &framed,
-                    Box::new(move |result| written.finish(result.map_err(|error| error.to_string()))),
+                    Box::new(move |result| {
+                        written.payload_finished(result.map_err(|error| error.to_string()))
+                    }),
                 )?;
                 // Send carriage return after a settle delay in a background task
                 // so we don't block the daemon event loop for 150-500ms. The CR
@@ -1374,6 +1396,7 @@ impl Pane {
                 // (its provenance envelope still being written) holds the CR,
                 // boundedly, in this detached task.
                 let gate = crate::submit_gate::take(&self.id);
+                let submitted = receipt.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
                     if let Some(gate) = gate
@@ -1399,6 +1422,7 @@ impl Pane {
                         );
                     };
                     let on_failure = report.clone();
+                    let completed = submitted.clone();
                     // cas-786a6 review H1: a control write, taken past the
                     // buffer cap, so a full buffer never strands the payload
                     // unsubmitted.
@@ -1407,11 +1431,16 @@ impl Pane {
                         Some(Box::new(move |result| match result {
                             Ok(()) => {
                                 submit_pending.store(false, std::sync::atomic::Ordering::Release);
+                                completed.submit_finished(Ok(()));
                             }
-                            Err(error) => on_failure(error.to_string()),
+                            Err(error) => {
+                                completed.submit_finished(Err(error.to_string()));
+                                on_failure(error.to_string());
+                            }
                         })),
                     );
                     if let Err(error) = queued {
+                        submitted.submit_finished(Err(error.to_string()));
                         report(error.to_string());
                     }
                 });

@@ -7,6 +7,123 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.63.0] - 2026-10-17
+
+### Fixed — sessions start and messages stay readable
+
+- **Startup without typing** — Was: a fresh Codex or Claude session could sit
+  idle with its startup brief waiting. → Now: the first turn starts without
+  typing, while typing, readiness and pending-tool safeguards remain in place.
+- **Long messages arrive whole** — Was: delivery into an idle Claude pane
+  could repeat and lose the opening text. → Now: the complete message,
+  including its sender and opening instructions, arrives in one turn.
+- **Compact routine activity** — Was: routine status updates and copied notices
+  crowded the pane. → Now: they appear as compact cards, direct messages stay
+  complete, and explicit reads return the full original text.
+- **Inbox history survives optional check failures** — Was: a failed
+  reply-permission check stopped conversation history and could falsely show
+  "No messages yet". → Now: history keeps loading independently, loading and
+  unavailable states are explicit, and actual revoked access is still refused.
+
+### Changed — `cas update` output you can read
+
+- **Phase-by-phase receipt** — Was: child output interleaved with findings and
+  a blanket retry hint. → Now: one line per phase, compact findings, a clear
+  binary and refresh verdict, and the reason-specific Cloud remedy.
+- **Install prompts** — Was: a declined install read as a failure and the
+  download bar could swallow the result. → Now: a decline reads as cancelled,
+  the download shows on its phase line, and a failed install names the cause
+  and says "rerun `cas update` to retry".
+- **Honest counts** — Was: a failed user-level store counted as a failed
+  project. → Now: projects and the user-level store are counted separately,
+  and exit reasons break between clauses at 80 columns.
+- **Retired settings removed** — Was: obsolete Cassy TOML keys warned on every
+  run. → Now: `cas update` retires them with a locked atomic write and one
+  compact maintenance receipt. Read-only configs are left untouched.
+- **Fewer repeat writes** — Was: each refresh rewrote identical hook settings
+  and rule files (63 identical writes on a repeat refresh). → Now: none.
+  Unchanged files keep their bytes and mtime, and only changed or missing ones
+  are repaired.
+- **Refused commit is an incomplete refresh** (GH #1259) — Was: a managed-file
+  commit refused by the checkout's commit guard looked like a file conflict on
+  a complete run. → Now: the refresh is reported incomplete and staged work is
+  kept.
+- **Stale Git index lock** — Was: a leftover `.git/index.lock` failed the
+  skills phase with a generic error. → Now: the lock is named with its age and
+  whether Git is still running, plus a manual remedy. The lock and index are
+  never touched.
+
+### Fixed — Cloud sync keeps your data
+
+- **Team-only cleanup needs proof** (GH #1268) — Was: switching to team-only
+  could drop queued personal changes that no team write had confirmed. → Now:
+  a personal row is removed only after an identical team write is
+  acknowledged. `cas cloud queue --purge-team-owned --dry-run` previews exact
+  IDs, and cleanup requires `--ids`.
+- **NUL characters explained** — Was: a task note containing U+0000 failed to
+  sync with no stated reason. → Now: the error names the upstream storage
+  block and keeps the stored text unchanged. The rows stay parked, and
+  `--retry-reason invalid_json_nul` applies only after Cloud supports lossless
+  NUL storage. This is an explanation, not a drain fix.
+- **Live tasks stay in progress** — Was: a team pull could downgrade a task
+  from In Progress to Open while its owner was working. → Now: live execution
+  ownership survives the pull.
+
+### Added — `cas doctor` reports a missing Git hooks directory
+
+- **Git hooks path** (GH #1263) — Was: doctor said nothing when
+  `core.hooksPath` pointed at a deleted directory. → Now: a Config warning
+  names the missing path and how to inspect and restore it. Doctor never
+  changes Git config. The repository ships a tracked `.githooks/pre-push`, and
+  `scripts/install-git-hooks.sh` installs it only from the operator's main
+  checkout.
+
+### Fixed — factory reliability
+
+- **Recycled sessions survive** — Was: `recycle_worker` could stop the
+  relaunched Codex process two seconds after restart. → Now: teardown is
+  scoped to the old generation and the replacement keeps running.
+- **No false stall alarms** (GH #1230 regression) — Was: "delivery stalled —
+  recipient unread" fired for workers that had already acted. → Now: task
+  lifecycle evidence counts as acting.
+- **Merge alerts** — Was: "MERGE REQUIRED" was resent for deliveries already
+  merged, and stall relays named peer-owned deliveries. → Now: the alert
+  rechecks the fresh target, and relays name only this factory's deliveries.
+- **Remote merges** — Was: `worktree_merge` needed a local worktree, so peer
+  deliveries were merged by hand. → Now: a pushed delivery merges by branch,
+  with CI bound to its exact SHA.
+- **Close gate** — Was: a delivery reopened by `request_changes` could close on
+  a lane-CI citation before reaching the target. → Now: target containment and
+  independent QA are required.
+- **Codex hooks check** — Was: the main-checkout check compared after the
+  PreToolUse budget upgrade and reported "stale". → Now: it compares first and
+  shows the real error.
+- **Codex startup guidance** (GH #1253) — Was: startup preflight guidance
+  treated unknown evidence as stale. → Now: it follows the active MCP state and
+  says when evidence is unknown.
+- **Hub file limit on macOS** — Was: repair could put `NumberOfFiles` outside
+  its dict, or leave Hard below a high Soft limit. → Now: limits stay inside
+  the dict, with Hard at least max(Soft, 8192).
+
+### Changed — builds respect disk and leave an audit trail
+
+- **Disk-aware admission** — Was: builder lanes were admitted at 93% disk, and
+  macOS load read "unknown". → Now: builds reserve disk headroom, and macOS
+  host pressure is probed.
+- **Reclaimable caches** — Was: GC couldn't see unknown caches or reclaim
+  terminal lanes' warm targets. → Now: unknown caches are inventoried and
+  terminal lanes release their targets under pressure.
+- **Build logs** — Was: worker-check logs were truncated on every retry and had
+  no slot timestamps. → Now: logs append across retries, and builder slots
+  record admission and release in UTC.
+
+### Changed — CI
+
+- **Leaner factory lanes (off by default)** — Was: every factory push ran
+  broad Rust and the fast rows. → Now: with `vars.CAS_LANE_SLIM=true`, factory
+  pushes skip them, pre-push runs the fast rows and park reads exact-tip
+  receipts. Unset, CI behaves as before.
+
 ## [3.62.0] - 2026-10-17
 
 ### Added

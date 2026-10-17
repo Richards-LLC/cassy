@@ -3187,18 +3187,21 @@ async fn failed_submit_keeps_later_injections_deferred_cas_eacc() {
         .expect("install deterministic writer");
     mux.add_pane(pane);
 
-    assert_eq!(
-        mux.inject("submit-failure", "director lifecycle event one")
-            .await
-            .expect("payload write succeeds before delayed CR failure"),
-        InjectOutcome::Delivered
-    );
+    let InjectStart::Started(ticket) = mux.begin_inject("submit-failure", "director lifecycle event one").unwrap() else {
+        panic!("clean pane begins a tracked normal write");
+    };
+    assert!(mux.advance_injects().await.is_empty(), "payload enqueue is not Delivered");
     assert!(
         mux.get("submit-failure").unwrap().inject_submit_pending(),
         "the lane closes as soon as the payload is written"
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+    let done = mux.advance_injects().await;
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].ticket, ticket);
+    assert!(done[0].result.as_ref().unwrap_err().to_string().contains("submit"), "failed CR never yields Delivered");
+
     assert!(
         mux.get("submit-failure").unwrap().inject_submit_pending(),
         "a failed submit CR must keep the pane unsafe instead of reopening the lane"
@@ -3767,7 +3770,7 @@ async fn back_to_back_urgent_injects_never_break_between_payload_and_cr() {
     let written = recorded.0.lock().unwrap().clone();
     assert_eq!(
         written,
-        b"\x1bFIRST\r\x1bSECOND\r".to_vec(),
+        b"\x1b\x1b[200~FIRST\x1b[201~\r\x1b\x1b[200~SECOND\x1b[201~\r".to_vec(),
         "{:?}",
         String::from_utf8_lossy(&written)
     );
@@ -3783,7 +3786,7 @@ async fn a_held_submit_gate_holds_the_cr_until_it_opens() {
     pane.inject_prompt("payload").await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     pane.input_drained_for_test();
-    assert_eq!(recorded.0.lock().unwrap().as_slice(), b"payload", "no CR while the gate is shut");
+    assert_eq!(recorded.0.lock().unwrap().as_slice(), b"\x1b[200~payload\x1b[201~", "no CR while the gate is shut");
     assert!(pane.inject_submit_pending());
     gate.open();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -3791,7 +3794,7 @@ async fn a_held_submit_gate_holds_the_cr_until_it_opens() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     pane.input_drained_for_test();
-    assert_eq!(recorded.0.lock().unwrap().as_slice(), b"payload\r");
+    assert_eq!(recorded.0.lock().unwrap().as_slice(), b"\x1b[200~payload\x1b[201~\r");
 }
 
 #[test]

@@ -16,6 +16,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   worker is told once. Red-CI override merges, rejected verdicts and QA-held
   deliveries still wait, and a worker close racing Cassy's reports the first.
 
+### Fixed
+
+- **Release report links and timing** — Was: the report's release PR and
+  GitHub release showed as `<https://…>` text with no link in the HTML or PDF,
+  and a latency measured with `release-latency-receipt.sh --run-dir` was never
+  found, so its timing rows were written by hand. → Now: both are links, and
+  `cas release report --latency-receipt <path>` reads that measurement.
+
 ## [3.61.0] - 2026-10-17
 
 ### Added

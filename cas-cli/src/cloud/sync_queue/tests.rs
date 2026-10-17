@@ -364,6 +364,9 @@ fn team_only_neutralizes_project_copies_without_deleting_personal_rows() {
         "a durable receipt cannot authorize a changed snapshot after restart"
     );
     assert_eq!(queue.personal_row_count().unwrap(), 6);
+    queue.enqueue(EntityType::Task, "project-task", SyncOperation::Upsert, team.payload.as_deref()).unwrap();
+    assert_eq!(queue.neutralize_team_only_personal("team-1", "p").unwrap(), 0,
+        "an old receipt cannot authorize a newly queued identical payload at the reused row ID");
     assert_eq!(
         queue.list_metadata().unwrap().len(),
         1,

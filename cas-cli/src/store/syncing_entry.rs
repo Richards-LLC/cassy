@@ -573,10 +573,13 @@ mod tests {
         store.add(&entry).unwrap();
         assert_eq!(queue_counts(&queue), (1, 1));
 
+        let original_personal = queue.pending(10, 5).unwrap().remove(0).payload;
         store.team_only = true;
         entry.content = "after".to_string();
         store.update(&entry).unwrap();
         assert_eq!(queue_counts(&queue), (1, 1));
+        assert_eq!(queue.pending(10, 5).unwrap().remove(0).payload, original_personal,
+            "routing changes must preserve the original mutation payload");
     }
 
     #[test]

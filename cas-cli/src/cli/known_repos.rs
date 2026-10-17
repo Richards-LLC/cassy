@@ -9,6 +9,7 @@
 use anyhow::Result;
 use cas_store::KnownRepoStore;
 use clap::Subcommand;
+use serde::Serialize;
 use std::path::PathBuf;
 
 use crate::store::known_repos::{
@@ -79,14 +80,14 @@ pub enum KnownReposCommands {
     },
 }
 
-pub fn execute(cmd: &KnownReposCommands) -> Result<()> {
+pub fn execute(cmd: &KnownReposCommands, json: bool) -> Result<()> {
     // `known-repos` is the bootstrap entry point for the registry, so we
     // install the schema here (idempotent) to cover hosts where `cas init`
     // predates the registry.
     ensure_host_schema()?;
     match cmd {
-        KnownReposCommands::List => execute_list(),
-        KnownReposCommands::Status => execute_status(),
+        KnownReposCommands::List => execute_list(json),
+        KnownReposCommands::Status => execute_status(json),
         KnownReposCommands::Bind { repo } => execute_bind(repo),
         KnownReposCommands::Unbind { selector } => execute_unbind(selector),
         KnownReposCommands::Seed { scan_home } => execute_seed(*scan_home),
@@ -234,19 +235,59 @@ fn execute_unbind(selector: &str) -> Result<()> {
     Ok(())
 }
 
-fn execute_status() -> Result<()> {
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BindingState {
+    Valid,
+    Stale,
+}
+
+#[derive(Serialize)]
+struct BindingRow {
+    selector: String,
+    repo_root: PathBuf,
+    state: BindingState,
+}
+
+#[derive(Serialize)]
+struct BindingReport {
+    bindings: Vec<BindingRow>,
+}
+
+fn execute_status(json: bool) -> Result<()> {
     let store = open_host_known_repo_store()?;
-    let bindings = store.list_bindings()?;
-    if bindings.is_empty() {
+    let report = BindingReport {
+        bindings: store
+            .list_bindings()?
+            .into_iter()
+            .map(|binding| {
+                let state =
+                    if crate::mcp::tools::core::task::repo_context::binding_is_live(&binding) {
+                        BindingState::Valid
+                    } else {
+                        BindingState::Stale
+                    };
+                BindingRow {
+                    selector: binding.selector,
+                    repo_root: binding.repo_root,
+                    state,
+                }
+            })
+            .collect(),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if report.bindings.is_empty() {
         println!("No explicit host-local repository bindings.");
         return Ok(());
     }
-    println!("{} host-local binding(s):", bindings.len());
-    for binding in bindings {
-        let state = if crate::mcp::tools::core::task::repo_context::binding_is_live(&binding) {
-            "valid"
-        } else {
-            "STALE"
+    println!("{} host-local binding(s):", report.bindings.len());
+    for binding in report.bindings {
+        let state = match binding.state {
+            BindingState::Valid => "valid",
+            BindingState::Stale => "STALE",
         };
         println!(
             "  [{state}] {} -> {}",
@@ -320,16 +361,43 @@ pub(crate) fn prune_missing(dry_run: bool) -> Result<PruneMissingReport> {
     })
 }
 
-fn execute_list() -> Result<()> {
-    let repos = list_tracked_repos()?;
-    if repos.is_empty() {
+#[derive(Serialize)]
+struct RepoRow {
+    path: PathBuf,
+    healthy: bool,
+    touch_count: u64,
+}
+
+#[derive(Serialize)]
+struct RepoReport {
+    repos: Vec<RepoRow>,
+    binding_count: usize,
+}
+
+fn execute_list(json: bool) -> Result<()> {
+    let report = RepoReport {
+        repos: list_tracked_repos()?
+            .into_iter()
+            .map(|repo| RepoRow {
+                path: repo.path,
+                healthy: repo.healthy,
+                touch_count: repo.touch_count,
+            })
+            .collect(),
+        binding_count: open_host_known_repo_store()?.list_bindings()?.len(),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if report.repos.is_empty() {
         println!(
             "No known repos yet. Run `cas init` in a project, or `cas known-repos seed` to bootstrap from existing sessions."
         );
         return Ok(());
     }
-    println!("{} known repo(s):", repos.len());
-    for r in repos {
+    println!("{} known repo(s):", report.repos.len());
+    for r in report.repos {
         let flag = if r.healthy { "ok    " } else { "MISSING" };
         println!(
             "  [{flag}] touch_count={:<4} {}",
@@ -337,11 +405,10 @@ fn execute_list() -> Result<()> {
             r.path.display()
         );
     }
-    let bindings = open_host_known_repo_store()?.list_bindings()?;
-    if !bindings.is_empty() {
+    if report.binding_count > 0 {
         println!(
             "{} explicit binding(s); run `cas known-repos status` for validated details.",
-            bindings.len()
+            report.binding_count
         );
     }
     Ok(())

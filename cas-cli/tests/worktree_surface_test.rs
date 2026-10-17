@@ -2062,8 +2062,21 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
                 refused.message
             );
             task.deliverables.factory_branch_anchor = Some(anchor.clone());
-            task.demo_statement = "Review the peer delivery".into();
             tasks.update(&task).unwrap();
+            let now = chrono::Utc::now();
+            cas_store::open_qa_pass(
+                &cas_root,
+                &cas_store::NewQaPass {
+                    task_id: &task.id,
+                    implementer_agent_id: "peer-implementer",
+                    branch: "factory/peer-worker",
+                    bound_head: &anchor,
+                    deadline_at: now + chrono::Duration::minutes(30),
+                    max_rounds: 3,
+                },
+                now,
+            )
+            .unwrap();
             let refused = svc
                 .coordination(Parameters(request.clone()))
                 .await
@@ -2073,8 +2086,17 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
                 "{}",
                 refused.message
             );
-            task.demo_statement.clear();
-            tasks.update(&task).unwrap();
+            cas_store::waive_qa_pass(
+                &cas_root,
+                &task.id,
+                &supervisor.id,
+                "peer-implementer",
+                "factory/peer-worker",
+                &anchor,
+                "fixture: isolate merge routing after proving the pending-QA refusal",
+                now,
+            )
+            .unwrap();
             assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/peer"]), before);
         }
         env.set(

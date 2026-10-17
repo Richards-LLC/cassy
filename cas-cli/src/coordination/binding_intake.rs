@@ -27,7 +27,7 @@ impl IntakeScope {
         if Uuid::parse_str(&self.team_id).is_err()
             || self.canonical_project_id.trim().is_empty()
             || self.canonical_project_id.len() > 256
-            || !self.channel_id.starts_with('C')
+            || !self.channel_id.starts_with(['C', 'G'])
             || !self.channel_id.bytes().all(|b| b.is_ascii_alphanumeric())
         {
             return Err("invalid binding intake scope".into());
@@ -48,6 +48,7 @@ pub struct PauseRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChannelDisposition {
+    Paused,
     Unknown,
     Managed {
         completion: Box<ReconciliationResponse>,
@@ -151,6 +152,59 @@ impl IntakeJournal {
                 return Err("invalid binding intake journal generation/operation".into());
             }
         }
+        let mut channels = std::collections::HashSet::new();
+        let root_scope = state
+            .pauses
+            .first()
+            .map(|p| &p.scope)
+            .or_else(|| state.policies.first().map(|p| &p.scope));
+        for scope in state
+            .pauses
+            .iter()
+            .map(|p| &p.scope)
+            .chain(state.policies.iter().map(|p| &p.scope))
+        {
+            scope.validate()?;
+            if root_scope.is_some_and(|root| {
+                root.team_id != scope.team_id
+                    || root.canonical_project_id != scope.canonical_project_id
+            }) {
+                return Err(
+                    "binding intake journal contains conflicting project/team scopes".into(),
+                );
+            }
+        }
+        for policy in &state.policies {
+            if !channels.insert(&policy.scope.channel_id) {
+                return Err("duplicate channel intake policy".into());
+            }
+            match &policy.disposition {
+                ChannelDisposition::Managed { completion } => {
+                    let request = ReconciliationRequest::new(
+                        &policy.scope.team_id,
+                        &policy.scope.canonical_project_id,
+                        &policy.scope.channel_id,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    let bytes = serde_json::to_vec(completion).map_err(|e| e.to_string())?;
+                    if request
+                        .parse_response(200, &bytes)
+                        .map_err(|e| e.to_string())?
+                        .code
+                        != ReconciliationCode::Completed
+                        || !state.conservative_unclassified
+                    {
+                        return Err("managed policy lacks strict completion/safety latch".into());
+                    }
+                }
+                ChannelDisposition::Paused | ChannelDisposition::Unknown => {
+                    if !state.pauses.iter().any(|p| p.scope == policy.scope) {
+                        return Err("channel gate lacks its original pause".into());
+                    }
+                }
+                ChannelDisposition::LegacyAllowed => {}
+            }
+        }
         Ok(state)
     }
     fn write_locked(&self, state: &IntakeState) -> Result<(), String> {
@@ -182,21 +236,53 @@ impl IntakeJournal {
     /// Project-wide v1 claims cannot select channels. Any pause closes that
     /// admission path. C will refine direct reads without opening v1 claims.
     pub fn legacy_allowed(&self) -> Result<bool, String> {
-        Ok(self.read()?.pauses.is_empty())
+        let state = self.read()?;
+        let blocked = state.pauses.iter().any(|pause| {
+            !matches!(
+                state
+                    .policies
+                    .iter()
+                    .find(|policy| policy.scope == pause.scope)
+                    .map(|p| &p.disposition),
+                Some(ChannelDisposition::Managed { .. } | ChannelDisposition::LegacyAllowed)
+            )
+        }) || state.policies.iter().any(|p| {
+            matches!(
+                p.disposition,
+                ChannelDisposition::Paused | ChannelDisposition::Unknown
+            )
+        });
+        Ok(!blocked
+            && (!state.conservative_unclassified
+                || state
+                    .policies
+                    .iter()
+                    .any(|p| matches!(p.disposition, ChannelDisposition::LegacyAllowed))))
     }
     /// Must be durable before the first ordinary POST byte can leave. There is
     /// deliberately no negative-GET/refusal/timer API that clears uncertainty.
     pub fn mark_submitting(&self, operation_id: Uuid) -> Result<(), String> {
         let _lock = self.lock()?;
-        let state = self.read_locked()?;
-        if !state
+        let mut state = self.read_locked()?;
+        let scope = state
             .pauses
             .iter()
-            .any(|pause| pause.operation_id == operation_id)
-        {
-            return Err("submission requires an existing durable pause".into());
+            .find(|pause| pause.operation_id == operation_id)
+            .ok_or("submission requires an existing durable pause")?
+            .scope
+            .clone();
+        if let Some(policy) = state.policies.iter_mut().find(|p| p.scope == scope) {
+            match policy.disposition {
+                ChannelDisposition::Managed { .. } | ChannelDisposition::Unknown => return Ok(()),
+                _ => policy.disposition = ChannelDisposition::Unknown,
+            }
+        } else {
+            state.policies.push(ChannelPolicy {
+                scope,
+                disposition: ChannelDisposition::Unknown,
+            });
         }
-        Ok(())
+        self.write_locked(&state)
     }
 
     pub fn store_completed(
@@ -226,6 +312,30 @@ impl IntakeJournal {
         if response.code != ReconciliationCode::Completed {
             return Err("only strict evidenced completion permits managed handoff".into());
         }
+        let existing = state
+            .policies
+            .iter()
+            .find(|policy| policy.scope == scope)
+            .ok_or("completion requires durable submitting state")?;
+        match &existing.disposition {
+            ChannelDisposition::Unknown => {}
+            ChannelDisposition::Managed {
+                completion: previous,
+            } => {
+                if previous.binding != response.binding
+                    || previous.fence_receipt != response.fence_receipt
+                {
+                    return Err(
+                        "immutable managed tuple/fence changed; explicit operator repair required"
+                            .into(),
+                    );
+                }
+                if previous.as_ref() == &response {
+                    return Ok(());
+                }
+            }
+            _ => return Err("completion requires durable submitting state".into()),
+        }
         state
             .policies
             .retain(|policy| policy.scope.channel_id != scope.channel_id);
@@ -251,6 +361,12 @@ impl IntakeJournal {
         }
         let _lock = self.lock()?;
         let mut state = self.read_locked()?;
+        if state.pauses.first().is_some_and(|p| {
+            p.scope.team_id != scope.team_id
+                || p.scope.canonical_project_id != scope.canonical_project_id
+        }) {
+            return Err("project/team changed since original intake gate; explicit operator repair required".into());
+        }
         if let Some(existing) = state.pauses.iter().find(|p| p.operation_id == operation_id) {
             return if existing.scope == scope {
                 Ok(existing.clone())
@@ -271,6 +387,16 @@ impl IntakeJournal {
             generation: state.generation,
         };
         state.pauses.push(pause.clone());
+        if let Some(policy) = state.policies.iter_mut().find(|p| p.scope == pause.scope) {
+            if matches!(policy.disposition, ChannelDisposition::LegacyAllowed) {
+                policy.disposition = ChannelDisposition::Paused;
+            }
+        } else {
+            state.policies.push(ChannelPolicy {
+                scope: pause.scope.clone(),
+                disposition: ChannelDisposition::Paused,
+            });
+        }
         self.write_locked(&state)?;
         Ok(pause)
     }
@@ -286,7 +412,7 @@ mod tests {
         let scope = IntakeScope {
             team_id: Uuid::new_v4().to_string(),
             canonical_project_id: "project".into(),
-            channel_id: "C123".into(),
+            channel_id: "G123".into(),
         };
         assert!(journal.legacy_allowed().unwrap());
         let operation = Uuid::new_v4();
@@ -370,7 +496,11 @@ mod recovery_tests {
         assert!(!state.channel_legacy_allowed(&scope.channel_id));
         assert!(!state.channel_legacy_allowed("CUNCLASSIFIED"));
         let mut foreign = completed.clone();
+        foreign.scope.as_mut().unwrap().workspace_id = "T9999999999".into();
         foreign.binding.as_mut().unwrap().workspace_id = "T9999999999".into();
+        request
+            .parse_response(200, &serde_json::to_vec(&foreign).unwrap())
+            .unwrap();
         assert!(restarted.store_completed(operation, &foreign).is_err());
         assert_eq!(std::fs::read(restarted.path()).unwrap(), evidence);
     }

@@ -911,3 +911,102 @@ fn format_suggestion_summary(s: &serde_json::Value) -> String {
 
     format!("[P{priority}] [{category}] [{user_response}] {id} — {truncated}{rec}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pattern_create_reports_cloud_write_outcome_cas_d16e() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        // Production deployment 7133052455, Cloud 9ed61999: POST /api/patterns
+        // returns the inserted row directly with HTTP 201 (route.ts:90).
+        for (response, created) in [
+            (
+                r#"{"id":"pat-fixture-1","content":"Fixture guidance","category":"general","priority":1,"propagation":"all_projects"}"#,
+                true,
+            ),
+            (r#"{"accepted":true}"#, false),
+            ("not-json", false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join(".cas");
+            std::fs::create_dir_all(&root).unwrap();
+            let server = std::sync::Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+            crate::cloud::CloudConfig {
+                endpoint: format!("http://{}", server.server_addr()),
+                token: Some("cas-d16e-fixture-token".into()),
+                ..Default::default()
+            }
+            .save_to_cas_dir(&root)
+            .unwrap();
+            let http = server.clone();
+            let reply = std::thread::spawn(move || {
+                let mut request = http
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+                    .expect("one create request");
+                assert_eq!(request.method().as_str(), "POST");
+                assert_eq!(request.url(), "/api/patterns");
+                let payload: serde_json::Value =
+                    serde_json::from_reader(request.as_reader()).unwrap();
+                assert_eq!(payload["content"], "Fixture guidance");
+                assert_eq!(
+                    payload["propagation_tags"],
+                    serde_json::json!(["cas-d16e-fixture"])
+                );
+                request
+                    .respond(
+                        tiny_http::Response::from_string(response)
+                            .with_status_code(201)
+                            .with_header(
+                                tiny_http::Header::from_bytes(
+                                    "x-request-id",
+                                    "create-fixture-request",
+                                )
+                                .unwrap(),
+                            ),
+                    )
+                    .unwrap();
+            });
+            let core = CasCore::with_daemon(root, None, None);
+            #[cfg(feature = "mcp-proxy")]
+            let service = CasService::new(core, None);
+            #[cfg(not(feature = "mcp-proxy"))]
+            let service = CasService::new(core);
+            let result = service
+                .pattern(Parameters(
+                    serde_json::from_value(serde_json::json!({
+                        "action": "create", "content": "Fixture guidance",
+                        "category": "general", "priority": 1,
+                        "propagation": "all_projects", "tags": "cas-d16e-fixture",
+                    }))
+                    .unwrap(),
+                ))
+                .await;
+            reply.join().unwrap();
+            assert!(
+                server.try_recv().unwrap().is_none(),
+                "create must not retry a write"
+            );
+            if created {
+                let result = result.expect("Cloud returned the persisted pattern row");
+                assert_ne!(result.is_error, Some(true));
+                let text = result
+                    .content
+                    .iter()
+                    .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(text.contains("Created pattern: pat-fixture-1"), "{text}");
+                assert!(text.contains("Fixture guidance"), "{text}");
+            } else {
+                let error = result.expect_err("an unreadable post-write result is uncertain");
+                assert_eq!(error.data.as_ref().unwrap()["outcome"], "uncertain");
+                assert!(error.message.contains("Do not retry"), "{error}");
+                assert!(error.message.contains("pattern action=list"), "{error}");
+                assert!(error.message.contains("create-fixture-request"), "{error}");
+            }
+        }
+    }
+}

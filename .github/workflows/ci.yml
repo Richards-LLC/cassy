@@ -1635,6 +1635,152 @@ jobs:
             echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
           fi
 
+  a153-macos-proof:
+    name: a153 native macOS GC proof
+    if: github.event_name == 'push' && github.ref == 'refs/heads/factory/a153-macos-proof'
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      ZIG: ${{ github.workspace }}/.context/zig/zig
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig
+        run: ./scripts/bootstrap-zig.sh
+
+      - name: Report Apple and Zig toolchains
+        run: |
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR"
+          xcode-select --print-path
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-path
+          xcrun --sdk macosx --show-sdk-version
+          ./.context/zig/zig version
+          ./.context/zig/zig env
+
+      - name: Setup sccache
+        id: setup-sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Probe sccache backend
+        env:
+          SCCACHE_OUTCOME: ${{ steps.setup-sccache.outcome }}
+        shell: bash
+        run: |
+          if [[ "$SCCACHE_OUTCOME" != "success" ]] || ! sccache --start-server; then
+            echo "::warning::sccache backend unavailable — building uncached"
+            printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=false\nSCCACHE_PATH=%s/scripts/sccache-unavailable.sh\n' \
+              "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          fi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          save-if: false
+
+      - name: Record native OS and source ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a153-macos-proof"
+          {
+            date -u
+            sw_vers
+            uname -a
+            xcodebuild -version
+            git rev-parse HEAD HEAD^
+            test "$(git rev-parse HEAD^)" = c18c46391f6f26f383419e49d044f2eeb43914da
+            git merge-base --is-ancestor d9733a007ca51b2d70c983b22f39865a082053be HEAD
+            echo "Parent assertion: PASS; d9733a007 ancestry: PASS"
+            echo "Process snapshot (runner and parent):"
+            ps -p "$$" -p "$PPID" -o pid,ppid,comm
+            echo "Lock/process evidence: the scratch suite below exercises real locks/processes and the native macOS ps/lsof path."
+          } 2>&1 | tee "$RUNNER_TEMP/a153-macos-proof/native-receipt.log"
+
+      - name: Prove physical-path scratch cleanup
+        id: scratch-proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/test-release-scratch.py -v 2>&1 | tee "$RUNNER_TEMP/a153-macos-proof/scratch-tests.log"
+
+      - name: Prove three exact GC acceptance tests
+        id: gc-proof
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          set -euo pipefail
+          cargo test -p cas --lib -- --exact --nocapture \
+            factory_target_cache::tests::terminal_dead_worker_loses_warm_reservation_only_under_pressure_cas_04a9 \
+            mcp::tools::service::factory_ops::artifact_project_scope_tests::reports_only_checkouts_with_missing_gitdir_cas_1a7a8 \
+            mcp::tools::service::factory_ops::artifact_project_scope_tests::cleanup_never_claims_another_projects_same_task_or_legacy_evidence_cas_6ebf \
+            2>&1 | tee "$RUNNER_TEMP/a153-macos-proof/gc-tests.log"
+          python3 - <<'PY' 2>&1 | tee "$RUNNER_TEMP/a153-macos-proof/test-counts.log"
+          import os
+          from pathlib import Path
+          import re
+
+          output = (Path(os.environ["RUNNER_TEMP"]) / "a153-macos-proof/gc-tests.log").read_text()
+          names = [
+              "factory_target_cache::tests::terminal_dead_worker_loses_warm_reservation_only_under_pressure_cas_04a9",
+              "mcp::tools::service::factory_ops::artifact_project_scope_tests::reports_only_checkouts_with_missing_gitdir_cas_1a7a8",
+              "mcp::tools::service::factory_ops::artifact_project_scope_tests::cleanup_never_claims_another_projects_same_task_or_legacy_evidence_cas_6ebf",
+          ]
+          for name in names:
+              count = len(re.findall(r"^test " + re.escape(name) + r" \.\.\. ok$", output, re.MULTILINE))
+              if count != 1:
+                  raise SystemExit(f"{name}: expected one successful execution, found {count}")
+              print(f"PASS: {name} (exactly once)")
+          totals = re.findall(r"^test result: ok\. 3 passed; 0 failed; 0 ignored;.*$", output, re.MULTILINE)
+          if len(totals) != 1:
+              raise SystemExit("expected exactly one total: 3 passed; 0 failed; 0 ignored")
+          print(totals[0])
+          PY
+
+      - name: Publish native proof summary
+        if: always()
+        env:
+          SCRATCH_RESULT: ${{ steps.scratch-proof.outcome }}
+          GC_RESULT: ${{ steps.gc-proof.outcome }}
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/a153-macos-proof"
+          {
+            echo "## cas-a153 native macOS proof"
+            echo "Scratch suite result: $SCRATCH_RESULT"
+            echo "Exact GC tests result: $GC_RESULT"
+            echo '### Native OS and source receipt'
+            cat "$RUNNER_TEMP/a153-macos-proof/native-receipt.log" 2>/dev/null || true
+            echo '### Exact test names and execution counts'
+            echo 'Requested: factory_target_cache::tests::terminal_dead_worker_loses_warm_reservation_only_under_pressure_cas_04a9'
+            echo 'Requested: mcp::tools::service::factory_ops::artifact_project_scope_tests::reports_only_checkouts_with_missing_gitdir_cas_1a7a8'
+            echo 'Requested: mcp::tools::service::factory_ops::artifact_project_scope_tests::cleanup_never_claims_another_projects_same_task_or_legacy_evidence_cas_6ebf'
+            cat "$RUNNER_TEMP/a153-macos-proof/test-counts.log" 2>/dev/null || true
+          } | tee "$RUNNER_TEMP/a153-macos-proof/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload native proof logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a153-macos-proof-${{ github.sha }}
+          path: ${{ runner.temp }}/a153-macos-proof/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Report sccache stats
+        if: always()
+        run: ./scripts/ci-sccache-summary.sh "a153 native macOS GC proof"
+
   # Keep this compile-only: --all-targets catches Darwin-only type errors in
   # production, test, example, and benchmark code without duplicating the full
   # Linux test suite on a more expensive runner. The full check runs on the

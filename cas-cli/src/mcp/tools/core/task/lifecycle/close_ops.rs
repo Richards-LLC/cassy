@@ -7149,11 +7149,18 @@ impl CasCore {
 
         // GH #1235: a reported/future proof is not completed evidence merely
         // because verification is disabled or another gate approves the task.
-        if req.reason.as_deref().is_some_and(proof_claims::has_unreceipted_claim) {
-            return Ok(Self::tool_error(
-                "PROOF CLAIM RECEIPT REQUIRED\nCite a run id or artifact id beside each third-party or future proof claim.\nIf it has not run, write \"deferred to <stage>\" instead of claiming a pass."
-                    .to_string(),
-            ));
+        if let Some(reason) = req.reason.as_deref() {
+            let receipt_root = self
+                .resolve_worker_worktree_path(&task, None)
+                .ok()
+                .flatten()
+                .or_else(|| resolve_close_gate_repo_root(&self.cas_root).ok())
+                .unwrap_or_else(|| {
+                    self.cas_root.parent().unwrap_or(&self.cas_root).to_path_buf()
+                });
+            if let Err(message) = proof_claims::validate_claims(reason, &self.cas_root, &receipt_root) {
+                return Ok(Self::tool_error(message));
+            }
         }
 
         // cas-099d, recurring after GH #272/#294/#304/#333: close-time

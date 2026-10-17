@@ -540,6 +540,14 @@ Before claiming a change done, workers must add one pre-close task-note line for
 
 ### Evidence-only task close
 
+Close reasons claiming third-party or future proof must cite a receipt beside
+each claim, or say `deferred to <stage>`. An `art-…` citation must exist in the
+project artifact store; a local receipt path must name an existing file.
+Relative paths resolve from the task's worker checkout, falling back to the
+owning project; `~/` expands to the caller's home. Use a qualified path such as
+`./receipt.log`, and backticks for paths containing spaces. Run IDs and
+`/actions/runs/…` URLs retain their existing citation check without network calls.
+
 Successful QA reports, ledgers and release drafts intentionally retained outside
 integration can close through the MCP task tool with `action=close`,
 `evidence_only=true`, `evidence_only_artifact_path=<existing durable evidence>`,

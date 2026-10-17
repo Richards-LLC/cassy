@@ -4642,6 +4642,11 @@ async fn cas_9b5d_team_only_daemon_sync_stays_team_scoped() {
     assert!(calls.get("team_pull").is_some_and(|n| *n >= 1), "{calls:?}");
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     assert_eq!(
+        queue.personal_row_count().unwrap(),
+        1,
+        "team-only routing cannot erase unacknowledged personal transport"
+    );
+    assert_eq!(
         queue
             .get_metadata("last_team_pull_at_team-1_p")
             .unwrap()
@@ -4664,5 +4669,127 @@ async fn cas_9b5d_personal_daemon_sync_is_unchanged() {
     assert_eq!(
         queue.get_metadata("last_pull_at").unwrap().as_deref(),
         Some("2026-10-16T12:00:00Z")
+    );
+}
+
+/// GH1268: only an exact, itemized equivalent write retires personal transport.
+/// All stores and the HTTP boundary are disposable; no live queue is opened.
+#[tokio::test]
+async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    crate::store::open_task_store_local(temp.path()).unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    for id in [
+        "absent",
+        "different",
+        "duplicate",
+        "lww",
+        "transformed",
+        "raced",
+        "aggregate",
+    ] {
+        let mut value = serde_json::json!({"id":id, "scope":"project", "origin_project":"p", "title":"personal"});
+        if id == "transformed" {
+            value.as_object_mut().unwrap().remove("scope");
+        }
+        let kind = if id == "aggregate" {
+            EntityType::Skill
+        } else {
+            EntityType::Task
+        };
+        queue
+            .enqueue(kind, id, SyncOperation::Upsert, Some(&value.to_string()))
+            .unwrap();
+        if id != "absent" {
+            if id == "different" {
+                value["title"] = "team".into();
+            }
+            queue
+                .enqueue_for_team(
+                    kind,
+                    id,
+                    SyncOperation::Upsert,
+                    Some(&value.to_string()),
+                    "team-1",
+                )
+                .unwrap();
+        }
+    }
+    let race_queue = queue.clone();
+    Mock::given(method("POST")).and(path("/api/teams/team-1/sync/push"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body = decode_push_body(request);
+            if body.get("skills").is_some() {
+                return ResponseTemplate::new(200).set_body_json(serde_json::json!({"synced":{"skills":1}}));
+            }
+            let replacement = serde_json::json!({"id":"raced", "scope":"project", "origin_project":"p", "title":"newer mutation"}).to_string();
+            race_queue.enqueue(EntityType::Task, "raced", SyncOperation::Upsert, Some(&replacement)).unwrap();
+            race_queue.enqueue_for_team(EntityType::Task, "raced", SyncOperation::Upsert, Some(&replacement), "team-1").unwrap();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "canonical_id":"p", "synced":{"tasks":{"inserted":3,"updated":1,"skipped":1}},
+                "rows":[
+                    {"id":"different","outcome":"updated"},
+                    {"id":"duplicate","outcome":"inserted"},
+                    {"id":"lww","outcome":"skipped_lww"},
+                    {"id":"transformed","outcome":"inserted"},
+                    {"id":"raced","outcome":"inserted"}
+                ]
+            }))
+        }).mount(&server).await;
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            team_id: Some("team-1".into()),
+            team_only: true,
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "p".into(),
+        temp.path(),
+    );
+    let result = syncer.push_team("team-1").unwrap();
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let personal = queue.personal_delivery_snapshots().unwrap();
+    assert_eq!(
+        personal
+            .iter()
+            .map(|row| row.entity_id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "absent",
+            "different",
+            "lww",
+            "transformed",
+            "raced",
+            "aggregate"
+        ]
+    );
+    let remaining_team = queue.pending_for_team("team-1", 20, 5).unwrap();
+    assert_eq!(
+        remaining_team.len(),
+        1,
+        "HTTP acknowledgment cannot consume a newer queued team mutation"
+    );
+    assert_eq!(remaining_team[0].entity_id, "raced");
+    assert!(
+        queue
+            .list_metadata()
+            .unwrap()
+            .iter()
+            .all(|(key, _)| !key.starts_with("team_delivery_ack:")),
+        "successful cleanup removes only its receipt"
     );
 }

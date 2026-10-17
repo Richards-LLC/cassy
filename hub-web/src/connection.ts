@@ -168,13 +168,15 @@ export async function readAuthRefusal(response: Response): Promise<AuthRefusal> 
 
 /**
  * Which re-pair screen a refusal earns. Only a definitive answer is a lost
- * pairing: an expired credential refreshes, and a legacy bare 401 keeps the
- * old reading (expired by date, else revoked) (cas-d636).
+ * pairing: an expired credential refreshes (cas-d636). A bare 401 names no
+ * reason, so it needs pairing but is never a revocation: a hub that failed
+ * internally once answered that way, and "revoked" purged and permanently
+ * fenced a pairing the hub still accepted (cas-2904).
  */
 export function authFailureKind(status: number, refusal: AuthRefusal, expiresAt: string, now = Date.now()): AuthFailureKind {
   if (status === 403) return "scope-mismatch";
   if (refusal.reason === "expired") return "expired";
-  if (refusal.reason === undefined && Date.parse(expiresAt) <= now) return "expired";
+  if (refusal.reason === undefined) return Date.parse(expiresAt) <= now ? "expired" : "needs-pairing";
   return "revoked";
 }
 
@@ -184,6 +186,7 @@ function authFailureMessage(kind: AuthFailureKind, refusal: AuthRefusal): string
   if (refusal.reason === "key_mismatch") return "this browser's key no longer matches the pairing";
   if (refusal.reason === "idle") return "pairing unused for too long";
   if (refusal.reason === "origin_mismatch") return "pairing belongs to another Cassy Cloud";
+  if (kind === "needs-pairing") return "the machine refused this pairing without a reason";
   return "pairing was revoked";
 }
 

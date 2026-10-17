@@ -130,6 +130,11 @@ class ReleaseRendererTests(unittest.TestCase):
         self.assertEqual(renderer.inline('<script>'), '&lt;script&gt;')
         self.assertEqual(renderer.inline('[safe](https://example.org/?a=1&b=2)'),
                          '<a href="https://example.org/?a=1&amp;b=2">safe</a>')
+        # cas-1a83: `cas release report` writes Evidence URLs as autolinks.
+        self.assertEqual(renderer.inline('PR: <https://example.org/pull/9?a=1&b=2>.'),
+                         'PR: <a href="https://example.org/pull/9?a=1&amp;b=2">'
+                         'https://example.org/pull/9?a=1&amp;b=2</a>.')
+        self.assertEqual(renderer.inline('<javascript:alert(1)>'), '&lt;javascript:alert(1)&gt;')
 
     def test_section_loss_fails(self):
         with self.assertRaisesRegex(ValueError, 'expected sections'):

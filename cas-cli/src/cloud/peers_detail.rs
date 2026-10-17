@@ -115,6 +115,9 @@ pub struct PeerEpicSplit {
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerReport {
     pub status: String,
+    /// Original Cloud activation read for this registration; status-only, never authority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation: Option<serde_json::Value>,
     pub observed_at: DateTime<Utc>,
     pub limitations: Vec<String>,
     pub cloud_presence: Option<super::presence::PresenceRecord>,
@@ -171,6 +174,7 @@ impl PeerReport {
             })
             .collect();
         Self {
+            activation: None,
             observed_at: now,
             limitations: vec![
                 "Read-only: shows conflicts; does not prevent them.".into(),
@@ -636,6 +640,9 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
             "Repo {}",
             report.canonical_id.as_deref().unwrap_or("-")
         ));
+        if let Some(activation) = &report.activation {
+            line(super::activation::line(activation));
+        }
         if report.peers.is_empty() {
             line("  no other supervisors seen in the last 24h".into());
         }

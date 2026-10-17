@@ -410,3 +410,29 @@ fn cas_9efb_parked_branch_and_new_delivery_tip_use_their_own_ci() {
         "{queries}"
     );
 }
+
+/// cas-c926: the merge-alert retry re-emits a remembered WorkerIdle every
+/// minute without passing the detector's hold gate, so a held worker with a
+/// parked delivery kept producing idle/liveness relays until release.
+#[test]
+fn cas_c926_held_worker_gets_no_merge_retry_relay_until_release() {
+    let mut f = Fixture::new();
+    let now = Utc::now();
+    f.ci(None);
+    f.app.merge_alert_retries.now = Some(now);
+    assert!(f.relay().is_empty(), "pending CI is remembered for retry");
+    f.app.event_detector.mark_worker_hold("merge-w");
+    f.ci(Some("success"));
+    let minute = now + chrono::Duration::minutes(1);
+    f.app.merge_alert_retries.now = Some(minute);
+    let retries = f.app.merge_alert_retry_events_at(minute);
+    let (events, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
+    assert!(
+        events.is_empty() && prompts.is_empty(),
+        "a held worker gets no relay: {prompts:?}"
+    );
+    f.app.event_detector.clear_worker_hold("merge-w");
+    // Release restores the merge relay.
+    let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
+    assert_eq!(prompts.len(), 1);
+}

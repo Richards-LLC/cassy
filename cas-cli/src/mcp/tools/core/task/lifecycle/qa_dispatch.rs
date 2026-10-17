@@ -2693,6 +2693,51 @@ mod stale_anchor_rebind_tests_cas_00eb {
         );
     }
 
+    /// cas-4171: the worker rebased after the commit-time anchor was recorded.
+    /// The anchor is no longer an ancestor of the tip, but every one of its
+    /// commits survives as a patch-equivalent, so the park binds the rebased
+    /// tip, on a per-task branch and on a plain lane alike (cas-1142 and
+    /// cas-c186, 2026-10-17). A rebased lane carrying a commit that does not
+    /// name the task keeps the recorded anchor.
+    #[test]
+    fn park_binds_the_rebased_tip_not_the_pre_rebase_anchor_cas_4171() {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, TaskStatus::InProgress);
+        let repo = f.dir.path();
+        std::fs::write(repo.join("target.txt"), "moved\n").unwrap();
+        git(repo, &["add", "target.txt"]);
+        git(repo, &["commit", "-q", "-m", "merge another delivery"]);
+        git(repo, &["checkout", "-q", WORKER_TASK_BRANCH]);
+        git(repo, &["rebase", "-q", "main"]);
+        let rebased = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["branch", "factory/worker", &rebased]);
+        std::fs::write(repo.join("next.txt"), "x\n").unwrap();
+        git(repo, &["add", "next.txt"]);
+        git(repo, &["commit", "-q", "-m", "wip"]);
+        let unnamed = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        for (branch, tip, expected) in [
+            (WORKER_TASK_BRANCH, &rebased, &rebased),
+            ("factory/worker", &rebased, &rebased),
+            ("factory/worker", &unnamed, &f.anchor),
+        ] {
+            let parking = f.core.advance_commit_time_anchor_before_park(
+                tasks.as_ref(),
+                &f.task,
+                repo,
+                "main",
+                Some(branch),
+                Some(tip),
+            );
+            assert_eq!(
+                parking.deliverables.factory_branch_anchor.as_deref(),
+                Some(expected.as_str()),
+                "{branch} at {tip}"
+            );
+        }
+    }
+
     /// cas-ba4a still holds: a commit claiming another task stops the advance.
     /// (Task ids are hex: `cas-f0a6` is recognised as foreign, `cas-zz99` is not.)
     #[test]

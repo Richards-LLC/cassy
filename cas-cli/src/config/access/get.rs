@@ -100,6 +100,7 @@ impl Config {
             // Factory section (cas-1a05): every key `set` accepts is readable.
             // An unset optional key reads as its registry default, so
             // `config list --modified` shows only what was changed.
+            "factory.slot_id" => Some(factory.slot_id.clone().unwrap_or_default()),
             "factory.artifacts_root" => Some(
                 factory
                     .artifacts_root

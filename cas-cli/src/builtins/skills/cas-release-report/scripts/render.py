@@ -27,15 +27,18 @@ def safe_url(value):
 
 def inline(value):
     """Small explicit Markdown subset; raw HTML is always text."""
-    pattern = r'`([^`]+)`|\[([^\]]+)\]\(([^\s)]+)\)|\*\*([^*]+)\*\*|\*([^*]+)\*'
+    pattern = (r'`([^`]+)`|\[([^\]]+)\]\(([^\s)]+)\)|<(https?://[^\s<>]+)>'
+               r'|\*\*([^*]+)\*\*|\*([^*]+)\*')
     result, offset = [], 0
     for match in re.finditer(pattern, value):
         result.append(escape(value[offset:match.start()]))
-        code, label, url, strong, em = match.groups()
+        code, label, url, autolink, strong, em = match.groups()
         if code is not None:
             result.append('<code>' + escape(code) + '</code>')
         elif label is not None:
             result.append('<a href="' + safe_url(url) + '">' + escape(label) + '</a>')
+        elif autolink is not None:
+            result.append('<a href="' + safe_url(autolink) + '">' + escape(autolink) + '</a>')
         elif strong is not None:
             result.append('<strong>' + escape(strong) + '</strong>')
         else:

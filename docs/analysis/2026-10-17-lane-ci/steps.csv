@@ -1,0 +1,184 @@
+name,n,median_s,min_s,max_s
+Classify CI diff / Check Violet references before queue admission,30,9.0,5.0,9.0
+Classify CI diff / Complete job,32,0.0,0.0,1.0
+Classify CI diff / Post Run actions/checkout@v4,32,0.0,0.0,1.0
+Classify CI diff / Run ./.github/actions/classify-required-diff,32,4.0,0.0,12.0
+Classify CI diff / Run actions/checkout@v4,32,10.0,8.0,12.0
+Classify CI diff / Set up job,32,0.0,0.0,1.0
+Fast Validation / Complete job,2,0.0,0.0,0.0
+Fast Validation / Compute successful merge-queue tree receipt,1,0.0,0.0,0.0
+Fast Validation / Post Run actions/checkout@v4,1,0.0,0.0,0.0
+Fast Validation / Publish successful merge-queue tree receipt,1,1.0,1.0,1.0
+Fast Validation / Require every Fast Validation lane to pass,2,0.0,0.0,0.0
+Fast Validation / Run actions/checkout@v4,1,8.0,8.0,8.0
+Fast Validation / Set up job,2,0.5,0.0,1.0
+Fast Validation — CI tiers / Complete job,2,0.0,0.0,0.0
+Fast Validation — CI tiers / Post Run actions/checkout@v4,2,0.5,0.0,1.0
+Fast Validation — CI tiers / Run actions/checkout@v4,2,9.5,9.0,10.0
+Fast Validation — CI tiers / Set up job,2,0.5,0.0,1.0
+Fast Validation — CI tiers / Test release publication guards,2,181.5,41.0,322.0
+Fast Validation — Commander journeys 1/6 / Complete job,2,0.0,0.0,0.0
+Fast Validation — Commander journeys 1/6 / Post Run actions/checkout@v4,2,0.0,0.0,0.0
+Fast Validation — Commander journeys 1/6 / Run Commander journeys shard 1/6,2,293.0,234.0,352.0
+Fast Validation — Commander journeys 1/6 / Run actions/checkout@v4,2,9.5,7.0,12.0
+Fast Validation — Commander journeys 1/6 / Set up job,2,0.5,0.0,1.0
+Fast Validation — Commander journeys 2/6 / Complete job,2,0.0,0.0,0.0
+Fast Validation — Commander journeys 2/6 / Post Run actions/checkout@v4,2,0.0,0.0,0.0
+Fast Validation — Commander journeys 2/6 / Run Commander journeys shard 2/6,2,209.5,203.0,216.0
+Fast Validation — Commander journeys 2/6 / Run actions/checkout@v4,2,10.5,10.0,11.0
+Fast Validation — Commander journeys 2/6 / Set up job,2,1.0,1.0,1.0
+Fast Validation — Commander journeys 3/6 / Complete job,2,0.0,0.0,0.0
+Fast Validation — Commander journeys 3/6 / Post Run actions/checkout@v4,2,0.0,0.0,0.0
+Fast Validation — Commander journeys 3/6 / Run Commander journeys shard 3/6,2,393.0,315.0,471.0
+Fast Validation — Commander journeys 3/6 / Run actions/checkout@v4,2,9.5,9.0,10.0
+Fast Validation — Commander journeys 3/6 / Set up job,2,1.0,1.0,1.0
+Fast Validation — Commander journeys 4/6 / Complete job,2,0.0,0.0,0.0
+Fast Validation — Commander journeys 4/6 / Post Run actions/checkout@v4,2,0.5,0.0,1.0
+Fast Validation — Commander journeys 4/6 / Run Commander journeys shard 4/6,2,168.5,162.0,175.0
+Fast Validation — Commander journeys 4/6 / Run actions/checkout@v4,2,9.0,9.0,9.0
+Fast Validation — Commander journeys 4/6 / Set up job,2,1.0,1.0,1.0
+Fast Validation — Commander journeys 5/6 / Complete job,2,0.5,0.0,1.0
+Fast Validation — Commander journeys 5/6 / Post Run actions/checkout@v4,2,0.5,0.0,1.0
+Fast Validation — Commander journeys 5/6 / Run Commander journeys shard 5/6,2,142.0,126.0,158.0
+Fast Validation — Commander journeys 5/6 / Run actions/checkout@v4,2,8.0,7.0,9.0
+Fast Validation — Commander journeys 5/6 / Set up job,2,1.0,1.0,1.0
+Fast Validation — Commander journeys 6/6 / Complete job,2,0.0,0.0,0.0
+Fast Validation — Commander journeys 6/6 / Post Run actions/checkout@v4,2,0.5,0.0,1.0
+Fast Validation — Commander journeys 6/6 / Run Commander journeys shard 6/6,2,463.5,459.0,468.0
+Fast Validation — Commander journeys 6/6 / Run actions/checkout@v4,2,11.5,11.0,12.0
+Fast Validation — Commander journeys 6/6 / Set up job,2,0.5,0.0,1.0
+Fast Validation — Commander web / Build Commander and check the committed bundle,2,3.0,3.0,3.0
+Fast Validation — Commander web / Complete job,2,0.0,0.0,0.0
+Fast Validation — Commander web / Install Commander dependencies,2,3.0,3.0,3.0
+Fast Validation — Commander web / Post Run actions/checkout@v4,2,0.5,0.0,1.0
+Fast Validation — Commander web / Run actions/checkout@v4,2,12.0,10.0,14.0
+Fast Validation — Commander web / Set up job,2,1.0,1.0,1.0
+Fast Validation — Commander web / Test Commander units,2,30.5,30.0,31.0
+Fast Validation — Commander web / Typecheck Commander,2,11.0,11.0,11.0
+Fast Validation — Commander web / Visual QA,2,405.0,394.0,416.0
+Fast Validation — doctests / Complete job,2,0.5,0.0,1.0
+Fast Validation — doctests / Post Run ./.github/actions/setup-rust-linux,2,7.5,1.0,14.0
+Fast Validation — doctests / Post Run actions/checkout@v4,2,0.0,0.0,0.0
+Fast Validation — doctests / Report sccache stats,2,0.0,0.0,0.0
+Fast Validation — doctests / Run ./.github/actions/classify-required-diff,2,0.5,0.0,1.0
+Fast Validation — doctests / Run ./.github/actions/setup-rust-linux,2,61.0,52.0,70.0
+Fast Validation — doctests / Run actions/checkout@v4,2,10.5,10.0,11.0
+Fast Validation — doctests / Set up job,2,0.5,0.0,1.0
+Fast Validation — doctests / Test doctests,2,200.5,169.0,232.0
+Fast Validation — full suite / Complete job,2,0.0,0.0,0.0
+Fast Validation — full suite / Post Run actions/checkout@v4,2,0.5,0.0,1.0
+Fast Validation — full suite / Require every suite shard to pass,2,0.0,0.0,0.0
+Fast Validation — full suite / Run ./.github/actions/classify-required-diff,2,0.0,0.0,0.0
+Fast Validation — full suite / Run actions/checkout@v4,2,11.5,11.0,12.0
+Fast Validation — full suite / Set up job,2,1.0,1.0,1.0
+Fast Validation — main-push tree dedupe / Check for successful merge-queue validation of this tree,2,3.0,2.0,4.0
+Fast Validation — main-push tree dedupe / Complete job,2,0.0,0.0,0.0
+Fast Validation — main-push tree dedupe / Post Run actions/checkout@v4,2,0.0,0.0,0.0
+Fast Validation — main-push tree dedupe / Run actions/checkout@v4,2,9.0,9.0,9.0
+Fast Validation — main-push tree dedupe / Set up job,2,0.0,0.0,0.0
+Fast Validation — merge-queue runner route / Complete job,2,0.0,0.0,0.0
+"Fast Validation — merge-queue runner route / Run if [[ ""$EVENT_NAME"" == merge_group && ""$SELF_HOSTED_ENABLED"" == enabled ]]; then",2,0.0,0.0,0.0
+Fast Validation — merge-queue runner route / Set up job,2,0.0,0.0,0.0
+Fast Validation — preflight (no test suite) / Build (without MCP proxy),2,189.0,90.0,288.0
+Fast Validation — preflight (no test suite) / Check,2,169.0,85.0,253.0
+Fast Validation — preflight (no test suite) / Complete job,2,0.5,0.0,1.0
+Fast Validation — preflight (no test suite) / Post Run ./.github/actions/setup-rust-linux,2,7.5,0.0,15.0
+Fast Validation — preflight (no test suite) / Post Run actions/checkout@v4,2,0.0,0.0,0.0
+Fast Validation — preflight (no test suite) / Report sccache stats,2,0.0,0.0,0.0
+Fast Validation — preflight (no test suite) / Run ./.github/actions/classify-required-diff,2,0.0,0.0,0.0
+Fast Validation — preflight (no test suite) / Run ./.github/actions/setup-rust-linux,2,55.5,52.0,59.0
+Fast Validation — preflight (no test suite) / Run actions/checkout@v4,2,9.5,9.0,10.0
+Fast Validation — preflight (no test suite) / Set up job,2,0.5,0.0,1.0
+Fast Validation — preflight (no test suite) / Test portable installer fixtures,2,1.0,1.0,1.0
+Fast Validation — preflight (no test suite) / Test portable x86_64 ISA audit,2,1.0,1.0,1.0
+Fast Validation — suite archive build / Build full suite archive,2,402.5,206.0,599.0
+Fast Validation — suite archive build / Complete job,2,0.0,0.0,0.0
+Fast Validation — suite archive build / Install nextest,2,1.5,1.0,2.0
+Fast Validation — suite archive build / Package CLI runner,2,9.0,8.0,10.0
+Fast Validation — suite archive build / Post Run ./.github/actions/setup-rust-linux,2,6.5,0.0,13.0
+Fast Validation — suite archive build / Post Run actions/checkout@v4,2,0.0,0.0,0.0
+Fast Validation — suite archive build / Report sccache stats,2,0.0,0.0,0.0
+Fast Validation — suite archive build / Run ./.github/actions/classify-required-diff,2,0.0,0.0,0.0
+Fast Validation — suite archive build / Run ./.github/actions/setup-rust-linux,2,55.5,52.0,59.0
+Fast Validation — suite archive build / Run actions/checkout@v4,2,10.0,10.0,10.0
+Fast Validation — suite archive build / Set up job,2,1.0,1.0,1.0
+Fast Validation — suite archive build / Upload full suite archive and CLI runner,2,4.5,4.0,5.0
+Fast Validation — suite shard 1/3 / Complete job,2,0.0,0.0,0.0
+Fast Validation — suite shard 1/3 / Download full suite archive,2,8.5,8.0,9.0
+Fast Validation — suite shard 1/3 / Install nextest,2,0.0,0.0,0.0
+Fast Validation — suite shard 1/3 / Post Run actions/checkout@v4,2,0.5,0.0,1.0
+Fast Validation — suite shard 1/3 / Prove MCP protocol tests leave the ambient store untouched,2,9.5,9.0,10.0
+Fast Validation — suite shard 1/3 / Publish full-suite recall evidence,2,1.0,1.0,1.0
+Fast Validation — suite shard 1/3 / Restore executable CLI runner,2,1.5,1.0,2.0
+Fast Validation — suite shard 1/3 / Run ./.github/actions/classify-required-diff,2,0.0,0.0,0.0
+Fast Validation — suite shard 1/3 / Run actions/checkout@v4,2,11.5,11.0,12.0
+Fast Validation — suite shard 1/3 / Set up job,2,1.5,1.0,2.0
+Fast Validation — suite shard 1/3 / Test full suite shard 1/3,2,165.5,158.0,173.0
+Fast Validation — suite shard 2/3 / Complete job,2,0.0,0.0,0.0
+Fast Validation — suite shard 2/3 / Download full suite archive,2,6.0,5.0,7.0
+Fast Validation — suite shard 2/3 / Install nextest,2,0.0,0.0,0.0
+Fast Validation — suite shard 2/3 / Post Run actions/checkout@v4,2,0.0,0.0,0.0
+Fast Validation — suite shard 2/3 / Publish full-suite recall evidence,2,1.0,1.0,1.0
+Fast Validation — suite shard 2/3 / Restore executable CLI runner,2,1.5,1.0,2.0
+Fast Validation — suite shard 2/3 / Run ./.github/actions/classify-required-diff,2,0.5,0.0,1.0
+Fast Validation — suite shard 2/3 / Run actions/checkout@v4,2,8.5,8.0,9.0
+Fast Validation — suite shard 2/3 / Set up job,2,1.5,1.0,2.0
+Fast Validation — suite shard 2/3 / Test full suite shard 2/3,2,174.0,159.0,189.0
+Fast Validation — suite shard 3/3 / Complete job,2,0.0,0.0,0.0
+Fast Validation — suite shard 3/3 / Download full suite archive,2,7.0,4.0,10.0
+Fast Validation — suite shard 3/3 / Install nextest,2,0.5,0.0,1.0
+Fast Validation — suite shard 3/3 / Post Run actions/checkout@v4,2,0.5,0.0,1.0
+Fast Validation — suite shard 3/3 / Publish full-suite recall evidence,2,1.0,1.0,1.0
+Fast Validation — suite shard 3/3 / Restore executable CLI runner,2,2.0,2.0,2.0
+Fast Validation — suite shard 3/3 / Run ./.github/actions/classify-required-diff,2,0.0,0.0,0.0
+Fast Validation — suite shard 3/3 / Run actions/checkout@v4,2,9.5,9.0,10.0
+Fast Validation — suite shard 3/3 / Set up job,2,1.5,1.0,2.0
+Fast Validation — suite shard 3/3 / Test full suite shard 3/3,2,230.0,215.0,245.0
+Scoped Validation (factory/PR) / Build and test the Slack bridge,7,5.0,4.0,7.0
+Scoped Validation (factory/PR) / Complete job,30,0.0,0.0,0.0
+Scoped Validation (factory/PR) / Install nextest,15,1.0,0.0,2.0
+Scoped Validation (factory/PR) / Post Run ./.github/actions/setup-rust-linux,15,15.0,0.0,19.0
+Scoped Validation (factory/PR) / Post Run actions/checkout@v4,30,0.0,0.0,1.0
+Scoped Validation (factory/PR) / Publish CI impact evidence,30,1.0,0.0,2.0
+Scoped Validation (factory/PR) / Report sccache stats,30,0.0,0.0,1.0
+Scoped Validation (factory/PR) / Report why no Rust work ran,2,0.0,0.0,0.0
+Scoped Validation (factory/PR) / Run ./.github/actions/classify-required-diff,30,7.5,0.0,12.0
+Scoped Validation (factory/PR) / Run ./.github/actions/setup-rust-linux,15,50.0,39.0,703.0
+Scoped Validation (factory/PR) / Run actions/checkout@v4,30,10.0,7.0,14.0
+Scoped Validation (factory/PR) / Run change-scoped tests with impact evidence,15,831.0,563.0,996.0
+Scoped Validation (factory/PR) / Set up job,30,1.0,0.0,3.0
+Scoped Validation (factory/PR) / Skip when a pull request event validates this head SHA,30,1.0,0.0,3.0
+Scoped Validation (factory/PR) / Test portable installer fixtures,16,1.0,0.0,1.0
+Scoped Validation (factory/PR) / Test snapshot-pinned CLI output surfaces,15,94.0,0.0,141.0
+Scoped Validation (factory/PR) / Typecheck and test Commander web assets,9,36.0,29.0,50.0
+Scoped Validation (fast) / Complete job,30,0.0,0.0,0.0
+Scoped Validation (fast) / Detect runner lock fixture changes,30,0.0,0.0,1.0
+Scoped Validation (fast) / Install nextest,13,1.0,0.0,1.0
+Scoped Validation (fast) / Post Run ./.github/actions/setup-rust-linux,13,16.0,0.0,21.0
+Scoped Validation (fast) / Post Run actions/checkout@v4,30,0.0,0.0,1.0
+Scoped Validation (fast) / Publish CI impact evidence,30,1.0,0.0,4.0
+Scoped Validation (fast) / Report full-tier routing,16,0.0,0.0,0.0
+Scoped Validation (fast) / Report sccache stats,30,0.0,0.0,0.0
+Scoped Validation (fast) / Run ./.github/actions/classify-required-diff,30,7.0,0.0,10.0
+Scoped Validation (fast) / Run ./.github/actions/setup-rust-linux,13,42.0,37.0,198.0
+Scoped Validation (fast) / Run actions/checkout@v4,30,10.0,8.0,12.0
+Scoped Validation (fast) / Run change-scoped tests with impact evidence,13,828.0,659.0,921.0
+Scoped Validation (fast) / Run no-build release gate rows,30,32.0,5.0,104.0
+Scoped Validation (fast) / Set up job,30,1.0,0.0,2.0
+Scoped Validation (fast) / Test snapshot-pinned CLI output surfaces,13,0.0,0.0,1.0
+Scoped Validation (fast) / Typecheck and test Commander web assets,1,43.0,43.0,43.0
+macOS Check / Cache cargo,2,9.5,7.0,12.0
+macOS Check / Check workspace,2,547.0,308.0,786.0
+macOS Check / Complete job,2,1.5,1.0,2.0
+macOS Check / Install Rust,2,9.0,8.0,10.0
+macOS Check / Install Zig,2,16.5,15.0,18.0
+macOS Check / Post Cache cargo,2,1.0,1.0,1.0
+macOS Check / Post Run actions/checkout@v4,2,0.5,0.0,1.0
+macOS Check / Post Setup sccache,2,0.0,0.0,0.0
+macOS Check / Probe sccache backend,2,0.0,0.0,0.0
+macOS Check / Report Apple and Zig toolchains,2,5.5,4.0,7.0
+macOS Check / Report sccache stats,2,0.0,0.0,0.0
+macOS Check / Run ./.github/actions/classify-required-diff,2,0.5,0.0,1.0
+macOS Check / Run actions/checkout@v4,2,14.0,10.0,18.0
+macOS Check / Set up job,2,2.5,2.0,3.0
+macOS Check / Setup sccache,2,1.0,1.0,1.0

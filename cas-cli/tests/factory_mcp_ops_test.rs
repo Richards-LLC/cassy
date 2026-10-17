@@ -5782,6 +5782,69 @@ async fn test_gc_report_empty() {
         text.contains("Orphan worker process groups: 0"),
         "Should expose the process-group GC surface: {text}"
     );
+    assert!(
+        text.contains("Serve memory (registered project sessions)"),
+        "{text}"
+    );
+    assert!(text.contains("processes=0 rss_bytes=0"), "{text}");
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let pid = std::process::id();
+        let start = cas::test_paths::pid_starttime(pid).expect("real process fingerprint");
+        for (id, fingerprint) in [
+            ("live", start),
+            ("alias", start),
+            ("recycled", start + 1),
+            ("foreign", start),
+        ] {
+            let mut agent = Agent::new(id.into(), id.into());
+            agent.pid = Some(pid);
+            agent.pid_starttime = Some(fingerprint);
+            if id == "foreign" {
+                agent.machine_id = Some("different-machine".into());
+            }
+
+            agent.cc_session_id = Some(
+                if id == "recycled" || id == "foreign" {
+                    "recycled-session"
+                } else {
+                    "serve-session"
+                }
+                .into(),
+            );
+            env.agent_store().register(&agent).unwrap();
+        }
+        let report = env
+            .service
+            .factory_request(Parameters(factory_req("gc_report")))
+            .await
+            .unwrap();
+        let text = get_text(&report);
+        assert!(text.contains("processes=1 rss_bytes="), "{text}");
+        assert_eq!(
+            text.matches("session=serve-session").count(),
+            1,
+            "one process must not be counted twice: {text}"
+        );
+        assert!(
+            !text.contains("session=recycled-session"),
+            "recycled PID must not be attributed: {text}"
+        );
+        let row = text
+            .lines()
+            .find(|line| line.contains("session=serve-session"))
+            .unwrap();
+        let rss: u64 = row
+            .split("rss_bytes=")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(rss > 0, "actual process RSS must be measured: {row}");
+    }
 }
 
 #[tokio::test]
@@ -5874,6 +5937,14 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
     std::fs::create_dir_all(root.join(&open_id)).unwrap();
     std::fs::create_dir_all(root.join("operator-review-stray")).unwrap();
     std::fs::write(root.join(&closed_id).join("proof.txt"), "durable proof").unwrap();
+    for id in [&closed_id, &open_id] {
+        std::fs::write(root.join(id).join("trace.zip"), b"trace").unwrap();
+        std::fs::write(root.join(id).join("video.webm"), b"video").unwrap();
+    }
+    let orphan = env.cas_root.join("old-checkout");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join(".git"), "gitdir: /missing-cas-1a7a8-gitdir\n").unwrap();
+
     std::fs::write(
         env.cas_root.join("config.toml"),
         format!(
@@ -5897,6 +5968,15 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         .unwrap();
     let report_text = get_text(&report);
     assert!(
+        report_text.contains(&orphan.display().to_string()),
+        "{report_text}"
+    );
+    assert!(
+        root.join(&closed_id).join("trace.zip").is_file(),
+        "report must not prune"
+    );
+
+    assert!(
         report_text.contains("closed-task candidates=1"),
         "{report_text}"
     );
@@ -5918,6 +5998,13 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         "process-only force=true dry_run=false deleted durable evidence: {}",
         get_text(&preview)
     );
+
+    assert!(root.join(&closed_id).join("proof.txt").is_file());
+    assert!(!root.join(&closed_id).join("trace.zip").exists());
+    assert!(!root.join(&closed_id).join("video.webm").exists());
+    assert!(root.join(&open_id).join("trace.zip").is_file());
+    assert!(root.join(&open_id).join("video.webm").is_file());
+    assert!(get_text(&preview).contains("removed_files=2 reclaimed_bytes=10"));
 
     assert!(
         root.join(&open_id).exists(),

@@ -46,6 +46,10 @@ pub struct HubProcessRecord {
     pub tailscale_serve_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_warning: Option<String>,
+    /// The soft open-file limit the hub runs under, after it raised its own
+    /// at start (cas-cb94). Older records omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nofile_limit: Option<u64>,
 }
 
 /// The process that currently owns hub.lock.

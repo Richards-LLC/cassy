@@ -2672,7 +2672,11 @@ fn cas_9815_update_distinguishes_old_shipped_skill_from_user_delta() {
 #[test]
 fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
-    let home = env.home().to_path_buf();
+    // Host-wide discovery excludes /tmp, so use its existing sanctioned
+    // fixture parent rather than weakening project eligibility.
+    let fixture_home = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    let home = fixture_home.path().canonicalize().unwrap();
+    env.set("HOME", &home);
     env.set_current_dir(&home);
     env.set("XDG_CONFIG_HOME", home.join(".config"));
     env.remove("CAS_AGENT_ROLE");
@@ -2681,7 +2685,7 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
     let project = cas_6718_drifted_project(&projects);
     let root = project.join(".cas");
     let host = crate::store::init_cas_dir(&home).unwrap();
-    let global = home.join(".config/cas");
+    let global = crate::config::global_cas_dir().unwrap();
     std::fs::create_dir_all(&global).unwrap();
     env.set("CAS_ROOT", &root);
     env.set("CAS_PROJECT_ROOTS", &projects);

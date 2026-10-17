@@ -1,0 +1,11 @@
+{
+  "task_id": "cas-0e24",
+  "source_base": "6ae4d0f9a1d4a8af7d6b3bfa79bca6c25427a968",
+  "measured_v46_tip": "18821c4dee57544196352952d2c10e3f86ad172c",
+  "operator_decision": "pending; measurement/design only; no process changes",
+  "artifacts": {
+    "report.html": "art-0d4db733",
+    "decision.md": "art-014d3d30",
+    "raw_evidence_replay_and_visual_qa": "art-9e499678"
+  }
+}

@@ -129,6 +129,28 @@ impl AuthRefusal {
     }
 }
 
+/// The hub could not consult or record its own auth state (cas-cb94): a lock,
+/// read, persist or audit write failed, as when prowl's hub hit EMFILE. The
+/// credential was never judged, so this is a retryable 503, never a 401 that
+/// the client would read as a lost pairing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthStoreUnavailable;
+
+impl AuthStoreUnavailable {
+    pub const CODE: &'static str = "auth_store_unavailable";
+}
+
+impl fmt::Display for AuthStoreUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("hub auth store unavailable")
+    }
+}
+
+/// Every authentication failure that is not a typed refusal is the hub's own.
+fn store_failure(error: anyhow::Error) -> anyhow::Error {
+    if error.is::<AuthRefusal>() { error } else { error.context(AuthStoreUnavailable) }
+}
+
 fn refusal_of(error: &anyhow::Error) -> AuthRefusal {
     error.downcast_ref::<AuthRefusal>().copied().unwrap_or(AuthRefusal::InvalidProof)
 }
@@ -1008,6 +1030,19 @@ impl AuthStore {
         target_uri: &str,
         now: DateTime<Utc>,
     ) -> Result<AuthContext> {
+        self.judge_dpop(authorization, proof, origin, method, target_uri, now)
+            .map_err(store_failure)
+    }
+
+    fn judge_dpop(
+        &self,
+        authorization: &str,
+        proof: &str,
+        origin: &str,
+        method: &str,
+        target_uri: &str,
+        now: DateTime<Utc>,
+    ) -> Result<AuthContext> {
         validate_origin(origin).map_err(|_| AuthRefusal::OriginMismatch)?;
         let credential = authorization
             .strip_prefix("DPoP ")
@@ -1101,6 +1136,19 @@ impl AuthStore {
         target_uri: &str,
         now: DateTime<Utc>,
     ) -> Result<DeviceCredential> {
+        self.rotate_device_credential(authorization, proof, origin, method, target_uri, now)
+            .map_err(store_failure)
+    }
+
+    fn rotate_device_credential(
+        &self,
+        authorization: &str,
+        proof: &str,
+        origin: &str,
+        method: &str,
+        target_uri: &str,
+        now: DateTime<Utc>,
+    ) -> Result<DeviceCredential> {
         validate_origin(origin).map_err(|_| AuthRefusal::OriginMismatch)?;
         let credential = authorization
             .strip_prefix("DPoP ")
@@ -1135,7 +1183,8 @@ impl AuthStore {
             method,
             target_uri,
             now,
-        )?;
+        )
+        .map_err(|error| anyhow::Error::from(refusal_of(&error)))?;
         state.dpop_jtis.retain(|entry| entry.expires_at >= now);
         if state
             .dpop_jtis

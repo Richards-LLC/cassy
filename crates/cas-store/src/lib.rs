@@ -743,6 +743,17 @@ pub trait TaskStore: Send + Sync {
         ))
     }
 
+    /// cas-eda0: record the green merge of a parked delivery as one
+    /// conditional write: only `deliverables.green_merge_commit` changes, and
+    /// only while the task is still a clean `awaiting_merge` park. Returns
+    /// `false` when it is not (for example, its worker closed it meanwhile),
+    /// so a concurrent close is never overwritten by a stale row.
+    fn record_green_merge(&self, _task_id: &str, _merge_commit: &str) -> Result<bool> {
+        Err(StoreError::Other(
+            "conditional green-merge records are unsupported by this store".to_string(),
+        ))
+    }
+
     /// Delete a task
     fn delete(&self, id: &str) -> Result<()>;
 

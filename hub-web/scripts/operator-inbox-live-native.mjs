@@ -154,7 +154,7 @@ const server = createServer(async (req, res) => {
       switch (req.url) {
         case "/approve":
           assert(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(data.code));
-          await jsonCas(["hub", "operator", "approve", data.code, ...(data.reply ? ["--command-scope", profile.projectId] : [])]); return { approved: true };
+          await jsonCas(["hub", "operator", "approve", data.code, ...(data.reply ? ["--command-scope", profile.projectId] : []), ...(data.manage === true ? ["--manage"] : [])]); return { approved: true };
         case "/queue": return queue(data.message);
         case "/devices": return inventory();
         case "/start": return startHub();

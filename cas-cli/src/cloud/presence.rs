@@ -297,7 +297,9 @@ fn register_with_shutdown(
         load(cas_root, &agent.id).filter(|record| record.last_attempt_at >= agent.registered_at);
     let focus = current_focus(agent);
     let branch = current_branch(cas_root, agent);
-    let mut coordinator = coordinator.clone().with_timeout(PRESENCE_TIMEOUT);
+    let mut coordinator = coordinator.clone().with_timeout(PRESENCE_TIMEOUT).with_factory_slot_id(
+        crate::config::Config::load(cas_root).ok().and_then(|config| config.factory().slot_id),
+    );
     let published_agent = super::peers_detail::presence_agent(cas_root, agent);
     let record =
         match coordinator.register_with_presence(&published_agent, focus.as_deref(), branch.as_deref()) {

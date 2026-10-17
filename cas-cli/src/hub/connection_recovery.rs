@@ -35,6 +35,7 @@ pub(super) fn refusal(value: &str) -> &'static str {
         "unknown_credential" => "unknown_credential", "scope_mismatch" => "scope_mismatch",
         "stale_proof" => "stale_proof", "proof_replay" => "proof_replay",
         "invalid_proof" => "invalid_proof", "viewer_lagged" => "viewer_lagged",
+        "auth_store_unavailable" => "auth_store_unavailable",
         _ => "other",
     }
 }

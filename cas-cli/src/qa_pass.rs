@@ -760,30 +760,7 @@ pub fn delivery_content_paths(repo: &Path, base: &str, head: &str) -> Result<Vec
     }
     let mut paths = Vec::new();
     for commit in String::from_utf8_lossy(&commits.stdout).lines() {
-        let diff = Command::new("git")
-            .args([
-                "diff",
-                "-w",
-                "--diff-filter=ACMRT",
-                "--name-only",
-                &format!("{commit}^"),
-                commit,
-                "--",
-            ])
-            .current_dir(repo)
-            .output()
-            .map_err(|error| format!("git diff failed to start: {error}"))?;
-        if !diff.status.success() {
-            return Err(format!(
-                "git diff {commit} failed: {}",
-                String::from_utf8_lossy(&diff.stderr).trim()
-            ));
-        }
-        paths.extend(
-            String::from_utf8_lossy(&diff.stdout)
-                .lines()
-                .map(str::to_string),
-        );
+        paths.extend(crate::qa_evidence::content_paths(repo, &format!("{commit}^"), commit)?);
     }
     paths.sort();
     paths.dedup();

@@ -8,6 +8,8 @@ A browser reading a retained conversation can ask its account owner for permissi
 
 The existing conversation composer carries one Ask to reply action and a plain pending, denied or expired status. The owner's inbox has a headed request list naming the browser and conversation beside Allow and Deny.
 
+Owner decisions use the existing dialog action row: its space-2 gap separates Allow from Deny, and Allow uses the existing primary button fill. The row wraps at phone width while each native button keeps its label and keyboard action together.
+
 ## Emotional register
 
 Explicit permission with no forced sign-out or lost history, using Commander's existing Glass sheet, headings and button tokens from hub-web/DESIGN.md and src/tokens.css.
@@ -18,7 +20,7 @@ Approval changes the same Cloud device grant; the conversation and its stored me
 
 ## Deliberately omitted
 
-No local hub pairing privilege, automatic owner approval, broad command scope, new sign-in or delivery guarantee. The feature is dormant until Cloud advertises reply-grant-upgrade-v1. Proposal: petra-stella-cloud#174; production activation awaits an agreed/shipped contract.
+No local hub pairing privilege, automatic owner approval, broad command scope, new sign-in or delivery guarantee. Cloud shipped reply-grant-upgrade-v1 in petra-stella-cloud PR #181 for #174. Its advertisement enables the existing client automatically; absent or incompatible support still offers no dead control.
 
 ## Components and state
 

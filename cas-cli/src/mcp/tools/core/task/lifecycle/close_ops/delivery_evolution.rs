@@ -1238,6 +1238,81 @@ fn line_content_presence_uncached(
     if !super::git_commit_is_ancestor(repo, delivery, target) {
         return Err("delivery line ancestry is not proven on the target".into());
     }
+    let lost = |owners: &[Option<OwnedLines>]| {
+        if allow_partial {
+            !owners.iter().flatten().any(|owner| !owner.positions.is_empty())
+        } else {
+            owners.iter().any(Option::is_none)
+        }
+    };
+    let mut states = walk_owners(repo, delivery, target, path, owners, resolutions, cycle)?;
+    // cas-90d8: a later ordinary commit may rename the delivered file (for
+    // example `release: vX` moving a dated release-notes draft). The
+    // per-path walk reads that edge as a whole-file deletion, so carry the
+    // owners across the rename's own hunks and keep walking the new path.
+    let mut start = delivery.to_string();
+    let mut current = path.to_string();
+    for _ in 0..RENAME_FOLLOW_LIMIT {
+        let final_owners = states
+            .get(target)
+            .ok_or("target delivery line state is unavailable")?;
+        if !lost(final_owners) {
+            break;
+        }
+        let Some((rename, renamed_to, carried)) =
+            follow_rename(repo, &states, &start, target, &current, cycle)?
+        else {
+            break;
+        };
+        states = walk_owners(repo, &rename, target, &renamed_to, carried, resolutions, cycle)?;
+        start = rename;
+        current = renamed_to;
+    }
+    let final_owners = states
+        .get(target)
+        .ok_or("target delivery line state is unavailable")?;
+    if lost(final_owners) {
+        return Ok(Some(super::DeliveryContentPresence::Dropped {
+            paths: vec![path.to_string()],
+        }));
+    }
+    let mut commits = Vec::new();
+    for owner in final_owners.iter().flatten() {
+        for commit in &owner.commits {
+            if !commits.contains(commit) {
+                commits.push(commit.clone());
+            }
+        }
+    }
+    Ok(Some(if commits.is_empty() {
+        super::DeliveryContentPresence::Present {
+            paths: vec![path.to_string()],
+        }
+    } else {
+        super::DeliveryContentPresence::Superseded {
+            paths: vec![path.to_string()],
+            commits,
+        }
+    }))
+}
+
+type OwnerStates = std::collections::HashMap<String, Vec<Option<OwnedLines>>>;
+
+/// Bound on renames followed for one delivered path.
+const RENAME_FOLLOW_LIMIT: usize = 8;
+
+/// Carry `owners` (positions in `path` at `start`) through every commit on
+/// the ancestry path `start..target`, returning each walked commit's state.
+fn walk_owners(
+    repo: &Path,
+    start: &str,
+    target: &str,
+    path: &str,
+    owners: Vec<Option<OwnedLines>>,
+    resolutions: &[String],
+    cycle: &[String],
+) -> Result<OwnerStates, String> {
+    let width = owners.len();
     let history = text(
         repo,
         &[
@@ -1246,12 +1321,12 @@ fn line_content_presence_uncached(
             "--topo-order",
             "--reverse",
             "--parents",
-            &format!("{delivery}..{target}"),
+            &format!("{start}..{target}"),
         ],
     )?;
     let mut states = std::collections::HashMap::new();
-    states.insert(delivery.to_string(), owners);
-    let mut walked = vec![delivery];
+    states.insert(start.to_string(), owners);
+    let mut walked = vec![start];
     for record in history.lines() {
         for commit in record.split_whitespace() {
             if !walked.contains(&commit) {
@@ -1311,7 +1386,7 @@ fn line_content_presence_uncached(
         } else {
             None
         };
-        let mut merged: Vec<Option<OwnedLines>> = vec![None; states[delivery].len()];
+        let mut merged: Vec<Option<OwnedLines>> = vec![None; width];
         for prior in fields.iter().skip(1) {
             let Some(previous) = states.get(*prior) else {
                 continue;
@@ -1409,35 +1484,98 @@ fn line_content_presence_uncached(
         }
         states.insert(commit.to_string(), merged);
     }
-    let final_owners = states
-        .get(target)
-        .ok_or("target delivery line state is unavailable")?;
-    let lost = if allow_partial {
-        !final_owners.iter().flatten().any(|owner| !owner.positions.is_empty())
-    } else {
-        final_owners.iter().any(Option::is_none)
-    };
-    if lost {
-        return Ok(Some(super::DeliveryContentPresence::Dropped {
-            paths: vec![path.to_string()],
-        }));
-    }
-    let mut commits = Vec::new();
-    for owner in final_owners.iter().flatten() {
-        for commit in &owner.commits {
-            if !commits.contains(commit) {
-                commits.push(commit.clone());
+    Ok(states)
+}
+
+/// cas-90d8: find the first ordinary commit on the walked route that renames
+/// `path`, and carry the owners its parent held through that rename's own
+/// hunks. Git must pair the two paths as one rename; a delete beside an
+/// unrelated add, a rename resolved inside a merge, or a parent whose
+/// ownership is already lost is not followed, so it stays dropped.
+fn follow_rename(
+    repo: &Path,
+    states: &OwnerStates,
+    start: &str,
+    target: &str,
+    path: &str,
+    cycle: &[String],
+) -> Result<Option<(String, String, Vec<Option<OwnedLines>>)>, String> {
+    let deletions = text(
+        repo,
+        &[
+            "log",
+            "--ancestry-path",
+            "--no-merges",
+            "--no-renames",
+            "--topo-order",
+            "--reverse",
+            "--diff-filter=D",
+            "--format=%H",
+            &format!("{start}..{target}"),
+            "--",
+            path,
+        ],
+    )?;
+    for commit in deletions.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let parent = text(repo, &["rev-parse", &format!("{commit}^1")])?;
+        let parent = parent.trim();
+        let Some(previous) = states.get(parent) else {
+            continue;
+        };
+        if previous.iter().all(Option::is_none) {
+            continue;
+        }
+        let listing = text(repo, &["diff", "-M", "--name-status", "-z", parent, commit, "--"])?;
+        let fields: Vec<_> = listing.split('\0').collect();
+        let mut renamed_to = None;
+        let mut index = 0;
+        while index < fields.len() {
+            let status = fields[index];
+            if status.starts_with('R') || status.starts_with('C') {
+                if status.starts_with('R') && fields.get(index + 1) == Some(&path) {
+                    renamed_to = fields.get(index + 2).copied();
+                }
+                index += 3;
+            } else {
+                index += 2;
             }
         }
+        let Some(renamed_to) = renamed_to.filter(|new| !new.is_empty()) else {
+            continue;
+        };
+        let patch = text(
+            repo,
+            &["diff", "-M", "--unified=0", parent, commit, "--", path, renamed_to],
+        )?;
+        if patch.matches("diff --git ").count() != 1
+            || !patch.lines().any(|line| line.starts_with("rename from "))
+        {
+            continue;
+        }
+        let changes = normalize_ordinary(repo, parent, path, parse_hunks(&patch)?)?;
+        let reverted = is_revert_message(&text(repo, &["show", "-s", "--format=%B", commit])?);
+        let retire_draft = cycle.iter().any(|owned| owned == commit);
+        let no_parallel_edits = ParallelEdits::new();
+        let carried = previous
+            .iter()
+            .map(|owner| {
+                owner.as_ref().and_then(|owner| {
+                    advance(
+                        owner,
+                        &changes,
+                        true,
+                        None,
+                        &no_parallel_edits,
+                        None,
+                        retire_draft,
+                        false,
+                        reverted,
+                        commit,
+                    )
+                })
+            })
+            .collect();
+        return Ok(Some((commit.to_string(), renamed_to.to_string(), carried)));
     }
-    Ok(Some(if commits.is_empty() {
-        super::DeliveryContentPresence::Present {
-            paths: vec![path.to_string()],
-        }
-    } else {
-        super::DeliveryContentPresence::Superseded {
-            paths: vec![path.to_string()],
-            commits,
-        }
-    }))
+    Ok(None)
 }

@@ -7,7 +7,10 @@ membership does not make separate accounts share operator history.
 The test uses the real CLI to enroll a disposable hub, bind a project, approve
 each browser, record supervisor messages and drain the durable outbox. It then
 stops the hub and takes the older browser offline before enrolling the phone.
-The phone replays retained history and queues a reply; the returning hub admits
+The phone replays retained history with read-only access, asks to reply, and
+the independently enrolled account-management desktop selects Allow. The same
+phone then queues a reply without signing out, changing device ID, or rotating
+its epoch keys; the grant generation increments once. The returning hub admits
 one command and writes one receipt. A hub restart preserves that admission.
 Revoking the older browser must produce `401 grant_revoked` on its next request
 and clear its local inbox. The phone must decrypt a new message sealed under a
@@ -60,8 +63,9 @@ Stop the registered native server after the test, including on failure.
 
 ## Receipts
 
-`live-receipt.json` records the tested commit and binary version, six user-path
-cells, command/prompt/receipt IDs, the revoked request, and the old/new epochs.
+`live-receipt.json` records the tested commit and binary version, eight user-path
+cells, sanitized capability/request/decision responses, command/prompt/receipt
+IDs, the revoked request, and the old/new epochs.
 `cleanup.json` lists only this run's principals and reports cleanup failures and
 remaining active principals. `qa/` contains cell captures, desktop/phone renders
 in both schemes, asserted ARIA snapshots, a rendered static DOM/CSS snapshot,

@@ -35,9 +35,12 @@
 # rerun this command); 4 a merge conflict outside the release files; 5 the
 # PR's CI is red, reported with its failing tests (it never entered the queue).
 
-set -euo pipefail
+set -Eeuo pipefail
 # prepare runs in a command substitution; keep errexit there too.
 shopt -s inherit_errexit
+# Include commands inside prepare's substitution: Git and gh can fail without
+# printing anything (notably a quiet commit with nothing to commit).
+trap 'printf "error: command failed (exit %s) at line %s: %s\n" "$?" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 usage() {
     sed -n '3,33p' "$0" | sed 's/^# \{0,1\}//'
@@ -79,9 +82,10 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 # Progress goes to stderr: prepare's stdout is the version it prepared.
 say() { printf 'release: %s\n' "$*" >&2; }
 
-if [[ -n "$notes_file" ]]; then
-    [[ -f "$notes_file" ]] || die "--notes file not found: $notes_file"
-    notes_file="$(cd "$(dirname "$notes_file")" && pwd)/$(basename "$notes_file")"
+if [[ -n "$notes_file" && "$notes_file" != /* ]]; then
+    # Keep the caller's directory, but resolve a missing path after finding the
+    # release commit: the first run may have renamed this very draft.
+    notes_file="$PWD/$notes_file"
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
@@ -274,16 +278,28 @@ place_draft() {
 
 # Steps 1-3 plus the commit. Prints the version prepared.
 prepare() {
-    local base_version version current
+    local base_version version current prepared_commit drafts=()
     fetch_base
     sync_with_base
     base_version="$(version_at "$remote/$base")"
     [[ "$base_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "cannot read $base's version"
     version="$(next_version "$base_version")"
     current="$(version_at HEAD)"
-    if [[ "$current" == "$version" ]] && grep -q "^## \[$version\] - " CHANGELOG.md \
-        && [[ -f "$(draft_path "$version")" || -n "$(git ls-files "docs/release-notes/*-v$version-slack.md")" ]] \
-        && [[ -z "$notes_file" ]]; then
+    prepared_commit="$(git log -1 --format=%H --grep="^release: v${version//./[.]}$" "$remote/$base..HEAD")"
+    if [[ -n "$notes_file" && ! -f "$notes_file" ]]; then
+        # Only accept a vanished --notes path if this release actually removed
+        # it. An unrelated typo must still fail instead of selecting any draft.
+        if [[ -n "$prepared_commit" && -n "$(git diff --no-renames --name-only --diff-filter=D "$prepared_commit^" "$prepared_commit" -- "$notes_file")" ]]; then
+            mapfile -t drafts < <(git diff --no-renames --name-only --diff-filter=A "$prepared_commit^" "$prepared_commit" -- "docs/release-notes/*-v$version-slack.md")
+            if ((${#drafts[@]} == 1)); then
+                say "--notes $notes_file was renamed to ${drafts[0]}"
+                notes_file="${drafts[0]}"
+            fi
+        fi
+        [[ -f "$notes_file" ]] || die "--notes file not found: $notes_file"
+    fi
+    if [[ -n "$prepared_commit" && "$current" == "$version" ]] && grep -q "^## \[$version\] - " CHANGELOG.md \
+        && [[ -f "$(draft_path "$version")" || -n "$(git ls-files "docs/release-notes/*-v$version-slack.md")" ]]; then
         say "v$version is already prepared on $branch"
         printf '%s\n' "$version"
         return 0

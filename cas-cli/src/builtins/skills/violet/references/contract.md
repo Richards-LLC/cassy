@@ -18,7 +18,7 @@ This is the Cassy-side summary of the hub's `docs/TOOL_CONTRACT.md` (violet_ps,
 | `include_threads` | true |
 | `include_recent_replies_to_older_roots` | true; with `since`, also expands older roots whose latest reply is in the window |
 | `thread_lookback_days` | 7; 1–30, measured before `since` |
-| `include_files` | true; when false, every message's `file_ids` is `[]` and `files[]` is empty, whatever is attached |
+| `include_files` | true; when false, every message's `file_ids` is `[]` and `files[]` is empty, so attachment presence is unknown, never absent |
 | `include_channels` | true for compatibility; pass `false` on every read except directory discovery |
 | `file_id` / `file_ids` | only these files (array ≤ 50); history, enrichment and `messages` are skipped |
 | `message_id` | exactly one root or reply |

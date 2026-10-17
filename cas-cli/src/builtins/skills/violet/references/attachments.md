@@ -12,8 +12,8 @@ below rather than a personal route.
    `include_channels: false`. Each message's `file_ids` names its
    attachments, and each file comes back as metadata only (`skipped: true`,
    `skip_reason: exceeds_max_file_bytes`). With `include_files: false` every
-   message's `file_ids` is `[]` whether or not it has attachments, so never
-   read that as "no files".
+   message's `file_ids` is `[]` whether or not it has attachments: presence is
+   unknown, never absent.
 2. **Read the files by ID.** Call `violet_read` with `file_ids` (up to 50). A
    file over the budget comes back `skipped: true` with `size_bytes` and,
    when the hub could hash it, `sha256`. Raise `max_bytes` only from a script.

@@ -12252,6 +12252,152 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn cas_7bcb_operator_reply_backoff_caps_and_resets() {
+        use crate::ui::factory::daemon::WsConnection;
+        use futures_util::{FutureExt, StreamExt};
+        use std::{
+            sync::{Arc, Mutex},
+            time::Duration,
+        };
+        use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (sink, stream) = WebSocketStream::from_raw_socket(server, Role::Server, None)
+            .await
+            .split();
+        let mut client = WebSocketStream::from_raw_socket(tcp, Role::Client, None).await;
+        daemon.ws_clients.insert(
+            0,
+            WsConnection {
+                sink,
+                stream,
+                pane_sizes: Default::default(),
+                relay_trusted: true,
+            },
+        );
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let id = queue
+            .enqueue_with_session(
+                "supervisor",
+                "operator",
+                &crate::supervisor_notices::operator_prompt("pending reply", "reply").unwrap(),
+                "provision-test",
+            )
+            .unwrap();
+        let reply = super::read_operator_replies(&root, queue.as_ref(), "provision-test", false)
+            .unwrap()
+            .remove(0);
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let sink = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || Capture(sink.clone()))
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let log_count = || {
+            String::from_utf8(output.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains("stage=\"operator_reply_forwarded\""))
+                .count()
+        };
+        tokio::time::pause();
+        daemon.forward_operator_replies(vec![reply.clone()]);
+        daemon.flush_ws_client_output().await;
+        assert!(client.next().await.unwrap().unwrap().is_binary());
+        assert_eq!(log_count(), 1);
+        // Independently specified intervals, including repeated capped retries.
+        let mut attempts = 1;
+        for seconds in [1, 2, 4, 8, 16, 32, 60, 60] {
+            tokio::time::advance(Duration::from_millis(seconds * 1000 - 100)).await;
+            daemon.forward_operator_replies(vec![reply.clone()]);
+            assert_eq!(
+                log_count(),
+                attempts,
+                "reply retried before {seconds}s deadline"
+            );
+            daemon.flush_ws_client_output().await;
+            assert!(client.next().now_or_never().is_none());
+            tokio::time::advance(Duration::from_millis(100)).await;
+            daemon.forward_operator_replies(vec![reply.clone()]);
+            daemon.flush_ws_client_output().await;
+            assert!(client.next().await.unwrap().unwrap().is_binary());
+            attempts += 1;
+            assert_eq!(
+                log_count(),
+                attempts,
+                "one log per scheduled backoff attempt"
+            );
+        }
+        // A newly connected device asks for its first history page through the
+        // existing hub socket. It must not inherit the offline device's delay.
+        daemon
+            .conversation_history_page("new-device".into(), "paired-device", None, 20)
+            .unwrap();
+        daemon.forward_operator_replies(vec![reply.clone()]);
+        attempts += 1;
+        assert_eq!(log_count(), attempts, "new device resets the pending retry");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        daemon.forward_operator_replies(vec![reply.clone()]);
+        attempts += 1;
+        assert_eq!(
+            log_count(),
+            attempts,
+            "reconnected device starts at one second"
+        );
+        daemon
+            .acknowledge_operator_reply(id, "wrong-device")
+            .unwrap_err();
+        daemon.forward_operator_replies(vec![reply.clone()]);
+        assert_eq!(
+            log_count(),
+            attempts,
+            "invalid receipts cannot reset retries"
+        );
+        // A valid receipt proves the transport recovered; other pending replies
+        // should immediately retry with a fresh one-second schedule.
+        let other = queue
+            .enqueue_with_session(
+                "supervisor",
+                "operator",
+                &crate::supervisor_notices::operator_prompt("received reply", "reply").unwrap(),
+                "provision-test",
+            )
+            .unwrap();
+        daemon.acknowledge_operator_reply(other, "*").unwrap();
+        daemon.forward_operator_replies(vec![reply.clone()]);
+        attempts += 1;
+        assert_eq!(
+            log_count(),
+            attempts,
+            "valid receipt resets pending retries"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        daemon.forward_operator_replies(vec![reply]);
+        assert_eq!(log_count(), attempts + 1);
+    }
+
+    #[tokio::test]
     async fn cas_5c2c_review_operator_fallback_is_consumed_and_acknowledged() {
         use crate::ui::factory::daemon::WsConnection;
         use futures_util::StreamExt;

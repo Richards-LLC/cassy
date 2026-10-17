@@ -2192,7 +2192,8 @@ pub(crate) fn content_paths(repo: &Path, from: &str, to: &str) -> Result<Vec<Str
     {
         let probe = Command::new("git")
             .args(["diff", "-w", "--quiet", "--diff-filter=ACMRT", from, to, "--"])
-            .arg(format!(":(literal){path}"))
+            // `--name-only` paths are top-relative; so is this pathspec (cas-833c).
+            .arg(format!(":(top,literal){path}"))
             .current_dir(repo)
             .status()
             .map_err(|error| format!("git diff failed to start: {error}"))?;

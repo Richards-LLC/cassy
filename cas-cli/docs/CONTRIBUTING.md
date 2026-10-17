@@ -937,10 +937,12 @@ against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`
 On Unix, named tests and their guard processes run with private links to resolved
 Rust tools first on PATH. Rustup proxies are resolved to concrete toolchain
 executables, and the selected Cargo invocation uses that private link; this
-prevents rustup from restoring `$CARGO_HOME/bin` when it dispatches. Only PATH
-directories containing `cas`, `codex` or `claude` files are removed. Other entries,
-including local build-tool and Homebrew directories, retain their order so tools
-such as mold, node, protoc and newer Bash remain available. Compile-only checks
+prevents rustup from restoring `$CARGO_HOME/bin` when it dispatches. A PATH
+directory containing `cas`, `codex` or `claude` files is replaced in place by a
+private mirror of its other entries, without those binaries or rustup proxies, so
+neighbours such as Homebrew `git` keep their precedence over `/usr/bin`. Other
+entries, including local build-tool and Homebrew directories, retain their order
+so tools such as mold, node, protoc and newer Bash remain available. Compile-only checks
 retain their ordinary PATH. The runner prints the PATH setup cost for measurement.
 
 Harness fixtures must supply their own fake executables. The shared

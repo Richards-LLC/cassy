@@ -555,8 +555,13 @@ fn reply_files_the_receipt_does_not_show_attached_fail_the_run() {
         assert_eq!(error.code, code, "{files}");
         assert!(!out.contains("[OK]"), "{out}");
         assert!(out.contains("0 root  9.0") && out.contains("1 reply 9.1"), "{out}");
-        let message = error.to_string();
-        assert!(message.contains("reply 1") && message.contains("same --idempotency-key"), "{message}");
+        assert!(out.contains("cas violet read --channel cas-internal --thread 9.0"), "{out}");
+        assert!(out.contains("same --idempotency-key, never a new key"), "{out}");
+        let line = format!("✗ {error}");
+        assert!(line.contains("reply 1:"), "{line}");
+        for line in out.lines().chain(std::iter::once(line.as_str())) {
+            assert!(line.chars().count() <= 80, "wider than 80 columns: {line}");
+        }
 
         let hub = ScriptedHub::with(vec![receipt(files.clone())]);
         let (out, result) = run_cli(&argv, &hub, true, &no_gate);
@@ -564,6 +569,8 @@ fn reply_files_the_receipt_does_not_show_attached_fail_the_run() {
         let printed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(printed["ok"], false);
         assert_eq!(printed["error"]["code"], code);
+        let full = printed["error"]["message"].as_str().unwrap();
+        assert!(full.contains("same --idempotency-key") && full.contains("9.1"), "JSON keeps the whole remedy: {full}");
         assert_eq!(printed["posted"][1]["message_id"], "9.1");
         assert_eq!(printed["posted"][1]["files"], files, "returned file ids are kept");
         assert_eq!(hub.calls().len(), 1, "no automatic retry");

@@ -652,21 +652,25 @@ fn confirm_reply_files(receipt: Value, channel: &str, replies: &[ReplyPlan]) -> 
         };
         let root = posted(0).and_then(|item| item["message_id"].as_str()).unwrap_or("unknown");
         let reply_id = item.and_then(|item| item["message_id"].as_str()).unwrap_or("unknown");
+        let plural = if sent == 1 { "" } else { "s" };
+        // The receipt's error carries the whole cause and remedy for machines;
+        // the terminal line stays short because the hint lines name the read
+        // command and the same-key rule (cas-e592 terminal-qa).
+        let full = format!(
+            "reply {position} was sent {sent} file{plural}, but {what}. The thread is posted (root {root}, reply \
+             {reply_id}): read it with `cas violet read --channel {channel} --thread {root}` before posting \
+             anything. Rerunning with the same --idempotency-key replays this receipt and never reposts; do not \
+             repost under a new key."
+        );
         let mut error = VioletError::local(
             code,
-            format!(
-                "reply {position} was sent {sent} file{}, but {what}. The thread is posted (root {root}, reply \
-                 {reply_id}): read it with `cas violet read --channel {channel} --thread {root}` before posting \
-                 anything. Rerunning with the same --idempotency-key replays this receipt and never reposts; do not \
-                 repost under a new key.",
-                if sent == 1 { "" } else { "s" }
-            ),
+            format!("reply {position}: {attached}/{sent} files attached; thread posted"),
         );
         let mut envelope = receipt.clone();
         envelope["ok"] = json!(false);
         envelope["failed_index"] = json!(position);
         envelope["resume_safe"] = json!(false);
-        envelope["error"] = json!({"code": code, "message": error.message, "retryable": false});
+        envelope["error"] = json!({"code": code, "message": full, "retryable": false});
         error.envelope = Some(envelope);
         return Err(error);
     }
@@ -901,23 +905,24 @@ fn render_partial_thread(out: &mut dyn Write, envelope: &Value) {
         Some("thread_files_unconfirmed" | "uploaded_not_attached")
     );
     if unconfirmed {
-        let _ = writeln!(
-            out,
-            "[FAILED] thread to {} posted, but the files of reply {failed} are not confirmed attached",
-            channel_label(envelope)
-        );
-    } else {
-        let _ = writeln!(
-            out,
-            "[FAILED] thread to {} stopped at index {failed}; resume_safe {resume_safe}",
-            channel_label(envelope)
-        );
+        let _ = writeln!(out, "[FAILED] reply {failed} files not confirmed attached; the thread was posted");
+        posted_lines(out, envelope);
+        let channel = str_at(envelope, "/channel/name").unwrap_or("<channel>");
+        let root = str_at(envelope, "/posted/0/message_id").unwrap_or("<root>");
+        let _ = writeln!(out, "  -> read it: cas violet read --channel {channel} --thread {root}");
+        let _ = writeln!(out, "  -> rerun only with the same --idempotency-key, never a new key");
+        return;
     }
+    let _ = writeln!(
+        out,
+        "[FAILED] thread to {} stopped at index {failed}; resume_safe {resume_safe}",
+        channel_label(envelope)
+    );
     posted_lines(out, envelope);
     let hint = if resume_safe {
         "retry the identical command with the same --idempotency-key"
     } else {
-        "read the thread with `cas violet read --thread <root>` before doing anything else"
+        "read the thread first: cas violet read --thread <root>"
     };
     let _ = writeln!(out, "  -> {hint}");
 }

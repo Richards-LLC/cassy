@@ -16,15 +16,17 @@ below rather than a personal route.
    the hub's side. With `include_files: false` every
    message's `file_ids` is `[]` whether or not it has attachments: presence is
    unknown, never absent.
-2. **Read the files by ID.** Call `violet_read` with `file_ids` (up to 50). A
+2. **Read the files by ID.** Call `violet_read` with `file_ids` (up to 50), or
+   `file_id` for one. A
    file over the budget comes back `skipped: true` with `size_bytes` and,
    when the hub could hash it, `sha256`. Raise `max_bytes` only from a script.
 3. **Find what was skipped.** An attachment Slack refuses (Slack Connect
    `access_denied`, `file_not_found`, or a refused download) does not fail
    the read: it comes back `skipped: true` with `skip_reason` `access_denied`,
    `file_not_found` or `file_unreadable`, Slack's code in `upstream`, and the
-   rest of the read intact. A rate limit, an outage, a transport error or any
-   other Slack refusal still fails the whole call (table below).
+   rest of the read intact; the hub's `file_unavailable` failure now lands on
+   the file instead of the call. A rate limit, an outage, a transport error or
+   any other Slack refusal still fails the whole call (table below).
 4. **Report what was not read.** List every skipped or unread file ID with its
    `skip_reason` or error code. Never conclude from the text alone when an
    attachment could not be read.

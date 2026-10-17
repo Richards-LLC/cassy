@@ -276,7 +276,9 @@ impl CheckGroup {
             | "models"
             | "sessionstart budget" => Self::Config,
             "issue repositories" | "shipped issues" => Self::Config,
-            "integrations" | "violet" | "violet wake" | "github origin" => Self::Integrations,
+            "integrations" | "violet" | "violet wake" | "violet claims" | "github origin" => {
+                Self::Integrations
+            }
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,
         }
@@ -1361,6 +1363,17 @@ fn violet_wake_check(cas_root: &Path, now: chrono::DateTime<chrono::Utc>) -> Opt
             WatchHealth::Ok => CheckStatus::Ok,
             WatchHealth::Warning => CheckStatus::Warning,
         },
+        message,
+    ))
+}
+
+/// cas-6ace: the managed Violet reader's last claim receipts, once it wrote one.
+fn violet_claim_check(cas_root: &Path, now: chrono::DateTime<chrono::Utc>) -> Option<Check> {
+    let (healthy, message) =
+        crate::ui::factory::daemon::runtime::violet_reader::claim_receipts_summary(cas_root, now)?;
+    Some(Check::new(
+        "violet claims",
+        if healthy { CheckStatus::Ok } else { CheckStatus::Warning },
         message,
     ))
 }
@@ -2956,6 +2969,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     }
     // cas-a897: Violet push-wake watches and the Cloud relay claim loop.
     checks.extend(violet_wake_check(&cas_root, chrono::Utc::now()));
+    checks.extend(violet_claim_check(&cas_root, chrono::Utc::now()));
     recorder.mark("violet hub", &checks);
 
     // Check 13c: stale user-level skills (cas-332f). `cas update` only prunes

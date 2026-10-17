@@ -2186,11 +2186,11 @@ impl VioletWakeRuntime {
     /// Run the due sweeps: read through Violet, then apply the results.
     /// Returns how many sweeps queued a wake.
     #[cfg(feature = "mcp-proxy")]
-    pub(crate) async fn sweep(&self, sweeps: Vec<SweepRequest>, presence: SupervisorPresence) -> usize {
+    pub(crate) async fn sweep(&self, sweeps: Vec<SweepRequest>, presence: SupervisorPresence) -> Result<usize, String> {
         // A prepared list is not admission. Refuse paused/corrupt state before
         // connecting, reading, advancing watermarks or applying anything.
         if !crate::coordination::binding_intake::IntakeJournal::new(&self.cas_dir).legacy_allowed().unwrap_or(false) {
-            return 0;
+            return Ok(0);
         }
         let caller = cmcp_core::ProxyCaller {
             agent_id: presence.agent_id.clone(),
@@ -2217,27 +2217,25 @@ impl VioletWakeRuntime {
     }
 
     /// The owned sweep handle includes blocking apply, not just the read.
-    pub(super) async fn apply_sweep_results(&self, results: Vec<(String, Result<SweepRead, String>)>) -> usize {
+    pub(super) async fn apply_sweep_results(&self, results: Vec<(String, Result<SweepRead, String>)>) -> Result<usize, String> {
         let state = std::sync::Arc::clone(&self.state);
         let cas_dir = self.cas_dir.clone();
         tokio::task::spawn_blocking(move || {
-            let Ok(queue) = crate::store::open_prompt_queue_store(&cas_dir) else {
-                return 0;
-            };
+            let queue = crate::store::open_prompt_queue_store(&cas_dir).map_err(|e| format!("sweep apply queue unavailable: {e}"))?;
             let mut state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            results
+            Ok(results
                 .into_iter()
                 .map(|(channel, read)| state.apply_sweep(queue.as_ref(), &channel, read, Utc::now()))
                 .filter(|outcome| matches!(outcome, SweepOutcome::Woke { .. }))
-                .count()
+                .count())
         })
         .await
-        .unwrap_or(0)
+        .map_err(|error| format!("sweep apply did not finish: {error}"))?
     }
 
     #[cfg(not(feature = "mcp-proxy"))]
-    pub(crate) async fn sweep(&self, _sweeps: Vec<SweepRequest>, _presence: SupervisorPresence) -> usize {
-        0
+    pub(crate) async fn sweep(&self, _sweeps: Vec<SweepRequest>, _presence: SupervisorPresence) -> Result<usize, String> {
+        Ok(0)
     }
 }
 

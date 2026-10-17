@@ -129,7 +129,7 @@ struct PendingPause {
 pub(crate) struct IntakeController {
     pub tick: Option<JoinHandle<TickResult>>,
     /// Includes the nested blocking apply. Never replace/drop an unreaped task.
-    pub sweep: Option<JoinHandle<()>>,
+    pub sweep: Option<JoinHandle<Result<(), String>>>,
     pending: Vec<PendingPause>,
     failure: Option<String>,
 }
@@ -140,6 +140,9 @@ impl IntakeController {
         request: PauseRequest,
         runtime: RuntimeIdentity,
     ) -> Result<(), String> {
+        if self.pending.len() >= 64 {
+            return Err("too many pending intake controls; reread status".into());
+        }
         runtime.validate()?;
         if request.nonce.is_nil()
             || request.factory_session != runtime.factory_session
@@ -166,10 +169,12 @@ impl IntakeController {
         self.failure = Some(error.into());
     }
     pub async fn reap_sweep(&mut self) {
-        if self.sweep.as_ref().is_some_and(JoinHandle::is_finished)
-            && let Err(error) = self.sweep.take().expect("finished sweep").await
-        {
-            self.failed(format!("legacy sweep/apply did not finish: {error}"));
+        if self.sweep.as_ref().is_some_and(JoinHandle::is_finished) {
+            match self.sweep.take().expect("finished sweep").await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => self.failed(error),
+                Err(error) => self.failed(format!("legacy sweep/apply did not finish: {error}")),
+            }
         }
     }
     /// Called only by the lifecycle after it has consumed completed tick output.

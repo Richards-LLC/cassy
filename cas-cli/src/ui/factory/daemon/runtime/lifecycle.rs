@@ -2895,6 +2895,7 @@ impl FactoryDaemon {
             compact_cols: 0,
             compact_rows: 0,
             pending_spawns: VecDeque::new(),
+            binding_intake: Default::default(),
             spawn_task: None,
             spawn_verifications: HashMap::new(),
             cloud_handle,
@@ -3470,9 +3471,10 @@ impl FactoryDaemon {
                                     let violet = std::sync::Arc::clone(violet);
                                     let cas_dir = self.app.cas_dir().to_path_buf();
                                     self.binding_intake.sweep = Some(tokio::spawn(async move {
-                                        if violet.sweep(sweeps, presence).await > 0 {
+                                        if violet.sweep(sweeps, presence).await? > 0 {
                                             super::delivery::wake_daemon_after_enqueue(&cas_dir);
                                         }
+                                        Ok(())
                                     }));
                                 }
                             }

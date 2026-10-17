@@ -555,7 +555,7 @@ impl DaemonInitPhase {
             compact_cols: 0,
             compact_rows: 0,
             pending_spawns: VecDeque::new(),
-        binding_intake: Default::default(),
+            binding_intake: Default::default(),
             spawn_task: None,
             spawn_verifications: HashMap::new(),
             cloud_handle,

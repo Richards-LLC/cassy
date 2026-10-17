@@ -1866,7 +1866,7 @@ async fn cas_9021_drain_waits_for_tick_and_nested_sweep_apply_without_resuming()
     let sweeping = runtime.clone();
     daemon.binding_intake.sweep = Some(tokio::spawn(async move {
         read_wait.await.unwrap(); // controlled external Violet read, no runtime mock
-        sweeping.apply_sweep_results(vec![("C1".into(), Ok(SweepRead { complete: true, ..Default::default() }))]).await;
+        sweeping.apply_sweep_results(vec![("C1".into(), Ok(SweepRead { complete: true, ..Default::default() }))]).await.map(|_| ())
     }));
     let mut local = std::os::unix::net::UnixStream::connect(root.join("gui.sock")).unwrap();
     local.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -1883,7 +1883,7 @@ async fn cas_9021_drain_waits_for_tick_and_nested_sweep_apply_without_resuming()
     daemon.finish_binding_intake_replies();
     assert!(daemon.gui_clients.values().all(|client| client.write_buf.is_empty()), "a finished tick is not a drained sweep/apply");
     read_done.send(()).unwrap();
-    daemon.binding_intake.sweep.take().unwrap().await.unwrap();
+    daemon.binding_intake.sweep.take().unwrap().await.unwrap().unwrap();
     assert!(WatchBook::read(&fx.watch_path).unwrap().watch("C1", "provision-test").unwrap().is_active());
     assert_eq!(fx.rows().iter().map(|row| row.id).collect::<Vec<_>>(), queue_ids);
     daemon.finish_binding_intake_replies(); daemon.flush_gui_client_output();
@@ -1898,7 +1898,7 @@ async fn cas_9021_drain_waits_for_tick_and_nested_sweep_apply_without_resuming()
     assert!(ack.verify(&request, &stale, &capabilities).is_err());
     let before = std::fs::read(&fx.watch_path).unwrap();
     let prepared = vec![SweepRequest { channel_id: "C1".into(), channel_name: "fixture".into(), since: now }];
-    assert_eq!(runtime.sweep(prepared, SupervisorPresence { agent_id: "supervisor".into() }).await, 0);
+    assert_eq!(runtime.sweep(prepared, SupervisorPresence { agent_id: "supervisor".into() }).await.unwrap(), 0);
     let (report, sweeps, presence) = runtime.tick_blocking();
     assert_eq!(report, PollReport::default());
     assert!(sweeps.is_empty() && presence.is_none());

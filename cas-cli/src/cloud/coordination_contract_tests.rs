@@ -28,6 +28,7 @@ const FIXTURES: &[(&str, &str)] = &[
     fixture!("activity--observe.json"),
     fixture!("deliveries--rebind.json"),
     fixture!("deliveries--receipts.json"),
+    fixture!("deliveries--recover.json"),
     fixture!("external_work--claim.json"),
     fixture!("external_work--complete.json"),
     fixture!("external_work--handoff_offer.json"),
@@ -201,7 +202,7 @@ fn fixtures_cover_part_a_and_nothing_of_part_b() {
 fn vendored_cloud_fixtures_are_unchanged() {
     let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
     let pinned = manifest["vendored"]["files"].as_object().unwrap();
-    assert_eq!(pinned.len(), 14, "Cloud ships 14 part-(a) files at this ref");
+    assert_eq!(pinned.len(), 15, "Cassy vendors 15 of Cloud's part-(a) files at this ref");
     for (name, sha) in pinned {
         let (_, text) = FIXTURES
             .iter()

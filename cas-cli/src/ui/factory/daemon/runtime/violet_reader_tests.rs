@@ -10,6 +10,8 @@ use std::time::Duration;
 const CLAIM: &str = include_str!("../../../../../tests/fixtures/coordination_contract/v1/violet_activity--claim_v2.json");
 const ACK: &str = include_str!("../../../../../tests/fixtures/coordination_contract/v1/violet_activity--ack_v2.json");
 const RECEIPTS: &str = include_str!("../../../../../tests/fixtures/coordination_contract/v1/deliveries--receipts.json");
+const RECOVER: &str = include_str!("../../../../../tests/fixtures/coordination_contract/v1/deliveries--recover.json");
+const REBIND: &str = include_str!("../../../../../tests/fixtures/coordination_contract/v1/deliveries--rebind.json");
 const REGISTRATION: &str = "reg-supervisor-alpha-01";
 const DELIVERY: &str = "0000de2a-1111-4111-8111-00000000de2a";
 
@@ -32,6 +34,8 @@ struct FixtureCloud {
     refuse_dispatch: bool,
     ack_response: Option<Value>,
     registration_id: &'static str,
+    recover: Value,
+    generations: Mutex<std::collections::HashMap<String, u64>>,
     claim_calls: AtomicUsize,
     log: Mutex<Vec<String>>,
 }
@@ -41,6 +45,7 @@ impl FixtureCloud {
         Self {
             claim: fixture(CLAIM, claim_case), refuse_dispatch: false,
             ack_response: None, registration_id: REGISTRATION,
+            recover: fixture(RECOVER, "nothing left to recover"), generations: Mutex::default(),
             claim_calls: AtomicUsize::new(0), log: Mutex::new(Vec::new()),
         }
     }
@@ -49,6 +54,9 @@ impl FixtureCloud {
     }
     fn log(&self) -> Vec<String> {
         self.log.lock().unwrap().clone()
+    }
+    fn generation(&self, id: &str) -> u64 {
+        *self.generations.lock().unwrap().get(id).unwrap_or(&1)
     }
 }
 
@@ -75,12 +83,20 @@ impl CloudCoordinationPort for FixtureCloud {
             response["results"] = Value::Array(results);
             return Ok(response);
         }
-        let id = path
-            .strip_prefix("/api/coordination/activity/deliveries/")
-            .and_then(|rest| rest.strip_suffix("/receipts"))
-            .unwrap_or_else(|| panic!("unexpected route {path}"));
+        let rest = path.strip_prefix("/api/coordination/activity/deliveries/").unwrap_or_else(|| panic!("{path}"));
+        if let Some(id) = rest.strip_suffix("/rebind") {
+            assert_eq!(payload["expected_delivery_generation"], self.generation(id));
+            let generation = self.generation(id) + 1;
+            self.generations.lock().unwrap().insert(id.to_string(), generation);
+            self.push(format!("rebind {id} {generation}"));
+            let mut rebound = fixture(REBIND, "successor adopts");
+            rebound["receipt"]["delivery"]["id"] = json!(id);
+            rebound["receipt"]["delivery"]["delivery_generation"] = json!(generation);
+            return Ok(rebound);
+        }
+        let id = rest.strip_suffix("/receipts").unwrap_or_else(|| panic!("unexpected route {path}"));
         let state = payload["state"].as_str().unwrap();
-        assert_eq!(payload["delivery_generation"], 1);
+        assert_eq!(payload["delivery_generation"], self.generation(id));
         assert!(payload["request_id"].as_str().is_some_and(|r| uuid::Uuid::parse_str(r).is_ok()));
         if state == "dispatch_uncertain" && self.refuse_dispatch {
             // A superseded reader's receipt: Cloud answers 409 stale_generation.
@@ -95,6 +111,12 @@ impl CloudCoordinationPort for FixtureCloud {
 
     fn lookup(&self, _: &str, _: &str, _: Duration) -> Result<Value, RemoteError> {
         unreachable!("the reader never looks up operations")
+    }
+
+    fn get(&self, path: &str, query: &[(&str, &str)], _: Duration) -> Result<Value, RemoteError> {
+        assert_eq!(path, "/api/coordination/activity/deliveries");
+        assert!(query.contains(&("registration_id", self.registration_id)), "{query:?}");
+        Ok(self.recover.clone())
     }
 }
 
@@ -125,6 +147,10 @@ struct Typer<'a>(&'a FixtureCloud);
 impl SessionTyper for Typer<'_> {
     fn type_into(&self, session: &str, delivery: &ClaimedDelivery, body: &str) -> Result<(), NamedRefusal> {
         self.0.push(format!("typed {} into {session}: {body}", delivery.id));
+        Ok(())
+    }
+    fn notice_into(&self, session: &str, delivery: &ClaimedDelivery) -> Result<(), NamedRefusal> {
+        self.0.push(format!("notice {} into {session}", delivery.id));
         Ok(())
     }
 }
@@ -235,6 +261,58 @@ fn unknown_registration_stops_consumption_until_successor_cas_c186() {
         let outcome = reader.tick(&cloud, cloud.registration_id, &violet_body(None), &Typer(&cloud), Utc::now());
         assert!(matches!(outcome, ClaimOutcome::Read(ReaderReport { typed: 1, .. })));
         assert_eq!(cloud.claim_calls.load(Ordering::Relaxed), 2);
+    }
+}
+
+/// cas-51aa: after a crash the successor consumes each admission once. A
+/// lease never acked returns through claim; an unread admission still bound
+/// to the predecessor is rebound and resumed; a dispatch-uncertain one gets
+/// one recovery notice, then `consumed`, and its ask is never typed again.
+#[test]
+fn successor_recovers_each_admission_once_and_never_retypes_an_uncertain_ask() {
+    const SUCCESSOR: &str = "reg-supervisor-beta-08";
+    let (resumed, uncertain) = ("0000de1b-1111-4111-8111-00000000de1b", "0000de1c-1111-4111-8111-00000000de1c");
+    let mut cloud = FixtureCloud::new("leases this reader's deliveries");
+    cloud.registration_id = "reg-supervisor-beta-07";
+    cloud.ack_response = Some(json!({})); // the predecessor crashes before its ack lands
+    tick_as(&mut VioletReader::new("factory-session"), &cloud);
+
+    cloud.registration_id = SUCCESSOR;
+    cloud.ack_response = None;
+    cloud.recover = fixture(RECOVER, "successor on another machine");
+    let mut successor = VioletReader::new("factory-session");
+    for _ in 0..2 {
+        tick_as(&mut successor, &cloud);
+    }
+    assert_eq!(
+        cloud.log(),
+        [
+            format!("rebind {resumed} 2"),
+            format!("receipt {resumed} dispatch_uncertain"),
+            format!("typed {resumed} into factory-session: body for 1760616000.123456"),
+            format!("receipt {resumed} consumed"),
+            format!("rebind {uncertain} 2"),
+            format!("notice {uncertain} into factory-session"),
+            format!("receipt {uncertain} consumed"),
+            format!("ack {DELIVERY} admitted"),
+            format!("receipt {DELIVERY} dispatch_uncertain"),
+            format!("typed {DELIVERY} into factory-session: body for 1760616042.000200"),
+            format!("receipt {DELIVERY} consumed"),
+            format!("ack {DELIVERY} admitted"),
+        ]
+    );
+}
+
+fn tick_as(reader: &mut VioletReader, cloud: &FixtureCloud) -> ClaimOutcome {
+    reader.tick(cloud, cloud.registration_id, &AnyTarget, &Typer(cloud), Utc::now())
+}
+
+/// Recovery resumes targets other than `violet_body`'s one fixture message;
+/// the fetch itself is covered by the Violet adapter tests.
+struct AnyTarget;
+impl BodySource for AnyTarget {
+    fn fetch_body(&self, target: &Value) -> Result<String, NamedRefusal> {
+        Ok(format!("body for {}", target["message_ts"].as_str().unwrap()))
     }
 }
 

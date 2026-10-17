@@ -7,7 +7,7 @@ wakes. Cloud, Violet and Cassy implement and test against the same files.
 
 ## What is here
 
-Cloud owns 14 files, vendored byte for byte from `Richards-LLC/petra-stella-cloud`
+Cloud owns 15 files, vendored byte for byte from `Richards-LLC/petra-stella-cloud`
 `tests/contracts/coordination/v1/` at `00d0675af` (petra-stella-cloud#161, PR #164; PR #179 added the
 `strict_activation_required` claim refusal).
 Cloud authored them and deployed the routes to production first, as §11
@@ -30,6 +30,7 @@ breaking change means a new `v2/`.
 | `violet_activity--ack_v2.json` | `violet_activity.ack_v2` | `POST /api/violet/activity/ack` with `schema` |
 | `deliveries--rebind.json` | `deliveries.rebind` | `POST /api/coordination/activity/deliveries/{id}/rebind` |
 | `deliveries--receipts.json` | `deliveries.receipts` | `POST /api/coordination/activity/deliveries/{id}/receipts` |
+| `deliveries--recover.json` | `deliveries.recover` | `GET /api/coordination/activity/deliveries` |
 | `external_work--reply_intents.json` | `external_work.reply_intents` | `POST /api/coordination/external-work/{id}/reply-intents` |
 | `reply_intents--dispatch.json` | `reply_intents.dispatch` | `POST /api/coordination/reply-intents/{id}/dispatch` (relay only) |
 

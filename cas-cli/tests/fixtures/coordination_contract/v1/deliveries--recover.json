@@ -1,0 +1,214 @@
+{
+  "contract": "cassy.coordination/v1",
+  "surface": "deliveries.recover",
+  "method": "GET",
+  "path": "/api/coordination/activity/deliveries",
+  "spec": "\u00a75, \u00a712(a).3",
+  "cases": [
+    {
+      "name": "successor on another machine discovers the predecessor's admissions with their targets",
+      "request": {
+        "query": {
+          "registration_id": "reg-supervisor-beta-08"
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Resume each admission under its target; rebind any bound to an earlier registration first. Never re-admit.",
+          "admissions": [
+            {
+              "delivery": {
+                "id": "0000de1b-1111-4111-8111-00000000de1b",
+                "occurrence_id": "00000cc1-1111-4111-8111-000000000cc1",
+                "reader_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+                "registration_id": "reg-supervisor-beta-07",
+                "route_kind": "unclaimed_fanout",
+                "route_generation": 0,
+                "delivery_generation": 1,
+                "status": "admitted",
+                "consumption": "unread"
+              },
+              "admitted_at": "2026-10-16T13:59:41.000Z",
+              "target": {
+                "resource_id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+                "project_id": "github.com/richards-llc/cassy",
+                "external_ref": {
+                  "provider": "slack",
+                  "workspace_id": "T07ABCDEF",
+                  "channel_id": "C08COORD01",
+                  "root_ts": "1760616000.123456"
+                },
+                "message_ts": "1760616000.123456",
+                "permalink": "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456?thread_ts=1760616000.123456"
+              },
+              "recovery": {
+                "rebind_required": true,
+                "mode": "resume"
+              }
+            },
+            {
+              "delivery": {
+                "id": "0000de1c-1111-4111-8111-00000000de1c",
+                "occurrence_id": "00000cc3-1111-4111-8111-000000000cc3",
+                "reader_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+                "registration_id": "reg-supervisor-beta-07",
+                "route_kind": "unclaimed_fanout",
+                "route_generation": 0,
+                "delivery_generation": 1,
+                "status": "admitted",
+                "consumption": "dispatch_uncertain"
+              },
+              "admitted_at": "2026-10-16T13:59:50.000Z",
+              "target": {
+                "resource_id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+                "project_id": "github.com/richards-llc/cassy",
+                "external_ref": {
+                  "provider": "slack",
+                  "workspace_id": "T07ABCDEF",
+                  "channel_id": "C08COORD01",
+                  "root_ts": "1760616000.123456"
+                },
+                "message_ts": "1760616090.000300",
+                "permalink": "https://richards-llc.slack.com/archives/C08COORD01/p1760616090000300?thread_ts=1760616000.123456"
+              },
+              "recovery": {
+                "rebind_required": true,
+                "mode": "recovery_notice"
+              }
+            }
+          ],
+          "next_cursor": null,
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "proceed"
+          }
+        }
+      }
+    },
+    {
+      "name": "paged with a cursor",
+      "request": {
+        "query": {
+          "registration_id": "reg-supervisor-beta-08",
+          "limit": "1"
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "Resume each admission under its target; rebind any bound to an earlier registration first. Never re-admit.",
+          "admissions": [
+            {
+              "delivery": {
+                "id": "0000de1b-1111-4111-8111-00000000de1b",
+                "occurrence_id": "00000cc1-1111-4111-8111-000000000cc1",
+                "reader_slot_id": "b2b2b2b2-0000-4000-8000-00000000000b",
+                "registration_id": "reg-supervisor-beta-07",
+                "route_kind": "unclaimed_fanout",
+                "route_generation": 0,
+                "delivery_generation": 1,
+                "status": "admitted",
+                "consumption": "unread"
+              },
+              "admitted_at": "2026-10-16T13:59:41.000Z",
+              "target": {
+                "resource_id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+                "project_id": "github.com/richards-llc/cassy",
+                "external_ref": {
+                  "provider": "slack",
+                  "workspace_id": "T07ABCDEF",
+                  "channel_id": "C08COORD01",
+                  "root_ts": "1760616000.123456"
+                },
+                "message_ts": "1760616000.123456",
+                "permalink": "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456?thread_ts=1760616000.123456"
+              },
+              "recovery": {
+                "rebind_required": true,
+                "mode": "resume"
+              }
+            }
+          ],
+          "next_cursor": "0000de1b-1111-4111-8111-00000000de1b",
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "proceed"
+          }
+        }
+      }
+    },
+    {
+      "name": "nothing left to recover",
+      "request": {
+        "query": {
+          "registration_id": "reg-supervisor-beta-08",
+          "cursor": "0000de1c-1111-4111-8111-00000000de1c"
+        }
+      },
+      "response": {
+        "status": 200,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "completed",
+          "guidance": "No admitted deliveries to recover for this supervisor.",
+          "admissions": [],
+          "next_cursor": null,
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "none"
+          }
+        }
+      }
+    },
+    {
+      "name": "superseded predecessor registration",
+      "request": {
+        "query": {
+          "registration_id": "reg-supervisor-beta-07"
+        }
+      },
+      "response": {
+        "status": 404,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "not_found",
+          "guidance": "A newer registration of this supervisor has taken over; use it.",
+          "reason": "unknown_registration",
+          "receipt": {
+            "operation_id": null,
+            "request_id": null,
+            "resource": null,
+            "visible_owner": null,
+            "generation": null,
+            "expires_at": null,
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "none"
+          }
+        }
+      }
+    }
+  ]
+}

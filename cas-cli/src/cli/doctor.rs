@@ -6419,25 +6419,31 @@ mod tests {
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute_batch(
             "CREATE TABLE prompt_queue (
-                id INTEGER PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,
-                prompt TEXT NOT NULL, created_at TEXT NOT NULL, processed_at TEXT,
-                factory_session TEXT, summary TEXT, acked_at TEXT, acked_via TEXT
-            );
+                    id INTEGER PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,
+                    prompt TEXT NOT NULL, created_at TEXT NOT NULL, processed_at TEXT,
+                    factory_session TEXT, summary TEXT, acked_at TEXT, acked_via TEXT
+                );
+                INSERT INTO prompt_queue VALUES
+                  (91,'supervisor','worker','retained message','2026-01-01',NULL,
+                   'legacy-session','retained summary','2026-01-02','inferred_from_reply');
             INSERT INTO prompt_queue VALUES
-              (91,'supervisor','worker','retained message','2026-01-01',NULL,
-               'legacy-session','retained summary','2026-01-02','inferred_from_reply');
-        INSERT INTO prompt_queue VALUES
-          (92,'supervisor','worker','legacy processed','2026-07-21T12:00:00Z',
-           '2026-07-21T12:00:01Z','legacy-session',NULL,NULL,NULL);
-            CREATE INDEX legacy_queue_source ON prompt_queue(source);
-            CREATE TRIGGER legacy_queue_preserve BEFORE DELETE ON prompt_queue
-              BEGIN SELECT RAISE(IGNORE); END;",
+              (92,'supervisor','worker','legacy processed','2026-07-21T12:00:00Z',
+               '2026-07-21T12:00:01Z','legacy-session',NULL,NULL,NULL);
+            INSERT INTO prompt_queue VALUES
+              (93,'supervisor','worker','changed processed time','2026-07-21T12:00:00Z',
+               '2026-07-21T12:00:01Z','legacy-session',NULL,NULL,NULL);
+            INSERT INTO prompt_queue VALUES
+              (94,'supervisor','worker','advanced lifecycle','2026-07-21T12:00:00Z',
+               '2026-07-21T12:00:01Z','legacy-session',NULL,NULL,NULL);
+                CREATE INDEX legacy_queue_source ON prompt_queue(source);
+                CREATE TRIGGER legacy_queue_preserve BEFORE DELETE ON prompt_queue
+                  BEGIN SELECT RAISE(IGNORE); END;",
         )
         .unwrap();
         conn.execute_batch(
             "INSERT INTO operator_delivery_outbox
-                (event_id,prompt_id,payload_snapshot,created_at)
-                VALUES ('retained-event',9001,'retained outbox bytes','2026-01-01');",
+                    (event_id,prompt_id,payload_snapshot,created_at)
+                    VALUES ('retained-event',9001,'retained outbox bytes','2026-01-01');",
         )
         .unwrap();
         let before = get_schema_summary(&root)
@@ -6492,6 +6498,45 @@ mod tests {
         // Repair is explicit and runs the actual numbered migration path.
         conn.execute("DELETE FROM cas_migrations WHERE id=279", [])
             .unwrap();
+        // Reserved snapshot collisions are refused without overwriting data.
+        conn.execute_batch(
+            "CREATE TABLE cas_prompt_queue_legacy_processed(unrelated TEXT);
+                INSERT INTO cas_prompt_queue_legacy_processed VALUES ('retain collision');",
+        )
+        .unwrap();
+        assert!(crate::migration::run_migrations(&root, false).is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT unrelated FROM cas_prompt_queue_legacy_processed",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "retain collision"
+        );
+        assert!(!crate::migration::detector::column_exists(
+            &conn,
+            "prompt_queue",
+            "highest_stage"
+        ));
+        conn.execute_batch(
+            "DROP TABLE cas_prompt_queue_legacy_processed;
+                CREATE TRIGGER refuse_snapshot_commit BEFORE INSERT ON cas_migrations
+                WHEN NEW.id=279 BEGIN SELECT RAISE(ABORT,'fixture refusal'); END;",
+        )
+        .unwrap();
+        assert!(crate::migration::run_migrations(&root, false).is_err());
+        assert!(!crate::migration::detector::table_exists(
+            &conn,
+            "cas_prompt_queue_legacy_processed"
+        ));
+        assert!(!crate::migration::detector::column_exists(
+            &conn,
+            "prompt_queue",
+            "highest_stage"
+        ));
+        conn.execute_batch("DROP TRIGGER refuse_snapshot_commit")
+            .unwrap();
         let result = crate::migration::run_migrations(&root, false).unwrap();
         assert!(result.errors.is_empty(), "{result:?}");
         assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
@@ -6536,25 +6581,77 @@ mod tests {
         // Explicit schema repair must not consume runtime's legacy delivery
         // compatibility sentinel. Later mark_processed calls remain distinct.
         let queue = crate::store::SqlitePromptQueueStore::open(&root).unwrap();
-        let later = queue.enqueue("supervisor", "worker", "post-repair drain").unwrap();
+        let later = queue
+            .enqueue("supervisor", "worker", "post-repair drain")
+            .unwrap();
         queue.mark_processed(later).unwrap();
+        conn.execute_batch(
+            "UPDATE prompt_queue SET processed_at='2026-07-21T12:00:02Z' WHERE id=93;
+                UPDATE prompt_queue SET highest_stage='selected' WHERE id=94;",
+        )
+        .unwrap();
+        // Runtime consumes neither changed timestamps nor advanced stages.
         queue.init().unwrap();
         let legacy = queue.message_delivery_report(92).unwrap().unwrap();
-        assert_eq!(legacy.stage, cas_store::DeliveryStage::Delivered,
-            "migration before runtime init must retain legacy delivery compatibility");
-        assert_eq!(legacy.delivered_at.unwrap().to_rfc3339(), "2026-07-21T12:00:01+00:00");
+        assert_eq!(
+            legacy.stage,
+            cas_store::DeliveryStage::Delivered,
+            "migration before runtime init must retain legacy delivery compatibility"
+        );
+        assert_eq!(
+            legacy.delivered_at.unwrap().to_rfc3339(),
+            "2026-07-21T12:00:01+00:00"
+        );
         assert!(legacy.confirmed_at.is_none());
-        assert_eq!(queue.message_delivery_report(later).unwrap().unwrap().stage,
-            cas_store::DeliveryStage::Enqueued, "new mark_processed is not transport evidence");
+        assert_eq!(
+            queue.message_delivery_report(later).unwrap().unwrap().stage,
+            cas_store::DeliveryStage::Enqueued,
+            "new mark_processed is not transport evidence"
+        );
+        assert_eq!(
+            queue.message_delivery_report(93).unwrap().unwrap().stage,
+            cas_store::DeliveryStage::Enqueued
+        );
+        assert_eq!(
+            queue.message_delivery_report(94).unwrap().unwrap().stage,
+            cas_store::DeliveryStage::Selected
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM cas_prompt_queue_legacy_processed",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        conn.execute_batch("UPDATE prompt_queue SET processed_at='2026-07-21T12:00:01Z' WHERE id=93;")
+            .unwrap();
         queue.init().unwrap();
-        assert!(queue.message_delivery_report(later).unwrap().unwrap().delivered_at.is_none());
+        assert!(
+            queue
+                .message_delivery_report(93)
+                .unwrap()
+                .unwrap()
+                .delivered_at
+                .is_none(),
+            "consumed stale evidence must not reactivate after timestamp reversal"
+        );
+        assert!(
+            queue
+                .message_delivery_report(later)
+                .unwrap()
+                .unwrap()
+                .delivered_at
+                .is_none()
+        );
 
         // A previously recorded repair is replayable, and failure to record
         // its receipt rolls back the DDL in the same owned transaction.
         conn.execute_batch(
             "ALTER TABLE prompt_queue DROP COLUMN first_attempt_at;
-                CREATE TRIGGER refuse_repair_receipt BEFORE INSERT ON cas_migration_reconciliations
-                WHEN NEW.migration_id=279 BEGIN SELECT RAISE(ABORT,'fixture refusal'); END;",
+                    CREATE TRIGGER refuse_repair_receipt BEFORE INSERT ON cas_migration_reconciliations
+                    WHEN NEW.migration_id=279 BEGIN SELECT RAISE(ABORT,'fixture refusal'); END;",
         )
         .unwrap();
         assert!(crate::migration::run_migrations(&root, false).is_err());

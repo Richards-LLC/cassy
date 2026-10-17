@@ -5054,6 +5054,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             }
             mark_historical_demotion_done(demotion_key);
 
+            // Numbered schema repair may already have added highest_stage.
+            // Its frozen candidates preserve the original compatibility path.
+            schema::hydrate_legacy_processed(&conn)?;
+
             // Pre-telemetry rows only have the legacy processed_at marker. Hydrate
             // both lifecycle fields so delivery reports stay internally consistent.
             if first_lifecycle_migration {

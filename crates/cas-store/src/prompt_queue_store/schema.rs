@@ -1,5 +1,14 @@
-//! Canonical prompt-queue DDL, separated from runtime receipt backfills.
+//! Canonical queue schema and metadata for deferred runtime compatibility.
 use super::*;
+
+// A reserved, versioned snapshot. CREATE deliberately refuses name collisions;
+// copying metadata must never overwrite a previous snapshot or unrelated table.
+const LEGACY_PROCESSED_SNAPSHOT_SCHEMA: &str = "CREATE TABLE cas_prompt_queue_legacy_processed (
+    prompt_id INTEGER PRIMARY KEY,
+    processed_at TEXT NOT NULL,
+    snapshot_kind TEXT NOT NULL DEFAULT 'cas-24d3:m279'
+        CHECK(snapshot_kind = 'cas-24d3:m279')
+)";
 
 // This freezes the shape required by doctor SLO/relay/retry readers for m279.
 // Missing queues are intentionally lazy. Existing queues must have all these
@@ -51,8 +60,8 @@ pub fn missing_prompt_queue_columns(conn: &Connection) -> Result<Vec<String>> {
     .collect())
 }
 
-/// Explicit migration repair on the caller-owned connection/transaction.
-/// Do not construct a queue store: init also changes historical receipts.
+/// Explicit repair and compatibility metadata snapshot in the caller's transaction.
+/// Original queue/receipt rows remain unchanged until runtime init.
 pub fn repair_legacy_prompt_queue_schema(conn: &Connection) -> Result<()> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='prompt_queue')",
@@ -60,8 +69,102 @@ pub fn repair_legacy_prompt_queue_schema(conn: &Connection) -> Result<()> {
         |row| row.get(0),
     )?;
     if exists {
+        if conn.is_autocommit() {
+            return Err(StoreError::Other(
+                "prompt queue schema repair requires a caller-owned transaction".into(),
+            ));
+        }
+        if !crate::shared_db::column_exists(conn, "prompt_queue", "highest_stage") {
+            conn.execute_batch(LEGACY_PROCESSED_SNAPSHOT_SCHEMA)?;
+            conn.execute(
+                "INSERT INTO cas_prompt_queue_legacy_processed(prompt_id,processed_at)
+                 SELECT id,processed_at FROM prompt_queue WHERE processed_at IS NOT NULL",
+                [],
+            )?;
+        }
         ensure_schema(conn)?;
     }
+    Ok(())
+}
+
+/// Validate ownership before consuming metadata, including empty snapshots.
+/// Unknown objects or versions stay untouched rather than becoming evidence.
+fn legacy_processed_pending(conn: &Connection) -> Result<bool> {
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT type FROM sqlite_master WHERE name='cas_prompt_queue_legacy_processed'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(kind) = kind else {
+        return Ok(false);
+    };
+    let mut stmt = conn.prepare("PRAGMA table_info(cas_prompt_queue_legacy_processed)")?;
+    let columns = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, Option<String>>(4)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let triggers: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'
+         AND tbl_name='cas_prompt_queue_legacy_processed'",
+        [],
+        |row| row.get(0),
+    )?;
+    if kind != "table"
+        || columns
+            != [
+                ("prompt_id".into(), None),
+                ("processed_at".into(), None),
+                ("snapshot_kind".into(), Some("'cas-24d3:m279'".into())),
+            ]
+        || triggers != 0
+    {
+        return Err(StoreError::Other(
+            "cannot consume unrecognized cas_prompt_queue_legacy_processed metadata; inspect the reserved snapshot before retrying".into(),
+        ));
+    }
+    let wrong_version: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM cas_prompt_queue_legacy_processed
+         WHERE snapshot_kind IS NOT 'cas-24d3:m279')",
+        [],
+        |row| row.get(0),
+    )?;
+    if wrong_version {
+        return Err(StoreError::Other(
+            "unsupported legacy processed snapshot version".into(),
+        ));
+    }
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM cas_prompt_queue_legacy_processed)",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// Runtime-only compatibility, not a schema repair or a new acknowledgement.
+pub(super) fn hydrate_legacy_processed(conn: &Connection) -> Result<()> {
+    // Avoid even a no-op write lock on repeated/current init (cas-1bc7).
+    if !legacy_processed_pending(conn)? {
+        return Ok(());
+    }
+    let tx = ImmediateTx::new(conn)?;
+    // A concurrent initializer may have consumed the snapshot while we waited.
+    if legacy_processed_pending(&tx)? {
+        tx.execute(
+            "UPDATE prompt_queue AS queue SET highest_stage='delivered',
+                transport_delivered_at=legacy.processed_at
+             FROM cas_prompt_queue_legacy_processed AS legacy
+             WHERE queue.id=legacy.prompt_id AND queue.processed_at=legacy.processed_at
+               AND queue.highest_stage IS NULL",
+            [],
+        )?;
+        // Consume stale and already-advanced candidates too. A later timestamp
+        // reversal or stage change must never reactivate old evidence.
+        tx.execute("DELETE FROM cas_prompt_queue_legacy_processed", [])?;
+    }
+    tx.commit()?;
     Ok(())
 }
 

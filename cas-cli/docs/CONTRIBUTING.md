@@ -99,8 +99,14 @@ queue or recording migration detections. If required health-check columns are
 missing, its schema finding names them and points to `cas update --schema-only`.
 That explicit migration reuses the queue's canonical additive DDL on the
 migration transaction's connection, preserving messages, receipts and outboxes.
-It does not run runtime acknowledgement demotion or lifecycle backfills. A store
-that has never created a prompt queue keeps it absent. Run `cas doctor` again
+Before adding lifecycle columns, it copies legacy processed-row identities and
+timestamps into reserved compatibility metadata in the same transaction. It
+does not change original messages, acknowledgements, receipts or outboxes.
+Runtime queue initialization later hydrates delivery stage/time only for those
+unchanged candidates, consuming stale candidates too; later `mark_processed`
+calls do not become transport evidence. The repair itself does not run runtime
+acknowledgement demotion or lifecycle hydration. A store that has never created
+a prompt queue keeps it absent. Run `cas doctor` again
 after repair to measure communication, relay and retry health.
 
 A parked task can merge its pushed delivery while its worker checkout holds

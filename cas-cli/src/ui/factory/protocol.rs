@@ -51,6 +51,13 @@ pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
     ]
 }
 
+/// Advertise local mutation controls only on the framed Unix GUI socket.
+pub fn local_gui_capabilities() -> Vec<ProtocolCapability> {
+    let mut capabilities = daemon_capabilities();
+    capabilities.push(ProtocolCapability::BindingIntakeControlV1);
+    capabilities
+}
+
 fn legacy_protocol_version() -> u32 {
     LEGACY_PROTOCOL_VERSION
 }
@@ -435,6 +442,13 @@ pub enum ClientMessage {
         shell: Option<String>,
     },
 
+    /// Durable local-only admission pause. WS/relay must refuse this control.
+    BindingIntakePause {
+        request: super::daemon::runtime::violet_intake::PauseRequest,
+    },
+    /// Read the durable local gate; this is not a drain acknowledgement.
+    BindingIntakeStatus { nonce: uuid::Uuid },
+
     /// Kill a shell pane
     KillShell {
         /// Pane name to kill
@@ -456,6 +470,8 @@ pub enum PaneSizeAuthority {
 /// Messages sent from daemon to TUI client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DaemonMessage {
+    /// Local-only response. An acknowledgement exists only after both tasks drain.
+    BindingIntake { reply: super::daemon::runtime::violet_intake::IntakeReply },
     /// Welcome message on attach with current state
     Welcome {
         /// Session name

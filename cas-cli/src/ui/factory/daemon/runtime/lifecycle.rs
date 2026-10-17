@@ -3089,14 +3089,6 @@ impl FactoryDaemon {
         let mut last_violet_poll = std::time::Instant::now()
             .checked_sub(super::violet_activity::POLL_INTERVAL)
             .unwrap_or_else(std::time::Instant::now);
-        let mut violet_task: Option<
-            JoinHandle<(
-                super::violet_activity::PollReport,
-                Vec<super::violet_activity::SweepRequest>,
-                Option<super::violet_activity::SupervisorPresence>,
-            )>,
-        > = None;
-        let mut violet_sweep_task: Option<JoinHandle<()>> = None;
         let mut violet_error_reported = false;
         // cas-f9c7: messages from peer supervisors of this repo on other
         // machines, claimed from the Cassy Cloud peer mailbox every 15 s on
@@ -3439,17 +3431,19 @@ impl FactoryDaemon {
                     }
                 }
 
+                self.binding_intake.reap_sweep().await;
                 if let Some(violet) = violet_wake.as_ref() {
-                    if violet_task.is_none()
+                    if self.binding_intake.tick.is_none()
+                        && crate::coordination::binding_intake::IntakeJournal::new(self.app.cas_dir()).legacy_allowed().unwrap_or(false)
                         && last_violet_poll.elapsed() >= super::violet_activity::POLL_INTERVAL
                     {
                         let violet = std::sync::Arc::clone(violet);
-                        violet_task =
+                        self.binding_intake.tick =
                             Some(tokio::task::spawn_blocking(move || violet.tick_blocking()));
                         last_violet_poll = std::time::Instant::now();
                     }
-                    if violet_task.as_ref().is_some_and(JoinHandle::is_finished) {
-                        match violet_task.take().expect("checked above").await {
+                    if self.binding_intake.tick.as_ref().is_some_and(JoinHandle::is_finished) {
+                        match self.binding_intake.tick.take().expect("checked above").await {
                             Ok((report, sweeps, presence)) => {
                                 if report.wakes > 0 {
                                     super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
@@ -3470,13 +3464,12 @@ impl FactoryDaemon {
                                 }
                                 if let Some(presence) = presence
                                     && !sweeps.is_empty()
-                                    && violet_sweep_task
-                                        .as_ref()
-                                        .is_none_or(JoinHandle::is_finished)
+                                    && self.binding_intake.sweep.is_none()
+                                    && crate::coordination::binding_intake::IntakeJournal::new(self.app.cas_dir()).legacy_allowed().unwrap_or(false)
                                 {
                                     let violet = std::sync::Arc::clone(violet);
                                     let cas_dir = self.app.cas_dir().to_path_buf();
-                                    violet_sweep_task = Some(tokio::spawn(async move {
+                                    self.binding_intake.sweep = Some(tokio::spawn(async move {
                                         if violet.sweep(sweeps, presence).await > 0 {
                                             super::delivery::wake_daemon_after_enqueue(&cas_dir);
                                         }
@@ -3484,11 +3477,14 @@ impl FactoryDaemon {
                                 }
                             }
                             Err(error) => {
+                                self.binding_intake.failed(format!("legacy tick did not finish: {error}"));
                                 tracing::warn!(%error, "Violet activity poll task failed")
                             }
                         }
                     }
                 }
+
+                self.finish_binding_intake_replies();
 
                 if let Some(report) = peer_mailbox.poll(std::time::Instant::now()).await
                     && report.delivered > 0

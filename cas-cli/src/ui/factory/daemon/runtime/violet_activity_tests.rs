@@ -1825,3 +1825,84 @@ fn doctor_verdict_warns_on_failing_or_stalled_relay_cas_a897() {
     assert_eq!(severity, WatchHealth::Warning, "{message}");
     assert!(message.contains("factory daemon"), "{message}");
 }
+
+/// Framed local control drains an owned HTTP tick and an external sweep read
+/// through real SQLite/watch-book apply before returning positive evidence.
+#[tokio::test]
+async fn cas_9021_drain_waits_for_tick_and_nested_sweep_apply_without_resuming() {
+    use std::io::{Read, Write};
+    use crate::coordination::binding_intake::{IntakeJournal, IntakeScope};
+    use crate::ui::factory::daemon::runtime::violet_intake::{PauseRequest, RuntimeIdentity};
+    use crate::ui::factory::protocol::{ClientMessage, DaemonMessage, ProtocolCapability, encode_message};
+    fn receive(stream: &mut std::os::unix::net::UnixStream) -> DaemonMessage {
+        let mut length = [0; 4]; stream.read_exact(&mut length).unwrap();
+        let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
+        stream.read_exact(&mut bytes).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+    let fx = Fixture::new();
+    let root = fx._temp.path();
+    std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id = {PROJECT:?}\n")).unwrap();
+    let team = uuid::Uuid::new_v4().to_string();
+    crate::cloud::CloudConfig { team_id: Some(team.clone()), ..Default::default() }.save_to_cas_dir(root).unwrap();
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    crate::cloud::CloudConfig { endpoint: format!("http://{}", server.server_addr()), token: Some("fixture-token".into()), ..Default::default() }.save_user().unwrap();
+    let now = Utc::now();
+    let seconds = (now - t0()).num_seconds();
+    let relay = FakeRelay::new(); relay.set_now(now);
+    let mut wake = fx.wake("provision-test", now);
+    relay.publish(mention("C1", seconds));
+    wake.poll_once(&relay, &fx.queue, true, now);
+    let queue_ids: Vec<_> = fx.rows().iter().map(|row| row.id).collect();
+    let runtime = std::sync::Arc::new(VioletWakeRuntime::start(root, "provision-test", "supervisor").unwrap());
+    let mut daemon = super::super::provisioning_tests::daemon(root);
+    let identity = RuntimeIdentity::current(root, "provision-test").unwrap();
+    let request = PauseRequest { operation_id: uuid::Uuid::new_v4(), nonce: uuid::Uuid::new_v4(), canonical_cas_dir: identity.canonical_cas_dir.clone(), factory_session: "provision-test".into(), scope: IntakeScope { team_id: team, canonical_project_id: PROJECT.into(), channel_id: "C1".into() }, expected_generation: 0 };
+    let ticking = runtime.clone();
+    daemon.binding_intake.tick = Some(tokio::task::spawn_blocking(move || ticking.tick_blocking()));
+    let http_request = tokio::task::spawn_blocking(move || server.recv_timeout(Duration::from_secs(5)).unwrap().expect("owned claim in flight")).await.unwrap();
+    assert_eq!(http_request.url(), "/api/violet/activity/claim");
+    let (read_done, read_wait) = tokio::sync::oneshot::channel();
+    let sweeping = runtime.clone();
+    daemon.binding_intake.sweep = Some(tokio::spawn(async move {
+        read_wait.await.unwrap(); // controlled external Violet read, no runtime mock
+        sweeping.apply_sweep_results(vec![("C1".into(), Ok(SweepRead { complete: true, ..Default::default() }))]).await;
+    }));
+    let mut local = std::os::unix::net::UnixStream::connect(root.join("gui.sock")).unwrap();
+    local.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    assert!(daemon.accept_gui_clients());
+    let capabilities = match receive(&mut local) { DaemonMessage::Welcome { capabilities, .. } => capabilities, other => panic!("{other:?}") };
+    assert!(capabilities.contains(&ProtocolCapability::BindingIntakeControlV1));
+    local.write_all(&encode_message(&ClientMessage::BindingIntakePause { request: request.clone() }).unwrap()).unwrap();
+    assert!(daemon.process_gui_client_input().await);
+    assert!(!IntakeJournal::new(root).legacy_allowed().unwrap());
+    daemon.finish_binding_intake_replies();
+    assert!(daemon.gui_clients.values().all(|client| client.write_buf.is_empty()), "busy tick cannot ACK");
+    http_request.respond(tiny_http::Response::from_string(r#"{"events":[],"denied":[]}"#)).unwrap();
+    daemon.binding_intake.tick.take().unwrap().await.unwrap();
+    daemon.finish_binding_intake_replies();
+    assert!(daemon.gui_clients.values().all(|client| client.write_buf.is_empty()), "a finished tick is not a drained sweep/apply");
+    read_done.send(()).unwrap();
+    daemon.binding_intake.sweep.take().unwrap().await.unwrap();
+    assert!(WatchBook::read(&fx.watch_path).unwrap().watch("C1", "provision-test").unwrap().is_active());
+    assert_eq!(fx.rows().iter().map(|row| row.id).collect::<Vec<_>>(), queue_ids);
+    daemon.finish_binding_intake_replies(); daemon.flush_gui_client_output();
+    let ack = match receive(&mut local) { DaemonMessage::BindingIntake { reply } => { assert!(reply.error.is_none(), "{reply:?}"); reply.acknowledgement.unwrap() }, other => panic!("{other:?}") };
+    ack.verify(&request, &identity, &capabilities).unwrap();
+    assert!(ack.verify(&request, &identity, &[]).is_err(), "old runtime cannot authorize repair");
+    let mut wrong = identity.clone(); wrong.build = "unknown".into();
+    assert!(ack.verify(&request, &wrong, &capabilities).is_err());
+    let mut stale = request.clone(); stale.nonce = uuid::Uuid::new_v4();
+    assert!(ack.verify(&stale, &identity, &capabilities).is_err());
+    let mut stale = identity.clone(); stale.pid_starttime += 1;
+    assert!(ack.verify(&request, &stale, &capabilities).is_err());
+    let before = std::fs::read(&fx.watch_path).unwrap();
+    let prepared = vec![SweepRequest { channel_id: "C1".into(), channel_name: "fixture".into(), since: now }];
+    assert_eq!(runtime.sweep(prepared, SupervisorPresence { agent_id: "supervisor".into() }).await, 0);
+    let (report, sweeps, presence) = runtime.tick_blocking();
+    assert_eq!(report, PollReport::default());
+    assert!(sweeps.is_empty() && presence.is_none());
+    assert_eq!(std::fs::read(&fx.watch_path).unwrap(), before, "paused operations leave watches/watermarks intact");
+    drop(local); drop(daemon);
+    assert!(!IntakeJournal::new(root).legacy_allowed().unwrap(), "disconnect/drop must never resume intake");
+}

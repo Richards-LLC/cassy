@@ -2122,6 +2122,11 @@ impl VioletWakeRuntime {
             }
             return (PollReport::default(), Vec::new(), None);
         }
+        match crate::coordination::binding_intake::IntakeJournal::new(&self.cas_dir).legacy_allowed() {
+            Ok(true) => {}
+            Ok(false) => return (PollReport::default(), Vec::new(), None),
+            Err(error) => return (PollReport { errors: vec![error], ..Default::default() }, Vec::new(), None),
+        }
         let cloud = crate::cloud::CloudConfig::load_effective();
         let Some(relay) = CloudActivityRelay::from_cloud_config(&cloud) else {
             return (PollReport::default(), Vec::new(), None);
@@ -2182,6 +2187,11 @@ impl VioletWakeRuntime {
     /// Returns how many sweeps queued a wake.
     #[cfg(feature = "mcp-proxy")]
     pub(crate) async fn sweep(&self, sweeps: Vec<SweepRequest>, presence: SupervisorPresence) -> usize {
+        // A prepared list is not admission. Refuse paused/corrupt state before
+        // connecting, reading, advancing watermarks or applying anything.
+        if !crate::coordination::binding_intake::IntakeJournal::new(&self.cas_dir).legacy_allowed().unwrap_or(false) {
+            return 0;
+        }
         let caller = cmcp_core::ProxyCaller {
             agent_id: presence.agent_id.clone(),
             role: cas_types::AgentRole::Supervisor,
@@ -2203,6 +2213,11 @@ impl VioletWakeRuntime {
                 }
             }
         }
+        self.apply_sweep_results(results).await
+    }
+
+    /// The owned sweep handle includes blocking apply, not just the read.
+    pub(super) async fn apply_sweep_results(&self, results: Vec<(String, Result<SweepRead, String>)>) -> usize {
         let state = std::sync::Arc::clone(&self.state);
         let cas_dir = self.cas_dir.clone();
         tokio::task::spawn_blocking(move || {

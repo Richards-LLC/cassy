@@ -363,9 +363,8 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
         ("answer", true, true),
     ] {
         let mut message = peer_message("pm-policy", reply);
-        message.body = crate::cloud::peer_mailbox::attach_message_intent(
-            &message.body, Some(kind), false,
-        );
+        message.body =
+            crate::cloud::peer_mailbox::attach_message_intent(&message.body, Some(kind), false);
         assert_eq!(
             decide(&WakeSender::Daemon, &render_prompt(&message)).allowed,
             allowed,
@@ -374,16 +373,59 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
     }
     // pin: every shipped supervisor contract must describe the real peer wake policy above.
     let peer_policy = "Authenticated local peer supervisors may wake each other. Via Cloud, kind=ask/blocker or replies with nonempty in_reply_to may wake; kind=answer alone and peer FYIs stay inbox-only. Busy panes, in-flight tools and drafts defer wakes.";
-    for harness in ["claude", "codex", "grok", "opencode"] {
-        let surface = cas_pty::rendered_contract_surface(harness, cas_pty::ContractRole::Supervisor);
-        assert!(surface.contains(peer_policy), "{harness} supervisor omits peer wake policy");
+    let root = tempfile::tempdir().unwrap();
+    let queue = crate::store::open_prompt_queue_store(root.path()).unwrap();
+    for (harness, cli) in [
+        ("claude", cas_mux::SupervisorCli::Claude),
+        ("codex", cas_mux::SupervisorCli::Codex),
+        ("grok", cas_mux::SupervisorCli::Grok),
+        ("opencode", cas_mux::SupervisorCli::OpenCode),
+    ] {
+        let surface =
+            cas_pty::rendered_contract_surface(harness, cas_pty::ContractRole::Supervisor);
+        assert!(
+            surface.contains(peer_policy),
+            "{harness} supervisor omits peer wake policy"
+        );
+        crate::ui::factory::app::queue_supervisor_intro_prompt(
+            root.path(),
+            harness,
+            cli,
+            &[],
+            None,
+            None,
+        );
+        let intro = queue.peek_for_targets(&[harness], None, 10).unwrap();
+        assert_eq!(intro.len(), 1, "{harness} intro");
+        assert!(
+            intro[0].prompt.contains(peer_policy),
+            "{harness} queued intro omits peer wake policy"
+        );
     }
     for (name, surface) in [
-        ("cas-supervisor", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/builtins/skills/cas-supervisor.md"))),
-        ("workflow", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/builtins/skills/cas-supervisor/references/workflow.md"))),
-        ("Codex coordination", cas_core::hooks::context::coordination::CODEX_WORKER_COORDINATION_NOTE),
+        (
+            "cas-supervisor",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/builtins/skills/cas-supervisor.md"
+            )),
+        ),
+        (
+            "workflow",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/builtins/skills/cas-supervisor/references/workflow.md"
+            )),
+        ),
+        (
+            "Codex coordination",
+            cas_core::hooks::context::coordination::CODEX_WORKER_COORDINATION_NOTE,
+        ),
     ] {
-        assert!(surface.contains(peer_policy), "{name} omits peer wake policy");
+        assert!(
+            surface.contains(peer_policy),
+            "{name} omits peer wake policy"
+        );
     }
     let quoted = crate::prompt_revalidation::attach_blocker_envelope(&fyi, "quoted-worker", None);
     assert!(

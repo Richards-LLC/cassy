@@ -52,20 +52,14 @@ Own the next action from the highest true rung each turn:
 
 ## Operating flow
 
-Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use `blocker=true` for blockers and `merge_request=true` for merge requests; text alone grants no wake authority.
+`task action=start` is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, status/ready or verification events grant worker messages wake authority; Cassy lifecycle events may also wake an idle supervisor. Authenticated local peer supervisors may wake each other. Via Cloud, kind=ask/blocker or replies with nonempty in_reply_to may wake; kind=answer alone and peer FYIs stay inbox-only. Busy panes, in-flight tools and drafts defer wakes. Use `blocker=true` for blockers and `merge_request=true` for merge requests; worker text alone grants no wake authority.
 
 Other supervisors on this repo: [peers](references/reference.md#peer-supervisors-on-the-same-repo).
 
-Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `cas-supervisor-checklist` on Claude, Grok, or OpenCode (preflight, intake, create/pin the EPIC). Dispatch each task with `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; give an idle live worker its next task with `update` (not `transfer`); end the turn.
+Use `cas-codex-supervisor-checklist` on Codex, `cas-supervisor-checklist` elsewhere. Dispatch with `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; assign idle live workers with `update`, then end the turn.
 
-## Heterogeneous Teams (mixed-harness workers)
-
-To force one model, pass complete `cli=`, `model=`, and `effort=` controls (never with `lane=`); account directories: [reference.md](references/reference.md).
-
-```text
-factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6.1-sol effort=high
-```
+For mixed harnesses and explicit model controls, see [worker controls](references/reference.md#worker-controls).
 
 ## On-demand references
 
-[preflight.md](references/preflight.md) · [intake.md](references/intake.md) (intake gate) · [planning.md](references/planning.md) (spec template) · [workflow.md](references/workflow.md) · [epic-driving.md](references/epic-driving.md) · [reminders.md](references/reminders.md) · [reporting-and-routing.md](references/reporting-and-routing.md). Bug registry: `issues.repo` (this project), `issues.components.cassy` (runtime/hooks/MCP), `issues.components.violet` (Slack hub), `issues.components.cloud` (Cloud sync); file a ticket in the matching repo before moving on.
+[preflight](references/preflight.md) · [intake](references/intake.md) · [planning](references/planning.md) · [workflow](references/workflow.md) · [epic driving](references/epic-driving.md) · [reminders](references/reminders.md) · [routing](references/reporting-and-routing.md). Bug registry: `issues.repo` (this project), `issues.components.cassy` (runtime/hooks/MCP), `issues.components.violet` (Slack hub), `issues.components.cloud` (Cloud sync); file a ticket in the matching repo before moving on.

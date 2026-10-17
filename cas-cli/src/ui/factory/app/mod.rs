@@ -2921,7 +2921,7 @@ pub(crate) fn queue_supervisor_intro_prompt(
 
     // Claude already receives the complete role contract above.
     if supervisor_cli != cas_mux::SupervisorCli::Claude {
-        prompt.push_str("\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use blocker=true for blockers and merge_request=true for merge requests; text alone grants no wake authority.");
+        prompt.push_str("\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, status/ready or verification events grant worker messages wake authority; Cassy lifecycle events may also wake an idle supervisor. Authenticated local peer supervisors may wake each other. Via Cloud, kind=ask/blocker or replies with nonempty in_reply_to may wake; kind=answer alone and peer FYIs stay inbox-only. Busy panes, in-flight tools and drafts defer wakes. Use blocker=true for blockers and merge_request=true for merge requests; worker text alone grants no wake authority.");
     }
 
     // cas-2085 / GH #290: Claude 2.1.231 can skip SessionStart entirely for

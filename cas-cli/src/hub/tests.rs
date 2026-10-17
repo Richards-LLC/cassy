@@ -1870,6 +1870,7 @@ fn h1_runtime_state_is_single_instance_and_round_trips() {
         tailscale_cli: None,
         tailscale_serve_target: None,
         transport_warning: None,
+        nofile_limit: None,
     };
     paths.write_process_record(&record).unwrap();
     assert_eq!(paths.read_process_record().unwrap(), record);

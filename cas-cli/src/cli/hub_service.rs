@@ -2302,6 +2302,7 @@ exit 1
             tailscale_cli: None,
             tailscale_serve_target: None,
             transport_warning: None,
+            nofile_limit: None,
         };
         let new_record_path = fixture.path().join("new-process.json");
         fs::write(&new_record_path, serde_json::to_vec(&new_record).unwrap()).unwrap();
@@ -2355,6 +2356,7 @@ exit 1
             tailscale_cli: None,
             tailscale_serve_target: None,
             transport_warning: None,
+            nofile_limit: None,
         };
         fs::write(
             hub_root.join("process.json"),

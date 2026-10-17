@@ -1482,6 +1482,7 @@ mod tests {
                 tailscale_cli: None,
                 tailscale_serve_target: None,
                 transport_warning: None,
+                nofile_limit: None,
             })
             .unwrap();
     }

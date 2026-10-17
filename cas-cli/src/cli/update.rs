@@ -3982,7 +3982,8 @@ fn install_error(error: &self_update::errors::Error, current: &str, target: &str
     };
     // One clause per line when the reason passes 80 columns (exit_reason).
     anyhow::anyhow!(exit_reason(&[
-        format!("could not install Cassy {target}: {cause}"),
+        format!("could not install Cassy {target}"),
+        cause,
         format!("Cassy {current} is unchanged; rerun `cas update` to retry"),
     ]))
 }

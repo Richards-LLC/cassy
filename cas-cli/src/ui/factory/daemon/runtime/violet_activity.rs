@@ -820,6 +820,15 @@ impl VioletWake {
         supervisor_live: bool,
         now: DateTime<Utc>,
     ) -> PollReport {
+        self.poll_with_policy(relay, queue, supervisor_live, now, true, &|_| true)
+    }
+
+    pub(crate) fn poll_with_policy(
+        &mut self, relay: &dyn ActivityRelay, queue: &dyn PromptQueueStore,
+        supervisor_live: bool, now: DateTime<Utc>, _claim_allowed: bool,
+        _channel_allowed: &dyn Fn(&str) -> bool,
+    ) -> PollReport {
+        // RED: this path still admits/ACKs every channel.
         let mut report = PollReport::default();
         let request = ClaimRequest {
             project_ids: vec![self.project_id.clone()],

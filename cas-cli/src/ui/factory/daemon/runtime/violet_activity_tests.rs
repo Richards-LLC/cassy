@@ -1910,3 +1910,34 @@ async fn cas_9021_drain_waits_for_tick_and_nested_sweep_apply_without_resuming()
     drop(local); drop(daemon);
     assert!(!IntakeJournal::new(root).legacy_allowed().unwrap(), "disconnect/drop must never resume intake");
 }
+
+#[test]
+fn cas_9021_mixed_legacy_batches_and_held_replays_never_ack_managed_channels() {
+    let fx = Fixture::new();
+    let relay = FakeRelay::new();
+    let mut wake = fx.wake(SESSION, t0());
+    relay.publish(mention("CMANAGED", 0));
+    relay.publish(mention("CLEGACY", 0));
+    // A project-wide claim may receive both classes even if a remote fence is
+    // stale. Local policy must retain the managed lease without admitting/ACKing.
+    let report = wake.poll_with_policy(&relay, &fx.queue, true, at(10), true, &|channel| channel == "CLEGACY");
+    assert_eq!((report.wakes, report.admitted), (1, 1));
+    assert_eq!(relay.outcome(&format!("slack:T0123:CMANAGED:{}", ts(0))), None);
+    assert!(relay.rows.borrow().iter().find(|row|row.envelope["channel"]["id"]=="CMANAGED").unwrap().lease_owner.is_some());
+    assert_eq!(relay.outcome(&format!("slack:T0123:CLEGACY:{}", ts(0))), Some(AckOutcome::Admitted));
+    assert_eq!(fx.wakes().len(), 1);
+    assert!(parse_violet_activity_envelope(&fx.wakes()[0].prompt).unwrap().channel == "CLEGACY");
+    // An entry already held before activation is also ineligible, including
+    // replay/duplicate ACK and no-supervisor expiry, not just new claim results.
+    let held_relay = FakeRelay::new();
+    held_relay.publish(mention("CHELD", 20));
+    wake.poll_once(&held_relay, &fx.queue, false, at(21));
+    let claims_before = held_relay.claims.borrow().len();
+    let before = fx.rows().len();
+    wake.poll_with_policy(&held_relay, &fx.queue, false, at(2000), false, &|_| false);
+    wake.poll_with_policy(&held_relay, &fx.queue, true, at(2001), false, &|_| false);
+    assert_eq!(held_relay.claims.borrow().len(), claims_before, "a pending gate forbids project-wide claim, not just local admission");
+    assert_eq!(held_relay.outcome(&format!("slack:T0123:CHELD:{}", ts(20))), None);
+    assert_eq!(fx.rows().len(), before);
+    assert!(wake.held.values().any(|held| held.envelope.channel.id == "CHELD"));
+}

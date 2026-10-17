@@ -1104,7 +1104,11 @@ mod tests {
                 Some(" example/cassy "),
                 "example/cassy",
             ),
-            (Some("example/project"), None, "example/project"),
+            (
+                Some("Richards-LLC/petra-stella-cloud"),
+                None,
+                "Richards-LLC/cassy",
+            ),
             (Some("example/project"), Some("   "), "example/project"),
             (None, Some("example/cassy"), "example/cassy"),
             (None, None, "Richards-LLC/cassy"),
@@ -1120,9 +1124,24 @@ mod tests {
                 config.set("issues.repo", repo).unwrap();
             }
             if let Some(repo) = component {
-                config.set("issues.components.cassy", repo).unwrap();
+                // Raw TOML can retain an explicit blank legacy opt-out;
+                // config set with blank clears the override instead.
+                config
+                    .issues
+                    .get_or_insert_with(Default::default)
+                    .components
+                    .get_or_insert_with(Default::default)
+                    .cassy = Some(repo.to_owned());
             }
             config.save(temp.path()).unwrap();
+            if component.is_none() {
+                assert_eq!(
+                    crate::config::Config::load(temp.path())
+                        .unwrap()
+                        .get("issues.components.cassy"),
+                    Some(expected.to_owned())
+                );
+            }
             let transport = recording_transport();
             let result = report_service(temp.path())
                 .report_cas_bug_with_transport(report_request(env.home()), &transport)
@@ -1153,13 +1172,20 @@ mod tests {
                 Some("bad/repo/extra"),
                 "issues.components.cassy",
             ),
-            ("bad --repo injected/name", None, "issues.repo"),
+            ("bad --repo injected/name", Some("   "), "issues.repo"),
         ] {
             let temp = tempfile::tempdir().unwrap();
             let mut config = crate::config::Config::default();
             config.set("issues.repo", project).unwrap();
             if let Some(repo) = component {
-                config.set("issues.components.cassy", repo).unwrap();
+                // Raw TOML can retain an explicit blank legacy opt-out;
+                // config set with blank clears the override instead.
+                config
+                    .issues
+                    .get_or_insert_with(Default::default)
+                    .components
+                    .get_or_insert_with(Default::default)
+                    .cassy = Some(repo.to_owned());
             }
             config
                 .set(

@@ -750,7 +750,7 @@ pub struct FactoryRequest {
 
     /// gc_cleanup only: exact absolute unknown-owner cache path authorized for reclaim.
     /// Requires force=true, dry_run=false and the configured positive quiet window.
-    #[schemars(description = "gc_cleanup: explicit opt-in naming one exact absolute unknown-owner regenerable target path; never source/evidence. Requires force=true dry_run=false; target_cache_min_idle_secs and all native/lock guards still apply.")]
+    #[schemars(description = "gc_cleanup: exact unknown-owner target; force=true dry_run=false.")]
     #[serde(default)]
     pub reclaim_unknown_target: Option<String>,
 
@@ -1454,7 +1454,7 @@ pub struct CoordinationRequest {
 
     /// gc_cleanup only: exact absolute unknown-owner cache path authorized for reclaim.
     /// Requires force=true, dry_run=false and the configured positive quiet window.
-    #[schemars(description = "gc_cleanup: explicit opt-in naming one exact absolute unknown-owner regenerable target path; never source/evidence. Requires force=true dry_run=false; target_cache_min_idle_secs and all native/lock guards still apply.")]
+    #[schemars(description = "gc_cleanup: exact unknown-owner target; force=true dry_run=false.")]
     #[serde(default)]
     pub reclaim_unknown_target: Option<String>,
 

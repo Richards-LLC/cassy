@@ -92,6 +92,8 @@ struct ReadHook {
     /// Only the idle-worker liveness job dies (cas-4491f).
     #[cfg(test)]
     liveness_panics: bool,
+    #[cfg(test)]
+    process_table: Option<fn() -> Box<dyn crate::cli::factory::wedged::ProcessTable>>,
 }
 
 /// The [`ReadHook::run`] name of the idle-worker liveness job.
@@ -299,6 +301,16 @@ impl DirectorRefresh {
     #[cfg(test)]
     pub(crate) fn with_failing_liveness(mut self) -> Self {
         self.hook.liveness_panics = true;
+        self
+    }
+
+    /// Supply the OS process table on the real background snapshot lane.
+    #[cfg(test)]
+    pub(crate) fn with_process_table(
+        mut self,
+        table: fn() -> Box<dyn crate::cli::factory::wedged::ProcessTable>,
+    ) -> Self {
+        self.hook.process_table = Some(table);
         self
     }
 
@@ -615,6 +627,12 @@ impl DirectorRefresh {
             factory_jobs::director_snapshot_spec(generation),
             move |stores: Option<&DirectorStores>| {
                 hook.run("snapshot read");
+                #[cfg(test)]
+                if let Some(table) = hook.process_table {
+                    return Box::new(FactoryJobOutput::DirectorSnapshot(
+                        request.read_with_process_table(stores, table().as_ref()),
+                    ));
+                }
                 Box::new(FactoryJobOutput::DirectorSnapshot(request.read(stores)))
             },
         );

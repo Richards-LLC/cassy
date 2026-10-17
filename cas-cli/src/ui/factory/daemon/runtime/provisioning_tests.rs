@@ -256,6 +256,7 @@ async fn targeted_shutdown_kills_stalled_provisioner_without_retiring_other_name
         count: None,
         names: vec!["other-worker".into()],
         force: true,
+        expected_generation: None,
     });
     daemon.process_pending_spawns().await;
     assert!(
@@ -267,6 +268,7 @@ async fn targeted_shutdown_kills_stalled_provisioner_without_retiring_other_name
         count: None,
         names: vec!["stalled-worker".into()],
         force: true,
+        expected_generation: None,
     });
     let started = Instant::now();
     daemon.process_pending_spawns().await;

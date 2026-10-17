@@ -395,10 +395,16 @@ fn clear_foreign_identity_metadata(
 
 #[derive(Parser)]
 pub struct CloudQueueArgs {
-    /// Purge only personal rows rejected by the server as team_owned_project.
-    /// Local entities and all team queue rows are kept; no cloud calls run.
+    /// Remove selected rejected personal copies with proven team delivery.
+    /// Ownership rejection alone is not proof; unproven transport is retained.
     #[arg(long, conflicts_with_all = ["prune", "clear", "retry"])]
     pub purge_team_owned: bool,
+    /// Preview IDs and delivery-proof eligibility without deleting queue rows.
+    #[arg(long, requires = "purge_team_owned")]
+    pub dry_run: bool,
+    /// Exact personal queue IDs to inspect or clean up (comma-separated).
+    #[arg(long, value_delimiter = ',', requires = "purge_team_owned")]
+    pub ids: Vec<i64>,
     /// Show detailed list of queued items
     #[arg(long, short)]
     pub verbose: bool,
@@ -2577,19 +2583,52 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
     queue.init()?;
 
     if args.purge_team_owned {
-        let purged = queue.purge_team_owned_personal_rejections()?;
+        let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
+        let team_id = config.active_team_id().unwrap_or_default();
+        let project_id = crate::cloud::resolve_canonical_id_for_sync(cas_root).unwrap_or_default();
+        let rows = queue.purge_team_owned_personal_rejections(
+            &team_id,
+            &project_id,
+            &args.ids,
+            args.dry_run,
+        )?;
+        let eligible = rows.iter().filter(|row| row.eligible).count();
+        let purged = if args.dry_run { 0 } else { eligible };
         if cli.json {
             println!(
                 "{}",
                 serde_json::json!({
                     "status": "ok", "purged": purged, "scope": "personal",
-                    "reason": "team_owned_project",
+                    "reason": "team_owned_project", "dry_run": args.dry_run,
+                    "rows": rows,
                 })
             );
         } else {
             let mut out = io::stdout();
             let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-            fmt.success(&format!("Purged {purged} rejected personal queue row(s)"))?;
+            // ASCII and default foreground keep the verdict legible in pipes,
+            // C locales and every terminal palette.
+            fmt.write_raw(&format!(
+                "{}: {eligible} eligible, {} retained\n",
+                if args.dry_run { "Preview" } else { "Cleanup" },
+                rows.len() - eligible
+            ))?;
+            fmt.write_raw("Ownership rejection alone does not prove team delivery.\n")?;
+            for row in rows.iter().take(args.limit) {
+                fmt.write_raw(&format!(
+                    "{} {}: {}\n",
+                    row.id,
+                    if row.eligible { "eligible" } else { "retained" },
+                    row.reason
+                ))?;
+            }
+            if rows.len() > args.limit {
+                fmt.write_raw(&format!("{} more rows; use --json for all IDs.\n", rows.len() - args.limit))?;
+            }
+            if args.dry_run && eligible > 0 {
+                let first_id = rows.iter().find(|row| row.eligible).unwrap().id;
+                fmt.write_raw(&format!("cas cloud queue --purge-team-owned --ids {first_id}\n"))?;
+            }
         }
         return Ok(());
     }
@@ -3632,9 +3671,6 @@ fn execute_push_with_output(
 
     let queue = Arc::new(SyncQueue::open(cas_root)?);
     queue.init()?;
-    if config.team_only && !args.dry_run {
-        queue.neutralize_team_only_personal()?;
-    }
     if config.team_only {
         if args.entries_only || args.tasks_only {
             anyhow::bail!(
@@ -4218,11 +4254,6 @@ fn execute_sync_with_output(
         .ok()
         .and_then(|config| config.active_team_id())
         .is_some();
-    if initial_config.team_only && !args.dry_run {
-        let queue = SyncQueue::open(cas_root)?;
-        queue.init()?;
-        queue.neutralize_team_only_personal()?;
-    }
     if team_linked {
         summaries.push(team_only_push_summary());
     } else {
@@ -7538,6 +7569,17 @@ mod team_cmd_tests {
         use clap::Parser;
         let args = CloudQueueArgs::try_parse_from(["queue", "--purge-team-owned"]).unwrap();
         assert!(args.purge_team_owned);
+        let preview = CloudQueueArgs::try_parse_from([
+            "queue",
+            "--purge-team-owned",
+            "--dry-run",
+            "--ids",
+            "1,3",
+        ])
+        .unwrap();
+        assert!(preview.dry_run);
+        assert_eq!(preview.ids, [1, 3]);
+        assert!(CloudQueueArgs::try_parse_from(["queue", "--ids", "1"]).is_err());
         for other in ["--clear", "--retry"] {
             assert!(
                 CloudQueueArgs::try_parse_from(["queue", "--purge-team-owned", other]).is_err()
@@ -7590,9 +7632,25 @@ mod team_cmd_tests {
             "--purge-team-owned",
         ])
         .unwrap();
-        let args = CloudQueueArgs::try_parse_from(["queue", "--purge-team-owned"]).unwrap();
+        let args =
+            CloudQueueArgs::try_parse_from(["queue", "--purge-team-owned", "--dry-run"]).unwrap();
         execute_queue(&args, &cli, &root).unwrap();
-        assert!(queue.pending(10, 5).unwrap().is_empty());
+        assert_eq!(
+            queue.pending(10, 5).unwrap().len(),
+            1,
+            "policy-only rejection remains"
+        );
+        let unscoped = CloudQueueArgs::try_parse_from(["queue", "--purge-team-owned"]).unwrap();
+        assert!(execute_queue(&unscoped, &cli, &root).is_err());
+        let id = row.id.to_string();
+        let selected =
+            CloudQueueArgs::try_parse_from(["queue", "--purge-team-owned", "--ids", &id]).unwrap();
+        execute_queue(&selected, &cli, &root).unwrap();
+        assert_eq!(
+            queue.pending(10, 5).unwrap().len(),
+            1,
+            "explicit IDs still require proof"
+        );
         assert_eq!(queue.pending_for_team("team-1", 10, 5).unwrap().len(), 1);
         assert_eq!(local.get("cas-purge-kept").unwrap().title, "keep local");
     }
@@ -8261,7 +8319,7 @@ mod team_cmd_tests {
             "{line}"
         );
         assert!(
-            line.contains("cas config set cloud.team_only true"),
+            line.contains("not proof of an equivalent remote copy"),
             "{line}"
         );
         assert!(
@@ -8270,8 +8328,17 @@ mod team_cmd_tests {
         );
         assert_eq!(team_only_mismatch_line(&queue, true), None);
 
-        queue.purge_team_owned_personal_rejections().unwrap();
-        assert_eq!(team_only_mismatch_line(&queue, false), None);
+        assert_eq!(
+            queue
+                .purge_team_owned_personal_rejections("team-1", "p", &[], true)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            team_only_mismatch_line(&queue, false).is_some(),
+            "preview retains policy rejections"
+        );
     }
 
     #[test]

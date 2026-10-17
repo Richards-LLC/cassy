@@ -3025,8 +3025,8 @@ impl CloudSyncer {
         // stores filled with refused rows, and their team watermark moved only
         // on a manual sync. Personal rows stay queued and untouched; they push
         // again only if the project returns to personal scope. A team-only
-        // store still runs the personal push, which retires its personal rows
-        // and sends nothing.
+        // store still runs the personal push guard, which retains unproven
+        // personal transport and sends nothing.
         let team_id = self.cloud_config.active_team_id();
 
         // Push personal changes first (with sessions).

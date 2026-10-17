@@ -331,10 +331,6 @@ impl SyncingTaskStore {
             let _ = self
                 .queue
                 .enqueue(EntityType::Task, id, SyncOperation::Delete, None);
-        } else {
-            let _ = self
-                .queue
-                .drop_personal_queued_push_for(EntityType::Task, id);
         }
 
         // See `share_policy` module docs: delete fans out unconditionally
@@ -392,10 +388,6 @@ impl SyncingTaskStore {
                 SyncOperation::Upsert,
                 Some(&payload),
             );
-        } else {
-            let _ = self
-                .queue
-                .drop_personal_queued_push_for(EntityType::TaskDependency, &entity_id);
         }
 
         if let Some(team_id) = self.team_id.as_deref()
@@ -420,10 +412,6 @@ impl SyncingTaskStore {
                 SyncOperation::Delete,
                 None,
             );
-        } else {
-            let _ = self
-                .queue
-                .drop_personal_queued_push_for(EntityType::TaskDependency, &entity_id);
         }
 
         // A delete must fan out when a team is configured, even when the

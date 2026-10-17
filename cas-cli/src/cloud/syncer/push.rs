@@ -134,7 +134,6 @@ impl CloudSyncer {
             .validate_team_only()
             .map_err(CasError::Other)?;
         if self.cloud_config.team_only {
-            self.queue.neutralize_team_only_personal()?;
             // A personal push envelope carries this root's project identity.
             // Even global rows would re-register the retired personal project.
             return Ok(result);

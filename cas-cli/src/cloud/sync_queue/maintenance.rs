@@ -35,21 +35,8 @@ pub(crate) fn recording_client_version() -> &'static str {
 }
 
 impl SyncQueue {
-    /// Remove only personal outbox rows conclusively rejected as belonging
-    /// to a team-owned project. Local entities and team outbox rows survive;
-    /// this never emits a remote delete or retries the rejected write.
-    pub fn purge_team_owned_personal_rejections(&self) -> Result<usize, CasError> {
-        let conn = self.conn.lock().unwrap();
-        Ok(conn.execute(
-            "DELETE FROM sync_queue WHERE team_id = ''
-             AND last_outcome = 'rejected' AND last_reason = 'team_owned_project'",
-            [],
-        )?)
-    }
-    /// Count the personal rows `purge_team_owned_personal_rejections` would
-    /// remove (cas-25c1). A non-zero count while `cloud.team_only` is off is
-    /// the cloud saying this project belongs to a team: status, doctor and the
-    /// sync summary name the mismatch and its fix instead of hiding the rows.
+    /// Count policy rejections, not verified duplicate deliveries. Status,
+    /// doctor and sync show this routing mismatch without authorizing cleanup.
     pub fn team_owned_personal_rejection_count(&self) -> Result<usize, CasError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(

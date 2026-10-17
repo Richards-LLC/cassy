@@ -749,7 +749,9 @@ fn configure_claude_hooks_at(
 
         // Write back
         let output = canonical_json_pretty(&settings)?;
-        std::fs::write(&settings_path, output)?;
+        if output != content {
+            std::fs::write(&settings_path, output)?;
+        }
         false
     } else {
         // Create new settings file

@@ -78,9 +78,9 @@ async fn codex_reminder_and_peer_reply_survive_async_claim_cas_353b() {
             )
             .unwrap();
         let id = queue.peek_all(10).unwrap()[0].id;
-        // Hold the real writer so this pass cannot accidentally complete its
-        // own claim inline, as the old queue fixtures did.
-        let writer = TestWriter::start(true);
+        // Use the asynchronous writer: even a fast completed job is only
+        // collected after claim_for_inject returns Waiting on its first pass.
+        let writer = TestWriter::start(false);
         daemon.queue_jobs = jobs_on(&writer);
         while !daemon.queue_jobs.has_claim(id, &name) {
             daemon.process_prompt_queue().await.unwrap();
@@ -92,7 +92,6 @@ async fn codex_reminder_and_peer_reply_survive_async_claim_cas_353b() {
             .get(&id)
             .copied()
             .unwrap_or(0);
-        writer.open(); // Also release the fixture thread on a failing assertion.
         assert_eq!(
             spent, 0,
             "{kind}: claim-only pass delivered no bytes and must spend no wake budget"

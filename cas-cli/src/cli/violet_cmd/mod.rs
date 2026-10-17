@@ -607,11 +607,11 @@ pub fn post_thread(
         "replies": entries,
     });
     let receipt = call_ok(hub, "violet_post", args).map_err(|error| with_begun(error, &begun))?;
-    confirm_reply_files(receipt, channel, replies)
+    confirm_reply_files(receipt, channel, replies).map_err(|error| with_begun(error, &begun))
 }
 
 /// GH #1251: a reply sent with files is confirmed only when its receipt,
-/// `posted[i].files`, lists that many files, each with a `file_id` and
+/// `posted[i].files`, lists that many distinct `file_id`s in
 /// `state: attached`. Anything less fails the run with a named code. The
 /// error keeps the hub's receipt, so the posted message ids and any returned
 /// file ids are printed, and it never retries.
@@ -632,7 +632,15 @@ fn confirm_reply_files(receipt: Value, channel: &str, replies: &[ReplyPlan]) -> 
             .flatten()
             .filter(|file| file["file_id"].as_str().is_some_and(|id| !id.is_empty()))
             .collect();
-        let in_state = |state: &str| files.iter().filter(|file| file["state"] == state).count();
+        // Distinct ids: two entries for one attached file prove one file.
+        let in_state = |state: &str| {
+            files
+                .iter()
+                .filter(|file| file["state"] == state)
+                .filter_map(|file| file["file_id"].as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        };
         let (sent, attached, uploaded) = (reply.files.len(), in_state("attached"), in_state("uploaded"));
         if attached == sent {
             continue;

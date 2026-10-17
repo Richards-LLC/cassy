@@ -173,7 +173,8 @@ cas violet read   --channel <name> --since <RFC3339> | --thread <message_id> | -
   `posted[]`, `failed_index` and `resume_safe`; follow the ordered-thread rules
   above. Each reply's files come back under `posted[i].files`; a thread
   receipt has no top-level `files`. The run succeeds only when every
-  `--reply-file` is listed there with a `file_id` and `state: attached`.
+  `--reply-file` is listed there with its own distinct `file_id` and
+  `state: attached`.
 - **read**: `violet_read` with `include_channels: false`. A channel read
   requires `--since`. Downloaded file bytes are dropped from the output
   (`content_omitted: true`); sizes and hashes stay.

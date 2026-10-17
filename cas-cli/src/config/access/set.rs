@@ -704,14 +704,19 @@ impl Config {
                     .map(ToOwned::to_owned)
                     .collect();
             }
-            "qa.user_facing_paths" => {
+            "qa.user_facing_paths" | "qa.api_paths" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);
-                qa.user_facing_paths = value
+                let paths = value
                     .split(',')
                     .map(str::trim)
                     .filter(|glob| !glob.is_empty())
                     .map(ToOwned::to_owned)
                     .collect();
+                if key == "qa.api_paths" {
+                    qa.api_paths = paths;
+                } else {
+                    qa.user_facing_paths = paths;
+                }
             }
             "qa.pass_timeout_mins" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);

@@ -1753,6 +1753,60 @@ pub fn validate_ledger(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRef
     validate_ledger_receipt(ctx).map(|receipt| receipt.0)
 }
 
+/// API evidence has two files: the ledger is the HTTP transcript itself.
+pub(crate) fn validate_api_evidence(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRefusal> {
+    let fix = "capture request:, status: and body: per changed status/refusal in LEDGER.md against the named real build; record head_sha: and origin:, plus contracts.diff against vendored fixtures (cas-qa-craft references/evidence-bundle.md)";
+    let refuse = |problem: &str| EvidenceRefusal::new(problem, fix);
+    let root = ctx.task_artifacts_dir.canonicalize().map_err(|_| refuse("missing API evidence directory"))?;
+    let mut files = Vec::new();
+    for name in ["LEDGER.md", "contracts.diff"] {
+        let path = resolve_bundle_file(&root, name, name)?;
+        if !path.is_file() {
+            return Err(refuse(&format!("API evidence {name} is not a file")));
+        }
+        if committer_time(ctx.repo, ctx.delivered_head)
+            .is_some_and(|at| mtime_secs(&path).is_none_or(|mtime| mtime < at))
+        {
+            return Err(refuse(&format!("stale API evidence: {name} predates the delivered commit")));
+        }
+        files.push((name.to_string(), path));
+    }
+    check_no_secrets(&root, &files)?;
+    let ledger = &files[0].1;
+    let body = std::fs::read_to_string(ledger).map_err(|_| refuse("unreadable HTTP transcript"))?;
+    let field = |name: &str| body.lines().find_map(|line| line.strip_prefix(name)).map(str::trim);
+    if field("head_sha:") != Some(ctx.delivered_head) {
+        return Err(refuse("API transcript head_sha does not match the delivered commit"));
+    }
+    let origin = field("origin:").and_then(url_origin).ok_or_else(|| refuse("API transcript has no HTTP origin"))?;
+    if !is_local_origin(&origin) {
+        if !ctx.deployed_origins.iter().any(|allowed| url_origin(allowed).as_deref() == Some(origin.as_str())) {
+            return Err(refuse("API origin is not in qa.deployed_origins"));
+        }
+        let sha = field("deployed_sha:").unwrap_or_default();
+        if !is_full_sha(sha)
+            || (sha != ctx.delivered_head && git(ctx.repo, &["merge-base", "--is-ancestor", ctx.delivered_head, sha]).is_none())
+            || !field("deployment_proof:").is_some_and(|proof| proof.contains(sha))
+        {
+            return Err(refuse("API deployment needs deployed_sha covering this commit and deployment_proof from its version endpoint, inline in LEDGER.md"));
+        }
+    }
+    let requests: Vec<_> = body.lines().filter_map(|line| line.strip_prefix("request:")).collect();
+    let statuses: Vec<_> = body.lines().filter_map(|line| line.strip_prefix("status:")).collect();
+    let bodies = body.lines().filter(|line| line.starts_with("body:")).count();
+    if requests.is_empty() || statuses.len() != requests.len() || bodies != requests.len()
+        || requests.iter().any(|request| {
+            let mut parts = request.split_whitespace();
+            !matches!(parts.next(), Some("GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"))
+                || parts.next().and_then(url_origin).as_deref() != Some(origin.as_str())
+        })
+        || statuses.iter().any(|status| !status.trim().parse::<u16>().is_ok_and(|code| (100..=599).contains(&code)))
+    {
+        return Err(refuse("API transcript needs matching HTTP request, numeric status and body captures"));
+    }
+    Ok(ledger.clone())
+}
+
 /// A deployed check deferred to a registered supervisor. This is not a PASS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeferredDeployedVerification {
@@ -2221,6 +2275,10 @@ pub fn run_close_gate_with_write_dir(
             command = command,
         )
     };
+    if tier != EvidenceTier::None && reasons.iter().any(|reason| reason.starts_with("api:")) {
+        let transcript = validate_api_evidence(ctx).map_err(|refusal| reject(refusal, "API evidence"))?;
+        pass.notes.push(format!("API HTTP transcript and contract diff accepted: {}.", transcript.display()));
+    }
     match tier {
         EvidenceTier::None => {}
         EvidenceTier::Bundle => {

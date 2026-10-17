@@ -997,10 +997,43 @@ fn cas_6d5c_task_lifecycle_retires_only_the_related_workers_alarms() {
         LifecycleTransition, emit_task_lifecycle_transition,
     };
     let _env = env();
-    for (transition, status) in [
-        (LifecycleTransition::Started, TaskStatus::InProgress),
-        (LifecycleTransition::AwaitingMerge, TaskStatus::AwaitingMerge),
-        (LifecycleTransition::Closed, TaskStatus::Closed),
+    for (transition, status, case, actor) in [
+        (
+            LifecycleTransition::Started,
+            TaskStatus::InProgress,
+            "current",
+            "worker",
+        ),
+        (
+            LifecycleTransition::AwaitingMerge,
+            TaskStatus::AwaitingMerge,
+            "current",
+            "worker",
+        ),
+        (
+            LifecycleTransition::Closed,
+            TaskStatus::Closed,
+            "current",
+            "worker",
+        ),
+        (
+            LifecycleTransition::Closed,
+            TaskStatus::Closed,
+            "other actor",
+            SUPERVISOR,
+        ),
+        (
+            LifecycleTransition::Closed,
+            TaskStatus::Closed,
+            "before handoff",
+            "worker",
+        ),
+        (
+            LifecycleTransition::Closed,
+            TaskStatus::Closed,
+            "other factory",
+            "worker",
+        ),
     ] {
         let mut f = Fixture::new();
         let acted = handed_off_row(&f, "supervisor", "worker");
@@ -1019,35 +1052,77 @@ fn cas_6d5c_task_lifecycle_retires_only_the_related_workers_alarms() {
         tasks.update(&task).unwrap();
         let agents = open_agent_store(&f.cas_dir).unwrap();
         emit_task_lifecycle_transition(
-            crate::store::open_supervisor_queue_store(&f.cas_dir).unwrap().as_ref(),
+            crate::store::open_supervisor_queue_store(&f.cas_dir)
+                .unwrap()
+                .as_ref(),
             Some(f.queue.as_ref()),
             agents.as_ref(),
             &task.id,
             &task.title,
             TaskStatus::Open,
             status,
-            "worker",
+            actor,
             None,
             transition,
             "lifecycle-after-handoff",
         )
         .unwrap();
+        let conn = rusqlite::Connection::open(f.cas_dir.join("cas.db")).unwrap();
+        if case == "before handoff" {
+            conn.execute(
+                "UPDATE supervisor_queue SET created_at=? WHERE event_type='task_lifecycle'",
+                [(chrono::Utc::now() - chrono::Duration::seconds(700)).to_rfc3339()],
+            )
+            .unwrap();
+        } else if case == "other factory" {
+            conn.execute(
+                "UPDATE supervisor_queue SET payload=json_set(payload, '$.factory_session', 'other-factory') WHERE event_type='task_lifecycle'",
+                [],
+            ).unwrap();
+        }
+        let retires = case == "current";
         let context = message_attention::AttentionInputs::from_daemon(&f.daemon);
         let bounces = super::super::poison_sweep_jobs::read_bounces(
-            &context, &HashMap::new(), cas_mux::SupervisorCli::Codex,
+            &context,
+            &HashMap::new(),
+            cas_mux::SupervisorCli::Codex,
         );
-        assert!(!bounces.iter().any(|row| row.row.id == acted),
-            "{transition:?}: recipient lifecycle must retire the delivery-stalled alarm");
-        assert!(bounces.iter().any(|row| row.row.id == unrelated),
-            "unrelated work, including a task-id prefix, must still alert");
+        assert_eq!(
+            !bounces.iter().any(|row| row.row.id == acted),
+            retires,
+            "{transition:?}/{case}: only related recipient lifecycle retires the alarm"
+        );
+        assert!(
+            bounces.iter().any(|row| row.row.id == unrelated),
+            "unrelated work, including a task-id prefix, must still alert"
+        );
         let idle = super::super::delivery_probe_jobs::read_idle_unread(&context, SUPERVISOR);
-        assert!(!idle.iter().any(|row| row.row.id == acted));
+        assert_eq!(
+            !idle.iter().any(|row| row.row.id == acted),
+            retires,
+            "{case}"
+        );
         assert!(idle.iter().any(|row| row.row.id == unrelated));
-        assert!(f.queue.enqueue_delivery_stalled_bounce(
-            acted, SESSION, "stale scan", "stale alarm",
-        ).unwrap().is_none(), "atomic bounce write must recheck the lifecycle");
-        assert!(!f.scan().is_empty(), "genuinely unread unrelated task still alerts");
-        assert!(f.queue.message_delivery_report(acted).unwrap().unwrap().confirmed_at.is_none(),
-            "alarm suppression must not manufacture a message read receipt");
+        assert_eq!(
+            f.queue
+                .enqueue_delivery_stalled_bounce(acted, SESSION, "stale scan", "stale alarm",)
+                .unwrap()
+                .is_none(),
+            retires,
+            "atomic bounce write must recheck the lifecycle: {case}"
+        );
+        assert!(
+            !f.scan().is_empty(),
+            "genuinely unread unrelated task still alerts"
+        );
+        assert!(
+            f.queue
+                .message_delivery_report(acted)
+                .unwrap()
+                .unwrap()
+                .confirmed_at
+                .is_none(),
+            "alarm suppression must not manufacture a message read receipt"
+        );
     }
 }

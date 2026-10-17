@@ -4641,6 +4641,7 @@ fn recipient_action_satisfies_alarm_on_conn(conn: &Connection, prompt_id: i64) -
         )?)
     };
     let mut action = String::new();
+    let mut lifecycle_tasks = None;
     if exists("agents")? {
         let mut evidence = vec![
             "EXISTS (SELECT 1 FROM prompt_queue outbound
@@ -4667,21 +4668,65 @@ fn recipient_action_satisfies_alarm_on_conn(conn: &Connection, prompt_id: i64) -
                     .into(),
             );
         }
-        action = format!("OR (q.transport_delivered_at IS NOT NULL AND EXISTS (
+        if exists("supervisor_queue")? {
+            // A parked worker may re-close without holding a lease. The
+            // lifecycle outbox still records its successful action (cas-6d5c).
+            // Bind that evidence to tasks named in this message; unrelated
+            // work must not retire an actionable request's alarm.
+            let text: Option<String> = conn
+                .query_row(
+                    "SELECT prompt FROM prompt_queue WHERE id=?",
+                    [prompt_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let mut tasks = text
+                .as_deref()
+                .unwrap_or_default()
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                .filter(|token| token.starts_with("cas-") && token.len() > 4)
+                .collect::<Vec<_>>();
+            tasks.sort_unstable();
+            tasks.dedup();
+            if !tasks.is_empty() {
+                lifecycle_tasks = Some(serde_json::to_string(&tasks)?);
+                evidence.push(
+                    "EXISTS (SELECT 1 FROM supervisor_queue lifecycle
+                    WHERE lifecycle.event_type = 'task_lifecycle'
+                      AND json_valid(lifecycle.payload)
+                      AND json_extract(lifecycle.payload, '$.factory_session') = q.factory_session
+                      AND json_extract(lifecycle.payload, '$.actor') IN (recipient.id, recipient.name)
+                      AND json_extract(lifecycle.payload, '$.transition') IN
+                          ('task_started', 'task_awaiting_merge', 'task_closed')
+                      AND json_extract(lifecycle.payload, '$.task_id') IN (SELECT value FROM json_each(?2))
+                      AND julianday(lifecycle.created_at) > julianday(q.transport_delivered_at))"
+                        .into(),
+                );
+            }
+        }
+        action = format!(
+            "OR (q.transport_delivered_at IS NOT NULL AND EXISTS (
             SELECT 1 FROM agents recipient
              WHERE recipient.factory_session = q.factory_session
                AND recipient.role = 'worker' AND recipient.name = q.target
-               AND ({})))", evidence.join(" OR "));
+               AND ({})))",
+            evidence.join(" OR ")
+        );
+    }
+    let mut bindings: Vec<&dyn rusqlite::ToSql> = vec![&prompt_id];
+    if let Some(tasks) = &lifecycle_tasks {
+        bindings.push(tasks);
     }
     Ok(conn.query_row(
         &format!(
-            "SELECT EXISTS(SELECT 1 FROM prompt_queue q WHERE q.id = ?
+            "SELECT EXISTS(SELECT 1 FROM prompt_queue q WHERE q.id = ?1
             AND (lower(q.source) = lower(q.target) {action}))"
         ),
-        [prompt_id],
+        rusqlite::params_from_iter(bindings),
         |row| row.get(0),
     )?)
 }
+
 /// cas-e829: a Commander turn (`target = 'operator'`) belongs to the session
 /// that wrote it. Live delivery and history both select on
 /// `factory_session`, so a row without one could never be delivered and

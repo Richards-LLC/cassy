@@ -4242,6 +4242,22 @@ impl CasCore {
             );
         }
 
+        // cas-eda0: a parked delivery merged here with green CI (no override)
+        // and published is closed by Cassy, not by a worker re-close. The
+        // close keeps every gate; a verdict still owed is dispatched by it.
+        let push_note = match (task_id, merge_commit.as_deref()) {
+            (Some(task_id), Some(merge_sha))
+                if transactional_delivery.is_none()
+                    && !ci_override
+                    && matches!(branch_ci_state, BranchCiState::Green { .. })
+                    && push_outcome.is_published() =>
+            {
+                let outcome = self.close_after_green_merge(task_id, merge_sha).await;
+                format!("{push_note}{}", outcome.receipt(task_id))
+            }
+            _ => push_note,
+        };
+
         if let Some(mut close_result) = delivery_close_result {
             // Git and durable delivery state reached CloseReady, but the
             // internal close surfaced another exact gate. Preserve that

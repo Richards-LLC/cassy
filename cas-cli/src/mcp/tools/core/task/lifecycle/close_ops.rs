@@ -84,6 +84,58 @@ const ASSIGNEE_STALE_SECS: i64 = 300;
 /// verifier-written Error verdict during auto-escalation.
 const DISPATCH_SUMMARY_PREFIX: &str = "Dispatch requested";
 
+tokio::task_local! {
+    /// cas-eda0: present while Cassy itself closes a delivery it merged.
+    static CASSY_MERGE_CLOSE: ();
+}
+
+/// cas-eda0: run `close` as Cassy's own post-merge close. Every ordinary
+/// gate still applies; only the supervisor verification skip is withheld.
+pub(crate) async fn as_cassy_merge_close<F: std::future::Future>(close: F) -> F::Output {
+    CASSY_MERGE_CLOSE.scope((), close).await
+}
+
+fn in_cassy_merge_close() -> bool {
+    CASSY_MERGE_CLOSE.try_with(|_| ()).is_ok()
+}
+
+/// Prefix of every close response that found the task already closed.
+pub(crate) const ALREADY_CLOSED_PREFIX: &str = "Already closed:";
+
+fn already_closed_message(task: &Task) -> String {
+    let closed_at = task
+        .closed_at
+        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| "unknown time".to_string());
+    format!(
+        "{ALREADY_CLOSED_PREFIX} {} - {} (closed at {closed_at}). This call did not re-close \
+         the task; closed_at and notes were left unchanged.",
+        task.id, task.title
+    )
+}
+
+/// cas-eda0: cross-process exclusive lock for one task's terminal close
+/// write. Best effort: if the lock cannot be taken the write proceeds as
+/// before, guarded only by the re-read.
+fn terminal_close_lock(cas_root: &std::path::Path, task_id: &str) -> Option<std::fs::File> {
+    use fs2::FileExt;
+    let dir = cas_root.join("locks");
+    std::fs::create_dir_all(&dir).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(format!("task-close-{task_id}.lock")))
+        .ok()?;
+    match file.lock_exclusive() {
+        Ok(()) => Some(file),
+        Err(error) => {
+            tracing::warn!(%task_id, %error, "terminal close lock unavailable");
+            None
+        }
+    }
+}
+
 pub(crate) fn required_verification_type(task_type: TaskType) -> VerificationType {
     if task_type == TaskType::Epic {
         VerificationType::Epic
@@ -6093,10 +6145,17 @@ impl CasCore {
         factory_branch_anchor: Option<String>,
         merge_conflicted: bool,
         measured_branch: Option<String>,
+        close_reason: Option<&str>,
     ) {
         let mut parked = task.clone();
         let now = chrono::Utc::now();
         parked.status = TaskStatus::AwaitingMerge;
+        // cas-eda0: keep the worker's reason as written at park time; Cassy
+        // closes with it after a green merge instead of asking for a re-close.
+        parked.deliverables.parked_close_reason = close_reason
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(str::to_string);
         // cas-a844/cas-7308a: snapshot whether THIS park needs worker merge
         // rework: either a genuine conflict, or a preflight error that means
         // Cassy cannot prove it clean. This only fires once per task (same
@@ -7012,15 +7071,7 @@ impl CasCore {
         if super::stale_close_guard::is_terminal_closed(task.status)
             || task.status == TaskStatus::Closed
         {
-            let closed_at_msg = task
-                .closed_at
-                .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
-                .unwrap_or_else(|| "unknown time".to_string());
-            return Ok(Self::success(format!(
-                "Already closed: {} - {} (closed at {}). This call did not re-close \
-                 the task; closed_at and notes were left unchanged.",
-                req.id, task.title, closed_at_msg
-            )));
+            return Ok(Self::success(already_closed_message(&task)));
         }
         if task.status == TaskStatus::Cancelled {
             return Ok(Self::tool_error(format!(
@@ -8157,6 +8208,7 @@ impl CasCore {
                             task.assignee.as_deref().map(|assignee| {
                                 recovery_branch.clone().unwrap_or_else(|| close_measured_factory_branch(&close_project_root, &task, assignee))
                             }),
+                            req.reason.as_deref(),
                         );
                     } else {
                         // GH #744 / #743: a worker may push again after the
@@ -8301,7 +8353,9 @@ impl CasCore {
             VerificationSkipReason::SupervisorEvidenceOnly
         } else if !close_disposition.requires_delivery_gates() {
             VerificationSkipReason::SupervisorNegativeResult
-        } else if verification_enabled && is_supervisor_from_env() {
+        } else if verification_enabled && is_supervisor_from_env() && !in_cassy_merge_close() {
+            // cas-eda0: Cassy's own post-merge close never takes the
+            // supervisor's orphan/convenience skip; it needs a real verdict.
             if task.task_type == TaskType::Epic && task.epic_verification_owner.is_some() {
                 // The ownership gate above already proved that this caller is
                 // the configured epic verification owner. Epics normally have
@@ -10336,6 +10390,16 @@ impl CasCore {
             }
         }
 
+        // cas-eda0: Cassy's post-merge close and the worker's own close may
+        // race. Serialize the terminal write per task across processes and
+        // re-read under the lock: the loser reports the existing close and
+        // writes, relays and notifies nothing.
+        let _terminal_close_lock = terminal_close_lock(&self.cas_root, &req.id);
+        if let Ok(current) = task_store.get(&req.id)
+            && current.status == TaskStatus::Closed
+        {
+            return Ok(Self::success(already_closed_message(&current)));
+        }
         // cas-ec74: adopt the store-owned stamp so the Closed occurrence below
         // matches the persisted row instead of a second clock read.
         task.updated_at = task_store.update(&task).map_err(|e| McpError {
@@ -10343,6 +10407,7 @@ impl CasCore {
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
+        drop(_terminal_close_lock);
         // cas-b1dd: the Closed write is this request's terminal mutation.
         // Everything below is post-commit work (indexing, reminders, the
         // lifecycle outbox, dependents, leases); the dispatch may answer
@@ -25141,9 +25206,15 @@ mod merge_state_gate_tests {
         core.park_task_awaiting_merge(
             &tasks, &task, "MERGE REQUIRED", "delivery is ready for merge",
             Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
+            Some("PASS delivery-tip: relay fixture"),
         );
         let parked = tasks.get(&task.id).unwrap();
         assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+        assert_eq!(
+            parked.deliverables.parked_close_reason.as_deref(),
+            Some("PASS delivery-tip: relay fixture"),
+            "cas-eda0: the park keeps the worker's close reason for Cassy's own close"
+        );
         let relays = queue.peek("relay-supervisor-id", 10).unwrap();
         assert_eq!(relays.len(), 1, "one park must produce one supervisor relay: {relays:?}");
         let payload: serde_json::Value = serde_json::from_str(&relays[0].payload).unwrap();

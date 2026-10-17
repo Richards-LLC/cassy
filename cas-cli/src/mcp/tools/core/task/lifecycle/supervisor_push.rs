@@ -411,20 +411,53 @@ pub(crate) fn queue_approved_verification_close_retry(
     if task.is_terminal() || !matches!(task.status, TaskStatus::InProgress | TaskStatus::AwaitingMerge) {
         return Ok(None);
     }
+    queue_assignee_notice(cas_root, task, |worker_name| {
+        (
+            format!("verification-approved-close:{dispatch_id}:worker:{worker_name}"),
+            format!(
+                "Verification approved for task {} (dispatch {dispatch_id}). Retry task close id={} now; the verdict is recorded.",
+                task.id, task.id
+            ),
+            format!("Verification approved: retry close {}", task.id),
+        )
+    })
+}
+
+/// cas-eda0: tell the assigned worker, once per task, that Cassy closed its
+/// merged delivery, so it neither waits for a merge reply nor re-closes.
+pub(crate) fn queue_cassy_merge_close_notice(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    merge_commit: &str,
+) -> Result<Option<i64>, String> {
+    queue_assignee_notice(cas_root, task, |worker_name| {
+        (
+            format!("cassy-merge-closed:{}:worker:{worker_name}", task.id),
+            format!(
+                "Task {} is closed: Cassy merged it at {merge_commit} with green CI and closed it with your parked close reason. No re-close is needed.",
+                task.id
+            ),
+            format!("Merged and closed by Cassy: {}", task.id),
+        )
+    })
+}
+
+/// Enqueue one idempotent prompt for the task's live assigned worker.
+/// `content` maps the worker name to (dedupe key, prompt, summary).
+fn queue_assignee_notice(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    content: impl FnOnce(&str) -> (String, String, String),
+) -> Result<Option<i64>, String> {
     let AutoUnblockWorkerTarget::Worker(worker_name) = auto_unblock_worker_target(cas_root, task)? else {
         return Ok(None);
     };
     let queue = crate::store::open_prompt_queue_store(cas_root)
-        .map_err(|error| format!("verification close-retry queue open failed: {error}"))?;
+        .map_err(|error| format!("worker notice queue open failed: {error}"))?;
     let factory_session = std::env::var("CAS_FACTORY_SESSION")
         .ok()
         .filter(|session| !session.trim().is_empty());
-    let key = format!("verification-approved-close:{dispatch_id}:worker:{worker_name}");
-    let prompt = format!(
-        "Verification approved for task {} (dispatch {dispatch_id}). Retry task close id={} now; the verdict is recorded.",
-        task.id, task.id
-    );
-    let summary = format!("Verification approved: retry close {}", task.id);
+    let (key, prompt, summary) = content(&worker_name);
     let result = queue.enqueue_idempotent(
         "supervisor",
         &worker_name,
@@ -434,7 +467,7 @@ pub(crate) fn queue_approved_verification_close_retry(
         Some(cas_store::NotificationPriority::Normal),
         &key,
         Some(&cas_store::QueueOrigin::Daemon),
-    ).map_err(|error| format!("verification close-retry enqueue failed: {error}"))?;
+    ).map_err(|error| format!("worker notice enqueue failed: {error}"))?;
     let prompt_id = match result {
         cas_store::EnqueueIdempotentResult::Created(id)
         | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,

@@ -312,6 +312,14 @@ impl SqliteTaskStore {
                 persisted_deliverables.parked_branch = None;
                 persisted_deliverables.merge_conflicted = false;
             }
+            let leaving_park = prev_status.as_deref() == Some("awaiting_merge")
+                && task.status != TaskStatus::Closed;
+            if reopening_terminal || leaving_park {
+                // cas-eda0: both describe one park/merge cycle; a new cycle
+                // must re-park and re-merge before Cassy may close for it.
+                persisted_deliverables.parked_close_reason = None;
+                persisted_deliverables.green_merge_commit = None;
+            }
 
             // Updates preserve the row's provenance. Only creation supplies a
             // default; an unattributed imported task must not become local on

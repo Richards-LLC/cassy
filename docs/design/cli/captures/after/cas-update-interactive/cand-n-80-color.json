@@ -1,0 +1,37 @@
+{
+ "version": "cas 3.62.0 (4cedda1 2026-10-17)",
+ "inherited_no_color": true,
+ "child_no_color": null,
+ "mode": "n",
+ "asset": "garbage",
+ "cols": 80,
+ "answered": "n",
+ "exit": 1,
+ "seconds": 1.68,
+ "requests": [
+  "/repos/pippenz/cas/releases/latest"
+ ],
+ "asset_requested": false,
+ "binary_unchanged": true,
+ "sha256": "9e097923384730f41b925c04c08660aa5ceee5b48b4fee335b540f63b3dcedce",
+ "cwd": "/mnt/rewind/cas/scratch/qa70a8r2/runs/run-yhjh2zeq/cwd",
+ "home": "/mnt/rewind/cas/scratch/qa70a8r2/runs/run-yhjh2zeq",
+ "identity_preserved": {
+  "CAS_AGENT_ROLE": "supervisor",
+  "CAS_AGENT_NAME": "true-leopard-45",
+  "CAS_SESSION_ID": "codex-true-leopard-45-2f652b58-a08f-4081-a980-f239c93f48ef",
+  "CAS_FACTORY_SESSION": "cassy-bright-lion-34",
+  "CAS_FACTORY_MODE": "1",
+  "CAS_CLONE_PATH": "/home/pippenz/Petrastella/cassy",
+  "CAS_SUPERVISOR_NAME": null
+ },
+ "widest": 80,
+ "cr_redraws": 0,
+ "non_ascii": [
+  "0x2139",
+  "0x2192",
+  "0x26a0",
+  "0x2717",
+  "0xb7"
+ ]
+}

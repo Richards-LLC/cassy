@@ -135,7 +135,7 @@ async fn idle_supervisor_reminder_wakes_once(ci: bool) {
         daemon.pane_silent_since.insert(name, Instant::now() - Duration::from_secs(600));
     }
     daemon.process_prompt_queue().await.unwrap();
-    let typed = typed_once(&root, &daemon, &body).await;
+    let typed = typed_once(&root, &mut daemon, &body).await;
     daemon.process_prompt_queue().await.unwrap();
     assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap(), typed, "ci={ci}");
 }
@@ -182,7 +182,7 @@ async fn busy_self_reminder_is_never_abandoned(takeover: bool) {
         .unwrap();
     daemon.pane_silent_since.insert(name, Instant::now() - Duration::from_secs(600));
     daemon.process_prompt_queue().await.unwrap();
-    typed_once(&root, &daemon, &body).await;
+    typed_once(&root, &mut daemon, &body).await;
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -343,7 +343,8 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         WorkerUpdatePlan::Unrestricted => {}
         WorkerUpdatePlan::Refuse(message) => anyhow::bail!(message),
         WorkerUpdatePlan::SyncWorktree(worktree) => {
-            return sync_claude_files_into(cli, cas_root, Some(&worktree)).map(|_| ());
+            return sync_claude_files_into(cli, cas_root, Some(&worktree))
+                .and_then(check_managed_commit);
         }
     }
 
@@ -380,7 +381,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     // Handle sync-only mode (just sync .claude/.codex files)
     if args.sync {
-        return sync_claude_files(cli, cas_root).map(|_| ());
+        return sync_claude_files(cli, cas_root).and_then(check_managed_commit);
     }
 
     // Handle schema-only mode
@@ -413,12 +414,69 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // Full update: binary + every local project's migration/sync/cloud state.
     run_full_update(
         cli,
-        update_interactivity(args, cli, io::stdin().is_terminal()).show_output,
+        !update_interactivity(args, cli, io::stdin().is_terminal()).no_confirm,
         || perform_update(args, current_version, cli),
         |pending| finish_post_swap(pending, current_version),
         |version| super::hub::restart_stale_hub(version, cli),
         |error, hub| refresh_all_projects(args, cli, cas_root, error, Some(hub), None),
     )
+}
+
+/// Called with the parsed command before Sentry/logging read configuration.
+/// No writes occur here: the native sweep owns both repair and its receipt.
+pub fn startup_config_notices(cli: &Cli) -> impl Drop + use<> {
+    struct Scope {
+        _notices: Option<crate::config::RetiredNoticeScope>,
+    }
+    impl Drop for Scope {
+        fn drop(&mut self) {}
+    }
+    let native = matches!(&cli.command, Some(crate::cli::Commands::Update(args))
+        if args.post_swap || (args.render_fixture.is_none() && !(args.sync && args.dry_run)
+            && matches!(UpdateMode::of(args), UpdateMode::Full | UpdateMode::AllProjects)));
+    Scope {
+        _notices: native.then(|| {
+            crate::config::RetiredNoticeScope::begin(replay_retired_config_notices, cli.verbose)
+        }),
+    }
+}
+
+fn replay_retired_config_notices(notices: Vec<crate::config::RetiredConfigNotice>, verbose: bool) {
+    let findings = notices
+        .iter()
+        .map(|notice| findings::Finding {
+            verdict: Verdict::Warning,
+            who: vec![notice.path.display().to_string()],
+            phase: "config",
+            // This is an unresolved read, not a maintenance inventory.
+            // Only the retirement receipt can count all supported entries.
+            cause: "retired config settings remain ignored".into(),
+            remedy: Some("check the config.toml above; rerun `cas update`".into()),
+        })
+        .collect();
+    let sweep = findings::SweepFindings {
+        findings,
+        healthy: Vec::new(),
+        unlinked: 0,
+        user_level_current: false,
+        project_count: 0,
+        config: findings::ConfigCleanup::default(),
+    };
+    let mut stderr = io::stderr();
+    let mut fmt = Formatter::stdout(&mut stderr, ActiveTheme::default());
+    if let Ok(shortened) = findings::print(&mut fmt, &sweep) {
+        if verbose {
+            for notice in notices {
+                let _ = fmt.write_raw(&format!(
+                    "  config: {}\n  retired: {}\n",
+                    notice.path.display(),
+                    notice.keys.into_iter().collect::<Vec<_>>().join(", ")
+                ));
+            }
+        } else if shortened {
+            let _ = fmt.receipt("cas update --verbose shows full config paths");
+        }
+    }
 }
 
 /// The full update after its seams: the binary phase, the post-swap child,
@@ -442,40 +500,65 @@ fn run_full_update(
         || {
             let outcome = binary()?;
             // After a swap the hub follows the installed binary's refresh,
-            // as it always has (cas-91ba).
-            let hub_restart = match outcome.pending_post_swap {
-                Some(_) => None,
-                None => Some(hub(&outcome.version)?),
+            // as it always has (cas-91ba). A phase that could not hold its
+            // output (it may prompt) still holds the hub's, which its
+            // findings already say (cas-70a8).
+            let (hub_restart, hub_output) = match outcome.pending_post_swap {
+                Some(_) => (None, String::new()),
+                None => {
+                    let (restart, output) =
+                        capture_phase(interactive && !cli.json, || hub(&outcome.version));
+                    (Some(restart?), output)
+                }
             };
-            Ok((outcome, hub_restart))
+            Ok((outcome, hub_restart, hub_output))
         },
         |result| match result {
-            Ok((outcome, _)) if outcome.updated => live::PhaseResult {
+            Ok((outcome, _, _)) if outcome.updated => live::PhaseResult {
                 verdict: Verdict::Ok,
                 text: format!("updated to {}", outcome.version),
             },
-            Ok((outcome, _)) => live::PhaseResult {
+            Ok((outcome, _, _)) => live::PhaseResult {
                 verdict: Verdict::Ok,
                 text: format!("{} is current", outcome.version),
             },
-            Err(_) => live::PhaseResult {
-                verdict: Verdict::Error,
-                text: "update failed".to_owned(),
+            Err(error) => match error.downcast_ref::<UpdateCancelled>() {
+                Some(UpdateCancelled(current)) => live::PhaseResult {
+                    verdict: Verdict::Warning,
+                    text: format!("cancelled · {current} unchanged"),
+                },
+                None => live::PhaseResult {
+                    verdict: Verdict::Error,
+                    text: "update failed".to_owned(),
+                },
             },
         },
         |result, output| match result {
-            Ok((outcome, hub_restart)) => {
-                binary_phase_remainder(output, &outcome.version, hub_restart.as_ref())
+            Ok((outcome, hub_restart, hub_output)) => {
+                let mut kept = outcome
+                    .notes
+                    .iter()
+                    .map(|note| format!("{note}\n"))
+                    .collect::<String>();
+                kept.push_str(&binary_phase_remainder(
+                    &format!("{output}{hub_output}"),
+                    &outcome.version,
+                    hub_restart.as_ref(),
+                ));
+                kept
             }
             Err(_) => output.to_owned(),
         },
-    )?;
+    )
+    .map(|(outcome, hub_restart, _)| (outcome, hub_restart))?;
 
     // cas-91ba: after a swap the installed binary runs the remaining phases
     // itself, on this terminal, as phase 2 of this run.
     if let Some(pending) = &outcome.pending_post_swap {
         post_swap(pending)?;
-        hub(&outcome.version)?;
+        let (restart, output) = capture_phase(!cli.json, || hub(&outcome.version));
+        let restart = restart?;
+        print_indented(&binary_phase_remainder(&output, &outcome.version, Some(&restart)))?;
         return Ok(());
     }
     let hub_restart = hub_restart.unwrap_or_default();
@@ -561,6 +644,9 @@ fn binary_phase_remainder(
         bare == format!("Already up to date ({version})")
             || bare == format!("Successfully updated to {version}")
             || line.starts_with("cas update: hub was ")
+            // The "hub not running" finding already carries its remedy.
+            || (hub.is_some_and(|hub| hub.prior_state == "none")
+                && line.starts_with("cas update: hub not running"))
             || hub.is_some_and(|hub| {
                 [hub.transport_warning.as_deref(), hub.remedy.as_deref()]
                     .into_iter()
@@ -747,6 +833,7 @@ struct ProjectRefreshReceipt {
     /// exactly like any other project, then registered so the next run finds
     /// it without scanning.
     unregistered: bool,
+    retired_toml: Option<crate::config::ConfigRetirement>,
     migration: ProjectPhase,
     search_index: ProjectPhase,
     skills: ProjectPhase,
@@ -1162,6 +1249,42 @@ fn update_banner_text(report: &RefreshReport) -> String {
     )
 }
 
+/// The receipt laid out for `width` cells (cas-70a8). The count grammar
+/// scripts grep (`Cassy X · N projects refreshed · F failed`) always stays on
+/// one line. The elapsed time is never left alone on a line: when the full
+/// receipt does not fit, it goes beside the counts if there is room and is
+/// otherwise dropped, because the phase line above already shows it. The
+/// user-level store and skipped counts follow on their own line.
+fn receipt_lines(report: &RefreshReport, width: usize) -> Vec<String> {
+    let full = update_banner_text(report);
+    if full.chars().count() <= width {
+        return vec![full];
+    }
+    let core = format!(
+        "Cassy {} · {} projects refreshed · {} failed",
+        env!("CARGO_PKG_VERSION"),
+        report.project_count,
+        report.failed_projects
+    );
+    let mut extras = Vec::new();
+    if report.user_level_failed {
+        extras.push("user-level store failed".to_owned());
+    }
+    if report.skipped_unregistered > 0 {
+        extras.push(format!("{} skipped", report.skipped_unregistered));
+    }
+    let elapsed = format_elapsed(report.elapsed);
+    let joined = std::iter::once(core.clone()).chain(extras.iter().cloned()).collect::<Vec<_>>();
+    if joined.join(" · ").chars().count() <= width {
+        return vec![joined.join(" · ")];
+    }
+    let with_time = format!("{core} · {elapsed}");
+    let first = if with_time.chars().count() <= width { with_time } else { core };
+    std::iter::once(first)
+        .chain((!extras.is_empty()).then(|| extras.join(" · ")))
+        .collect()
+}
+
 /// One exit reason from its clauses: on one line when it fits beside the
 /// error mark in 80 columns, otherwise one clause per line under the first
 /// (cas-06b0), so a terminal never wraps it mid-clause.
@@ -1389,6 +1512,8 @@ fn refresh_all_projects_with_user_refresh(
     first_launch_ms: Option<u64>,
     user_refresh: impl FnOnce() -> ProjectPhase,
 ) -> anyhow::Result<RefreshReport> {
+    let _notices =
+        crate::config::RetiredNoticeScope::begin(replay_retired_config_notices, cli.verbose);
     let started_at = Instant::now();
     let mut discovery = discover_local_projects(current_cas_root);
     for project in std::mem::take(&mut discovery.projects) {
@@ -1406,7 +1531,35 @@ fn refresh_all_projects_with_user_refresh(
     // Account registrations must converge before project proxies choose their
     // bearer. Keep this phase advisory and run it once for the whole update.
     live::set_activity("user-level store");
-    let (user_level, user_details, user_documents) = capture_phase_documents(cli, user_refresh);
+    let mut user_retired_toml = Vec::new();
+    let mut user_roots = BTreeSet::new();
+    for root in [user_level_store_root(), crate::config::global_cas_dir()]
+        .into_iter()
+        .flatten()
+    {
+        let root = root.canonicalize().unwrap_or(root);
+        if user_roots.insert(root.clone()) {
+            user_retired_toml.push(crate::config::retire_config(&root, args.dry_run));
+        }
+    }
+    let (mut user_level, user_details, user_documents) =
+        capture_phase_documents(cli, user_refresh);
+    for maintenance in &user_retired_toml {
+        let label = dirs::home_dir()
+            .and_then(|home| {
+                maintenance
+                    .path
+                    .strip_prefix(home)
+                    .ok()
+                    .map(|path| format!("~/{}", path.display()))
+            })
+            .unwrap_or_else(|| maintenance.path.display().to_string());
+        user_level = with_config_retirement(user_level, maintenance, &label);
+        // Failure is represented too: its cause/remedy is now in the phase.
+        if let Some(root) = maintenance.path.parent() {
+            crate::config::represented_retired_config(root);
+        }
+    }
 
     let names = findings::display_names(discovery.projects.iter().map(PathBuf::as_path));
     for (index, project) in discovery.projects.iter().enumerate() {
@@ -1420,6 +1573,9 @@ fn refresh_all_projects_with_user_refresh(
         let cas_root = project.join(".cas");
         let mut details = String::new();
         let mut documents: Vec<(&'static str, Vec<serde_json::Value>)> = Vec::new();
+        // Remove ignored TOML before migrations and managed-file readers load
+        // config. Ownership/discovery is unchanged; never initialize a store.
+        let retired_toml = crate::config::retire_config(&cas_root, args.dry_run);
 
         // Run each phase independently. A malformed database must be visible
         // in the receipt, but must not leave another project stale.
@@ -1477,6 +1633,8 @@ fn refresh_all_projects_with_user_refresh(
             phase_details.push((cloud.is_ok(), output));
             (search_index, skills, membership, cloud)
         };
+        let skills = with_config_retirement(skills, &retired_toml, ".cas/config.toml");
+        crate::config::represented_retired_config(&cas_root);
 
         // Registration is what makes discovery converge: a project the scan had
         // to find this time is in the registry for every later run, and for
@@ -1489,6 +1647,7 @@ fn refresh_all_projects_with_user_refresh(
         receipts.push(ProjectRefreshReceipt {
             project,
             unregistered,
+            retired_toml: Some(retired_toml),
             migration,
             search_index,
             skills,
@@ -1508,6 +1667,7 @@ fn refresh_all_projects_with_user_refresh(
             user_level,
             user_details,
             user_documents,
+            user_retired_toml,
             skipped_unregistered: discovery.skipped_unregistered,
         },
         hub_transport_error,
@@ -1517,6 +1677,42 @@ fn refresh_all_projects_with_user_refresh(
     )
 }
 
+/// Keep an existing phase failure and its remedy when maintenance also fails.
+/// Successful repair counts belong to the aggregate receipt, not another
+/// file's failure prose. Keep unrelated failures and their remedies.
+fn with_config_retirement(
+    phase: ProjectPhase,
+    maintenance: &crate::config::ConfigRetirement,
+    label: &str,
+) -> ProjectPhase {
+    let detail = match maintenance.status {
+        "planned" if !phase.failed() => format!(
+            "{} retired TOML entries would be removed",
+            maintenance.removed.len()
+        ),
+        "failed" => format!(
+            "{label}: {}; check `{label}` and rerun `cas update`",
+            maintenance.error.as_deref().unwrap_or("cleanup failed"),
+        ),
+        _ => return phase,
+    };
+    let detail = if maintenance.status == "failed" && phase.is_ok() {
+        detail
+    } else {
+        format!("{}; {detail}", phase.detail())
+    };
+    if phase.failed() || maintenance.status == "failed" {
+        ProjectPhase::Failed(detail)
+    } else {
+        match phase {
+            ProjectPhase::Warning(_) => ProjectPhase::Warning(detail),
+            ProjectPhase::Skipped(_) => ProjectPhase::Skipped(detail),
+            ProjectPhase::Planned(_) => ProjectPhase::Planned(detail),
+            _ => ProjectPhase::Ok(detail),
+        }
+    }
+}
+
 /// Everything one sweep learned, before any of it is printed.
 struct RefreshResults {
     receipts: Vec<ProjectRefreshReceipt>,
@@ -1524,6 +1720,7 @@ struct RefreshResults {
     user_details: String,
     /// `--json`: what the user-level phase printed, nested into the receipt.
     user_documents: Vec<serde_json::Value>,
+    user_retired_toml: Vec<crate::config::ConfigRetirement>,
     skipped_unregistered: Vec<SkippedProject>,
 }
 
@@ -1543,8 +1740,19 @@ fn finish_project_refresh(
         user_level,
         user_details,
         user_documents,
+        user_retired_toml,
         skipped_unregistered,
     } = results;
+
+    let mut config_cleanup = findings::ConfigCleanup::default();
+    for maintenance in receipts
+        .iter()
+        .filter_map(|r| r.retired_toml.as_ref())
+        .chain(&user_retired_toml)
+    {
+        config_cleanup.include(maintenance);
+    }
+
     let failed_count = receipts.iter().filter(|receipt| receipt.failed()).count()
         + usize::from(user_level.failed());
     let mut receipt = with_first_launch_ms(
@@ -1565,6 +1773,12 @@ fn finish_project_refresh(
         receipt["user_level_store"]["phase_documents"] =
             serde_json::json!({ "migration": migration, "builtins": builtins });
     }
+    if !user_retired_toml.is_empty() {
+        receipt["user_level_store"]["retired_toml"] = serde_json::to_value(&user_retired_toml)?;
+    }
+    if receipts.iter().any(|r| r.retired_toml.is_some()) || !user_retired_toml.is_empty() {
+        receipt["config_maintenance"] = serde_json::to_value(&config_cleanup)?;
+    }
     if let Some(path) = &args.refresh_receipt {
         write_refresh_receipt(path, &receipt)?;
     }
@@ -1573,13 +1787,17 @@ fn finish_project_refresh(
         (None, String::new())
     } else {
         (
-            Some(findings::collect(
-                &receipts,
-                &user_level,
-                &skipped_unregistered,
-                hub_restart,
-                hub_transport_error,
-            )),
+            Some({
+                let mut sweep = findings::collect(
+                    &receipts,
+                    &user_level,
+                    &skipped_unregistered,
+                    hub_restart,
+                    hub_transport_error,
+                );
+                sweep.config = config_cleanup;
+                sweep
+            }),
             // A dry run's plan is its result, so it keeps its table.
             if cli.verbose || args.dry_run {
                 render_project_refresh_summary(
@@ -1744,22 +1962,10 @@ fn print_sweep(fmt: &mut Formatter<'_>, report: &RefreshReport, verbose: bool) -
         Some(sweep) => findings::print(fmt, sweep)?,
         None => false,
     };
-    // The receipt wraps between its fields, never inside one.
-    let width = usize::from(fmt.width()).clamp(40, 100) - 2;
-    let mut line = String::new();
-    for field in update_banner_text(report).split(" · ") {
-        if !line.is_empty() && line.chars().count() + 3 + field.chars().count() > width {
-            fmt.write_raw("  ")?;
-            fmt.receipt(&line)?;
-            line.clear();
-        }
-        if !line.is_empty() {
-            line.push_str(" · ");
-        }
-        line.push_str(field);
+    for line in receipt_lines(report, usize::from(fmt.width()).clamp(40, 100) - 2) {
+        fmt.write_raw("  ")?;
+        fmt.receipt(&line)?;
     }
-    fmt.write_raw("  ")?;
-    fmt.receipt(&line)?;
     if !verbose
         && (shortened || report.sweep.as_ref().is_some_and(|sweep| !sweep.findings.is_empty()))
     {
@@ -1994,6 +2200,14 @@ fn run_project_phase(
     }
 }
 
+// Deliberate staging remains inspectable; an attempted commit failure is an error.
+fn check_managed_commit(report: crate::cli::project_files::Report) -> anyhow::Result<()> {
+    if let Some(error) = report.commit_error {
+        anyhow::bail!(error);
+    }
+    Ok(())
+}
+
 // Preserve the managed-file verdict through the compact sweep. In particular,
 // a skipped writer must never become an OK skills phase with its warning hidden.
 fn refresh_project_files(cli: &Cli, cas_root: &Path, dry_run: bool) -> ProjectPhase {
@@ -2002,6 +2216,9 @@ fn refresh_project_files(cli: &Cli, cas_root: &Path, dry_run: bool) -> ProjectPh
     }
     match sync_claude_files(cli, Some(cas_root)) {
         Err(error) => ProjectPhase::Failed(format!("skills: {error:#}")),
+        Ok(report) if report.commit_error.is_some() => {
+            ProjectPhase::Failed(report.commit_error.unwrap())
+        }
         Ok(report) if !report.conflicts.is_empty() => ProjectPhase::Warning(format!(
             "{} managed file conflict(s); run `cas update --sync --json`",
             report.conflicts.len()
@@ -2197,7 +2414,7 @@ fn project_refresh_receipt_json(
     let projects = receipts
         .iter()
         .map(|receipt| {
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "project": receipt.project,
                 "store": receipt.project.join(".cas"),
                 "registered": !receipt.unregistered,
@@ -2206,7 +2423,11 @@ fn project_refresh_receipt_json(
                 "skills": receipt.skills.summary(),
                 "membership": receipt.membership.summary(),
                 "cloud_sync": receipt.cloud.summary(),
-            })
+            });
+            if let Some(maintenance) = &receipt.retired_toml {
+                value["retired_toml"] = serde_json::json!(maintenance);
+            }
+            value
         })
         .zip(receipts)
         .map(|(mut project, receipt)| {
@@ -3817,38 +4038,30 @@ fn perform_update(
         .map(|v| v.trim_start_matches('v').to_string())
         .unwrap_or_else(|| latest.version.trim_start_matches('v').to_string());
 
-    if !args.yes && !cli.json {
-        let mut out = io::stdout();
-        let theme = ActiveTheme::default();
-        let mut fmt = Formatter::stdout(&mut out, theme);
-
-        fmt.subheading("Binary Update")?;
-        fmt.write_raw("  Current version: ")?;
-        fmt.write_accent(current_version)?;
-        fmt.newline()?;
-        fmt.write_raw("  Target version:  ")?;
-        fmt.write_accent(&target_version)?;
-        fmt.newline()?;
-
+    // cas-70a8: the confirmation is CAS's own, in the phase's grammar.
+    // self_update's prompt came with an unwrapped release-status block, and
+    // its release check printed chatter around the phase line.
+    if !update_interactivity(args, cli, io::stdin().is_terminal()).no_confirm {
         if !is_newer(&target_version, current_version) && args.version.is_none() {
-            fmt.newline()?;
-            fmt.write_raw("  ")?;
-            fmt.success("Already on the latest version")?;
             return Ok(BinaryUpdateOutcome {
                 version: current_version.to_owned(),
                 updated: false,
                 post_install_refresh: None,
                 pending_post_swap: None,
+                notes: Vec::new(),
             });
         }
-
-        fmt.newline()?;
-        fmt.write_raw("  This will download and replace the current binary.")?;
-        fmt.newline()?;
+        confirm_install(current_version, &target_version)?;
     }
 
-    // Perform the update
-    let status = updater.update()?;
+    // Perform the update. A run that asked first shows its download on the
+    // phase line (cas-70a8): self_update's own bar ended without a newline,
+    // so the phase result landed on the same line.
+    let status = {
+        let _download = live::during_open_phase(format!("downloading Cassy {target_version}"));
+        updater.update()
+    }
+    .map_err(|error| install_error(&error, current_version, &target_version))?;
     if matches!(&status, Status::Updated(_)) {
         // A new updater can remove quarantine before the first child launch.
         // An older parent cannot, so execute_post_swap repeats this before
@@ -3909,6 +4122,7 @@ fn perform_update(
             updated,
             post_install_refresh,
             pending_post_swap: None,
+            notes: Vec::new(),
         });
     }
 
@@ -3916,41 +4130,76 @@ fn perform_update(
         Status::UpToDate(v) => (false, v.trim_start_matches('v').to_owned()),
         Status::Updated(v) => (true, v.trim_start_matches('v').to_owned()),
     };
-    print_binary_status(updated, &version, &running_factory_sessions())?;
+    let notes = binary_notes(updated, &version, &running_factory_sessions());
     Ok(BinaryUpdateOutcome {
         version,
         updated,
         post_install_refresh,
         pending_post_swap,
+        notes,
     })
 }
 
-/// The human result of the binary phase. Shared with `--render-fixture`.
-fn print_binary_status(
-    updated: bool,
-    version: &str,
-    factory_sessions: &[(String, bool)],
-) -> io::Result<()> {
+/// A failed download or swap, in the reader's words: self_update's type
+/// prefix (`UpdateError:`, `NetworkError:`) is dropped and the state of the
+/// installed binary is said, so the next step is clear (cas-70a8).
+fn install_error(error: &self_update::errors::Error, current: &str, target: &str) -> anyhow::Error {
+    let text = error.to_string();
+    let cause = match text.split_once(": ") {
+        Some((kind, rest)) if kind.ends_with("Error") && !kind.contains(' ') => rest.to_owned(),
+        _ => text,
+    };
+    // One clause per line when the reason passes 80 columns (exit_reason).
+    anyhow::anyhow!(exit_reason(&[
+        format!("could not install Cassy {target}"),
+        cause,
+        format!("Cassy {current} is unchanged; rerun `cas update` to retry"),
+    ]))
+}
+
+/// Ask before replacing the binary: `Enter` or `y` installs, anything else
+/// keeps the current binary, as self_update's own prompt did.
+fn confirm_install(current: &str, target: &str) -> anyhow::Result<()> {
     let mut out = io::stdout();
-    let theme = ActiveTheme::default();
-    let mut fmt = Formatter::stdout(&mut out, theme);
-    fmt.newline()?;
+    let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+    let arrow = Icons::arrow_right(fmt.unicode());
     fmt.write_raw("  ")?;
+    fmt.mark(Verdict::Info)?;
+    fmt.write_raw(" ")?;
+    fmt.write_text(&format!("Cassy {current} {arrow} {target} is available"))?;
+    fmt.newline()?;
+    fmt.write_raw("    Download and install it now? [Y/n] ")?;
+    fmt.flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    let answer = answer.trim().to_ascii_lowercase();
+    if answer.is_empty() || answer == "y" || answer == "yes" {
+        return Ok(());
+    }
+    Err(UpdateCancelled(current.to_owned()).into())
+}
+
+/// The operator declined the install; the current binary is untouched.
+#[derive(Debug)]
+struct UpdateCancelled(String);
+
+impl std::fmt::Display for UpdateCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "update cancelled; Cassy {} is unchanged", self.0)
+    }
+}
+
+impl std::error::Error for UpdateCancelled {}
+
+/// What the binary phase adds below its result line: where to read about
+/// the release, and what happens to running factories.
+fn binary_notes(updated: bool, version: &str, factory_sessions: &[(String, bool)]) -> Vec<String> {
     if !updated {
-        return fmt.success(&format!("Already up to date ({version})"));
+        return Vec::new();
     }
-    fmt.success(&format!("Successfully updated to {version}"))?;
-    fmt.newline()?;
-    fmt.write_raw("  Run ")?;
-    fmt.write_accent("cas changelog")?;
-    fmt.write_raw(" to see what's new")?;
-    fmt.newline()?;
-    if let Some(notice) = running_factory_update_notice(factory_sessions, version) {
-        fmt.write_raw("  ")?;
-        fmt.warning(&notice)?;
-        fmt.newline()?;
-    }
-    Ok(())
+    let mut notes = vec!["cas changelog shows what's new".to_owned()];
+    notes.extend(running_factory_update_notice(factory_sessions, version));
+    notes
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -3967,12 +4216,14 @@ fn update_interactivity(
 ) -> UpdateInteractivity {
     let silent = cli.json || !stdin_is_terminal;
     let no_confirm = args.yes || silent;
-    // cas-0aa5: a run that cannot prompt draws its own phase line, so the
-    // release check's chatter would only interleave with it.
+    // cas-0aa5 / cas-70a8: the phase line says what self_update's chatter
+    // said, and the confirmation is CAS's own (`confirm_install`), so the
+    // release check never prints.
     UpdateInteractivity {
         no_confirm,
-        show_output: !no_confirm,
-        show_download_progress: !no_confirm,
+        show_output: false,
+        // cas-70a8 QA F01: the phase line shows the download instead.
+        show_download_progress: false,
     }
 }
 
@@ -3997,7 +4248,8 @@ fn configure_updater(
         .current_version(current_version)
         .show_download_progress(interactivity.show_download_progress)
         .show_output(interactivity.show_output)
-        .no_confirm(interactivity.no_confirm);
+        // perform_update has already asked (confirm_install) when it must.
+        .no_confirm(true);
     if let Some(token) = github_auth_token() {
         updater.auth_token(&token);
     }
@@ -4037,6 +4289,8 @@ struct BinaryUpdateOutcome {
     /// Human mode: the swap happened and the installed binary still has to
     /// run the remaining phases on this terminal, after the binary phase line.
     pending_post_swap: Option<PendingPostSwap>,
+    /// Lines for below the binary phase's result, in human mode.
+    notes: Vec<String>,
 }
 
 /// The installed binary that must run the post-swap phases.
@@ -4212,13 +4466,7 @@ fn run_post_swap_refresh(
                 )
                 .into());
             };
-            verify_refresh_binary_version(
-                child_receipt
-                    .get("refresh_binary_version")
-                    .and_then(|v| v.as_str()),
-                installed_version,
-                installed_binary,
-            )?;
+            verify_child_refresh_receipt(&child_receipt, installed_version, installed_binary)?;
             let message =
                 post_swap_refresh_failed_hint(installed_version, status, "", Some(&child_receipt));
             return Err(PostSwapRefreshFailure::new(
@@ -4230,13 +4478,7 @@ fn run_post_swap_refresh(
         // The child inherited stdio, so use its side-channel receipt when
         // available; retain the version probe for older installed children.
         if let Some(child_receipt) = read_refresh_receipt(&receipt_path) {
-            verify_refresh_binary_version(
-                child_receipt
-                    .get("refresh_binary_version")
-                    .and_then(|v| v.as_str()),
-                installed_version,
-                installed_binary,
-            )?;
+            verify_child_refresh_receipt(&child_receipt, installed_version, installed_binary)?;
         } else {
             verify_refresh_binary_version(
                 reported_binary_version(installed_binary).as_deref(),
@@ -4276,13 +4518,7 @@ fn run_post_swap_refresh(
             )
             .into());
         };
-        verify_refresh_binary_version(
-            child_receipt
-                .get("refresh_binary_version")
-                .and_then(|v| v.as_str()),
-            installed_version,
-            installed_binary,
-        )?;
+        verify_child_refresh_receipt(&child_receipt, installed_version, installed_binary)?;
         let message = post_swap_refresh_failed_hint(
             installed_version,
             output.status,
@@ -4308,13 +4544,7 @@ fn run_post_swap_refresh(
                 stdout.trim()
             )
         })?;
-    verify_refresh_binary_version(
-        receipt
-            .get("refresh_binary_version")
-            .and_then(|v| v.as_str()),
-        installed_version,
-        installed_binary,
-    )?;
+    verify_child_refresh_receipt(&receipt, installed_version, installed_binary)?;
     Ok(receipt)
 }
 
@@ -4536,6 +4766,55 @@ fn post_swap_rerun_hint(installed_version: &str, installed_binary: &Path) -> Str
     )
 }
 
+/// The parent's startup reads precede the child process's repair. Resolve
+/// only maintenance paths the verified child actually represented, including
+/// reported failures. Absent/unverified receipts leave notices for final replay.
+fn verify_child_refresh_receipt(
+    receipt: &serde_json::Value,
+    installed_version: &str,
+    installed_binary: &Path,
+) -> anyhow::Result<()> {
+    verify_refresh_binary_version(
+        receipt
+            .get("refresh_binary_version")
+            .and_then(|v| v.as_str()),
+        installed_version,
+        installed_binary,
+    )?;
+    let projects = receipt
+        .get("projects")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|project| project.get("retired_toml"));
+    let user = receipt
+        .pointer("/user_level_store/retired_toml")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten();
+    for maintenance in projects.chain(user) {
+        let represented = match maintenance.get("status").and_then(|v| v.as_str()) {
+            Some("repaired" | "unchanged" | "missing" | "planned") => true,
+            Some("failed") => maintenance.get("error").and_then(|v| v.as_str()).is_some(),
+            _ => false,
+        };
+        if !represented {
+            continue;
+        }
+        if let Some(path) = maintenance
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(Path::new)
+            && path.is_absolute()
+            && path.file_name() == Some(std::ffi::OsStr::new("config.toml"))
+            && let Some(root) = path.parent()
+        {
+            crate::config::represented_retired_config(root);
+        }
+    }
+    Ok(())
+}
+
 /// The child must be the binary we just installed. A version it does not
 /// report — or reports differently — means something else answered (a stale
 /// `cas` earlier on PATH, a wrapper script), and its refresh proves nothing.
@@ -4732,7 +5011,10 @@ impl UpdateStepTracker {
             }
             (value, output)
         } else {
-            (f(), String::new())
+            live::set_open_phase(Some((mode, counter.clone(), label.to_owned())));
+            let value = f();
+            live::set_open_phase(None);
+            (value, String::new())
         };
         let shown = result(&value);
         print_phase_line(
@@ -4749,7 +5031,7 @@ impl UpdateStepTracker {
 }
 
 /// The real terminal, held open while the phase's own stdout is captured.
-fn terminal_handle() -> Option<std::fs::File> {
+pub(super) fn terminal_handle() -> Option<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::fd::FromRawFd;
@@ -4828,7 +5110,9 @@ fn report_managed_files(
     if cli.json {
         println!("{}", serde_json::json!({"managed_files": report}));
     } else {
-        let message = if !report.conflicts.is_empty() {
+        let message = if let Some(error) = &report.commit_error {
+            error.clone()
+        } else if !report.conflicts.is_empty() {
             format!(
                 "Managed files: {} conflicts preserved; cas update --sync --json for paths",
                 report.conflicts.len()

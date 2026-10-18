@@ -245,19 +245,44 @@ team-eligible project tasks, dependencies, memories, rules, and skills keep
 their existing personal plus team queue behavior. With the opt-in enabled,
 those project rows use only the team queue. Global rows and private memories
 remain in the personal queue. `cas cloud push` and `cas cloud sync` avoid a
-personal project push, and queued personal copies of project rows are removed
-locally before sync. Cloud rows are never deleted by this cleanup. Without
+personal project push. Existing personal transport is retained until an exact,
+itemized team write is acknowledged; changing the setting alone never removes
+it. Cloud rows are never deleted by this cleanup. Without
 an active team, sync refuses and `cas doctor` reports an error.
 The personal push API requires a project identity, so global and private rows
 from a team-only root remain queued rather than re-registering its retired
 personal project. `cas cloud status` and `cas doctor` show the held count.
 
 Standalone push/pull, the daemon cycle, and MCP startup use the same team-only
-scope policy. To remove stale personal outbox rows rejected by the server with
-`team_owned_project`, run `cas cloud queue --purge-team-owned`. It removes only
-personal rows with that exact structured rejection, keeps local entities and
-team queue rows, and makes no cloud calls. `--json` reports the purged count,
-scope and reason. This cleanup does not backfill or delete remote cloud data.
+scope policy. A `team_owned_project` rejection establishes project policy, not
+remote entity presence or payload equivalence. Keep legacy or mixed rejection
+groups until their delivery is proven; keeping team-only off remains a safe
+operational workaround while investigating them.
+
+Preview exact IDs with `cas cloud queue --purge-team-owned --dry-run --json`.
+The response lists each ID, its eligibility and reason without printing payloads.
+Cleanup requires an explicit selection, for example
+`cas cloud queue --purge-team-owned --ids 12,18`. Only selected personal rows
+with the exact structured rejection **and** a matching durable team delivery
+receipt are removed. Missing/differing/legacy proof retains the row; unscoped
+cleanup is refused. Local entities and team rows survive, and this command
+makes no cloud calls, backfills, promotions or remote deletes. An old verified
+server copy without a locally recorded equivalent acknowledgment remains
+unproven to this command.
+
+Receipt version 1 uses existing `sync_metadata` keys
+`team_delivery_ack:<personal-queue-id>`. The receipt binds the canonical project,
+team, entity, operation, queue creation snapshot and SHA-256 of the entire
+serialized transmitted JSON; it stores no private payload. Only itemized
+`inserted`/`updated` responses can certify it. Aggregate counts, `skipped_lww`,
+deletes, canonical remaps, transformed payloads and uncertain results cannot.
+Before HTTP, the team pusher captures the personal snapshots; after HTTP it
+persists proof and consumes only the exact acknowledged team snapshot in one
+transaction. Preview and cleanup in `cloud/sync_queue/team_delivery.rs` are the
+receipt authority readers. Cleanup revalidates under the same transaction that
+deletes the matching personal row and receipt. A crash before cleanup leaves
+proof durable; a changed/reused row or different routing cannot reuse it.
+Ambiguous receipts have no age-based deletion authority.
 
 `duplicate_of_other_project` means the same row already lives under another
 Cloud project identity. The rejection names that owning project. If both
@@ -337,9 +362,27 @@ These reads never save the inferred value. Raw `Config::get`/`list`, editing,
 serialization and `config diff` retain stored values. Legacy `report_cas_bug`,
 automatic issue triage and release-report GitHub intake retain their explicit
 configuration contracts; they do not infer a project target from origin.
-`report_cas_bug` continues using its explicit legacy override or the Cassy
-component repository. Only project initialization may persist a discovered
-origin; routine reads and updates do not backfill it.
+`report_cas_bug` uses effective `issues.components.cassy`, including the
+compiled Cassy repository (`Richards-LLC/cassy`) when that component is absent.
+For example, `issues.repo = "example/downstream"` alone still files Cassy bugs
+in `Richards-LLC/cassy`, agreeing with `cas config get issues.components.cassy`.
+The checkout's inferred origin is never a Cassy filing target.
+
+Legacy opt-out: a raw, explicitly blank or whitespace-only
+`[issues.components] cassy` value in config.toml permits a nonblank stored
+`issues.repo` fallback. If the project override is also blank or absent, the
+compiled Cassy default applies. This opt-out differs from clearing the component
+with `cas config set issues.components.cassy ""`, which removes the raw override
+and restores the default. Configure a nonblank component explicitly for a fork.
+
+It validates the selected destination as `owner/name` before any GitHub call;
+an invalid selected value never falls through to another tracker. Instead the
+report is durably staged under the task's artifacts directory and the response
+names the selected key and `cas config set <key> owner/name` remedy. Correct
+that setting before retrying; a staged report has not been filed. Existing
+credential failures and label degradation retain their filing behavior.
+Only project initialization may persist a discovered origin; routine reads
+and updates do not backfill it.
 
 ## Canonical install path
 
@@ -729,6 +772,38 @@ denied, with the conflict named in the same warning. An operation needing an
 unavailable credential then fails visibly; one missing token does not stop the
 fleet. Supervisors keep their own credentials and configuration.
 
+### Tool-cache paths in Codex children
+
+Cassy forwards these four tool-owned variables through Codex's restricted
+`cas serve` MCP environment: `NODE_COMPILE_CACHE`, `PWTEST_CACHE_DIR`,
+`PYTEST_DEBUG_TEMPROOT`, and `V8_COMPILE_CACHE_CACHE_DIR`. Servers started through
+that MCP process inherit them. Export the desired paths before starting the
+factory or its owning daemon, for example:
+
+```sh
+export NODE_COMPILE_CACHE="$HOME/.cache/node-compile"
+export PWTEST_CACHE_DIR="$HOME/.cache/playwright-tests"
+export PYTEST_DEBUG_TEMPROOT="$HOME/.cache/pytest-temp"
+export V8_COMPILE_CACHE_CACHE_DIR="$HOME/.cache/v8-compile"
+```
+
+Factory spawns forward the final pane values, including explicit overrides;
+`supervisor_only_env` removals still win. Changing a shell or user-manager
+environment does not change an already running process's environment. Cassy
+does not read these paths back from shell profiles or the user manager.
+
+`cas init` and `cas update` also append these names to the managed
+`mcp_servers.cs.env_vars` array in Codex configuration, preserving existing
+entries and explicit `cs.env` settings. Only names are stored there, so each
+Codex launch reads its own environment. An unset variable adds no value or
+default; an explicitly configured MCP value retains its existing behavior.
+No other cache, credential, or account variables gain passthrough.
+
+The forwarding policy uses Codex configuration on supported factory platforms;
+it does not depend on systemd. Paths, spaces and Unicode are forwarded without
+expansion or rewriting. The consuming tool determines platform support, cache
+creation and cleanup. Cassy does not migrate existing caches or restart servers.
+
 ## Testing
 
 ### Duplicate-task warnings
@@ -854,6 +929,63 @@ Paste the `terminal-qa: PASS …` receipt line into the pre-close note; briefs a
 shipped commands live in `docs/design/cli/`.
 
 Dev dependencies include: `insta` (snapshot testing), `wiremock` (HTTP mocking), `rstest` (parametrized tests), `proptest` (property-based), `criterion` (benchmarks), `cas-tui-test` (TUI testing).
+
+## Git hook authority and checkout moves
+
+`cas doctor` reports an effective configured `core.hooksPath` whose directory
+is missing. Git resolves the path from the checkout root, including relative
+paths and worktree overrides. When doctor runs in a worker sharing the main
+checkout's store, it reports the main checkout and active worker separately.
+This finding is read-only, including under `--fix`; a stale host-registry entry
+is a separate diagnostic.
+
+Before repairing a moved checkout, run these **in each affected checkout**:
+
+```bash
+git config --show-origin --show-scope --get core.hooksPath
+git rev-parse --path-format=absolute --git-path hooks
+```
+
+Review the old configuration and any existing hook files, and save a backup
+before changing authority. Never unset `core.hooksPath` to make a warning go
+away, or point the main checkout at a worker's `hooks-cas-guard` directory.
+Dependency-generated hooks such as `.husky/_` belong to that project's setup;
+doctor does not install dependencies or disable them.
+
+For this repository's **main checkout**, an operator outside a factory session
+can run `bash scripts/install-git-hooks.sh` after reviewing the source. It uses
+the committed executable `.githooks/pre-push` and existing
+`scripts/fast-rows-pre-push.sh`. It refuses factory identities, linked worktrees,
+uncommitted/missing source and existing executable hook authority. A reviewed
+repair of an existing authority requires preserving/backing it up separately;
+the installer never overwrites it. Repeating the same owned installation is
+safe. With `extensions.worktreeConfig` enabled it writes the main checkout's
+`--worktree` override, preserving the shared setting and worker overrides.
+There is no repository pre-commit or Clippy policy installed by this script.
+
+The main pre-push delegate enforces the existing no-build fast rows for pushes
+to `factory/*`; other refs pass through. Receipts live under
+`<git-common-dir>/cas/fast-rows/<tip>.pass`. Only an exact-tip PASS is reusable;
+a failing row or missing tool refuses the push. This source is not a worker
+ownership guard.
+
+**Workers need their own private guards.** Factory spawn and reuse call
+`TeamsManager::install_worker_pre_commit_hook`, which installs the commit guard
+and refreshes an older push guard in `<worker-git-dir>/hooks-cas-guard`, retaining
+its existing project-hook chain and `--worktree` scope. Installing a new Cassy
+binary alone does not refresh already running workers. The supervisor must
+coordinate a safe spawn/reuse after the new runtime is active, then inspect the
+effective worker pre-push hook for delegation and prove a rejected push against
+a disposable remote. Existing 3.62 private guards may still enforce ownership
+while lacking the fast-row delegate; inspect them rather than assuming absence.
+Do not copy those guards into the main checkout. A hook-install warning during
+spawn/reuse means enforcement is not proven.
+
+At park, `receipt_scope::park_refusal` reads the exact-tip fast-row receipt and
+passing capped test receipts for every changed Rust crate. Missing fast rows
+produce `FAST ROWS REQUIRED`; missing crate tests produce `FOCUSED PROOF
+REQUIRED`. Park executes neither checks nor tests. Hook restoration does not
+waive these refusals or the merge queue's final-tree proof.
 
 ## Build, assembly and CI policy
 
@@ -1938,6 +2070,19 @@ A read-only no-code task also closes on portable PR or artifact evidence when
 its allocated task branch contains only foreign commits. An earlier false park
 on those commits is retired; allocating a branch does not establish ownership.
 Named task commits and unclaimed unmerged changes still require delivery proof.
+A live registered supervisor can close a verification-only task whose throwaway
+CI commits must never merge with `evidence_only=true` and
+`evidence_only_reference=never-merge:branch:<proof-ref>`, retaining the required
+task-root artifact and rationale. Cassy measures the reference, retained anchors
+and task lanes against the fresh target, with a combined 256-commit limit.
+Only regular YAML files directly under `.github/workflows/` may be declared
+non-delivery; product paths, executable files, symlinks, merges, unknown anchors
+and code methodologies refuse this disposition. The proof reference must be
+unmerged. Its immutable SHA and measured commits are audited, while evidence
+records the target SHA with no delivery paths. The explicit never-merge
+declaration does not predict or authorize a future Git merge. Ordinary evidence
+references and negative-result closes retain their existing rules. Stale-anchor
+recovery suggests a replacement receipt only when its tip belongs to the task.
 QA classification of an integrated merge receipt uses that merge's own
 first-parent diff. Later PR merges cannot add their UI paths to the receipt's
 evidence requirements or hide UI that the receipt itself delivered.

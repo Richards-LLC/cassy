@@ -262,6 +262,9 @@ pub(crate) struct Report {
     pub untracked: usize,
     pub staged: usize,
     pub commit: Option<String>,
+    /// An attempted Git commit failed; this is not a file-body conflict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_error: Option<String>,
     pub conflicts: Vec<String>,
 }
 
@@ -616,8 +619,20 @@ impl Reconcile {
                     "committed"
                 }
                 Err(error) => {
-                    self.report.conflicts.push(error.to_string());
-                    "staged"
+                    let hook = git(
+                        root,
+                        &["rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-commit"],
+                    )
+                        .ok()
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                        .map(|path| path.trim().to_owned())
+                        .filter(|path| Path::new(path).is_file())
+                        .map(|path| format!("; active pre-commit hook {path}"))
+                        .unwrap_or_default();
+                    self.report.commit_error = Some(format!(
+                        "Managed-files commit failed: {error}{hook}; run `git config --show-origin --show-scope --get core.hooksPath` in this checkout, review the hooks and staged diff with the supervisor/operator, then commit from an authorized checkout after restoring the intended hook scope"
+                    ));
+                    "commit_failed"
                 }
             }
         };

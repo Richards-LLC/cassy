@@ -159,3 +159,17 @@ Task capture: `cas doctor --fix --json` keeps nested foreign-scope purge preview
 inside the top-level checks array; strict decoding now accepts both `--fix` and
 `--fix --yes` as exactly one JSON document. The nested purge/sync renderers stay
 silent when doctor owns the report.
+
+## Effective Git hook path (cas-edb0)
+
+The Config row `Git hooks path` leads with `Hooks directory is missing` before
+the resolved directory, configured value and checkout, so long paths cannot hide
+the cause under the default three-line limit. Its remedy starts with the read-only
+`git config --show-origin --show-scope --get core.hooksPath`, then asks for
+restoration with the project's documented installer after reviewing authority.
+The main checkout and active same-repository worktree remain separate rows when
+they share a Cassy store. Unconfigured hooks produce no row; an existing
+configured directory is healthy, without claiming hook contents are current.
+`--fix` never changes Git configuration or installs hooks. The existing renderer
+and JSON array contract apply. The isolated final-build CLI probe and terminal
+captures live with task cas-edb0's evidence.

@@ -8,11 +8,19 @@
                                    .git/index.lock (age 1d)
     → recheck writers, remove only this lock, then retry
   ⚠ rocketship-template     cloud  push incomplete: 2 rejected by cloud
-                                   (invalid_json_nul ×2)
-    → cas cloud queue --retry
+                                   (invalid_json_nul ×2); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    → Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
   ⚠ Richards LLC/Accounting cloud  push incomplete: 1 rejected by cloud
-                                   (invalid_json_nul ×1)
-    → cas cloud queue --retry
+                                   (invalid_json_nul ×1); invalid_json_nul:
+                                   PostgreSQL jsonb cannot store U+0000; payload
+                                   retained unchanged
+    → Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for
+      lossless roundtrip support, then
+      `cas cloud queue --retry --retry-reason invalid_json_nul`
   ⚠ Petra Stella/Accounting skills 3 managed file conflict(s)
     → cas update --sync --json
   ⚠ Documents/Accounting    skills 2 managed file conflict(s)

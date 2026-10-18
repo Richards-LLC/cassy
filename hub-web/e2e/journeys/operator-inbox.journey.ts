@@ -459,7 +459,7 @@ async function replyUpgradeCloud(enabled = true) {
   } });
   return cloud;
 }
-async function enrollReplyBrowser(reader: import("@playwright/test").Page, cloud: Awaited<ReturnType<typeof replyUpgradeCloud>>, label: string, owner = false) {
+async function enrollReplyBrowser(reader: import("@playwright/test").Page, cloud: Awaited<ReturnType<typeof replyUpgradeCloud>>, label: string, owner = false, waitForHistory = true) {
   await reader.getByRole("button", { name: "Operator inbox", exact: true }).click();
   const inbox = reader.getByRole("dialog", { name: "Operator inbox" });
   await inbox.getByLabel("Name this browser").fill(label);
@@ -467,7 +467,7 @@ async function enrollReplyBrowser(reader: import("@playwright/test").Page, cloud
   await expect(inbox.getByLabel("Sign-in code")).toHaveText(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
   const code = (await inbox.getByLabel("Sign-in code").textContent())!.trim();
   await cloud.approve(code, { capabilities: ["feed:read", ...(owner ? ["account:manage"] : [])] });
-  await expect(inbox.getByRole("button", { name: /^soundwave · amber-fox-29/ })).toBeVisible({ timeout: 15_000 });
+  if (waitForHistory) await expect(inbox.getByRole("button", { name: /^soundwave · amber-fox-29/ })).toBeVisible({ timeout: 15_000 });
   return inbox;
 }
 
@@ -598,26 +598,44 @@ test("HUB-J19 Ask to reply names denial and expiry without granting permission (
   } finally { await peer.close(); }
 });
 
-test("HUB-J19 unshipped Cloud never offers Ask to reply (cas-874b)", journeyPart, async ({ page, journey }) => {
+test("HUB-J19 unavailable or unshipped reply permissions never block history (cas-6f38)", journeyPart, async ({ page, journey }) => {
   const cloud = await replyUpgradeCloud(false);
+  let grantsUnavailable = true;
+  let releaseHistory!: () => void;
+  const historyHeld = new Promise<void>(resolve => { releaseHistory = resolve; });
   // cas-7f99: legacy introspection without origin must still replay history.
   const handle = cloud.handle.bind(cloud);
   cloud.handle = async request => {
+    if (request.path.startsWith("/api/operator/feed?")) await historyHeld;
     const result = await handle(request);
     if (request.path === "/api/operator/grants/me" && result.status === 200) {
-      delete (result.body as { grant: Record<string, unknown> }).grant.origin;
+      if (grantsUnavailable) { result.status = 500; result.body = { error: "internal_error" }; }
+      else delete (result.body as { grant: Record<string, unknown> }).grant.origin;
     }
     return result;
   };
   await routeOperatorCloud(page.context(), cloud);
-  await journey.stage("The old cloud keeps the honest existing reply guidance and no dead control", async () => {
-    await journey.open(); const inbox = await enrollReplyBrowser(page, cloud, "Read only");
+  await journey.stage("Reply permissions fail but history loads, with no false empty state or dead control", async () => {
+    await journey.open(); const inbox = await enrollReplyBrowser(page, cloud, "Read only", false, false);
+    await expect(inbox.getByText("Loading inbox history…", { exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(inbox.getByText(/^No messages yet/)).toHaveCount(0);
+    releaseHistory();
+    await expect(inbox.getByRole("button", { name: /soundwave · amber-fox-29/ })).toBeVisible({ timeout: 15_000 });
     await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
     await expect(inbox.getByRole("button", { name: "Ask to reply", exact: true })).toHaveCount(0);
     await expect(inbox.getByText(/This browser can read this conversation but not reply/)).toBeVisible();
     await cloud.appendSessionEvent({ hubId: HUB, projectId: PROJECT, sessionId,
       plaintext: supervisorTurn(799, "New history after grant introspection.", journeyDay(1, 13)) });
     await expect(inbox.getByText("New history after grant introspection.", { exact: true })).toBeVisible({ timeout: 15_000 });
+    await captureReply(page, "M06-grants500");
+  });
+  await journey.stage("An older Cloud can recover without enabling unsupported replies", async () => {
+    grantsUnavailable = false;
+    const inbox = page.getByRole("dialog", { name: "Operator inbox" });
+    await cloud.appendSessionEvent({ hubId: HUB, projectId: PROJECT, sessionId,
+      plaintext: supervisorTurn(800, "History after reply-permission recovery.", journeyDay(1, 14)) });
+    await expect(inbox.getByText("History after reply-permission recovery.", { exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(inbox.getByRole("button", { name: "Ask to reply", exact: true })).toHaveCount(0);
     expect(cloud.log.some(r => r.path === "/api/operator/grants/me")).toBe(true);
     expect(cloud.log.some(r => r.path.includes("reply-grant-requests"))).toBe(false);
     await captureReply(page, "F03-unshipped");

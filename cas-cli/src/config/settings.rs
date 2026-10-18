@@ -135,7 +135,7 @@ pub struct IssueRepoRegistry {
 pub struct HistoryConfig {
     /// GitHub repository in `owner/repo` form. When unset, the indexer uses
     /// the checkout's GitHub `origin`; this is deliberately separate from
-    /// [`IssuesConfig::repo`], which routes Cassy-system bug reports.
+    /// [`IssuesConfig::repo`], which configures project issue intake.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_repo: Option<String>,
 }
@@ -184,8 +184,10 @@ impl IssueRepoRegistry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IssuesConfig {
     /// Explicit project GitHub issue repository in `owner/repo` form. CLI
-    /// reads may infer origin; legacy Cassy-system bug filing uses only this
-    /// stored override or the Cassy component destination.
+    /// reads may infer origin. Cassy-system bug filing uses the effective Cassy
+    /// component (including its compiled default); only a raw explicitly blank
+    /// component opts into this stored legacy override. An absent component
+    /// never does. Filing never infers the checkout origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
 

@@ -1,15 +1,12 @@
 # Unified factory preflight
 
-Run this before spawning workers:
+Before spawning workers, call `system action=preflight` through the connected
+CAS MCP session. Without an active MCP connection, run
+`cas --json factory preflight` (or `cas factory preflight` for the human view).
 
-```bash
-cas factory preflight
-cas --json factory preflight
-```
-
-The command is read-only and hard-bounded below seven seconds, including every
-known-repository lookup and Git subprocess. It does not connect optional
-upstreams, start a model, or spawn a worker. The human and JSON views come from
+Both routes are read-only and hard-bounded below seven seconds, including every
+known-repository lookup and Git subprocess. Neither route connects optional
+upstreams, starts a model, or spawns a worker. The human and JSON views come from
 the same schema-versioned report covering:
 
 - the running Cassy build SHA versus identifiable Cassy source or configured
@@ -33,27 +30,43 @@ compiled registry missing required Cassy tools. Dirty, unknown, or stale binary
 identity is a warning. Optional upstream failures and harness version drift are
 warnings and never block factory launch.
 
-For automation from an active CAS MCP session, call `system action=preflight`.
-That invocation is itself live CAS-MCP evidence, so a missing project
-`.mcp.json` is reported as `configured=false`, `observed_via_mcp=true`, and is
-not critical by itself.
+An active `system action=preflight` invocation is itself live CAS-MCP
+evidence. A missing project `.mcp.json` can therefore report `configured=false`
+with `observed_via_mcp=true` without being critical. Prefer this route over a
+separate shell process when already connected.
 
-Nonzero exit → do not spawn; fix the finding named by its code (each non-ready
-state carries a stable finding code and its remediation), then rerun. Inspect
-the binary finding before choosing a deployment:
+Read `factory_blocked` and `findings[].code`/`severity`, not just `overall` or
+`binary.state`. With `factory_blocked=true` (or a nonzero shell exit), do not
+spawn; fix the critical finding and rerun. With `factory_blocked=false`, a
+`cas_mcp.state=ready` connection and empty `missing_required_tools` establish
+MCP readiness even when binary comparison is unavailable. Apply the binary
+finding as follows:
 
-- `binary.checkout_behind` or `binary.checkout_diverged`: continue factory
-  startup. Git proved the runtime contains the checkout, or the runtime matches
-  its release tag and the diverged checkout adds only documentation. Select a
+- `binary.source_evidence_missing`, `binary.source_probe_timed_out`, or
+  `binary.deployment_unverified`: comparison is unknown, not proof of an outdated
+  runtime. Continue startup with healthy MCP while gathering source evidence:
+  identify the Cassy checkout with `CAS_SOURCE_DIR`, retry complete, responsive
+  local Git history, or obtain the intended `CAS_EXPECTED_DEPLOYMENT_SHA`.
+  These findings alone do not require a rebuild or MCP reconnect.
+- `binary.checkout_behind` or `binary.checkout_diverged`: continue startup.
+  Git proved the runtime contains the checkout, or the runtime matches its
+  release tag and the diverged checkout adds only documentation. Select a
   matching checkout for source work; do not rebuild or downgrade the runtime.
-- `binary.deployment_unverified`: retry with complete, responsive local Git
-  history or set the intended `CAS_EXPECTED_DEPLOYMENT_SHA` before choosing a
-  replacement. A different SHA alone does not prove the runtime is older.
-- A stale/dirty/unknown deployment warning: stop, resolve the intended clean
-  deployment with the operator, and reconnect MCP after installing it. An
-  explicit `CAS_EXPECTED_DEPLOYMENT_SHA` remains authoritative even when local
-  ancestry or a release tag would otherwise allow the runtime.
+- `binary.deployment_stale`: the runtime differs from the explicit expected
+  deployment, or Git proved it is behind the source checkout. Resolve the
+  intended deployment with the operator before replacement. An explicit
+  `CAS_EXPECTED_DEPLOYMENT_SHA` remains authoritative even when local ancestry
+  or a release tag would otherwise allow the runtime.
+- `binary.deployment_diverged`: ancestry does not establish compatibility.
+  Resolve the intended deployment with the operator; a different SHA alone
+  does not prove the runtime is older or authorize a downgrade.
+- `binary.expected_sha_invalid`: correct the configured pin and rerun.
+  `binary.identity_untrusted`: obtain a clean, identifiable deployment with the
+  operator before deciding whether replacement is needed.
 
+If replacement is needed, ask the operator to install the intended clean build
+and use the harness's MCP reconnect/restart control or a fresh session; then
+confirm the Cassy tools are available and rerun preflight.
 Never restart `cas serve` from the active MCP session.
 If `repository.candidate_limit` is reported, preview safe registry-only cleanup
 with `cas known-repos prune-missing --dry-run`, then apply it without the flag.

@@ -648,12 +648,9 @@ impl SyncQueue {
                 "",
                 None,
             )?;
-        } else {
-            tx.execute(
-                "DELETE FROM sync_queue WHERE entity_type = 'task' AND entity_id = ?1 AND team_id = ''",
-                params![intent.entity_id],
-            )?;
         }
+        // A route change is not delivery evidence. Retain any older personal
+        // mutation until an equivalent team write has been acknowledged.
 
         let previous_route = intent
             .previous_team_id

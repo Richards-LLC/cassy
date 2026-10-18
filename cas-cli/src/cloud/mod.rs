@@ -134,7 +134,9 @@ pub use syncer::{
     SyncResult, TaskStatusTransition, TeamMemoriesResponse, TeamProject, TeamProjectsResponse,
     knowledge_share_scope, push_reason_hint,
 };
-pub(crate) use syncer::{SyncWarningSummary, collect_sync_warnings, entity_matches_project};
+pub(crate) use syncer::{
+    SyncWarningSummary, collect_sync_warnings, entity_matches_project, push_rejection_is_retryable,
+};
 pub use team_registration::{
     REGISTRATION_TIMEOUT, RegistrationFailure, RegistrationOutcome, TeamRegistration,
 };

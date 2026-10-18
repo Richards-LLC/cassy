@@ -761,7 +761,7 @@ pub const BUILTIN_WORKFLOWS: &[BuiltinFile] = &[
 ];
 
 /// All built-in skills managed by Cassy for Codex. Entries embed the canonical
-/// (prefix-neutral, audit D1) files plus the Codex-only no-hooks
+/// (prefix-neutral, audit D1) files plus the Codex-tailored
 /// `cas-codex-supervisor-checklist` and the `agents/openai.yaml` policies.
 pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
@@ -1429,8 +1429,8 @@ pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
 /// a `~/.grok` home with no Claude tree present, so every twin is installed here
 /// directly. Entries embed the canonical (prefix-neutral, audit D1) files; the
 /// task-verifier agent differs only by its generated `tools:` frontmatter. The
-/// supervisor checklist is the Claude one
-/// (not Codex's "no hooks" variant), since Grok has real SessionStart hooks.
+/// supervisor checklist is the Claude one (not Codex's tailored twin), since
+/// Grok's SessionStart hooks follow the Claude contract.
 pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-worker/SKILL.md",
@@ -2197,15 +2197,16 @@ pub const REQUIRED_FACTORY_CAPABILITIES: &[RequiredCapability] = &[
     },
     RequiredCapability {
         // AC-1 "Codex supervisor-checklist ... where applicable": Claude and Grok
-        // share the hooks-aware `cas-supervisor-checklist`; Codex uses its
-        // tailored `cas-codex-supervisor-checklist` twin (a "no hooks"
-        // compensation variant). Same capability, intentional twin spelling.
+        // share `cas-supervisor-checklist`; Codex uses its tailored
+        // `cas-codex-supervisor-checklist` twin, which covers Codex's hook trust
+        // and explicit tool calls (cas-d0fe: Codex has lifecycle hooks; the twin
+        // is not a no-hooks variant). Same capability, intentional twin spelling.
         id: "supervisor-checklist",
         claude: Some("skills/cas-supervisor-checklist"),
         codex: Some("skills/cas-codex-supervisor-checklist"),
         grok: Some("skills/cas-supervisor-checklist"),
-        note: "Codex uses the cas-codex-supervisor-checklist twin (no-hooks variant); \
-               Claude and Grok share the hooks-aware cas-supervisor-checklist.",
+        note: "Codex uses the cas-codex-supervisor-checklist twin (hook trust and explicit \
+               tool calls); Claude and Grok share cas-supervisor-checklist.",
     },
 ];
 

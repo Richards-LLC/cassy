@@ -27,7 +27,12 @@ async fn never_merge_workflow_proof_closes_without_foreign_delivery_cas_3d72() {
     let repo = f.dir.path();
     let id = "cas-3d72";
     let proof_branch = "factory/native-macos-proof";
-    let standby_branch = format!("{LANE}-{id}");
+    let standby_branch = "factory/native-macos-standby";
+    // Allocating this task's lane inherits the preceding task's content;
+    // its only unmerged subject must remain cas-a0b1, never this task's.
+    let task_lane = format!("{LANE}-{id}");
+    git(repo, &["branch", &task_lane, LANE]);
+    assert_eq!(git(repo, &["log", "--format=%s", &format!("main..{task_lane}")]), OTHER);
     git(repo, &["checkout", "-q", "-b", proof_branch, "main"]);
     std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
     std::fs::write(repo.join(".github/workflows/proof.yml"), "name: native proof\n").unwrap();
@@ -35,7 +40,7 @@ async fn never_merge_workflow_proof_closes_without_foreign_delivery_cas_3d72() {
     git(repo, &["commit", "-q", "-m", "test(cas-3d72): throwaway native proof"]);
     let proof_tip = git(repo, &["rev-parse", "HEAD"]);
     git(repo, &["push", "-q", "origin", proof_branch]);
-    git(repo, &["checkout", "-q", "-b", &standby_branch, "main"]);
+    git(repo, &["checkout", "-q", "-b", standby_branch, "main"]);
     std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
     std::fs::write(repo.join(".github/workflows/proof.yml"), "name: unused standby\n").unwrap();
     git(repo, &["add", ".github/workflows/proof.yml"]);
@@ -51,7 +56,6 @@ async fn never_merge_workflow_proof_closes_without_foreign_delivery_cas_3d72() {
     let mut task = assigned(id, TaskType::Task, "main");
     task.status = TaskStatus::Blocked;
     task.deliverables.factory_branch_anchor = Some(stale_anchor.clone());
-    task.deliverables.parked_branch = Some(standby_branch);
     f.put(&task);
     claim(&f, id);
     let mut foreign = assigned("cas-a0b1", TaskType::Bug, "main");

@@ -157,12 +157,20 @@ async fn cas_bdbc_blocked_write_escalates_once_without_retyping() {
             .await;
         assert!(
             notices.is_empty(),
-            "a normal slow write has not crossed the bound"
+            "{case}: a normal slow write has not crossed the bound"
         );
-        assert!(daemon.app.mux.pane_inject_busy(WORKER));
+        assert!(
+            daemon.app.mux.pane_inject_busy(WORKER),
+            "{case}: pending writer remains busy"
+        );
         assert_eq!(
             queue.recipient_receipt(row, WORKER).unwrap(),
-            Some(cas_store::SurfacingSource::TransportClaimed)
+            Some(cas_store::SurfacingSource::TransportClaimed),
+            "{case}: pending writer retains its claim"
+        );
+        assert!(
+            !queue.recipient_handed_off(row, WORKER).unwrap(),
+            "{case}: pending writer has no physical handoff"
         );
 
         if case != "slow" {
@@ -191,28 +199,42 @@ async fn cas_bdbc_blocked_write_escalates_once_without_retyping() {
                 .iter()
                 .find(|row| row.target == "supervisor")
                 .expect("durable supervisor relay");
-            assert!(matches!(
-                relay.origin.as_ref(),
-                Some(cas_store::QueueOrigin::Daemon)
-            ));
-            assert!(crate::prompt_revalidation::parse_blocker_envelope(&relay.prompt).is_some());
+            assert!(
+                matches!(relay.origin.as_ref(), Some(cas_store::QueueOrigin::Daemon)),
+                "{case}: relay has authenticated daemon authority"
+            );
+            assert!(
+                crate::prompt_revalidation::parse_blocker_envelope(&relay.prompt).is_some(),
+                "{case}: relay carries a blocker envelope"
+            );
             assert!(
                 relay.prompt.contains(WORKER)
                     && relay.prompt.contains("partial")
                     && relay.prompt.contains("resend"),
-                "the blocker must identify the pane and explain safe recovery: {}",
+                "{case}: the blocker must identify the pane and explain safe recovery: {}",
                 relay.prompt
             );
             assert_eq!(
                 notices.len(),
                 1,
-                "enqueue the escalation once, not once per tick"
+                "{case}: enqueue the escalation once, not once per tick"
             );
-            assert!(daemon.app.mux.pane_inject_busy(WORKER));
-            assert!(daemon.urgent_injects.holds_row(row));
+            assert!(
+                daemon.app.mux.pane_inject_busy(WORKER),
+                "{case}: stalled writer remains busy"
+            );
+            assert!(
+                daemon.urgent_injects.holds_row(row),
+                "{case}: stalled writer retains its owner"
+            );
             assert_eq!(
                 queue.recipient_receipt(row, WORKER).unwrap(),
-                Some(cas_store::SurfacingSource::TransportClaimed)
+                Some(cas_store::SurfacingSource::TransportClaimed),
+                "{case}: deadline retains the claim"
+            );
+            assert!(
+                !queue.recipient_handed_off(row, WORKER).unwrap(),
+                "{case}: deadline never invents a handoff"
             );
             assert!(
                 queue
@@ -221,12 +243,12 @@ async fn cas_bdbc_blocked_write_escalates_once_without_retyping() {
                     .unwrap()
                     .delivered_at
                     .is_none(),
-                "no false Delivered"
+                "{case}: no false Delivered"
             );
             assert_eq!(
                 port.writes.lock().unwrap().len(),
                 1,
-                "a deadline must never resend payload bytes"
+                "{case}: a deadline must never resend payload bytes"
             );
         }
         let replacement = if case == "respawn" {
@@ -245,39 +267,51 @@ async fn cas_bdbc_blocked_write_escalates_once_without_retyping() {
                 |write| notices.push(write),
             )
             .await;
-        assert!(!daemon.app.mux.pane_inject_busy(WORKER));
-        assert!(!daemon.urgent_injects.holds_row(row));
+        assert!(
+            !daemon.app.mux.pane_inject_busy(WORKER),
+            "{case}: terminal receipt or incarnation loss releases busy"
+        );
+        assert!(
+            !daemon.urgent_injects.holds_row(row),
+            "{case}: terminal receipt or incarnation loss releases ownership"
+        );
         assert!(
             daemon
                 .queue_jobs
-                .drain_for_shutdown(&cas_dir, Duration::from_secs(5))
+                .drain_for_shutdown(&cas_dir, Duration::from_secs(5)),
+            "{case}: terminal stamps finish"
         );
         let report = queue.message_delivery_report(row).unwrap().unwrap();
         if let Some(replacement) = replacement {
             assert!(
                 replacement.writes.lock().unwrap().is_empty(),
-                "old ticket must never write to the new incarnation"
+                "{case}: old ticket must never write to the new incarnation"
             );
-            assert_eq!(report.broadcast_failed, Some(1));
+            assert_eq!(
+                report.broadcast_failed,
+                Some(1),
+                "{case}: incarnation loss settles failed tally"
+            );
             assert!(
                 queue.recipient_receipt(row, WORKER).unwrap().is_none(),
-                "old incarnation releases only its claim"
+                "{case}: old incarnation releases only its claim"
             );
         } else {
             assert_eq!(
                 report.broadcast_succeeded,
                 Some(1),
-                "receipt completion settles the tally"
+                "{case}: receipt completion settles the tally"
             );
-            assert_eq!(
-                queue.recipient_receipt(row, WORKER).unwrap(),
-                Some(cas_store::SurfacingSource::TransportDelivered)
+            // The store preserves source=transport_claimed and stamps delivered_at.
+            assert!(
+                queue.recipient_handed_off(row, WORKER).unwrap(),
+                "{case}: real completion records a physical handoff"
             );
         }
         assert_eq!(
             notices.len(),
             usize::from(case != "slow"),
-            "slow success must produce zero escalations"
+            "{case}: slow success must produce zero escalations"
         );
         assert_eq!(
             &*port.writes.lock().unwrap(),
@@ -285,7 +319,7 @@ async fn cas_bdbc_blocked_write_escalates_once_without_retyping() {
                 format!("\x1b[200~{case}\x1b[201~").into_bytes(),
                 b"\r".to_vec(),
             ],
-            "exactly one payload and submit, including after recovery"
+            "{case}: exactly one payload and submit, including after recovery"
         );
     }
 }

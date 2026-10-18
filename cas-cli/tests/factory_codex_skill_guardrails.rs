@@ -313,8 +313,9 @@ fn supervisor_reference_tree_uses_current_lifecycle_contract() {
     // Audit D6 (cas-6b97): Codex ignores `.md` agents, so the inert
     // factory-supervisor agent is gone and its constraints live in the
     // Codex supervisor checklist.
+    assert!(builtins.contains("include_str!(\"builtins/codex/agents/task-verifier.toml\")"));
     assert!(
-        !builtins.contains("builtins/codex/agents/"),
-        "builtins.rs must not register Codex .md agents"
+        cas::builtins::CODEX_BUILTIN_AGENTS.iter().all(|agent| !agent.path.ends_with(".md")),
+        "builtins.rs must register the native Codex role without inert .md agents"
     );
 }

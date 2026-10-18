@@ -4377,7 +4377,11 @@ mod tests {
         assert!(!content.contains("/stale-rendered-file"));
         assert!(content.contains("/.codex/skills/cas-worker/SKILL.md"));
         assert!(["/.codex/config.toml.cas-lock", "/.codex/hooks.toml.cas-lock"].iter().all(|path| builtin_gitignore_entries(&[SupervisorCli::Codex]).iter().any(|entry| entry == path)));
-        assert!(!content.contains("/.codex/agents/"), "Codex installs no .md agents (D6)");
+        assert!(content.contains("/.codex/agents/task-verifier.toml"));
+        assert!(
+            !content.lines().any(|line| line.starts_with("/.codex/agents/") && line.ends_with(".md")),
+            "Codex installs its native TOML role, never inert .md agents"
+        );
         assert!(!content.contains("/.claude/agents/task-verifier.md"));
     }
 

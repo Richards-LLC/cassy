@@ -62,7 +62,14 @@ class CallShapes(unittest.TestCase):
 
     def test_the_capability_bound_verifier_needs_no_dispatch_id(self):
         text = "`verification action=add task_id=x status=approved`"
-        self.assertEqual(defects(text, "cas-cli/src/builtins/agents/task-verifier.body.md"), [])
+        for origin in [
+            "cas-cli/src/builtins/agents/task-verifier.body.md",
+            "cas-cli/src/builtins/codex/agents/task-verifier.toml",
+        ]:
+            with self.subTest(origin=origin):
+                self.assertEqual(defects(text, origin), [])
+        self.assertIn("verification action=add: missing dispatch_id",
+                      defects(text, "user/agents/task-verifier.toml"))
 
     def test_runtime_text_skips_test_modules_and_comments_and_keeps_lines(self):
         source = ('// coordination action=spawn_workers\nfn a() {}\n#[cfg(test)]\nmod tests {\n'

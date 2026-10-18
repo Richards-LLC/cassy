@@ -44,7 +44,7 @@ pub use backend::{
     Backend, SupervisorLaunchConfig, WORKER_GITHUB_READ_TOKEN_ENV, WorkerLaunchConfig,
 };
 pub use error::{Error, Result};
-pub use harness::{HarnessCapabilities, SupervisorCli};
+pub use harness::{CapabilityState, HarnessCapabilities, SupervisorCli};
 pub use input_stream::{BracketedPasteTracker, StreamByteClass, key_stream_marks_submit};
 pub use mux::{
     InjectCompletion, InjectOutcome, InjectStart, InjectTicket, InjectWriteStall, Mux, MuxConfig,

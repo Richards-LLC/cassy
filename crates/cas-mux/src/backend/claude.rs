@@ -5,7 +5,7 @@ use super::{
 use crate::Effort;
 use crate::Result;
 use crate::error::Error;
-use crate::harness::HarnessCapabilities;
+use crate::harness::{CapabilityState, HarnessCapabilities};
 use crate::pty::PtyConfig;
 use std::path::Path;
 
@@ -20,8 +20,8 @@ impl Backend for Claude {
 
     fn capabilities(&self) -> HarnessCapabilities {
         HarnessCapabilities {
-            supports_hooks: true,
-            supports_subagents: true,
+            supports_hooks: CapabilityState::Supported,
+            supports_subagents: CapabilityState::Supported,
             supports_textbox_submit: true,
             requires_bracketed_paste_injection: true,
             tool_prefix: "mcp__cas__",

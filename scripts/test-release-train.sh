@@ -896,7 +896,7 @@ else
 fi
 
 cat >"$dir_a/release-workflow.json" <<EOF
-{"headBranch":"v9.99.0","headSha":"$(git -C "$wt_a" rev-parse HEAD)","status":"completed","conclusion":"failure"}
+{"event":"push","headBranch":"main","headSha":"$(git -C "$wt_a" rev-parse HEAD)","status":"completed","conclusion":"failure"}
 EOF
 status="$("$train" 9.99.0 "$wt_a" --status 2>&1 || true)"
 if [[ "$status" == *'publication: unavailable'* ]] \
@@ -908,7 +908,7 @@ else
 fi
 
 cat >"$dir_a/release-workflow.json" <<EOF
-{"headBranch":"v9.99.0","headSha":"$(git -C "$wt_a" rev-parse HEAD)","status":"completed","conclusion":"success"}
+{"event":"push","headBranch":"main","headSha":"$(git -C "$wt_a" rev-parse HEAD)","status":"completed","conclusion":"success"}
 EOF
 cat >"$dir_a/release-published.receipt" <<'EOF'
 TAG=v9.99.0
@@ -1531,9 +1531,12 @@ post_publication_gh="$tmp/post-publication-gh.sh"
 cat >"$post_publication_gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ -z "${POST_PUBLICATION_GH_CALLS:-}" ]] || printf '%s\n' "$*" >>"$POST_PUBLICATION_GH_CALLS"
 case "$1 $2" in
   "run list")
-    printf '%s\n' '[{"databaseId":4242,"status":"completed","conclusion":"success","headBranch":"v9.99.8","headSha":"'"$(cat "$POST_PUBLICATION_LANDED")"'","createdAt":"2099-01-02T00:00:00Z"}]'
+    head_sha="$(cat "$POST_PUBLICATION_LANDED")"
+    [[ "${POST_PUBLICATION_WRONG_SHA:-0}" != 1 ]] || head_sha="${POST_PUBLICATION_WRONG_SHA_VALUE:?}"
+    printf '%s\n' '[{"databaseId":4242,"status":"completed","conclusion":"success","event":"push","headBranch":"main","headSha":"'"$head_sha"'","createdAt":"2099-01-02T00:00:00Z"}]'
     ;;
   "release view") printf '2099-01-02T00:15:08Z\n' ;;
   "api repos"*) printf '{"workflow_runs":[{"id":4242,"created_at":"2099-01-02T00:00:00Z"}]}\n' ;;
@@ -1550,6 +1553,8 @@ chmod +x "$post_publication_published"
 post_publication_latency="$repo_root/scripts/release-latency-receipt.sh"
 post_publication_landed="$(git -C "$stage_wt" rev-parse HEAD)"
 printf '%s\n' "$post_publication_landed" >"$post_publication_run/landed-main.sha"
+git -C "$stage_wt" tag -a -f v9.99.8 -m 'fixture release tag' "$post_publication_landed"
+post_publication_gh_calls="$tmp/post-publication-gh.calls"
 # cas-52de: the draft's {{RELEASE_PR}} is filled here from the pipeline's PR.
 printf '\nRelease PR #{{RELEASE_PR}}\n' >>"$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
 printf '4242\n' >"$post_publication_run/pr-number.txt"
@@ -1563,6 +1568,7 @@ if (
     run_dir="$post_publication_run"
     script_dir="$repo_root/scripts"
     export POST_PUBLICATION_LANDED="$post_publication_run/landed-main.sha"
+    export POST_PUBLICATION_GH_CALLS="$post_publication_gh_calls"
     CAS_RELEASE_TRAIN_GH="$post_publication_gh" \
     CAS_RELEASE_TRAIN_POST_PUBLICATION_POLL_SECS=0 \
     CAS_RELEASE_TRAIN_POST_PUBLICATION_TRIES=1 \
@@ -1572,15 +1578,61 @@ if (
 ) 2>"$post_publication_stderr" && [[ -s "$post_publication_run/release-workflow.json" ]] \
     && [[ -s "$post_publication_run/release-published.receipt" ]] \
     && [[ -s "$post_publication_run/release-latency.receipt" ]] \
+    && grep -q -- '--branch main --event push' "$post_publication_gh_calls" \
     && grep -qx 'WITHIN_BUDGET=false' "$post_publication_run/release-latency.receipt" \
     && grep -q '908s; over budget (600s)' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
     && grep -qx 'Release PR #4242' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
     && ! grep -qF '{{RELEASE_PR}}' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
     && ! grep -q 'command not found' "$post_publication_stderr"; then
-    ok 'gap 7: post-publication records an overrun and Dev trailer, and fills the release PR, without blocking'
+    ok 'gap 7: post-publication accepts the matching main push, records receipts and fills the release PR'
 else
     bad "gap 7: post-publication did not produce clean workflow/receipt output: $(cat "$post_publication_stderr" 2>/dev/null || true)"
 fi
+
+# The same gate must reject an annotated tag or workflow receipt that points
+# somewhere other than landed-main.sha. Both probes use only local Git and the
+# fake gh executable above.
+post_publication_other_sha="$(git -C "$stage_wt" rev-parse HEAD^)"
+post_publication_rejections=true
+git -C "$stage_wt" tag -fa v9.99.8 -m 'mismatched fixture release tag' "$post_publication_other_sha"
+if (
+    source "$repo_root/scripts/release-train.d/post-publication.sh"
+    version=9.99.8
+    worktree="$stage_wt"
+    run_dir="$post_publication_run"
+    script_dir="$repo_root/scripts"
+    release_train_post_publication_workflow
+) 2>"$post_publication_stderr"; then
+    post_publication_rejections=false
+elif ! grep -q 'annotated release tag v9.99.8 does not resolve to landed-main.sha' "$post_publication_stderr"; then
+    post_publication_rejections=false
+fi
+git -C "$stage_wt" tag -fa v9.99.8 -m 'fixture release tag' "$post_publication_landed"
+if (
+    source "$repo_root/scripts/release-train.d/post-publication.sh"
+    version=9.99.8
+    worktree="$stage_wt"
+    run_dir="$post_publication_run"
+    script_dir="$repo_root/scripts"
+    CAS_RELEASE_TRAIN_GH="$post_publication_gh" \
+    CAS_RELEASE_TRAIN_POST_PUBLICATION_POLL_SECS=0 \
+    CAS_RELEASE_TRAIN_POST_PUBLICATION_TRIES=1 \
+    POST_PUBLICATION_LANDED="$post_publication_run/landed-main.sha" \
+    POST_PUBLICATION_GH_CALLS="$post_publication_gh_calls" \
+    POST_PUBLICATION_WRONG_SHA=1 \
+    POST_PUBLICATION_WRONG_SHA_VALUE="$post_publication_other_sha" \
+        release_train_post_publication_workflow
+) 2>"$post_publication_stderr"; then
+    post_publication_rejections=false
+elif ! grep -q 'no successful Release workflow for v9.99.8 at' "$post_publication_stderr"; then
+    post_publication_rejections=false
+fi
+if [[ "$post_publication_rejections" == true ]]; then
+    ok 'post-publication rejects mismatched annotated tags and workflow SHAs'
+else
+    bad "post-publication accepted mismatched publication evidence: $(cat "$post_publication_stderr" 2>/dev/null || true)"
+fi
+
 # Without the pipeline's PR number the token cannot be filled: a named error.
 printf '\nAgain PR #{{RELEASE_PR}}\n' >>"$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
 rm -f "$post_publication_run/pr-number.txt"
@@ -1670,33 +1722,32 @@ PY_CATALOG
         bad "cas-cut-release ($flavour) catalog does not embed the shared source"
     fi
     skill="$repo_root/cas-cli/src/builtins/skills/cas-cut-release/SKILL.md"
-    if grep -q 'release-train.sh' "$skill" 2>/dev/null; then
-        ok "cas-cut-release ($flavour) points at release-train.sh"
+    if grep -qF 'scripts/release.sh' "$skill" 2>/dev/null; then
+        ok "cas-cut-release ($flavour) names the one-command release entrypoint"
     else
-        bad "cas-cut-release ($flavour) does not mention release-train.sh"
+        bad "cas-cut-release ($flavour) does not name the one-command release entrypoint"
     fi
-    # The rule has to be stated, not merely implied by the tooling: an operator
-    # improvising a wrapper is exactly how the version-keyed path came back.
-    if grep -qi 'recorded pid' "$skill" 2>/dev/null; then
-        ok "cas-cut-release ($flavour) states the recorded-PID rule"
+    if grep -qF 'in the background with a log' "$skill" 2>/dev/null; then
+        ok "cas-cut-release ($flavour) keeps release execution visible in a log"
     else
-        bad "cas-cut-release ($flavour) does not state the recorded-PID rule"
+        bad "cas-cut-release ($flavour) does not keep release execution visible in a log"
     fi
-    if grep -qi 'never.*version-keyed\|version-keyed.*never\|per-run directory' "$skill" 2>/dev/null; then
-        ok "cas-cut-release ($flavour) forbids a version-keyed artifacts path"
+    if grep -qF 'draft path' "$skill" 2>/dev/null; then
+        ok "cas-cut-release ($flavour) documents the next-version draft path"
     else
-        bad "cas-cut-release ($flavour) does not forbid a version-keyed artifacts path"
+        bad "cas-cut-release ($flavour) does not document the next-version draft path"
     fi
-    for marker in 'Scoped Validation' 'ledger is the last prep step' 'scratch-base' \
-        'detached process group' 'runtime_fixture_parent' 'reviewed snapshot update' \
-        '9.99.x' 'cause class' 'workers never poll CI' 'competing release' \
-        'merge-queue GraphQL query' 'CAS_RELEASE_ENV_FILE' 'annotated tag peels' \
-        'four Slack POSTED' 'refresh_binary_version' 'stranded_branch_override' \
-        'release.tag-complete.epoch' 'release-published.receipt' \
-        'Pin the cut date' 'Cargo.lock' 'docs-only release commits' \
-        'status-check rollup' 'announcement lint' 'scripts/release-train-announce.py' \
-        'is the authority for User-thread'; do
-        if grep -qF "$marker" "$skill" 2>/dev/null; then
+    for marker in 'docs/release-notes/RUBRIC.md' 'docs/RELEASE_SLACK_RUBRIC.md' \
+        '.claude/CODEMAP.md' '--no-watch' 'auto-merge' 'Exit 4 is a code conflict' \
+        'Exit 3 means the queue' 'Commander journey shards' \
+        'merge queue runs the required checks' 'remind_event=ci_completed' \
+        'remind_event=branch_contained_in' 'Release Prebuild' 'release.yml' \
+        "run's archives by tree id" 'annotated tag' \
+        'cassy-install-on-publish' 'scripts/install-on-publish.sh --install' \
+        'cas --version' 'release-published-receipt.sh --write-draft' \
+        'cas-release-notes' 'cas-release-report' '9.99.x' 'workers never poll CI' \
+        'stranded_branch_override' 'Cargo.lock'; do
+        if grep -qF -- "$marker" "$skill" 2>/dev/null; then
             ok "cas-cut-release ($flavour) carries marker: $marker"
         else
             bad "cas-cut-release ($flavour) missing marker: $marker"

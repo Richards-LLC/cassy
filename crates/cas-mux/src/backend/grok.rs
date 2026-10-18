@@ -3,7 +3,7 @@ use super::{
     finish_worker_config,
 };
 use crate::Effort;
-use crate::harness::HarnessCapabilities;
+use crate::harness::{CapabilityState, HarnessCapabilities};
 use crate::pty::PtyConfig;
 
 pub(crate) static GROK: Grok = Grok;
@@ -17,8 +17,8 @@ impl Backend for Grok {
 
     fn capabilities(&self) -> HarnessCapabilities {
         HarnessCapabilities {
-            supports_hooks: true,
-            supports_subagents: true,
+            supports_hooks: CapabilityState::Supported,
+            supports_subagents: CapabilityState::Supported,
             supports_textbox_submit: true,
             requires_bracketed_paste_injection: false,
             tool_prefix: "cas__",

@@ -108,7 +108,7 @@ readonly -a gate_rows=(
     version-literals ci-script-tests hub-web-tests release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
-    journey-catalog builtin-skill-limits doctor-snapshot migration-registry ci-script-tests-changed
+    journey-catalog builtin-skill-limits doctor-snapshot communication-slos migration-registry ci-script-tests-changed
     fixture-paths-src builtin-projections-src call-shapes release-notes-draft
 )
 
@@ -1010,7 +1010,7 @@ print_release_report_status() {
 }
 
 print_publication_status() {
-    local tag="v$version" landed tag_sha workflow_row workflow_branch workflow_sha workflow_status workflow_conclusion
+    local tag="v$version" landed tag_sha workflow_row workflow_branch workflow_sha workflow_event workflow_status workflow_conclusion
     local published_file="$run_dir/release-published.receipt"
     local latency_file="$run_dir/release-latency.receipt"
     local workflow_file="$run_dir/release-workflow.json"
@@ -1032,9 +1032,11 @@ print_publication_status() {
         workflow_row="$(jq -c 'if type == "array" then (.[0] // {}) else . end' "$workflow_file" 2>/dev/null || true)"
         workflow_branch="$(printf '%s' "$workflow_row" | jq -r '.headBranch // empty' 2>/dev/null || true)"
         workflow_sha="$(printf '%s' "$workflow_row" | jq -r '.headSha // empty' 2>/dev/null || true)"
+        workflow_event="$(printf '%s' "$workflow_row" | jq -r '.event // empty' 2>/dev/null || true)"
         workflow_status="$(printf '%s' "$workflow_row" | jq -r '.status // empty' 2>/dev/null || true)"
         workflow_conclusion="$(printf '%s' "$workflow_row" | jq -r '.conclusion // empty' 2>/dev/null || true)"
-        if [[ -n "$landed" && "$workflow_branch" == "$tag" && "$workflow_sha" == "$landed" \
+        if [[ -n "$landed" && "$workflow_branch" == main && "$workflow_event" == push \
+            && "$workflow_sha" == "$landed" \
             && "$workflow_status" == completed && "$workflow_conclusion" != success ]]; then
             printf 'publication: unavailable (matching release workflow conclusion=%s)\n' \
                 "${workflow_conclusion:-missing}"
@@ -1049,7 +1051,8 @@ print_publication_status() {
 
     tag_sha="$(git -C "$worktree" rev-parse "$tag^{}" 2>/dev/null || true)"
     if [[ "$(git -C "$worktree" cat-file -t "$tag" 2>/dev/null || true)" != tag \
-        || -z "$landed" || "$tag_sha" != "$landed" || "$workflow_branch" != "$tag" \
+        || -z "$landed" || "$tag_sha" != "$landed" || "$workflow_branch" != main \
+        || "$workflow_event" != push \
         || "$workflow_sha" != "$landed" \
         || "$workflow_status" != completed || "$workflow_conclusion" != success ]]; then
         printf 'publication: unavailable (tag, landed SHA, and successful workflow receipt do not match)\n'

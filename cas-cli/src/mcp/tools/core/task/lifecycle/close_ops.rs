@@ -26,7 +26,7 @@ use crate::git_evidence::{
 
 use super::TaskLifecycleGateError;
 use crate::harness_policy::{
-    is_supervisor_from_env, is_worker_without_subagents_from_env, supervisor_harness_from_env,
+    is_supervisor_from_env, worker_needs_supervisor_verification_from_env, supervisor_harness_from_env,
     verification_policy, worker_harness_from_env,
 };
 use crate::mcp::tools::core::imports::*;
@@ -8499,7 +8499,7 @@ impl CasCore {
             && !skip_verification
             && !depth_light
         {
-            let is_worker_without_subagents = is_worker_without_subagents_from_env();
+            let is_worker_without_subagents = worker_needs_supervisor_verification_from_env();
 
             // Check for approved verification
             if let Ok(verification_store) = self.open_verification_store() {

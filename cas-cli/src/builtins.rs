@@ -81,14 +81,13 @@ pub const BUILTIN_AGENTS: &[BuiltinFile] = &[
     },
 ];
 
-/// Built-in agents Cassy installs for Codex: none (audit D6, cas-6b97).
-///
-/// Codex custom agents are TOML files with `developer_instructions`; it
-/// ignores `.md` files in its agents directory, so the task-verifier and factory-supervisor
-/// files Cassy used to install there were inert. With an empty catalog the
-/// agent prune removes the installed copies on the next sync. The Codex
-/// supervisor's constraints live in `cas-codex-supervisor-checklist`.
-pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[];
+/// Native Codex roles. The TOML projection is generated from the shared
+/// verifier body by `scripts/gen-builtin-reference-history.sh`; Markdown
+/// agents remain inert and their old managed copies are pruned.
+pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[BuiltinFile {
+    path: "agents/task-verifier.toml",
+    content: include_str!("builtins/codex/agents/task-verifier.toml"),
+}];
 
 /// All built-in skills managed by Cassy
 pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
@@ -761,7 +760,7 @@ pub const BUILTIN_WORKFLOWS: &[BuiltinFile] = &[
 ];
 
 /// All built-in skills managed by Cassy for Codex. Entries embed the canonical
-/// (prefix-neutral, audit D1) files plus the Codex-only no-hooks
+/// (prefix-neutral, audit D1) files plus the Codex-tailored
 /// `cas-codex-supervisor-checklist` and the `agents/openai.yaml` policies.
 pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
@@ -1429,8 +1428,8 @@ pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
 /// a `~/.grok` home with no Claude tree present, so every twin is installed here
 /// directly. Entries embed the canonical (prefix-neutral, audit D1) files; the
 /// task-verifier agent differs only by its generated `tools:` frontmatter. The
-/// supervisor checklist is the Claude one
-/// (not Codex's "no hooks" variant), since Grok has real SessionStart hooks.
+/// supervisor checklist is the Claude one (not Codex's tailored twin), since
+/// Grok's SessionStart hooks follow the Claude contract.
 pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-worker/SKILL.md",
@@ -2197,15 +2196,16 @@ pub const REQUIRED_FACTORY_CAPABILITIES: &[RequiredCapability] = &[
     },
     RequiredCapability {
         // AC-1 "Codex supervisor-checklist ... where applicable": Claude and Grok
-        // share the hooks-aware `cas-supervisor-checklist`; Codex uses its
-        // tailored `cas-codex-supervisor-checklist` twin (a "no hooks"
-        // compensation variant). Same capability, intentional twin spelling.
+        // share `cas-supervisor-checklist`; Codex uses its tailored
+        // `cas-codex-supervisor-checklist` twin, which covers Codex's hook trust
+        // and explicit tool calls (cas-d0fe: Codex has lifecycle hooks; the twin
+        // is not a no-hooks variant). Same capability, intentional twin spelling.
         id: "supervisor-checklist",
         claude: Some("skills/cas-supervisor-checklist"),
         codex: Some("skills/cas-codex-supervisor-checklist"),
         grok: Some("skills/cas-supervisor-checklist"),
-        note: "Codex uses the cas-codex-supervisor-checklist twin (no-hooks variant); \
-               Claude and Grok share the hooks-aware cas-supervisor-checklist.",
+        note: "Codex uses the cas-codex-supervisor-checklist twin (hook trust and explicit \
+               tool calls); Claude and Grok share cas-supervisor-checklist.",
     },
 ];
 
@@ -2408,8 +2408,8 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
 ];
 
 /// Factory-critical agent roles that every harness that loads `.md` agents
-/// must define in its own agent catalog (cas-cc8c AC-3). Codex loads none
-/// (audit D6); see [`required_factory_agents_for`].
+/// must define in its own agent catalog (cas-cc8c AC-3). Codex uses native
+/// TOML instead; see [`required_factory_agents_for`].
 ///
 /// The Stop-hook maintenance jobs (learning-reviewer, rule-reviewer,
 /// duplicate-detector, session-summarizer) are not agents: each has one body
@@ -2418,11 +2418,10 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
 pub const REQUIRED_FACTORY_AGENTS: &[&str] = &["agents/task-verifier.md"];
 
 /// The required agent roles for one harness: [`REQUIRED_FACTORY_AGENTS`],
-/// except for Codex, which ignores `.md` agents and so is required to ship
-/// none (audit D6, cas-6b97).
+/// except for Codex, which requires the equivalent native TOML role.
 pub fn required_factory_agents_for(harness: SupervisorCli) -> &'static [&'static str] {
     match harness {
-        SupervisorCli::Codex => &[],
+        SupervisorCli::Codex => &["agents/task-verifier.toml"],
         SupervisorCli::Claude | SupervisorCli::Grok | SupervisorCli::OpenCode => {
             REQUIRED_FACTORY_AGENTS
         }
@@ -2528,11 +2527,20 @@ pub fn preview_builtin(
     let target = target_dir.join(builtin.path);
     let content = builtin.content;
 
+    if is_native_agent(builtin) && native_agent_symlink(target_dir, builtin) {
+        return Ok(None);
+    }
+
     if target.exists() {
         let existing = std::fs::read_to_string(&target)?;
 
         // Only update if managed by Cassy
-        if !is_managed_by_cas(&existing) && !is_managed_by_cas(content) {
+        if is_native_agent(builtin) {
+            let state = BuiltinReferenceState::load(target_dir)?;
+            if !owned_destination_replaceable(builtin, &existing, &state) {
+                return Ok(None);
+            }
+        } else if !is_managed_by_cas(&existing) && !is_managed_by_cas(content) {
             return Ok(None);
         }
 
@@ -2595,6 +2603,12 @@ pub fn sync_builtin_detailed(
     builtin: &BuiltinFile,
     target_dir: &Path,
 ) -> std::io::Result<SyncOutcome> {
+    if is_native_agent(builtin) {
+        let mut state = BuiltinReferenceState::load(target_dir)?;
+        let outcome = sync_owned_reference(builtin, target_dir, &mut state)?;
+        state.save(target_dir)?;
+        return Ok(outcome);
+    }
     let target = target_dir.join(builtin.path);
     let content = builtin.content;
 
@@ -2849,12 +2863,37 @@ fn is_file_owned_by_managed_skill(builtin: &BuiltinFile, skills: &[BuiltinFile])
     child_path != "SKILL.md" && skill_dir_is_managed(skill_dir, skills)
 }
 
+fn is_native_agent(builtin: &BuiltinFile) -> bool {
+    builtin.path.starts_with("agents/")
+        && builtin.path.ends_with(".toml")
+        && builtin.content.starts_with("# managed_by: cas\n")
+}
+
+fn native_agent_symlink(target_dir: &Path, builtin: &BuiltinFile) -> bool {
+    target_dir.join("agents").is_symlink() || target_dir.join(builtin.path).is_symlink()
+}
+
+fn owned_destination_replaceable(
+    builtin: &BuiltinFile,
+    existing: &str,
+    state: &BuiltinReferenceState,
+) -> bool {
+    let hash = builtin_content_hash(existing);
+    state.replace_on_next_sync.contains(builtin.path)
+        || state.files.get(builtin.path).is_some_and(|baseline| baseline == &hash)
+        || is_shipped_builtin_reference_version(builtin.path, &hash)
+}
+
 fn sync_owned_reference(
     builtin: &BuiltinFile,
     target_dir: &Path,
     state: &mut BuiltinReferenceState,
 ) -> std::io::Result<SyncOutcome> {
     let target = target_dir.join(builtin.path);
+    if is_native_agent(builtin) && native_agent_symlink(target_dir, builtin) {
+        state.skipped_references.insert(builtin.path.to_string(), "symlink".to_string());
+        return Ok(SyncOutcome::SkippedModifiedReference);
+    }
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -2965,7 +3004,12 @@ fn sync_all_builtins_inner(
 
     // Sync agents
     for builtin in agents {
-        match sync_builtin_detailed(builtin, target_dir)? {
+        let outcome = if is_native_agent(builtin) {
+            sync_owned_reference(builtin, target_dir, &mut reference_state)?
+        } else {
+            sync_builtin_detailed(builtin, target_dir)?
+        };
+        match outcome {
             SyncOutcome::Created | SyncOutcome::Updated => {
                 result.agents_updated += 1;
                 result.updated_files.push(builtin.path.to_string());
@@ -3964,6 +4008,10 @@ fn install_parity(target_dir: &Path, agents: &[BuiltinFile], skills: &[BuiltinFi
     let mut parity = InstallParity::default();
     for builtin in agents.iter().chain(skills) {
         parity.checked += 1;
+        if is_native_agent(builtin) && native_agent_symlink(target_dir, builtin) {
+            parity.local_edits.push(builtin.path.to_string());
+            continue;
+        }
         let Ok(existing) = std::fs::read(target_dir.join(builtin.path)) else {
             parity.missing.push(builtin.path.to_string());
             continue;
@@ -3973,11 +4021,8 @@ fn install_parity(target_dir: &Path, agents: &[BuiltinFile], skills: &[BuiltinFi
         }
         // Mirror the sync decision exactly: owned files follow the baseline
         // and shipped-version ledger, everything else the managed marker.
-        let replaceable = if is_file_owned_by_managed_skill(builtin, skills) {
-            let hash = file_bytes_hash(&existing);
-            state.replace_on_next_sync.contains(builtin.path)
-                || state.files.get(builtin.path).is_some_and(|baseline| *baseline == hash)
-                || is_shipped_builtin_reference_version(builtin.path, &hash)
+        let replaceable = if is_native_agent(builtin) || is_file_owned_by_managed_skill(builtin, skills) {
+            std::str::from_utf8(&existing).is_ok_and(|text| owned_destination_replaceable(builtin, text, &state))
         } else {
             is_managed_by_cas(builtin.content)
                 || std::str::from_utf8(&existing).is_ok_and(is_managed_by_cas)
@@ -4333,7 +4378,11 @@ mod tests {
         assert!(!content.contains("/stale-rendered-file"));
         assert!(content.contains("/.codex/skills/cas-worker/SKILL.md"));
         assert!(["/.codex/config.toml.cas-lock", "/.codex/hooks.toml.cas-lock"].iter().all(|path| builtin_gitignore_entries(&[SupervisorCli::Codex]).iter().any(|entry| entry == path)));
-        assert!(!content.contains("/.codex/agents/"), "Codex installs no .md agents (D6)");
+        assert!(content.contains("/.codex/agents/task-verifier.toml"));
+        assert!(
+            !content.lines().any(|line| line.starts_with("/.codex/agents/") && line.ends_with(".md")),
+            "Codex installs its native TOML role, never inert .md agents"
+        );
         assert!(!content.contains("/.claude/agents/task-verifier.md"));
     }
 
@@ -7401,10 +7450,10 @@ This is the body content."#;
         );
     }
 
-    /// Audit D6 (cas-6b97): Codex ignores `.md` agents, so its sync installs
-    /// none and prunes the inert managed copies earlier versions installed.
+    /// Codex loads a native verifier while preserving overrides and pruning
+    /// the inert managed Markdown copies earlier versions installed.
     #[test]
-    fn test_sync_all_codex_builtins_installs_no_md_agents_and_prunes_old_ones() {
+    fn test_sync_all_codex_builtins_installs_native_verifier_and_preserves_overrides() {
         use tempfile::tempdir;
 
         let temp = tempdir().unwrap();
@@ -7422,7 +7471,15 @@ This is the body content."#;
 
         let result = sync_all_codex_builtins(&codex_dir).unwrap();
 
-        assert_eq!(result.agents_updated, 0, "Codex has no agent catalog");
+        assert_eq!(result.agents_updated, 1);
+        let native = agents.join("task-verifier.toml");
+        let shipped = std::fs::read_to_string(&native).unwrap();
+        let role: toml::Value = toml::from_str(&shipped).unwrap();
+        assert_eq!(role["name"].as_str(), Some("task-verifier"));
+        assert!(role["developer_instructions"].as_str().unwrap().contains(
+            include_str!("builtins/agents/task-verifier.body.md")
+        ));
+        assert_eq!(sync_all_codex_builtins(&codex_dir).unwrap().agents_updated, 0);
         assert!(result.skills_updated > 0);
         assert_eq!(
             result.pruned_files,
@@ -7432,8 +7489,27 @@ This is the body content."#;
             ]
         );
         assert!(agents.join("reviewer.toml").is_file(), "user TOML agents are untouched");
-        assert!(CODEX_BUILTIN_AGENTS.is_empty());
-        assert!(required_factory_agents_for(SupervisorCli::Codex).is_empty());
+        assert!(required_factory_agents_for(SupervisorCli::Codex).contains(&"agents/task-verifier.toml"));
+
+        let custom = "name = \"task-verifier\"\ndescription = \"Local review\"\ndeveloper_instructions = \"Report evidence only.\"\n";
+        std::fs::write(&native, custom).unwrap();
+        sync_all_codex_builtins(&codex_dir).unwrap();
+        assert_eq!(std::fs::read_to_string(&native).unwrap(), custom);
+        assert!(preview_all_codex_builtins(&codex_dir).unwrap().iter().all(|change| change.path != "agents/task-verifier.toml"));
+        let parity = install_parity_for_harness(SupervisorCli::Codex, &codex_dir);
+        assert!(parity.local_edits.contains(&"agents/task-verifier.toml".to_string()));
+        assert!(!parity.stale.contains(&"agents/task-verifier.toml".to_string()));
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&native).unwrap();
+            let external = temp.path().join("user-role.toml");
+            std::fs::write(&external, &shipped).unwrap();
+            std::os::unix::fs::symlink(&external, &native).unwrap();
+            sync_all_codex_builtins(&codex_dir).unwrap();
+            assert!(native.is_symlink());
+            assert_eq!(std::fs::read_to_string(&external).unwrap(), shipped);
+        }
     }
 
     /// cas-2c61, audit D1: a Codex worker following a skill that spells
@@ -7725,8 +7801,7 @@ This is the body content."#;
         }
     }
 
-    /// Required agent roles have equivalent coverage across every harness that
-    /// loads `.md` agents; Codex requires none (audit D6).
+    /// Required agent roles have equivalent coverage in each native format.
     #[test]
     fn test_required_agents_present_in_every_harness() {
         for harness in [
@@ -8278,16 +8353,18 @@ This is the body content."#;
                 "{harness:?} wrote other trees"
             );
             let agents = temp.path().join(dir).join("agents");
-            let md_agents = std::fs::read_dir(&agents)
+            let installed_agents = std::fs::read_dir(&agents)
                 .map(|entries| entries.flatten().count())
                 .unwrap_or(0);
+            // Project sync omits OpenCode agents because their schema differs;
+            // Codex now installs its native TOML role alongside its skills.
+            let expected_agents = match harness {
+                SupervisorCli::OpenCode => 0,
+                _ => required_factory_agents_for(harness).len(),
+            };
             assert_eq!(
-                md_agents,
-                required_factory_agents_for(harness).len()
-                    * usize::from(matches!(
-                        harness,
-                        SupervisorCli::Claude | SupervisorCli::Grok
-                    )),
+                installed_agents,
+                expected_agents,
                 "{harness:?} installed an unexpected agent set"
             );
         }
@@ -8300,14 +8377,12 @@ This is the body content."#;
         assert!(entries.iter().all(|entry| entry.starts_with("/.opencode/skills/")));
     }
 
-    /// Audit D6: Codex ignores `.md` agents, so none is registered, required,
-    /// or kept on disk, and the Codex supervisor's constraints moved into its
-    /// checklist.
+    /// Codex ignores `.md` roles and ships the native equivalent instead.
     #[test]
     fn codex_ships_no_md_agents_and_the_checklist_keeps_its_constraints() {
-        assert!(CODEX_BUILTIN_AGENTS.is_empty());
-        assert!(agent_catalog_for_harness(SupervisorCli::Codex).is_empty());
-        assert!(required_factory_agents_for(SupervisorCli::Codex).is_empty());
+        assert!(CODEX_BUILTIN_AGENTS.iter().all(|agent| agent.path.ends_with(".toml")));
+        assert_eq!(agent_catalog_for_harness(SupervisorCli::Codex).len(), 1);
+        assert_eq!(required_factory_agents_for(SupervisorCli::Codex), &["agents/task-verifier.toml"]);
         assert_eq!(
             required_factory_agents_for(SupervisorCli::Grok),
             REQUIRED_FACTORY_AGENTS
@@ -8352,5 +8427,5 @@ pub(crate) fn project_managed_body(path: &str) -> bool {
     .into_iter()
     .flatten()
     .chain(opencode_builtin_skills().iter())
-    .any(|f| f.path == relative && is_managed_by_cas(f.content))
+    .any(|f| f.path == relative && (is_managed_by_cas(f.content) || is_native_agent(f)))
 }

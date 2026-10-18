@@ -90,8 +90,8 @@ const TAILORED: &[Tailored] = &[Tailored {
 const ALLOWED_MISSING_TWIN: &[(&str, &str, &str)] = &[(
     "skills/cas-supervisor-checklist/SKILL.md",
     "codex",
-    "Codex ships the renamed no-hooks variant skills/cas-codex-supervisor-checklist instead \
-     (cas-59ee): Codex has no SessionStart hook banner.",
+    "Codex ships the renamed twin skills/cas-codex-supervisor-checklist instead (cas-59ee), \
+     which covers Codex hook trust and explicit tool calls (cas-d0fe).",
 ), (
     "agents/task-verifier.md",
     "codex",
@@ -101,6 +101,12 @@ const ALLOWED_MISSING_TWIN: &[(&str, &str, &str)] = &[(
 
 /// Files only a twin catalog ships: (flavor, catalog path, source path, rationale).
 const ALLOWED_FLAVOR_ONLY: &[(&str, &str, &str, &str)] = &[
+    (
+        "codex",
+        "agents/task-verifier.toml",
+        "codex/agents/task-verifier.toml",
+        "Native TOML role generated from the shared verifier body; Codex ignores Markdown agents.",
+    ),
     (
         "codex",
         "skills/cas-improve-architecture/agents/openai.yaml",

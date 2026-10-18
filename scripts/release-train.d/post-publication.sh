@@ -11,13 +11,19 @@ if ! declare -F release_train_date_stamp >/dev/null 2>&1; then
 fi
 
 release_train_post_publication_workflow() {
-    local landed tag repo gh tries poll i workflows row status conclusion
+    local landed tag tag_type tag_sha repo gh tries poll i workflows row status conclusion
     landed="$(tr -d '[:space:]' <"$run_dir/landed-main.sha" 2>/dev/null || true)"
     [[ "$landed" =~ ^[0-9a-f]{40}$ ]] || {
         printf 'ERROR post-publication: %s/landed-main.sha is missing or invalid\n' "$run_dir" >&2
         return 1
     }
     tag="v$version"
+    tag_type="$(git -C "$worktree" cat-file -t "$tag" 2>/dev/null || true)"
+    tag_sha="$(git -C "$worktree" rev-parse "$tag^{}" 2>/dev/null || true)"
+    [[ "$tag_type" == tag && "$tag_sha" == "$landed" ]] || {
+        printf 'ERROR post-publication: annotated release tag %s does not resolve to landed-main.sha\n' "$tag" >&2
+        return 1
+    }
     repo="${CAS_RELEASE_TRAIN_REPO:-Richards-LLC/cassy}"
     gh="${CAS_RELEASE_TRAIN_GH:-gh}"
     # The Release workflow takes about 15 minutes (3.39: 14m14s); wait 30.
@@ -30,11 +36,11 @@ release_train_post_publication_workflow() {
         return 1
     }
     for ((i = 1; i <= tries; i++)); do
-        workflows="$("$gh" run list -R "$repo" --workflow release.yml --branch "$tag" \
+        workflows="$("$gh" run list -R "$repo" --workflow release.yml --branch main \
             --event push --limit 20 \
-            --json databaseId,status,conclusion,headBranch,headSha,createdAt 2>&1 || true)"
-        row="$(printf '%s' "$workflows" | jq -c --arg tag "$tag" --arg sha "$landed" \
-            '[.[]? | select(.headBranch == $tag and .headSha == $sha)] | sort_by(.createdAt) | first // empty' \
+            --json databaseId,status,conclusion,event,headBranch,headSha,createdAt 2>&1 || true)"
+        row="$(printf '%s' "$workflows" | jq -c --arg sha "$landed" \
+            '[.[]? | select(.event == "push" and .headBranch == "main" and .headSha == $sha)] | sort_by(.createdAt) | first // empty' \
             2>/dev/null || true)"
         if [[ -n "$row" ]]; then
             status="$(printf '%s' "$row" | jq -r '.status // empty')"

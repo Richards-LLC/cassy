@@ -3046,8 +3046,8 @@
           "reason": "Keep the installed workflow/reference route reachable; supervisor reference tree uses current lifecycle contract."
         },
         {
-          "text": "no session hooks",
-          "reason": "Preserve the operational safety boundary documented by supervisor reference tree uses current lifecycle contract."
+          "text": "lifecycle hooks once they are installed and trusted",
+          "reason": "Keep Codex lifecycle guidance conditional on installed, trusted handlers."
         },
         {
           "text": "never implement a worker's task yourself",
@@ -3087,6 +3087,10 @@
         }
       ],
       "absent": [
+        {
+          "text": "no session hooks",
+          "reason": "Reject the retired claim that Codex cannot run lifecycle hooks."
+        },
         {
           "text": "restart any live `cas serve` processes before continuing",
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor checklists delegate stale serve recovery to operator."

@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.64.0] - 2026-10-18
+
 ### Fixed — project and hub diagnostics
 
 - **Hub route status** — Was: a missing live Serve shim could be described as a route mismatch even when the expected and actual addresses matched. → Now: status names the missing live shim, shows the route once, and keeps the mismatch diagnosis for real mismatches.

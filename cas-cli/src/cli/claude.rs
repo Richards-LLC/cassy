@@ -386,7 +386,7 @@ fn seed_missing_personal_finish(home: &Path, profile_dir: &Path) -> Result<()> {
             return Err(error).with_context(|| format!("could not create {}", target.display()));
         }
     }
-    eprintln!("Added your personal /finish command from ~/{PERSONAL_FINISH_REFERENCE}.");
+    eprintln!("Added your personal /finish from ~/{PERSONAL_FINISH_REFERENCE}.");
     Ok(())
 }
 

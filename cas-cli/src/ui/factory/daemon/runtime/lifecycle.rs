@@ -1026,6 +1026,25 @@ pub(super) enum WorkerAttentionRelayOutcome {
     NotApplicable,
 }
 
+/// The daemon observed one original physical write past its outcome bound.
+/// Retry the same durable episode, never the prompt's PTY bytes.
+pub(super) fn enqueue_blocked_pty_write_relay(
+    cas_dir: &std::path::Path,
+    pane: &str,
+    detail: &str,
+    occurrence: &str,
+) -> WorkerAttentionRelayOutcome {
+    enqueue_worker_attention_relay_detail(
+        cas_dir,
+        "pty_write_stalled",
+        pane,
+        None,
+        None,
+        detail,
+        occurrence,
+    )
+}
+
 fn enqueue_worker_attention_relay_detail(
     cas_dir: &std::path::Path,
     kind: &str,
@@ -1201,6 +1220,8 @@ fn enqueue_worker_attention_relay_inner(
     // supervisor are a blocker, not routine: idle workers burn wall clock.
     if kind == "supervisor_stalled" {
         body = crate::prompt_revalidation::attach_blocker_envelope(&body, "ready work", task_id);
+    } else if kind == "pty_write_stalled" {
+        body = crate::prompt_revalidation::attach_blocker_envelope(&body, "PTY write blocked", task_id);
     }
     if supervisor.id == "operator" {
         body = match crate::supervisor_notices::operator_prompt(&body, kind) {

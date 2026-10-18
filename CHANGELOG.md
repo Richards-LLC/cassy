@@ -7,6 +7,42 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — project and hub diagnostics
+
+- **Hub route status** — Was: a missing live Serve shim could be described as a route mismatch even when the expected and actual addresses matched. → Now: status names the missing live shim, shows the route once, and keeps the mismatch diagnosis for real mismatches.
+- **Project identity warnings** — Was: registry collisions could be repeated in each project report, and explicit pins could still receive automatic split advice. → Now: host-level collisions are reported once, and explicitly pinned roots receive an identity-review warning without split advice.
+- **Legacy activity history** — Was: the migration ledger could report current while an older lazy queue lacked columns used by doctor and delivery reporting. → Now: doctor names the missing schema; an explicit migration repairs it and preserves prior delivery meaning through versioned migration metadata.
+
+### Changed — structured output and support routing
+
+- **Known-project JSON** — Was: known-repos list/status could ignore the effective JSON option and print human text. → Now: either flag position returns one structured JSON document; default human output and discovery semantics are unchanged.
+- **One JSON document per update** — Was: update --all-projects --json could emit multiple top-level documents, and an uncaptured phase could break the JSON contract while appearing successful. → Now: phase documents are nested in one response, and a phase is not run if its output cannot be captured.
+- **Cassy issue destination** — Was: a missing Cassy component setting could silently route a report to the project-level issue destination. → Now: the effective Cassy component setting is used; only an explicitly blank raw setting keeps legacy project routing, and an invalid selected destination fails closed with a staged remedy.
+- **Push recovery advice** — Was: blocked Cloud items could still trigger generic retry advice. → Now: blocked-only errors suppress retry guidance while retryable work keeps its recovery path.
+
+### Changed — managed replies and delivery signals
+
+- **Pattern creation outcome** — Was: the client required a wrapped create response, so a successful write returning the row directly was reported as a failure. → Now: both response shapes are accepted; an unreadable or incomplete post-write response is reported as uncertain with a reconciliation reference and no-retry guidance.
+- **Managed-thread reply intent** — Was: the client lacked journaled claim-renew and reply-intent operations for managed thread replies. → Now: explicit actions preserve thread, claim generation, and expiry checks; expired claims fail closed and are never automatically reclaimed.
+- **Communication SLOs** — Was: local operator snapshots without an enrolled delivery were counted as zero receipts. → Now: unenrolled-only data is N/A; enrolled deliveries without receipts still breach, and the gated metric is unchanged.
+- **Pending-delivery notices** — Was: repeated idle notices could continue while CI was pending for the exact pushed tip. → Now: a fresh matching lease, task, pushed tip, and pending CI result suppress repeats; stale, unknown, or unpushed states keep the normal notice.
+
+### Changed — Codex and operator setup
+
+- **Curated child caches** — Was: approved tool-cache paths could be lost when Codex children launched. → Now: allowlisted cache variables reach the child while unrelated secrets stay filtered.
+- **User-level /finish** — Was: updates could overwrite or omit the operator's finish command. → Now: the recovered command installs across supported harnesses, preserves user overrides, and survives updates.
+- **Codex lifecycle hooks** — Was: supported hooks were described as unavailable and trusted launch setup was incomplete. → Now: generated configuration provisions trust and the supported lifecycle hooks; idle-wake behavior remains a separate contract.
+- **Codex specialist review** — Was: supported Codex subagents were not detected and no native task-verifier role was installed. → Now: capability detection installs the native role without weakening independent review requirements.
+- **Verification-only close** — Was: proof-only work could be refused or suggest a different task's shared branch. → Now: supervisors can record bounded proof without merging and without attributing a foreign shared tip.
+
+### Changed — release reporting
+
+- **Post-publication report** — Was: a successful release workflow on main could be rejected before report delivery. → Now: the report path accepts it only when workflow, tag, and landed source point to the same release.
+
+### Changed — cache cleanup
+
+- **Unknown-owner cache reclaim** — Was: unknown-owner cache targets could be inventoried but not reclaimed. → Now: an explicit exact-target opt-in can reclaim only a quiet eligible target after ownership, process, evidence, path, and lease checks. macOS not verified.
+
 ## [3.63.0] - 2026-10-17
 
 ### Fixed — sessions start and messages stay readable

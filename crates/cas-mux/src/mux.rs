@@ -65,6 +65,15 @@ pub struct InjectCompletion {
     pub settled_after: std::time::Duration,
 }
 
+/// One observation of a blocked physical write, never a delivery outcome.
+#[derive(Debug)]
+pub struct InjectWriteStall {
+    pub ticket: InjectTicket,
+    pub pane_id: String,
+    pub pane_spawned_at: std::time::Instant,
+    pub pending_for: std::time::Duration,
+}
+
 /// Post-break readiness poll for harnesses without a textbox submit (Codex),
 /// cas-4208: the output must stay unchanged this long after the floor.
 const INJECT_STABILITY_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
@@ -92,6 +101,8 @@ struct PendingInject {
     written: Option<(crate::pane::PayloadWrite, std::time::Instant)>,
     // Log a slow physical write once, without inventing a delivery receipt.
     write_slow_reported: bool,
+    // Escalate once while retaining the original writer and its receipts.
+    write_stall_reported: bool,
 }
 
 /// Existing slow-write reporting window. Crossing it is diagnostic only:
@@ -1182,6 +1193,7 @@ impl Mux {
             pane_spawned_at: pane.spawned_at(),
             written: Some((receipt, now)),
             write_slow_reported: false,
+            write_stall_reported: false,
         });
         Ok(InjectStart::Started(ticket))
     }
@@ -1189,6 +1201,41 @@ impl Mux {
     /// Whether a command owns this pane through payload and submit completion.
     pub fn inject_pending(&self, pane_id: &str) -> bool {
         self.pending_injects.iter().any(|inject| inject.pane_id == pane_id)
+    }
+
+    /// Observe writes beyond the owner's bound once per original ticket.
+    /// This neither completes nor cancels a write: an unknown partial write
+    /// must keep its ownership so a queue retry cannot type duplicate bytes.
+    pub fn take_stalled_injects(
+        &mut self,
+        now: std::time::Instant,
+        bound: std::time::Duration,
+    ) -> Vec<InjectWriteStall> {
+        let mut stalled = Vec::new();
+        for inject in &mut self.pending_injects {
+            let Some((receipt, queued_at)) = &inject.written else {
+                continue;
+            };
+            let pending_for = now.saturating_duration_since(*queued_at);
+            if inject.write_stall_reported || pending_for < bound || receipt.result().is_some() {
+                continue;
+            }
+            if !self
+                .panes
+                .get(&inject.pane_id)
+                .is_some_and(|pane| pane.spawned_at() == inject.pane_spawned_at)
+            {
+                continue;
+            }
+            inject.write_stall_reported = true;
+            stalled.push(InjectWriteStall {
+                ticket: inject.ticket,
+                pane_id: inject.pane_id.clone(),
+                pane_spawned_at: inject.pane_spawned_at,
+                pending_for,
+            });
+        }
+        stalled
     }
 
     /// Whether `pane_id` has an injected payload still awaiting its submit
@@ -1279,6 +1326,7 @@ impl Mux {
             pane_spawned_at,
             written: None,
             write_slow_reported: false,
+            write_stall_reported: false,
         });
         Ok(InjectStart::Started(ticket))
     }

@@ -1,0 +1,580 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude integration research for Cassy 3.64</title><style>/* Generated from design-tokens.json by scripts/gen-design-tokens-css.py. Do not edit.
+   Paste into the artifact's <style>; DESIGN.md tokens replace these when a project has one. */
+:root {
+  color-scheme: light dark;
+  --bg: #F7F4EE;
+  --surface: #FFFFFF;
+  --surface-hero: #F1E7DD;
+  --line: #DAD3C7;
+  --line-strong: #8F8371;
+  --ink: #1B1D24;
+  --ink-muted: #5A5F6E;
+  --verdict: #2E3A9F;
+  --verdict-soft: #DDE1F7;
+  --evidence: #5A5F6E;
+  --action: #2E3A9F;
+  --good: #226845;
+  --warning: #7F5504;
+  --danger: #B3261E;
+  --good-tint: rgba(34,104,69,0.10);
+  --warning-tint: rgba(127,85,4,0.10);
+  --danger-tint: rgba(179,38,30,0.10);
+  --focus: #2E3A9F;
+  --series-1: #4C5CA8;
+  --series-2: #9D433B;
+  --series-3: #0095A0;
+  --series-4: #693F88;
+  --series-5: #5C6C00;
+  --magnitude-1: #E5E8F8;
+  --magnitude-2: #B7BEEB;
+  --magnitude-3: #8590DA;
+  --magnitude-4: #5563C2;
+  --magnitude-5: #2E3A9F;
+  --polarity-1: #B3261E;
+  --polarity-2: #DAD3C7;
+  --polarity-3: #226845;
+  --series-neutral: #6B7280;
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Times New Roman", serif;
+  --font-body: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --type-eyebrow: 600 12px/16px var(--font-mono);
+  --type-caption: 400 14px/20px var(--font-body);
+  --type-body: 400 17px/26px var(--font-body);
+  --type-lede: 400 21px/30px var(--font-body);
+  --type-heading: 600 27px/32px var(--font-body);
+  --type-title: 400 34px/38px var(--font-display);
+  --type-verdict: 400 clamp(32px, 4.6vw, 52px)/1.08 var(--font-display);
+  --type-hero-number: 500 clamp(56px, 8vw, 96px)/1 var(--font-mono);
+  --type-ledger: 400 15px/22px var(--font-mono);
+  --measure: 68ch;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-24: 96px;
+  --container: 1120px;
+  --gutter: 24px;
+  --margin-column: 240px;
+  --radius-chip: 4px;
+  --radius-panel: 8px;
+  --radius-ledger: 0px;
+}
+@media screen and (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12141A;
+    --surface: #191C24;
+    --surface-hero: #241E1E;
+    --line: #2B3040;
+    --line-strong: #6B7390;
+    --ink: #E9E6E0;
+    --ink-muted: #A3A7B4;
+    --verdict: #A9B3FF;
+    --verdict-soft: rgba(169,179,255,0.16);
+    --evidence: #A3A7B4;
+    --action: #A9B3FF;
+    --good: #5FC492;
+    --warning: #E2B14D;
+    --danger: #EF7B72;
+    --good-tint: rgba(95,196,146,0.14);
+    --warning-tint: rgba(226,177,77,0.14);
+    --danger-tint: rgba(239,123,114,0.14);
+    --focus: #A9B3FF;
+    --series-1: #7083D1;
+    --series-2: #C86A60;
+    --series-3: #00A5B4;
+    --series-4: #8C52B6;
+    --series-5: #819334;
+    --magnitude-1: #2A3050;
+    --magnitude-2: #3F4A8C;
+    --magnitude-3: #5B69C4;
+    --magnitude-4: #8592EA;
+    --magnitude-5: #A9B3FF;
+    --polarity-1: #EF7B72;
+    --polarity-2: #2B3040;
+    --polarity-3: #5FC492;
+    --series-neutral: #9AA1AF;
+  }
+}
+
+
+*{box-sizing:border-box}html{scroll-behavior:auto}body{margin:0;background:var(--bg);color:var(--ink);font:var(--type-body)}
+a{color:var(--action);text-underline-offset:.18em;overflow-wrap:anywhere}a:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+.wrap{width:min(var(--container),calc(100% - 48px));margin-inline:auto}.hero{background:var(--surface-hero);color:var(--ink);padding:32px 0;border-bottom:3px solid var(--verdict)}
+.eyebrow{font:var(--type-eyebrow);letter-spacing:.07em;text-transform:uppercase;color:var(--ink-muted);margin:0 0 24px}.hero-grid{display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:center}
+h1{font:var(--type-verdict);letter-spacing:-.015em;max-width:19ch;margin:0}figure{margin:0}figure svg{display:block;width:100%;max-width:450px;margin:auto;height:auto}figcaption{font:var(--type-caption);color:var(--ink-muted);margin-top:12px;max-width:56ch}
+.flow text{fill:var(--ink);font-family:var(--font-body)}.flow .top{fill:var(--verdict-soft);stroke:var(--verdict);stroke-width:2}.flow .planned{fill:none;stroke:var(--ink-muted);stroke-width:1.5;stroke-dasharray:5 4}.flow .arrow{fill:none;stroke:var(--ink-muted);stroke-width:1.5}.flow .arrow-head{fill:var(--ink-muted)}.flow .small{font-size:13px;fill:var(--ink-muted)}.flow .label{font-size:17px;font-weight:600}
+main{padding-block:32px 64px}main p,main li{max-width:var(--measure)}main h2{font:var(--type-heading);margin:56px 0 20px;border-top:1px solid var(--line-strong);padding-top:24px;break-after:avoid}main h3{font:600 21px/30px var(--font-body);margin:32px 0 12px;break-after:avoid}main h2:first-of-type{margin-top:32px}p{margin:0 0 20px}li{margin:8px 0}code{font-family:var(--font-mono);font-size:.88em;overflow-wrap:anywhere}pre{background:var(--surface);color:var(--ink);padding:16px;overflow:auto;max-width:100%}
+.table-wrap{max-width:100%;overflow-x:auto;padding:4px 3px 10px;margin:24px -3px 32px;overscroll-behavior-x:contain}table{border-collapse:collapse;width:100%;min-width:760px;font-size:15px;line-height:1.5}th{font:600 12px/18px var(--font-mono);text-transform:uppercase;letter-spacing:.04em;text-align:left;background:var(--bg);color:var(--ink);position:sticky;top:0;border-bottom:1px solid var(--line-strong)}th,td{padding:14px 12px;vertical-align:top;overflow-wrap:anywhere}td{border-bottom:1px solid var(--line)}th:first-child,td:first-child{padding-left:0}.recommended{background:var(--verdict-soft);color:var(--ink)}strong{font-weight:650}footer{padding:24px 0;border-top:1px solid var(--line-strong);font:var(--type-caption);color:var(--ink-muted)}
+@media(max-width:820px){.hero-grid{grid-template-columns:1fr;gap:24px}.hero{padding:24px 0}h1{font-size:36px;max-width:21ch}.hero figure{max-width:390px}.eyebrow{margin-bottom:20px}.table-wrap{margin-block:20px 28px}main{padding-top:24px}}
+@media print{@page{margin:15mm}body{background:var(--surface);color:var(--ink);font-size:10pt;line-height:1.4}.wrap{width:100%;max-width:none}.hero{background:var(--surface);color:var(--ink);padding:0 0 16px}.hero-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}h1{font-size:26pt}.eyebrow{font-size:9pt}.hero figure svg{max-width:300px}figcaption{font-size:9pt}.table-wrap{overflow:visible;margin:12px 0;padding:0}table{min-width:0;width:100%;font-size:8.4pt;table-layout:fixed}th,td{padding:9px 6px}th{position:static;background:var(--surface);color:var(--ink);font-size:8pt}thead{display:table-header-group}tr,figure,pre{break-inside:avoid}h2,h3{break-after:avoid}main{padding:0}main h2{margin-top:28px;padding-top:12px;font-size:17pt}main h3{font-size:13pt}a[href^="http"]::after{content:" (" attr(href) ")";font-size:8pt;color:var(--ink-muted)}footer{font-size:8pt}.recommended{background:var(--surface);color:var(--ink);border-left:2px solid var(--verdict)}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+</style></head><body><header class="hero"><div class="wrap"><p class="eyebrow">Claude integration research for Cassy 3.64</p><div class="hero-grid"><h1>Keep task authority in Cassy; adapt native execution.</h1><figure aria-describedby="figure-caption"><svg class="flow" viewBox="0 0 340 265" role="img" aria-labelledby="flow-title flow-desc"><title id="flow-title">Cassy retains authority above native execution</title><desc id="flow-desc">The existing Cassy authority rail controls assignment, identity and independent review. Proposed Claude and Codex projections receive authorized work and return observed outcomes. Evidence remains scoped to version, mode, trust and actual behavior. Outline means recommendation, not executed proof.</desc><defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path class="arrow-head" d="M0,0 L7,3.5 L0,7z"/></marker></defs><rect class="top" x="4" y="8" width="332" height="57"/><text class="label" x="170" y="32" text-anchor="middle">Cassy task authority</text><text x="170" y="52" text-anchor="middle" style="font-size:13px">assignment · identity · independent review</text><path class="arrow" d="M84,65 V105" marker-end="url(#arrow)"/><path class="arrow" d="M256,65 V105" marker-end="url(#arrow)"/><text class="small" x="170" y="88" text-anchor="middle">authorized work</text><rect class="planned" x="4" y="110" width="155" height="47"/><rect class="planned" x="181" y="110" width="155" height="47"/><text class="label" x="82" y="138" text-anchor="middle">Claude adapter</text><text class="label" x="258" y="138" text-anchor="middle">Codex adapter</text><path class="arrow" d="M84,157 V202" marker-end="url(#arrow)"/><path class="arrow" d="M256,157 V202" marker-end="url(#arrow)"/><text class="small" x="170" y="183" text-anchor="middle">observed outcomes</text><rect class="planned" x="4" y="207" width="332" height="52"/><text class="label" x="170" y="230" text-anchor="middle">Scoped evidence</text><text x="170" y="249" text-anchor="middle" style="font-size:13px">version · mode · trust · actual behavior</text></svg><figcaption id="figure-caption">Recommendation from Cassy source at 5e4774024 and official documentation reviewed 17 October 2026. Solid: existing authority. Outline: proposed projection and proof obligations. <a href="#structure-data">Read the responsibilities table</a>.</figcaption></figure></div></div></header><main class="wrap"><p>Research cutoff: 17 October 2026, 21:30 UTC. Cassy source:
+<code>5e4774024045f19adaddf8da0e7ac1e69d19a9ad</code>. This is a recommendation, with
+high confidence in the documented distinctions and source mapping, and no new
+runtime validation. It creates no dependency on the 3.63 release.</p>
+<h2>Recommendation</h2>
+<p>Prefer the existing backend and delivery adapters, with canonical role content
+projected into each supported native format and capability evidence bound to
+the actual launch. Keep assignment, task start, durable messages, verifier
+dispatch and independent QA in Cassy. A native role, task, goal, permission
+approval or successful write to a transport does not grant that authority.</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Table 1; scroll sideways on small screens"><table id="structure-data">
+<thead>
+<tr>
+<th>Layer</th>
+<th>Existing Cassy seam</th>
+<th>Recommended responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Authority</td>
+<td>Task lifecycle, verifier and QA services</td>
+<td>Assignment, leases, authenticated dispatch and reviewed-tip acceptance</td>
+</tr>
+<tr>
+<td>Native execution</td>
+<td>Backend, role assets, hook encoding and delivery adapters</td>
+<td>Harness-specific fields, modes, launch prerequisites and transport</td>
+</tr>
+<tr>
+<td>Evidence</td>
+<td>Conformance receipts and delivery observations</td>
+<td>Version, channel, effective policy/trust, loaded behavior and actual turn; missing facts stay unknown</td>
+</tr>
+</tbody>
+</table></div>
+<p>This is a preferred structure under Cassy's existing constraints, not a measured
+claim of the fastest or cheapest implementation.</p>
+<h2>Decision context</h2>
+<p>The 3.64 supervisor decides which follow-ups to authorize after this research.
+This research feeds the cas-558a diary and the 3.64 plan. The merged
+<a href="2026-10-17-cas-9ca1-codex-integration-research.md">cas-9ca1 Codex research</a>
+is a comparison source; the diary and plan are the only planned consumers.
+Hook/trust canaries remain with cas-d0fe, and native role/capability work remains
+with cas-6c54. This task changes none of those implementations and starts no
+account, connector, harness or factory session.</p>
+<h3>Version and source evidence</h3>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Table 2; scroll sideways on small screens"><table>
+<thead>
+<tr>
+<th>Observation</th>
+<th>Value at retrieval</th>
+<th>Primary source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Latest published non-prerelease</td>
+<td>2.1.302, published 16 October 2026 at 20:53:06 UTC</td>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.302">Official release</a></td>
+</tr>
+<tr>
+<td>npm latest</td>
+<td>2.1.302</td>
+<td><a href="https://registry.npmjs.org/@anthropic-ai/claude-code/latest">Official package metadata</a></td>
+</tr>
+<tr>
+<td>Native latest channel</td>
+<td>2.1.302</td>
+<td><a href="https://downloads.claude.ai/claude-code-releases/latest">Latest feed</a></td>
+</tr>
+<tr>
+<td>Native stable channel</td>
+<td>2.1.292</td>
+<td><a href="https://downloads.claude.ai/claude-code-releases/stable">Stable feed</a></td>
+</tr>
+<tr>
+<td>Installed executable target</td>
+<td><code>~/.local/share/claude/versions/2.1.302</code></td>
+<td>Local symlink inspection only; no CLI invocation</td>
+</tr>
+<tr>
+<td>Retained Cassy conformance</td>
+<td>2.1.280, dated 23 September 2026</td>
+<td><code>crates/cas-pty/conformance/claude-code-2.1.280-2026-09-23.json</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>Freshness recheck on 18 October 2026 confirmed the official release API and npm
+latest remain 2.1.302, while the native latest and stable feeds remain 2.1.302
+and 2.1.292. No release was published after the reviewed 2.1.302 entry. The
+four endpoint timestamps are recorded as separate metadata rows in the coverage
+CSV. This check updates release/channel currency only; the rolling documentation
+page reads remain explicitly dated 17 October.</p>
+<p>Latest non-prerelease and the native updater's stable channel are different
+claims. Official setup documents separate channels and version floors. Keep a
+user's chosen channel and pins; do not silently switch or downgrade it. The
+installed pathname is not a new execution receipt. <a href="https://code.claude.com/docs/en/setup#configure-release-channel">Setup</a></p>
+<p>The official index contains 275 link positions and 239 unique URLs: 228 English
+pages and 11 translation indexes. Review covers 35 pages: three full reads and
+32 scoped reads. Twelve attempted pages were unavailable, two were fetched but
+not reviewed, and 190 remain inventory-only. The complete URL/date/scope ledger
+is <a href="cas-f1ca-claude-coverage.csv">cas-f1ca-claude-coverage.csv</a>, including exclusions.
+Current documentation is rolling, not an exact-version runtime contract.
+<a href="https://code.claude.com/llms.txt">Documentation index</a></p>
+<h2>Options</h2>
+<p>These are qualitative engineering judgments, not estimated costs or benchmarks.</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Table 3; scroll sideways on small screens"><table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Cost and effort</th>
+<th>Risk</th>
+<th>Reversibility</th>
+<th>Outcome</th>
+</tr>
+</thead>
+<tbody>
+<tr class="recommended"><td><strong>Existing adapters plus canonical native projections — recommended</strong></td>
+<td>Maintain concrete serializers and scoped evidence; extend existing owners' seams</td>
+<td>Native mode and trust differences still need proof</td>
+<td>Preserve current backend and PTY fallback</td>
+<td>Common task policy, native execution where supported</td>
+</tr>
+<tr>
+<td>Native teams/workflows own coordination</td>
+<td>Integrate another task and recovery model</td>
+<td>Native completion, replay and lead approval differ from Cassy authority</td>
+<td>State migration is harder once ownership moves</td>
+<td>Attractive for bounded Claude work, unsuitable as the durable factory authority</td>
+</tr>
+<tr>
+<td>Universal session/connector engine</td>
+<td>New registry, policy, identity and protocol framework</td>
+<td>Speculative interfaces hide different authority and failure modes</td>
+<td>Large shared interface to unwind</td>
+<td>Defer until multiple demonstrated callers need it</td>
+</tr>
+</tbody>
+</table></div>
+<h2>Why this one</h2>
+<p>The deciding criterion is preserving durable authority while using supported
+native capabilities. Three independent source-only proposals converged on that
+criterion: a narrow delivery interface; shared role delivery for ordinary launch
+and asset reconciliation; and separate launch, hook and proxy policy contracts.
+Their useful parts fit existing modules. They do not justify one universal
+engine or a new connector option whose every use would fail.</p>
+<p><code>Backend</code> already varies launch and cancellation behavior
+(<code>crates/cas-mux/src/backend/mod.rs:58</code>); <code>HookOutput</code> owns differing wire shapes
+(<code>crates/cas-core/src/hooks/types.rs:49</code>); proxy policy authorizes before
+forwarding (<code>crates/cas-mcp-proxy/src/lib.rs:1430</code>). Keep those responsibilities
+separate. The existing verifier body macro demonstrates shared content with
+native tool-name projection (<code>cas-cli/src/builtins.rs:62</code>).</p>
+<h3>Adopt, test or defer</h3>
+<p><strong>Adopt</strong> means a recommended 3.64 design direction, not a shipped change.
+<strong>Test</strong> means owner-approved evidence is required before adoption; no new tests
+or probes ran here. <strong>Defer</strong> names a limitation rather than an implementation.</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Table 4; scroll sideways on small screens"><table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Evidence and Cassy seam</th>
+<th>Bounded next step</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Adopt: contextual capability evidence</strong></td>
+<td>Static <code>supports_hooks</code>/<code>supports_subagents</code> live in <code>crates/cas-mux/src/harness.rs:42</code>. The latter directly selects verification mode in <code>cas-cli/src/harness_policy.rs:231</code>. Existing <code>HarnessConformanceReceipt</code> carries version and evidence at <code>crates/cas-pty/src/conformance.rs:73</code>.</td>
+<td>cas-6c54 should distinguish documented support, effective disable/trust and executed proof by backend/version/mode. Keep independence policy explicit; a boolean change must not silently change review authority.</td>
+</tr>
+<tr>
+<td><strong>Test: hook context and failure behavior</strong></td>
+<td>Current <a href="https://code.claude.com/docs/en/hooks#stop">Stop output docs</a> permit continuation context; Cassy's type documentation excludes Stop variants and uses <code>systemMessage</code> (<code>crates/cas-core/src/hooks/types.rs:364</code>, <code>:762</code>). <a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.294">2.1.294</a> and <a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.295">2.1.295</a> also change hook behavior.</td>
+<td>Feed the concrete discrepancy to cas-d0fe. Establish exact CLI payload, model-visible context, malformed output/timeout behavior and bounded continuation. Documentation/source disagreement is not a demonstrated runtime failure.</td>
+</tr>
+<tr>
+<td><strong>Test: native messaging beneath durable delivery</strong></td>
+<td>Native <a href="https://code.claude.com/docs/en/cross-session-messaging#message-delivery">cross-session messaging</a> distinguishes idle turn start from busy delivery. Cassy separates attention evidence (<code>message_attention.rs:72</code>) and delivery (<code>delivery.rs:1142</code>) under <code>cas-cli/src/ui/factory/daemon/runtime/</code>.</td>
+<td>Keep handoff, surfaced, turn-start, reaction and ACK separate. Prove supported framing, recipient generation, held/refused outcomes, duplicate retry and composer safety before an optional adapter. The docs do not establish a complete stable daemon-client frame protocol.</td>
+</tr>
+<tr>
+<td><strong>Adopt: keep wake authorization central</strong></td>
+<td><code>queue_and_events.rs:6622</code> classifies authenticated lifecycle traffic; <code>:6709</code> keeps ordinary worker chatter inbox-only. Native messaging can wake an idle session.</td>
+<td>Revalidate the existing queue row and current authority before a wake-capable route. A native hold/refusal must not trigger a fallback that circumvents it. A hook/tool result alone proves no idle turn.</td>
+</tr>
+<tr>
+<td><strong>Adopt: one role body, mode-specific projection</strong></td>
+<td>Native <a href="https://code.claude.com/docs/en/sub-agents">subagent definitions</a> and <a href="https://code.claude.com/docs/en/agent-teams">teams</a> differ. With teams enabled, named Agent calls may become teammates; teammates ignore definition skills, and some modes ignore MCP/compaction fields. Cassy already shares verifier content at <code>builtins.rs:62</code>.</td>
+<td>cas-6c54 owns the role seam. Preserve explicit model/tool choices and user overrides; distinguish factory, subagent, fork and teammate modes. Verify actual loading and invocation, not only file presence.</td>
+</tr>
+<tr>
+<td><strong>Adopt: independent verification remains outside native roles</strong></td>
+<td><code>verification_tools.rs:258</code> requires a registered supervisor or distinct sealed verifier child; <code>qa_pass_ops.rs:76</code> rejects self-review. Native teammate plan approval is automatically granted in the lead session; it supplies no independent review. <a href="https://code.claude.com/docs/en/agent-teams">Teams</a></td>
+<td>Treat native role completion as an observation. Preserve assigned-task start, sealed dispatch, separate reviewer identity and exact reviewed head; do not accept a role label or native completed state as authority.</td>
+</tr>
+<tr>
+<td><strong>Test: worktree provenance and recovery</strong></td>
+<td>Native <a href="https://code.claude.com/docs/en/worktrees">worktrees</a> have base, instruction-source and cleanup semantics. Cassy's cwd/trust seam is <code>backend/claude.rs:85</code>, with worktree binding at <code>crates/cas-pty/src/pty.rs:1250</code>.</td>
+<td>Prove source branch, effective instruction root, hook cwd, resume/deletion and shell-write behavior. Native isolation is not automatically Cassy delivery-branch ownership.</td>
+</tr>
+<tr>
+<td><strong>Adopt: portable skill content, explicit native field limits</strong></td>
+<td><a href="https://code.claude.com/docs/en/skills">Skills</a> have invocation, context and permission lifetimes. <code>context: fork</code> is not a full conversation fork. Stored fields live at <code>crates/cas-types/src/skill.rs:249</code>; reference reconciliation at <code>builtins.rs:2770</code> preserves custom content.</td>
+<td>Reuse canonical content and the existing history/baseline ledger. Test old shipped content, custom edits, duplicate names and unsupported fields. Do not treat temporary <code>allowed-tools</code> or <code>disallowed-tools</code> as a durable cross-harness security policy.</td>
+</tr>
+<tr>
+<td><strong>Adopt: durable knowledge outside native memory and compaction</strong></td>
+<td>Native <a href="https://code.claude.com/docs/en/memory#auto-memory">auto memory</a> is scoped to local configuration/repository identity; worktrees can share it, ordinary subagents do not inherit the main memory, and compaction can lose early instructions. <a href="https://code.claude.com/docs/en/checkpointing">Checkpoints</a> exclude some shell, external and subagent edits. Cassy persists knowledge through <code>cas-cli/src/mcp/tools/core/memory.rs:454</code>.</td>
+<td>Keep durable task checkpoints and accepted knowledge in Cassy. Preserve the user's native memory settings; test instruction reload and compact/resume against the exact mode. Native summary or rewind is neither a complete delivery checkpoint nor independent proof of filesystem state.</td>
+</tr>
+<tr>
+<td><strong>Test: account intent versus effective authentication</strong></td>
+<td>Explicit account precedes requester account in <code>factory_ops.rs:215</code>; <code>pty.rs:2543</code> removes selected key/OAuth overrides. Official <a href="https://code.claude.com/docs/en/authentication#authentication-precedence">authentication precedence</a> also includes provider, gateway and helper choices.</td>
+<td>Audit with synthetic selectors first, then authorized-owner proof where needed. Do not read credentials or broaden stripping in this research. Account selection grants neither connectors nor proxy routes.</td>
+</tr>
+<tr>
+<td><strong>Adopt: strict native scope plus proxy authorization</strong></td>
+<td>Claude's strict private configuration and denial refusal are at <code>backend/mod.rs:208–240</code>. Proxy decisions check routes/roles before forwarding (<code>cas-mcp-proxy/src/lib.rs:230</code>, <code>:334</code>). <a href="https://code.claude.com/docs/en/managed-mcp">Managed MCP</a> can make a strict launch incompatible with administrator policy.</td>
+<td>Preserve GH1047 and the operator's Neon/Vercel CLI-only directive. Explain incompatibility; never remove strict flags or clear denials silently. Discovery visibility and a declared read route do not authorize a call by themselves.</td>
+</tr>
+<tr>
+<td><strong>Defer: selective native connector contract</strong></td>
+<td>Native-fetched, cloud-delivered and desktop in-process <a href="https://code.claude.com/docs/en/mcp#how-connectors-reach-claude-code">connectors</a> have different enforcement paths. Display names are not secure identities; ordinary allowlists merge. <a href="https://code.claude.com/docs/en/managed-mcp#policy-based-control-with-allowlists-and-denylists">Managed controls</a></td>
+<td>cas-16c0 retains the dedicated-owner/interface question. Require exact identity, operation, transport and enforcement proof. Do not add the rejected always-refused request field, copy profiles, or infer mailbox authority from an explicit directory.</td>
+</tr>
+<tr>
+<td><strong>Test: bounded workflows; defer scheduler replacement</strong></td>
+<td><a href="https://code.claude.com/docs/en/workflows">Workflows</a> can replay work after interruption. <a href="https://code.claude.com/docs/en/scheduled-tasks">Native schedules</a> depend on session lifetime and have missed-fire/expiry behavior. CAS reminder semantics live at <code>factory_remind.rs:95</code>, <code>:435</code>.</td>
+<td>Pilot bounded read-only fan-out inside one assigned task. Keep durable reminders, restart ownership and completion in Cassy. Native success or a restarted transcript is not proof that side effects occurred exactly once.</td>
+</tr>
+<tr>
+<td><strong>Defer: goals as completion authority</strong></td>
+<td><a href="https://code.claude.com/docs/en/goal">/goal</a> evaluates the conversation and can continue turns, pause, fail or clear. Its evaluator does not independently run checks or inspect files.</td>
+<td>A goal may assist one authorized task after separate proof; it cannot replace a verifier, clean blocked/done stop, artifact receipt or external wake policy. Do not add unconditional keep-running behavior.</td>
+</tr>
+<tr>
+<td><strong>Defer: SDK replacement of the interactive backend</strong></td>
+<td>Official <a href="https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode">streaming input</a> supports persistent input, unlike one-shot query. <a href="https://code.claude.com/docs/en/agent-sdk/hooks">SDK hooks</a> have language/async differences; <a href="https://code.claude.com/docs/en/agent-sdk/overview">SDK overview</a> constrains authentication routes.</td>
+<td>An SDK route needs its own supported auth, session, interruption and trust design. Python callback lifecycle support is not identical to TypeScript. Do not move existing subscription-profile PTYs to SDK execution by assumption.</td>
+</tr>
+<tr>
+<td><strong>Defer: plugin/mod packaging migration</strong></td>
+<td><a href="https://code.claude.com/docs/en/plugins/loading">Plugin loading</a> depends on provenance, trust, sync, settings and names; <a href="https://code.claude.com/docs/en/plugins/manifest-reference">manifest components</a> have replacement/merge rules. Current worker traffic settings can suppress account sync.</td>
+<td>Keep managed builtin reconciliation until a concrete packaging benefit is demonstrated. A plugin can execute code; tool rules are not a sandbox for its own process. No install, profile mutation or plugin experiment is authorized here.</td>
+</tr>
+</tbody>
+</table></div>
+<h3>Release window reviewed</h3>
+<p>Every top-level bullet in all 15 published entries from 2.1.286 through the
+installed/latest 2.1.302 was reviewed: <strong>1,266 bullets</strong>. This includes the native
+stable boundary at 2.1.292. Counts were cross-checked between official release
+bodies and the official changelog. The summaries below select Cassy implications;
+they do not claim all bullets require changes.</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Table 5; scroll sideways on small screens"><table>
+<thead>
+<tr>
+<th>Version</th>
+<th style="text-align:right">Bullets</th>
+<th>Relevant additions and disposition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.286">2.1.286</a></td>
+<td style="text-align:right">88</td>
+<td>Resume, mixed-output hooks and agent/workflow delivery fixes merit compatibility checks. Bare mode removes background/reminder capabilities and narrows discovery; do not substitute it for normal factory launch without mode-specific proof.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.287">2.1.287</a></td>
+<td style="text-align:right">106</td>
+<td>Mod extension points arrive alongside async-rewake, heartbeat, background reply and plugin-startup fixes. Test the existing event/output path; defer adopting mods as a replacement for Cassy hooks or delivery.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.288">2.1.288</a></td>
+<td style="text-align:right">89</td>
+<td>Held/delivered distinctions, hook fail-closed fixes, background identity and attended/headless timeout differences matter. Keep transport evidence truthful and test each execution mode separately.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.289">2.1.289</a></td>
+<td style="text-align:right">27</td>
+<td>Mostly mod/plugin stabilization. Teammate event identity may aid observation, but is not CAS task authority or proof that native coordination is an equivalent replacement.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.290">2.1.290</a></td>
+<td style="text-align:right">190</td>
+<td>Hook identity/permission ceilings, schedule restore, message replay and rewritten-input checks affect integration. Preserve holds and permissions; do not infer delivery or side-effect guarantees from version order.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.291">2.1.291</a></td>
+<td style="text-align:right">2</td>
+<td>Repairs cloud permission replies and latest-message persistence on shutdown. Relevant reliability improvements; no new native role/orchestration interface to adopt.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.292">2.1.292</a></td>
+<td style="text-align:right">92</td>
+<td>Invocation-specific effort, marketplace behavior and extensive policy/background/session fixes. This is the observed stable update channel; newer features need their own applicability evidence.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.293">2.1.293</a></td>
+<td style="text-align:right">56</td>
+<td>Compaction, queued messages, agent metadata and managed plugins change; a cloud wakeup recovery change is reverted. Scheduling durability must be established directly rather than assumed monotonic.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.294">2.1.294</a></td>
+<td style="text-align:right">2</td>
+<td>Repairs instruction hooks that allowed intended denials and improves Stop/SubagentStop continuation interpretation. Feed owned canaries; this upstream fix is not a Cassy acceptance receipt.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.295">2.1.295</a></td>
+<td style="text-align:right">143</td>
+<td>Fail-closed hook handling, retries, headless output, MCP reconnection and skill-result/lifetime fixes. Test timeout/malformed-output policy and native role result routing before adoption.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.296">2.1.296</a></td>
+<td style="text-align:right">79</td>
+<td>Subagent compaction windows, workflow model choice, managed hooks, headless MCP and startup ordering change. Test per-mode field applicability; new diagnostics do not prove actual loading.</td>
+</tr>
+<tr>
+<td>2.1.297 / 2.1.298</td>
+<td style="text-align:right">—</td>
+<td>No sections in the official changelog, and official release-tag API returned 404 at retrieval. Source gaps, not invented contents or a claim that an unpublished feature exists.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.299">2.1.299</a></td>
+<td style="text-align:right">190</td>
+<td>Policy-before-MCP-start, name matching, connector redirect, hook serialization and managed precedence hardening. Keep route parsing, launch filtering and execution authorization separate.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.300">2.1.300</a></td>
+<td style="text-align:right">88</td>
+<td>Rewritten hook inputs receive normal validation; MCP, account, worktree and headless resume improve. Test exact payload validation and recorded context; no new runtime claim follows.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.301">2.1.301</a></td>
+<td style="text-align:right">51</td>
+<td>Classifier telemetry and unattended waits expand; skipped workflow success, cleanup and identity races are fixed. Preserve truthful skipped/failed outcomes and bounded waiting.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/anthropics/claude-code/releases/tag/v2.1.302">2.1.302</a></td>
+<td style="text-align:right">63</td>
+<td>Classifier model selection, MCP interoperability, queued config writes and nested/forked agent behavior change. Some headless defaults depend on route/configuration; pass intended mode explicitly and verify effective behavior.</td>
+</tr>
+</tbody>
+</table></div>
+<h3>Common structures with the Codex research</h3>
+<p>The merged <a href="2026-10-17-cas-9ca1-codex-integration-research.md">cas-9ca1 Codex report</a>
+and <a href="2026-10-17-cas-9ca1-codex-integration-research.brief.md">practitioner brief</a>
+independently recommend canonical Cassy authority, native projections and
+contextual evidence. The crosswalk links shared decisions to the counterpart's
+source-specific findings; it does not combine the two coverage counts or imply
+that Codex runtime observations validate Claude behavior.</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Table 6; scroll sideways on small screens"><table>
+<thead>
+<tr>
+<th>Shared area</th>
+<th>Claude decision here</th>
+<th>Codex counterpart</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Durable authority and independent review</td>
+<td><strong>Adopt:</strong> task start, identity, verifier dispatch and independent QA remain Cassy-owned; native completion is an observation.</td>
+<td><a href="2026-10-17-cas-9ca1-codex-integration-research.md#roles-skills-and-independent-verification">Roles, skills and independent verification</a> and <a href="2026-10-17-cas-9ca1-codex-integration-research.md#adopt--test--defer-matrix">adopt/test/defer matrix</a> reach the same boundary for native roles and SubagentStart.</td>
+</tr>
+<tr>
+<td>Effective capabilities, trust and policy</td>
+<td><strong>Adopt/Test:</strong> collect mode-specific evidence; test exact hook behavior and preserve operator trust/disablement.</td>
+<td><a href="2026-10-17-cas-9ca1-codex-integration-research.md#lifecycle-and-trust-adopt-a-bounded-projection">Lifecycle and trust</a> and <a href="2026-10-17-cas-9ca1-codex-integration-research.md#native-readers-preserve-unknowns">native readers</a> distinguish support, requested policy and effective state.</td>
+</tr>
+<tr>
+<td>Shared roles and portable skills</td>
+<td><strong>Adopt/Test:</strong> one canonical body with native projection; test mode-specific loading, field limits and user overrides.</td>
+<td><a href="2026-10-17-cas-9ca1-codex-integration-research.md#roles-skills-and-independent-verification">Roles and skills</a> recommends TOML projection while retaining unowned files and testing discovery.</td>
+</tr>
+<tr>
+<td>Messages, state and interruption recovery</td>
+<td><strong>Adopt/Test/Defer:</strong> keep durable memory in Cassy; test message delivery and compact/resume behavior; defer scheduler replacement and goal authority.</td>
+<td><a href="2026-10-17-cas-9ca1-codex-integration-research.md#transport-and-background-execution-test-before-replacement">Transport and background execution</a> and <a href="2026-10-17-cas-9ca1-codex-integration-research.md#state-compaction-account-and-profile-boundaries">state, compaction, account and profile</a> preserve the same delivery and recovery boundary.</td>
+</tr>
+<tr>
+<td>Account, worktree and MCP/connector policy</td>
+<td><strong>Test/Defer:</strong> test resolved account/trust context; retain Cassy's route authorization; defer native connector or SDK replacement.</td>
+<td><a href="2026-10-17-cas-9ca1-codex-integration-research.md#state-compaction-account-and-profile-boundaries">State and account boundaries</a> and the <a href="2026-10-17-cas-9ca1-codex-integration-research.md#adopt--test--defer-matrix">decision matrix</a> retain identity and enforcement gaps.</td>
+</tr>
+</tbody>
+</table></div>
+<p>A common caller should describe an assigned operation and required safeguards,
+not construct native JSON, socket paths or role frontmatter. Reuse existing
+launch inputs and conformance records before adding interfaces. A future role
+delivery plan can share the canonical body while reporting unsupported native
+fields; delivery should accept a durable message ID and return the observed
+attempt/evidence. Do not combine launch, account selection, message delivery and
+authorization in one module.</p>
+<p>For example, an already-assigned task requests a specialist through the existing
+backend with its resolved model, tools and workspace. The native adapter prepares
+the appropriate role assets and launch. Successful loading is evidence only;
+a child owning assigned implementation work still needs its genuine CAS
+identity and authorized task start. A task-verifier needs its separate sealed
+dispatch. Bounded research delegation can remain within the parent's task
+ownership. A message reply updates delivery evidence without changing task
+ownership or independently closing work.</p>
+<p>The deletion test is concrete: a shared role projection earns its place only
+when deleting it redistributes body/tool-prefix/field/migration rules into both
+sync and launch callers. A delivery seam earns its place only when it removes
+duplicate generation, hold, retry and receipt logic from actual callers. A
+wrapper around one function or a speculative connector registry does not.</p>
+<h2>What we give up</h2>
+<p>The strongest alternative is native-first orchestration: teams, workflows,
+goals and streaming sessions can reduce manual prompt and context plumbing.
+That is a useful pilot hypothesis for bounded work. It also inherits native
+replay, feature rollouts, scope-dependent fields and session persistence. Keep
+its potential benefit separate from an unmeasured speed/cost claim and from
+CAS assignment or independent review.</p>
+<h2>Reversal cost</h2>
+<p>Preserve the current backend and durable records while a native adapter is
+evaluated. Disable a new execution route without moving task ownership,
+rewriting live profiles or converting the queue. Keep canonical role bodies and
+managed-file provenance so an adapter rollback preserves user customization.
+Moving durable ownership into native tasks would make that reversal materially
+harder; no such migration is recommended.</p>
+<h2>Confidence, gaps and next evidence</h2>
+<ul>
+<li><strong>Documented and source-observed:</strong> release/channel metadata, the stated docs
+scopes, concrete source consumers and the retained 2.1.280 receipt. That receipt
+explicitly excludes cloud-skill precedence and long-running MCP backgrounding.</li>
+<li><strong>Not exercised here:</strong> 2.1.292/302 conformance, Stop-context handling, native
+idle wake/framing, plugin/skill precedence, team field behavior, selective
+connectors, SDK auth/session behavior and effective live account policy.</li>
+<li><strong>Existing owner evidence:</strong> cas-d0fe's 21:15 UTC note records a Codex 0.163.0
+SessionStart context and PreToolUse matching canary. Stop and MCP execution
+were not exercised there. This is narrowly attributed owner evidence, not a
+new Claude receipt or proof of the separate idle-wake issue.</li>
+<li><strong>Unavailable pages:</strong> direct <code>.md</code> retrieval returned 403 for commands, tools
+reference, environment variables, feature availability, configuration debug,
+agents overview, directory layout, context window, prompt caching, SDK
+structured output, plugin components and server-managed settings. Goal and
+SDK streaming-input text were recovered separately through Exa and reviewed
+within their listed scope. No missing page is silently marked reviewed.</li>
+<li><strong>Retrieved but unreviewed:</strong> best-practices and common-workflows pages. Other
+English pages and translation indexes remain inventory-only in the coverage
+CSV; language variants were not recursively traversed.</li>
+</ul>
+<p>Implementation owners should reuse authorized conformance work, then prove
+loaded identity/trust, required capability, actual output and failure behavior
+for the precise operation. Local fixtures can establish serialization and
+policy decisions; the external CLI needs a bounded owned run. No new runtime
+PASS, product tests, builds, live configuration changes or 3.63 gate are claimed.</p>
+<h3>Provenance</h3>
+<p>Official sources were retrieved on 17 October 2026, with per-URL UTC timestamps
+in the coverage CSV. Public retrieval used Exa and HTTPS GET; no installer was
+executed. The official installer script itself returned 403 and was not used
+as evidence. The correct npm latest endpoint succeeded after an invalid
+dist-tag endpoint returned 404. Raw retrieval logs and reviewed source snapshots
+remain in the cas-f1ca task artifacts; the portable bundle contains research
+and receipts, not a republished full documentation corpus.</p>
+<p>Source anchors are pinned to Cassy commit
+<code>5e4774024045f19adaddf8da0e7ac1e69d19a9ad</code>. Review used <code>rg</code>, scoped file reads,
+official release JSON bodies and changelog sections. Three independent research
+passes reviewed 500, 374 and 392 release bullets respectively and compared
+minimum, common-caller and flexible interface alternatives. Documentation
+sections were reviewed fully only where the CSV explicitly says so. See the
+adjacent brief for report rendering and QA evidence; none of those browser
+checks are a Claude/Codex product conformance run.</p>
+</main><footer><div class="wrap">Research only · no new runtime acceptance. <a href="cas-f1ca-claude-integration.md">Markdown source</a> · <a href="cas-f1ca-claude-coverage.csv">URL and scope ledger</a></div></footer></body></html>

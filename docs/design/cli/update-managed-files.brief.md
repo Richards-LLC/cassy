@@ -2,11 +2,18 @@
 
 | Field | Contract |
 | --- | --- |
-| First two lines | The managed-files receipt says current, committed, staged or conflicts, with the pending action where needed. |
+| First two lines | The managed-files receipt says current, committed, staged, conflicts or commit failed, with the pending action where needed. |
 | Scannable | One compact managed-files line per project; doctor has one managed file drift finding. |
 | Readable | Staged changes name the existing staged work as the reason; conflicts remain untouched and JSON names their paths. |
-| Machine output | Update adds managed_files with outcome, untracked, staged, commit and conflicts to its existing JSON receipt; doctor returns its existing checks shape. |
+| Machine output | Update adds managed_files with outcome, untracked, staged, commit and conflicts to its existing JSON receipt; a failed commit adds commit_error and outcome commit_failed, while doctor retains its checks shape. |
 | Omitted | Builtin per-path inventories remain in JSON and existing verbose sync details; no push or unrelated project changes enter the repair commit. |
+
+A normal Git hook refusal is a failed managed commit, with its reason, active
+pre-commit path and read-only hook-scope inspection step. The existing failed
+project phase supplies the sweep finding and nonzero final status; standalone
+sync also fails. It never becomes a user file-conflict warning. Hook enforcement
+and the existing summary renderer stay authoritative. User staging remains a
+pending commit for review, and no hook is bypassed or rewritten.
 
 ## Critique
 

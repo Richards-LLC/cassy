@@ -11,109 +11,121 @@ fn create_test_queue() -> (TempDir, SyncQueue) {
 
 #[test]
 fn cas_8095_purge_removes_only_rejected_team_owned_personal_rows() {
-    let (_temp, queue) = create_test_queue();
-    for (id, outcome, reason) in [
-        ("retired-task", "rejected", "team_owned_project"),
-        ("retired-dependency", "rejected", "team_owned_project"),
-        ("other-rejection", "rejected", "revision_conflict"),
-        ("skipped-team-owned", "skipped", "team_owned_project"),
-        ("retryable", "", ""),
+    let (temp, queue) = create_test_queue();
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    let payload = r#"{"id":"duplicate","scope":"project","origin_project":"p","title":"same"}"#;
+    for (id, content) in [
+        ("absent", "unacknowledged"),
+        ("different", "personal"),
+        ("duplicate", "same"),
     ] {
-        let kind = if id == "retired-dependency" {
-            EntityType::TaskDependency
-        } else {
-            EntityType::Task
-        };
+        let value =
+            serde_json::json!({"id": id, "scope":"project", "origin_project":"p", "title":content});
         queue
-            .enqueue(kind, id, SyncOperation::Upsert, Some("{}"))
-            .unwrap();
-        let row = queue
-            .list_all(100)
-            .unwrap()
-            .into_iter()
-            .find(|row| row.entity_id == id)
-            .unwrap();
-        queue
-            .record_row_outcome(row.id, outcome, Some(reason))
+            .enqueue(
+                EntityType::Task,
+                id,
+                SyncOperation::Upsert,
+                Some(&value.to_string()),
+            )
             .unwrap();
     }
-    queue
-        .enqueue_for_team(
-            EntityType::Task,
-            "team-row",
-            SyncOperation::Upsert,
-            Some("{}"),
-            "team-1",
-        )
+    let personal = queue.personal_delivery_snapshots().unwrap();
+    for row in &personal {
+        queue
+            .record_row_outcome(row.id, "rejected", Some("team_owned_project"))
+            .unwrap();
+    }
+    for (id, value) in [
+        (
+            "different",
+            serde_json::json!({"id":"different", "scope":"project", "origin_project":"p", "title":"team"}),
+        ),
+        ("duplicate", serde_json::from_str(payload).unwrap()),
+    ] {
+        queue
+            .enqueue_for_team(
+                EntityType::Task,
+                id,
+                SyncOperation::Upsert,
+                Some(&value.to_string()),
+                "team-1",
+            )
+            .unwrap();
+        let team = queue.pending_for_team("team-1", 10, 5).unwrap().remove(0);
+        queue
+            .acknowledge_team_write(&team, &value, "team-1", "p", &personal)
+            .unwrap();
+    }
+    let preview = queue
+        .purge_team_owned_personal_rejections("team-1", "p", &[], true)
         .unwrap();
-    let team_row = queue
-        .list_all(100)
-        .unwrap()
-        .into_iter()
-        .find(|row| row.entity_id == "team-row")
-        .unwrap();
-    queue
-        .record_row_outcome(team_row.id, "rejected", Some("team_owned_project"))
-        .unwrap();
-    assert_eq!(queue.purge_team_owned_personal_rejections().unwrap(), 2);
-    let survivors = queue.list_all(100).unwrap();
-    assert_eq!(survivors.len(), 4);
-    assert!(survivors.iter().any(|row| row.entity_id == "team-row"));
-    assert!(
-        !survivors
+    assert_eq!(preview.len(), 3);
+    assert_eq!(
+        preview
             .iter()
-            .any(|row| row.entity_id.starts_with("retired-"))
+            .filter(|row| row.eligible)
+            .map(|row| row.entity_id.as_str())
+            .collect::<Vec<_>>(),
+        ["duplicate"]
     );
-    assert_eq!(queue.purge_team_owned_personal_rejections().unwrap(), 0);
+    assert_eq!(
+        queue.personal_row_count().unwrap(),
+        3,
+        "preview never mutates"
+    );
+    assert!(
+        queue
+            .purge_team_owned_personal_rejections("team-1", "p", &[], false)
+            .is_err(),
+        "no unscoped cleanup"
+    );
+    let ids = personal.iter().map(|row| row.id).collect::<Vec<_>>();
+    queue
+        .purge_team_owned_personal_rejections("team-1", "p", &ids, false)
+        .unwrap();
+    let survivors = queue.personal_delivery_snapshots().unwrap();
+    assert_eq!(
+        survivors
+            .iter()
+            .map(|row| row.entity_id.as_str())
+            .collect::<Vec<_>>(),
+        ["absent", "different"]
+    );
+    assert!(
+        queue.list_metadata().unwrap().is_empty(),
+        "successful cleanup removes receipt atomically"
+    );
 }
 
-/// cas-25c1: the mismatch count is exactly the set the purge would remove:
-/// personal rows the cloud rejected as `team_owned_project`. Team rows, other
-/// rejection reasons and merely skipped rows are not the team-only mismatch.
+/// Ownership mismatch counts remain policy diagnostics, not cleanup authority.
 #[test]
 fn cas_25c1_team_owned_rejection_count_matches_the_purge_scope() {
     let (_temp, queue) = create_test_queue();
-    for (id, outcome, reason) in [
-        ("owned-a", "rejected", "team_owned_project"),
-        ("owned-b", "rejected", "team_owned_project"),
-        ("orphan", "rejected", "orphan_dependency"),
-        ("skipped-owned", "skipped", "team_owned_project"),
+    for (id, reason) in [
+        ("owned-a", "team_owned_project"),
+        ("owned-b", "team_owned_project"),
+        ("orphan", "orphan_dependency"),
     ] {
         queue
             .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some("{}"))
             .unwrap();
         let row = queue
-            .list_all(100)
+            .personal_delivery_snapshots()
             .unwrap()
             .into_iter()
             .find(|row| row.entity_id == id)
             .unwrap();
         queue
-            .record_row_outcome(row.id, outcome, Some(reason))
+            .record_row_outcome(row.id, "rejected", Some(reason))
             .unwrap();
     }
-    queue
-        .enqueue_for_team(
-            EntityType::Task,
-            "team-row",
-            SyncOperation::Upsert,
-            Some("{}"),
-            "team-1",
-        )
-        .unwrap();
-    let team_row = queue
-        .list_all(100)
-        .unwrap()
-        .into_iter()
-        .find(|row| row.entity_id == "team-row")
-        .unwrap();
-    queue
-        .record_row_outcome(team_row.id, "rejected", Some("team_owned_project"))
-        .unwrap();
-
     assert_eq!(queue.team_owned_personal_rejection_count().unwrap(), 2);
-    assert_eq!(queue.purge_team_owned_personal_rejections().unwrap(), 2);
-    assert_eq!(queue.team_owned_personal_rejection_count().unwrap(), 0);
+    let rows = queue
+        .purge_team_owned_personal_rejections("team-1", "p", &[], true)
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| !row.eligible));
 }
 
 #[test]
@@ -256,9 +268,14 @@ fn queued_user_prompts_are_dropped_across_personal_and_team_scopes() {
 
 #[test]
 fn team_only_neutralizes_project_copies_without_deleting_personal_rows() {
-    let (_temp, queue) = create_test_queue();
+    let (temp, queue) = create_test_queue();
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     for (kind, id, payload) in [
-        (EntityType::Task, "project-task", r#"{"scope":"project"}"#),
+        (
+            EntityType::Task,
+            "project-task",
+            r#"{"scope":"project","origin_project":"p"}"#,
+        ),
         (EntityType::Task, "global-task", r#"{"scope":"global"}"#),
         (
             EntityType::Entry,
@@ -281,7 +298,7 @@ fn team_only_neutralizes_project_copies_without_deleting_personal_rows() {
             EntityType::Task,
             "project-task",
             SyncOperation::Upsert,
-            Some(r#"{"scope":"project"}"#),
+            Some(r#"{"scope":"project","origin_project":"p"}"#),
             "team-1",
         )
         .unwrap();
@@ -303,13 +320,58 @@ fn team_only_neutralizes_project_copies_without_deleting_personal_rows() {
         )
         .unwrap();
 
-    assert_eq!(queue.neutralize_team_only_personal().unwrap(), 4);
-    assert_eq!(queue.personal_row_count().unwrap(), 2);
+    assert_eq!(
+        queue.neutralize_team_only_personal("team-1", "p").unwrap(),
+        0
+    );
+    assert_eq!(queue.personal_row_count().unwrap(), 6);
     let personal = queue.pending(10, 5).unwrap();
-    assert_eq!(personal.len(), 2);
+    assert_eq!(personal.len(), 6);
     assert!(personal.iter().any(|row| row.entity_id == "global-task"));
     assert!(personal.iter().any(|row| row.entity_id == "private-entry"));
     assert_eq!(queue.pending_for_team("team-1", 10, 5).unwrap().len(), 2);
+    let team = queue
+        .pending_for_team("team-1", 10, 5)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.entity_id == "project-task")
+        .unwrap();
+    let value = serde_json::from_str(team.payload.as_deref().unwrap()).unwrap();
+    let before_http = queue.personal_delivery_snapshots().unwrap();
+    queue
+        .acknowledge_team_write(&team, &value, "team-1", "p", &before_http)
+        .unwrap();
+    drop(queue);
+    let queue = SyncQueue::open(temp.path()).unwrap();
+    queue.init().unwrap();
+    assert_eq!(
+        queue
+            .neutralize_team_only_personal("other-team", "p")
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        queue
+            .neutralize_team_only_personal("team-1", "other-project")
+            .unwrap(),
+        0
+    );
+    queue.enqueue(EntityType::Task, "project-task", SyncOperation::Upsert,
+        Some(r#"{"scope":"project","origin_project":"p","title":"changed after acknowledgment"}"#)).unwrap();
+    assert_eq!(
+        queue.neutralize_team_only_personal("team-1", "p").unwrap(),
+        0,
+        "a durable receipt cannot authorize a changed snapshot after restart"
+    );
+    assert_eq!(queue.personal_row_count().unwrap(), 6);
+    queue.enqueue(EntityType::Task, "project-task", SyncOperation::Upsert, team.payload.as_deref()).unwrap();
+    assert_eq!(queue.neutralize_team_only_personal("team-1", "p").unwrap(), 0,
+        "an old receipt cannot authorize a newly queued identical payload at the reused row ID");
+    assert_eq!(
+        queue.list_metadata().unwrap().len(),
+        1,
+        "ambiguous receipt is retained"
+    );
 }
 
 #[test]

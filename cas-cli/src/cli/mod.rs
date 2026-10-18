@@ -105,7 +105,7 @@ pub use setup::SetupArgs;
 pub use status::StatusArgs;
 pub use statusline::StatusLineArgs;
 pub use sync::SyncCommands;
-pub use update::UpdateArgs;
+pub use update::{UpdateArgs, startup_config_notices};
 pub use viktor::ViktorArgs;
 
 /// Build version string including git hash and date

@@ -36,6 +36,39 @@ fn activity() -> Option<String> {
     ACTIVITY.lock().ok().and_then(|slot| slot.clone())
 }
 
+/// The phase that holds the terminal without capturing it (it may prompt),
+/// so work inside it can still draw a live line once its prompt is answered.
+struct OpenPhase {
+    mode: OutputMode,
+    counter: String,
+    label: String,
+}
+
+static OPEN_PHASE: Mutex<Option<OpenPhase>> = Mutex::new(None);
+
+/// Record (or, with `None`, clear) the uncaptured phase now running.
+pub(super) fn set_open_phase(phase: Option<(OutputMode, String, String)>) {
+    if let Ok(mut slot) = OPEN_PHASE.lock() {
+        *slot = phase.map(|(mode, counter, label)| OpenPhase { mode, counter, label });
+    }
+}
+
+/// Redraw the open phase's line with `doing` until the guard drops
+/// (cas-70a8: the download after an interactive confirmation). Nothing is
+/// drawn when stdout cannot animate or no uncaptured phase is open.
+pub(super) fn during_open_phase(doing: impl Into<String>) -> Option<LiveLine> {
+    if !can_animate() {
+        return None;
+    }
+    let (mode, counter, label) = {
+        let slot = OPEN_PHASE.lock().ok()?;
+        let phase = slot.as_ref()?;
+        (phase.mode, phase.counter.clone(), phase.label.clone())
+    };
+    let terminal = super::terminal_handle()?;
+    Some(LiveLine::start(terminal, mode, counter, label, doing.into()))
+}
+
 /// Phase lines align on these columns: mark, counter, label, text, elapsed.
 const LABEL_CELLS: usize = 14;
 const LINE_CELLS: usize = 80;

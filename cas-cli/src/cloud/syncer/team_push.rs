@@ -156,6 +156,10 @@ impl CloudSyncer {
             .pending_for_team(team_id, usize::MAX, self.config.max_retries)?;
 
         if queued.is_empty() {
+            if self.cloud_config.team_only {
+                self.queue
+                    .neutralize_team_only_personal(team_id, &self.personal_push_project_id()?)?;
+            }
             result.duration_ms = start.elapsed().as_millis() as u64;
             return Ok(result);
         }
@@ -297,6 +301,13 @@ impl CloudSyncer {
             }
         }
 
+        // Retire personal copies only after durable, itemized delivery proof.
+        // Both explicit CLI sync and background sync drain through this path.
+        if self.cloud_config.team_only {
+            self.queue
+                .neutralize_team_only_personal(team_id, &project_id)?;
+        }
+
         // Update team sync timestamp on success
         if result.errors.is_empty() {
             let _ = self.queue.set_metadata(
@@ -435,11 +446,20 @@ impl CloudSyncer {
             let (batch_items, values): (Vec<&QueuedSync>, Vec<serde_json::Value>) =
                 sub_batch.into_iter().unzip();
             let sent_count = values.len();
+            // Capture before HTTP. A concurrent personal mutation must not gain
+            // deletion authority from this older request's acknowledgment.
+            let personal_snapshots = match self.queue.personal_delivery_snapshots() {
+                Ok(snapshots) => snapshots,
+                Err(error) => {
+                    errors.push(format!("could not capture delivery snapshots: {error}"));
+                    continue;
+                }
+            };
 
             match self.push_team_sub_batch(
                 team_id,
                 entity_key,
-                values,
+                values.clone(),
                 token,
                 &target_project,
                 git_remote,
@@ -462,6 +482,13 @@ impl CloudSyncer {
                                     entity_key,
                                     raw_response,
                                     rows,
+                                    &values,
+                                    &personal_snapshots,
+                                    team_id,
+                                    &target_project,
+                                    body.canonical_id
+                                        .as_deref()
+                                        .is_none_or(|id| id == target_project),
                                     &mut synced,
                                     &mut errors,
                                 );
@@ -637,16 +664,40 @@ impl CloudSyncer {
         entity_key: &str,
         raw_response: &str,
         rows: HashMap<String, PushRowResult>,
+        transmitted: &[serde_json::Value],
+        personal_snapshots: &[QueuedSync],
+        team_id: &str,
+        project_id: &str,
+        canonical_unchanged: bool,
         synced: &mut usize,
         errors: &mut Vec<String>,
     ) {
         let mut rejected = Vec::new();
-        for item in batch_items {
+        for (item, value) in batch_items.iter().zip(transmitted) {
             let row = rows
                 .get(&item.entity_id)
                 .expect("row_results_for validates every queue identity");
             if row.acknowledges() {
-                let _ = self.queue.mark_synced(item.id);
+                let result = if canonical_unchanged
+                    && matches!(
+                        row.outcome,
+                        crate::cloud::syncer::PushRowOutcome::Inserted
+                            | crate::cloud::syncer::PushRowOutcome::Updated
+                    ) {
+                    self.queue.acknowledge_team_write(
+                        item,
+                        value,
+                        team_id,
+                        project_id,
+                        personal_snapshots,
+                    )
+                } else {
+                    self.queue.mark_synced(item.id)
+                };
+                if let Err(error) = result {
+                    errors.push(format!("could not persist team delivery: {error}"));
+                    continue;
+                }
                 *synced += 1;
                 continue;
             }

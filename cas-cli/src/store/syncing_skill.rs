@@ -48,11 +48,7 @@ impl SyncingSkillStore {
             Err(_) => return,
         };
 
-        if self.team_only && eligible_for_team_skill(skill) {
-            let _ = self
-                .queue
-                .drop_personal_queued_push_for(EntityType::Skill, &skill.id);
-        } else {
+        if !(self.team_only && eligible_for_team_skill(skill)) {
             let _ = self.queue.enqueue(
                 EntityType::Skill,
                 &skill.id,
@@ -75,11 +71,7 @@ impl SyncingSkillStore {
     }
 
     fn queue_delete(&self, id: &str, team_eligible: bool) {
-        if self.team_only && team_eligible {
-            let _ = self
-                .queue
-                .drop_personal_queued_push_for(EntityType::Skill, id);
-        } else {
+        if !(self.team_only && team_eligible) {
             let _ = self
                 .queue
                 .enqueue(EntityType::Skill, id, SyncOperation::Delete, None);

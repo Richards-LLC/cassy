@@ -59,13 +59,20 @@ describe("operator inbox controller", () => {
     const machine = await cloud.enrollMachine("hub", [], await exportPublicKey((await generateKeyPair()).publicKey));
     cloud.presence.set(machine.id, { monitoring: "enabled", monitoring_generation: "1", presence: "unobserved" });
     const transport = cloud.fetchFor(PAGE_ORIGIN);
+    let feedUnavailable = true;
     const inbox = new OperatorInboxController({ origin: cloud.baseUrl, store: new MemoryInboxStore(), pageOrigin: PAGE_ORIGIN, fetch: (input, init) => {
-      if (new URL(String(input)).pathname === "/api/operator/feed") throw new TypeError("feed unavailable");
+      if (feedUnavailable && new URL(String(input)).pathname === "/api/operator/feed") throw new TypeError("feed unavailable");
       return transport(input, init);
     } });
     await signIn(cloud, inbox);
+    expect((await inbox.snapshot()).replay?.kind).toBe("loading");
     await inbox.runOnce();
     expect((await inbox.snapshot()).presence?.machines[0].presence).toBe("unobserved");
+    expect((await inbox.snapshot()).replay).toMatchObject({ kind: "unavailable", reason: expect.stringContaining("history") });
+    expect(inbox.current().kind).toBe("ready"); // Authentication still drives the retry loop.
+    feedUnavailable = false;
+    await inbox.runOnce();
+    expect((await inbox.snapshot()).replay?.kind).toBe("ready");
   });
 
   it("keeps a presence-revoked device signed out after its replay round", async () => {
@@ -179,7 +186,7 @@ describe("operator inbox controller", () => {
     expect((await controller(cloud, store).load()).kind).toBe("ready");
   });
 
-  it.each([undefined, `${PAGE_ORIGIN}/`])("replays history and disables reply upgrades when grants/me origin is %s", async (origin) => {
+  it.each([undefined, `${PAGE_ORIGIN}/`, "HTTP500"])("replays history and disables reply upgrades when grants/me is %s", async (origin) => {
     const cloud = new OperatorCloudDouble();
     cloud.replyGrants.enabled = true;
     await cloud.appendSessionEvent({ hubId: "h", projectId: "p", sessionId: "s", plaintext: { type: "cas.operator.turn", v: 1, snapshot: { prompt_id: 1 } } });
@@ -190,7 +197,8 @@ describe("operator inbox controller", () => {
     expect((await inbox.snapshot()).replyGrants!.supported).toBe(true);
     const trusted = store.identity;
     const original = inbox.client.request.bind(inbox.client);
-    vi.spyOn(inbox.client, "request").mockImplementation(async options => {
+    if (origin === "HTTP500") cloud.faults.push({ method: "GET", pathPrefix: "/api/operator/grants/me", status: 500, code: "internal_error", times: 2 });
+    else vi.spyOn(inbox.client, "request").mockImplementation(async options => {
       const response = await original(options);
       if (options.path === "/api/operator/grants/me") {
         const grant = { ...(response.grant as Record<string, unknown>) };
@@ -202,14 +210,19 @@ describe("operator inbox controller", () => {
     });
     const seen: number[] = [];
     inbox.subscribe((snapshot) => seen.push(snapshot.events.length));
-    expect(await inbox.runOnce()).toBe(5000);
+    const delay = await inbox.runOnce();
     expect(seen.at(-1)).toBe(1);
+    expect(delay).toBe(5000);
     expect(inbox.current().kind).toBe("ready");
     expect((await inbox.snapshot()).replyGrants!.supported).toBe(false);
     expect(store.identity).toBe(trusted);
+    await cloud.appendSessionEvent({ hubId: "h", projectId: "p", sessionId: "s", plaintext: { type: "cas.operator.turn", v: 1, snapshot: { prompt_id: 2 } } });
+    await inbox.runOnce();
+    expect((await inbox.snapshot()).events).toHaveLength(2);
+    expect((await inbox.snapshot()).replyGrants!.supported).toBe(false);
   });
 
-  it("wipes this profile's inbox when the device is revoked", async () => {
+  it.each([null, "grant_revoked", "grant_expired", "grant_unknown"])("wipes this profile's inbox on authoritative device revocation: %s", async (code) => {
     const cloud = new OperatorCloudDouble();
     const store = new MemoryInboxStore();
     const inbox = controller(cloud, store);
@@ -218,7 +231,8 @@ describe("operator inbox controller", () => {
     await inbox.runOnce();
     const accountId = store.identity!.accountId;
     expect(await store.events(accountId, "1")).toHaveLength(1);
-    await cloud.revokeDevice(store.identity!.deviceId);
+    if (code) cloud.faults.push({ method: "GET", pathPrefix: "/api/operator/grants/me", status: 401, code, times: 1 });
+    else await cloud.revokeDevice(store.identity!.deviceId);
     await inbox.runOnce();
     expect(inbox.current()).toMatchObject({ kind: "revoked" });
     expect(store.identity).toBeNull();

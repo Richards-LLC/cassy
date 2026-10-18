@@ -5374,7 +5374,22 @@ impl CasCore {
             .as_deref()
             .expect("missing receipt list checked reference")
             .trim();
-        validate_negative_result_reference(reference)
+        // cas-3d72: this declaration belongs only to the successful evidence
+        // disposition. Negative-result references retain their exact grammar.
+        let validation_reference = if flag == "evidence_only"
+            && let Some(proof) = reference.strip_prefix("never-merge:")
+        {
+            if !proof.starts_with("branch:") || reference.len() > 512 {
+                return Err("EVIDENCE ONLY CLOSE REJECTED: use never-merge:branch:<proof-ref> (at most 512 bytes) for a workflow-only non-delivery declaration.".into());
+            }
+            if req.commit_receipt.is_some() {
+                return Err("EVIDENCE ONLY CLOSE REJECTED: a never-merge proof declaration cannot also supply a product commit_receipt.".into());
+            }
+            proof
+        } else {
+            reference
+        };
+        validate_negative_result_reference(validation_reference)
             .map_err(|error| format!("{label} CLOSE REJECTED: {}", error.to_string().replace("negative_result", flag)))?;
 
         Ok(Some(NonIntegrationCloseReceipt {
@@ -7950,8 +7965,8 @@ impl CasCore {
             Err(_) if !close_repo_verified && worker_worktree_path.is_none() => String::new(),
             Err(message) => return Ok(Self::tool_error(message)),
         };
-        let measured_evidence = if evidence_only_receipt.is_some() {
-            match evidence_only::measure(&close_project_root, &task, &resolved_parent_branch) {
+        let measured_evidence = if let Some(receipt) = evidence_only_receipt.as_ref() {
+            match evidence_only::measure(&close_project_root, &task, &resolved_parent_branch, &receipt.reference) {
                 Ok(measured) => Some(measured),
                 Err(message) => return Ok(Self::tool_error(format!("EVIDENCE ONLY CLOSE REJECTED: {message}"))),
             }
@@ -10234,6 +10249,10 @@ impl CasCore {
         task.closed_at = Some(now);
         task.updated_at = now;
         task.deliverables.pre_close_hook = declared_hook_evidence;
+        if let Some(audit) = measured_evidence.as_ref().and_then(|measured| measured.audit.as_deref()) {
+            let note = format!("[{}] DECISION: {audit}", now.format("%Y-%m-%d %H:%M"));
+            task.notes = if task.notes.is_empty() { note } else { format!("{}\n\n{note}", task.notes) };
+        }
         // GH #1151: an earlier park could anchor a no-code task to the
         // worker lane's other-task delivery. Every recorded anchor was shown
         // to be another task's, so none survives as this task's delivery
@@ -21870,9 +21889,7 @@ fn stale_rebased_anchor_rejection(
             , tool_prefix = crate::mcp::tools::core::guidance::caller_prefix())
         })
         .unwrap_or_else(|| {
-            format!(
-                " Resolve the current worker branch tip, merge it into `{parent_branch}`, and retry close with `{tool_prefix}task action=close id={task_id} commit_receipt=<current tip>`."
-            , tool_prefix = crate::mcp::tools::core::guidance::caller_prefix())
+            " No task-owned replacement tip was established; the shared checkout's HEAD is not a delivery receipt.".to_string()
         });
     format!(
         "PRE-CLOSE HOOK CONTEXT REJECTED: recorded task anchor `{parked_anchor}` is no longer reachable from the validated task worktree branch after a history rewrite. No close-time executable gate was run. {retry}\n\nIf the current tip cannot be merged or its task attribution is unclear, ask the supervisor to verify the delivery and re-anchor/reconcile task `{task_id}` before retrying close."
@@ -22104,8 +22121,16 @@ pub(crate) fn run_declared_pre_close_hook(
             } else {
                 measure_ref.trim_start_matches("origin/").to_string()
             };
-            let own_tip = || own_ref.as_deref().and_then(|own| resolve_branch_sha(path, own));
             let parked_anchor = task.deliverables.factory_branch_anchor.as_deref();
+            let own_tip = || own_ref.as_deref()
+                .and_then(|own| resolve_branch_sha(path, own))
+                .filter(|tip| {
+                    // A shared checkout may now belong to another task. Its
+                    // subject's ownership wins over incidental body mentions.
+                    !task_attribution::commit_claims_another_task(
+                        path, tip, &task_commit_identity(task, None),
+                    ) && task_tip_has_non_empty_attributed_diff(path, task, tip, parked_anchor)
+                });
             let mut reanchored = false;
             let tip = normalized_receipt
                 .clone()

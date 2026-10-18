@@ -28,6 +28,7 @@ mod backlog_hygiene;
 mod idle_sync;
 mod slack_transport;
 mod communication;
+mod git_hooks;
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
@@ -274,6 +275,7 @@ impl CheckGroup {
             | "mcp upstream reachability"
             | "sync target"
             | "models"
+            | "git hooks path"
             | "sessionstart budget" => Self::Config,
             "issue repositories" | "shipped issues" => Self::Config,
             "integrations" | "violet" | "violet wake" | "github origin" => Self::Integrations,
@@ -2485,6 +2487,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     recorder.mark("host checks", &checks);
     if let Some(check) = github_origin_check(project_root) { checks.push(check); }
     recorder.mark("GitHub origin", &checks);
+    checks.extend(git_hooks::checks(project_root));
+    recorder.mark("Git hooks path", &checks); // doctor-snapshot: no default row (core.hooksPath unset)
     checks.push(managed_file_drift_check(project_root));
     recorder.mark("managed file drift", &checks);
     checks.push(prompt_hook_check(&cas_root));
@@ -5836,8 +5840,16 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         .collect::<Vec<_>>()
         .join(", ");
     let registration_conflicts = cloud_queue_registration_conflicts(&conn);
-    let remediation = "Run `cas cloud queue --retry`, then `cas cloud push` to deliver pending work; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately.";
     let rejections = cloud_queue_rejections(&conn);
+    let remediation = if rejections.is_empty()
+        || rejections
+            .iter()
+            .any(|(reason, _)| crate::cloud::push_rejection_is_retryable(reason))
+    {
+        "Run `cas cloud queue --retry`, then `cas cloud push` to deliver pending work; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately."
+    } else {
+        "Run `cas cloud push` to deliver other pending work; resolve the rejection-specific blockers below before retrying their rows; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately."
+    };
 
     if !registration_conflicts.is_empty() {
         let parked = registration_conflicts
@@ -6330,7 +6342,7 @@ mod tests {
         assert!(
             check
                 .message
-                .contains("cas config set cloud.team_only true"),
+                .contains("not proof of an equivalent remote copy"),
             "{}",
             check.message
         );
@@ -8618,6 +8630,24 @@ mod tests {
             "a row with no cloud verdict is not a rejection: {}",
             check.message
         );
+
+        for (reason, retry_now) in [
+            ("invalid_json_nul", false),
+            ("version_gate", false),
+            ("unknown_server_reason", false),
+            ("timeout", true),
+        ] {
+            conn.execute("UPDATE sync_queue SET last_reason = ?1 WHERE id IN (1, 2)", [reason]).unwrap();
+            let check = cloud_queue_check(&cas_root);
+            assert!(matches!(check.status, CheckStatus::Warning));
+            assert_eq!(
+                check.message.contains("Run `cas cloud queue --retry`, then"),
+                retry_now,
+                "{reason}: blocked-only rejection advice must not prescribe an immediate broad retry: {}", check.message
+            );
+            assert!(check.message.contains(crate::cloud::push_reason_hint(reason)), "{}", check.message);
+            assert!(check.message.contains("cas cloud push"), "other pending work still needs a push: {}", check.message);
+        }
     }
 
     #[test]

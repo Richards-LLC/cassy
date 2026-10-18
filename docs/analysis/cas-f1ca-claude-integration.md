@@ -27,10 +27,12 @@ claim of the fastest or cheapest implementation.
 ## Decision context
 
 The 3.64 supervisor decides which follow-ups to authorize after this research.
-The diary owner, cas-558a, receives the release coverage; cas-9ca1 supplies the
-Codex comparison. cas-d0fe owns hook/trust canaries and cas-6c54 owns native role
-and capability work. This task changes none of those implementations and
-starts no account, connector, harness or factory session.
+This research feeds the cas-558a diary and the 3.64 plan. The merged
+[cas-9ca1 Codex research](2026-10-17-cas-9ca1-codex-integration-research.md)
+is a comparison source; the diary and plan are the only planned consumers.
+Hook/trust canaries remain with cas-d0fe, and native role/capability work remains
+with cas-6c54. This task changes none of those implementations and starts no
+account, connector, harness or factory session.
 
 ### Version and source evidence
 
@@ -42,6 +44,13 @@ starts no account, connector, harness or factory session.
 | Native stable channel | 2.1.292 | [Stable feed](https://downloads.claude.ai/claude-code-releases/stable) |
 | Installed executable target | `~/.local/share/claude/versions/2.1.302` | Local symlink inspection only; no CLI invocation |
 | Retained Cassy conformance | 2.1.280, dated 23 September 2026 | `crates/cas-pty/conformance/claude-code-2.1.280-2026-09-23.json` |
+
+Freshness recheck on 18 October 2026 confirmed the official release API and npm
+latest remain 2.1.302, while the native latest and stable feeds remain 2.1.302
+and 2.1.292. No release was published after the reviewed 2.1.302 entry. The
+four endpoint timestamps are recorded as separate metadata rows in the coverage
+CSV. This check updates release/channel currency only; the rolling documentation
+page reads remain explicitly dated 17 October.
 
 Latest non-prerelease and the native updater's stable channel are different
 claims. Official setup documents separate channels and version floors. Keep a
@@ -136,10 +145,20 @@ they do not claim all bullets require changes.
 
 ### Common structures with the Codex research
 
-cas-9ca1 independently recommends canonical Cassy authority, native projections
-and contextual evidence. Its source review distinguishes native feature support
-from effective configuration and treats app-server RPC as a separate pilot.
-That comparison is research from its owner, not a Codex execution result here.
+The merged [cas-9ca1 Codex report](2026-10-17-cas-9ca1-codex-integration-research.md)
+and [practitioner brief](2026-10-17-cas-9ca1-codex-integration-research.brief.md)
+independently recommend canonical Cassy authority, native projections and
+contextual evidence. The crosswalk links shared decisions to the counterpart's
+source-specific findings; it does not combine the two coverage counts or imply
+that Codex runtime observations validate Claude behavior.
+
+| Shared area | Claude decision here | Codex counterpart |
+| --- | --- | --- |
+| Durable authority and independent review | **Adopt:** task start, identity, verifier dispatch and independent QA remain Cassy-owned; native completion is an observation. | [Roles, skills and independent verification](2026-10-17-cas-9ca1-codex-integration-research.md#roles-skills-and-independent-verification) and [adopt/test/defer matrix](2026-10-17-cas-9ca1-codex-integration-research.md#adopt--test--defer-matrix) reach the same boundary for native roles and SubagentStart. |
+| Effective capabilities, trust and policy | **Adopt/Test:** collect mode-specific evidence; test exact hook behavior and preserve operator trust/disablement. | [Lifecycle and trust](2026-10-17-cas-9ca1-codex-integration-research.md#lifecycle-and-trust-adopt-a-bounded-projection) and [native readers](2026-10-17-cas-9ca1-codex-integration-research.md#native-readers-preserve-unknowns) distinguish support, requested policy and effective state. |
+| Shared roles and portable skills | **Adopt/Test:** one canonical body with native projection; test mode-specific loading, field limits and user overrides. | [Roles and skills](2026-10-17-cas-9ca1-codex-integration-research.md#roles-skills-and-independent-verification) recommends TOML projection while retaining unowned files and testing discovery. |
+| Messages, state and interruption recovery | **Adopt/Test/Defer:** keep durable memory in Cassy; test message delivery and compact/resume behavior; defer scheduler replacement and goal authority. | [Transport and background execution](2026-10-17-cas-9ca1-codex-integration-research.md#transport-and-background-execution-test-before-replacement) and [state, compaction, account and profile](2026-10-17-cas-9ca1-codex-integration-research.md#state-compaction-account-and-profile-boundaries) preserve the same delivery and recovery boundary. |
+| Account, worktree and MCP/connector policy | **Test/Defer:** test resolved account/trust context; retain Cassy's route authorization; defer native connector or SDK replacement. | [State and account boundaries](2026-10-17-cas-9ca1-codex-integration-research.md#state-compaction-account-and-profile-boundaries) and the [decision matrix](2026-10-17-cas-9ca1-codex-integration-research.md#adopt--test--defer-matrix) retain identity and enforcement gaps. |
 
 A common caller should describe an assigned operation and required safeguards,
 not construct native JSON, socket paths or role frontmatter. Reuse existing

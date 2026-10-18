@@ -7,7 +7,9 @@ recommendation. No new product or design framework is introduced.
 ## Single idea
 
 Keep durable task and review authority in Cassy while projecting supported
-roles and events into native harness implementations.
+roles and events into native harness implementations. The companion
+[cas-9ca1 Codex report](2026-10-17-cas-9ca1-codex-integration-research.md)
+provides a linked crosswalk of shared boundaries and harness-specific evidence.
 
 ## Hero form
 
@@ -57,7 +59,7 @@ corpora are not republished. The report creates no 3.63 release dependency.
 | Fit to argument | 5 | The single solid authority bar stays above both optional execution branches; the geometry states the recommendation. |
 | Hierarchy | 4 | One verdict leads; the source ledger and comparison follow below the rule. On phone, the evidence caption adds height before the context paragraph. |
 | Craft | 4 | Strict visual-QA PASS, six captures, zero findings or allowlists. Long matrix rows require deliberate horizontal table scrolling at phone width. |
-| Accessibility | 5 | Light/dark, 390px, visible 3px keyboard focus, JS-disabled content, offline reading and all eleven printed pages preserve the report. |
+| Accessibility | 5 | Light/dark, 390px, visible 3px keyboard focus, JS-disabled content, offline reading and all twelve printed pages preserve the report. |
 
 Scored by true-lynx-17 on 17 October 2026 after Chrome and print inspection.
 Independent common-caller reviewer, 17 October 2026: distinctiveness 5,
@@ -71,19 +73,22 @@ checks cover those corrections; the second reviewer did not repeat checks.
 
 VERIFIED report-only evidence in the cas-f1ca task artifacts:
 
-- `verify-research.py`: PASS; 262 CSV rows, 239 unique documentation URLs;
+- `verify-research.py`: PASS; 266 CSV rows, including four 18 October release
+  and channel freshness checks, 239 unique documentation URLs;
   3 full and 32 scoped reviews, 12 unavailable, 2 fetched but not reviewed,
   190 inventory-only. Fifteen release bodies and changelog sections agree on
-  1,266 bullets; 2.1.297/298 remain source gaps. Sixteen decision rows.
-- `visual-qa/visual-qa.md` and `visual-qa-844/visual-qa.md`: strict PASS,
+  1,266 bullets; 2.1.297/298 remain source gaps. Sixteen decision rows and a
+  five-area crosswalk to the merged Codex report.
+- `visual-qa/visual-qa.md` and `visual-qa-844/visual-qa.md`: strict PASS after
+  the crosswalk update,
   six light/dark captures at 1280×800, 390×800 and 390×844; zero findings,
   zero allowlists. No report JavaScript or network dependencies.
 - `browser/receipt.json`: Chrome 155.0.8059.84, Playwright 1.64.1; four
   first screens, complete Markdown/main-text fidelity, seven sections,
-  five keyboard-focusable table regions and 48 links. No page overflow,
-  page errors or external requests. JS-disabled offline reading retains all.
-- `print-a4/receipt.json`: eleven A4 pages, zero printable-bounds findings;
-  all eleven page images inspected, repeated headers and complete rows retained.
+  six keyboard-focusable table regions and 60 links. No page overflow, page
+  errors or external requests. JS-disabled offline reading retains all.
+- `print-a4-final-20261018-r2/receipt.json`: twelve A4 pages, zero printable-bounds findings;
+  all twelve page images inspected, repeated headers and complete rows retained.
   The PDF is a research print preview, not a release report or runtime proof.
 
 Markdown lint and clean diff checks are recorded with the delivery receipt.

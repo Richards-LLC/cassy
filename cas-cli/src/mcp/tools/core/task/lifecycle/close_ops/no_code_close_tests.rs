@@ -18,6 +18,97 @@ const LANE: &str = "factory/nocode-worker";
 const OTHER: &str = "fix(cas-a0b1): another task's delivery";
 const PROOF: &str = "https://example.test/deploys/month";
 
+/// cas-3d72: throwaway native-proof workflows are explicitly non-delivery;
+/// neither their stale anchor nor the worker's next task may become a merge.
+#[tokio::test]
+async fn never_merge_workflow_proof_closes_without_foreign_delivery_cas_3d72() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let repo = f.dir.path();
+    let id = "cas-3d72";
+    let proof_branch = "factory/native-macos-proof";
+    let standby_branch = format!("{LANE}-{id}");
+    git(repo, &["checkout", "-q", "-b", proof_branch, "main"]);
+    std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
+    std::fs::write(repo.join(".github/workflows/proof.yml"), "name: native proof\n").unwrap();
+    git(repo, &["add", ".github/workflows/proof.yml"]);
+    git(repo, &["commit", "-q", "-m", "test(cas-3d72): throwaway native proof"]);
+    let proof_tip = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["push", "-q", "origin", proof_branch]);
+    git(repo, &["checkout", "-q", "-b", &standby_branch, "main"]);
+    std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
+    std::fs::write(repo.join(".github/workflows/proof.yml"), "name: unused standby\n").unwrap();
+    git(repo, &["add", ".github/workflows/proof.yml"]);
+    git(repo, &["commit", "-q", "-m", "test(cas-3d72): unused proof standby"]);
+    let stale_anchor = git(repo, &["rev-parse", "HEAD"]);
+    let product_branch = "factory/contaminated-proof";
+    git(repo, &["checkout", "-q", "-b", product_branch, proof_branch]);
+    std::fs::write(repo.join("product.rs"), "pub fn product() {}\n").unwrap();
+    git(repo, &["add", "product.rs"]);
+    git(repo, &["commit", "-q", "-m", "fix(cas-3d72): product content"]);
+    git(repo, &["checkout", "-q", "main"]);
+
+    let mut task = assigned(id, TaskType::Task, "main");
+    task.status = TaskStatus::Blocked;
+    task.deliverables.factory_branch_anchor = Some(stale_anchor.clone());
+    task.deliverables.parked_branch = Some(standby_branch);
+    f.put(&task);
+    claim(&f, id);
+    let mut foreign = assigned("cas-a0b1", TaskType::Bug, "main");
+    foreign.status = TaskStatus::AwaitingMerge;
+    foreign.deliverables.factory_branch_anchor = Some(f.foreign_tip.clone());
+    f.put(&foreign);
+    let artifact = f.artifact(id);
+    let request = serde_json::json!({
+        "action": "close", "id": id,
+        "reason": "Native proof accepted; workflow branches are never merged",
+        "evidence_only": true, "evidence_only_artifact_path": artifact,
+        "evidence_only_reference": format!("never-merge:branch:{proof_branch}"),
+    });
+    let refused = call(&f.worker, request.clone()).await;
+    assert!(refused.contains("EVIDENCE ONLY CLOSE REJECTED"), "{refused}");
+    assert!(refused.contains("supervisor"), "{refused}");
+    assert_eq!(f.task(id).status, TaskStatus::Blocked, "{refused}");
+
+    // Exercise the ordinary close handler too: its hook must not advertise
+    // this shared checkout's other-task HEAD as a recovery commit receipt.
+    let refused = call(&f.worker, serde_json::json!({
+        "action": "close", "id": id, "reason": "Native proof recorded",
+    })).await;
+    assert!(refused.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{refused}");
+    assert!(
+        !refused.contains(&format!("commit_receipt={}", f.foreign_tip)),
+        "a foreign shared HEAD must not be offered as this task's receipt: {refused}"
+    );
+
+    task.execution_note = Some("no-code".into());
+    task.external_ref = Some(PROOF.into());
+    f.put(&task);
+    let mut contaminated = request.clone();
+    contaminated["evidence_only_reference"] =
+        format!("never-merge:branch:{product_branch}").into();
+    let refused = call(&f.supervisor, contaminated).await;
+    assert!(refused.contains("EVIDENCE ONLY CLOSE REJECTED"), "{refused}");
+    assert_eq!(f.task(id).status, TaskStatus::Blocked, "{refused}");
+    let response = call(&f.supervisor, request).await;
+    assert_closed_without_lane(&f, id, &response);
+    let closed = f.task(id);
+    let evidence = closed.deliverables.evidence_only.as_ref().expect("evidence recorded");
+    assert!(evidence.paths.is_empty(), "{:?}", evidence.paths);
+    assert_eq!(evidence.commit_sha, git(repo, &["rev-parse", "origin/main"]));
+    assert_eq!(evidence.base_sha, evidence.commit_sha);
+    assert!(evidence.reference.starts_with("never-merge:branch:"));
+    assert!(closed.deliverables.factory_branch_anchor.is_none());
+    assert_eq!(closed.assignee.as_deref(), Some(WORKER));
+    assert!(closed.notes.contains(&proof_tip), "{}", closed.notes);
+    assert!(closed.notes.contains(&stale_anchor), "{}", closed.notes);
+    assert_eq!(git(repo, &["rev-parse", LANE]), f.foreign_tip);
+    let unchanged = f.task(&foreign.id);
+    assert_eq!(unchanged.status, foreign.status);
+    assert_eq!(unchanged.assignee, foreign.assignee);
+    assert_eq!(unchanged.deliverables.factory_branch_anchor, foreign.deliverables.factory_branch_anchor);
+}
+
 fn git(repo: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .args(args)

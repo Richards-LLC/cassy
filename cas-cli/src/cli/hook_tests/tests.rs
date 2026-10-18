@@ -508,9 +508,21 @@ args = ["-y", "neon"]
         .collect();
     assert_eq!(cassy, vec!["cs"], "{content}");
     assert_eq!(
-        servers["cs"]["env_vars"].as_array().map(Vec::len),
-        Some(2),
-        "the surviving `cs` entry keeps its own settings: {content}"
+        servers["cs"]["env_vars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "PATH",
+            "HOME",
+            "NODE_COMPILE_CACHE",
+            "PWTEST_CACHE_DIR",
+            "PYTEST_DEBUG_TEMPROOT",
+            "V8_COMPILE_CACHE_CACHE_DIR",
+        ],
+        "the surviving `cs` entry keeps its settings and adds approved cache names: {content}"
     );
     assert_eq!(servers["neon"]["command"].as_str(), Some("npx"), "{content}");
 }

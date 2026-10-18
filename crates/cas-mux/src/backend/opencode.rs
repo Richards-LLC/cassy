@@ -3,7 +3,7 @@ use super::{
     finish_worker_config,
 };
 use crate::Effort;
-use crate::harness::HarnessCapabilities;
+use crate::harness::{CapabilityState, HarnessCapabilities};
 use crate::opencode::{
     OPENCODE_PLUGIN_FILE_NAME, OpenCodeProjectionSpec, OpenCodeRole, merge_opencode_projection,
     persist_opencode_plugin,
@@ -24,10 +24,10 @@ impl Backend for OpenCode {
             // OpenCode 1.18.23 loaded the generated async plugin factory and
             // persisted root session, busy/tool, and idle events during the
             // hosted-token-plan live matrix (cas-a1c9).
-            supports_hooks: true,
+            supports_hooks: CapabilityState::Supported,
             // Keep subagents disabled: the gated matrix did not request or
             // attribute a child OpenCode agent.
-            supports_subagents: false,
+            supports_subagents: CapabilityState::Unknown,
             // Ctrl+C cancellation needs output-quiescence polling before a
             // follow-up submit; the immediate flat-sleep path lost the turn.
             supports_textbox_submit: false,

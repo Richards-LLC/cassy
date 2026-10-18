@@ -5,7 +5,7 @@ use super::{
     finish_worker_config, push_plain_factory_session, sanitize_toml_arg,
 };
 use crate::error::Error;
-use crate::harness::HarnessCapabilities;
+use crate::harness::{CapabilityState, HarnessCapabilities};
 use crate::pty::PtyConfig;
 use crate::{Effort, Result};
 
@@ -20,12 +20,16 @@ impl Backend for Codex {
 
     fn capabilities(&self) -> HarnessCapabilities {
         HarnessCapabilities {
-            supports_hooks: false,
-            supports_subagents: false,
+            supports_hooks: CapabilityState::Unknown,
+            supports_subagents: CapabilityState::Unknown,
             supports_textbox_submit: false,
             requires_bracketed_paste_injection: true,
             tool_prefix: "mcp__cs__",
         }
+    }
+
+    fn runtime_capability_evidence(&self, config: &PtyConfig) -> Option<cas_pty::CodexCapabilityEvidence> {
+        Some(cas_pty::detect_codex_capabilities(config))
     }
 
     fn effort_arg(&self, effort: Effort) -> &'static str {

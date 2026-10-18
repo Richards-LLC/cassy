@@ -56,6 +56,7 @@ pub use claude_trust::{
     CLAUDE_TRUST_FIELD, ClaudeTrustOutcome, claude_global_config_path,
     ensure_claude_project_trusted_in,
 };
+pub use codex_hook_warning::{CapabilityState, CodexCapabilityEvidence, detect_codex_capabilities};
 pub use codex_trust::{
     CODEX_HOOK_REVIEW_FAILURE, CODEX_HOOK_REVIEW_MARKER, CODEX_PRE_TOOL_TIMEOUT_SECS,
     CODEX_TRUST_TIMEOUT_HINT, CodexHookReadiness, CodexHookTrust, CodexLaunchReadiness,

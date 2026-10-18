@@ -103,6 +103,12 @@ const ALLOWED_MISSING_TWIN: &[(&str, &str, &str)] = &[(
 const ALLOWED_FLAVOR_ONLY: &[(&str, &str, &str, &str)] = &[
     (
         "codex",
+        "agents/task-verifier.toml",
+        "codex/agents/task-verifier.toml",
+        "Native TOML role generated from the shared verifier body; Codex ignores Markdown agents.",
+    ),
+    (
+        "codex",
         "skills/cas-improve-architecture/agents/openai.yaml",
         "codex/skills/cas-improve-architecture/agents/openai.yaml",
         "Codex explicit-invocation policy; this architecture scan is user-invoked.",

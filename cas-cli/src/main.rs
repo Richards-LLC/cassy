@@ -85,9 +85,6 @@ fn main() -> ExitCode {
     // clients with a confusing "Connection refused" error.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Initialize Sentry crash reporting (respects telemetry config)
-    let _sentry_guard = sentry::init(sentry::is_sentry_enabled());
-
     let raw_args: Vec<String> = std::env::args().collect();
     let parse_args = maybe_rewrite_factory_args(raw_args);
 
@@ -102,6 +99,9 @@ fn main() -> ExitCode {
     let cli = match cli::try_parse_from_with_wordmark(parse_args) {
         Ok(cli) => cli,
         Err(e) => {
+            // Preserve crash reporting for parse/usage errors, including the
+            // existing telemetry policy, before clap renders and exits.
+            let _sentry_guard = sentry::init(sentry::is_sentry_enabled());
             // Record the argument parsing error
             record_arg_error(&e);
 
@@ -109,6 +109,11 @@ fn main() -> ExitCode {
             e.exit();
         }
     };
+
+    // The updater owns retired-setting guidance through its maintenance
+    // receipts. Establish that scope before the earliest config read.
+    let config_notices = cli::startup_config_notices(&cli);
+    let _sentry_guard = sentry::init(sentry::is_sentry_enabled());
 
     // Initialize logging (after CLI parsing so we can use --verbose)
     init_logging(&cli);
@@ -118,6 +123,8 @@ fn main() -> ExitCode {
     sentry::add_command_breadcrumb(&args.join(" "));
 
     let outcome = cli::run(cli);
+    // Unresolved/failed paths replay before the final exit-reason line.
+    drop(config_notices);
     // The shared SQLite pool owns every close; checkpoint and close its idle
     // connections before exiting rather than leave the WAL behind.
     cas_store::shared_db::close_idle_connections();

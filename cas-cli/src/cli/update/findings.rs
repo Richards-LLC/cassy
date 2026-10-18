@@ -36,6 +36,34 @@ pub(super) struct SweepFindings {
     pub(super) unlinked: usize,
     pub(super) user_level_current: bool,
     pub(super) project_count: usize,
+    pub(super) config: ConfigCleanup,
+}
+
+/// Config files, including host state, are counted separately from projects.
+#[derive(Default, serde::Serialize)]
+pub(super) struct ConfigCleanup {
+    pub(super) repaired: usize,
+    pub(super) unchanged: usize,
+    pub(super) skipped: usize,
+    pub(super) failed: usize,
+    pub(super) planned: usize,
+    pub(super) entries_removed: usize,
+}
+
+impl ConfigCleanup {
+    pub(super) fn include(&mut self, receipt: &crate::config::ConfigRetirement) {
+        match receipt.status {
+            "repaired" => {
+                self.repaired += 1;
+                self.entries_removed += receipt.removed.len();
+            }
+            "unchanged" => self.unchanged += 1,
+            "missing" => self.skipped += 1,
+            "failed" => self.failed += 1,
+            "planned" => self.planned += 1,
+            _ => {}
+        }
+    }
 }
 
 const PHASES: [&str; 5] = ["migr", "index", "skills", "member", "cloud"];
@@ -62,7 +90,11 @@ pub(super) fn collect(
     let mut findings: Vec<Finding> = Vec::new();
     let mut healthy = Vec::new();
     let mut unlinked = 0;
+    let mut config = ConfigCleanup::default();
     for (receipt, name) in receipts.iter().zip(&names) {
+        if let Some(maintenance) = &receipt.retired_toml {
+            config.include(maintenance);
+        }
         let phases = [
             &receipt.migration,
             &receipt.search_index,
@@ -177,6 +209,7 @@ pub(super) fn collect(
         unlinked,
         user_level_current: user_level.is_ok(),
         project_count: receipts.len(),
+        config,
     }
 }
 
@@ -414,6 +447,33 @@ pub(super) fn print(fmt: &mut Formatter<'_>, sweep: &SweepFindings) -> io::Resul
         fmt.write_raw(&" ".repeat(lead))?;
         fmt.write_muted(&names)?;
         fmt.newline()?;
+    }
+    if sweep.config.repaired > 0 {
+        write_mark(fmt, Verdict::Ok, mark_cells)?;
+        let text = format!(
+            "config  {} retired {} removed in {} {}",
+            sweep.config.entries_removed,
+            if sweep.config.entries_removed == 1 {
+                "entry"
+            } else {
+                "entries"
+            },
+            sweep.config.repaired,
+            if sweep.config.repaired == 1 {
+                "file"
+            } else {
+                "files"
+            }
+        );
+        let (lines, cut) = wrap(&text, width.saturating_sub(lead), unicode);
+        shortened |= cut;
+        for (index, line) in lines.iter().enumerate() {
+            if index > 0 {
+                fmt.write_raw(&" ".repeat(lead))?;
+            }
+            fmt.write_text(line)?;
+            fmt.newline()?;
+        }
     }
     if sweep.user_level_current {
         write_mark(fmt, Verdict::Ok, mark_cells)?;

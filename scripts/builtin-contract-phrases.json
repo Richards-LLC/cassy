@@ -3072,6 +3072,18 @@
         {
           "text": "../cas-tdd/SKILL.md#fewest-tests",
           "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
+        },
+        {
+          "text": "system action=preflight",
+          "reason": "Use the connected MCP runtime as startup evidence before a separate shell process (GH #1253)."
+        },
+        {
+          "text": "factory_blocked",
+          "reason": "Structured critical findings determine launch blocking; a stale binary state alone does not prove an outdated deployment."
+        },
+        {
+          "text": "binary.source_evidence_missing",
+          "reason": "Unavailable source comparison must not force healthy MCP sessions to rebuild or reconnect."
         }
       ],
       "absent": [
@@ -3098,6 +3110,10 @@
         {
           "text": "code-review-queue",
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "If it reports a stale Cassy binary, stop here",
+          "reason": "A stale component state also represents unavailable comparison evidence; replacement requires the specific finding."
         }
       ],
       "any_of": []
@@ -3200,6 +3216,10 @@
         {
           "text": "one full assembly gate run",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "system action=preflight",
+          "reason": "EPIC resumption uses the same active-MCP evidence route as session startup (GH #1253)."
         }
       ],
       "absent": [
@@ -3243,6 +3263,10 @@
           "text": "awaiting review",
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract.",
           "case_sensitive": false
+        },
+        {
+          "text": "If it reports a stale Cassy binary, stop",
+          "reason": "EPIC resumption must not restore the retired blanket rebuild/reconnect rule for unknown source evidence."
         }
       ],
       "any_of": []
@@ -3422,6 +3446,18 @@
         {
           "text": "../cas-tdd/SKILL.md#fewest-tests",
           "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
+        },
+        {
+          "text": "system action=preflight",
+          "reason": "Use the connected MCP runtime as startup evidence before a separate shell process (GH #1253)."
+        },
+        {
+          "text": "factory_blocked",
+          "reason": "Structured critical findings determine launch blocking; a stale binary state alone does not prove an outdated deployment."
+        },
+        {
+          "text": "binary.source_evidence_missing",
+          "reason": "Unavailable source comparison must not force healthy MCP sessions to rebuild or reconnect."
         }
       ],
       "absent": [
@@ -3458,6 +3494,10 @@
         {
           "text": "code-review-queue",
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "If it reports a stale Cassy binary, stop here",
+          "reason": "A stale component state also represents unavailable comparison evidence; replacement requires the specific finding."
         }
       ],
       "any_of": []
@@ -4674,6 +4714,48 @@
         }
       ],
       "absent": [],
+      "any_of": []
+    },
+    "skills/cas-supervisor/references/preflight.md": {
+      "source": "cas-cli/src/builtins/skills/cas-supervisor/references/preflight.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "system action=preflight",
+          "reason": "An active MCP call proves the running connection; shell configuration absence alone cannot negate it."
+        },
+        {
+          "text": "`factory_blocked=false`",
+          "reason": "Use the structured blocker decision together with live MCP readiness."
+        },
+        {
+          "text": "binary.source_evidence_missing",
+          "reason": "Missing comparison evidence is not a proven stale deployment."
+        },
+        {
+          "text": "binary.source_probe_timed_out",
+          "reason": "A timed-out source probe cannot establish that the runtime is outdated."
+        },
+        {
+          "text": "binary.deployment_stale",
+          "reason": "An explicit pin mismatch or proven behind ancestry requires a distinct deployment decision."
+        },
+        {
+          "text": "Never restart `cas serve` from the active MCP session.",
+          "reason": "Keep recovery outside the process providing the current tools."
+        }
+      ],
+      "absent": [
+        {
+          "text": "A stale/dirty/unknown deployment warning: stop",
+          "reason": "Do not force rebuild/reconnect for an unknown source comparison."
+        }
+      ],
       "any_of": []
     }
   },

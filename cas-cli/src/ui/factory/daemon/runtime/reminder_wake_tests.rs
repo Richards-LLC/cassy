@@ -71,6 +71,7 @@ async fn a_fired_reminder_wakes_an_idle_supervisor_pane_cas_835e() {
     assert_eq!(row.source, daemon.app.supervisor_name(), "the owner's agent name, not its id");
 
     daemon.process_prompt_queue().await.unwrap();
+    super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
     let report = queue.message_delivery_report(id).unwrap().unwrap();
     assert_eq!(report.wake_attempt, cas_store::WakeAttempt::Fired, "{report:?}");
 }

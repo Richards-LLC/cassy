@@ -22,6 +22,7 @@ mod revisions;
 mod schema;
 mod stats;
 mod task_intents;
+mod team_delivery;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -42,6 +43,7 @@ pub use quarantine::{
     PULL_ID_COLLISION, QUARANTINE_TASK, QUARANTINED_ROW_STATEMENTS, QuarantinedRow,
 };
 pub use revisions::{SYNC_REVISION_STATEMENTS, parse_wire_revision, wire_revision};
+pub use team_delivery::TeamOwnedCleanupRow;
 pub use types::{
     EntityType, PendingByType, QueueHealth, QueueStats, QueuedSync, SyncConflictRecord,
     SyncOperation,

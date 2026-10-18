@@ -331,10 +331,6 @@ impl SyncingTaskStore {
             let _ = self
                 .queue
                 .enqueue(EntityType::Task, id, SyncOperation::Delete, None);
-        } else {
-            let _ = self
-                .queue
-                .drop_personal_queued_push_for(EntityType::Task, id);
         }
 
         // See `share_policy` module docs: delete fans out unconditionally
@@ -392,10 +388,6 @@ impl SyncingTaskStore {
                 SyncOperation::Upsert,
                 Some(&payload),
             );
-        } else {
-            let _ = self
-                .queue
-                .drop_personal_queued_push_for(EntityType::TaskDependency, &entity_id);
         }
 
         if let Some(team_id) = self.team_id.as_deref()
@@ -420,10 +412,6 @@ impl SyncingTaskStore {
                 SyncOperation::Delete,
                 None,
             );
-        } else {
-            let _ = self
-                .queue
-                .drop_personal_queued_push_for(EntityType::TaskDependency, &entity_id);
         }
 
         // A delete must fan out when a team is configured, even when the
@@ -1981,17 +1969,20 @@ mod tests {
     }
 
     #[test]
-    fn team_only_task_update_removes_the_older_personal_copy() {
+    fn team_only_task_update_retains_the_older_personal_copy() {
         let (temp, mut store) = create_team_store(None);
         let queue = SyncQueue::open(temp.path()).unwrap();
         let mut task = Task::new("switching-task".to_string(), "before".to_string());
         store.add(&task).unwrap();
         assert_eq!(queue_counts(&queue), (1, 1));
 
+        let original_personal = queue.pending(10, 5).unwrap().remove(0).payload;
         store.team_only = true;
         task.title = "after".to_string();
         store.update(&task).unwrap();
-        assert_eq!(queue_counts(&queue), (0, 1));
+        assert_eq!(queue_counts(&queue), (1, 1));
+        assert_eq!(queue.pending(10, 5).unwrap().remove(0).payload, original_personal,
+            "routing changes must preserve the original mutation payload");
     }
 
     #[test]

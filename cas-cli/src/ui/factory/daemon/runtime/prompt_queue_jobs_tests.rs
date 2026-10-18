@@ -292,7 +292,13 @@ fn flv2_no_double_inject() {
     jobs.settle_injects(&cas_dir);
     assert_eq!(jobs.expire_injects(&cas_dir, t0 + INJECT_OUTCOME_TIMEOUT - Duration::from_millis(1)), 0);
     assert!(jobs.in_flight().holds_row(lost));
-    assert_eq!(jobs.expire_injects(&cas_dir, t0 + INJECT_OUTCOME_TIMEOUT), 1);
+    // A physical write still owned by the mux must not release its claim
+    // and invite a second copy while the first writer is blocked.
+    jobs.retain_owned_injects(t0 + INJECT_OUTCOME_TIMEOUT, |row| row == lost);
+    assert_eq!(jobs.expire_injects(&cas_dir, t0 + INJECT_OUTCOME_TIMEOUT), 0);
+    assert!(jobs.in_flight().holds_row(lost));
+    // Once orphaned, the existing bounded missing-outcome timeout applies.
+    assert_eq!(jobs.expire_injects(&cas_dir, t0 + 2 * INJECT_OUTCOME_TIMEOUT), 1);
     assert!(!jobs.in_flight().holds_row(lost));
     settle(&mut jobs, |_| claim_source(&cas_dir, lost, "worker-a").is_none());
     assert!(store_claim(&cas_dir, lost, "worker-a").unwrap().is_some());

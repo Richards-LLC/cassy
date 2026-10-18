@@ -1670,33 +1670,32 @@ PY_CATALOG
         bad "cas-cut-release ($flavour) catalog does not embed the shared source"
     fi
     skill="$repo_root/cas-cli/src/builtins/skills/cas-cut-release/SKILL.md"
-    if grep -q 'release-train.sh' "$skill" 2>/dev/null; then
-        ok "cas-cut-release ($flavour) points at release-train.sh"
+    if grep -qF 'scripts/release.sh' "$skill" 2>/dev/null; then
+        ok "cas-cut-release ($flavour) names the one-command release entrypoint"
     else
-        bad "cas-cut-release ($flavour) does not mention release-train.sh"
+        bad "cas-cut-release ($flavour) does not name the one-command release entrypoint"
     fi
-    # The rule has to be stated, not merely implied by the tooling: an operator
-    # improvising a wrapper is exactly how the version-keyed path came back.
-    if grep -qi 'recorded pid' "$skill" 2>/dev/null; then
-        ok "cas-cut-release ($flavour) states the recorded-PID rule"
+    if grep -qF 'in the background with a log' "$skill" 2>/dev/null; then
+        ok "cas-cut-release ($flavour) keeps release execution visible in a log"
     else
-        bad "cas-cut-release ($flavour) does not state the recorded-PID rule"
+        bad "cas-cut-release ($flavour) does not keep release execution visible in a log"
     fi
-    if grep -qi 'never.*version-keyed\|version-keyed.*never\|per-run directory' "$skill" 2>/dev/null; then
-        ok "cas-cut-release ($flavour) forbids a version-keyed artifacts path"
+    if grep -qF 'draft path' "$skill" 2>/dev/null; then
+        ok "cas-cut-release ($flavour) documents the next-version draft path"
     else
-        bad "cas-cut-release ($flavour) does not forbid a version-keyed artifacts path"
+        bad "cas-cut-release ($flavour) does not document the next-version draft path"
     fi
-    for marker in 'Scoped Validation' 'ledger is the last prep step' 'scratch-base' \
-        'detached process group' 'runtime_fixture_parent' 'reviewed snapshot update' \
-        '9.99.x' 'cause class' 'workers never poll CI' 'competing release' \
-        'merge-queue GraphQL query' 'CAS_RELEASE_ENV_FILE' 'annotated tag peels' \
-        'four Slack POSTED' 'refresh_binary_version' 'stranded_branch_override' \
-        'release.tag-complete.epoch' 'release-published.receipt' \
-        'Pin the cut date' 'Cargo.lock' 'docs-only release commits' \
-        'status-check rollup' 'announcement lint' 'scripts/release-train-announce.py' \
-        'is the authority for User-thread'; do
-        if grep -qF "$marker" "$skill" 2>/dev/null; then
+    for marker in 'docs/release-notes/RUBRIC.md' 'docs/RELEASE_SLACK_RUBRIC.md' \
+        '.claude/CODEMAP.md' '--no-watch' 'auto-merge' 'Exit 4 is a code conflict' \
+        'Exit 3 means the queue' 'Commander journey shards' \
+        'merge queue runs the required checks' 'remind_event=ci_completed' \
+        'remind_event=branch_contained_in' 'Release Prebuild' 'release.yml' \
+        "run's archives by tree id" 'annotated tag' \
+        'cassy-install-on-publish' 'scripts/install-on-publish.sh --install' \
+        'cas --version' 'release-published-receipt.sh --write-draft' \
+        'cas-release-notes' 'cas-release-report' '9.99.x' 'workers never poll CI' \
+        'stranded_branch_override' 'Cargo.lock'; do
+        if grep -qF -- "$marker" "$skill" 2>/dev/null; then
             ok "cas-cut-release ($flavour) carries marker: $marker"
         else
             bad "cas-cut-release ($flavour) missing marker: $marker"

@@ -8348,12 +8348,18 @@ This is the body content."#;
                 "{harness:?} wrote other trees"
             );
             let agents = temp.path().join(dir).join("agents");
-            let md_agents = std::fs::read_dir(&agents)
+            let installed_agents = std::fs::read_dir(&agents)
                 .map(|entries| entries.flatten().count())
                 .unwrap_or(0);
+            // Project sync omits OpenCode agents because their schema differs;
+            // Codex now installs its native TOML role alongside its skills.
+            let expected_agents = match harness {
+                SupervisorCli::OpenCode => 0,
+                _ => required_factory_agents_for(harness).len(),
+            };
             assert_eq!(
-                md_agents,
-                required_factory_agents_for(harness).len(),
+                installed_agents,
+                expected_agents,
                 "{harness:?} installed an unexpected agent set"
             );
         }

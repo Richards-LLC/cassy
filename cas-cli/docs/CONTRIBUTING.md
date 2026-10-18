@@ -1988,6 +1988,19 @@ A read-only no-code task also closes on portable PR or artifact evidence when
 its allocated task branch contains only foreign commits. An earlier false park
 on those commits is retired; allocating a branch does not establish ownership.
 Named task commits and unclaimed unmerged changes still require delivery proof.
+A live registered supervisor can close a verification-only task whose throwaway
+CI commits must never merge with `evidence_only=true` and
+`evidence_only_reference=never-merge:branch:<proof-ref>`, retaining the required
+task-root artifact and rationale. Cassy measures the reference, retained anchors
+and task lanes against the fresh target, with a combined 256-commit limit.
+Only regular YAML files directly under `.github/workflows/` may be declared
+non-delivery; product paths, executable files, symlinks, merges, unknown anchors
+and code methodologies refuse this disposition. The proof reference must be
+unmerged. Its immutable SHA and measured commits are audited, while evidence
+records the target SHA with no delivery paths. The explicit never-merge
+declaration does not predict or authorize a future Git merge. Ordinary evidence
+references and negative-result closes retain their existing rules. Stale-anchor
+recovery suggests a replacement receipt only when its tip belongs to the task.
 QA classification of an integrated merge receipt uses that merge's own
 first-parent diff. Later PR merges cannot add their UI paths to the receipt's
 evidence requirements or hide UI that the receipt itself delivered.

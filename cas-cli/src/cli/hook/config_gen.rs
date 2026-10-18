@@ -827,6 +827,31 @@ fn configure_codex_dir(codex_dir: &Path) -> anyhow::Result<bool> {
         }
     }
 
+    // Codex's stdio MCP environment is curated. Keep names (not operator path
+    // values) in managed files, appending without replacing existing grants or
+    // explicit env settings. The same exact list is used by factory spawns.
+    let entry = mcp_servers
+        .get_mut(CODEX_CAS_SERVER_KEY)
+        .and_then(toml::Value::as_table_mut)
+        .expect("Cassy MCP entry was normalized above");
+    let env_vars = entry
+        .entry("env_vars")
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| {
+            anyhow::anyhow!("mcp_servers.{CODEX_CAS_SERVER_KEY}.env_vars is not an array")
+        })?;
+    for &name in cas_pty::TOOL_CACHE_ENV {
+        let present = env_vars.iter().any(|value| {
+            value.as_str() == Some(name)
+                || value.get("name").and_then(toml::Value::as_str) == Some(name)
+        });
+        if !present {
+            env_vars.push(toml::Value::String(name.to_string()));
+            changed = true;
+        }
+    }
+
     let hooks_changed = configure_codex_tool_hooks(&codex_dir)?;
 
     if changed {

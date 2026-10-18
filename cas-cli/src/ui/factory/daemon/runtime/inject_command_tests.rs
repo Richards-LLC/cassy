@@ -9,6 +9,287 @@ use crate::ui::factory::daemon::FactoryDaemon;
 const WORKER: &str = "worker-a";
 const SESSION: &str = "provision-test";
 
+/// Control the physical writer, without replacing mux receipts or daemon state.
+struct InjectWritePort {
+    release: std::sync::mpsc::Sender<()>,
+    started: std::sync::mpsc::Receiver<()>,
+    writes: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    input: cas_pty::PtyInput,
+}
+
+impl InjectWritePort {
+    async fn pane() -> (cas_mux::Pane, Self) {
+        struct Writer {
+            release: std::sync::mpsc::Receiver<()>,
+            started: Option<std::sync::mpsc::Sender<()>>,
+            writes: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+        }
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.writes.lock().unwrap().push(bytes.to_vec());
+                if let Some(started) = self.started.take() {
+                    let _ = started.send(());
+                    self.release
+                        .recv()
+                        .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let pty = cas_mux::Pty::spawn(
+            WORKER,
+            cas_mux::PtyConfig {
+                command: "sh".into(),
+                args: vec!["-c".into(), "exec cat".into()],
+                cwd: Some(std::env::temp_dir()),
+                env: vec![],
+                env_remove: vec![],
+                rows: 24,
+                cols: 80,
+            },
+        )
+        .unwrap();
+        let input = pty.input();
+        let (release, released) = std::sync::mpsc::channel();
+        let (start, started) = std::sync::mpsc::channel();
+        let writes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        *pty.writer_handle().lock().await = Box::new(Writer {
+            release: released,
+            started: Some(start),
+            writes: writes.clone(),
+        });
+        let mut pane = cas_mux::Pane::with_pty(
+            WORKER,
+            cas_mux::PaneKind::Worker,
+            pty,
+            24,
+            80,
+            cas_mux::SupervisorCli::Claude,
+        )
+        .unwrap();
+        pane.backdate_spawn_for_test(Duration::from_secs(6));
+        (
+            pane,
+            Self {
+                release,
+                started,
+                writes,
+                input,
+            },
+        )
+    }
+}
+
+/// Exercise the real completion handler, claims, tally and authenticated outbox.
+/// Clock/write/persistence ports control ordering; no timeout is simulated as a receipt.
+#[tokio::test(start_paused = true)]
+async fn cas_bdbc_blocked_write_escalates_once_without_retyping() {
+    use super::inject_commands::{BroadcastTally, UrgentInject};
+    let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[(
+        "CAS_FACTORY_SESSION",
+        Some(SESSION),
+    )]);
+    for case in ["slow", "stuck", "respawn"] {
+        let (_root, cas_dir) = project_with_worker();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "supervisor-id".into(),
+            "supervisor".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some(SESSION.into());
+        supervisor.status = cas_types::AgentStatus::Active;
+        open_agent_store(&cas_dir)
+            .unwrap()
+            .register(&supervisor)
+            .unwrap();
+        let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+        let (pane, port) = InjectWritePort::pane().await;
+        daemon.app.adopt_worker_pane_for_test(pane);
+        let queue = open_prompt_queue_store(&cas_dir).unwrap();
+        let row = queue
+            .enqueue_with_session("supervisor", "all_workers", case, SESSION)
+            .unwrap();
+        let queued = queue.queued_prompt(row).unwrap().unwrap();
+        let claim_token = queue
+            .claim_recipient_transport_token(row, WORKER)
+            .unwrap()
+            .unwrap();
+        let t0 = Instant::now();
+        let cas_mux::InjectStart::Started(ticket) =
+            daemon.app.mux.begin_inject_at(WORKER, case, t0).unwrap()
+        else {
+            panic!("clean pane starts write")
+        };
+        daemon.urgent_injects.owners.insert(
+            ticket,
+            UrgentInject::BroadcastMember {
+                row,
+                worker: WORKER.into(),
+                claim_token,
+            },
+        );
+        let mut tally = BroadcastTally::new(queued, 1);
+        tally.pending = 1;
+        daemon.urgent_injects.broadcasts.insert(row, tally);
+        port.started.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Let the real submit task enqueue its CR using virtual time. The
+        // native writer stays blocked until this test explicitly releases it.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let (drained, drain) = std::sync::mpsc::channel();
+        port.input
+            .write_then(
+                b"",
+                Box::new(move |result| {
+                    let _ = drained.send(result);
+                }),
+            )
+            .unwrap();
+        let mut notices = Vec::new();
+        daemon
+            .advance_urgent_injects_with_ports(t0 + Duration::from_secs(9), |write| {
+                notices.push(write)
+            })
+            .await;
+        assert!(
+            notices.is_empty(),
+            "a normal slow write has not crossed the bound"
+        );
+        assert!(daemon.app.mux.pane_inject_busy(WORKER));
+        assert_eq!(
+            queue.recipient_receipt(row, WORKER).unwrap(),
+            Some(cas_store::SurfacingSource::TransportClaimed)
+        );
+
+        if case != "slow" {
+            for elapsed in [10, 11, 60] {
+                daemon
+                    .advance_urgent_injects_with_ports(t0 + Duration::from_secs(elapsed), |write| {
+                        notices.push(write)
+                    })
+                    .await;
+            }
+            for write in &notices {
+                write().unwrap();
+                write().unwrap();
+            }
+            let events = crate::store::open_supervisor_queue_store(&cas_dir)
+                .unwrap()
+                .list_pending("supervisor-id")
+                .unwrap();
+            assert_eq!(
+                events.len(),
+                1,
+                "a persistently blocked physical write must raise exactly one escalation across repeated ticks ({case})"
+            );
+            let relays = queue.peek_all(100).unwrap();
+            let relay = relays
+                .iter()
+                .find(|row| row.target == "supervisor")
+                .expect("durable supervisor relay");
+            assert!(matches!(
+                relay.origin.as_ref(),
+                Some(cas_store::QueueOrigin::Daemon)
+            ));
+            assert!(crate::prompt_revalidation::parse_blocker_envelope(&relay.prompt).is_some());
+            assert!(
+                relay.prompt.contains(WORKER)
+                    && relay.prompt.contains("partial")
+                    && relay.prompt.contains("resend"),
+                "the blocker must identify the pane and explain safe recovery: {}",
+                relay.prompt
+            );
+            assert_eq!(
+                notices.len(),
+                1,
+                "enqueue the escalation once, not once per tick"
+            );
+            assert!(daemon.app.mux.pane_inject_busy(WORKER));
+            assert!(daemon.urgent_injects.holds_row(row));
+            assert_eq!(
+                queue.recipient_receipt(row, WORKER).unwrap(),
+                Some(cas_store::SurfacingSource::TransportClaimed)
+            );
+            assert!(
+                queue
+                    .message_delivery_report(row)
+                    .unwrap()
+                    .unwrap()
+                    .delivered_at
+                    .is_none(),
+                "no false Delivered"
+            );
+            assert_eq!(
+                port.writes.lock().unwrap().len(),
+                1,
+                "a deadline must never resend payload bytes"
+            );
+        }
+        let replacement = if case == "respawn" {
+            drop(daemon.app.mux.remove_pane(WORKER).unwrap());
+            let (pane, replacement) = InjectWritePort::pane().await;
+            daemon.app.adopt_worker_pane_for_test(pane);
+            Some(replacement)
+        } else {
+            None
+        };
+        port.release.send(()).unwrap();
+        drain.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        daemon
+            .advance_urgent_injects_with_ports(
+                t0 + Duration::from_secs(if case == "slow" { 9 } else { 61 }),
+                |write| notices.push(write),
+            )
+            .await;
+        assert!(!daemon.app.mux.pane_inject_busy(WORKER));
+        assert!(!daemon.urgent_injects.holds_row(row));
+        assert!(
+            daemon
+                .queue_jobs
+                .drain_for_shutdown(&cas_dir, Duration::from_secs(5))
+        );
+        let report = queue.message_delivery_report(row).unwrap().unwrap();
+        if let Some(replacement) = replacement {
+            assert!(
+                replacement.writes.lock().unwrap().is_empty(),
+                "old ticket must never write to the new incarnation"
+            );
+            assert_eq!(report.broadcast_failed, Some(1));
+            assert!(
+                queue.recipient_receipt(row, WORKER).unwrap().is_none(),
+                "old incarnation releases only its claim"
+            );
+        } else {
+            assert_eq!(
+                report.broadcast_succeeded,
+                Some(1),
+                "receipt completion settles the tally"
+            );
+            assert_eq!(
+                queue.recipient_receipt(row, WORKER).unwrap(),
+                Some(cas_store::SurfacingSource::TransportDelivered)
+            );
+        }
+        assert_eq!(
+            notices.len(),
+            usize::from(case != "slow"),
+            "slow success must produce zero escalations"
+        );
+        assert_eq!(
+            &*port.writes.lock().unwrap(),
+            &[
+                format!("\x1b[200~{case}\x1b[201~").into_bytes(),
+                b"\r".to_vec(),
+            ],
+            "exactly one payload and submit, including after recovery"
+        );
+    }
+}
+
 /// A raw, non-echoing Claude stand-in running `cat`, past its injection grace period
 /// (backdated, not slept: review L4).
 pub(super) async fn ready_claude_worker(daemon: &mut FactoryDaemon) {

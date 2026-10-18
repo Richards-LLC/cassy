@@ -1149,6 +1149,16 @@ impl Mux {
     /// Start a normal durable injection without waiting on a PTY write or
     /// submit. The same command owner as urgent injects reports completion.
     pub fn begin_inject(&mut self, pane_id: &str, prompt: &str) -> Result<InjectStart> {
+        self.begin_inject_at(pane_id, prompt, std::time::Instant::now())
+    }
+
+    /// Start a normal injection using the caller's monotonic clock snapshot.
+    pub fn begin_inject_at(
+        &mut self,
+        pane_id: &str,
+        prompt: &str,
+        now: std::time::Instant,
+    ) -> Result<InjectStart> {
         let pane = self
             .panes
             .get(pane_id)
@@ -1157,7 +1167,6 @@ impl Mux {
             return Ok(InjectStart::Deferred);
         }
         let receipt = pane.inject_prompt_tracked(prompt)?;
-        let now = std::time::Instant::now();
         self.next_inject_ticket += 1;
         let ticket = InjectTicket(self.next_inject_ticket);
         self.pending_injects.push(PendingInject {
@@ -1279,8 +1288,15 @@ impl Mux {
     /// returned; the rest keep waiting. Reads only in-memory pane state,
     /// the output counter the loop's PTY drain keeps current.
     pub async fn advance_injects(&mut self) -> Vec<InjectCompletion> {
+        self.advance_injects_at(std::time::Instant::now()).await
+    }
+
+    /// Advance using the same monotonic clock snapshot as the owning handler.
+    pub async fn advance_injects_at(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Vec<InjectCompletion> {
         let mut done = Vec::new();
-        let now = std::time::Instant::now();
         let mut index = 0;
         while index < self.pending_injects.len() {
             let pane_id = self.pending_injects[index].pane_id.clone();

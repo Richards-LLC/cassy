@@ -118,7 +118,19 @@ impl FactoryDaemon {
     /// in. Called once per loop pass and at the top of each prompt-queue
     /// pass; never waits.
     pub(crate) async fn advance_urgent_injects(&mut self) {
-        let completions = self.app.mux.advance_injects().await;
+        self.advance_urgent_injects_with_ports(std::time::Instant::now(), |write| {
+            super::store_worker::submit_write("blocked PTY write notice", write);
+        })
+        .await;
+    }
+
+    /// The production handler with clock and off-loop persistence boundaries.
+    pub(super) async fn advance_urgent_injects_with_ports(
+        &mut self,
+        now: std::time::Instant,
+        _persist: impl FnMut(Box<dyn Fn() -> Result<(), String> + Send>),
+    ) {
+        let completions = self.app.mux.advance_injects_at(now).await;
         self.start_operator_backlog().await;
         for completion in completions {
             let Some(owner) = self.urgent_injects.owners.remove(&completion.ticket) else {

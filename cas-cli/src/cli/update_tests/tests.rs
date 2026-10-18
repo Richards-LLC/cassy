@@ -2625,10 +2625,16 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
             .lines()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .collect::<Vec<_>>();
-        let managed = rows
-            .iter()
-            .find_map(|row| row.get("managed_files"))
-            .expect("managed-file receipt");
+        assert_eq!(rows.len(), 1, "{mode}: expected one JSON receipt:\n{output}");
+        let receipt = &rows[0];
+        // cas-fd1e: the all-projects receipt owns each phase's documents;
+        // sync still reports managed files directly. Both preserve the refusal.
+        let managed = if mode == "all-projects" {
+            receipt.pointer("/projects/0/phase_documents/skills/0/managed_files")
+        } else {
+            receipt.get("managed_files")
+        }
+        .unwrap_or_else(|| panic!("{mode}: missing managed-file receipt:\n{output}"));
         assert_eq!(managed["outcome"], "commit_failed", "{output}");
         assert!(
             managed["conflicts"].as_array().unwrap().is_empty(),
@@ -2642,10 +2648,6 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
             "{reason}"
         );
         if mode == "all-projects" {
-            let receipt = rows
-                .iter()
-                .find(|row| row.get("refresh_status").is_some())
-                .unwrap();
             assert_eq!(receipt["refresh_status"], "refresh_failed", "{output}");
             assert!(
                 receipt["projects"][0]["skills"]

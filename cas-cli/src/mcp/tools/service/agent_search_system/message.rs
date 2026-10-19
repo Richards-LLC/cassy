@@ -3070,38 +3070,6 @@ impl CasService {
                 format!("Failed to open prompt queue: {error}"),
             )
         })?;
-        // cas-d047 (GH #69): a freshly spawned worker must never be handed a
-        // months-old item addressed to a recycled name. The daemon sweeps
-        // these too, but a worker can poll in a session with no daemon tick
-        // yet (or none at all), so quarantine on the read path as well — the
-        // store keeps the row and its forensics, it just stops being
-        // deliverable, and every withheld row is named in the log.
-        match queue.expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS) {
-            Ok(stale) => {
-                for row in &stale {
-                    tracing::warn!(
-                        target: "cas::coordination",
-                        stage = "stale_quarantine",
-                        prompt_id = row.id,
-                        source = %row.source,
-                        target_agent = %row.target,
-                        created_at = %row.created_at.to_rfc3339(),
-                        age_secs = (chrono::Utc::now() - row.created_at).num_seconds(),
-                        recipient = %recipient,
-                        "cas-d047: withheld stale queue item from inbox delivery"
-                    );
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "cas::coordination",
-                    stage = "stale_quarantine",
-                    %error,
-                    "cas-d047: stale queue sweep failed; stale rows remain filtered out of this poll"
-                );
-            }
-        }
-
         // The store records recipient-seen state in the same transaction that
         // selects the rows, before this MCP response is handed back. That
         // prevents concurrent duplicate delivery; a later poll does not replay
@@ -3145,6 +3113,43 @@ impl CasService {
                 if !messages.iter().any(|existing| existing.id == row.id) {
                     messages.push(row);
                 }
+            }
+        }
+        // cas-8cbe (GH #123): named reads are the recipient's explicit request
+        // for a retained row. Surface that id before the stale quarantine
+        // sweep; otherwise the sweep terminally abandons it before the
+        // store's NamedRead eligibility can return it. Automatic polling
+        // below still has its own stale cutoff, and the sweep quarantines
+        // every other stale pending row before that automatic drain.
+        // cas-d047 (GH #69): a freshly spawned worker must never be handed a
+        // months-old item addressed to a recycled name. The daemon sweeps
+        // these too, but a worker can poll in a session with no daemon tick
+        // yet (or none at all), so quarantine on the read path as well — the
+        // store keeps the row and its forensics, it just stops being
+        // deliverable, and every withheld row is named in the log.
+        match queue.expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS) {
+            Ok(stale) => {
+                for row in &stale {
+                    tracing::warn!(
+                        target: "cas::coordination",
+                        stage = "stale_quarantine",
+                        prompt_id = row.id,
+                        source = %row.source,
+                        target_agent = %row.target,
+                        created_at = %row.created_at.to_rfc3339(),
+                        age_secs = (chrono::Utc::now() - row.created_at).num_seconds(),
+                        recipient = %recipient,
+                        "cas-d047: withheld stale queue item from inbox delivery"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "cas::coordination",
+                    stage = "stale_quarantine",
+                    %error,
+                    "cas-d047: stale queue sweep failed; stale rows remain filtered out of this poll"
+                );
             }
         }
         for alias in &aliases {

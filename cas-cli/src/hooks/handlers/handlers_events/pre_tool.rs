@@ -2473,6 +2473,21 @@ fn factory_shell_tokens_with_literals(command: &str) -> (Vec<ShellToken>, Vec<bo
             escaped = false;
             continue;
         }
+        // Preserve the nested heredoc's quotes before the outer double-quote
+        // tokenizer can consume them. Only the bounded literal cat form is
+        // recognized; the effect collector still judges how its output is used.
+        if quote == Some('"') && ch == '$' && chars.peek() == Some(&'(') {
+            let tail = format!("${}", chars.clone().collect::<String>());
+            if let Some(end) = shell_effects::literal_cat_heredoc_end(&tail) {
+                let substitution = &tail[..=end];
+                word.push_str(substitution);
+                for _ in 1..substitution.chars().count() {
+                    chars.next();
+                }
+                literal = false;
+                continue;
+            }
+        }
         if quote != Some('\'') {
             if ch == '$' && chars.peek().is_some_and(|next| matches!(next, '?' | '$' | '!')) {
                 word.push(ch);
@@ -5983,6 +5998,12 @@ fn factory_workspace_contract_denial(
     let worktree = worktree_root
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    if violation.matched_rule == "an unresolved shell payload" {
+        return format!(
+            "🚫 FACTORY WORKSPACE CONTRACT: cannot resolve shell filesystem effects (an unresolved shell payload). For gh issue or PR text, save a literal body file under your configured scratch root or assigned worktree and pass `--body-file <path>`. Assigned worktree: `{}`.",
+            worktree.display(),
+        );
+    }
     if matches!(violation.matched_rule,
         "a write with an unresolved effective working directory"
         | "a link with an unresolved effective working directory"

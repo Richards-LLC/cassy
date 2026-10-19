@@ -813,6 +813,7 @@ impl VioletWake {
     }
 
     /// Claim this project's events, admit them, and acknowledge them.
+    #[cfg(test)]
     pub(crate) fn poll_once(
         &mut self,
         relay: &dyn ActivityRelay,

@@ -2916,6 +2916,7 @@ impl FactoryDaemon {
             compact_cols: 0,
             compact_rows: 0,
             pending_spawns: VecDeque::new(),
+            binding_intake: Default::default(),
             spawn_task: None,
             spawn_verifications: HashMap::new(),
             cloud_handle,
@@ -3110,14 +3111,6 @@ impl FactoryDaemon {
         let mut last_violet_poll = std::time::Instant::now()
             .checked_sub(super::violet_activity::POLL_INTERVAL)
             .unwrap_or_else(std::time::Instant::now);
-        let mut violet_task: Option<
-            JoinHandle<(
-                super::violet_activity::PollReport,
-                Vec<super::violet_activity::SweepRequest>,
-                Option<super::violet_activity::SupervisorPresence>,
-            )>,
-        > = None;
-        let mut violet_sweep_task: Option<JoinHandle<()>> = None;
         let mut violet_error_reported = false;
         // cas-f9c7: messages from peer supervisors of this repo on other
         // machines, claimed from the Cassy Cloud peer mailbox every 15 s on
@@ -3460,17 +3453,20 @@ impl FactoryDaemon {
                     }
                 }
 
+                self.binding_intake.reap_sweep().await;
                 if let Some(violet) = violet_wake.as_ref() {
-                    if violet_task.is_none()
+                    // cas-9021: each tick and sweep reads the durable intake
+                    // gate per channel; the v2 managed reader is never gated.
+                    if self.binding_intake.tick.is_none()
                         && last_violet_poll.elapsed() >= super::violet_activity::POLL_INTERVAL
                     {
                         let violet = std::sync::Arc::clone(violet);
-                        violet_task =
+                        self.binding_intake.tick =
                             Some(tokio::task::spawn_blocking(move || violet.tick_blocking()));
                         last_violet_poll = std::time::Instant::now();
                     }
-                    if violet_task.as_ref().is_some_and(JoinHandle::is_finished) {
-                        match violet_task.take().expect("checked above").await {
+                    if self.binding_intake.tick.as_ref().is_some_and(JoinHandle::is_finished) {
+                        match self.binding_intake.tick.take().expect("checked above").await {
                             Ok((report, sweeps, presence)) => {
                                 if report.wakes > 0 {
                                     super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
@@ -3491,25 +3487,27 @@ impl FactoryDaemon {
                                 }
                                 if let Some(presence) = presence
                                     && !sweeps.is_empty()
-                                    && violet_sweep_task
-                                        .as_ref()
-                                        .is_none_or(JoinHandle::is_finished)
+                                    && self.binding_intake.sweep.is_none()
                                 {
                                     let violet = std::sync::Arc::clone(violet);
                                     let cas_dir = self.app.cas_dir().to_path_buf();
-                                    violet_sweep_task = Some(tokio::spawn(async move {
-                                        if violet.sweep(sweeps, presence).await > 0 {
+                                    self.binding_intake.sweep = Some(tokio::spawn(async move {
+                                        if violet.sweep(sweeps, presence).await? > 0 {
                                             super::delivery::wake_daemon_after_enqueue(&cas_dir);
                                         }
+                                        Ok(())
                                     }));
                                 }
                             }
                             Err(error) => {
+                                self.binding_intake.failed(format!("legacy tick did not finish: {error}"));
                                 tracing::warn!(%error, "Violet activity poll task failed")
                             }
                         }
                     }
                 }
+
+                self.finish_binding_intake_replies();
 
                 if let Some(report) = peer_mailbox.poll(std::time::Instant::now()).await
                     && report.delivered > 0

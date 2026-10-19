@@ -24,6 +24,8 @@ pub const COMMANDER_EARLIER_SESSIONS_LIMIT: usize = 30;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProtocolCapability {
+    /// Local framed Unix GUI control only; never advertised by WS/relay.
+    BindingIntakeControlV1,
     TargetedInterrupt,
     AttributedSendMessage,
     /// A pane can be initialized from terminal state instead of a raw-byte tail.
@@ -47,6 +49,13 @@ pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
         ProtocolCapability::ConversationHistory,
         ProtocolCapability::MessageClientRefDedupe,
     ]
+}
+
+/// Advertise local mutation controls only on the framed Unix GUI socket.
+pub fn local_gui_capabilities() -> Vec<ProtocolCapability> {
+    let mut capabilities = daemon_capabilities();
+    capabilities.push(ProtocolCapability::BindingIntakeControlV1);
+    capabilities
 }
 
 fn legacy_protocol_version() -> u32 {
@@ -433,6 +442,13 @@ pub enum ClientMessage {
         shell: Option<String>,
     },
 
+    /// Durable local-only admission pause. WS/relay must refuse this control.
+    BindingIntakePause {
+        request: super::daemon::runtime::violet_intake::PauseRequest,
+    },
+    /// Read the durable local gate; this is not a drain acknowledgement.
+    BindingIntakeStatus { nonce: uuid::Uuid },
+
     /// Kill a shell pane
     KillShell {
         /// Pane name to kill
@@ -454,6 +470,8 @@ pub enum PaneSizeAuthority {
 /// Messages sent from daemon to TUI client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DaemonMessage {
+    /// Local-only response. An acknowledgement exists only after both tasks drain.
+    BindingIntake { reply: super::daemon::runtime::violet_intake::IntakeReply },
     /// Welcome message on attach with current state
     Welcome {
         /// Session name

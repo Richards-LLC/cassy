@@ -746,8 +746,8 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
   const footer = page.locator(".hub-footer-meta");
   const empty = page.getByText(/No live supervisors listed/);
   const outages = [
-    ["The network is gone for longer than the catalog's freshness", { sockets: "close" }],
-    ["The hub answers 503 auth_store_unavailable for as long", { sockets: "close", http: "auth_store_unavailable" }],
+    ["The machine stays down past its catalog's freshness: the network is gone", { sockets: "close" }],
+    ["The machine stays down past its catalog's freshness: the hub answers 503 auth_store_unavailable", { sockets: "close", http: "auth_store_unavailable" }],
   ] as const;
   for (const [stage, outage] of outages) {
     await journey.stage(stage, async () => {

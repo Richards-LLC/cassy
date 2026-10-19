@@ -4061,6 +4061,19 @@ fn running_factory_update_notice(sessions: &[(String, bool)], version: &str) -> 
     Some(notice)
 }
 
+/// Pre-swap failures have no refresh receipt. Preserve their original error
+/// for stderr; post-swap failures already own a receipt claiming the new binary.
+fn binary_install_failure(cli: &Cli, current: &str, error: anyhow::Error) -> anyhow::Error {
+    if cli.json {
+        let mut receipt = combined_update_receipt(current, false, None, None, None);
+        receipt["binary_status"] = serde_json::json!("failed");
+        receipt["refresh_status"] = serde_json::json!("not_run");
+        receipt["error"] = serde_json::json!({"phase": "binary", "message": format!("{error:#}")});
+        println!("{receipt}");
+    }
+    error
+}
+
 /// Download and install the latest (or specified) version
 fn perform_update(
     args: &UpdateArgs,
@@ -4070,15 +4083,18 @@ fn perform_update(
     use self_update::Status;
     use self_update::update::ReleaseUpdate;
 
-    let updater = configure_updater(args, current_version, cli, io::stdin().is_terminal())?;
-    let updater = updater.build()?;
+    let updater = configure_updater(args, current_version, cli, io::stdin().is_terminal())
+        .map_err(|error| binary_install_failure(cli, current_version, error))?;
+    let updater = updater.build()
+        .map_err(|error| binary_install_failure(cli, current_version, error.into()))?;
     // self_update resolves its install destination before the replacement.
     // Keep that stable path: after a Linux rename swap, current_exe() can
     // report the old process image as `/path/cas (deleted)`.
     let installed_binary = strip_deleted_suffix(updater.bin_install_path());
 
     // Check what we're updating to
-    let latest = updater.get_latest_release()?;
+    let latest = updater.get_latest_release()
+        .map_err(|error| binary_install_failure(cli, current_version, error.into()))?;
     let target_version = args
         .version
         .as_ref()
@@ -4108,7 +4124,11 @@ fn perform_update(
         let _download = live::during_open_phase(format!("downloading Cassy {target_version}"));
         updater.update()
     }
-    .map_err(|error| install_error(&error, current_version, &target_version))?;
+    .map_err(|error| binary_install_failure(
+        cli,
+        current_version,
+        install_error(&error, current_version, &target_version),
+    ))?;
     if matches!(&status, Status::Updated(_)) {
         // A new updater can remove quarantine before the first child launch.
         // An older parent cannot, so execute_post_swap repeats this before

@@ -1734,39 +1734,46 @@ fn tty_update_without_yes_keeps_confirmation_and_human_output_enabled() {
 
 #[test]
 fn json_update_from_fake_release_never_prompts_or_leaks_self_update_output() {
-    use self_update::update::ReleaseUpdate;
-
-    let (base_url, server) = fake_release_source();
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.set("GITHUB_TOKEN", "fixture-token-not-a-secret");
     let args = update_test_args();
     let cli = update_test_cli(true);
-    let mut builder = configure_updater(&args, "3.17.1", &cli, false)
-        .expect("JSON mode must not require --yes on a non-TTY");
-    builder.with_url(&base_url);
-    let updater = builder.build().expect("fake release updater configuration");
 
     #[cfg(unix)]
     let _output_lock = update_output_lock();
-    let (result, output) = capture_phase(true, || updater.update());
-    server
-        .join()
-        .expect("fake release source should serve its release response");
-
-    result.expect_err("the fake download intentionally fails after release lookup");
-    assert!(
-        !output.contains("Do you want to continue?"),
-        "output was: {output:?}"
-    );
-    assert!(
-        !output.contains("Checking target-arch"),
-        "output was: {output:?}"
-    );
-    assert!(
-        !output.contains("Looking for tag"),
-        "output was: {output:?}"
-    );
+    let mut failures = Vec::new();
+    for download_fails in [true, false] {
+        let (base_url, server) = fake_release_source(download_fails);
+        env.set("CAS_UPDATE_GITHUB_API_URL", &base_url);
+        let (result, output) = capture_phase(true, || run_full_update(
+            &cli,
+            false,
+            || perform_update(&args, "3.17.1", &cli),
+            |_| panic!("failed install must not invoke the installed binary"),
+            |_| panic!("failed install must not restart the hub"),
+            |_, _| panic!("failed install must not refresh projects"),
+        ));
+        server.join().expect("loopback release/download fixture");
+        let error = result.expect_err("download/extraction refusal must remain nonzero");
+        let document = serde_json::from_str::<serde_json::Value>(&output);
+        match document {
+            Ok(receipt) => {
+                assert_eq!(receipt["binary_updated"], false, "{receipt}");
+                assert_eq!(receipt["version"], "3.17.1", "{receipt}");
+                assert_eq!(receipt["binary_status"], "failed", "{receipt}");
+                assert_eq!(receipt["refresh_status"], "not_run", "{receipt}");
+                assert_eq!(receipt["error"]["phase"], "binary", "{receipt}");
+                assert_eq!(receipt["error"]["message"], format!("{error:#}"));
+                assert!(receipt.get("projects").is_none() && receipt.get("hub_restart").is_none(), "{receipt}");
+            }
+            Err(_) => failures.push(format!("download_fails={download_fails}: expected one JSON object, got {output:?}; error={error:#}")),
+        }
+        assert!(!output.contains("Do you want to continue?") && !output.contains("Checking target-arch") && !output.contains("Looking for tag"), "{output}");
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
-fn fake_release_source() -> (String, thread::JoinHandle<()>) {
+fn fake_release_source(download_fails: bool) -> (String, thread::JoinHandle<()>) {
     let server = tiny_http::Server::http("127.0.0.1:0").expect("bind fake release source");
     let base_url = format!("http://{}", server.server_addr());
     let release = format!(
@@ -1775,20 +1782,29 @@ fn fake_release_source() -> (String, thread::JoinHandle<()>) {
             "name": "9.9.9",
             "created_at": "2026-09-05T00:00:00Z",
             "assets": [{{
-                "name": "cas-linux-x86_64.tar.gz",
-                "url": "{base_url}/asset"
+                "name": "cas-{target}.tar.gz",
+                "url": "{base_url}/asset",
+                "browser_download_url": "{base_url}/asset"
             }}]
         }}"#,
-        base_url = base_url
+        base_url = base_url,
+        target = self_update::get_target(),
     );
     let handle = thread::spawn(move || {
-        let request = server
-            .incoming_requests()
-            .next()
-            .expect("updater should request the fake release");
-        request
-            .respond(tiny_http::Response::from_string(release))
-            .expect("respond with fake release");
+        loop {
+            let request = server.recv_timeout(Duration::from_secs(10)).unwrap()
+                .expect("updater must reach only the loopback release/download fixture");
+            let asset = request.url() == "/asset";
+            let response = if asset {
+                // Neither fixture can yield an executable or replace the test binary.
+                tiny_http::Response::from_string("not a release archive")
+                    .with_status_code(if download_fails { 500 } else { 200 })
+            } else {
+                tiny_http::Response::from_string(release.clone())
+            };
+            request.respond(response).expect("respond with fake release");
+            if asset { break; }
+        }
     });
     (base_url, handle)
 }

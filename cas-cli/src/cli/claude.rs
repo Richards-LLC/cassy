@@ -403,10 +403,11 @@ fn prepare_login_profile(home: &Path, profile: &str) -> Result<PathBuf> {
             profile_dir.display()
         )
     })?;
-    eprintln!(
-        "Logging in Claude account config: {}",
-        profile_dir.display()
-    );
+    let display_path = profile_dir
+        .strip_prefix(home)
+        .map(|relative| format!("~/{}", relative.display()))
+        .unwrap_or_else(|_| profile_dir.display().to_string());
+    eprintln!("Logging in Claude account config: {display_path}");
     if profile != "main" && (created || crate::accounts::Provider::Claude.base_dir(home).is_dir()) {
         link_or_seed_new_profile(home, &profile_dir)?;
     }

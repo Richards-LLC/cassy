@@ -39,7 +39,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **No share before verification passes:** never post a deliverable through Violet during its epic's open verification; a caveat isn't enough ([publication](references/reporting-and-routing.md#publication)).
 - **Unprompted operator updates:** use `target=operator kind=status|receipt|ask|blocker` (plus `attachment=<artifact-id>` if needed), not pane prose.
 
-### Exit ladder
+### Drive to the exit
 
 Own the next action from the highest true rung each turn:
 
@@ -62,4 +62,4 @@ For mixed harnesses and explicit `cli=`/`model=`/`effort=` controls, see [worker
 
 ## On-demand references
 
-For startup, planning and release, use [workflow](references/workflow.md) and [routing](references/reporting-and-routing.md). File operational bugs through the [issue registry](references/filing-cas-bugs.md) before moving on. [Epic driving](references/epic-driving.md) · [reminders](references/reminders.md).
+For startup, planning and release, use [workflow](references/workflow.md) and [routing](references/reporting-and-routing.md). Before moving on, file bugs through `issues.repo` or `issues.components.cassy`, `issues.components.violet`, `issues.components.cloud` ([issue registry](references/filing-cas-bugs.md)). [Epic driving](references/epic-driving.md) · [reminders](references/reminders.md).

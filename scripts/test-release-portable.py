@@ -115,7 +115,7 @@ class Report(Fixture):
         self.run.mkdir(parents=True)
         (self.run / 'landed-main.sha').write_text(sha + '\n')
         (self.run / 'release-workflow.json').write_text(json.dumps(
-            dict(headBranch='v9.99.7', headSha=sha, status='completed', conclusion='success')))
+            dict(headBranch='main', event='push', headSha=sha, status='completed', conclusion='success')))
         self.receipts('2026-10-02T19:28:19Z')
         self.renderer = self.root / 'render'
         self.executable(self.renderer, '#!/bin/sh\necho reached >"$RENDER_MARKER"\nexit 7\n')

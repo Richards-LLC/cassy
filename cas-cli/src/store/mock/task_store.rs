@@ -148,6 +148,23 @@ impl TaskStore for MockTaskStore {
         Ok(now)
     }
 
+    fn update_if_current(&self, task: &Task, expected: &Task) -> Result<DateTime<Utc>> {
+        self.check_error()?;
+        let mut tasks = self.tasks.write().unwrap();
+        let current = tasks.get(&task.id)
+            .ok_or_else(|| StoreError::NotFound(task.id.clone()))?;
+        if task.id != expected.id || current.updated_at != expected.updated_at
+            || current.status != expected.status
+        {
+            return Err(StoreError::Other("task changed since close snapshot; park refused".into()));
+        }
+        let now = Utc::now();
+        let mut stored = task.clone();
+        stored.updated_at = now;
+        tasks.insert(task.id.clone(), stored);
+        Ok(now)
+    }
+
     fn update_from_sync(&self, task: &Task, expected: &Task) -> Result<Option<DateTime<Utc>>> {
         self.check_error()?;
         let mut tasks = self.tasks.write().unwrap();

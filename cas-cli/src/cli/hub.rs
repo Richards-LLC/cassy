@@ -77,7 +77,7 @@ pub struct HubArgs {
     #[arg(long, global = true, conflicts_with = "no_tailscale_serve")]
     pub tailscale_serve: bool,
     /// Keep this launch loopback-only (overrides hub.tailscale_serve)
-    #[arg(long, global = true, conflicts_with = "tailscale_serve")]
+    #[arg(long, visible_alias = "loopback", global = true, conflicts_with = "tailscale_serve")]
     pub no_tailscale_serve: bool,
     /// Tailscale Serve HTTPS port (443 is the stable no-port URL)
     #[arg(long, global = true, default_value_t = 443)]
@@ -491,8 +491,7 @@ fn decide_live_start(
                 .tailscale_serve_port
                 .is_some_and(|port| port != tailscale_port));
     let target_missing = tailscale_serve
-        && record.tailscale_serve_target.is_none()
-        && record.transport_warning.is_none();
+        && (record.tailscale_serve_target.is_none() || record.transport_warning.is_some());
     let flags_differ = record.bind != args.bind.to_string()
         || record.port != args.port
         || tailscale_flags_differ
@@ -555,8 +554,7 @@ fn running_hub_satisfies_request(
         return false;
     }
     if tailscale_serve
-        && record.tailscale_serve_target.is_none()
-        && record.transport_warning.is_none()
+        && (record.tailscale_serve_target.is_none() || record.transport_warning.is_some())
     {
         return false;
     }
@@ -1001,6 +999,15 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
         ),
         _ => args.tailscale_serve,
     };
+    if requested && matches!(args.command, Some(HubCommands::Start(_) | HubCommands::Restart(_))) {
+        let paths = HubRuntimePaths::default_for_user()?;
+        let manager = TailscaleServeManager::new(paths.root());
+        if manager.cli_available() {
+            anyhow::ensure!(manager.is_logged_in()
+                .context("Cannot inspect Tailscale; use `cas hub start --loopback` for local access")?,
+                "Tailscale is not signed in; sign in first or use `cas hub start --loopback`");
+        }
+    }
     match args.command.clone().unwrap_or_else(default_hub_command) {
         HubCommands::Start(serve) => start(&serve, cli, requested, args.tailscale_serve_port),
         HubCommands::ReapDaemon(reap) => reap_factory_daemon(&reap),
@@ -1012,16 +1019,7 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
             let (tailscale_serve, tailscale_port) =
                 resolve_lifecycle_tailscale_request(requested, args.tailscale_serve_port, &paths)?;
             if super::hub_service::restart_supervised(cli, tailscale_serve, tailscale_port)? {
-                let result = status(cli);
-                // status remains strict about remote reachability, but optional
-                // publication cannot turn a healthy restart into a failure.
-                if let Ok(record) = paths.read_process_record()
-                    && record.transport_warning.is_some()
-                    && record_is_ready(&paths, &record)
-                {
-                    return Ok(());
-                }
-                return result;
+                return status(cli);
             }
             // `hub restart` is a stop-to-relaunch, so its stop carries the
             // intent: if a concurrent lifecycle command already produced a hub
@@ -1366,6 +1364,9 @@ fn start_with_output_resolved(
     if let Some(executable) = std::env::var_os("TAILSCALE").filter(|value| !value.is_empty()) {
         command.env("TAILSCALE", executable);
     }
+    if let Some(socket) = std::env::var_os("TAILSCALE_SOCKET").filter(|value| !value.is_empty()) {
+        command.env("TAILSCALE_SOCKET", socket);
+    }
     if let Some((port, target)) = prior_serve_target {
         command
             .arg("--prior-tailscale-serve-port")
@@ -1412,6 +1413,14 @@ fn start_with_output_resolved(
     while Instant::now() < deadline {
         if let Ok(record) = paths.read_process_record() {
             if record_is_ready(&paths, &record) {
+                if launch_origin != HubLaunchOrigin::Update && tailscale_serve
+                    && TailscaleServeManager::new(paths.root()).cli_available()
+                    && let Some(warning) = &record.transport_warning
+                {
+                    let warning = warning.clone();
+                    stop_with_output(cli, false, None, false)?;
+                    anyhow::bail!("Tailscale Serve failed: {warning}; use `cas hub start --loopback` for local access");
+                }
                 if emit_output && cli.json {
                     println!("{}", serde_json::to_string(&record)?);
                 } else if emit_output {
@@ -1657,9 +1666,11 @@ fn serve_foreground_logged(
                 tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
             let proxy_port = proxy_listener.local_addr()?.port();
             let ensure_started = Instant::now();
-            let ensure_result = tailscale_manager.ensure_with_prior_target(
-                proxy_port, tailscale_port, prior_serve_target,
-            );
+            let ensure_result = if args.launched_by == "service" {
+                tailscale_manager.ensure_for_service(proxy_port, tailscale_port, prior_serve_target).await
+            } else {
+                tailscale_manager.ensure_with_prior_target(proxy_port, tailscale_port, prior_serve_target)
+            };
             let _ = writeln!(
                 startup_log,
                 "{}",
@@ -1671,6 +1682,9 @@ fn serve_foreground_logged(
             );
             match ensure_result {
                 Ok(receipt) => (Some(proxy_listener), Some(receipt), None),
+                Err(error) if args.launched_by == "service" => {
+                    return Err(error).context("Tailscale Serve service startup exhausted its bounded retries");
+                }
                 Err(error) => {
                     let warning = error.to_string();
                     tracing::warn!(%warning, "Tailscale Serve refused; keeping Commander loopback-only");
@@ -2480,6 +2494,7 @@ fn lock_holder_json(holder: &HubLockHolder) -> serde_json::Value {
 }
 
 fn stop(cli: &Cli, force: bool) -> Result<()> {
+    super::hub_service::stop_supervised()?;
     // No relaunch intent: a live hub can never mean success here, so this
     // keeps the pre-cas-bf90 behaviour exactly.
     stop_with_output(cli, true, None, force).map(|_| ())

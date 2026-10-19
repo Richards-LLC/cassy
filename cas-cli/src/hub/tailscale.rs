@@ -66,6 +66,8 @@ struct TailscaleTeardownReceipt {
 pub struct TailscaleServeManager {
     executable: OsString,
     state_dir: PathBuf,
+    socket: Option<OsString>,
+    deadline: Option<Deadline>,
 }
 
 impl TailscaleServeManager {
@@ -81,11 +83,44 @@ impl TailscaleServeManager {
         Self {
             executable: executable.as_ref().to_owned(),
             state_dir: state_dir.as_ref().to_path_buf(),
+            socket: env::var_os("TAILSCALE_SOCKET").filter(|socket| !socket.is_empty()),
+            deadline: None,
         }
     }
 
     pub fn executable_display(&self) -> String {
         self.executable.to_string_lossy().into_owned()
+    }
+
+    pub(crate) fn cli_available(&self) -> bool {
+        Path::new(&self.executable).is_file()
+            || self.executable.to_str().and_then(executable_on_path).is_some()
+    }
+
+    /// Service startup races the local Tailscale daemon after login. All
+    /// attempts share the existing startup deadline, including CLI commands.
+    pub(crate) async fn ensure_for_service(
+        &self,
+        local_port: u16,
+        https_port: u16,
+        prior_target: Option<(u16, String)>,
+    ) -> Result<TailscaleServeReceipt> {
+        let mut manager = self.clone();
+        let deadline = Deadline::after(Self::successful_ensure_budget());
+        manager.deadline = Some(deadline);
+        let mut delays = [1, 2, 4].into_iter();
+        loop {
+            match manager.ensure_with_prior_target(local_port, https_port, prior_target.clone()) {
+                Ok(receipt) => return Ok(receipt),
+                Err(error) => {
+                    let Some(delay) = delays.next().map(Duration::from_secs)
+                        .filter(|delay| deadline.remaining() > *delay)
+                    else { return Err(error); };
+                    tracing::warn!(%error, ?delay, "retrying Tailscale Serve service startup");
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
     }
 
     pub fn ensure(&self, local_port: u16, https_port: u16) -> Result<TailscaleServeReceipt> {
@@ -429,13 +464,13 @@ impl TailscaleServeManager {
 
     fn run(&self, args: &[String]) -> Result<Vec<u8>> {
         let mut command = tailscale_command(&self.executable);
-        if let Some(socket) = env::var_os("TAILSCALE_SOCKET").filter(|socket| !socket.is_empty()) {
+        if let Some(socket) = &self.socket {
             command.arg(format!("--socket={}", socket.to_string_lossy()));
         }
         command.args(args);
         let output = bounded_process::run_command(
             &mut command,
-            Deadline::after(COMMAND_TIMEOUT),
+            self.deadline.unwrap_or_else(|| Deadline::after(COMMAND_TIMEOUT)),
             COMMAND_TIMEOUT,
         )
         .map_err(|error| match error {
@@ -457,6 +492,7 @@ pub(super) fn tailscale_command(executable: &OsStr) -> Command {
 
 fn tailscale_command_with_term(executable: &OsStr, term: Option<OsString>) -> Command {
     let mut command = Command::new(executable);
+    command.env("TAILSCALE_BE_CLI", "1");
     if term.is_none() {
         command.env("TERM", "dumb");
     }

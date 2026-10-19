@@ -511,6 +511,14 @@ fn rewrite_launchd_publication_flags(
     ensure_launchd_file_limits(&ensure_launchd_cli_environment(&rewritten)?)
 }
 
+fn launchd_tailscale_environment() -> [(&'static str, Option<std::ffi::OsString>); 3] {
+    [
+        ("TAILSCALE_BE_CLI", Some("1".into())),
+        ("TAILSCALE", std::env::var_os("TAILSCALE").filter(|value| !value.is_empty())),
+        ("TAILSCALE_SOCKET", std::env::var_os("TAILSCALE_SOCKET").filter(|value| !value.is_empty())),
+    ]
+}
+
 fn ensure_launchd_cli_environment(definition: &str) -> Result<String> {
     if let Some(key_start) = definition.find("<key>EnvironmentVariables</key>") {
         let after_key = key_start + "<key>EnvironmentVariables</key>".len();
@@ -533,11 +541,6 @@ fn ensure_launchd_cli_environment(definition: &str) -> Result<String> {
             .context("launchd EnvironmentVariables has an unclosed dict")?;
         let has_path = definition[dict_start..dict_end].contains("<key>PATH</key>");
         let has_term = definition[dict_start..dict_end].contains("<key>TERM</key>");
-        let tailscale_override = std::env::var_os("TAILSCALE").filter(|value| !value.is_empty());
-        let has_tailscale = definition[dict_start..dict_end].contains("<key>TAILSCALE</key>");
-        if has_path && has_term && (tailscale_override.is_none() || has_tailscale) {
-            return Ok(definition.to_owned());
-        }
         let insert_at = definition[..dict_end]
             .rfind('\n')
             .map_or(dict_end, |newline| newline + 1);
@@ -550,11 +553,29 @@ fn ensure_launchd_cli_environment(definition: &str) -> Result<String> {
         if !has_term {
             additions.push_str("    <key>TERM</key>\n    <string>dumb</string>\n");
         }
-        if !has_tailscale && let Some(executable) = tailscale_override {
-            additions.push_str(&format!(
-                "    <key>TAILSCALE</key>\n    <string>{}</string>\n",
-                xml_escape(&executable.to_string_lossy())
-            ));
+        for (key, value) in launchd_tailscale_environment() {
+            let Some(value) = value else { continue };
+            let escaped = xml_escape(&value.to_string_lossy());
+            let key_tag = format!("<key>{key}</key>");
+            if let Some(offset) = definition[dict_start..dict_end].find(&key_tag) {
+                let after_key = dict_start + offset + key_tag.len();
+                let string_start = definition.len() - definition[after_key..].trim_start().len();
+                let value_start = string_start + "<string>".len();
+                ensure!(definition[string_start..].starts_with("<string>"),
+                    "launchd {key} must be a string");
+                let value_end = definition[value_start..dict_end].find("</string>")
+                    .map(|offset| value_start + offset).context("unclosed launchd environment string")?;
+                if definition[value_start..value_end] != escaped {
+                    let mut updated = definition.to_owned();
+                    updated.replace_range(value_start..value_end, &escaped);
+                    return ensure_launchd_cli_environment(&updated);
+                }
+            } else {
+                additions.push_str(&format!("    <key>{key}</key>\n    <string>{escaped}</string>\n"));
+            }
+        }
+        if additions.is_empty() {
+            return Ok(definition.to_owned());
         }
         return Ok(format!(
             "{}{}{}",
@@ -857,6 +878,29 @@ pub(super) fn installed_service_exists() -> Result<bool> {
         ServicePlatform::Systemd | ServicePlatform::ManualLinux => Ok(systemd_path()?.is_file()),
         ServicePlatform::Unsupported => Ok(false),
     }
+}
+
+/// Unload before signaling a launchd-owned hub: KeepAlive must no longer
+/// own a restart while the ordinary stop path waits for process teardown.
+/// Keep the plist so an explicit restart can bootstrap it again.
+pub(super) fn stop_supervised() -> Result<()> {
+    if native_platform() != ServicePlatform::Launchd || !launchd_path()?.is_file() {
+        return Ok(());
+    }
+    let target = format!("{}/{}", launchd_domain()?, launchd_label());
+    if !probe_manager("launchctl", ["print", &target]).require_observed()? {
+        return Ok(());
+    }
+    let mut command = manager_command("launchctl");
+    command.args(["bootout", &target]);
+    let timeout = Duration::from_secs(5);
+    let output = crate::bounded_process::run_command(
+        &mut command, crate::bounded_process::Deadline::after(timeout), timeout,
+    ).map_err(|_| anyhow::anyhow!("launchctl bootout did not complete; refusing to race hub supervision"))?;
+    ensure!(output.status.success(), "launchctl refused to unload the Cassy hub service");
+    ensure!(!probe_manager("launchctl", ["print", &target]).require_observed()?,
+        "Cassy hub service is still loaded after launchctl bootout");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1475,15 +1519,13 @@ fn launchd_plist(
         .map(|arg| format!("    <string>{}</string>", xml_escape(&arg)))
         .collect::<Vec<_>>()
         .join("\n");
-    let tailscale_override = std::env::var_os("TAILSCALE")
-        .filter(|value| !value.is_empty())
-        .map(|value| {
+    let tailscale_override = launchd_tailscale_environment()
+        .into_iter().filter_map(|(key, value)| value.map(|value| {
             format!(
-                "    <key>TAILSCALE</key>\n    <string>{}</string>\n",
+                "    <key>{key}</key>\n    <string>{}</string>\n",
                 xml_escape(&value.to_string_lossy())
             )
-        })
-        .unwrap_or_default();
+        })).collect::<String>();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1856,7 +1898,7 @@ exit 0
         );
         let old = old.replace(
             &format!(
-                "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n    <key>TERM</key>\n    <string>dumb</string>\n  </dict>\n"
+                "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n    <key>TERM</key>\n    <string>dumb</string>\n    <key>TAILSCALE_BE_CLI</key>\n    <string>1</string>\n  </dict>\n"
             ),
             "",
         );
@@ -1992,7 +2034,7 @@ exit 0
         );
         let existing = original.replace(
             &format!(
-                "<dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n    <key>TERM</key>\n    <string>dumb</string>\n  </dict>"
+                "<dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n    <key>TERM</key>\n    <string>dumb</string>\n    <key>TAILSCALE_BE_CLI</key>\n    <string>1</string>\n  </dict>"
             ),
             "<dict/>",
         );
@@ -2014,7 +2056,7 @@ exit 0
         let legacy = current.replace("    <key>TERM</key>\n    <string>dumb</string>\n", "");
         assert_eq!(ensure_launchd_cli_environment(&legacy).unwrap(), current);
         let legacy = current.replace(
-            &format!("  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n    <key>TERM</key>\n    <string>dumb</string>\n  </dict>\n"),
+            &format!("  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n    <key>TERM</key>\n    <string>dumb</string>\n    <key>TAILSCALE_BE_CLI</key>\n    <string>1</string>\n  </dict>\n"),
             "",
         );
         assert_eq!(ensure_launchd_cli_environment(&legacy).unwrap(), current);

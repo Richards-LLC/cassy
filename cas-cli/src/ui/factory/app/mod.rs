@@ -16,7 +16,7 @@ use super::director::{
     DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
     PanelAreas, Prompt, SidecarFocus, ViewMode,
     generate_prompt_at, revalidate_event_for_delivery_with_context,
-    revalidate_event_for_delivery_with_focus, supervisor_actionable_state_with_classifiers,
+    revalidate_event_for_delivery_with_focus, supervisor_actionable_state_with_ownership,
 };
 use crate::store::open_prompt_queue_store;
 use crate::types::Worktree;
@@ -30,6 +30,7 @@ use crate::ui::theme::ActiveTheme;
 use crate::ui::widgets::TreeItemType;
 use crate::worktree::WorktreeManager;
 
+mod assignment_evidence;
 mod branch_visibility;
 pub(crate) mod delivery_evidence;
 #[cfg(test)]
@@ -1066,6 +1067,7 @@ pub struct FactoryApp {
     /// `CiStatus` job on the external lane. The stall check joins the two in
     /// memory and only looks them up.
     git_evidence: delivery_evidence::GitEvidenceMap,
+    assignment_evidence: assignment_evidence::AssignmentEvidence,
     /// cas-3b16: the session metadata the supervisor-stall check reads, from
     /// the latest director snapshot job (never read on the loop).
     session_progress: SessionProgressRead,
@@ -1561,6 +1563,7 @@ impl FactoryApp {
             blocks_deps,
             idle_liveness,
             facts,
+            assignment,
             session: session_progress,
             mut merge_alerts,
             worker_ci_waits,
@@ -1659,6 +1662,7 @@ impl FactoryApp {
                         &unfiltered_data,
                         &evidence,
                         &session_progress,
+                        assignment.as_ref(),
                     )
                         .then(|| event.clone())
                 } else {
@@ -1815,14 +1819,15 @@ impl FactoryApp {
         // Synchronous callers resolve the git half of the stall evidence
         // here too; the daemon runs it as a `CiStatus` job instead.
         if let Some(facts) = load.facts()
-            && let Some(request) = delivery_evidence::CiStatusRequest::new(
+            && let Some(request) = delivery_evidence::CiStatusRequest::for_stall(
                 self.delivery_repo_root(),
                 facts,
                 std::sync::Arc::clone(&self.lane_ci_pending),
                 std::sync::Arc::clone(&self.delivery_containment),
+                load.assignment.clone(),
             )
         {
-            self.git_evidence = request.run();
+            self.apply_ci_status(request.run());
         }
         let events = self.apply_director_refresh(load);
         // The daemon writes a changed stall tracker on its store worker;
@@ -1931,6 +1936,7 @@ impl FactoryApp {
         data: &DirectorData,
         evidence: &delivery_evidence::DeliveryEvidenceMap,
         session_progress: &SessionProgressRead,
+        assignment: Option<&assignment_evidence::AssignmentEvidence>,
     ) -> bool {
         let DirectorEvent::SupervisorStalled {
             next_step,
@@ -1954,7 +1960,8 @@ impl FactoryApp {
             return false;
         }
         let held_workers = session_progress.held_workers.clone().unwrap_or_default();
-        self.supervisor_actionable_from_evidence(data, evidence, &held_workers, Utc::now())
+        self.supervisor_actionable_from_ownership(data, evidence, &held_workers, Utc::now(),
+            assignment.unwrap_or(&Default::default()))
             .as_ref()
             == Some(next_step)
     }
@@ -1968,7 +1975,18 @@ impl FactoryApp {
         held_workers: &HashSet<String>,
         now: DateTime<Utc>,
     ) -> Option<super::director::SupervisorActionableState> {
-        supervisor_actionable_state_with_classifiers(
+        self.supervisor_actionable_from_ownership(data, evidence, held_workers, now, &self.assignment_evidence)
+    }
+
+    fn supervisor_actionable_from_ownership(
+        &self,
+        data: &DirectorData,
+        evidence: &delivery_evidence::DeliveryEvidenceMap,
+        held_workers: &HashSet<String>,
+        now: DateTime<Utc>,
+        assignment: &assignment_evidence::AssignmentEvidence,
+    ) -> Option<super::director::SupervisorActionableState> {
+        supervisor_actionable_state_with_ownership(
             data,
             self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
             &self.supervisor_name,
@@ -1980,6 +1998,7 @@ impl FactoryApp {
                 delivery_evidence::evidence_merged_close_blocked(evidence, task, target_branch)
             },
             |task, worker| delivery_evidence::evidence_hold(evidence, task, worker),
+            |task| assignment.allows(&task.id),
         )
     }
 

@@ -25,7 +25,8 @@ use std::time::Instant;
 
 use cas_factory::SourceChangesInfo;
 
-use super::delivery_evidence::{CiStatusRequest, GitEvidenceMap, ParkedFactsMap, StallEvidenceRequest};
+use super::delivery_evidence::{CiStatusRequest, StallExternalEvidence, ParkedFactsMap, StallEvidenceRequest};
+use super::assignment_evidence::{AssignmentEvidence, AssignmentRequest};
 use super::{
     CasDbFingerprint, FactoryApp, PhantomWorkerTarget, SessionEpicFocus, SessionProgressRead,
     merge_director_data_preserving_git, preferred_epic_focus_from_session_metadata_named,
@@ -81,6 +82,7 @@ pub(crate) struct DirectorRefreshLoad {
     requested_after: Instant,
     /// The store half of the supervisor-stall evidence.
     facts: Option<ParkedFactsMap>,
+    pub(super) assignment: Option<AssignmentRequest>,
     /// The session metadata, read with the snapshot.
     session: Option<SessionProgressRead>,
     transcript_fingerprints: TranscriptFingerprints,
@@ -187,12 +189,14 @@ impl DirectorRefreshRequest {
             ),
             _ => None,
         };
+        let assignment = self.stall.as_ref().and_then(|stall| stall.assignment_request(fresh));
         DirectorRefreshLoad {
             fingerprint,
             git_due: self.git_due,
             director,
             requested_after: self.requested_after,
             facts,
+            assignment,
             session: self.session.as_deref().map(session_progress_named),
             transcript_fingerprints: self
                 .transcript_paths
@@ -260,6 +264,7 @@ pub(crate) struct DeliveryInputs {
     /// Supervisor-stall store facts against the fresh read; `None` when the
     /// read failed (uncertain) or no `SupervisorStalled` event needs them.
     pub(super) facts: Option<ParkedFactsMap>,
+    pub(super) assignment: Option<AssignmentEvidence>,
     /// The session metadata a `SupervisorStalled` event is revalidated
     /// against, read with the facts.
     pub(super) session: Option<SessionProgressRead>,
@@ -279,6 +284,7 @@ impl DeliveryInputs {
             blocks_deps: Vec::new(),
             idle_liveness: HashMap::new(),
             facts: None,
+            assignment: None,
             session: None,
             merge_alerts: HashMap::new(),
             worker_ci_waits: HashMap::new(),
@@ -309,7 +315,7 @@ impl DeliveryInputs {
 
 impl DeliveryRequest {
     /// Merge reads run on the external lane because they fetch Git and query CI.
-    pub(crate) fn needs_external_lane(&self) -> bool { !self.merge_events.is_empty() }
+    pub(crate) fn needs_external_lane(&self) -> bool { !self.merge_events.is_empty() || self.stall.is_some() }
     /// Move the idle-worker liveness out of this read, for a job of its own
     /// on the blocking lane. `None` when no `WorkerIdle` event needs it.
     pub(crate) fn take_idle_liveness(&mut self) -> Option<IdleLivenessRequest> {
@@ -366,11 +372,15 @@ impl DeliveryRequest {
                 super::merge_alert::read_worker_ci_wait(event, fresh, repo)
             }).collect()
         }).unwrap_or_default();
+        let assignment = self.stall.as_ref().and_then(|stall|
+            data.as_ref().ok().and_then(|fresh| stall.assignment_request(Some(fresh))))
+            .map(|request| request.read());
         DeliveryInputs {
             data,
             blocks_deps,
             idle_liveness,
             facts,
+            assignment,
             session,
             merge_alerts,
             worker_ci_waits,
@@ -652,17 +662,18 @@ impl FactoryApp {
     /// The `CiStatus` job for the parked deliveries the last snapshot read,
     /// or `None` when none needs git evidence (cas-223f review M1).
     pub(crate) fn ci_status_request(&self) -> Option<CiStatusRequest> {
-        CiStatusRequest::new(
-            self.delivery_repo_root(),
-            &self.parked_facts,
+        let assignment = self.stall_evidence_request().and_then(|stall| stall.assignment_request(None));
+        CiStatusRequest::for_stall(
+            self.delivery_repo_root(), &self.parked_facts,
             std::sync::Arc::clone(&self.lane_ci_pending),
-            std::sync::Arc::clone(&self.delivery_containment),
+            std::sync::Arc::clone(&self.delivery_containment), assignment,
         )
     }
 
     /// Apply a finished `CiStatus` job.
-    pub(crate) fn apply_ci_status(&mut self, evidence: GitEvidenceMap) {
-        self.git_evidence = evidence;
+    pub(crate) fn apply_ci_status(&mut self, evidence: StallExternalEvidence) {
+        self.git_evidence = evidence.git;
+        self.assignment_evidence = evidence.assignment.unwrap_or_default();
     }
 
     /// Capture what the delivery stage's fresh read needs to revalidate

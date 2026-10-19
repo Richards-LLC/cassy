@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 
 use super::{git_is_ancestor, last_close_rejection_reason};
+use super::assignment_evidence::{AssignmentEvidence, AssignmentRequest};
 use crate::ui::factory::director::{
     DeliveryHold, DirectorData, DirectorStores, MergedCloseBlockedTask, TaskSummary,
     blocker_note_after_park, hold_decision_after_park, merge_target_for_task, task_delivery_ref,
@@ -178,6 +179,7 @@ pub(crate) struct StallEvidenceRequest {
     /// The parked deliveries in the loop's current snapshot, for a job that
     /// reads no new snapshot (the database is unchanged).
     parked: Vec<ParkedDelivery>,
+    assignment: Option<AssignmentRequest>,
 }
 
 impl StallEvidenceRequest {
@@ -188,11 +190,14 @@ impl StallEvidenceRequest {
         current: &DirectorData,
     ) -> Self {
         let parked = parked_deliveries(current, &epic_id);
-        Self {
-            cas_dir,
-            epic_id,
-            session,
-            parked,
+        let assignment = AssignmentRequest::new(cas_dir.clone(), current, &epic_id);
+        Self { cas_dir, epic_id, session, parked, assignment }
+    }
+
+    pub(super) fn assignment_request(&self, fresh: Option<&DirectorData>) -> Option<AssignmentRequest> {
+        match fresh {
+            Some(data) => AssignmentRequest::new(self.cas_dir.clone(), data, &self.epic_id),
+            None => self.assignment.clone(),
         }
     }
 
@@ -318,10 +323,16 @@ impl StallEvidenceRequest {
 /// lane.
 #[derive(Debug, Clone)]
 pub(crate) struct CiStatusRequest {
+    assignment: Option<AssignmentRequest>,
     repo_root: PathBuf,
     facts: Vec<ParkedFacts>,
     lane_ci_pending: LaneCiCache,
     containment: DeliveryContainmentCache,
+}
+
+pub(crate) struct StallExternalEvidence {
+    pub(super) git: GitEvidenceMap,
+    pub(super) assignment: Option<AssignmentEvidence>,
 }
 
 impl CiStatusRequest {
@@ -334,6 +345,7 @@ impl CiStatusRequest {
     ) -> Option<Self> {
         let facts: Vec<ParkedFacts> = facts.values().filter(|f| f.needs_git()).cloned().collect();
         (!facts.is_empty()).then_some(Self {
+            assignment: None,
             repo_root,
             facts,
             lane_ci_pending,
@@ -341,8 +353,25 @@ impl CiStatusRequest {
         })
     }
 
-    /// Resolve every delivery's tip, lane CI and merged state.
-    pub(crate) fn run(&self) -> GitEvidenceMap {
+    pub(super) fn for_stall(
+        repo_root: PathBuf, facts: &ParkedFactsMap, lane_ci_pending: LaneCiCache,
+        containment: DeliveryContainmentCache, assignment: Option<AssignmentRequest>,
+    ) -> Option<Self> {
+        if assignment.is_none() {
+            return Self::new(repo_root, facts, lane_ci_pending, containment);
+        }
+        Some(Self { repo_root, facts: facts.values().filter(|f| f.needs_git()).cloned().collect(),
+            lane_ci_pending, containment, assignment })
+    }
+
+    /// Resolve assignments and deliveries off the loop, including when there
+    /// are ready children but no parked deliveries.
+    pub(crate) fn run(&self) -> StallExternalEvidence {
+        StallExternalEvidence { assignment: self.assignment.as_ref().map(AssignmentRequest::read),
+            git: self.run_git() }
+    }
+
+    fn run_git(&self) -> GitEvidenceMap {
         self.facts
             .iter()
             .map(|facts| (facts.task.id.clone(), self.evidence_for(facts)))
@@ -601,7 +630,7 @@ mod tests {
         ci.lock().unwrap().insert(("factory/wa-cas-a".into(), anchor.clone()), (std::time::Instant::now(), false));
         let classify = |facts: &ParkedFacts| {
             let request = CiStatusRequest::new(repo.into(), &HashMap::from([("cas-a".into(), facts.clone())]), Arc::clone(&ci), Arc::clone(&containment)).unwrap();
-            let git = request.run();
+            let git = request.run().git;
             let evidence = combine(&HashMap::from([("cas-a".into(), facts.clone())]), &git);
             let mut data = DirectorData {
                 ready_tasks: Vec::new(), in_progress_tasks: Vec::new(), epic_tasks: Vec::new(),

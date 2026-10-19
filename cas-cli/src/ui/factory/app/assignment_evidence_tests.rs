@@ -11,8 +11,16 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
     let now = Utc::now();
     // Only this task has a live peer claim; local and expired claims are controls.
     for (id, owner, expires) in [
-        ("cas-claimed", "peer-worker", now + chrono::Duration::minutes(10)),
-        ("cas-expired", "peer-worker", now - chrono::Duration::minutes(1)),
+        (
+            "cas-claimed",
+            "peer-worker",
+            now + chrono::Duration::minutes(10),
+        ),
+        (
+            "cas-expired",
+            "peer-worker",
+            now - chrono::Duration::minutes(1),
+        ),
         ("cas-own", "id-local", now + chrono::Duration::minutes(10)),
     ] {
         let key = crate::cloud::peer_claims::claim_key("github.com/acme/widgets", id);
@@ -23,17 +31,24 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
                 "status": "active", "expires_at": expires, "renewed_at": now,
                 "renewal_count": 0, "epoch": 1, "claim_reason": null
             }})))
-            .mount(&server).await;
+            .mount(&server)
+            .await;
     }
-    Mock::given(method("GET")).and(path("/api/agents/locks"))
+    Mock::given(method("GET"))
+        .and(path("/api/agents/locks"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"locks": []})))
-        .mount(&server).await;
-    Mock::given(method("GET")).and(path("/api/agents"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/agents"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"agents": []})))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"lock": null})))
-        .with_priority(10).mount(&server).await;
+        .with_priority(10)
+        .mount(&server)
+        .await;
     let endpoint = server.uri();
     tokio::task::spawn_blocking(move || {
         let mut env = crate::test_support::TestEnvGuard::temp_home();

@@ -245,23 +245,25 @@ impl SqliteTaskStore {
             if let Some(expected) = expected {
                 if expected.id != task.id {
                     return Err(StoreError::Parse(
-                        "sync expectation names a different task".into(),
+                        "task expectation names a different task".into(),
                     ));
                 }
-                let clock: Option<String> = tx
+                let current: Option<(String, String)> = tx
                     .query_row(
-                        "SELECT updated_at FROM tasks WHERE id = ?",
+                        "SELECT updated_at, status FROM tasks WHERE id = ?",
                         params![task.id],
-                        |row| row.get(0),
+                        |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .optional()?;
-                let Some(clock) = clock else {
+                let Some((clock, status)) = current else {
                     return Err(StoreError::TaskNotFound(task.id.clone()));
                 };
-                if Self::parse_datetime(&clock) != Some(expected.updated_at) {
+                if Self::parse_datetime(&clock) != Some(expected.updated_at)
+                    || status != expected.status.to_string()
+                {
                     return Ok(None);
                 }
-                if !task.lifecycle_matches(expected)
+                if from_sync && !task.lifecycle_matches(expected)
                     && crate::delivery_store::delivery_owns_task_lifecycle(&tx, &task.id)?
                 {
                     return Ok(None);
@@ -272,7 +274,7 @@ impl SqliteTaskStore {
                 // claiming/renewing a lease need not change the task clock.
                 // Terminal owner updates and ordinary local reset/release
                 // writes remain permitted.
-                if expected.status == TaskStatus::InProgress
+                if from_sync && expected.status == TaskStatus::InProgress
                     && !task.is_terminal()
                     && (task.status == TaskStatus::Open || task.assignee != expected.assignee)
                 {
@@ -1183,6 +1185,19 @@ impl TaskStore for SqliteTaskStore {
     fn update_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<DateTime<Utc>> {
         self.update_checked(task, receipt_id, None, false)?
             .ok_or_else(|| StoreError::Other("unconditional task update was refused".to_string()))
+    }
+
+    fn update_if_current_with_mutation_receipt(
+        &self,
+        task: &Task,
+        expected: &Task,
+        receipt_id: &str,
+    ) -> Result<DateTime<Utc>> {
+        self.update_checked(task, receipt_id, Some(expected), false)?
+            .ok_or_else(|| StoreError::Other(format!(
+                "task changed since close snapshot for {}; park refused (request_changes or another task update may have won). Reload the task before retrying close",
+                task.id
+            )))
     }
 
     fn update_from_sync(&self, task: &Task, expected: &Task) -> Result<Option<DateTime<Utc>>> {

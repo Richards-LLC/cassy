@@ -436,6 +436,17 @@ fn unknown_time_is_held_and_unreadable_activation_releases_the_claim_cas_b94d() 
         assert_eq!((report.typed, report.held, body.0.load(Ordering::Relaxed)), (0, 1, 0));
     }
 
+    // The binding is activated after the reader's first read: the next tick
+    // re-reads activation for the unactivated channel and types the fresh ask.
+    let mut cloud = FixtureCloud::new("leases this reader's deliveries");
+    cloud.activation = Some(activation("C08COORD01", None));
+    let (mut reader, body) = (VioletReader::new("factory-session"), CountingBody(AtomicUsize::new(0)));
+    tick_with(&mut reader, &cloud, REGISTRATION, &body);
+    cloud.activation = Some(activation("C08COORD01", Some("2025-01-01T00:00:00.000Z")));
+    cloud.claim["deliveries"][0]["delivery"]["id"] = json!(FRESH);
+    let ClaimOutcome::Read(report) = tick_with(&mut reader, &cloud, REGISTRATION, &body) else { panic!() };
+    assert_eq!((report.typed, report.held), (1, 0), "{:?}", report.not_typed);
+
     let mut cloud = FixtureCloud::new("leases this reader's deliveries");
     cloud.activation = None;
     cloud.recover = fixture(RECOVER, "successor on another machine");

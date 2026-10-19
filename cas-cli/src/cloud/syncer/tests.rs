@@ -4793,3 +4793,74 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
         "successful cleanup removes only its receipt"
     );
 }
+
+/// cas-abad: Cloud answers a personal pull for a team-owned project with an
+/// empty envelope flagged `team_owned_project`. That is not an inventory: a
+/// full `cas cloud pull` healed every local edge (and its endpoint tasks)
+/// against it and staged them all for personal push (rocketship-template,
+/// 2026-10-19: 412 task + 919 dependency rows from one pull).
+#[tokio::test]
+async fn personal_pull_of_a_team_owned_project_stages_nothing_cas_abad() {
+    use crate::store::{
+        open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
+        open_rule_store_local, open_skill_store_local, open_spec_store, open_store_local,
+        open_task_store_local,
+    };
+    use crate::types::{Dependency, DependencyType};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(super::pull::PULL_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [], "tasks": [], "rules": [], "skills": [], "task_dependencies": [],
+            "team_owned_project": {"team_id": "team-cas-abad"},
+            "pulled_at": "2026-10-19T14:40:52Z",
+        })))
+        .mount(&server)
+        .await;
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    let task_store = open_task_store_local(temp.path()).unwrap();
+    for id in ["cas-abad-from", "cas-abad-to"] {
+        let mut task = Task::new(id.to_string(), id.to_string());
+        task.origin_project = Some("p".into());
+        task_store.add(&task).unwrap();
+    }
+    task_store
+        .add_dependency(&Dependency::new("cas-abad-from".into(), "cas-abad-to".into(), DependencyType::Blocks))
+        .unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "p".into(),
+        temp.path(),
+    );
+    let result = syncer
+        .pull(
+            open_store_local(temp.path()).unwrap().as_ref(),
+            task_store.as_ref(),
+            open_rule_store_local(temp.path()).unwrap().as_ref(),
+            open_skill_store_local(temp.path()).unwrap().as_ref(),
+            open_spec_store(temp.path()).unwrap().as_ref(),
+            open_event_store(temp.path()).unwrap().as_ref(),
+            open_prompt_store(temp.path()).unwrap().as_ref(),
+            open_file_change_store(temp.path()).unwrap().as_ref(),
+            open_commit_link_store(temp.path()).unwrap().as_ref(),
+        )
+        .unwrap();
+    assert_eq!(result.healed_task_dependencies_to_cloud, 0);
+    assert!(
+        queue.list_all(10).unwrap().is_empty(),
+        "an empty team-owned envelope is not an inventory to heal against"
+    );
+    assert_eq!(task_store.list_dependencies(None).unwrap().len(), 1, "local edges are untouched");
+}

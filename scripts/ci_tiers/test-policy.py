@@ -193,16 +193,50 @@ fi
             self.assertFalse(valid(changed))
 
     @staticmethod
-    def gh_expr(expression, context):
-        """Evaluate a GitHub `if:` expression over a flat context mapping."""
+    def gh_value(expression, context):
+        """Evaluate a GitHub expression over a flat context mapping."""
         import re
         body = expression.strip()
         if body.startswith('${{') and body.endswith('}}'):
             body = body[3:-2]
+        elif not any(op in body for op in ('==', '!=', '&&', '||', '(')):
+            return body  # a literal such as runs-on: ubuntu-latest
         body = re.sub(r'\b(?:github|needs|steps|vars)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
         body = body.replace('always()', 'True').replace('&&', ' and ').replace('||', ' or ')
         body = re.sub(r'!(?!=)', ' not ', body)
-        return bool(eval(body, {'__builtins__': {}, 'startsWith': lambda a, b: str(a).startswith(b)}))
+        return eval(body, {'__builtins__': {}, 'startsWith': lambda a, b: str(a).startswith(b), 'fromJSON': json.loads})
+
+    @classmethod
+    def gh_expr(cls, expression, context):
+        """Evaluate a GitHub `if:` expression over a flat context mapping."""
+        return bool(cls.gh_value(expression, context))
+
+    def test_only_slim_factory_pushes_route_to_the_local_runners_cas_14e0(self):
+        workflow = self.ci()
+        local = ['self-hosted', 'Linux', 'X64', 'cas-ci-32core']
+        routed = ['ci-diff', 'docs-lint', 'scoped-validation-fast', 'scoped-validation']
+        def runner(job, event='push', ref='refs/heads/factory/w', slim='true', enabled='enabled'):
+            return self.gh_value(workflow['jobs'][job]['runs-on'], {
+                'github.event_name': event, 'github.ref': ref,
+                'vars.CAS_LANE_SLIM': slim, 'vars.CASSY_LANE_SELF_HOSTED': enabled})
+        for job in routed:
+            with self.subTest(job=job):
+                self.assertEqual(runner(job), local)
+                for hosted in (
+                    dict(event='pull_request', ref='refs/pull/1/merge'),  # forks included
+                    dict(event='pull_request', ref='refs/heads/factory/w'),
+                    dict(event='merge_group', ref='refs/heads/gh-readonly-queue/main/pr-1-abc'),
+                    dict(ref='refs/heads/main'), dict(ref='refs/heads/epic/x'), dict(ref='refs/tags/v1'),
+                    dict(enabled=''), dict(enabled='disabled'), dict(slim=''),
+                ):
+                    self.assertEqual(runner(job, **hosted), 'ubuntu-latest', hosted)
+        # No other job may name the local label set except through the
+        # merge-queue route's output, and no fork-capable trigger exists.
+        for name, job in workflow['jobs'].items():
+            if name in routed or name == 'fast-validation-runner-route':
+                continue
+            self.assertNotIn('cas-ci-32core', json.dumps(job.get('runs-on', '')), name)
+        self.assertNotIn('pull_request_target', workflow['on'])
 
     def test_macos_check_warms_main_cache_but_stays_off_branch_pushes_cas_861c0(self):
         job = self.ci()['jobs']['macos-check']

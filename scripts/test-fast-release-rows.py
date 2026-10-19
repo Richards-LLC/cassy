@@ -821,7 +821,8 @@ Source gaps: none.
         self.base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
         self.refused_at_park("release-notes-draft",
                              {path: draft.replace("no Cassy change is needed", "cas-6718 needs review")},
-                             "Grok reply body contains a ticket, task, or epic ID")
+                             "harness-diary drafts need one parent and exactly three replies ordered Grok, "
+                             "Claude, Codex, with no ticket IDs")
 
 
 class Budget(unittest.TestCase):

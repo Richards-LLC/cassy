@@ -2256,12 +2256,13 @@ impl CasCore {
             }
         }
 
+        let mut start_lease_epoch = None;
         let claim_info =
             match agent_store.try_claim(&req.id, &agent_id, lease_duration, Some("Task started")) {
-                Ok(ClaimResult::Success(lease)) => Some(format!(
-                    " (claimed until {})",
-                    lease.expires_at.format("%H:%M")
-                )),
+                Ok(ClaimResult::Success(lease)) => {
+                    start_lease_epoch = Some(lease.epoch);
+                    Some(format!(" (claimed until {})", lease.expires_at.format("%H:%M")))
+                }
                 Ok(ClaimResult::AlreadyClaimed {
                     held_by,
                     expires_at,
@@ -2298,79 +2299,15 @@ impl CasCore {
                         ));
                     }
                 }
-                Ok(_) => None, // TaskNotFound, NotClaimable, Unauthorized - log but continue
-                Err(e) => {
-                    // Log but continue - claim is optional enhancement
-                    eprintln!("Warning: Failed to claim task: {e}");
-                    None
-                }
+                Ok(refused) => return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("Cannot start task: local lease refused: {refused:?}"),
+                )),
+                Err(error) => return Err(Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to claim task before start: {error}"),
+                )),
             };
-        // cas-0078: this start won the local lease, so a cloud claim another
-        // agent of this database holds now moves here.
-        if claim_info.is_some()
-            && let (Some(claims), Some(holder)) = (peer_claims.clone(), cloud_local_holder.take())
-        {
-            let (id, agent, name) = (req.id.clone(), agent_id.clone(), agent_name.clone());
-            let kind = task_claim_kind;
-            let _ = peer_budget
-                .run(move || claims.take_from_local(&id, kind, &holder, &agent, &name, cloud_duration))
-                .await;
-        }
-        // cas-5f28: a standard agent's start also focuses the parent epic
-        // (claimed locally below). Mirror that focus, and say when a peer on
-        // another machine already works the same epic. A claim another agent
-        // of this database holds stays with it; renewal moves it to whoever
-        // holds the epic's local lease (cas-0078).
-        if !is_worker && let Some(claims) = peer_claims.as_ref() {
-            let parents: Vec<String> = task_store
-                .get_dependencies(&req.id)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|dep| dep.dep_type == crate::types::DependencyType::ParentChild)
-                .filter_map(|dep| task_store.get(&dep.to_id).ok())
-                .filter(|parent| parent.task_type == crate::types::TaskType::Epic)
-                .map(|parent| parent.id)
-                .collect();
-            if !parents.is_empty() {
-                use crate::cloud::peer_claims::{Acquire, ClaimKind};
-                let (claims, agent, name, local) = (
-                    claims.clone(),
-                    agent_id.clone(),
-                    agent_name.clone(),
-                    std::sync::Arc::clone(&local_agents),
-                );
-                let answers = peer_budget
-                    .run(move || {
-                        parents
-                            .into_iter()
-                            .map(|parent| {
-                                let answer = claims.acquire(
-                                    &parent,
-                                    ClaimKind::Epic,
-                                    &agent,
-                                    &name,
-                                    cloud_duration,
-                                    &|holder| local.contains(holder),
-                                );
-                                (parent, answer)
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .await
-                    .unwrap_or_default();
-                for (parent, answer) in answers {
-                    if let Acquire::PeerHolds(hold) = answer {
-                        peer_notes.push_str(&shared_epic_note(&parent, &hold));
-                    }
-                }
-            }
-        }
-        let claim_info = if peer_notes.is_empty() {
-            claim_info
-        } else {
-            Some(format!("{}{peer_notes}", claim_info.unwrap_or_default()))
-        };
-
         // Record working epic if this task belongs to one
         // This is used by the exit blocker to ensure all epic subtasks are completed
         // Also look up the parent epic's worktree and sibling notes
@@ -2571,12 +2508,27 @@ impl CasCore {
         // cas-ec74: `updated_at` is store-owned. Adopt the stamp the store
         // actually persisted so the lifecycle occurrence below is derived from
         // the same clock read as the stored row, not from a second one.
-        task.updated_at = task_store.update(&task).map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to update: {e}")),
-            data: None,
-        })?;
-
+        // cas-d5f4: there is no await between acquiring the local lease and
+        // persisting InProgress. A response deadline can cancel before this
+        // local transition or after it, never between its two writes.
+        task.updated_at = match task_store.update(&task) {
+            Ok(updated_at) => updated_at,
+            Err(error) => {
+                if matches!(error, crate::store::StoreError::SyncDegradedAfterCommit { .. }) {
+                    // The local status committed, but publishing its sync intent
+                    // failed. Keep the matching lease and report the commit.
+                    crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
+                } else if let Some(epoch) = start_lease_epoch {
+                    agent_store.release_lease_if_owner_epoch(
+                        &req.id, &agent_id, epoch, "Task start status write failed",
+                    ).map_err(|rollback| Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("Failed to start: {error}; lease rollback failed: {rollback}; re-query before retrying"),
+                    ))?;
+                }
+                return Err(Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to update: {error}")));
+            }
+        };
         // cas-b269 review 2: clear urgent-stop halt ONLY after start fully
         // succeeds, and only if halt gen is not newer than this start's
         // ceiling (concurrent urgent stop must win).
@@ -2593,6 +2545,76 @@ impl CasCore {
                 }
             }
         }
+
+        // Explicit even when notifications and Cloud syncing are disabled:
+        // the receipt belongs to this start's completed local transition.
+        crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
+
+        // cas-0078: this start won the local lease, so a cloud claim another
+        // agent of this database holds now moves here.
+        if claim_info.is_some()
+            && let (Some(claims), Some(holder)) = (peer_claims.clone(), cloud_local_holder.take())
+        {
+            let (id, agent, name) = (req.id.clone(), agent_id.clone(), agent_name.clone());
+            let kind = task_claim_kind;
+            let _ = peer_budget
+                .run(move || claims.take_from_local(&id, kind, &holder, &agent, &name, cloud_duration))
+                .await;
+        }
+        // cas-5f28: a standard agent's start also focuses the parent epic
+        // (claimed locally above). Mirror that focus, and say when a peer on
+        // another machine already works the same epic. A claim another agent
+        // of this database holds stays with it; renewal moves it to whoever
+        // holds the epic's local lease (cas-0078).
+        if !is_worker && let Some(claims) = peer_claims.as_ref() {
+            let parents: Vec<String> = task_store
+                .get_dependencies(&req.id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|dep| dep.dep_type == crate::types::DependencyType::ParentChild)
+                .filter_map(|dep| task_store.get(&dep.to_id).ok())
+                .filter(|parent| parent.task_type == crate::types::TaskType::Epic)
+                .map(|parent| parent.id)
+                .collect();
+            if !parents.is_empty() {
+                use crate::cloud::peer_claims::{Acquire, ClaimKind};
+                let (claims, agent, name, local) = (
+                    claims.clone(),
+                    agent_id.clone(),
+                    agent_name.clone(),
+                    std::sync::Arc::clone(&local_agents),
+                );
+                let answers = peer_budget
+                    .run(move || {
+                        parents
+                            .into_iter()
+                            .map(|parent| {
+                                let answer = claims.acquire(
+                                    &parent,
+                                    ClaimKind::Epic,
+                                    &agent,
+                                    &name,
+                                    cloud_duration,
+                                    &|holder| local.contains(holder),
+                                );
+                                (parent, answer)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .await
+                    .unwrap_or_default();
+                for (parent, answer) in answers {
+                    if let Acquire::PeerHolds(hold) = answer {
+                        peer_notes.push_str(&shared_epic_note(&parent, &hold));
+                    }
+                }
+            }
+        }
+        let claim_info = if peer_notes.is_empty() {
+            claim_info
+        } else {
+            Some(format!("{}{peer_notes}", claim_info.unwrap_or_default()))
+        };
 
         // cas-062d / cas-17e4: durable outbox push after successful start.
         let actor = agent_store

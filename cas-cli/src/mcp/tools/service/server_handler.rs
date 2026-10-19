@@ -1101,6 +1101,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
         std::fs::create_dir_all(&core.cas_root).unwrap();
+        // Start must observe its own commit even without a notifying/syncing
+        // wrapper marking the SQLite write for it (cas-d5f4).
+        std::fs::write(core.cas_root.join("config.toml"), "[notifications]\nenabled=false\n").unwrap();
+        let agent = crate::types::Agent::new_with_role("start-agent".into(), "start-agent".into(), crate::types::AgentRole::Standard);
+        core.open_agent_store().unwrap().register(&agent).unwrap();
+        core.set_agent_id_for_testing(agent.id.clone());
         let tasks = core.open_task_store().unwrap();
         tasks
             .add(&crate::types::Task::new(
@@ -1116,6 +1122,7 @@ mod tests {
         for arguments in [
             serde_json::json!({"action":"create", "title":"timeout creation", "risk":"none"}),
             serde_json::json!({"action":"notes", "id":"cas-note", "notes":"committed note"}),
+            serde_json::json!({"action":"start", "id":"cas-note", "brief":true}),
         ] {
             let sender = service.clone();
             let request = serde_json::from_value(arguments.clone()).unwrap();
@@ -1136,6 +1143,7 @@ mod tests {
             assert_eq!(error.data.unwrap()["mutation_outcome"], "COMMITTED");
         }
         assert_eq!(tasks.list(None).unwrap().len(), 2);
+        assert_eq!(tasks.get("cas-note").unwrap().status, crate::types::TaskStatus::InProgress);
         assert!(
             tasks
                 .get("cas-note")

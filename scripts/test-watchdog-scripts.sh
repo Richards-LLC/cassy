@@ -48,6 +48,7 @@ if [[ "${FAKE_GH_FAILURE:-}" == list-once && "$*" == *'actions/runs?status=queue
     count_file="${FAKE_GH_STATE:?}/list-once-count"; count=0; [[ -f "$count_file" ]] && count="$(<"$count_file")"
     echo $((count + 1)) >"$count_file"
     if (( count == 0 )); then
+        printf '%s\n' '{"message":"Resource not accessible by integration"}'
         echo 'gh: transient network error' >&2
         exit 1
     fi
@@ -128,7 +129,9 @@ fi
 : >"$tmp/sleep.log"
 transient_list_output="$tmp/transient-list-output"
 if env "${run_env[@]}" FAKE_GH_FAILURE=list-once "$queued_script" >"$transient_list_output" 2>&1; then
-    expect_text "$(<"$transient_list_output")" 'cancelling stale queued run=101 event=push' 'queued watchdog resumes after a transient list failure'
+    transient_list_text="$(<"$transient_list_output")"
+    expect_text "$transient_list_text" 'cancelling stale queued run=101 event=push' 'queued watchdog resumes after a transient list failure'
+    expect_absent "$transient_list_text" 'Cannot iterate over null' 'failed response body is discarded before parsing the successful list'
     expect_count "$(<"$tmp/gh.log")" 'actions/runs?status=queued&per_page=100' 2 'queued list is retried once after a transient failure'
     expect_count "$(<"$tmp/sleep.log")" '1' 1 'queued list retry backs off for one second'
 else

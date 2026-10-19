@@ -289,3 +289,55 @@ fn build_violet(_cas_root: &Path, _caller: ()) -> anyhow::Result<Arc<dyn VioletT
     }
     Ok(Arc::new(Unavailable))
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use crate::cli::Cli;
+
+    #[test]
+    fn coordination_help_describes_flags_and_fits_eighty_columns() {
+        let mut command = Cli::command();
+        command.build();
+        let coordination = command.find_subcommand("coordination").unwrap();
+        let mut findings = Vec::new();
+        for subcommand in coordination.get_subcommands() {
+            if subcommand.get_name() == "help" {
+                continue;
+            }
+            let error = Cli::command()
+                .try_get_matches_from(["cas", "coordination", subcommand.get_name(), "--help"])
+                .expect_err("help should exit before dispatching a coordination operation");
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+            let help = error.to_string();
+            for line in help.lines().filter(|line| line.chars().count() > 80) {
+                findings.push(format!("{}: over 80 columns: {line}", subcommand.get_name()));
+            }
+            for argument in subcommand
+                .get_arguments()
+                .filter(|argument| !argument.is_global_set() && argument.get_id() != "help")
+            {
+                let description = argument
+                    .get_help()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                if description.trim().is_empty() || !help.contains(&description) {
+                    findings.push(format!(
+                        "{}: --{} has no rendered explanation",
+                        subcommand.get_name(),
+                        argument.get_long().unwrap()
+                    ));
+                }
+                if argument.is_required_set() {
+                    let usage = help.split("Options:").next().unwrap();
+                    assert!(
+                        usage.contains(&format!("--{}", argument.get_long().unwrap())),
+                        "required flag missing from usage: {help}"
+                    );
+                }
+            }
+        }
+        assert!(findings.is_empty(), "{}", findings.join("\n"));
+    }
+}

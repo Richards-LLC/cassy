@@ -155,9 +155,9 @@ factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5
 Workers from previous sessions are gone. Stale DB records are not live processes.
 
 1. **Check deployment evidence** — call `system action=preflight` from connected MCP; otherwise run `cas --json factory preflight`. Follow the structured findings and `factory_blocked` decision in [preflight.md](preflight.md). Missing source comparison alone does not require rebuilding or reconnecting healthy MCP. If a "fixed" bug reappears, check this evidence first.
-2. Spawn fresh workers
-3. Confirm they are live: `factory action=worker_status summary_mode=true`
-4. Assign open tasks to the new workers
+2. Inspect delivered work and apply the [closure pass](#wall-clock-is-a-resource) before new dispatch
+3. Spawn fresh workers only for the work that pass selects; confirm they are live: `factory action=worker_status summary_mode=true`
+4. Assign the selected tasks to those workers
 
 ## Phase 3: Merge and Sync (Isolated Mode)
 
@@ -200,16 +200,26 @@ clean-target-checkout rule; commit or stash target-checkout dirt first.
 
 ### Wall-clock is a resource
 
-A reviewed delivery or an idle worker that waits costs the epic time. Apply
-these rules every turn:
+Finish delivered work before expanding noncritical work. Apply this closure
+pass every turn, including startup and simultaneous worker completions:
 
-- **Merge reviewed deliveries at once.** A lane whose CI is green and whose
-  review passed merges now; never queue it behind another lane's proof.
-- **Cap Rust lanes, not the fleet.** Keep Rust-compiling lanes at or below
-  `[factory] max_concurrent_builders`. Give every extra worker non-Rust work.
-- **Leave nothing waiting.** In the turn you review or merge a delivery,
-  assign its idle worker the next task. A reviewed delivery is either merging
-  or blocked on a named cause.
+1. Inspect `awaiting_merge` and delivered corrections. Merge every reviewed
+   lane with satisfied QA gates and green required CI now; one lane's proof cannot delay
+   another ready merge. Complete any remaining close action.
+2. Give each held delivery a named blocker, next owner and event/reminder:
+   missing candidate, review, QA, red/pending CI, or merge conflict. Assign
+   available workers to those bounded gaps before opening new noncritical work.
+   For a correction, use [correction proof](correction-proof.md) to retain
+   unaffected evidence and repeat only what its delta invalidates.
+3. If every delivery is genuinely blocked on an external event, dispatch only
+   already-authorized independent work that cannot delay closure. Keeping a
+   worker busy is not a reason to expand release scope; an idle worker is valid.
+   Keep Rust-compiling lanes at or below `[factory] max_concurrent_builders`.
+
+Use existing task notes and merge receipts to record first delivery time,
+merge time and elapsed delivered-to-merged latency, with the cause of a hold.
+Report the oldest held delivery and its next action rather than utilization;
+this needs no new ledger or mandatory test matrix.
 
 When tracked delivery requires `worktree_merge`, use that path so leases stay
 consistent.
@@ -252,7 +262,10 @@ base has one, otherwise local assembly.
    supervisor supplies `supervisor_override=true`, `task_id`, and a non-empty
    `reason`; the decision is logged on the task. Pending, unavailable and
    no-checks results stay advisory, with code validation reported as unconfirmed.
-   Investigate these results and record the decision; the lookup never polls.
+   For normal delivery, hold pending, unavailable and no-checks results until
+   required validation is green, even when the tool reports them as advisory.
+   Red/pending CI is not proof that can be reused away; any supported override
+   needs its explicit authority and logged reason. The lookup never polls.
 
 Three flags that are routinely confused — they are independent (cas-0b32 / cas-369f):
 
@@ -336,15 +349,16 @@ git diff <base>...factory/<worker> | git patch-id --stable
 
 After the rebase, run the same command against the new base.
 
-- **Same patch-id:** the diff did not change, so the verdict still holds.
-  Merge without a second review.
+- **Same patch-id:** reuse the source-review verdict; inspect changed base
+  dependencies for integration risk. Continue through current QA and CI gates.
 - **Different patch-id:** the rebase changed content (a conflict resolution
   or new commits). Review only what changed:
   `git range-diff <old-base>..<old-tip> <new-base>..factory/<worker>`.
 
 A matching patch-id proves the diff is the same. It does not prove the diff
 still integrates with the new base: the merge queue run on the epic PR
-still proves that. A green CI run is not a review verdict.
+still proves that. A green CI run is not a review verdict. Runtime evidence
+and independent QA have separate reuse limits in [correction proof](correction-proof.md).
 
 ## Phase 3: Review (Shared Mode)
 
@@ -354,7 +368,7 @@ When workers share the main directory, there's no branch merging — workers com
 
 1. Worker closes their own task
 2. Review their commits
-3. Clear worker context and assign next task
+3. Clear worker context; apply the closure pass before assigning another task
 
 ### Lessons must remove causes
 
@@ -371,7 +385,7 @@ Fix a recurring failure on the highest rung that fits — a default or auto-fix,
 
 - Merge each parked lane (`worktree_merge`) in one response turn
 - Message each worker to re-close its own task
-- Reassign workers immediately
+- Apply the closure pass before reassigning workers
 
 ## Phase 4: Complete
 

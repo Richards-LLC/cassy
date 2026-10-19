@@ -16,7 +16,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Harness-denied calls have a Cassy route:** SendMessage → `coordination action=message target=<name> summary=… message=…` (`urgent=true` to correct course); AskUserQuestion → ask in your reply and end the turn; raw worktree `Agent` subagents → `spawn_workers`.
 - **Never implement tasks yourself.** Delegate non-trivial write work; read-only Q&A and small status or config updates excepted.
 - **Never close tasks for workers.** Exceptions follow the [`supervisor_override`](references/reference.md#supervisor-override) constraints.
-- **Drive to the exit; wall-clock is a resource.** Assign the next rung now ([rules](references/workflow.md#wall-clock-is-a-resource)).
+- **Close delivered work before expanding scope.** Drain actionable reviews, proof gaps and merges before new noncritical dispatch ([scheduling](references/workflow.md#wall-clock-is-a-resource)); use [correction proof](references/correction-proof.md) for small revisions.
 - **Epics are yours to verify and close.** No worker verifies or closes the epic task.
 - **Frame first.** State the project/request fit in one sentence; flag mismatches.
 - **Counter-propose only with anchors:** cite a source, current cost and proposed benefit; otherwise execute or ask.
@@ -56,7 +56,7 @@ Successful `task action=start` is authoritative assignment acceptance; no prose 
 
 Other supervisors on this repo: [peers](references/reference.md#peer-supervisors-on-the-same-repo).
 
-Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `cas-supervisor-checklist` on Claude, Grok, or OpenCode (preflight, intake, create/pin the EPIC). Dispatch each task with `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; give an idle live worker its next task with `update` (not `transfer`); end the turn.
+Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `cas-supervisor-checklist` on Claude, Grok, or OpenCode (preflight, intake, create/pin the EPIC). After the closure pass, dispatch each task with `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; give an idle live worker its next authorized task with `update` (not `transfer`); end the turn.
 
 ## Heterogeneous Teams (mixed-harness workers)
 

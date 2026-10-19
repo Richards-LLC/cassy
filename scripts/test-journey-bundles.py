@@ -90,6 +90,7 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(data["files"]["parts"][0]["receipt"], "parts/reconnecting/receipt.webm")
         passing_trace = main / data["files"]["trace"]
         actions = main / data["files"]["trace_actions"]
+        # pin: qa_evidence requires at least one trace-actions Expect row.
         self.assertIn('Expect "toHaveText"', actions.read_text())
         self.assertTrue(passing_trace.is_file())
         self.assertEqual(list(main.rglob(passing_trace.name)), [passing_trace])

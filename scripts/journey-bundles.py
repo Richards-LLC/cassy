@@ -5,8 +5,8 @@ Usage: journey-bundles.py <artifact-dir> <dist-tree> <commit> <suite-exit> <hub-
 
 Called by scripts/journey-eval.sh after the `journeys` project ran with
 JOURNEY_RECEIPTS=<artifact-dir>/journeys. For every <ID>/result.json it:
-  - copies the test's trace.zip into the bundle
-  - writes trace-actions.txt (`npx playwright trace actions`)
+  - moves a failed or incomplete test's trace.zip into the bundle once
+  - writes trace-actions.txt for a retained trace
   - writes bundle.json (producer "journey"; contract: cas-qa-craft evidence bundle v1)
 Then writes <artifact-dir>/journeys/JOURNEYS.md, the run summary the evaluator reads.
 """
@@ -69,6 +69,39 @@ def read_result(result: Path, ident: str, suite_failed: bool = False) -> dict:
     return data
 
 
+def should_keep_trace(data: dict) -> bool:
+    incomplete = data.get("incomplete_stages", [])
+    incomplete = incomplete or [
+        stage for stage in data.get("stages", [])
+        if stage.get("status") == "INCOMPLETE"
+    ]
+    return data.get("status") != "PASS" or bool(incomplete)
+
+
+def bundle_trace(data: dict, bundle: Path, hub: str) -> dict[str, str]:
+    """Keep a failed/incomplete trace once, at its journey-bundle path."""
+    output_dir = data.get("output_dir")
+    source = Path(output_dir) / "trace.zip" if output_dir else None
+    trace = bundle / "trace.zip"
+    actions = bundle / "trace-actions.txt"
+    if not should_keep_trace(data):
+        for path in (source, trace):
+            if path is not None:
+                path.unlink(missing_ok=True)
+        actions.unlink(missing_ok=True)
+        return {}
+
+    if source is not None and source.is_file() and source.resolve() != trace.resolve():
+        trace.unlink(missing_ok=True)
+        shutil.move(str(source), str(trace))
+    if not trace.is_file():
+        actions.unlink(missing_ok=True)
+        return {}
+
+    actions.write_text(trace_actions(bundle, hub))
+    return {"trace": "trace.zip", "trace_actions": "trace-actions.txt"}
+
+
 def main(argv: list[str]) -> int:
     artifacts, tree, commit, status, hub, pw_version = Path(argv[0]), argv[1], argv[2], int(argv[3]), argv[4], argv[5]
     journeys = artifacts / "journeys"
@@ -90,13 +123,7 @@ def main(argv: list[str]) -> int:
         files: dict[str, object] = {"cells": [stage["screenshot"] for stage in stages]}
         if data is not None:
             files.update({"receipt": "receipt.webm", "aria_yaml": "final.aria.yml", "aria_json": "final.aria.json"})
-            trace = Path(data.get("output_dir", "")) / "trace.zip"
-            if trace.is_file():
-                if trace.resolve() != (bundle / "trace.zip").resolve():
-                    shutil.copyfile(trace, bundle / "trace.zip")
-                (bundle / "trace-actions.txt").write_text(trace_actions(bundle, hub))
-                files["trace"] = "trace.zip"
-                files["trace_actions"] = "trace-actions.txt"
+            files.update(bundle_trace(data, bundle, hub))
         verdicts = [data["status"]] if data is not None else []
         folded = []
         for part_result in parts:
@@ -105,12 +132,7 @@ def main(argv: list[str]) -> int:
             part = read_result(part_result, ident, suite_failed=status != 0)
             verdicts.append(part["status"])
             part_files = {"receipt": f"{rel}/receipt.webm", "aria_yaml": f"{rel}/final.aria.yml", "aria_json": f"{rel}/final.aria.json"}
-            part_trace = Path(part.get("output_dir", "")) / "trace.zip"
-            if part_trace.is_file():
-                if part_trace.resolve() != (part_dir / "trace.zip").resolve():
-                    shutil.copyfile(part_trace, part_dir / "trace.zip")
-                (part_dir / "trace-actions.txt").write_text(trace_actions(part_dir, hub))
-                part_files.update({"trace": f"{rel}/trace.zip", "trace_actions": f"{rel}/trace-actions.txt"})
+            part_files.update({key: f"{rel}/{path}" for key, path in bundle_trace(part, part_dir, hub).items()})
             for stage in part.get("stages", []):
                 stage = dict(stage, screenshot=f"{rel}/{stage['screenshot']}")
                 stages.append(stage)

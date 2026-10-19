@@ -4,8 +4,8 @@
 //   <receipts>/<ID>/J01.png, J02.png  the screen at the end of each stage
 //   <receipts>/<ID>/final.aria.yml    aria snapshot of the goal state (+ .json)
 //   <receipts>/<ID>/result.json       id, title, status, per-stage timings
-// scripts/journey-eval.sh adds trace.zip, trace-actions.txt and bundle.json,
-// the cas-qa-craft evidence-bundle shape with producer "journey".
+// scripts/journey-eval.sh adds a trace.zip and trace-actions.txt only for a
+// failed or incomplete test, then writes bundle.json with producer "journey".
 import { test as base, expect, type Page } from "@playwright/test";
 import { writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";

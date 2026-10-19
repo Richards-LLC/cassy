@@ -61,7 +61,7 @@ export default defineConfig({
         permissions: ["clipboard-read", "clipboard-write"],
         // screenshots:false keeps the screencast receipt full size (the trace
         // filmstrip shares it and caps frames at 800 px); screen snapshots stay.
-        trace: { mode: "on", snapshots: { dom: true, aria: true, screen: true }, sources: true, screenshots: false },
+        trace: { mode: "retain-on-failure", snapshots: { dom: true, aria: true, screen: true }, sources: true, screenshots: false },
         video: "off",
       },
     },

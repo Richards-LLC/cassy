@@ -2643,7 +2643,11 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
                 || visible.matches("--show-origin").count() != 1
                 || error.lines().any(|line| ratatui::text::Line::from(line).width() > 80)
             {
-                diagnostic_failures.push(format!("human sync repeats or overflows: {visible}"));
+                diagnostic_failures.push(format!(
+                    "human sync repeats or overflows: causes={}, remedies={}; {error}",
+                    visible.matches("pre-commit: fixture refuses").count(),
+                    visible.matches("--show-origin").count(),
+                ));
             }
         } else {
             let rows = output

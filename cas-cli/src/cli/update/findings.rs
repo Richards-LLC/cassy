@@ -558,7 +558,7 @@ fn words(text: &str) -> Vec<String> {
 
 /// Wrap prose at word boundaries; a single word wider than the column is
 /// shortened rather than split.
-fn wrap(text: &str, cells: usize, unicode: bool) -> (Vec<String>, bool) {
+pub(super) fn wrap(text: &str, cells: usize, unicode: bool) -> (Vec<String>, bool) {
     let cells = cells.max(16);
     let mut lines = Vec::new();
     let mut line = String::new();

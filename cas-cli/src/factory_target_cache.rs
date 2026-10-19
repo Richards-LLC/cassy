@@ -2340,6 +2340,7 @@ mod tests {
             }
         }
         let proc = root.join("proc");
+        #[cfg(target_os = "linux")]
         fs::create_dir_all(&proc).unwrap();
         let policy = TargetCachePolicy {
             min_idle_secs: 2 * 3600,
@@ -2661,8 +2662,20 @@ mod tests {
             );
             assert_eq!(row.disposition, CacheDisposition::Reclaimed);
             assert_eq!(report.reclaimed_bytes, expected_bytes);
+            assert_eq!(
+                report
+                    .caches
+                    .iter()
+                    .filter(|row| row.disposition == CacheDisposition::Reclaimed)
+                    .count(),
+                1
+            );
             if cache == &target {
-                assert!(retired.exists(), "consent names only one cache");
+                assert_eq!(
+                    fs::read(retired.join("output.rlib")).unwrap(),
+                    b"scratch",
+                    "consent names only one cache"
+                );
             }
         }
         assert_eq!(

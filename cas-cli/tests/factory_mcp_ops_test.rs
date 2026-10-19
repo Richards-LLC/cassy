@@ -6017,7 +6017,12 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         named.force = Some(true);
         named.dry_run = Some(false);
         named.reclaim_unknown_target = Some(target.canonicalize().unwrap().display().to_string());
-        let result = env.service.factory_request(Parameters(named)).await.unwrap();
+        // Exact-path admission deliberately rejects aliases, including macOS
+        // /var -> /private/var. Canonicalize the fixture service's root too.
+        let core = CasCore::with_daemon(env.cas_root.canonicalize().unwrap(), None, None);
+        core.set_agent_id_for_testing("test-agent-id".to_string());
+        let service = CasService::new(core, None);
+        let result = service.factory_request(Parameters(named)).await.unwrap();
         let text = get_text(&result);
         assert!(!target.exists(), "native exact-path reclaim must succeed: {text}");
         assert_eq!(std::fs::read(orphan.join("source.rs")).unwrap(), b"uncommitted source");

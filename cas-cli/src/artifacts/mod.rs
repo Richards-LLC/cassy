@@ -808,6 +808,47 @@ mod cloud_double_tests {
     }
 
     #[tokio::test]
+    async fn xz_publish_is_rejected_before_presign_when_cloud_does_not_allow_detected_mime() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        let (outcome, stored_status) = tokio::task::spawn_blocking(move || {
+            let f = fixture();
+            let file = f.file.with_file_name("live-evidence.tar.xz");
+            fs::write(&file, b"xz evidence bytes").unwrap();
+            let context = PublishContext {
+                store: &f.store,
+                roots: f.roots.clone(),
+                task_id: "cas-29624".to_string(),
+                cloud: Some(client.clone()),
+            };
+
+            let outcome = publish(&context, &file).expect("publish keeps a local record");
+            let stored_status = f
+                .store
+                .get(&outcome.artifact.id)
+                .unwrap()
+                .expect("publish retains the local artifact record")
+                .status;
+            (outcome, stored_status)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.artifact.mime, "application/x-xz");
+        let reason = match &outcome.disposition {
+            PublishDisposition::UploadFailed { reason } => reason,
+            other => panic!("expected a named unsupported-MIME refusal, got {other:?}"),
+        };
+        assert!(reason.contains("unsupported_content_type"), "{reason}");
+        assert!(reason.contains("application/x-xz"), "{reason}");
+        assert_eq!(stored_status, "local");
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "an unsupported detected MIME must be refused before presign or PUT"
+        );
+    }
+
+    #[tokio::test]
     async fn a_digest_the_server_rejects_leaves_the_record_out_of_cloud_and_unviewable() {
         let server = cloud_double(
             409,

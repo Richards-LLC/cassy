@@ -1059,12 +1059,34 @@ pub(crate) fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
         .unwrap_or_default();
     let updated = if let Some((start, end)) = unique_complete_provenance_block(notes) {
         format!("{}{}{}", &notes[..start], rendered, &notes[end..])
+    } else if notes.split("\n\n").any(is_provenance_paragraph) {
+        // cas-a8e2: a row that already holds several (or partial) copies is
+        // normalised to the one freshly rendered block, kept where the first was.
+        let mut kept = Vec::new();
+        for paragraph in notes.split("\n\n") {
+            if !is_provenance_paragraph(paragraph) {
+                kept.push(paragraph);
+            } else if !kept.contains(&rendered.as_str()) {
+                kept.push(rendered.as_str());
+            }
+        }
+        kept.join("\n\n")
     } else if notes.is_empty() {
         rendered
     } else {
         format!("{}\n\n{}", notes.trim_end(), rendered)
     };
     raw["notes"] = serde_json::Value::String(updated);
+}
+
+/// cas-a8e2: one section (server-attested or client-asserted) of a rendered
+/// provenance block, as one `\n\n`-separated notes paragraph.
+fn is_provenance_paragraph(paragraph: &str) -> bool {
+    let paragraph = paragraph.trim();
+    (paragraph.starts_with(PROPOSAL_PROVENANCE_BEGIN)
+        && paragraph.ends_with("--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---"))
+        || (paragraph.starts_with("--- BEGIN CLIENT-ASSERTED PROPOSAL PROVENANCE ---")
+            && paragraph.ends_with(PROPOSAL_PROVENANCE_END))
 }
 
 /// Build a project-scoped `/api/sync/pull` URL, **failing closed** when the
@@ -1416,11 +1438,19 @@ fn reconcile_web_close(
 /// Merge append-only task-note blocks without allowing a whole-row conflict
 /// resolution to discard one machine's timeline.
 fn merge_task_notes(local: &str, remote: &str) -> String {
+    // cas-a8e2: the remote row's provenance is rendered fresh from Cloud's
+    // attested record, so it replaces the local copy. A union would keep both
+    // whenever a field's formatting differs (received_at did) and leave two
+    // server-attested sections, which no reader can trust.
+    let remote_has_provenance = remote.split("\n\n").any(is_provenance_paragraph);
     let mut blocks = Vec::<(Option<chrono::NaiveDateTime>, usize, String)>::new();
-    for notes in [local, remote] {
+    for (is_local, notes) in [(true, local), (false, remote)] {
         for block in notes.split("\n\n") {
             let block = block.trim();
-            if block.is_empty() || blocks.iter().any(|(_, _, existing)| existing == block) {
+            if block.is_empty()
+                || (is_local && remote_has_provenance && is_provenance_paragraph(block))
+                || blocks.iter().any(|(_, _, existing)| existing == block)
+            {
                 continue;
             }
             let timestamp = block

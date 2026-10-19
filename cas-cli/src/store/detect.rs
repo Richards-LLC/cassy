@@ -92,9 +92,16 @@ pub(crate) fn root_override_notice(env_root: &Path, cwd_root: &Path) -> Option<S
     if same {
         return None;
     }
+    // Convert decoration only: the paths identify real stores and must not
+    // have their punctuation rewritten by a whole-message ASCII fallback.
+    let (mark, dash) = if crate::ui::components::locale_is_utf8() {
+        ("⚠️", "—")
+    } else {
+        ("[WARN]", "--")
+    };
     Some(format!(
-        "⚠️  CAS_ROOT override: CAS_ROOT={} overrides the working-directory store {} \
-         — CAS_ROOT wins; every read and write below targets {}.\n\
+        "{mark}  CAS_ROOT override: CAS_ROOT={} overrides the working-directory store {} \
+         {dash} CAS_ROOT wins; every read and write below targets {}.\n\
          \x20   This precedence is intentional (factory workers in clones rely on it). \
          To act on the working-directory store instead, clear the variable for this \
          command: `env -u CAS_ROOT cas <command>`.",
@@ -1485,23 +1492,33 @@ mod tests {
     /// tell that the store under their feet was not the one used.
     #[test]
     fn root_override_notice_names_both_roots_and_the_winner_cas_b69a() {
-        let notice = root_override_notice(
-            Path::new("/live/project/.cas"),
-            Path::new("/tmp/casmig/proj/.cas"),
-        )
-        .expect("differing roots must produce a notice");
+        let mut env = TestEnvGuard::new();
+        for (locale, mark, separator) in [("C", "[WARN]", "--"), ("C.UTF-8", "⚠️", "—")] {
+            env.set("LC_ALL", locale);
+            let notice = root_override_notice(
+                Path::new("/live/project/.cas"),
+                Path::new("/tmp/casmig/proj/.cas"),
+            )
+            .expect("differing roots must produce a notice");
 
-        assert!(notice.contains("/live/project/.cas"), "{notice}");
-        assert!(notice.contains("/tmp/casmig/proj/.cas"), "{notice}");
-        assert!(notice.contains("CAS_ROOT wins"), "{notice}");
-        // The first line alone must carry both paths and the verdict: some
-        // consoles show only the first stderr line before a wall of output.
-        let first_line = notice.lines().next().unwrap();
-        assert!(first_line.contains("/live/project/.cas"), "{first_line}");
-        assert!(first_line.contains("/tmp/casmig/proj/.cas"), "{first_line}");
-        assert!(first_line.contains("CAS_ROOT wins"), "{first_line}");
-        // And it must point at the escape hatch, not just complain.
-        assert!(notice.contains("env -u CAS_ROOT"), "{notice}");
+            assert!(notice.contains("/live/project/.cas"), "{notice}");
+            assert!(notice.contains("/tmp/casmig/proj/.cas"), "{notice}");
+            assert!(notice.contains("CAS_ROOT wins"), "{notice}");
+            // The first line alone must carry both paths and the verdict: some
+            // consoles show only the first stderr line before a wall of output.
+            let first_line = notice.lines().next().unwrap();
+            assert!(first_line.contains("/live/project/.cas"), "{first_line}");
+            assert!(first_line.contains("/tmp/casmig/proj/.cas"), "{first_line}");
+            assert!(first_line.contains("CAS_ROOT wins"), "{first_line}");
+            // And it must point at the escape hatch, not just complain.
+            assert!(notice.contains("env -u CAS_ROOT"), "{notice}");
+            assert!(notice.starts_with(mark), "{locale}: {notice}");
+            assert!(notice.contains(&format!("{separator} CAS_ROOT wins")), "{locale}: {notice}");
+            if locale == "C" {
+                assert!(notice.is_ascii(), "C-locale decorations must be ASCII: {notice}");
+            }
+        }
+
     }
 
     /// No conflict, no noise: CAS_ROOT pointing at the very store the working

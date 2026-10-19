@@ -13,7 +13,7 @@ work, then apply the supported binding limits below.
 
 | Delta | Repeat | Preserve when unaffected |
 | --- | --- | --- |
-| Product behavior, build/dependency or journey inputs | Review changed behavior; build a new candidate when its inputs changed; run affected checks and QA cells | Evidence for unrelated inputs; use the affected journey selection, not a new full matrix |
+| Product behavior, build/dependency or browser-test inputs | Review changed behavior; build a new candidate when its inputs changed; run affected checks and QA cells | Evidence for unrelated inputs; use the affected browser-test selection, not a new full matrix |
 | CLI help text only | Inspect the exact rendered help from the revised candidate and any affected snapshots; build once if compiled help changed | Prior runtime/terminal cells outside help; a source comment that cannot affect output needs source review only |
 | Tests only, such as missing request-field initializers | Compile affected test targets, run the named regression and require code CI on the new tip | Original runtime captures as proof of their executed revision when product/build inputs are unchanged; no automatic binary rebuild or unrelated matrix |
 | Documentation/ledger only | Review the document and validate any supported bundle rebind | Original execution when the rebind validator accepts ancestry and unchanged protected inputs; a catalog or rendered fixture edit is not exempt |
@@ -26,7 +26,7 @@ work, then apply the supported binding limits below.
 - **Implementer bundle:** `executed_head_sha` retains the actual execution
   commit; `head_sha` names the delivered tip. The existing `doc_only_rebind`
   validator must accept readable ancestor history, non-surface paths and
-  unchanged protected product/journey/build inputs. A filename or an
+  unchanged protected product/browser/build inputs. A filename or an
   unchanged-runtime assertion cannot substitute for that validation.
 - **Independent QA:** inspect `verification action=qa_status task_id=<task-id>`.
   Cassy can carry a verdict when the source patch matches (excluding its

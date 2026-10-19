@@ -24,6 +24,17 @@ fn origin_note(config: &Config, key: &str, value: &str) -> &'static str {
     }
 }
 
+fn blank_component_note(config: &Config, key: &str) -> Option<&'static str> {
+    if key != "issues.components.cassy" { return None; }
+    let raw = config.issues.as_ref()?.components.as_ref()?.cassy.as_deref()?;
+    if !raw.trim().is_empty() { return None; }
+    Some(if config.cassy_issue_legacy_repo().is_some() {
+        "(blank: legacy issues.repo fallback)"
+    } else {
+        "(blank: issues.repo unset; using component default)"
+    })
+}
+
 fn with_issue_repo_source(
     mut json: serde_json::Value,
     config: &Config,
@@ -39,6 +50,17 @@ fn with_issue_repo_source(
             "unset"
         });
         json["configured"] = serde_json::json!(config.issue_repo_registry().project.is_some());
+    }
+    if blank_component_note(config, key).is_some() {
+        let legacy = config.cassy_issue_legacy_repo();
+        json["raw_blank"] = serde_json::json!(true);
+        json["report_repo"] = serde_json::json!(legacy.map(str::to_owned)
+            .unwrap_or_else(|| config.issue_repo_registry().cassy));
+        json["report_source"] = serde_json::json!(if legacy.is_some() {
+            "issues.repo"
+        } else {
+            "issues.components.cassy"
+        });
     }
     json
 }
@@ -56,7 +78,7 @@ fn get_output(
         });
         Ok((serde_json::to_string_pretty(&with_issue_repo_source(json, config, key, value))?, None))
     } else {
-        Ok((value.to_owned(), None))
+        Ok((value.to_owned(), blank_component_note(config, key)))
     }
 }
 

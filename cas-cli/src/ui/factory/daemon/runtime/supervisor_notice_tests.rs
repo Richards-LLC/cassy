@@ -113,12 +113,13 @@ fn ct2_p3_dead_owner_notice_rerouted() {
     for (stage, target, session) in [
         (1, "owner", Some("new-session")),
         (2, "peer", Some("peer-session")),
-        (3, "operator", Some("ended-session")),
+        (3, "operator", Some("connected-observer-session")),
     ] {
         let id = format!("cas-route-{stage}");
-        tasks
-            .add(&Task::new(id.clone(), "Ejected PR".into()))
-            .unwrap();
+        let mut epic = Task::new(id.clone(), "Ejected PR".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/release".into());
+        tasks.add(&epic).unwrap();
         let result = enqueue_merge_queue_ejection_relay(
             &root,
             &id,
@@ -126,8 +127,14 @@ fn ct2_p3_dead_owner_notice_rerouted() {
             12,
             Some(stage),
             &format!("run-{stage}"),
-            None,
+            Some("Fast Validation › publication fixture"),
         );
+        if stage == 3 {
+            // The ejection outlives its factory. Reuse the existing Commander
+            // adoption tick of another daemon, with no live supervisor.
+            crate::supervisor_notices::adopt_operator_notices(&root, "connected-observer-session")
+                .unwrap();
+        }
         assert!(
             matches!(result, WorkerAttentionRelayOutcome::Persisted { .. }),
             "{result:?}"
@@ -142,6 +149,17 @@ fn ct2_p3_dead_owner_notice_rerouted() {
             "the live receiver must replace dead routing"
         );
         assert_eq!(row.factory_session.as_deref(), session);
+        if stage == 3 {
+            let payload: crate::ui::factory::OperatorReplyPayload =
+                serde_json::from_str(&row.prompt).unwrap();
+            assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
+            assert!(payload.message.contains("#12"));
+            assert!(payload.message.contains("run 3"));
+            assert!(payload.message.contains("Fast Validation › publication fixture"));
+            crate::supervisor_notices::adopt_operator_notices(&root, "connected-observer-session")
+                .unwrap();
+            assert_eq!(queue.peek_all(100).unwrap().iter().filter(|r| r.target == "operator").count(), 1);
+        }
         assert!(rows.iter().all(
             |r| r.target == "operator" || r.factory_session.as_deref() != Some("ended-session")
         ));
@@ -152,6 +170,23 @@ fn ct2_p3_dead_owner_notice_rerouted() {
             agents.unregister(&peer.id).unwrap();
         }
     }
+    // The original relay was stamped while the owner was alive. Replaying
+    // the same CI observation after that owner ends must still alert the
+    // operator, once; a delivered-to-outbox stamp is not a human receipt.
+    for _ in 0..2 {
+        let replay = enqueue_merge_queue_ejection_relay(
+            &root, "cas-route-1", "", 12, Some(1), "run-1",
+            Some("Fast Validation › publication fixture"),
+        );
+        assert!(matches!(replay, WorkerAttentionRelayOutcome::Persisted { .. }));
+        crate::supervisor_notices::adopt_operator_notices(&root, "connected-observer-session")
+            .unwrap();
+    }
+    let rows = queue.peek_all(100).unwrap();
+    let alerts: Vec<_> = rows.iter().filter(|r| r.target == "operator").collect();
+    assert_eq!(alerts.len(), 2, "one alert for each distinct orphaned ejection");
+    assert!(alerts.iter().any(|r| r.prompt.contains("cas-route-1")));
+    assert!(alerts.iter().all(|r| r.factory_session.as_deref() == Some("connected-observer-session")));
 }
 
 #[test]

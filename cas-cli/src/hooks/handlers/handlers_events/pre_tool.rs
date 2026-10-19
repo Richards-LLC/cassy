@@ -2473,6 +2473,21 @@ fn factory_shell_tokens_with_literals(command: &str) -> (Vec<ShellToken>, Vec<bo
             escaped = false;
             continue;
         }
+        // Preserve the nested heredoc's quotes before the outer double-quote
+        // tokenizer can consume them. Only the bounded literal cat form is
+        // recognized; the effect collector still judges how its output is used.
+        if quote == Some('"') && ch == '$' && chars.peek() == Some(&'(') {
+            let tail = format!("${}", chars.clone().collect::<String>());
+            if let Some(end) = shell_effects::literal_cat_heredoc_end(&tail) {
+                let substitution = &tail[..=end];
+                word.push_str(substitution);
+                for _ in 1..substitution.chars().count() {
+                    chars.next();
+                }
+                literal = false;
+                continue;
+            }
+        }
         if quote != Some('\'') {
             if ch == '$' && chars.peek().is_some_and(|next| matches!(next, '?' | '$' | '!')) {
                 word.push(ch);
@@ -5984,6 +5999,12 @@ fn factory_workspace_contract_denial(
     let worktree = worktree_root
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    if violation.matched_rule == "an unresolved shell payload" {
+        return format!(
+            "🚫 FACTORY WORKSPACE CONTRACT: cannot resolve shell filesystem effects (an unresolved shell payload). For gh issue or PR text, save a literal body file under your configured scratch root or assigned worktree and pass `--body-file <path>`. Assigned worktree: `{}`.",
+            worktree.display(),
+        );
+    }
     if matches!(violation.matched_rule,
         "a write with an unresolved effective working directory"
         | "a link with an unresolved effective working directory"
@@ -8047,6 +8068,14 @@ mod workspace_contract_tests {
             ("sh -c \"printf x $UNKNOWN_SCRIPT\"", true),
             ("sh -c 'printf \"%s\" \"$(cat src/new.rs)\"'", false),
             ("sh -c 'printf \"%s\" \"$(touch ../../config.toml)\"'", true),
+            // cas-9623: a quoted cat heredoc is literal argument data. Its
+            // quotes, substitutions and parentheses must not become syntax.
+            ("gh issue comment 1290 --body \"$(cat <<'EOF'\nIt's done: $(touch /etc/cas-literal) (\nEOF\n)\"", false),
+            ("gh issue comment 1290 --body \"$(cat <<\"EOF\"\nIt's done\nEOF\n)\"", false),
+            ("gh issue comment 1290 --body \"$(cat <<'EOF'\ntext\nEOF\n)\" > ../../ordinary-data.txt", true),
+            ("gh issue comment 1290 --body \"$(cat > ../../ordinary-data.txt <<'EOF'\nIt's done\nEOF\n)\"", true),
+            ("gh issue comment 1290 --body \"$(cat <<EOF\n$(touch ../../ordinary-data.txt)\nEOF\n)\"", true),
+            ("bash -c \"$(cat <<'EOF'\ntouch ../../ordinary-data.txt\nEOF\n)\"", true),
             ("sh -c \"printf '%s' $?\"", false),
             ("B=$PWD/target/debug/cas; $B --version", false),
             ("R='env -i PATH=/usr/bin /bin/true'; $R", false),
@@ -8087,6 +8116,13 @@ mod workspace_contract_tests {
             let decision = value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("");
             if (decision == "deny") != denied {
                 mismatches.push(format!("{command}: expected denied={denied}, got {value}"));
+            }
+            if command.starts_with("gh issue comment") && denied
+                && value["hookSpecificOutput"]["permissionDecisionReason"].as_str()
+                    .is_some_and(|reason| reason.contains("an unresolved shell payload")
+                        && !reason.contains("--body-file"))
+            {
+                mismatches.push(format!("unresolved gh body needs --body-file guidance: {value}"));
             }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");

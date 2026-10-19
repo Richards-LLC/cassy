@@ -622,7 +622,7 @@ async fn a_claim_held_by_a_local_agent_moves_with_the_local_lease() {
         task.status = TaskStatus::Open;
         task.assignee = None;
         open_task_store(&alpha.cas_dir).unwrap().update(&task).unwrap();
-    
+
         let worker = alpha.second_agent("delta-worker");
         if cancel_at_handoff {
             let (entered, reached) = tokio::sync::oneshot::channel();

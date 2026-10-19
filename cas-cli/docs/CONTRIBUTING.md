@@ -813,6 +813,16 @@ Task creation excludes common planning words and prose such as `NOT` and
 require near identity; exact duplicate titles and concrete code/path overlap
 still warn. Intentional duplicates retain the `confirm_warning=true` escape.
 
+### Task start cancellation
+
+`task action=start` commits its local lease and InProgress status before awaiting
+Cloud handoff or parent-epic claim work. Those requests share the existing
+8-second peer budget. A response deadline after the local transition reports
+COMMITTED, including when notification and sync wrappers are disabled. Re-query
+the task before retrying. A failed lease acquisition leaves status unchanged;
+a failed status write releases only the lease generation acquired by that start.
+A sync-publication error after the local commit keeps the matching lease.
+
 ### Task lease release
 
 `task action=release` lets a live registered supervisor release a worker's

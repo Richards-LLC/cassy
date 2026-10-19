@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 THREAD_HEADINGS = ("Parent post", "Grok reply", "Claude reply", "Codex reply")
-TICKET_ID = re.compile(r"\b(?:cas-[0-9a-f]{4,}|(?:task|epic)-[a-z0-9-]+)\b", re.IGNORECASE)
+TICKET_ID = re.compile(r"\bcas-[0-9a-f]{4,}\b", re.IGNORECASE)
 FENCED_TEXT = re.compile(r"```text\r?\n(.*?)\r?\n```", re.DOTALL)
 
 

@@ -779,7 +779,7 @@ sleep 2
 
 ```text
 *Dev — Harness diary sweep — 2026-10-14*
-Was: the harness notes stopped at older pins → Now: current installed versions and validated pins are distinguished; no Cassy runtime behavior is announced.
+Was: the harness notes stopped at older pins → Now: current installed versions and validated pins are distinguished; no Cassy runtime behavior is announced. The task-verifier reviewed this diary.
 ```
 
 ## Grok reply

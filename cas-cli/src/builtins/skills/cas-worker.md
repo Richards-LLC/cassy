@@ -7,10 +7,8 @@ metadata:
 
 # Factory Worker
 
-Factory workers run the targeted tests for their change themselves. Every task
-assignment authorizes and requires the fewest tests that fail without the change
-([Fewest tests](../cas-tdd/SKILL.md#fewest-tests)) and running its affected
-targeted tests. Workers close their own tasks; never ask the supervisor to close
+Each assignment authorizes and requires running the fewest affected tests that
+fail without the change ([Fewest tests](../cas-tdd/SKILL.md#fewest-tests)). Workers close their own tasks; never ask the supervisor to close
 your task on their behalf. `CONTRIBUTING` names the scoped test commands. Docs-only and no-code tasks prove their
 acceptance check instead (e.g. markdownlint, `cas codemap status`, a published
 artifact); don't add code tests to them.
@@ -70,16 +68,33 @@ use assigned work; `ready` and `available` are backlog
   to that session's supervisor. Use this narrow lane for collision
   warnings, not general chat or cross-session contact; send task status, blockers
   and handoffs to `target=supervisor`.
-- A worker can send `coordination action=message target=supervisor kind=status summary="status" message="Please review the current task update."`
-  or `kind=ready` with `summary` and `message` for a typed action wake when the
-  supervisor must review an update or continue coordination. Ordinary messages
-  remain inbox-only; never set `merge_request=true` to wake the supervisor for a
-  status update.
+- Use `kind=status` for actionable updates that allow work to continue, or
+  `kind=ready` for completed work awaiting coordination. Ordinary updates stay inbox-only.
 - Never block the pane: run long commands in the background with a log.
 - Stop only the PID you started (capture `$!` or use your own PID file); never use `pkill`, `killall`, or process-name searches to send signals on the shared host.
 - Checkpoint, never compact: commit, push and note, then request a respawn when
   context runs low.
 - When close says verification required, quote its guidance in `need:`.
+
+## Blockers and review waits
+
+When required supervisor review or approval blocks work (e.g. publication),
+enter awaiting supervisor review:
+
+1. Add a `note_type=blocker` task note with the required decision, blocked next
+   action, commit and proof; run `task action=update id=<task-id> status=blocked`.
+2. Send `coordination action=message target=supervisor task_id=<task-id> blocker=true summary="Review required" message="..."`
+   using the return contract with `status: blocked` and `blocker: <cause>`.
+   Omit `kind`: `kind=status|ready` cannot accompany `blocker=true`.
+3. Save the notification ID; wait for the review reply. Record its ID and actual
+   decision/action. Clear the review hold with
+   `task action=update id=<task-id> status=open`, then
+   `task action=start id=<task-id>` before resuming.
+   Track transport delivery and inbox receipt separately with `message_status`.
+   Mark unobserved model action NOT VERIFIED; the supervisor owns that proof.
+
+Other blockers use the same sequence. Finished deliveries follow MERGE REQUIRED.
+Wake eligibility never guarantees a turn.
 
 ## Browser checks
 
@@ -121,9 +136,6 @@ deferred: <one line or none>
 need: <what the supervisor must do, one line, or none>
 ```
 
-For blockers add `blocker: <cause>`, a blocker task note, `status=blocked`,
-and `blocker=true` on the message. Coordination uses the literal string `supervisor`
-and both `summary` and `message`. Ordinary updates reach the inbox on the next turn;
-only authenticated typed blocker, merge, status/ready action, verification or
-lifecycle events wake an idle supervisor. Free-form worker messages remain
-inbox-only. Evidence stays in notes and the close reason.
+Coordination uses the literal string `supervisor` and both `summary` and `message`.
+Authenticated typed blocker, merge, status/ready, verification or lifecycle
+events may wake an idle supervisor. Text alone stays inbox-only; proof stays in notes.

@@ -387,6 +387,7 @@ impl HubTransportReport {
 
     pub(crate) fn message_with_remedy(&self) -> String {
         match &self.remedy {
+            Some(remedy) if self.message.contains('\n') => format!("{}\n{remedy}", self.message),
             Some(remedy) => format!("{}; {remedy}", self.message),
             None => self.message.clone(),
         }
@@ -1003,9 +1004,10 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
         let paths = HubRuntimePaths::default_for_user()?;
         let manager = TailscaleServeManager::new(paths.root());
         if manager.cli_available() {
-            anyhow::ensure!(manager.is_logged_in()
-                .context("Cannot inspect Tailscale; use `cas hub start --loopback` for local access")?,
-                "Tailscale is not signed in; sign in first or use `cas hub start --loopback`");
+            let issue = manager.login_issue().unwrap_or_else(|error| Some(error.to_string()));
+            if let Some(issue) = issue {
+                anyhow::bail!("{issue}\nSelect a daemon with TAILSCALE_SOCKET or run `cas hub start --loopback`.");
+            }
         }
     }
     match args.command.clone().unwrap_or_else(default_hub_command) {
@@ -1666,7 +1668,8 @@ fn serve_foreground_logged(
                 tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
             let proxy_port = proxy_listener.local_addr()?.port();
             let ensure_started = Instant::now();
-            let ensure_result = if args.launched_by == "service" {
+            let service_startup = cfg!(target_os = "macos") && args.launched_by == "service";
+            let ensure_result = if service_startup {
                 tailscale_manager.ensure_for_service(proxy_port, tailscale_port, prior_serve_target).await
             } else {
                 tailscale_manager.ensure_with_prior_target(proxy_port, tailscale_port, prior_serve_target)
@@ -1682,7 +1685,7 @@ fn serve_foreground_logged(
             );
             match ensure_result {
                 Ok(receipt) => (Some(proxy_listener), Some(receipt), None),
-                Err(error) if args.launched_by == "service" => {
+                Err(error) if service_startup => {
                     return Err(error).context("Tailscale Serve service startup exhausted its bounded retries");
                 }
                 Err(error) => {
@@ -2455,6 +2458,11 @@ fn render_transport_status(report: &HubTransportReport) -> String {
 
     let mut lines = if report.message.starts_with("hub is supervised but not publishable") {
         vec!["Tailscale Serve: FAIL - supervised hub is not publishable".to_owned()]
+    } else if let Some(issue) = report.message.strip_prefix("Tailscale: ") {
+        issue.lines().enumerate().map(|(index, line)| {
+            if index == 0 { format!("Tailscale Serve: FAIL - {line}") }
+            else { format!("  {line}") }
+        }).collect()
     } else if report.message.starts_with("hub machine lock") {
         vec![format!(
             "Tailscale Serve: FAIL - {}",
@@ -3099,6 +3107,14 @@ pub(crate) fn hub_transport_report(
             receipt.is_some() || record.is_some_and(tailscale_enabled),
         );
     }
+    if receipt.is_some() || (manager.cli_available()
+        && record.is_some_and(|record| record.transport_warning.is_some())) {
+        let issue = manager.login_issue().unwrap_or_else(|error| Some(error.to_string()));
+        if let Some(issue) = issue {
+            return HubTransportReport::fail_with_remedy(issue, None, None,
+                "Select the signed-in daemon with TAILSCALE_SOCKET, then restart.".to_owned());
+        }
+    }
     let Some(receipt) = receipt else {
         if record.is_some_and(|record| {
             record.tailscale_serve_target.is_some()
@@ -3386,6 +3402,7 @@ mod tests {
             https_port: 8443,
             created_by_cas: true,
             executable: "tailscale".to_owned(),
+            socket: None,
             status_before: serde_json::json!({}),
             status_after: serde_json::json!({}),
             recorded_at: "2026-09-08T00:00:00Z".to_owned(),
@@ -3417,6 +3434,7 @@ mod tests {
             https_port: 443,
             created_by_cas: true,
             executable: "tailscale".to_owned(),
+            socket: None,
             status_before: serde_json::json!({}),
             status_after: serde_json::json!({}),
             recorded_at: "2026-09-08T00:00:00Z".to_owned(),

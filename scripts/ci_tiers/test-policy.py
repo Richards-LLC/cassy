@@ -206,6 +206,21 @@ fi
 
     def test_macos_check_warms_main_cache_but_stays_off_branch_pushes_cas_861c0(self):
         job = self.ci()['jobs']['macos-check']
+        native = next(step for step in job['steps'] if step.get('name') == 'Prove native hub lifecycle and cache reclaim')
+        self.assertIn('scripts/run-verified-tests.sh nextest run -p cas --lib --test integration_cli', native['run'])
+        for name in (
+            'cas_49b9_exact_unknown_target_opt_in_reclaims_only_quiet_regenerable_subtree',
+            'cas_49b9_unknown_target_refuses_without_exact_opt_in_or_with_live_handle',
+            'isolated_launchd_lifecycle_stops_without_respawn_and_restarts',
+            'service_start_retries_tailscale_before_publication',
+            'detached_hub_uses_app_bundle_override_with_no_parent_term',
+            'signed_out_hub_start_requires_explicit_loopback',
+            'stopped_tailscale_diagnostic_names_cli_and_socket',
+            'flagless_hub_lifecycle_publishes_and_host_opt_out_removes_serve',
+            'gui_launcher_output_has_actionable_cli_error',
+        ):
+            self.assertIn(f'test({name})', native['run'])
+        self.assertFalse(any('cargo check --workspace' in step.get('run', '') for step in job['steps']))
         def context(event, ref, run='false', reuse='', diff='rust-touched'):
             return {'github.event_name': event, 'github.ref': ref, 'github.base_ref': 'main',
                     'github.event.repository.default_branch': 'main', 'needs.ci-diff.outputs.class': diff,

@@ -4,7 +4,7 @@ import { credentialFence, type CredentialFence } from "./commander-journal";
 import { anySignal } from "./abort-signals";
 import { withRequestDeadline } from "./request-deadline";
 import { EventRecovery } from "./event-recovery";
-import { ConnectionDiagnostics, type CauseEvidence } from "./connection-diagnostics";
+import { ConnectionDiagnostics, httpRefusalCause, type CauseEvidence } from "./connection-diagnostics";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { CoalescedRefresh } from "./catalog-refresh";
 import { dpopHeaders } from "./dpop";
@@ -553,7 +553,7 @@ export class HubConnectionSupervisor {
     if (error instanceof AuthenticationError) return { code: `auth_${error.kind.replaceAll("-", "_")}` as CauseEvidence["code"], layer: "auth", retryable: false, requestId: error.requestId };
     if (error instanceof TransientAuthError) return { code: "proof_refused", layer: "auth", retryable: true };
     if (error instanceof DOMException && error.name === "TimeoutError") return { code: "request_timeout", layer: "http", retryable: true };
-    if (error instanceof HubRequestError) return { code: error.code === "health_probe" && error.status === 503 ? "health_http_unavailable" : "http_refused", layer: "http", retryable: true, status: error.status, requestId: error.requestId };
+    if (error instanceof HubRequestError) return { code: httpRefusalCause(error.status, error.code, error.detail), layer: "http", retryable: true, status: error.status, requestId: error.requestId };
     if (typeof navigator !== "undefined" && navigator.onLine === false) return { code: "browser_offline", layer: "browser", retryable: true };
     if (isNetworkFailure(error)) return { code: "network_or_browser_policy_unknown", layer: "browser", retryable: true, permission: "unknown" };
     if (error instanceof UnsupportedBrowserError) return { code: "unsupported_browser", layer: "browser", retryable: false };

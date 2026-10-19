@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect, journeyPart, RECEIPTS } from "./journey";
 import { ATLAS } from "./world";
@@ -150,5 +150,77 @@ test("HUB-J12 degraded live machine keeps its measured cause in the open Connect
     // Unsteady: the log agrees with the rail's "checking…" (F08), never "No retry scheduled".
     await expect(page.locator(".connection-log-summary")).not.toContainText("No retry scheduled");
     await expect(page.locator(".connection-log-summary")).toContainText("Last successful connection:");
+  });
+});
+
+test("HUB-J12 retryable auth-store 503 keeps the pairing and names the hub cause (cas-6348)", journeyPart, async ({ page, journey }) => {
+  const clock = new ProtocolClock(page);
+  const hub = new HubDouble(page, { machines: [ATLAS], paired: ["atlas"], multiplex: true, time: clock });
+  await page.addInitScript(() => { Math.random = () => 0.5; });
+  await hub.install();
+  let unavailable = false;
+  await page.route("https://atlas.test/v1/**", route => {
+    if (!unavailable || new URL(route.request().url()).pathname === "/v1/health") return route.fallback();
+    const reason = "auth_store_unavailable";
+    return route.fulfill({ status: 503, headers: { "retry-after": "2", "x-cas-refusal": reason }, json: { error: reason, reason, retryable: true } });
+  });
+  await page.goto("./"); await hub.seedPaired(); await clock.start(); await page.goto("./");
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  const header = page.locator("#conversation-connection");
+  const summary = page.locator(".connection-log-summary");
+  await expect(header).toHaveText(" · Live");
+  await journey.stage("The hub answers retryable 503 auth_store_unavailable", async () => {
+    unavailable = true;
+    await hub.down("atlas", { sockets: "close" }); await hub.up("atlas");
+    await clock.advance(1_000);
+    await expect(header).toHaveText(" · Reconnecting");
+    await page.getByRole("button", { name: "Connection details", exact: true }).click();
+    await expect(summary).toContainText("Atlas · Linux: Hub is temporarily unable to check pairings. Commander is retrying by itself; this device's pairing is intact.");
+    await expect(summary).toContainText("Next retry in");
+    await expect(summary).not.toContainText("refused");
+    await expect(page.locator(".connection-log-evidence")).toContainText("Measured HTTP status: 503.");
+    await page.locator(".connection-log-technical summary").click();
+    await expect(page.locator(".connection-log-technical pre")).toContainText("auth_store_unavailable");
+    const capturePath = process.env.QA_CONNECTION_LOG_CAPTURE;
+    if (capturePath) {
+      const html = await page.evaluate(async () => {
+        const source = document.querySelector<HTMLLinkElement>('link[rel="stylesheet"]');
+        const css = source ? await fetch(source.href).then(response => response.text()) : "";
+        const documentCopy = document.documentElement.cloneNode(true) as HTMLElement;
+        documentCopy.removeAttribute("data-scheme");
+        documentCopy.querySelectorAll("script").forEach(script => script.remove());
+        const styleLink = documentCopy.querySelector<HTMLLinkElement>('link[rel="stylesheet"]');
+        if (styleLink) {
+          const style = document.createElement("style");
+          style.textContent = css;
+          styleLink.replaceWith(style);
+        }
+        return `<!doctype html>${documentCopy.outerHTML}`;
+      });
+      await writeFile(capturePath, html);
+      const a11yDir = process.env.QA_CONNECTION_LOG_A11Y_DIR;
+      if (a11yDir) {
+        await mkdir(a11yDir, { recursive: true });
+        const mediaCaptures = [
+          ["forced-colors", { forcedColors: "active" as const, reducedMotion: null, contrast: null }],
+          ["reduced-motion", { forcedColors: null, reducedMotion: "reduce" as const, contrast: null }],
+          ["contrast-more", { forcedColors: null, reducedMotion: null, contrast: "more" as const }],
+        ] as const;
+        for (const [name, media] of mediaCaptures) {
+          await page.emulateMedia({ colorScheme: "dark", ...media });
+          const query = name === "forced-colors" ? "(forced-colors: active)"
+            : name === "reduced-motion" ? "(prefers-reduced-motion: reduce)" : "(prefers-contrast: more)";
+          expect(await page.evaluate(value => matchMedia(value).matches, query)).toBe(true);
+          await page.screenshot({ path: join(a11yDir, `a11y-${name}.png`), fullPage: true });
+        }
+        await page.emulateMedia({ colorScheme: null, forcedColors: null, reducedMotion: null, contrast: null });
+      }
+    }
+  });
+  await journey.stage("Recovery stays paired and returns Live", async () => {
+    unavailable = false;
+    await clock.advance(10_000);
+    await expect(header).toHaveText(" · Live");
+    await expect(summary).toContainText("Atlas · Linux: nothing is failing now.");
   });
 });

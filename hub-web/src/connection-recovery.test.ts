@@ -2,7 +2,7 @@ import { webcrypto } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CoalescedRefresh, EventRecovery } from "./event-recovery";
 import { withRequestDeadline } from "./request-deadline";
-import { ConnectionDiagnostics } from "./connection-diagnostics";
+import { CAUSE_COPY, ConnectionDiagnostics, httpRefusalCause } from "./connection-diagnostics";
 import { HubConnectionSupervisor } from "./connection";
 import { createDeviceKey } from "./dpop";
 import { createPairingRequest, pollPairingRequest, acknowledgePairing } from "./pairing-relay";
@@ -114,5 +114,18 @@ describe("bounded connection recovery (cas-2b3a5)", () => {
     expect((report.transitions as unknown[]).length).toBe(64);
     expect((report.transitions as Record<string, unknown>[]).at(-1)?.recovered).toBe("network_or_browser_policy_unknown");
     expect((report.hub as Record<string, unknown>).refusals).toEqual({ revoked: 2 });
+  });
+  it("names a retryable auth-store 503 without changing other refusal copy (cas-6348)", () => {
+    const cause = httpRefusalCause(503, "auth_store_unavailable");
+    expect(cause).toBe("hub_auth_store_unavailable");
+    expect(CAUSE_COPY[cause]).toMatchObject({
+      title: "Hub is temporarily unable to check pairings",
+      action: "Commander is retrying by itself; this device's pairing is intact.",
+    });
+    expect(CAUSE_COPY[cause].detail).toContain("auth_store_unavailable");
+    expect(httpRefusalCause(503, undefined, "auth_store_unavailable")).toBe(cause);
+    expect(httpRefusalCause(503, "health_probe")).toBe("health_http_unavailable");
+    expect(httpRefusalCause(500, "auth_store_unavailable")).toBe("http_refused");
+    expect(CAUSE_COPY.http_refused.title).toBe("HTTP request was refused");
   });
 });

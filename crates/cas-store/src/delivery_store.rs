@@ -945,6 +945,9 @@ mod tests {
         .unwrap();
         drop(conn);
 
+        // GH #1276: deterministically pause a close retry after its read,
+        // then let the supervisor commit request_changes before it writes.
+        let stale_park = task_store.get(&task.id).unwrap();
         let outcome = crate::request_changes_for_parked_delivery(
             root.path(),
             &task.id,
@@ -957,6 +960,11 @@ mod tests {
             outcome.delivery_transaction_id.as_deref(),
             Some(delivery.id.as_str())
         );
+
+        let stale_writer = SqliteTaskStore::open(root.path()).unwrap();
+        let refused = stale_writer.update(&stale_park)
+            .expect_err("a stale re-park must not erase request_changes");
+        assert!(refused.to_string().contains("task changed"), "{refused}");
 
         let reopened = task_store.get(&task.id).unwrap();
         assert_eq!(reopened.status, TaskStatus::Open);

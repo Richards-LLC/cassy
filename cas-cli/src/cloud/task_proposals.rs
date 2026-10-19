@@ -855,6 +855,41 @@ mod tests {
         assert_eq!(result.provenance.server_attested.creator_user_id, "user-1");
     }
 
+    /// cas-a968 (GH #1281): Cloud persisted the proposal but attests another
+    /// spelling of the target (a registry alias). The create is still refused,
+    /// but the refusal carries Cloud's receipt, and a retry with the same
+    /// attempt id sends the identical request and gets the same receipt.
+    #[tokio::test]
+    async fn create_identity_mismatch_refusal_carries_the_persisted_receipt_cas_a968() {
+        let server = MockServer::start().await;
+        let request = create_request();
+        let mut attested = provenance();
+        attested["server_attested"]["target_project_canonical_id"] = json!("target-alias");
+        Mock::given(method("POST"))
+            .and(path("/api/teams/team-1/task-proposals"))
+            .and(body_json(serde_json::to_value(&request).unwrap()))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "proposal_id": "proposal-1",
+                "target_task_id": "cas-0123456789abcdef",
+                "state": "proposed",
+                "provenance": attested
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let refusals = tokio::task::spawn_blocking(move || {
+            let client = client(&server);
+            [client.create(&request).unwrap_err(), client.create(&request).unwrap_err()].map(|error| error.to_string())
+        })
+        .await
+        .unwrap();
+        assert_eq!(refusals[0], refusals[1], "the retry dedupes to the same receipt");
+        for receipt in ["did not match the request", "proposal-1", "cas-0123456789abcdef", "request-1", "target-alias", "target-project"] {
+            assert!(refusals[0].contains(receipt), "{receipt} missing: {}", refusals[0]);
+        }
+    }
+
     #[tokio::test]
     async fn inbox_follows_opaque_cursor_to_exhaustion() {
         let server = MockServer::start().await;

@@ -9929,6 +9929,7 @@ mod worker_commit_guard_tests {
             (format!("git -C '{repo_path}' log --grep commit"), false),
             (format!("git -C '{linked_path}' commit -m work"), false),
             (format!("{ledger}\ngit -C '{repo_path}' commit -m work"), true),
+            (format!("cat > LEDGER.md <<EOF\n$(git -C '{repo_path}' commit -m work)\nEOF"), true),
         ] {
             let input = hook_git_write_input(&cwd, &command);
             let out = handle_pre_tool_use(&input, None).expect("handler ok");

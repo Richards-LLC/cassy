@@ -6453,7 +6453,14 @@ mod tests {
 
     #[test]
     fn opencode_hosted_lanes_pin_endpoint_and_key_environment_without_values() {
-        let _env = TestEnvGuard::new();
+        let mut env = TestEnvGuard::new();
+        let canaries = [
+            ("QWENCLOUD_TOKEN_PLAN_API_KEY", "sk-cas273e-token-plan-canary"),
+            ("DASHSCOPE_API_KEY", "sk-cas273e-payg-canary"),
+        ];
+        for (key, value) in canaries {
+            env.set(key, value);
+        }
         let cases = [
             (
                 "qwencloud/qwen3.8-max",
@@ -6499,8 +6506,10 @@ mod tests {
                 token_plan.then_some(true)
             );
             let encoded = serde_json::to_string(&inline).unwrap();
+            // The full config also contains instructions with words such as
+            // "task-scoped". Prove absence of actual key values, not "sk-".
             assert!(
-                !encoded.contains("sk-"),
+                canaries.iter().all(|(_, value)| !encoded.contains(*value)),
                 "inline config must contain no key value"
             );
         }

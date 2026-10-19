@@ -5735,7 +5735,7 @@ fn log_write_root_uses(cas_root: &Path, input: &HookInput, uses: &[WriteRootUse]
     }
 }
 
-/// cas-3147: the denial message, naming the operator's write roots in effect.
+/// Name the operator remedy even before any write roots have been configured.
 fn factory_workspace_contract_denial_with_roots(
     input: &HookInput,
     violation: &FactoryWriteViolation,
@@ -5753,12 +5753,13 @@ fn factory_workspace_contract_denial_with_roots(
         worktree_root,
     );
     let roots = policy.describe(task_ids);
-    if roots.is_empty() {
-        return denial;
-    }
+    let roots = if roots.is_empty() {
+        String::new()
+    } else {
+        format!(" Operator write roots in effect: {}.", roots.join("; "))
+    };
     format!(
-        "{denial} Operator write roots in effect: {}. Only the operator can add roots (`cas config set factory.write_roots`) or grants.",
-        roots.join("; ")
+        "{denial}{roots} Only the operator can add directories to `factory.write_roots` in the project's `.cas/config.toml` (`cas config set factory.write_roots`) or add task grants."
     )
 }
 
@@ -6223,6 +6224,62 @@ mod workspace_contract_tests {
             tool_input: Some(payload),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn support_cycle_write_uses_project_root_and_names_operator_remedy_cas_4f8e() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("home");
+        let worktree = fixture.path().join("worker");
+        let support = home.join(".gabber-support");
+        let neighbour = home.join(".gabber-support-other");
+        for directory in [&worktree, &support, &neighbour, &home.join(".cas")] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let mut env = TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.set("CAS_CLONE_PATH", &worktree);
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "support-cycle-test");
+        env.set("CAS_FACTORY_SESSION", "cas-4f8e-test");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let cas_root = crate::store::init_cas_dir(&worktree).unwrap();
+        let roots = "[factory]\nwrite_roots = [\"~/.gabber-support\"]\n";
+        // Host settings do not grant the project's writes.
+        std::fs::write(home.join(".cas/config.toml"), roots).unwrap();
+        let completed_at = "2026-10-19T14:00:00Z";
+        let state = serde_json::json!({"last_cycle_completed_at": completed_at}).to_string();
+        let input = tool_input("Write", serde_json::json!({
+            "file_path": support.join("state.json"), "content": state,
+        }), &worktree);
+        let run = |input: &HookInput| {
+            serde_json::to_value(handle_pre_tool_use(input, Some(&cas_root)).unwrap()).unwrap()
+        };
+        let denied = run(&input);
+        assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny", "{denied}");
+        assert!(denied.to_string().contains("factory.write_roots"),
+            "an unconfigured refusal must name the operator's remedy: {denied}");
+        assert!(denied.to_string().contains("project's `.cas/config.toml`"), "{denied}");
+
+        std::fs::write(cas_root.join("config.toml"), roots).unwrap();
+        let admitted = run(&input);
+        assert_ne!(admitted["hookSpecificOutput"]["permissionDecision"], "deny", "{admitted}");
+        // Execute only the admitted write; the watchdog's completion field survives.
+        std::fs::write(support.join("state.json"), &state).unwrap();
+        let persisted: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(support.join("state.json")).unwrap(),
+        ).unwrap();
+        assert_eq!(persisted["last_cycle_completed_at"], completed_at);
+
+        let outside = tool_input("Write", serde_json::json!({
+            "file_path": neighbour.join("state.json"), "content": state,
+        }), &worktree);
+        let denied = run(&outside);
+        assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny", "{denied}");
+        assert!(!neighbour.join("state.json").exists());
     }
 
     /// cas-0d4f0: an agent shell cannot set or reset a security-relevant key

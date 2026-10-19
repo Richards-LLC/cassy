@@ -1485,6 +1485,9 @@ mod tests {
     /// tell that the store under their feet was not the one used.
     #[test]
     fn root_override_notice_names_both_roots_and_the_winner_cas_b69a() {
+        let mut env = TestEnvGuard::new();
+        for (locale, mark, separator) in [("C", "[WARN]", "--"), ("C.UTF-8", "⚠️", "—")] {
+            env.set("LC_ALL", locale);
         let notice = root_override_notice(
             Path::new("/live/project/.cas"),
             Path::new("/tmp/casmig/proj/.cas"),
@@ -1502,6 +1505,13 @@ mod tests {
         assert!(first_line.contains("CAS_ROOT wins"), "{first_line}");
         // And it must point at the escape hatch, not just complain.
         assert!(notice.contains("env -u CAS_ROOT"), "{notice}");
+        assert!(notice.starts_with(mark), "{locale}: {notice}");
+        assert!(notice.contains(&format!("{separator} CAS_ROOT wins")), "{locale}: {notice}");
+        if locale == "C" {
+            assert!(notice.is_ascii(), "C-locale decorations must be ASCII: {notice}");
+        }
+        }
+
     }
 
     /// No conflict, no noise: CAS_ROOT pointing at the very store the working

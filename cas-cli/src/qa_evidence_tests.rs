@@ -2290,7 +2290,7 @@ fn cas_38e7_close_needs_no_journey_receipt() {
 }
 
 #[test]
-fn cas_0b07_doc_rebind_accepts_hub_web_critique_but_rejects_catalog_and_source_changes() {
+fn cas_0b07_doc_rebind_accepts_hub_web_critique_but_rejects_input_changes() {
     let mut fx = Fixture::new();
     let executed = fx.head.clone();
     std::fs::create_dir_all(fx.repo.join("hub-web/src/inbox")).unwrap();
@@ -2326,20 +2326,23 @@ fn cas_0b07_doc_rebind_accepts_hub_web_critique_but_rejects_catalog_and_source_c
         &[],
     )
     .unwrap();
-    std::fs::create_dir_all(fx.repo.join("docs/qa")).unwrap();
-    let catalog_change = commit(&fx.repo, "docs/qa/journeys.md", 0);
-    assert!(!journeys::doc_only_rebind(
-        &fx.repo,
-        &fx.head,
-        &catalog_change
-    ));
-    std::fs::create_dir_all(fx.repo.join("hub-web/src/inbox")).unwrap();
-    let source_change = commit(&fx.repo, "hub-web/src/inbox/presence.ts", 0);
-    assert!(!journeys::doc_only_rebind(
-        &fx.repo,
-        &executed,
-        &source_change
-    ));
+    let critique = fx.head.clone();
+    for input in [
+        "hub-web/src/inbox/presence.ts",
+        "hub-web/dist/app.js",
+        "hub-web/e2e/presence.journey.ts",
+        "docs/qa/journeys.md",
+        "scripts/journey-eval.sh",
+        "scripts/journey-bundles.py",
+    ] {
+        git_ok(&fx.repo, &["reset", "--hard", &critique]);
+        std::fs::create_dir_all(fx.repo.join(input).parent().unwrap()).unwrap();
+        let changed_head = commit(&fx.repo, input, 0);
+        assert!(
+            !journeys::doc_only_rebind(&fx.repo, &executed, &changed_head),
+            "rebind must reject changed QA input {input}"
+        );
+    }
 }
 
 #[test]

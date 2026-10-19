@@ -544,7 +544,7 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
       await reply.fill("Thanks, I can reply now.");
       await inbox.getByRole("button", { name: "Queue reply", exact: true }).press("Enter");
       await expect(inbox.getByText("Thanks, I can reply now.", { exact: true })).toBeVisible();
-      await captureReply(page, "M04-replied");
+      await captureReply(page, "M04-replied", true);
       expect(cloud.commands.size).toBe(1);
       expect(cloud.devices.size).toBe(2);
     });

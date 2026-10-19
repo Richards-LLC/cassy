@@ -10058,20 +10058,25 @@ mod worker_commit_guard_tests {
             ("CAS_CLONE_PATH", Some(&p)),
         ]);
 
-        let mut input = crate::hooks::handlers::HookInput::default();
-        input.hook_event_name = "PreToolUse".to_string();
-        input.tool_name = Some("Bash".to_string());
-        input.cwd = p.clone();
-        input.tool_input = Some(serde_json::json!({"command": "git commit -m 'oops'"}));
-
-        let out = handle_pre_tool_use(&input, None).expect("handler ok");
-        let val = serde_json::to_value(&out).unwrap();
-        let decision = val
-            .get("hookSpecificOutput")
-            .and_then(|h| h.get("permissionDecision"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(decision, "deny", "expected deny, got: {val}");
+        let mut mismatches = Vec::new();
+        for command in [
+            "git commit -m 'oops'",
+            r"find . -exec git commit -m x \;",
+            r"find . -execdir git commit -m x \;",
+            "command git commit -m x",
+            "sudo git commit -m x",
+            "exec git commit",
+            "builtin git -C . commit -m x",
+            "xargs -I{} git commit",
+        ] {
+            let input = hook_git_write_input(&p, command);
+            let out = handle_pre_tool_use(&input, None).expect("handler ok");
+            let val = serde_json::to_value(&out).unwrap();
+            if val["hookSpecificOutput"]["permissionDecision"] != "deny" {
+                mismatches.push(format!("{command}: expected deny: {val}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     #[test]

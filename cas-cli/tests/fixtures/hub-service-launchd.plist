@@ -39,6 +39,8 @@
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>TERM</key>
     <string>dumb</string>
+    <key>TAILSCALE_BE_CLI</key>
+    <string>1</string>
   </dict>
   <key>StandardOutPath</key>
   <string>/Users/test/.cas/hub/hub.log</string>

@@ -1736,13 +1736,19 @@ fn tty_update_without_yes_keeps_confirmation_and_human_output_enabled() {
 fn json_update_from_fake_release_never_prompts_or_leaks_self_update_output() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     env.set("GITHUB_TOKEN", "fixture-token-not-a-secret");
-    let args = update_test_args();
     let cli = update_test_cli(true);
 
     #[cfg(unix)]
     let _output_lock = update_output_lock();
     let mut failures = Vec::new();
     for download_fails in [true, false] {
+        let mut args = update_test_args();
+        if !download_fails {
+            // cas-a99a: exercise the reported full `cas --json update --yes`,
+            // including latest-release selection, rather than a pinned version.
+            args.version = None;
+            args.yes = true;
+        }
         let (base_url, server) = fake_release_source(download_fails);
         env.set("CAS_UPDATE_GITHUB_API_URL", &base_url);
         let (result, output) = capture_phase(true, || run_full_update(
@@ -1755,6 +1761,12 @@ fn json_update_from_fake_release_never_prompts_or_leaks_self_update_output() {
         ));
         server.join().expect("loopback release/download fixture");
         let error = result.expect_err("download/extraction refusal must remain nonzero");
+        let cause = format!("{error:#}");
+        assert!(cause.contains("could not install Cassy 9.9.9"), "{cause}");
+        assert!(
+            cause.contains(if download_fails { "500" } else { "archive" }),
+            "the failure must reach the intended download/extraction boundary: {cause}"
+        );
         let document = serde_json::from_str::<serde_json::Value>(&output);
         match document {
             Ok(receipt) => {
@@ -1763,7 +1775,7 @@ fn json_update_from_fake_release_never_prompts_or_leaks_self_update_output() {
                 assert_eq!(receipt["binary_status"], "failed", "{receipt}");
                 assert_eq!(receipt["refresh_status"], "not_run", "{receipt}");
                 assert_eq!(receipt["error"]["phase"], "binary", "{receipt}");
-                assert_eq!(receipt["error"]["message"], format!("{error:#}"));
+                assert_eq!(receipt["error"]["message"], cause);
                 assert!(receipt.get("projects").is_none() && receipt.get("hub_restart").is_none(), "{receipt}");
             }
             Err(_) => failures.push(format!("download_fails={download_fails}: expected one JSON object, got {output:?}; error={error:#}")),
@@ -1800,7 +1812,14 @@ fn fake_release_source(download_fails: bool) -> (String, thread::JoinHandle<()>)
                 tiny_http::Response::from_string("not a release archive")
                     .with_status_code(if download_fails { 500 } else { 200 })
             } else {
-                tiny_http::Response::from_string(release.clone())
+                // Unpinned --yes resolves a release list; pinned updates and
+                // the initial latest-release lookup request a single object.
+                let body = if request.url().ends_with("/releases") {
+                    format!("[{release}]")
+                } else {
+                    release.clone()
+                };
+                tiny_http::Response::from_string(body)
             };
             request.respond(response).expect("respond with fake release");
             if asset { break; }

@@ -3130,6 +3130,16 @@ impl CasCore {
                 data: None,
             });
         }
+        // cas-9c34: the supervisor is acting on this task's merge request,
+        // whatever this attempt's outcome; it is read.
+        if let Some(task_id) = task_id
+            && let Ok(caller) = self.get_agent_id()
+            && let Some(supervisor) =
+                self.open_agent_store().ok().and_then(|store| store.get(&caller).ok())
+            && let Ok(queue) = crate::store::open_prompt_queue_store(&cas_root)
+        {
+            crate::prompt_revalidation::ack_merge_requests_acted_on(queue.as_ref(), &supervisor, task_id);
+        }
         let config = Config::load(&cas_root).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to load config: {e}")),

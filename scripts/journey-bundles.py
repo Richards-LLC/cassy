@@ -5,7 +5,8 @@ Usage: journey-bundles.py <artifact-dir> <dist-tree> <commit> <suite-exit> <hub-
 
 Called by scripts/journey-eval.sh after the `journeys` project ran with
 JOURNEY_RECEIPTS=<artifact-dir>/journeys. For every <ID>/result.json it:
-  - moves a failed or incomplete test's trace.zip into the bundle once
+  - keeps one passing trace per journey bundle for qa_evidence
+  - moves failed or incomplete traces into the bundle once
   - writes trace-actions.txt for a retained trace
   - writes bundle.json (producer "journey"; contract: cas-qa-craft evidence bundle v1)
 Then writes <artifact-dir>/journeys/JOURNEYS.md, the run summary the evaluator reads.
@@ -69,37 +70,37 @@ def read_result(result: Path, ident: str, suite_failed: bool = False) -> dict:
     return data
 
 
-def should_keep_trace(data: dict) -> bool:
+def is_clean_pass(data: dict) -> bool:
     incomplete = data.get("incomplete_stages", [])
     incomplete = incomplete or [
         stage for stage in data.get("stages", [])
         if stage.get("status") == "INCOMPLETE"
     ]
-    return data.get("status") != "PASS" or bool(incomplete)
+    return data.get("status") == "PASS" and not incomplete
 
 
-def bundle_trace(data: dict, bundle: Path, hub: str) -> dict[str, str]:
-    """Keep a failed/incomplete trace once, at its journey-bundle path."""
+def bundle_trace(data: dict, bundle: Path, hub: str, target: Path | None) -> dict[str, str]:
+    """Move one selected trace into its canonical bundle path, or discard it."""
     output_dir = data.get("output_dir")
     source = Path(output_dir) / "trace.zip" if output_dir else None
-    trace = bundle / "trace.zip"
-    actions = bundle / "trace-actions.txt"
-    if not should_keep_trace(data):
-        for path in (source, trace):
-            if path is not None:
-                path.unlink(missing_ok=True)
-        actions.unlink(missing_ok=True)
+    if target is None:
+        if source is not None:
+            source.unlink(missing_ok=True)
         return {}
 
-    if source is not None and source.is_file() and source.resolve() != trace.resolve():
-        trace.unlink(missing_ok=True)
-        shutil.move(str(source), str(trace))
-    if not trace.is_file():
-        actions.unlink(missing_ok=True)
+    if source is None or not source.is_file():
         return {}
 
-    actions.write_text(trace_actions(bundle, hub))
-    return {"trace": "trace.zip", "trace_actions": "trace-actions.txt"}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.resolve() != target.resolve():
+        target.unlink(missing_ok=True)
+        shutil.move(str(source), str(target))
+    actions = target.with_name("trace-actions.txt")
+    actions.write_text(trace_actions(target.parent, hub))
+    return {
+        "trace": target.relative_to(bundle).as_posix(),
+        "trace_actions": actions.relative_to(bundle).as_posix(),
+    }
 
 
 def main(argv: list[str]) -> int:
@@ -121,9 +122,17 @@ def main(argv: list[str]) -> int:
         stages = [dict(stage) for stage in (data or {}).get("stages", [])]
         incomplete_stages = [dict(stage) for stage in (data or {}).get("incomplete_stages", [])]
         files: dict[str, object] = {"cells": [stage["screenshot"] for stage in stages]}
+        passing_trace: dict[str, str] = {}
+        diagnostics = []
         if data is not None:
             files.update({"receipt": "receipt.webm", "aria_yaml": "final.aria.yml", "aria_json": "final.aria.json"})
-            files.update(bundle_trace(data, bundle, hub))
+            if is_clean_pass(data):
+                passing_trace = bundle_trace(data, bundle, hub, bundle / "trace.zip")
+                files.update(passing_trace)
+            else:
+                diagnostic = bundle_trace(data, bundle, hub, bundle / "diagnostics/main/trace.zip")
+                if diagnostic:
+                    diagnostics.append(diagnostic)
         verdicts = [data["status"]] if data is not None else []
         folded = []
         for part_result in parts:
@@ -132,7 +141,15 @@ def main(argv: list[str]) -> int:
             part = read_result(part_result, ident, suite_failed=status != 0)
             verdicts.append(part["status"])
             part_files = {"receipt": f"{rel}/receipt.webm", "aria_yaml": f"{rel}/final.aria.yml", "aria_json": f"{rel}/final.aria.json"}
-            part_files.update({key: f"{rel}/{path}" for key, path in bundle_trace(part, part_dir, hub).items()})
+            if is_clean_pass(part):
+                if not passing_trace:
+                    passing_trace = bundle_trace(part, bundle, hub, bundle / "trace.zip")
+                    files.update(passing_trace)
+                else:
+                    bundle_trace(part, bundle, hub, None)
+            else:
+                trace = bundle_trace(part, bundle, hub, part_dir / "trace.zip")
+                part_files.update(trace)
             for stage in part.get("stages", []):
                 stage = dict(stage, screenshot=f"{rel}/{stage['screenshot']}")
                 stages.append(stage)
@@ -144,6 +161,8 @@ def main(argv: list[str]) -> int:
             folded.append({"title": part.get("title"), "project": part.get("project"), "title_path": part.get("title_path"), "verdict": part["status"], "label": part.get("label", "real-bundle, protocol-double"), **part_files})
         if folded:
             files["parts"] = folded
+        if diagnostics:
+            files["diagnostic_traces"] = diagnostics
         if data is None:
             data = {"id": ident, "title": json.loads(parts[0].read_text()).get("title", ident)}
         labels = {item.strip() for row in [data, *folded] for item in row.get("label", "" if row is data and not result.is_file() else "real-bundle, protocol-double").split(",") if item.strip()}

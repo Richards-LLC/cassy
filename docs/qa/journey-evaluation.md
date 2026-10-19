@@ -63,9 +63,12 @@ For the Commander hub, the suite is `hub-web/e2e/journeys/`. It runs as the
 - **Receipts per journey.** Each journey is one cas-qa-craft evidence
   bundle in `<artifact-dir>/journeys/<ID>/`, and its `bundle.json` names
   `journey` as the producer. The bundle holds:
-  - `trace.zip`, recorded with `snapshots: { dom, aria, screen }` and
-    `screenshots: false`, plus `trace-actions.txt`, retained only for failed
-    or incomplete cells; passing cells do not keep traces
+  - one passing-run `trace.zip` and `trace-actions.txt` per bundle, required
+    by `qa_evidence`; failed or incomplete cell traces are also retained for
+    diagnosis. The bundler moves retained traces out of Playwright output and
+    drops redundant passing-cell traces
+  - journey traces use DOM and ARIA snapshots, with screen snapshots and trace
+    screenshots off; the stage screenshots and full-size screencast remain
   - `receipt.webm`, a full-size `page.screencast` recording with
     `showActions` on and one `showChapter` per stage
   - `J01.png`, `J02.png` and so on, one screenshot at the end of every stage

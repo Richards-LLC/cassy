@@ -475,6 +475,83 @@ fn a_thread_is_one_ordered_call_with_inline_reply_files() {
 }
 
 #[test]
+fn multipart_post_and_thread_receipts_show_part_ids_human_and_json() {
+    let part_ids = json!(["1710000000.000001", "1710000000.000002"]);
+    let post_receipt = json!({
+        "ok": true, "kind": "message", "channel": channel(),
+        "message": {
+            "message_id": "1710000000.000002",
+            "thread_id": "1710000000.000001",
+            "permalink": "https://slack.test/p/2",
+            "part_ids": part_ids
+        }
+    });
+    let post_args = ["post", "--channel", "cas-internal", "--text", "long post"];
+
+    let hub = ScriptedHub::with(vec![post_receipt.clone()]);
+    let (out, result) = run_cli(&post_args, &hub, false, &no_gate);
+    result.unwrap();
+    assert!(
+        out.contains("part_ids: 1710000000.000001, 1710000000.000002"),
+        "{out}"
+    );
+
+    let hub = ScriptedHub::with(vec![post_receipt]);
+    let (out, result) = run_cli(&post_args, &hub, true, &no_gate);
+    result.unwrap();
+    let report: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["message"]["message_id"], "1710000000.000002");
+    assert_eq!(report["message"]["part_ids"], part_ids);
+
+    let thread_receipt = json!({
+        "ok": true, "kind": "thread", "channel": channel(),
+        "posted": [
+            {
+                "index": 0,
+                "message_id": "1710000000.000002",
+                "thread_id": "1710000000.000001",
+                "permalink": "https://slack.test/p/2",
+                "part_ids": part_ids
+            },
+            {
+                "index": 1,
+                "message_id": "1710000000.000003",
+                "thread_id": "1710000000.000001",
+                "permalink": "https://slack.test/p/3"
+            }
+        ],
+        "failed_index": null, "resume_safe": true
+    });
+    let thread_args = [
+        "thread",
+        "--channel",
+        "cas-internal",
+        "--text",
+        "root",
+        "--reply",
+        "reply",
+        "--idempotency-key",
+        "multipart-fixture",
+    ];
+
+    let hub = ScriptedHub::with(vec![thread_receipt.clone()]);
+    let (out, result) = run_cli(&thread_args, &hub, false, &no_gate);
+    result.unwrap();
+    assert!(
+        out.contains("part_ids: 1710000000.000001, 1710000000.000002"),
+        "{out}"
+    );
+
+    let hub = ScriptedHub::with(vec![thread_receipt]);
+    let (out, result) = run_cli(&thread_args, &hub, true, &no_gate);
+    result.unwrap();
+    let report: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["posted"][0]["message_id"], "1710000000.000002");
+    assert_eq!(report["posted"][0]["thread_id"], "1710000000.000001");
+    assert_eq!(report["posted"][0]["part_ids"], part_ids);
+}
+
+#[test]
 fn a_stopped_thread_reports_failed_index_and_exits_non_zero() {
     let failure = json!({
         "ok": false, "schema_version": 1, "kind": "thread", "channel": channel(),

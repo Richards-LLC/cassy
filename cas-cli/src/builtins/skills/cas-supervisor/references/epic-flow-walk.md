@@ -44,11 +44,20 @@ Run one pass per epic when any child has a non-empty `demo_statement`:
    `Epic flow walk` with tip, child coverage, ledger path, counts, and label
    split. Stop registered QA servers. A completed pass may still contain FAIL
    or NOT EXERCISED; completion is not approval.
-7. Once both gate and walk receipts exist, use the normal sealed epic close
-   verification dispatch (`verification_type=epic`). Require the evidence note
-   and the task-verifier Step 0A REJECT table before reading the close reason.
-   If the assembled tip changes, the receipt is stale: reject it and report the
-   mismatch and owed work; do not silently rerun this once-per-epic pass.
+7. Once both gate and walk receipts exist, call `task action=close id=<epic-id>`
+   as the registered epic owner. With verification enabled and deep/default
+   depth, close returns the pending dispatch ID and bound head; ownership and
+   assembly proof do not replace an epic verdict. Use that exact dispatch for
+   the sealed task-verifier review (`verification_type=epic`), or an authorized
+   registered supervisor-direct `verification action=add task_id=<epic-id>
+   dispatch_id=<dispatch-id> verification_type=epic status=approved|rejected
+   summary="<evidence verdict>"`. Require the evidence note and task-verifier
+   Step 0A REJECT table before reading the close reason. If the assembled tip
+   changes, the receipt is stale: record `status=rejected` against the active
+   dispatch, report the mismatch and owed work, and retain genuine deployment
+   evidence; do not silently rerun this once-per-epic pass. After an approved
+   verdict retry close. After rejection, keep the epic open until the owed
+   evidence is resolved; the next close creates a fresh review dispatch.
 
 ## Example epic note
 

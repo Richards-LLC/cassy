@@ -16,6 +16,10 @@ use ratatui::style::Color as RatatuiColor;
 
 use crate::ui::theme::{ActiveTheme, Icons};
 
+// A one-cell success mark that remains distinguishable on the dark, light,
+// and Solarized terminal backgrounds. Longer text uses the terminal default.
+const SUCCESS_MARK_COLOR: RatatuiColor = RatatuiColor::Rgb(40, 145, 75);
+
 /// The one-word outcome of a command; drives the mark glyph and its colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -310,9 +314,9 @@ impl<'w> Formatter<'w> {
         self.newline()
     }
 
-    /// Print a sub-heading with the primary text color and bold.
+    /// Print a sub-heading in bold using the terminal's default foreground.
     pub fn subheading(&mut self, text: &str) -> io::Result<()> {
-        self.write_bold(text)?;
+        self.write_bold_plain(text)?;
         self.newline()
     }
 
@@ -328,10 +332,20 @@ impl<'w> Formatter<'w> {
     }
 
     /// Print a success status with a locale-appropriate mark.
+    ///
+    /// Styled UTF-8 output colors only the one-cell mark; the message stays
+    /// in the terminal's default foreground. ASCII fallback is bold and
+    /// uncolored so it remains legible on every terminal background.
     pub fn success(&mut self, message: &str) -> io::Result<()> {
-        let color = self.theme.palette.text_success;
         if self.mode == OutputMode::Styled {
-            self.write_colored(&format!("{} {message}", Verdict::Ok.label(self.glyphs())), color)?;
+            let label = Verdict::Ok.label(self.glyphs());
+            if self.glyphs() {
+                self.write_colored(label, SUCCESS_MARK_COLOR)?;
+            } else {
+                self.write_bold_plain(label)?;
+            }
+            self.write_raw(" ")?;
+            self.write_raw(message)?;
         } else {
             write!(self.writer, "[OK] {message}")?;
         }
@@ -711,7 +725,10 @@ mod tests {
             let mut fmt = Formatter::styled(&mut success_buf, theme);
             fmt.success("sync complete").unwrap();
         }
-        assert_eq!(String::from_utf8(success_buf).unwrap(), "\x1b[1m[OK]\x1b[0m sync complete\n");
+        assert_eq!(
+            String::from_utf8(success_buf).unwrap(),
+            "\x1b[1m[OK]\x1b[0m sync complete\n"
+        );
     }
 
     #[test]
@@ -738,7 +755,11 @@ mod tests {
         let luminance = |(r, g, b): (u8, u8, u8)| {
             let channel = |c: u8| {
                 let s = f64::from(c) / 255.0;
-                if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+                if s <= 0.04045 {
+                    s / 12.92
+                } else {
+                    ((s + 0.055) / 1.055).powf(2.4)
+                }
             };
             0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
         };
@@ -752,7 +773,10 @@ mod tests {
             let bg = luminance(background);
             let (high, low) = if mark >= bg { (mark, bg) } else { (bg, mark) };
             let ratio = (high + 0.05) / (low + 0.05);
-            assert!(ratio >= 3.0, "success mark contrast on {palette}: {ratio:.2}:1");
+            assert!(
+                ratio >= 3.0,
+                "success mark contrast on {palette}: {ratio:.2}:1"
+            );
         }
     }
 

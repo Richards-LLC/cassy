@@ -8931,11 +8931,20 @@ impl SqlitePromptQueueStore {
                 (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339()
             };
             let explicit_ack_sql = if named_read { "" } else { UNSURFACED_UNLESS_EXPLICIT_ACK_SQL };
-            let deliverable_sql = format!(
-                "AND q.created_at >= ?
-                 AND (q.highest_stage IS NULL
-                      OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})"
-            );
+            let terminal_stage_sql = if named_read {
+                // cas-66c9: the daemon's stale-TTL sweep retains the row but
+                // marks it abandoned with a cas-d047 detail. An explicit read
+                // of that exact retained notification may still retrieve it;
+                // dropped, suppressed and other abandoned rows remain hidden.
+                "AND (q.highest_stage IS NULL
+                     OR q.highest_stage NOT IN ('dropped', 'suppressed', 'abandoned')
+                     OR (q.highest_stage = 'abandoned'
+                         AND q.last_pending_detail LIKE '%(cas-d047)%'))"
+            } else {
+                "AND (q.highest_stage IS NULL
+                     OR q.highest_stage NOT IN ('dropped', 'suppressed', 'abandoned'))"
+            };
+            let deliverable_sql = format!("AND q.created_at >= ? {terminal_stage_sql}");
             // Filtering after the drain would already acknowledge and consume
             // the alarm. Keep all automatic hook variants on this SQL boundary.
             let daemon_nudge_sql = if source == SurfacingSource::HookSurfaced {

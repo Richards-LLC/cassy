@@ -109,6 +109,16 @@ impl TailscaleServeManager {
         self.executable.to_string_lossy().into_owned()
     }
 
+    pub(crate) fn socket(&self) -> Option<&OsStr> {
+        self.socket.as_deref()
+    }
+
+    pub(crate) fn last_https_port(&self) -> Option<u16> {
+        fs::read(self.state_dir.join(TEARDOWN_RECEIPT_FILE)).ok()
+            .and_then(|bytes| serde_json::from_slice::<TailscaleTeardownReceipt>(&bytes).ok())
+            .map(|receipt| receipt.https_port).filter(|port| *port != 0)
+    }
+
     pub(crate) fn cli_available(&self) -> bool {
         Path::new(&self.executable).is_file()
             || self.executable.to_str().and_then(executable_on_path).is_some()
@@ -521,7 +531,7 @@ impl TailscaleServeManager {
     }
 
     fn run(&self, args: &[String]) -> Result<Vec<u8>> {
-        let mut command = tailscale_command(&self.executable);
+        let mut command = tailscale_command_with_term(&self.executable, env::var_os("TERM"));
         if let Some(socket) = &self.socket {
             command.arg(format!("--socket={}", socket.to_string_lossy()));
         }
@@ -545,7 +555,11 @@ impl TailscaleServeManager {
 }
 
 pub(super) fn tailscale_command(executable: &OsStr) -> Command {
-    tailscale_command_with_term(executable, env::var_os("TERM"))
+    let mut command = tailscale_command_with_term(executable, env::var_os("TERM"));
+    if let Some(socket) = env::var_os("TAILSCALE_SOCKET").filter(|socket| !socket.is_empty()) {
+        command.arg(format!("--socket={}", socket.to_string_lossy()));
+    }
+    command
 }
 
 fn tailscale_command_with_term(executable: &OsStr, term: Option<OsString>) -> Command {
@@ -1017,6 +1031,11 @@ mod tests {
             Some(OsString::from("xterm-256color")),
         );
         assert!(command.get_envs().all(|(key, _)| key != OsStr::new("TERM")));
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("TAILSCALE_SOCKET", "/operator/selected.socket");
+        let command = tailscale_command(OsStr::new("tailscale"));
+        assert_eq!(command.get_args().collect::<Vec<_>>(),
+            vec![OsStr::new("--socket=/operator/selected.socket")]);
     }
 
     #[test]

@@ -515,7 +515,7 @@ fn launchd_tailscale_environment() -> [(&'static str, Option<std::ffi::OsString>
     [
         ("TAILSCALE_BE_CLI", Some("1".into())),
         ("TAILSCALE", std::env::var_os("TAILSCALE").filter(|value| !value.is_empty())),
-        ("TAILSCALE_SOCKET", std::env::var_os("TAILSCALE_SOCKET").filter(|value| !value.is_empty())),
+        ("TAILSCALE_SOCKET", std::env::var_os("TAILSCALE_SOCKET")),
     ]
 }
 

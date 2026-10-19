@@ -465,11 +465,17 @@ fn resolve_lifecycle_tailscale_request(
     } else {
         None
     };
-    Ok(resolved_tailscale_request(
+    let (enabled, port) = resolved_tailscale_request(
         requested,
         requested_port,
         receipt.as_ref(),
-    ))
+    );
+    // A deliberate stop/loopback switch removes the ownership receipt, but
+    // its verified teardown still carries the operator's stable HTTPS port.
+    let port = if enabled && requested_port == 443 && receipt.is_none() {
+        TailscaleServeManager::new(paths.root()).last_https_port().unwrap_or(port)
+    } else { port };
+    Ok((enabled, port))
 }
 
 fn tailscale_enabled(record: &HubProcessRecord) -> bool {
@@ -1124,6 +1130,30 @@ fn reap_factory_daemon(_args: &HubReapDaemonArgs) -> Result<()> {
 }
 
 fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: u16) -> Result<()> {
+    if super::hub_service::installed_service_exists()? {
+        validate_control_bind(SocketAddr::new(args.bind, args.port), TransportSecurity::Plaintext)?;
+        let paths = HubRuntimePaths::default_for_user()?;
+        let (enabled, port) = resolve_lifecycle_tailscale_request(tailscale_serve, tailscale_port, &paths)?;
+        let record = paths.read_process_record().ok();
+        anyhow::ensure!(args.port == 0 || args.port == DEFAULT_HUB_PORT
+            || record.as_ref().is_some_and(|record| record.port == args.port),
+            "The installed hub service owns its listener port.\nUse `cas hub restart`, or uninstall the service to choose another port.");
+        let mut request = args.clone();
+        if request.port == DEFAULT_HUB_PORT {
+            // A flagless start inherits the installed service's listener.
+            request.port = 0;
+        }
+        if record.as_ref().is_some_and(|record| {
+            record.launched_by.as_deref() == Some("service")
+                && record_is_ready(&paths, record)
+                && running_hub_satisfies_request(record, &request, enabled, port, env!("CARGO_PKG_VERSION"))
+        }) {
+            return status(cli);
+        }
+        if super::hub_service::restart_supervised(cli, enabled, port)? {
+            return status(cli);
+        }
+    }
     start_with_output_from(
         args,
         cli,
@@ -1366,7 +1396,8 @@ fn start_with_output_resolved(
     if let Some(executable) = std::env::var_os("TAILSCALE").filter(|value| !value.is_empty()) {
         command.env("TAILSCALE", executable);
     }
-    if let Some(socket) = std::env::var_os("TAILSCALE_SOCKET").filter(|value| !value.is_empty()) {
+    if let Some(socket) = std::env::var_os("TAILSCALE_SOCKET")
+        .or_else(|| TailscaleServeManager::new(paths.root()).socket().map(ToOwned::to_owned)) {
         command.env("TAILSCALE_SOCKET", socket);
     }
     if let Some((port, target)) = prior_serve_target {

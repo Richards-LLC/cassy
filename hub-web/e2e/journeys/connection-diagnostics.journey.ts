@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect, journeyPart, RECEIPTS } from "./journey";
 import { ATLAS } from "./world";
@@ -198,6 +198,23 @@ test("HUB-J12 retryable auth-store 503 keeps the pairing and names the hub cause
         return `<!doctype html>${documentCopy.outerHTML}`;
       });
       await writeFile(capturePath, html);
+      const a11yDir = process.env.QA_CONNECTION_LOG_A11Y_DIR;
+      if (a11yDir) {
+        await mkdir(a11yDir, { recursive: true });
+        const mediaCaptures = [
+          ["forced-colors", { forcedColors: "active" as const, reducedMotion: null, contrast: null }],
+          ["reduced-motion", { forcedColors: null, reducedMotion: "reduce" as const, contrast: null }],
+          ["contrast-more", { forcedColors: null, reducedMotion: null, contrast: "more" as const }],
+        ] as const;
+        for (const [name, media] of mediaCaptures) {
+          await page.emulateMedia({ colorScheme: "dark", ...media });
+          const query = name === "forced-colors" ? "(forced-colors: active)"
+            : name === "reduced-motion" ? "(prefers-reduced-motion: reduce)" : "(prefers-contrast: more)";
+          expect(await page.evaluate(value => matchMedia(value).matches, query)).toBe(true);
+          await page.screenshot({ path: join(a11yDir, `a11y-${name}.png`), fullPage: true });
+        }
+        await page.emulateMedia({ colorScheme: null, forcedColors: null, reducedMotion: null, contrast: null });
+      }
     }
   });
   await journey.stage("Recovery stays paired and returns Live", async () => {

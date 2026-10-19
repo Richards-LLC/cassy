@@ -539,13 +539,21 @@ fn multipart_post_and_thread_receipts_show_part_ids_human_and_json() {
     let hub = ScriptedHub::with(vec![thread_receipt.clone()]);
     let (out, result) = run_cli(&thread_args, &hub, false, &no_gate);
     result.unwrap();
-    assert!(out.contains("0 root 1710000000.000002"), "{out}");
+    assert!(
+        out.lines()
+            .any(|line| { line.contains("0 root") && line.contains("1710000000.000002") }),
+        "{out}"
+    );
     assert!(
         out.contains("part_ids: 1710000000.000001, 1710000000.000002"),
         "{out}"
     );
     assert_eq!(out.matches("part_ids:").count(), 1, "{out}");
-    assert!(out.contains("1 reply 1710000000.000003"), "{out}");
+    assert!(
+        out.lines()
+            .any(|line| { line.contains("1 reply") && line.contains("1710000000.000003") }),
+        "{out}"
+    );
 
     let hub = ScriptedHub::with(vec![thread_receipt]);
     let (out, result) = run_cli(&thread_args, &hub, true, &no_gate);

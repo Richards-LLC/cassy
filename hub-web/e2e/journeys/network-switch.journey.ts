@@ -770,6 +770,10 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
       else await expect(studioRow).toContainText("last known");
       await expect(empty).toHaveCount(0);
       await expect(footer).toContainText(new RegExp(`^${count}Hub `));
+    });
+    await journey.stage(down.length === 1
+      ? "Atlas reconnects — the full conversation count is live again"
+      : "Both machines reconnect — the full conversation count is live again", async () => {
       for (const id of down) await hub.up(id);
       await clock.advance(10_000);
       await expect(header).toHaveText(" · Live");

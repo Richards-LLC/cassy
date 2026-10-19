@@ -217,7 +217,10 @@ impl CasService {
     fn resolve_reminder_target(
         &self,
         target: &str,
+        owner_id: &str,
     ) -> std::result::Result<(String, String), McpError> {
+        use crate::mcp::tools::service::agent_search_system::message::
+            resolve_worker_supervisor_target;
         use crate::store::open_agent_store;
         use cas_types::AgentStatus;
 
@@ -227,6 +230,39 @@ impl CasService {
                 format!("Failed to open agent store: {e}"),
             )
         })?;
+
+        if target.eq_ignore_ascii_case("supervisor")
+            && let Ok(caller) = store.get(owner_id)
+            && caller.role == cas_types::AgentRole::Worker
+        {
+            // Match message's authenticated worker resolution: the caller's
+            // registered factory session wins, with the environment retained
+            // only as the same compatibility fallback used by message_send.
+            let factory_session = caller
+                .factory_session
+                .as_deref()
+                .filter(|session| !session.trim().is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    std::env::var("CAS_FACTORY_SESSION")
+                        .ok()
+                        .filter(|session| !session.trim().is_empty())
+                });
+            let supervisor = resolve_worker_supervisor_target(
+                store.as_ref(),
+                factory_session.as_deref(),
+            )
+            .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Cannot resolve 'supervisor' for factory session {}: no live supervisor belongs to this worker's session",
+                        factory_session.as_deref().unwrap_or("none")
+                    ),
+                )
+            })?;
+            return Ok((supervisor.agent_id, supervisor.name));
+        }
 
         // Try exact ID match first
         if let Ok(agent) = store.get(target) {
@@ -297,7 +333,7 @@ impl CasService {
 
         // Resolve target: if provided, look up agent by name/ID; otherwise self-reminder
         let (target_id, target_display) = if let Some(ref target_name) = req.target {
-            let (id, name) = self.resolve_reminder_target(target_name)?;
+            let (id, name) = self.resolve_reminder_target(target_name, &owner_id)?;
             (Some(id), Some(name))
         } else {
             (None, None)
@@ -822,6 +858,115 @@ fn ended_reminder_desc(reminder: &cas_store::Reminder) -> String {
 #[cfg(test)]
 mod tests {
     use super::validate_external_reminder;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_remind_supervisor_target_uses_owning_factory_session() {
+        use crate::test_support::TestEnvGuard;
+        use cas_types::{Agent, AgentRole};
+
+        let env = TestEnvGuard::temp_home();
+        let sessions = env.home().join(".cas").join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions directory");
+        std::fs::write(
+            sessions.join("factory-a.json"),
+            r#"{"name":"factory-a","supervisor":{"name":"supervisor-a"},"workers":[]}"#,
+        )
+        .expect("session metadata");
+
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agents = core.open_agent_store().expect("agent store");
+
+        let mut worker = Agent::new("worker-id".into(), "worker-a".into());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some("factory-a".into());
+        agents.register(&worker).expect("register worker");
+
+        let mut supervisor_a = Agent::new("supervisor-a-id".into(), "supervisor-a".into());
+        supervisor_a.role = AgentRole::Supervisor;
+        agents
+            .register(&supervisor_a)
+            .expect("register sessionless owning supervisor");
+
+        let mut supervisor_b = Agent::new("supervisor-b-id".into(), "supervisor-b".into());
+        supervisor_b.role = AgentRole::Supervisor;
+        supervisor_b.factory_session = Some("factory-b".into());
+        agents
+            .register(&supervisor_b)
+            .expect("register sibling supervisor");
+
+        core.set_agent_id_for_testing(worker.id.clone());
+        #[cfg(feature = "mcp-proxy")]
+        let service = crate::mcp::tools::service::CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = crate::mcp::tools::service::CasService::new(core);
+        let request: crate::mcp::tools::service::FactoryRequest =
+            serde_json::from_value(serde_json::json!({
+                "action": "remind",
+                "target": "supervisor",
+                "remind_message": "factory checkpoint",
+                "remind_delay_secs": 60
+            }))
+            .expect("reminder request");
+
+        service
+            .factory_remind(request)
+            .await
+            .expect("worker's supervisor alias resolves");
+
+        let reminders = crate::store::open_reminder_store(&cas_root).expect("reminder store");
+        let targeted = reminders
+            .list_pending_for_target(&supervisor_a.id)
+            .expect("reminders for owning supervisor");
+        assert_eq!(targeted.len(), 1);
+        assert_eq!(targeted[0].owner_id, worker.id);
+        assert!(
+            reminders
+                .list_pending_for_target(&supervisor_b.id)
+                .expect("reminders for sibling supervisor")
+                .is_empty(),
+            "must not target a supervisor from another factory session"
+        );
+
+        let explicit_request: crate::mcp::tools::service::FactoryRequest =
+            serde_json::from_value(serde_json::json!({
+                "action": "remind",
+                "target": supervisor_b.id.clone(),
+                "remind_message": "explicit recipient",
+                "remind_delay_secs": 60
+            }))
+            .expect("explicit target reminder request");
+        service
+            .factory_remind(explicit_request)
+            .await
+            .expect("registered agent IDs remain valid targets");
+        assert_eq!(
+            reminders
+                .list_pending_for_target(&supervisor_b.id)
+                .expect("explicit registered-ID reminder")
+                .len(),
+            1
+        );
+
+        let self_request: crate::mcp::tools::service::FactoryRequest =
+            serde_json::from_value(serde_json::json!({
+                "action": "remind",
+                "remind_message": "self reminder",
+                "remind_delay_secs": 60
+            }))
+            .expect("self reminder request");
+        service
+            .factory_remind(self_request)
+            .await
+            .expect("omitted target remains a self-reminder");
+        let self_reminders = reminders
+            .list_pending_for_target(&worker.id)
+            .expect("self-targeted reminder");
+        assert_eq!(self_reminders.len(), 1);
+        assert_eq!(self_reminders[0].target_id, worker.id);
+    }
 
     #[test]
     fn cas_3349_validated_aliases_are_parseable() {

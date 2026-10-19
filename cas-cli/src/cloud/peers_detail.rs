@@ -722,10 +722,7 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                 "  Session {}",
                 peer.session.as_deref().unwrap_or("-")
             ));
-            line(format!(
-                "  Focus   {}",
-                peer.focus.as_deref().unwrap_or("-")
-            ));
+            line(format!("  Epic    {}", peer.epic_label()));
             line(format!("  Heartbeat {}s ago", peer.heartbeat_age_secs));
             if !report.detail {
                 continue;

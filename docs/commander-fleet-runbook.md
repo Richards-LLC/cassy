@@ -17,6 +17,7 @@ This is the per-machine operating procedure for the Commander hub. Repeat it on 
 Inbound **Tailscale SSH** uses tailnet identity and policy rather than SSH keys.
 On macOS it requires the open-source `tailscaled` daemon. Installing a CLI
 wrapper for `Tailscale.app` does not add this server capability.
+See [Tailscale SSH's platform limitations](https://tailscale.com/kb/1193/tailscale-ssh).
 
 | Variant | Connect to the tailnet / Serve HTTPS | Tailscale SSH client | Tailscale SSH server | Management |
 | --- | --- | --- | --- | --- |
@@ -35,8 +36,8 @@ The daemon has no menu-bar UI and cannot be managed through macOS VPN settings.
 Start it with `sudo brew services start tailscale`, which installs a system
 LaunchDaemon that runs before user login. `brew services start tailscale`
 without sudo is not the fleet's boot-persistence configuration. Check the
-installed service definition and `sudo brew services list`; Homebrew service
-labels can differ between releases.
+installed service definition and `sudo brew services list`; a non-root
+`brew services list` may show `none` for this root-owned service.
 
 Inspect the daemon explicitly while migrating:
 
@@ -44,11 +45,55 @@ Inspect the daemon explicitly while migrating:
 tailscale --socket=/var/run/tailscaled.socket status --json
 ```
 
-An unqualified Homebrew CLI can still select the GUI's local API while its
-system extension is active. Verify the reported daemon version as well as the
-CLI's `tailscale version`; do not infer the variant from the executable path.
-Disable GUI launch-at-login and retire its VPN/system extension before relying
-on the daemon for unattended operation.
+An unqualified Homebrew CLI can still select the GUI's local API when the GUI
+variant is installed, even if the open-source daemon is the one you intend to
+use. Verify the reported daemon version as well as the CLI's `tailscale
+version`; do not infer the active variant from the executable path. Keep the
+GUI app stopped when the Homebrew daemon owns the tailnet connection.
+
+### Launchd socket selection
+
+Launchd starts services with a minimal environment and does not inherit shell
+exports. On a Mac that has both the GUI app and the Homebrew formula installed,
+Cassy can select the brew CLI executable but still reach the stopped GUI
+daemon's local API. That API reports no usable tailnet state, so hub status can
+say Tailscale is unavailable and Serve publication can fail even while
+`tailscaled` is running.
+
+For a launchd-managed Cassy hub using the Homebrew daemon, set
+`TAILSCALE_SOCKET=/var/run/tailscaled.socket` in the launchd job's
+`EnvironmentVariables`. The Cassy Tailscale helper passes this socket to the
+CLI. Add it to the job's existing environment dictionary; do not replace its
+other required variables. For a direct read-only check, use:
+
+```sh
+tailscale --socket=/var/run/tailscaled.socket status --json
+```
+
+Check the output's `BackendState`, node name, and Tailscale IPs. Do not rely on
+an interactive shell's `TAILSCALE_SOCKET` setting to reach a launchd child.
+After correcting the launchd environment, have the hub operator verify status,
+Serve, and HTTPS health.
+
+### Prowl migration record (2026-10-19)
+
+The 2026-10-17 before-state showed the standalone GUI app connected as
+`prowl.tailf5a734.ts.net` at `100.106.196.93`; Homebrew `tailscaled` 1.102.5
+was already installed but logged out. The operator completed the switch on
+Oct 19: the root Homebrew LaunchDaemon was brought online and signed in to the
+same tailnet, Tailscale SSH was enabled against its socket, and the GUI app was
+stopped (it remains installed). To repeat the final step, run
+`tailscale --socket=/var/run/tailscaled.socket up --ssh`. The read-only
+after-state shows
+`tailscaled` 1.102.5 Running at `/var/run/tailscaled.socket`, MagicDNS enabled,
+and `prowl.tailf5a734.ts.net` at `100.76.232.42`. From soundwave,
+`tailscale ssh pippenz@prowl` exited 0 and opened a shell without SSH keys.
+
+The after-state capture also found `tailscale serve status --json` returned
+`{}`. This does not prove that the hub's HTTPS route is published; the hub
+operator must verify or republish its Serve mapping before relying on that
+endpoint. The before/after command outputs are retained in the cas-4f8d task
+artifacts.
 
 MagicDNS is supported by the daemon. Current macOS builds manage split-DNS
 files under `/etc/resolver` and may configure a default resolver through
@@ -79,9 +124,10 @@ the machine; use LAN access when changing prowl's networking.
   verify the daemon's version and service state.
 
 After an update, check `tailscale status`, MagicDNS, `tailscale ssh prowl` from
-soundwave, `cas hub status`, and HTTPS `/v1/health`. Re-publish the hub with
-`cas hub restart --tailscale-serve` if its recorded mapping no longer targets
-the live shim.
+soundwave, `cas hub status`, `tailscale serve status`, and HTTPS `/v1/health`.
+If the hub's Serve mapping no longer targets the live shim, have its operator
+re-publish it with `cas hub restart --tailscale-serve` after confirming the
+launchd `TAILSCALE_SOCKET` value.
 
 ## Hub promotion (hosted Commander at hub.petrastella.io)
 

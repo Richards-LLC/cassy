@@ -1423,22 +1423,52 @@ fn human_dry_run(
     path: &Path,
     definition: &str,
     actions: &[String],
-    _full: bool,
-    _utf8: bool,
+    full: bool,
+    utf8: bool,
 ) -> String {
-    let supervision = match platform {
-        ServicePlatform::Launchd => "launchd",
-        ServicePlatform::Systemd => "systemd-user",
-        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => "none",
+    let (supervision, action_summary) = match platform {
+        ServicePlatform::Launchd => (
+            "launchd",
+            "bootout (if present), bootstrap, kickstart via launchctl",
+        ),
+        ServicePlatform::Systemd => (
+            "systemd-user",
+            "enable lingering, reload, enable service via systemctl",
+        ),
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => {
+            ("none", "no manager steps")
+        }
     };
+    let dash = if utf8 { "—" } else { "-" };
+    let header = format!(
+        "Cassy hub service ({supervision}) dry run {dash} no files or manager state changed."
+    );
+    if !full {
+        return format!(
+            "{header}\nWould write: {}\nWould run: {action_summary}\nFull definition: cas hub service install --dry-run --full\n",
+            service_file_display_path(platform, path)
+        );
+    }
     let actions = actions
         .iter()
         .map(|action| format!("  {action}\n"))
         .collect::<String>();
     format!(
-        "Cassy hub service ({supervision}) dry run — no files or manager state changed.\nWould write: {}\nWould run:\n{actions}\nService definition:\n{definition}\n",
+        "{header}\nWould write: {}\nWould run:\n{actions}\nService definition:\n{definition}\n",
         path.display()
     )
+}
+
+fn service_file_display_path(platform: ServicePlatform, path: &Path) -> String {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "service file".into());
+    match platform {
+        ServicePlatform::Launchd => format!("~/Library/LaunchAgents/{file_name}"),
+        ServicePlatform::Systemd => format!("~/.config/systemd/user/{file_name}"),
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => path.display().to_string(),
+    }
 }
 
 fn print_dry_run(
@@ -1814,7 +1844,12 @@ exit 0
             !summary.contains(&definition),
             "the default human preview should not dump the plist"
         );
-        assert!(summary.contains("Would write: ~/Library/LaunchAgents/dev.cas.commander-hub.plist"));
+        assert!(
+            summary.contains("Would write: ~/Library/LaunchAgents/dev.cas.commander-hub.plist")
+        );
+        assert!(
+            summary.contains("Would run: bootout (if present), bootstrap, kickstart via launchctl")
+        );
         assert!(summary.contains("Full definition: cas hub service install --dry-run --full"));
         assert!(summary.starts_with(
             "Cassy hub service (launchd) dry run - no files or manager state changed."

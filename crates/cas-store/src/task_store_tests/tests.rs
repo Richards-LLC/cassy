@@ -950,6 +950,16 @@ fn sync_update_keeps_the_pulled_clock_so_an_echo_cannot_outrank_a_park_cas_3122(
         "the echoed Open ({}) must lose to the park at {parked_at}",
         echo.updated_at
     );
+    // Merging older metadata must not move a replica's clock backwards;
+    // a genuinely newer incoming clock must still be preserved verbatim.
+    let mut older = echo.clone();
+    older.updated_at -= chrono::Duration::hours(1);
+    assert_eq!(replica.update_from_sync(&older, &echo).unwrap(), Some(echo.updated_at));
+    let mut newer = replica.get(&task.id).unwrap();
+    let expected = newer.clone();
+    newer.updated_at += chrono::Duration::hours(1);
+    assert_eq!(replica.update_from_sync(&newer, &expected).unwrap(), Some(newer.updated_at));
+    assert_eq!(replica.get(&task.id).unwrap().updated_at, newer.updated_at);
 }
 
 fn add_sync_test_delivery(

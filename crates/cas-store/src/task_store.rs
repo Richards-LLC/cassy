@@ -236,6 +236,7 @@ impl SqliteTaskStore {
         task: &Task,
         receipt_id: &str,
         expected: Option<&Task>,
+        from_sync: bool,
     ) -> Result<Option<DateTime<Utc>>> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -295,12 +296,15 @@ impl SqliteTaskStore {
                 }
             }
 
-            // cas-ec74: read the clock ONCE and return that same instant. The
-            // caller's `task.updated_at` is deliberately ignored (updated_at is
-            // store-owned), but the value we persist has to be observable or
-            // callers are forced to guess it with a second `Utc::now()` — which
-            // is exactly how lifecycle occurrences became unmatchable.
-            let now = Utc::now();
+            // Local writes own their clock (cas-ec74). A sync apply is not a
+            // new edit: minting an apply-time clock lets a stale lifecycle echo
+            // outrank a later park on its origin (cas-3122). Keep the incoming
+            // clock without moving the local clock backwards, and return the
+            // exact stamp persisted by either path.
+            let now = match (from_sync, expected) {
+                (true, Some(expected)) => task.updated_at.max(expected.updated_at),
+                _ => Utc::now(),
+            };
 
             // Combine the status read with the UPDATE: only SELECT the old status
             // when the new status differs from what's in the DB, avoiding the
@@ -1177,12 +1181,12 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn update_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<DateTime<Utc>> {
-        self.update_checked(task, receipt_id, None)?
+        self.update_checked(task, receipt_id, None, false)?
             .ok_or_else(|| StoreError::Other("unconditional task update was refused".to_string()))
     }
 
     fn update_from_sync(&self, task: &Task, expected: &Task) -> Result<Option<DateTime<Utc>>> {
-        self.update_checked(task, "", Some(expected))
+        self.update_checked(task, "", Some(expected), true)
     }
 
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {

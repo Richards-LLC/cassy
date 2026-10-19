@@ -73,9 +73,10 @@ class BundleTests(unittest.TestCase):
         self.assertTrue((part / "trace.zip").is_file())
         self.assertFalse((self.artifacts / "playwright/HUB-J19/trace.zip").exists())
         self.assertFalse((self.artifacts / "playwright/forced-colors/trace.zip").exists())
-        self.assertEqual(sorted(main.rglob("trace.zip")), sorted([main / "trace.zip", part / "trace.zip"]))
-        self.assertEqual(bundle["files"]["trace"], "trace.zip")
-        self.assertEqual(bundle["files"]["trace_actions"], "trace-actions.txt")
+        passing_trace = main / bundle["files"]["trace"]
+        failed_trace = main / failed_part["trace"]
+        self.assertEqual(sorted(main.rglob(passing_trace.name)), sorted([passing_trace, failed_trace]))
+        self.assertTrue((main / bundle["files"]["trace_actions"]).is_file())
 
     def test_parts_keep_each_tests_media_and_cells_and_one_catalog_row(self):
         main = self.receipt("HUB-J13", "start a new session", stages=10)
@@ -87,11 +88,11 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(data["verdict"], "PASS")
         self.assertEqual(len(data["files"]["cells"]), 13)
         self.assertEqual(data["files"]["parts"][0]["receipt"], "parts/reconnecting/receipt.webm")
-        self.assertEqual(data["files"]["trace"], "trace.zip")
-        self.assertEqual(data["files"]["trace_actions"], "trace-actions.txt")
-        self.assertIn('Expect "toHaveText"', (main / "trace-actions.txt").read_text())
-        self.assertTrue((main / "trace.zip").is_file())
-        self.assertEqual(list(main.rglob("trace.zip")), [main / "trace.zip"])
+        passing_trace = main / data["files"]["trace"]
+        actions = main / data["files"]["trace_actions"]
+        self.assertIn('Expect "toHaveText"', actions.read_text())
+        self.assertTrue(passing_trace.is_file())
+        self.assertEqual(list(main.rglob(passing_trace.name)), [passing_trace])
         self.assertFalse((self.artifacts / "playwright/HUB-J13/trace.zip").exists())
         self.assertFalse((self.artifacts / "playwright/reconnecting/trace.zip").exists())
         rows = (self.artifacts / "journeys/JOURNEYS.md").read_text()

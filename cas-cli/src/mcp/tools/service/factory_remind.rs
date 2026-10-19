@@ -929,6 +929,43 @@ mod tests {
                 .is_empty(),
             "must not target a supervisor from another factory session"
         );
+
+        let explicit_request: crate::mcp::tools::service::FactoryRequest =
+            serde_json::from_value(serde_json::json!({
+                "action": "remind",
+                "target": supervisor_b.id.clone(),
+                "remind_message": "explicit recipient",
+                "remind_delay_secs": 60
+            }))
+            .expect("explicit target reminder request");
+        service
+            .factory_remind(explicit_request)
+            .await
+            .expect("registered agent IDs remain valid targets");
+        assert_eq!(
+            reminders
+                .list_pending_for_target(&supervisor_b.id)
+                .expect("explicit registered-ID reminder")
+                .len(),
+            1
+        );
+
+        let self_request: crate::mcp::tools::service::FactoryRequest =
+            serde_json::from_value(serde_json::json!({
+                "action": "remind",
+                "remind_message": "self reminder",
+                "remind_delay_secs": 60
+            }))
+            .expect("self reminder request");
+        service
+            .factory_remind(self_request)
+            .await
+            .expect("omitted target remains a self-reminder");
+        let self_reminders = reminders
+            .list_pending_for_target(&worker.id)
+            .expect("self-targeted reminder");
+        assert_eq!(self_reminders.len(), 1);
+        assert_eq!(self_reminders[0].target_id, worker.id);
     }
 
     #[test]

@@ -1929,6 +1929,9 @@ fn cas_9021_mixed_legacy_batches_and_held_replays_never_ack_managed_channels() {
     assert!(parse_violet_activity_envelope(&fx.wakes()[0].prompt).unwrap().channel == "CLEGACY");
     // An entry already held before activation is also ineligible, including
     // replay/duplicate ACK and no-supervisor expiry, not just new claim results.
+    // A fresh relay numbers its rows from 1 again; a fresh wake keeps event
+    // IDs from colliding with the CMANAGED entry still held above.
+    let mut wake = fx.wake(SESSION, at(20));
     let held_relay = FakeRelay::new();
     held_relay.publish(mention("CHELD", 20));
     wake.poll_once(&held_relay, &fx.queue, false, at(21));

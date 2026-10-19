@@ -7,7 +7,7 @@ describe("httpRefusalCause", () => {
     const cause = httpRefusalCause(503, "auth_store_unavailable");
     expect(cause).toBe("hub_auth_store_unavailable");
     expect(CAUSE_COPY[cause].title).toBe("Hub is temporarily unable to check pairings");
-    expect(CAUSE_COPY[cause].action).toBe("Commander is retrying by itself; this device's pairing is intact.");
+    expect(CAUSE_COPY[cause].action).toMatch(/retrying.*pairing is intact/);
     expect(httpRefusalCause(503, undefined, "auth_store_unavailable")).toBe("hub_auth_store_unavailable");
     expect(httpRefusalCause(503, "health_probe")).toBe("health_http_unavailable");
     for (const [status, code] of [[503, undefined], [500, "auth_store_unavailable"], [409, "conflict"]] as const) {

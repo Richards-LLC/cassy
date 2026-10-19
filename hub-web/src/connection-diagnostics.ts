@@ -1,5 +1,5 @@
 import type { ConnectionSnapshot } from "./connection-state";
-export type ConnectionCause = "browser_offline" | "network_or_browser_policy_unknown" | "health_http_unavailable" | "request_timeout" | "auth_expired" | "auth_revoked" | "auth_scope_mismatch" | "auth_needs_pairing" | "proof_refused" | "http_refused" | "socket_closed" | "session_upstream_unavailable" | "event_sequence_gap" | "event_retention_gap" | "event_epoch_changed" | "viewer_lagged" | "stream_closed" | "unsupported_browser";
+export type ConnectionCause = "browser_offline" | "network_or_browser_policy_unknown" | "health_http_unavailable" | "request_timeout" | "auth_expired" | "auth_revoked" | "auth_scope_mismatch" | "auth_needs_pairing" | "proof_refused" | "hub_auth_store_unavailable" | "http_refused" | "socket_closed" | "session_upstream_unavailable" | "event_sequence_gap" | "event_retention_gap" | "event_epoch_changed" | "viewer_lagged" | "stream_closed" | "unsupported_browser";
 export interface CauseEvidence {
   code: ConnectionCause;
   layer: "browser" | "http" | "auth" | "socket" | "session" | "events";
@@ -25,6 +25,7 @@ export const CAUSE_COPY: Record<ConnectionCause, { title: string; action: string
   auth_scope_mismatch: { title: "Hub refused the required permission", action: "Approve the required scope on the machine." },
   auth_needs_pairing: { title: "Hub refused this credential", action: "Pair this device again." },
   proof_refused: { title: "Hub refused a fresh proof", action: "Commander retries with the hub's clock. Check this device's clock if it persists." },
+  hub_auth_store_unavailable: { title: "Hub is temporarily unable to check pairings", action: "Commander is retrying by itself; this device's pairing is intact.", detail: "The hub answered 503 auth_store_unavailable: it could not read its pairing store, so this credential was never judged." },
   http_refused: { title: "HTTP request was refused", action: "Check the measured HTTP status and hub diagnostics." },
   socket_closed: { title: "The live link to the machine dropped", action: "Commander reconnects it by itself.", detail: "Terminal socket closed; the HTTP hub may still be healthy." },
   session_upstream_unavailable: { title: "Session's upstream is unavailable", action: "Commander retries this session. Check that its supervisor is running." },
@@ -35,6 +36,16 @@ export const CAUSE_COPY: Record<ConnectionCause, { title: string; action: string
   stream_closed: { title: "Hub event stream closed", action: "Commander reconnects automatically." },
   unsupported_browser: { title: "Browser cannot support this connection", action: "Open Commander in a supported browser." },
 };
+/**
+ * A refused HTTP request's cause. The hub's retryable 503 when it can't read
+ * its pairing store (cas-cb94) is named as such (cas-6348): "refused" would
+ * read as a lost pairing. `code` is the body's `error`, `reason` its reason.
+ */
+export function httpRefusalCause(status: number, code?: string, reason?: string): ConnectionCause {
+  if (code === "health_probe" && status === 503) return "health_http_unavailable";
+  if (status === 503 && (code === "auth_store_unavailable" || reason === "auth_store_unavailable")) return "hub_auth_store_unavailable";
+  return "http_refused";
+}
 interface TransitionRecord {
   scope: "machine" | "session";
   at: number; phase: ConnectionSnapshot["phase"]; stage: ConnectionSnapshot["stage"]; attempt: number;

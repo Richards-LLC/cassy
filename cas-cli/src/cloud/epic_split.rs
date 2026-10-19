@@ -20,8 +20,11 @@
 //!
 //! Authority (cas-604d): a split line is honoured only in a message the cloud
 //! delivered to a local supervisor, whose sender identity the cloud stamped;
-//! an answer or cancel changes only a split whose peer is that sender. No
-//! side ever claims, releases or acts for the other.
+//! an answer or cancel changes only a split whose peer was that sender. Normal
+//! cancellation releases only the caller's claims. A live registered
+//! supervisor may supersede an accepted split only after its registered owner
+//! has no live process and its heartbeat is past the stale threshold; the
+//! cancellation reason records both supervisors.
 
 use std::path::Path;
 
@@ -812,8 +815,10 @@ pub fn answer(
     }
 }
 
-/// Cancel split `id` from this side: release the claims this side's
-/// supervisor holds on its own share, and tell the peer.
+/// Cancel split `id`: normally release this side's supervisor claims and tell
+/// the peer. A live supervisor may also supersede an accepted split owned by
+/// another registered supervisor once that owner is proven gone past the
+/// heartbeat TTL. The override records its actor and reason on the split.
 pub fn cancel(
     cas_root: &Path,
     caller: &Caller,
@@ -824,9 +829,59 @@ pub fn cancel(
     let split = get_epic_split(cas_root, id)
         .map_err(store_error)?
         .ok_or_else(|| format!("no epic split {id} recorded here"))?;
-    if split.local_agent_id != caller.id {
-        return Err(format!("{id} belongs to another supervisor of this database"));
-    }
+    let superseded_owner = if split.local_agent_id == caller.id {
+        None
+    } else {
+        if split.state != SplitState::Accepted {
+            return Err(format!("{id} belongs to another supervisor of this database"));
+        }
+        let agents = crate::store::open_agent_store(cas_root)
+            .map_err(|error| format!("could not open the agent store: {error}"))?;
+        let registered_caller = agents
+            .get(&caller.id)
+            .map_err(|_| format!("{id} can only be superseded by a registered supervisor"))?;
+        if registered_caller.role != crate::types::AgentRole::Supervisor
+            || !crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(
+                &registered_caller,
+            )
+            .is_live()
+        {
+            return Err(format!(
+                "{id} can only be superseded by a live registered supervisor of this project"
+            ));
+        }
+        let owner = agents.get(&split.local_agent_id).map_err(|_| {
+            format!(
+                "{id} still belongs to supervisor {}; its liveness cannot be verified because it is not registered here",
+                split.local_agent_id
+            )
+        })?;
+        if owner.role != crate::types::AgentRole::Supervisor {
+            return Err(format!(
+                "{id} belongs to registered agent {}, which is not a supervisor",
+                owner.id
+            ));
+        }
+        let heartbeat_age =
+            crate::mcp::tools::service::agent_liveness::agent_heartbeat_age_secs(&owner);
+        let owner_live = crate::mcp::tools::service::agent_liveness::
+            evaluate_supervision_liveness(&owner)
+            .is_live();
+        if owner_live {
+            return Err(format!(
+                "{id} belongs to live supervisor {} ({}); only that supervisor may cancel it",
+                owner.name, owner.id
+            ));
+        }
+        let stale_secs = crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS;
+        if heartbeat_age <= stale_secs {
+            return Err(format!(
+                "{id} cannot be superseded yet: supervisor {}'s heartbeat is {heartbeat_age}s old; it must exceed the {stale_secs}s stale threshold",
+                owner.name
+            ));
+        }
+        Some(owner)
+    };
     match (split.state, split.direction) {
         (SplitState::Pending, SplitDirection::Incoming) => {
             return Err(format!(
@@ -839,21 +894,41 @@ pub fn cancel(
         }
         _ => {}
     }
+    let supersede_reason = superseded_owner.as_ref().map(|owner| {
+        let mut audit = format!(
+            "superseded by live supervisor {} ({}) because original supervisor {} ({}) is not live; heartbeat age {}s exceeds the {}s stale threshold",
+            caller.name,
+            caller.id,
+            owner.name,
+            owner.id,
+            crate::mcp::tools::service::agent_liveness::agent_heartbeat_age_secs(owner),
+            crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS,
+        );
+        if let Some(reason) = reason {
+            audit.push_str(&format!("; reason: {reason}"));
+        }
+        audit
+    });
+    let cancellation_reason = supersede_reason.as_deref().or(reason);
     let now = Utc::now();
     let changed = decide_epic_split(
         cas_root,
         id,
         &[SplitState::Pending, SplitState::Accepted],
         SplitState::Cancelled,
-        reason,
+        cancellation_reason,
         now,
     )
     .map_err(store_error)?;
     if !changed {
         return Err(format!("{id} changed while cancelling it; check `epic_split`"));
     }
+    let claim_owner_id = superseded_owner
+        .as_ref()
+        .map(|owner| owner.id.as_str())
+        .unwrap_or(&caller.id);
     let released = peer_claims(cas_root)
-        .map(|claims| release_share(&claims, &split.mine, &caller.id))
+        .map(|claims| release_share(&claims, &split.mine, claim_owner_id))
         .unwrap_or(0);
     let line = SplitMessage {
         kind: SplitKind::Cancel,
@@ -863,13 +938,15 @@ pub fn cancel(
         peer_takes: Vec::new(),
         expires_at: None,
         at: now,
-        reason: reason.map(str::to_string),
+        reason: cancellation_reason.map(str::to_string),
     };
     let body = format!(
-        "{}\nCancelled epic split {id} of {}{}. Your claims are yours; nothing of yours was released.",
+        "{}\nCancelled epic split {id} of {}{}.",
         line.render(),
         split.epic_id,
-        reason.map(|reason| format!(": {reason}")).unwrap_or_default()
+        cancellation_reason
+            .map(|reason| format!(": {reason}"))
+            .unwrap_or_default()
     );
     let told = match send_to_split_peer(
         cas_root,
@@ -889,8 +966,15 @@ pub fn cancel(
             split.peer_name, split.peer_machine
         ),
     };
+    let release_detail = match superseded_owner {
+        Some(owner) => format!(
+            "released {released} claim(s) formerly held by gone supervisor {} ({})",
+            owner.name, owner.id
+        ),
+        None => format!("released {released} of your own claim(s)"),
+    };
     Ok(format!(
-        "Cancelled epic split {id} of {}; released {released} of your own claim(s); {told}.",
+        "Cancelled epic split {id} of {}; {release_detail}; {told}.",
         split.epic_id
     ))
 }

@@ -1963,7 +1963,17 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
     let mut targets = Vec::new();
     let mut shell_cwd = default_target.cwd.clone();
 
-    for words in shell_statement_words(command) {
+    // Strip only literal heredoc data for this allowance. Expanding bodies
+    // can run $(git ...); retain the raw subprocess scopes in that case.
+    let expanding_heredoc = shell_command_without_heredoc_bodies(command).lines().any(|line| {
+        heredoc_delimiters(line).iter().any(|delimiter| !delimiter.literal_body)
+    });
+    let statements = if expanding_heredoc {
+        super::attribution::split_shell_statements(command)
+    } else {
+        shell_statement_words(command)
+    };
+    for words in statements {
         let Some(command_index) = unwrapped_command_index(&words) else {
             continue;
         };
@@ -3147,6 +3157,7 @@ fn expand_factory_shell_word(
 struct HeredocDelimiter {
     value: String,
     strip_leading_tabs: bool,
+    literal_body: bool,
 }
 
 /// Find heredoc delimiters on one shell command line without interpreting
@@ -3215,6 +3226,7 @@ fn heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
                     delimiters.push(HeredocDelimiter {
                         value,
                         strip_leading_tabs,
+                        literal_body: matches!(first, '\'' | '"'),
                     });
                 }
                 index = next_index;
@@ -9921,7 +9933,7 @@ mod worker_commit_guard_tests {
 
         let artifacts = tempfile::tempdir().unwrap();
         let cwd = artifacts.path().display().to_string();
-        let ledger = "cat > LEDGER.md <<'EOF'\ngit config\ncommit failed; commits normally\nEOF";
+        let ledger = format!("cat > LEDGER.md <<'EOF'\ngit config\ncommit failed; commits normally\n$(git -C '{repo_path}' commit -m inert)\nEOF");
         let mut mismatches = Vec::new();
         for (command, denied) in [
             (ledger.to_string(), false),

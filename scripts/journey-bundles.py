@@ -36,15 +36,36 @@ def trace_actions(bundle: Path, hub: str) -> str:
     return actions.stdout + actions.stderr
 
 
-def read_result(result: Path, ident: str) -> dict:
+def read_result(result: Path, ident: str, suite_failed: bool = False) -> dict:
     data = json.loads(result.read_text())
     if data["id"] != ident:
         raise ValueError(f"{ident}: mixed receipt id {data['id']} in {result}")
     screenshots = [stage["screenshot"] for stage in data.get("stages", [])]
     actual = {path.name for path in result.parent.glob("J*.png")}
     if len(screenshots) != len(set(screenshots)) or set(screenshots) != actual:
-        raise ValueError(f"{ident}: stale or mixed stage receipts in {result.parent}; "
-                         f"declared={sorted(screenshots)}, actual={sorted(actual)}")
+        expected = [f"J{index:02}.png" for index in range(1, len(screenshots) + 1)]
+        extra = actual - set(screenshots)
+        pending = f"J{len(screenshots) + 1:02}.png"
+        # journey-eval archives prior runs and the receipt owner clears files
+        # on retries. A lone next screenshot beside a failed current result is
+        # therefore the capture interrupted before journey.ts appended a stage.
+        if (suite_failed and data.get("status") == "FAIL" and screenshots == expected
+                and set(screenshots) <= actual and extra == {pending}):
+            data["incomplete_stages"] = [{
+                "screenshot": pending,
+                "status": "INCOMPLETE",
+                "reason": "suite timed out after screenshot write and before stage receipt",
+            }]
+            data.setdefault("stages", []).append({
+                "title": "Incomplete stage screenshot (timeout before stage receipt)",
+                "slug": "incomplete-stage-capture",
+                "ms": 0,
+                "screenshot": pending,
+                "status": "INCOMPLETE",
+            })
+        else:
+            raise ValueError(f"{ident}: stale or mixed stage receipts in {result.parent}; "
+                             f"declared={sorted(screenshots)}, actual={sorted(actual)}")
     return data
 
 
@@ -63,8 +84,9 @@ def main(argv: list[str]) -> int:
         bundle = journeys / ident
         result = bundle / "result.json"
         parts = sorted(bundle.glob("parts/*/result.json"))
-        data = read_result(result, ident) if result.is_file() else None
+        data = read_result(result, ident, suite_failed=status != 0) if result.is_file() else None
         stages = [dict(stage) for stage in (data or {}).get("stages", [])]
+        incomplete_stages = [dict(stage) for stage in (data or {}).get("incomplete_stages", [])]
         files: dict[str, object] = {"cells": [stage["screenshot"] for stage in stages]}
         if data is not None:
             files.update({"receipt": "receipt.webm", "aria_yaml": "final.aria.yml", "aria_json": "final.aria.json"})
@@ -80,7 +102,7 @@ def main(argv: list[str]) -> int:
         for part_result in parts:
             part_dir = part_result.parent
             rel = part_dir.relative_to(bundle).as_posix()
-            part = read_result(part_result, ident)
+            part = read_result(part_result, ident, suite_failed=status != 0)
             verdicts.append(part["status"])
             part_files = {"receipt": f"{rel}/receipt.webm", "aria_yaml": f"{rel}/final.aria.yml", "aria_json": f"{rel}/final.aria.json"}
             part_trace = Path(part.get("output_dir", "")) / "trace.zip"
@@ -93,6 +115,10 @@ def main(argv: list[str]) -> int:
                 stage = dict(stage, screenshot=f"{rel}/{stage['screenshot']}")
                 stages.append(stage)
                 files["cells"].append(stage["screenshot"])
+            incomplete_stages.extend(
+                dict(stage, screenshot=f"{rel}/{stage['screenshot']}")
+                for stage in part.get("incomplete_stages", [])
+            )
             folded.append({"title": part.get("title"), "project": part.get("project"), "title_path": part.get("title_path"), "verdict": part["status"], "label": part.get("label", "real-bundle, protocol-double"), **part_files})
         if folded:
             files["parts"] = folded
@@ -117,6 +143,7 @@ def main(argv: list[str]) -> int:
             "visual_change": False,
             "visual_qa_status": "unavailable",
             "files": files,
+            "incomplete_stages": incomplete_stages,
         }, indent=2) + "\n")
         total = sum(stage.get("ms", 0) for stage in stages)
         slow = max(stages, key=lambda stage: stage.get("ms", 0)) if stages else {"title": "-", "ms": 0}

@@ -145,3 +145,34 @@ fn local_paths(clause: &str) -> Vec<&str> {
     }
     paths
 }
+
+#[cfg(test)]
+mod tests {
+    use super::validate_claims;
+
+    #[test]
+    fn close_reason_slash_prose_is_not_a_receipt_path() {
+        let cas_root = tempfile::tempdir().expect("temporary Cassy root");
+        let receipt_root = tempfile::tempdir().expect("temporary receipt root");
+        std::fs::write(receipt_root.path().join("receipt.log"), "proof").expect("receipt file");
+
+        let error = validate_claims(
+            "CI reported 10312 tests passed / 1 failed",
+            cas_root.path(),
+            receipt_root.path(),
+        )
+        .expect_err("an unsupported CI claim still requires a receipt");
+        assert!(
+            error.contains("Cite a run id, artifact id or local receipt path"),
+            "{error}"
+        );
+        assert!(!error.contains("Cannot resolve receipt `/`"), "{error}");
+
+        validate_claims(
+            "CI tests passed ./receipt.log",
+            cas_root.path(),
+            receipt_root.path(),
+        )
+        .expect("path-shaped local receipts remain valid");
+    }
+}

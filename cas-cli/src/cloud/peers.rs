@@ -465,6 +465,9 @@ pub enum PeerDiscovery {
         /// Supervisors the `own` scope excluded (cas-d58d), so a send to one
         /// can be refused by name rather than falling through.
         hidden: Vec<Peer>,
+        /// Live workers in the listed peers' sessions (cas-9f53), so a send
+        /// to one names the supervisor to relay through.
+        workers: Vec<crate::cloud::peers_detail::PeerWorkerRef>,
     },
     /// Not logged in to Cassy Cloud: cross-machine peers are unknowable.
     NotLoggedIn,
@@ -533,10 +536,13 @@ pub fn discover_peers(
     });
     mark_own(&mut peers, viewer.as_deref());
     let (peers, hidden) = apply_same_repo_scope(peers, same_repo_scope(cas_root));
+    let workers =
+        crate::cloud::peers_detail::live_peer_workers(&peers, &agents, &alias_class, Utc::now());
     Ok(PeerDiscovery::Found {
         canonical_id,
         peers,
         hidden,
+        workers,
     })
 }
 
@@ -773,6 +779,7 @@ fn peers_discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
             canonical_id,
             peers,
             hidden,
+            ..
         }) => format!(
             "{}{}",
             render_peers(&canonical_id, &peers),

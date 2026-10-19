@@ -60,11 +60,7 @@ daemon's local API. That API reports no usable tailnet state, so hub status can
 say Tailscale is unavailable and Serve publication can fail even while
 `tailscaled` is running.
 
-For a launchd-managed Cassy hub using the Homebrew daemon, set
-`TAILSCALE_SOCKET=/var/run/tailscaled.socket` in the launchd job's
-`EnvironmentVariables`. The Cassy Tailscale helper passes this socket to the
-CLI. Add it to the job's existing environment dictionary; do not replace its
-other required variables. For a direct read-only check, use:
+For a direct read-only check against the Homebrew daemon, use:
 
 ```sh
 tailscale --socket=/var/run/tailscaled.socket status --json
@@ -72,8 +68,17 @@ tailscale --socket=/var/run/tailscaled.socket status --json
 
 Check the output's `BackendState`, node name, and Tailscale IPs. Do not rely on
 an interactive shell's `TAILSCALE_SOCKET` setting to reach a launchd child.
-After correcting the launchd environment, have the hub operator verify status,
-Serve, and HTTPS health.
+The Cassy Tailscale helper reads `TAILSCALE_SOCKET`, but released 3.64 service
+install and refresh do not preserve that value in launchd's environment. A
+manual `EnvironmentVariables` plist edit is temporary: the next service
+install, refresh, or `cas update` overwrites it. This persistence fix lands
+with cas-f149 in 3.65.
+
+Until that fix is released, the visible symptom is hub status saying
+`not publishable … not logged in`. Repeating
+`cas hub restart --tailscale-serve` loops without fixing the launchd socket
+selection. After 3.65 preserves `TAILSCALE_SOCKET`, have the hub operator
+verify status, Serve, and HTTPS health.
 
 ### Prowl migration record (2026-10-19)
 

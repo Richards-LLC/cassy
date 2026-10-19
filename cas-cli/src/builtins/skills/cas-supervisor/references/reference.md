@@ -215,9 +215,9 @@ Other supervisors of this GitHub repo, on this machine or another one logged in 
   - The peer answers with `epic_split id=<split> decision=accept`, which claims only its own share, or `decision=reject reason="..."`.
   - An unanswered proposal expires after `ttl_secs` (default 1800), and a late accept is refused.
   - While a split binds (accepted, or your own open proposal), `task start`, `task claim` and `spawn_workers task_id=` on the other side's children are refused. Message the peer first; `force=true` on start or spawn takes the child anyway, with a visible note.
-  - Either side ends it with `decision=cancel`. That releases only your own claims and tells the peer; the peer's claims stay.
+  - Either side ends it with `decision=cancel`. That releases only your own claims and tells the peer; the peer's claims stay. A live registered supervisor can also cancel an accepted split after its registered owner has no live process and its heartbeat is older than the 30-second stale threshold. Include a reason; Cassy records the acting and original supervisors.
   - `epic_split` with no arguments, `coordination action=peers` and the Peers section of `worker_status` list the splits.
-  - Neither side claims, releases or spawns for the other.
+  - Neither side claims or spawns for the other. A superseding supervisor releases only the original owner's claims after the owner is proven gone.
   - Cassy Cloud shows claims only within one user account. A peer on another account cannot see your claims, but the split refusal still holds on both sides, because each database records the agreement.
 - **Check your own presence first.** If the peers section opens with `Cloud presence: failing: <cause>` or ends with `Peer mailbox: not receiving: <cause>`, peers cannot see you or cannot reach you. Fix the cause before you rely on claims, splits or messages.
 - **Another account's claims are invisible.** A peer whose details read `Claims not visible (different account)` may still be working. Agree on ownership by message and record it with an epic split.

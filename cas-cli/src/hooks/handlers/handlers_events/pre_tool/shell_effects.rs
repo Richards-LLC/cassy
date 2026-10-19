@@ -80,7 +80,19 @@ fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
     let mut index = 0;
     while index < bytes.len() {
         if bytes.get(index..index + 2) == Some(b"$(") {
-            let end = substitution_end(bytes, index + 2, 0).ok_or("an unresolved shell payload")?;
+            let literal_heredoc = literal_cat_heredoc_end(&word[index..]);
+            let end = match literal_heredoc {
+                Some(end) => index + end,
+                None => substitution_end(bytes, index + 2, 0)
+                    .ok_or("an unresolved shell payload")?,
+            };
+            // Other nested heredocs may execute expansions before cat (or an
+            // interpreter) sees the body. Never discard those effects as data.
+            if literal_heredoc.is_none()
+                && word[index + 2..end].lines().any(|line| !heredoc_delimiters(line).is_empty())
+            {
+                return Err("an unresolved shell payload");
+            }
             bodies.push(&word[index + 2..end]);
             index = end + 1;
         } else if bytes[index] == b'`' {
@@ -99,6 +111,43 @@ fn substitution_bodies(word: &str) -> Result<Vec<&str>, &'static str> {
         }
     }
     Ok(bodies)
+}
+
+/// Closing `)` of exactly `$(cat <<'WORD'\n...\nWORD\n)` (also double
+/// quoted delimiters and <<-). No options, redirects or extra commands are
+/// accepted. The quoted body cannot expand, so its quotes/parentheses are data.
+/// This only finds the boundary; callers still treat the output as dynamic
+/// when used as an executable, shell program, directory or write target.
+pub(super) fn literal_cat_heredoc_end(word: &str) -> Option<usize> {
+    let newline = word.find('\n')?;
+    let header = word.get(2..newline)?;
+    if !word.starts_with("$(") {
+        return None;
+    }
+    let header = header.trim_matches([' ', '\t']);
+    let delimiter = header.strip_prefix("cat")?.trim_start_matches([' ', '\t']);
+    let delimiter = delimiter.strip_prefix("<<")?;
+    let strip_tabs = delimiter.starts_with('-');
+    let delimiter = delimiter.strip_prefix('-').unwrap_or(delimiter).trim_start_matches([' ', '\t']);
+    let quote = *delimiter.as_bytes().first()?;
+    if !matches!(quote, b'\'' | b'"') {
+        return None;
+    }
+    let delimiter = delimiter.strip_prefix(char::from(quote))?.strip_suffix(char::from(quote))?;
+    if delimiter.is_empty() || !delimiter.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'_') {
+        return None;
+    }
+    let mut offset = newline + 1;
+    for line in word[offset..].split_inclusive('\n') {
+        let candidate = line.strip_suffix('\n').unwrap_or(line);
+        let candidate = if strip_tabs { candidate.trim_start_matches('\t') } else { candidate };
+        offset += line.len();
+        if candidate == delimiter {
+            let closing = word[offset..].trim_start_matches([' ', '\t']);
+            return closing.starts_with(')').then_some(word.len() - closing.len());
+        }
+    }
+    None
 }
 
 fn substitution_end(bytes: &[u8], mut index: usize, depth: usize) -> Option<usize> {

@@ -19,8 +19,8 @@ pub use knowledge::{
 };
 pub(crate) mod pull;
 pub(crate) use pull::{
-    SyncWarningSummary, collect_sync_warnings, entity_matches_project,
-    render_task_proposal_provenance,
+    SyncWarningSummary, accepted_proposal_execution_project, collect_sync_warnings,
+    entity_matches_project, render_task_proposal_provenance,
 };
 mod push;
 mod team_push;
@@ -865,6 +865,10 @@ struct PullResponse {
     /// envelope key so the pull path can materialize them after tasks.
     #[serde(default)]
     task_dependencies: Option<Vec<serde_json::Value>>,
+    /// Cloud's flag for a project a team owns: the envelope is deliberately
+    /// empty and names the owning team. It holds no personal inventory.
+    #[serde(default)]
+    team_owned_project: Option<serde_json::Value>,
     pulled_at: Option<String>,
 }
 

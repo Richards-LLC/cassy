@@ -431,7 +431,8 @@ fn a_thread_is_one_ordered_call_with_inline_reply_files() {
         "posted": [
             {"index": 0, "message_id": "1.0", "thread_id": "1.0", "permalink": "https://slack.test/0"},
             {"index": 1, "message_id": "1.1", "thread_id": "1.0", "permalink": "https://slack.test/1",
-             "files": [{"file_id": "F7", "name": "notes.md", "size_bytes": 8, "sha256_verified": true}]},
+             "files": [{"file_id": "F7", "name": "notes.md", "size_bytes": 8, "sha256_verified": true,
+                        "state": "attached"}]},
             {"index": 2, "message_id": "1.2", "thread_id": "1.0", "permalink": "https://slack.test/2"}
         ],
         "failed_index": null, "resume_safe": true
@@ -518,6 +519,66 @@ fn a_stopped_thread_reports_failed_index_and_exits_non_zero() {
     );
 }
 
+/// GH #1251: an `ok: true` thread receipt that does not show every reply
+/// file attached is not a success. The run fails with a named code, keeps the
+/// posted ids, and says to read the thread instead of reposting.
+#[test]
+fn reply_files_the_receipt_does_not_show_attached_fail_the_run() {
+    let dir = TempDir::new().unwrap();
+    let (a, b) = (write_file(&dir, "a.png", b"\x89PNG a"), write_file(&dir, "b.png", b"\x89PNG b"));
+    let argv = [
+        "thread", "--channel", "cas-internal", "--text", "root", "--reply", "shots",
+        "--reply-file", a.to_str().unwrap(), "--reply-file", b.to_str().unwrap(),
+        "--idempotency-key", "k1251",
+    ];
+    // Real-shape ids and a long channel name: the read hint must stay usable at 80 columns.
+    let long_channel = json!({"id": "C09FCTHCQ2U", "name": "release-notes-for-customer-facing-announcements-and-screenshots"});
+    let receipt = |files: Value| {
+        json!({
+            "ok": true, "schema_version": 1, "kind": "thread", "channel": long_channel,
+            "idempotency_key": "k1251", "failed_index": null, "resume_safe": false,
+            "posted": [
+                {"index": 0, "message_id": "1792208267.493989", "thread_id": "1792208267.493989", "permalink": "https://slack.test/0"},
+                {"index": 1, "message_id": "1792208270.846219", "thread_id": "1792208267.493989", "permalink": "https://slack.test/1",
+                 "files": files}
+            ]
+        })
+    };
+    let attached = |id: &str| json!({"file_id": id, "name": "a.png", "state": "attached"});
+    for (files, code) in [
+        (json!([]), "thread_files_unconfirmed"),
+        (json!([attached("F1")]), "thread_files_unconfirmed"),
+        (json!([attached("F1"), attached("F1")]), "thread_files_unconfirmed"),
+        (json!([attached("F1"), {"file_id": "F2", "name": "b.png", "state": "uploaded"}]), "uploaded_not_attached"),
+    ] {
+        let hub = ScriptedHub::with(vec![receipt(files.clone())]);
+        let (out, result) = run_cli(&argv, &hub, false, &no_gate);
+        let error = result.unwrap_err();
+        assert_eq!(error.code, code, "{files}");
+        assert!(!out.contains("[OK]"), "{out}");
+        assert!(out.contains("0 root  1792208267.493989") && out.contains("1 reply 1792208270.846219"), "{out}");
+        assert!(out.contains("cas violet read --channel C09FCTHCQ2U --thread 1792208267.493989"), "{out}");
+        assert!(out.contains("same --idempotency-key, never a new key"), "{out}");
+        let line = format!("✗ {error}");
+        assert!(line.contains("reply 1:"), "{line}");
+        for line in out.lines().chain(std::iter::once(line.as_str())) {
+            assert!(line.chars().count() <= 80, "wider than 80 columns: {line}");
+        }
+
+        let hub = ScriptedHub::with(vec![receipt(files.clone())]);
+        let (out, result) = run_cli(&argv, &hub, true, &no_gate);
+        assert!(result.is_err());
+        let printed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(printed["ok"], false);
+        assert_eq!(printed["error"]["code"], code);
+        let full = printed["error"]["message"].as_str().unwrap();
+        assert!(full.contains("same --idempotency-key") && full.contains("1792208270.846219"), "JSON keeps the whole remedy: {full}");
+        assert_eq!(printed["posted"][1]["message_id"], "1792208270.846219");
+        assert_eq!(printed["posted"][1]["files"], files, "returned file ids are kept");
+        assert_eq!(hub.calls().len(), 1, "no automatic retry");
+    }
+}
+
 #[test]
 fn an_external_thread_uploads_first_and_sends_only_metadata() {
     let dir = TempDir::new().unwrap();
@@ -530,7 +591,11 @@ fn an_external_thread_uploads_first_and_sends_only_metadata() {
     let hub = ScriptedHub::with(vec![
         json!({"ok": true, "kind": "file_external", "step": "begin",
                "upload_url": "https://files.slack.test/u/F8", "file_id": "F8"}),
-        json!({"ok": true, "kind": "thread", "channel": channel(), "posted": [], "failed_index": null}),
+        json!({"ok": true, "kind": "thread", "channel": channel(), "failed_index": null, "posted": [
+            {"index": 0, "message_id": "2.0", "thread_id": "2.0", "permalink": "https://slack.test/0"},
+            {"index": 1, "message_id": "2.1", "thread_id": "2.0", "permalink": "https://slack.test/1",
+             "files": [{"file_id": "F8", "name": "trace.bin", "state": "attached"}]}
+        ]}),
     ]);
     let mut live = hub.clone();
     post_thread(&mut live, "cas-internal", "root", "k2", &replies).unwrap();
@@ -541,6 +606,22 @@ fn an_external_thread_uploads_first_and_sends_only_metadata() {
     assert_eq!(reply_file["size_bytes"], big.len());
     assert!(reply_file.get("content").is_none());
     assert_eq!(hub.uploads()[0].1, sha(&big));
+
+    // A success-shaped receipt that omits the reply's files is refused, and
+    // the refusal still names the upload Slack began.
+    let hub = ScriptedHub::with(vec![
+        json!({"ok": true, "kind": "file_external", "step": "begin",
+               "upload_url": "https://files.slack.test/u/F8", "file_id": "F8"}),
+        json!({"ok": true, "kind": "thread", "channel": channel(), "failed_index": null, "posted": [
+            {"index": 0, "message_id": "2.0", "thread_id": "2.0", "permalink": "https://slack.test/0"},
+            {"index": 1, "message_id": "2.1", "thread_id": "2.0", "permalink": "https://slack.test/1"}
+        ]}),
+    ]);
+    let mut live = hub.clone();
+    let error = post_thread(&mut live, "cas-internal", "root", "k2", &replies).unwrap_err();
+    assert_eq!(error.code, "thread_files_unconfirmed");
+    assert_eq!(error.file_ids, ["F8"], "the begun upload is kept");
+    assert_eq!(error.to_json()["uploads_begun"], json!(["F8"]));
 }
 
 // ---------------------------------------------------------------------------

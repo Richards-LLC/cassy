@@ -17,8 +17,9 @@ ships a changed user-facing surface.
   supervisor"). It crosses feature boundaries on purpose.
 - **Stage** — one user-visible step inside a journey. In the suite, each
   stage is one `test.step`, and the screencast shows one chapter per stage.
-- **Receipt** — the evidence one journey run leaves: a trace, a screencast,
-  per-stage screenshots and a final aria snapshot.
+- **Receipt** — the evidence one journey run leaves: a screencast, per-stage
+  screenshots and a final aria snapshot; failed or incomplete runs also retain
+  a trace for diagnosis.
 - **Friction finding** — something a real user would trip over. It is scored
   on the rubric below; it is not a test failure.
 
@@ -62,8 +63,12 @@ For the Commander hub, the suite is `hub-web/e2e/journeys/`. It runs as the
 - **Receipts per journey.** Each journey is one cas-qa-craft evidence
   bundle in `<artifact-dir>/journeys/<ID>/`, and its `bundle.json` names
   `journey` as the producer. The bundle holds:
-  - `trace.zip`, recorded with `snapshots: { dom, aria, screen }` and
-    `screenshots: false`, plus `trace-actions.txt`
+  - one passing-run `trace.zip` and `trace-actions.txt` per bundle, required
+    by `qa_evidence`; failed or incomplete cell traces are also retained for
+    diagnosis. The bundler moves retained traces out of Playwright output and
+    drops redundant passing-cell traces
+  - journey traces use DOM and ARIA snapshots, with screen snapshots and trace
+    screenshots off; the stage screenshots and full-size screencast remain
   - `receipt.webm`, a full-size `page.screencast` recording with
     `showActions` on and one `showChapter` per stage
   - `J01.png`, `J02.png` and so on, one screenshot at the end of every stage

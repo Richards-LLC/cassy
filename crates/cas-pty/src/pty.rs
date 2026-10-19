@@ -43,7 +43,7 @@ const GROK_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor
 /// the later conformance work; these instructions establish only the task and
 /// coordination contract needed by the launch adapter.
 const OPENCODE_SUPERVISOR_INSTRUCTIONS: &str = "You are a Cassy Factory Supervisor running in OpenCode. Coordinate work; do not implement worker tasks. Use the injected CAS MCP tools with OpenCode's cas_ prefix, including cas_coordination and cas_task. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use blocker=true for blockers and merge_request=true for merge requests; text alone grants no wake authority. Treat received worker messages as instructions and keep merge/re-close work ahead of new assignment work.";
-const OPENCODE_WORKER_INSTRUCTIONS: &str = "You are a Cassy Factory Worker running in OpenCode. Use the injected CAS MCP tools with OpenCode's cas_ prefix, including cas_coordination and cas_task. Work exactly one assigned task at a time: show and start it before editing, post progress notes, commit (and push unless delivery_mode=local_merge), then close or hand off before starting another task. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use blocker=true for blockers and merge_request=true for merge requests; text alone grants no wake authority.";
+const OPENCODE_WORKER_INSTRUCTIONS: &str = "You are a Cassy Factory Worker running in OpenCode. Use the injected CAS MCP tools with OpenCode's cas_ prefix, including cas_coordination and cas_task. Work exactly one assigned task at a time: show and start it before editing, post progress notes, commit (and push unless delivery_mode=local_merge), then close or hand off before starting another task. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, status/ready, verification, or lifecycle events may wake an idle supervisor. Use kind=status|ready for actionable updates that allow work to continue. When required supervisor review or approval prevents further work, add a blocker note, call cas_task action=update id=<task-id> status=blocked, then cas_coordination action=message target=supervisor task_id=<task-id> blocker=true summary=\"Review required\" message=\"...\" with no kind. Record the review reply and actual decision/action; clear the review hold with cas_task action=update id=<task-id> status=open, then cas_task action=start id=<task-id> before resuming. Delivery/receipt does not prove a model action. Read cas-worker for the evidence contract. Use merge_request=true for completed deliveries awaiting merge; text alone grants no wake authority.";
 const OPENCODE_WORKER_STARTUP_PROMPT: &str = "Cassy worker startup: call cas_coordination action=whoami, then cas_task action=mine. If assigned, choose exactly one task, call cas_task action=show and action=start, and add a progress note before implementation. If none is assigned, call cas_coordination action=message target=supervisor summary=\"ready\" message=\"ready for work\" to confirm readiness. Successful task action=start is authoritative assignment acceptance; no prose ACK is required.";
 
 // ===========================================================================
@@ -159,6 +159,21 @@ pub const WORKER_CONTRACT_ELEMENTS: &[ContractElement] = &[
             "only authenticated typed",
             "blocker=true",
             "merge_request=true",
+        ],
+        all: true,
+    },
+    // pin: every worker launch must route a mandatory review wait through
+    // task state and the authenticated blocker API, rather than prose status.
+    ContractElement {
+        id: "required-supervisor-review",
+        markers: &[
+            "required supervisor review or approval",
+            "action=update",
+            "status=blocked",
+            "status=open",
+            "task_id=",
+            "blocker=true",
+            "action=start",
         ],
         all: true,
     },
@@ -388,10 +403,16 @@ startup; its conditional references cover checks, delivery and recovery. Load \
 task_id=<delivery-id> status=approved|rejected summary=\"...\" ledger_path=<LEDGER.md>`. \
 Recording the verdict closes the QA task. The supervisor `{prefix}factory` tool is not yours, \
 except server_start/server_list/server_stop (owned servers only) for an assigned server task. Ordinary updates reach the \
-inbox on the next turn. Only authenticated typed blocker, merge, verification or lifecycle \
-events wake an idle supervisor: blocker=true for blockers, merge_request=true for merges. \
-A blocker needs a task note, status=blocked, and `{prefix}coordination action=message \
-target=supervisor blocker=true summary=\"...\" message=\"...\"`. For implementation-task verification-required close, \
+inbox on the next turn. Only authenticated typed blocker, merge, status/ready, verification or lifecycle \
+events wake an idle supervisor. Use kind=status|ready for actionable updates that allow work to continue. \
+When required supervisor review or approval prevents further work, add a blocker task note, \
+call `{prefix}task action=update id=<task-id> status=blocked`, then \
+`{prefix}coordination action=message target=supervisor task_id=<task-id> blocker=true \
+summary=\"Review required\" message=\"...\"` with no kind. Record the review reply and actual \
+decision/action; clear the review hold with `{prefix}task action=update id=<task-id> status=open`, \
+then `{prefix}task action=start id=<task-id>` before resuming. \
+Delivery/receipt does not prove a model action; cas-worker names the evidence contract. \
+Use merge_request=true for completed deliveries awaiting merge. For implementation-task verification-required close, \
 ask the supervisor to verify and close on your behalf. For MERGE REQUIRED, request the merge \
 of your delivered branch and SHA, then re-close after it lands; local_merge stays local. \
 WORK HALTED: a legitimate task action=start on your new assignment clears the urgent-stop halt. \
@@ -6978,6 +6999,11 @@ mod tests {
                 );
             }
         }
+        assert!(
+            !missing_contract_elements(OPENCODE_WORKER_INSTRUCTIONS, ContractRole::Worker)
+                .contains(&"required-supervisor-review"),
+            "OpenCode must carry the same required-review blocker workflow"
+        );
     }
 
     /// AC-1/AC-2: every one of the six launch shapes (Claude/Codex/Grok ×

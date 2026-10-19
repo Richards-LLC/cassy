@@ -42,7 +42,8 @@ class BundleTests(unittest.TestCase):
         return directory
 
     def fold(self, suite_exit=0):
-        with patch.object(bundles, "trace_actions", return_value="trace actions"), contextlib.redirect_stdout(io.StringIO()):
+        actions = '1. 0:00.1 Expect "toHaveText" 2ms'
+        with patch.object(bundles, "trace_actions", return_value=actions), contextlib.redirect_stdout(io.StringIO()):
             return bundles.main([str(self.artifacts), "tree", "commit", str(suite_exit), "hub", "1.63"])
 
     def test_refuses_overwritten_result_with_stale_stage_screenshots(self):
@@ -52,7 +53,7 @@ class BundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "HUB-J13.*stale|mixed"):
             self.fold()
 
-    def test_preserves_a_timeout_screenshot_as_incomplete_failed_stage_evidence(self):
+    def test_keeps_only_one_trace_for_a_timeout_with_incomplete_stage_evidence(self):
         self.receipt("HUB-J19", "machine alerts", part="forced-colors", status="FAIL", stages=7)
         part = self.artifacts / "journeys/HUB-J19/parts/forced-colors"
         (part / "J08.png").write_text("screenshot completed before the timed-out stage receipt")
@@ -67,8 +68,17 @@ class BundleTests(unittest.TestCase):
             "status": "INCOMPLETE",
             "reason": "suite timed out after screenshot write and before stage receipt",
         }])
+        failed_part = bundle["files"]["parts"][0]
+        self.assertEqual(failed_part["trace"], "parts/forced-colors/trace.zip")
+        self.assertTrue((part / "trace.zip").is_file())
+        self.assertFalse((self.artifacts / "playwright/HUB-J19/trace.zip").exists())
+        self.assertFalse((self.artifacts / "playwright/forced-colors/trace.zip").exists())
+        passing_trace = main / bundle["files"]["trace"]
+        failed_trace = main / failed_part["trace"]
+        self.assertEqual(sorted(main.rglob(passing_trace.name)), sorted([passing_trace, failed_trace]))
+        self.assertTrue((main / bundle["files"]["trace_actions"]).is_file())
 
-    def test_parts_keep_each_tests_media_trace_and_cells_and_one_catalog_row(self):
+    def test_parts_keep_each_tests_media_and_cells_and_one_catalog_row(self):
         main = self.receipt("HUB-J13", "start a new session", stages=10)
         part = self.receipt("HUB-J13", "reconnecting machine", part="reconnecting", stages=3)
         for ident in ["HUB-J14", "HUB-J15", "HUB-J16"]:
@@ -77,9 +87,15 @@ class BundleTests(unittest.TestCase):
         data = json.loads((main / "bundle.json").read_text())
         self.assertEqual(data["verdict"], "PASS")
         self.assertEqual(len(data["files"]["cells"]), 13)
-        self.assertEqual((main / "trace.zip").read_text(), "start a new session")
-        self.assertEqual((part / "trace.zip").read_text(), "reconnecting machine")
         self.assertEqual(data["files"]["parts"][0]["receipt"], "parts/reconnecting/receipt.webm")
+        passing_trace = main / data["files"]["trace"]
+        actions = main / data["files"]["trace_actions"]
+        # pin: qa_evidence requires at least one trace-actions Expect row.
+        self.assertIn('Expect "toHaveText"', actions.read_text())
+        self.assertTrue(passing_trace.is_file())
+        self.assertEqual(list(main.rglob(passing_trace.name)), [passing_trace])
+        self.assertFalse((self.artifacts / "playwright/HUB-J13/trace.zip").exists())
+        self.assertFalse((self.artifacts / "playwright/reconnecting/trace.zip").exists())
         rows = (self.artifacts / "journeys/JOURNEYS.md").read_text()
         for ident in ["HUB-J13", "HUB-J14", "HUB-J15", "HUB-J16"]:
             self.assertEqual(rows.count(f"| {ident} |"), 1)
@@ -109,17 +125,15 @@ class BundleTests(unittest.TestCase):
         self.assertEqual({part["title_path"][1] for part in parts}, {"phone feedback light", "phone feedback dark"})
         self.assertEqual({(directory / part["receipt"]).read_text() for part in parts}, {"light", "dark"})
 
-    def test_real_hub_part_preserves_transport_and_its_already_scrubbed_trace(self):
+    def test_real_hub_part_preserves_transport(self):
         part = self.receipt("HUB-J11", "real disposable hub", part="real-hub-run-0")
         result = json.loads((part / "result.json").read_text())
         result.update(label="real-bundle, real-hub, real-factory-daemon", output_dir=str(part))
         (part / "result.json").write_text(json.dumps(result))
-        (part / "trace.zip").write_bytes(b"scrubbed real trace")
         self.assertEqual(self.fold(), 0)
         data = json.loads((part.parent.parent / "bundle.json").read_text())
         self.assertIn("real-hub", data["label"])
         self.assertNotIn("protocol-double", data["label"])
-        self.assertEqual((part / "trace.zip").read_bytes(), b"scrubbed real trace")
         self.assertIn("real-hub", data["files"]["parts"][0]["label"])
 
 

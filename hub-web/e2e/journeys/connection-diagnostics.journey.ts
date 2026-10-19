@@ -181,6 +181,24 @@ test("HUB-J12 retryable auth-store 503 keeps the pairing and names the hub cause
     await expect(page.locator(".connection-log-evidence")).toContainText("Measured HTTP status: 503.");
     await page.locator(".connection-log-technical summary").click();
     await expect(page.locator(".connection-log-technical pre")).toContainText("auth_store_unavailable");
+    const capturePath = process.env.QA_CONNECTION_LOG_CAPTURE;
+    if (capturePath) {
+      const html = await page.evaluate(async () => {
+        const source = document.querySelector<HTMLLinkElement>('link[rel="stylesheet"]');
+        const css = source ? await fetch(source.href).then(response => response.text()) : "";
+        const documentCopy = document.documentElement.cloneNode(true) as HTMLElement;
+        documentCopy.removeAttribute("data-scheme");
+        documentCopy.querySelectorAll("script").forEach(script => script.remove());
+        const styleLink = documentCopy.querySelector<HTMLLinkElement>('link[rel="stylesheet"]');
+        if (styleLink) {
+          const style = document.createElement("style");
+          style.textContent = css;
+          styleLink.replaceWith(style);
+        }
+        return `<!doctype html>${documentCopy.outerHTML}`;
+      });
+      await writeFile(capturePath, html);
+    }
   });
   await journey.stage("Recovery stays paired and returns Live", async () => {
     unavailable = false;

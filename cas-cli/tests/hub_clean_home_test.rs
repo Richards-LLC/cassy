@@ -855,7 +855,21 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
         assert!(Instant::now() < deadline, "isolated launchd hub did not become ready");
         thread::sleep(Duration::from_millis(20));
     }
+    let initial_pid = paths.read_process_record().unwrap().pid;
+    let keep = command(&["hub", "start", "--port", &port.to_string()]);
+    assert!(keep.status.success(), "{}", String::from_utf8_lossy(&keep.stderr));
+    assert_eq!(paths.read_process_record().unwrap().pid, initial_pid);
+    let loopback = command(&["hub", "start", "--loopback", "--port", &port.to_string()]);
+    assert!(loopback.status.success(), "{}", String::from_utf8_lossy(&loopback.stderr));
+    let local = paths.read_process_record().unwrap();
+    assert!(local.public_url.is_none());
+    assert_eq!(local.launched_by.as_deref(), Some("service"));
+    assert!(!home.path().join("mock-route").exists());
+    let publish = command(&["hub", "start"]);
+    assert!(publish.status.success(), "{}", String::from_utf8_lossy(&publish.stderr));
     let first_pid = paths.read_process_record().unwrap().pid;
+    assert_eq!(paths.read_process_record().unwrap().launched_by.as_deref(), Some("service"));
+    assert!(paths.read_process_record().unwrap().public_url.is_some());
     socket.set(None);
     let stopped_at = Instant::now();
     let stop = command(&["hub", "stop"]);

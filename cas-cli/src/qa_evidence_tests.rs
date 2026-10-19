@@ -2290,11 +2290,11 @@ fn cas_38e7_close_needs_no_journey_receipt() {
 }
 
 #[test]
-fn cas_1ca0_doc_rebind_reuses_execution_but_catalog_and_source_changes_do_not_rebind() {
+fn cas_0b07_doc_rebind_accepts_hub_web_critique_but_rejects_catalog_and_source_changes() {
     let mut fx = Fixture::new();
     let executed = fx.head.clone();
-    std::fs::create_dir_all(fx.repo.join("docs")).unwrap();
-    fx.head = commit(&fx.repo, "docs/QA.md", 0);
+    std::fs::create_dir_all(fx.repo.join("hub-web/src/inbox")).unwrap();
+    fx.head = commit(&fx.repo, "hub-web/src/inbox/presence.brief.md", 0);
     assert!(journeys::doc_only_rebind(&fx.repo, &executed, &fx.head));
     fx.write_bundle(|v| {
         v["executed_head_sha"] = serde_json::json!(executed);
@@ -2333,7 +2333,8 @@ fn cas_1ca0_doc_rebind_reuses_execution_but_catalog_and_source_changes_do_not_re
         &fx.head,
         &catalog_change
     ));
-    let source_change = commit(&fx.repo, "changed.ts", 0);
+    std::fs::create_dir_all(fx.repo.join("hub-web/src/inbox")).unwrap();
+    let source_change = commit(&fx.repo, "hub-web/src/inbox/presence.ts", 0);
     assert!(!journeys::doc_only_rebind(
         &fx.repo,
         &executed,

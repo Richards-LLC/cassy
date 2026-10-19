@@ -1493,32 +1493,37 @@ mod tests {
     #[test]
     fn root_override_notice_names_both_roots_and_the_winner_cas_b69a() {
         let mut env = TestEnvGuard::new();
+        let long_root = format!("/fixtures/{}/store/.cas", "long path-segment/".repeat(12));
         for (locale, mark, separator) in [("C", "[WARN]", "--"), ("C.UTF-8", "⚠️", "—")] {
             env.set("LC_ALL", locale);
-            let notice = root_override_notice(
-                Path::new("/live/project/.cas"),
-                Path::new("/tmp/casmig/proj/.cas"),
-            )
-            .expect("differing roots must produce a notice");
-
-            assert!(notice.contains("/live/project/.cas"), "{notice}");
-            assert!(notice.contains("/tmp/casmig/proj/.cas"), "{notice}");
-            assert!(notice.contains("CAS_ROOT wins"), "{notice}");
-            // The first line alone must carry both paths and the verdict: some
-            // consoles show only the first stderr line before a wall of output.
-            let first_line = notice.lines().next().unwrap();
-            assert!(first_line.contains("/live/project/.cas"), "{first_line}");
-            assert!(first_line.contains("/tmp/casmig/proj/.cas"), "{first_line}");
-            assert!(first_line.contains("CAS_ROOT wins"), "{first_line}");
-            // And it must point at the escape hatch, not just complain.
-            assert!(notice.contains("env -u CAS_ROOT"), "{notice}");
-            assert!(notice.starts_with(mark), "{locale}: {notice}");
-            assert!(notice.contains(&format!("{separator} CAS_ROOT wins")), "{locale}: {notice}");
-            if locale == "C" {
-                assert!(notice.is_ascii(), "C-locale decorations must be ASCII: {notice}");
+            for columns in [80, 120] {
+                env.set("COLUMNS", columns.to_string());
+                for env_root in ["/live/project/.cas", long_root.as_str()] {
+                    let cwd_root = "/tmp/casmig/proj/.cas";
+                    let notice = root_override_notice(Path::new(env_root), Path::new(cwd_root))
+                        .expect("differing roots must produce a notice");
+                    assert!(notice.lines().all(|line| ratatui::text::Line::raw(line).width() <= columns),
+                        "{locale}/{columns}: notice must fit the terminal:\n{notice}");
+                    // Explicit backslash + indented newline is a lossless path continuation.
+                    let joined = notice.replace("\\\n    ", "");
+                    assert!(joined.contains(env_root), "full overriding path: {notice}");
+                    assert!(joined.contains(cwd_root), "full cwd path: {notice}");
+                    let first_line = notice.lines().next().unwrap();
+                    assert!(first_line.contains("CAS_ROOT wins"), "{first_line}");
+                    if env_root == "/live/project/.cas" {
+                        assert!(first_line.contains(env_root), "short paths fit: {first_line}");
+                        assert!(first_line.contains(cwd_root), "short paths fit: {first_line}");
+                    }
+                    assert!(notice.lines().any(|line| line.trim() == "env -u CAS_ROOT cas <command>"),
+                        "remedy must be copyable on one line: {notice}");
+                    assert!(notice.starts_with(mark), "{locale}: {notice}");
+                    assert!(notice.contains(&format!("{separator} CAS_ROOT wins")), "{locale}: {notice}");
+                    if locale == "C" {
+                        assert!(notice.is_ascii(), "C-locale decorations must be ASCII: {notice}");
+                    }
+                }
             }
         }
-
     }
 
     /// No conflict, no noise: CAS_ROOT pointing at the very store the working

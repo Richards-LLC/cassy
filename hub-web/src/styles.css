@@ -3061,7 +3061,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
   .operator-inbox-command-state::before { forced-color-adjust: none; border-color: CanvasText; }
 }
 .operator-inbox-composer { display: flex; flex-direction: column; gap: var(--space-2); }
-.operator-inbox-composer textarea { width: 100%; border: var(--line-width) solid var(--line-strong); border-radius: 23px; background: var(--panel); color: var(--ink); font: inherit; }
+.operator-inbox-composer textarea { width: 100%; padding: 12px 22px; border: var(--line-width) solid var(--line-strong); border-radius: 23px; resize: none; background: var(--panel); color: var(--ink); font: inherit; line-height: 1.55; }
 .operator-inbox-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); color: var(--text-mid); font-size: var(--fs-xs); }
 .conversation-welcome-inbox { margin-top: var(--space-3); }
 .link-button { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }

@@ -528,6 +528,10 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
         expected.style.border = "var(--line-width) solid var(--line-strong)";
         expected.style.borderRadius = "23px";
         expected.style.color = "var(--ink)";
+        expected.style.font = getComputedStyle(field).font;
+        expected.style.padding = "12px 22px";
+        expected.style.lineHeight = "1.55";
+        expected.style.resize = "none";
         document.body.append(expected);
         const actualStyle = getComputedStyle(field);
         const expectedStyle = getComputedStyle(expected);
@@ -536,11 +540,19 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
           border: actualStyle.borderColor === expectedStyle.borderColor && actualStyle.borderStyle === expectedStyle.borderStyle && actualStyle.borderWidth === expectedStyle.borderWidth,
           radius: actualStyle.borderRadius === expectedStyle.borderRadius,
           color: actualStyle.color === expectedStyle.color,
+          padding: actualStyle.padding === expectedStyle.padding,
+          lineHeight: actualStyle.lineHeight === expectedStyle.lineHeight,
+          resize: actualStyle.resize === expectedStyle.resize,
         };
         expected.remove();
         return matches;
       });
-      expect(fieldTokens).toEqual({ background: true, border: true, radius: true, color: true });
+      expect(fieldTokens).toEqual({ background: true, border: true, radius: true, color: true, padding: true, lineHeight: true, resize: true });
+      const longReply = [...Array.from({ length: 11 }, (_, i) => `Reply line ${i + 1} stays inset from the rounded field edge.`), `Reply line 12: https://example.test/${"long-text-".repeat(8)}`].join("\n");
+      await reply.fill(longReply);
+      await expect(reply).toHaveValue(longReply);
+      expect(await reply.evaluate(field => field.scrollHeight > field.clientHeight)).toBe(true);
+      await captureReply(page, "F01-long-reply");
       await reply.fill("Thanks, I can reply now.");
       await inbox.getByRole("button", { name: "Queue reply", exact: true }).press("Enter");
       await expect(inbox.getByText("Thanks, I can reply now.", { exact: true })).toBeVisible();

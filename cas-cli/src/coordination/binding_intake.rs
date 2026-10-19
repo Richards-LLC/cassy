@@ -49,10 +49,11 @@ pub struct PauseRecord {
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChannelDisposition {
     Paused,
-    /// This operation's request may have left. Uncertain like `Unknown`, but
+    /// One attempt's request may have left. Uncertain like `Unknown`, but
     /// attributable: only a definite answer to this same attempt settles it.
     Submitting {
         operation_id: Uuid,
+        attempt_id: Uuid,
     },
     Unknown,
     Managed {
@@ -126,6 +127,8 @@ impl IntakeState {
     }
 }
 
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// An absent journal is legacy-compatible. Any present unreadable, invalid or
 /// future journal refuses admission; it is never reset or silently repaired.
 pub struct IntakeJournal {
@@ -149,9 +152,18 @@ impl IntakeJournal {
             .write(true)
             .open(self.directory.join("state.lock"))
             .map_err(|e| e.to_string())?;
-        lock.try_lock_exclusive()
-            .map_err(|e| format!("binding intake journal busy/unavailable: {e}"))?;
-        Ok(lock)
+        // Readers (the daemon tick, drain replies) hold the lock briefly; wait
+        // for them rather than failing a settle/release and stranding a pause.
+        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        loop {
+            match lock.try_lock_exclusive() {
+                Ok(()) => return Ok(lock),
+                Err(e) if std::time::Instant::now() >= deadline => {
+                    return Err(format!("binding intake journal busy/unavailable: {e}"));
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
     }
     fn read_locked(&self) -> Result<IntakeState, String> {
         let bytes = match fs::read(self.path()) {
@@ -227,7 +239,7 @@ impl IntakeJournal {
                         return Err("managed policy lacks strict completion/safety latch".into());
                     }
                 }
-                ChannelDisposition::Submitting { operation_id } => {
+                ChannelDisposition::Submitting { operation_id, .. } => {
                     if !state.pauses.iter().any(|pause| {
                         pause.operation_id == *operation_id && pause.scope == policy.scope
                     }) {
@@ -267,6 +279,11 @@ impl IntakeJournal {
         Ok(())
     }
     pub fn read(&self) -> Result<IntakeState, String> {
+        // A project that never gated a channel has no journal directory; do
+        // not create one (and its lock file) on every daemon tick.
+        if !self.directory.exists() {
+            return Ok(IntakeState::default());
+        }
         let _lock = self.lock()?;
         self.read_locked()
     }
@@ -282,8 +299,10 @@ impl IntakeJournal {
                     .any(|p| matches!(p.disposition, ChannelDisposition::LegacyAllowed))))
     }
     /// Must be durable before the first ordinary POST byte can leave. There is
-    /// deliberately no negative-GET/refusal/timer API that clears uncertainty.
-    pub fn mark_submitting(&self, operation_id: Uuid) -> Result<(), String> {
+    /// deliberately no negative-GET/timer API that clears uncertainty; only a
+    /// definite answer to a later identical attempt does (`settle_refusal`).
+    /// Returns the new attempt, or `None` when managed evidence stands.
+    pub fn mark_submitting(&self, operation_id: Uuid) -> Result<Option<Uuid>, String> {
         let _lock = self.lock()?;
         let mut state = self.read_locked()?;
         let scope = state
@@ -293,32 +312,53 @@ impl IntakeJournal {
             .ok_or("submission requires an existing durable pause")?
             .scope
             .clone();
-        let submitting = ChannelDisposition::Submitting { operation_id };
+        let attempt_id = Uuid::new_v4();
+        // An identical retry subsumes earlier uncertainty: if an earlier attempt
+        // committed, Cloud answers this one already_managed; a definite refusal
+        // of this attempt is the exit from Unknown.
+        let submitting = ChannelDisposition::Submitting {
+            operation_id,
+            attempt_id,
+        };
         if let Some(policy) = state.policies.iter_mut().find(|p| p.scope == scope) {
-            policy.disposition = match &policy.disposition {
-                ChannelDisposition::Managed { .. } | ChannelDisposition::Unknown => return Ok(()),
-                // An earlier attempt may have committed: no longer attributable.
-                ChannelDisposition::Submitting { .. } => ChannelDisposition::Unknown,
-                ChannelDisposition::Paused | ChannelDisposition::LegacyAllowed => submitting,
-            };
+            if matches!(policy.disposition, ChannelDisposition::Managed { .. }) {
+                return Ok(None);
+            }
+            policy.disposition = submitting;
         } else {
             state.policies.push(ChannelPolicy {
                 scope,
                 disposition: submitting,
             });
         }
-        self.write_locked(&state)
+        self.write_locked(&state)?;
+        Ok(Some(attempt_id))
     }
 
-    /// Settle THIS attempt from a strict, definite refusal. Only an attempt that
-    /// still owns the channel (no earlier uncertainty) settles: legacy intake
-    /// still active stays paused so the host can go quiet; any other definite
-    /// refusal proves no effect and restores legacy intake. An unknown outcome
-    /// or a channel that is already uncertain/managed is never relaxed; the
-    /// returned disposition is what the channel holds afterwards.
+    /// The attempt's outcome is unknown (transport, parser, no-store). It stays
+    /// uncertain until a later identical attempt is answered definitely.
+    pub(super) fn settle_uncertain(&self, attempt_id: Uuid) -> Result<(), String> {
+        let _lock = self.lock()?;
+        let mut state = self.read_locked()?;
+        if let Some(policy) = state.policies.iter_mut().find(|policy| {
+            matches!(policy.disposition, ChannelDisposition::Submitting { attempt_id: a, .. } if a == attempt_id)
+        }) {
+            policy.disposition = ChannelDisposition::Unknown;
+            return self.write_locked(&state);
+        }
+        Ok(())
+    }
+
+    /// Settle THIS attempt from a strict, definite refusal. Only the attempt
+    /// that still owns the channel settles: legacy intake still active stays
+    /// paused so the host can go quiet; any other definite refusal of an
+    /// unmanaged binding proves no effect and restores legacy intake. An
+    /// unknown outcome, or a refusal reporting a managed binding, stays
+    /// uncertain. Returns what the channel holds afterwards.
     pub(super) fn settle_refusal(
         &self,
         operation_id: Uuid,
+        attempt_id: Uuid,
         response: &ReconciliationResponse,
     ) -> Result<ChannelDisposition, String> {
         use super::binding_reconciliation::ReconciliationReason as Reason;
@@ -336,8 +376,13 @@ impl IntakeJournal {
             .iter_mut()
             .find(|policy| policy.scope == scope)
             .ok_or("refusal requires durable submitting state")?;
-        // Earlier uncertainty or managed evidence is never relaxed here.
-        if policy.disposition != (ChannelDisposition::Submitting { operation_id }) {
+        // Another attempt or managed evidence is never relaxed here.
+        if policy.disposition
+            != (ChannelDisposition::Submitting {
+                operation_id,
+                attempt_id,
+            })
+        {
             return Ok(policy.disposition.clone());
         }
         let request = ReconciliationRequest::new(
@@ -351,10 +396,15 @@ impl IntakeJournal {
         let response = request
             .parse_response(status, &bytes)
             .map_err(|e| e.to_string())?;
+        let reports_managed = response
+            .binding
+            .as_ref()
+            .is_some_and(|binding| binding.mode == super::binding_reconciliation::BindingMode::Managed);
         policy.disposition = match (response.code, response.reason) {
             (ReconciliationCode::Completed, _) | (_, Reason::ActivationOutcomeUnknown) => {
                 ChannelDisposition::Unknown
             }
+            _ if reports_managed => ChannelDisposition::Unknown,
             (_, Reason::LegacyIntakeActive) => ChannelDisposition::Paused,
             _ => ChannelDisposition::LegacyAllowed,
         };
@@ -463,6 +513,43 @@ impl IntakeJournal {
         self.write_locked(&state)
     }
 
+    /// The project was re-linked to another team or canonical project. A gate
+    /// that never reached Cloud (Paused/LegacyAllowed) carries no authority:
+    /// archive it beside the journal and start over. A channel Cloud may hold
+    /// under the old scope is named, with what to do, instead.
+    fn retire_relinked(&self, state: &IntakeState) -> Result<(), String> {
+        let held: Vec<String> = state
+            .policies
+            .iter()
+            .filter_map(|policy| {
+                let label = match policy.disposition {
+                    ChannelDisposition::Paused | ChannelDisposition::LegacyAllowed => return None,
+                    ChannelDisposition::Managed { .. } => "managed",
+                    ChannelDisposition::Submitting { .. } | ChannelDisposition::Unknown => "uncertain",
+                };
+                Some(format!("{} ({label})", policy.scope.channel_id))
+            })
+            .collect();
+        if let Some(old) = state.pauses.first().map(|pause| &pause.scope)
+            && !held.is_empty()
+        {
+            return Err(format!(
+                "project was re-linked since {} reconciled under team {} / project {}; Cloud may still hold those bindings. Restore that link with `cas cloud team set` and rerun `cas update`, or retire the old bindings in Cloud and move {} aside",
+                held.join(", "),
+                old.team_id,
+                old.canonical_project_id,
+                self.path().display()
+            ));
+        }
+        let archive = self.directory.join(format!(
+            "state.retired-{}.json",
+            chrono::Utc::now().format("%Y%m%dT%H%M%S%.fZ")
+        ));
+        fs::rename(self.path(), &archive).map_err(|e| e.to_string())?;
+        tracing::warn!(archive = %archive.display(), "binding intake journal retired after project re-link");
+        Ok(())
+    }
+
     pub fn pause(
         &self,
         scope: IntakeScope,
@@ -475,11 +562,14 @@ impl IntakeJournal {
         }
         let _lock = self.lock()?;
         let mut state = self.read_locked()?;
+        let mut retired = false;
         if state.pauses.first().is_some_and(|p| {
             p.scope.team_id != scope.team_id
                 || p.scope.canonical_project_id != scope.canonical_project_id
         }) {
-            return Err("project/team changed since original intake gate; explicit operator repair required".into());
+            self.retire_relinked(&state)?;
+            state = IntakeState::default();
+            retired = true;
         }
         if let Some(existing) = state.pauses.iter().find(|p| p.operation_id == operation_id) {
             if existing.scope != scope {
@@ -495,7 +585,7 @@ impl IntakeJournal {
             }
             return Ok(existing);
         }
-        if expected_generation != state.generation {
+        if !retired && expected_generation != state.generation {
             return Err("binding intake generation changed; reread status".into());
         }
         state.generation = state
@@ -543,11 +633,27 @@ mod tests {
             "a restart must retain the pause"
         );
         assert_eq!(journal.pause(scope.clone(), operation, 0).unwrap(), pause);
-        assert!(journal.pause(scope, Uuid::new_v4(), 0).is_err());
+        assert!(journal.pause(scope.clone(), Uuid::new_v4(), 0).is_err());
+        // A reader holding the lock briefly is waited for, not a failure that
+        // strands a settle or release.
+        let (held, holding) = std::sync::mpsc::channel();
+        let reader = {
+            let journal = IntakeJournal::new(temp.path());
+            std::thread::spawn(move || {
+                let _lock = journal.lock().unwrap();
+                held.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            })
+        };
+        holding.recv().unwrap();
+        journal.release_unsubmitted(&scope).unwrap();
+        reader.join().unwrap();
+        assert!(journal.legacy_allowed().unwrap(), "the waited-for release took effect");
+        journal.pause(scope.clone(), operation, 0).unwrap();
         let before = fs::read(journal.path()).unwrap();
         {
             let _held = journal.lock().unwrap();
-            assert!(journal.legacy_allowed().is_err());
+            assert!(journal.legacy_allowed().is_err(), "a lock held past the bound still refuses");
         }
         assert_eq!(fs::read(journal.path()).unwrap(), before);
         for invalid in [
@@ -575,7 +681,7 @@ mod recovery_tests {
         };
         let operation = Uuid::new_v4();
         journal.pause(scope.clone(), operation, 0).unwrap();
-        journal.mark_submitting(operation).unwrap();
+        journal.mark_submitting(operation).unwrap().unwrap();
         let restarted = IntakeJournal::new(temp.path());
         assert!(
             matches!(
@@ -663,22 +769,24 @@ mod settle_tests {
         let disposition = || journal.read().unwrap().policies[0].disposition.clone();
 
         let operation = Uuid::new_v4();
+        let attempt = || journal.mark_submitting(operation).unwrap().unwrap();
         journal.pause(scope.clone(), operation, 0).unwrap();
-        journal.mark_submitting(operation).unwrap();
-        assert_eq!(journal.settle_refusal(operation, &legacy_active).unwrap(), ChannelDisposition::Paused);
+        let first = attempt();
+        assert_eq!(journal.settle_refusal(operation, first, &legacy_active).unwrap(), ChannelDisposition::Paused);
         assert!(!journal.legacy_allowed().unwrap(), "the host must go quiet before a retry");
-        journal.mark_submitting(operation).unwrap();
-        assert_eq!(journal.settle_refusal(operation, &not_member).unwrap(), ChannelDisposition::LegacyAllowed);
+        let second = attempt();
+        assert_eq!(journal.settle_refusal(operation, second, &not_member).unwrap(), ChannelDisposition::LegacyAllowed);
         assert!(journal.legacy_allowed().unwrap(), "a definite refusal had no effect");
 
         journal.pause(scope.clone(), operation, 1).unwrap();
         assert_eq!(disposition(), ChannelDisposition::Paused, "the same operation re-arms its pause");
-        journal.mark_submitting(operation).unwrap();
-        journal.mark_submitting(operation).unwrap();
-        assert_eq!(disposition(), ChannelDisposition::Unknown, "an earlier attempt may have committed");
-        assert_eq!(journal.settle_refusal(operation, &not_member).unwrap(), ChannelDisposition::Unknown);
+        let overtaken = attempt();
+        let latest = attempt();
+        assert!(
+            matches!(journal.settle_refusal(operation, overtaken, &not_member).unwrap(), ChannelDisposition::Submitting { attempt_id, .. } if attempt_id == latest),
+            "a superseded attempt cannot settle the channel"
+        );
         journal.release_unsubmitted(&scope).unwrap();
-        assert_eq!(disposition(), ChannelDisposition::Unknown);
-        assert!(!journal.legacy_allowed().unwrap());
+        assert!(!journal.legacy_allowed().unwrap(), "a submitted attempt is never released");
     }
 }

@@ -110,8 +110,12 @@ impl OrdinaryBindingClient {
             .find(|pause| &pause.scope == scope)
             .map_or_else(Uuid::new_v4, |pause| pause.operation_id);
         let pause = journal.pause(scope.clone(), operation_id, state.generation)?;
+        // Nothing has left for Cloud yet: every refusal here releases the pause.
         let blocked_before_submit = |error: String| -> Result<RepairReport, String> {
-            journal.release_unsubmitted(scope)?;
+            let error = match journal.release_unsubmitted(scope) {
+                Ok(()) => error,
+                Err(release) => format!("{error}; pause not released ({release}), rerun `cas update`"),
+            };
             Ok(RepairReport::blocked(scope, pause.operation_id, error))
         };
         let inventory = match RuntimeInventory::discover(cas_dir).and_then(|inventory| {
@@ -133,19 +137,29 @@ impl OrdinaryBindingClient {
         {
             return blocked_before_submit(error.reason);
         }
-        // This durable transition precedes request construction/send. Every
-        // transport/parser/refusal path retains it; no negative observation can
-        // prove that an earlier in-flight invocation had no effect.
-        journal.mark_submitting(pause.operation_id)?;
-        let request = ReconciliationRequest::new(
+        let request = match ReconciliationRequest::new(
             &scope.team_id,
             &scope.canonical_project_id,
             &scope.channel_id,
-        )
-        .map_err(|e| e.to_string())?;
+        ) {
+            Ok(request) => request,
+            Err(error) => return blocked_before_submit(error.to_string()),
+        };
+        // This durable transition precedes sending. Transport/parser failures
+        // keep it uncertain; no negative observation can prove that an
+        // in-flight invocation had no effect.
+        let attempt = match journal.mark_submitting(pause.operation_id) {
+            Ok(attempt) => attempt,
+            Err(error) => return blocked_before_submit(error),
+        };
         let response = match self.invoke(&request) {
             Ok(response) => response,
             Err(error) => {
+                if let Some(attempt) = attempt
+                    && let Err(settle) = journal.settle_uncertain(attempt)
+                {
+                    tracing::warn!(%settle, "uncertain attempt left submitting");
+                }
                 return Ok(RepairReport {
                     channel_id: scope.channel_id.clone(),
                     operation_id: pause.operation_id,
@@ -158,16 +172,23 @@ impl OrdinaryBindingClient {
         };
         let activation_id = response.activation_id.clone();
         if response.code != ReconciliationCode::Completed {
-            let settled = journal.settle_refusal(pause.operation_id, &response)?;
+            // Managed evidence (no attempt) stands; a refusal does not relax it.
+            let uncertain = attempt.is_some_and(|attempt| {
+                matches!(
+                    journal
+                        .settle_refusal(pause.operation_id, attempt, &response)
+                        .unwrap_or(ChannelDisposition::Unknown),
+                    ChannelDisposition::Unknown | ChannelDisposition::Submitting { .. }
+                )
+            });
             return Ok(RepairReport {
                 channel_id: scope.channel_id.clone(),
                 operation_id: pause.operation_id,
                 activation_id,
-                outcome: match settled {
-                    ChannelDisposition::Unknown | ChannelDisposition::Submitting { .. } => {
-                        RepairOutcome::Unknown
-                    }
-                    _ => RepairOutcome::Blocked,
+                outcome: if uncertain {
+                    RepairOutcome::Unknown
+                } else {
+                    RepairOutcome::Blocked
                 },
                 error: Some(response.guidance.clone()),
                 response: Some(response),

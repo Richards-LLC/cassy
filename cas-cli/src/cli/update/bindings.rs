@@ -206,8 +206,13 @@ fn channel_result(channel_name: String, report: RepairReport) -> ChannelResult {
     };
     let remedy = match (&report.outcome, next_action) {
         (RepairOutcome::Managed, _) => None,
-        (RepairOutcome::Unknown, _) => Some(
-            "rerun `cas update` to retry this channel; legacy intake stays paused until Cloud confirms".into(),
+        // The real blocker first; a definite answer to the retry settles it.
+        (RepairOutcome::Unknown, Some(action)) => Some(format!(
+            "{}; legacy intake stays paused until Cloud answers definitely",
+            remedy(action, &report.channel_id, retry_after)
+        )),
+        (RepairOutcome::Unknown, None) => Some(
+            "rerun `cas update` to retry this channel; legacy intake stays paused until Cloud answers definitely".into(),
         ),
         (_, Some(action)) => Some(remedy(action, &report.channel_id, retry_after)),
         (_, None) => Some("resolve the cause above, then rerun `cas update`".into()),

@@ -2162,10 +2162,12 @@ impl VioletWakeRuntime {
             return (PollReport::default(), Vec::new(), None);
         }
         // cas-9021: the durable intake gate decides legacy admission per
-        // channel. It never gates the v2 managed reader below.
-        let intake = match crate::coordination::binding_intake::IntakeJournal::new(&self.cas_dir).read() {
-            Ok(intake) => intake,
-            Err(error) => return (PollReport { errors: vec![error], ..Default::default() }, Vec::new(), None),
+        // channel. It never gates the v2 managed reader or idle stops below;
+        // an unreadable gate only closes the legacy path, conservatively.
+        let intake = crate::coordination::binding_intake::IntakeJournal::new(&self.cas_dir).read();
+        let legacy_claims = intake.as_ref().is_ok_and(|intake| intake.legacy_claims_allowed());
+        let legacy_channel = |channel: &str| {
+            intake.as_ref().is_ok_and(|intake| intake.channel_legacy_allowed(channel))
         };
         let cloud = crate::cloud::CloudConfig::load_effective();
         let Some(relay) = CloudActivityRelay::from_cloud_config(&cloud) else {
@@ -2197,10 +2199,14 @@ impl VioletWakeRuntime {
                 queue.as_ref(),
                 presence.is_some(),
                 now,
-                intake.legacy_claims_allowed(),
-                &|channel| intake.channel_legacy_allowed(channel),
+                legacy_claims,
+                &legacy_channel,
             ),
         };
+        let mut report = report;
+        if let Err(error) = &intake {
+            report.errors.push(format!("binding intake gate: {error}"));
+        }
         // Shutdown never waits for this tick's HTTP calls. The in-flight tick
         // owns the deferred stop and must finish it before releasing state.
         if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
@@ -2216,7 +2222,7 @@ impl VioletWakeRuntime {
         // Sweeps run only with a live supervisor to read the result.
         let sweeps = if presence.is_some() && managed.is_none() {
             let mut sweeps = state.due_sweeps(now);
-            sweeps.retain(|sweep| intake.channel_legacy_allowed(&sweep.channel_id));
+            sweeps.retain(|sweep| legacy_channel(&sweep.channel_id));
             sweeps
         } else {
             Vec::new()

@@ -165,8 +165,12 @@ impl IntakeController {
         });
         Ok(())
     }
+    /// A failed tick/sweep refuses only the pauses waiting on it. With none
+    /// pending it proves nothing about a later pause, so it is not latched.
     pub fn failed(&mut self, error: impl Into<String>) {
-        self.failure = Some(error.into());
+        if !self.pending.is_empty() {
+            self.failure = Some(error.into());
+        }
     }
     pub async fn reap_sweep(&mut self) {
         if self.sweep.as_ref().is_some_and(JoinHandle::is_finished) {
@@ -184,11 +188,13 @@ impl IntakeController {
         if self.tick.is_some() || self.sweep.is_some() {
             return Vec::new();
         }
+        // Reported once, to the pauses it affected; the next pause starts clean.
+        let failure = self.failure.take();
         self.pending
             .drain(..)
             .map(|pending| {
                 let result = (|| {
-                    if let Some(error) = &self.failure {
+                    if let Some(error) = &failure {
                         return Err(error.clone());
                     }
                     pending.runtime.validate()?;

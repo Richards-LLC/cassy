@@ -194,37 +194,46 @@ impl RuntimeInventory {
                     .map_err(|e| e.to_string())?,
                 )
                 .map_err(|_| "runtime control write failed")?;
-            let mut acknowledged = false;
-            for _ in 0..128 {
-                if let DaemonMessage::BindingIntake { reply } = receive(&mut stream, deadline)? {
-                    if reply.nonce != request.nonce {
-                        return Err("runtime drain nonce mismatch".into());
-                    }
-                    if let Some(error) = reply.error {
-                        return Err(error);
-                    }
-                    let ack = reply
-                        .acknowledgement
-                        .ok_or("runtime returned status without a drain acknowledgement")?;
-                    ack.verify(&request, &probe.identity, &capabilities)?;
-                    let state = reply
-                        .state
-                        .ok_or("runtime drain omitted durable gate state")?;
-                    if !state.pauses.contains(pause) {
-                        return Err("runtime drain did not confirm this durable pause".into());
-                    }
-                    acknowledged = true;
-                    break;
+            // A GUI client also receives every broadcast (pane output, state).
+            // Skip anything that is not this control's reply until the deadline.
+            let reply = loop {
+                if let Ok(DaemonMessage::BindingIntake { reply }) =
+                    receive_frame(&mut stream, deadline)?
+                {
+                    break reply;
                 }
+            };
+            if reply.nonce != request.nonce {
+                return Err("runtime drain nonce mismatch".into());
             }
-            if !acknowledged {
-                return Err("runtime drain message budget exhausted".into());
+            if let Some(error) = reply.error {
+                return Err(error);
+            }
+            let ack = reply
+                .acknowledgement
+                .ok_or("runtime returned status without a drain acknowledgement")?;
+            ack.verify(&request, &probe.identity, &capabilities)?;
+            let state = reply
+                .state
+                .ok_or("runtime drain omitted durable gate state")?;
+            if !state.pauses.contains(pause) {
+                return Err("runtime drain did not confirm this durable pause".into());
             }
         }
         Ok(())
     }
 }
 fn receive(stream: &mut UnixStream, deadline: Instant) -> Result<DaemonMessage, String> {
+    receive_frame(stream, deadline)?
+        .map_err(|_| "unknown/corrupt runtime control response".into())
+}
+
+/// One complete frame. The outer error is transport/deadline; the inner one
+/// is a frame this build cannot parse (skippable while awaiting a reply).
+fn receive_frame(
+    stream: &mut UnixStream,
+    deadline: Instant,
+) -> Result<Result<DaemonMessage, serde_json::Error>, String> {
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .ok_or("runtime drain deadline expired")?;
@@ -237,8 +246,7 @@ fn receive(stream: &mut UnixStream, deadline: Instant) -> Result<DaemonMessage, 
     }
     let mut bytes = vec![0; length];
     read_exact_until(stream, &mut bytes, deadline)?;
-    serde_json::from_slice(&bytes)
-        .map_err(|_| "unknown/corrupt runtime control response".into())
+    Ok(serde_json::from_slice(&bytes))
 }
 
 fn read_exact_until(

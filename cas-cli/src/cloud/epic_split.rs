@@ -1127,15 +1127,9 @@ mod tests {
     fn a_live_supervisor_can_release_an_accepted_split_of_a_gone_supervisor() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
-        let owner = test_supervisor(root, "daring-leopard-21", "daring-leopard-21", 120);
+        let owner = test_supervisor(root, "daring-leopard-21", "gone-owner-probe-cas-59cf", 120);
         let caller = test_supervisor(root, "swift-heron-11", "swift-heron-11", 0);
-        let mut retired_owner = owner;
-        retired_owner.status = crate::types::AgentStatus::Shutdown;
-        crate::store::open_agent_store(root)
-            .unwrap()
-            .update(&retired_owner)
-            .unwrap();
-        accepted_split(root, &retired_owner.id);
+        accepted_split(root, &owner.id);
 
         let result = cancel(
             root,
@@ -1178,7 +1172,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.contains("still live"), "{error}");
+        assert!(error.contains("live supervisor"), "{error}");
         let split = get_epic_split(root, "split-2c91dc59").unwrap().unwrap();
         assert_eq!(split.state, SplitState::Accepted);
         assert_eq!(split.reason, None);

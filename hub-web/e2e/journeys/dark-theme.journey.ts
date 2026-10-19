@@ -49,8 +49,8 @@ test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
     const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
     const sidebar = page.locator(".conversation-sidebar");
     const bg = (locator: typeof row) => locator.evaluate((element) => getComputedStyle(element).backgroundColor);
-    // CSSOM can serialize the same forced-colour pixel as Oklab before hover
-    // and sRGB after it; compare the browser-rendered pixel, not the string.
+    // CSSOM can serialize equivalent forced-colour pixels in different color
+    // spaces; compare the browser-rendered pixel, not the string.
     const bgPixel = (locator: typeof row) => locator.evaluate((element) => {
       const context = document.createElement("canvas").getContext("2d");
       if (!context) throw new Error("A 2D canvas is required to compare rendered background colors");
@@ -58,8 +58,16 @@ test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
       context.fillRect(0, 0, 1, 1);
       return Array.from(context.getImageData(0, 0, 1, 1).data);
     });
+    // Changing the emulated color scheme can leave the shared button
+    // background transition active; sample only after that transition settles.
+    const waitForBackgroundTransition = () => expect.poll(() => row.evaluate((element) =>
+      element.getAnimations().some((animation) =>
+        (animation as CSSTransition).transitionProperty === "background-color",
+      ),
+    )).toBe(false);
     for (const colorScheme of ["dark", "light"] as const) {
       await page.emulateMedia({ colorScheme, forcedColors: "active" });
+      await waitForBackgroundTransition();
       expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
       await expect(row).toHaveAttribute("aria-current", "true");
       expect(await bg(row), `${colorScheme}: the open row is filled`).not.toBe(await bg(sidebar));
@@ -72,8 +80,10 @@ test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
       // rule must not swap in the author tint under HighlightText).
       const filled = await bgPixel(row);
       await row.hover();
+      await waitForBackgroundTransition();
       expect(await bgPixel(row), `${colorScheme}: the open row keeps its fill under the pointer`).toEqual(filled);
       await row.focus();
+      await waitForBackgroundTransition();
       expect(await bgPixel(row), `${colorScheme}: the open row keeps its fill with focus`).toEqual(filled);
       await page.mouse.move(700, 300);
       // The coalesced status line's 10px clamp spacer is a border; forced

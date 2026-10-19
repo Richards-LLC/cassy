@@ -241,6 +241,8 @@ pub(crate) struct VioletReader {
     managed: bool,
     /// cas-b94d: binding activation read for `registration_id`, per channel.
     activations: Option<Activations>,
+    /// cas-b94d: activation was already read this tick (at most one re-read).
+    activation_read_this_tick: bool,
 }
 
 impl VioletReader {
@@ -254,6 +256,7 @@ impl VioletReader {
             recovered_for: None,
             managed: false,
             activations: None,
+            activation_read_this_tick: false,
         }
     }
 
@@ -321,19 +324,16 @@ impl VioletReader {
         // cas-b94d: without the bindings' activation the reader cannot tell
         // history from a fresh ask, so it admits nothing this tick: leases go
         // back to Cloud unread and the recovery listing waits.
-        if self.activations.is_none() {
-            let read = completed(port.get(ACTIVATION_PATH, &[("registration_id", registration_id)], CALL_REMOTE_BUDGET));
-            match read {
-                Ok(payload) => self.activations = Some(parse_activations(&payload)),
-                Err(refusal) => {
-                    if !deliveries.is_empty() {
-                        let released: Vec<_> = deliveries.iter().map(|d| (d, "released")).collect();
-                        let _ = call(port, ACK_PATH, &acks_for(&actor, &released));
-                    }
-                    report.not_typed.push(("activation".into(), refusal));
-                    return ClaimOutcome::Read(report);
-                }
+        self.activation_read_this_tick = false;
+        if self.activations.is_none()
+            && let Err(refusal) = self.read_activations(port)
+        {
+            if !deliveries.is_empty() {
+                let released: Vec<_> = deliveries.iter().map(|d| (d, "released")).collect();
+                let _ = call(port, ACK_PATH, &acks_for(&actor, &released));
             }
+            report.not_typed.push(("activation".into(), refusal));
+            return ClaimOutcome::Read(report);
         }
         // cas-b94d: fresh claims first, within their lease; then recovery.
         self.walk_claims(port, &actor, deliveries, io, now, &mut report);
@@ -361,7 +361,7 @@ impl VioletReader {
         let actor = actor.clone();
         let classes: Vec<Result<Option<Withheld>, NamedRefusal>> = deliveries
             .iter()
-            .map(|d| match self.withheld(&d.target) {
+            .map(|d| match self.classify(port, &d.target) {
                 // Already quarantined by this process: the record is durable.
                 Some(class) if self.typed.contains(&d.id) => Ok(Some(class)),
                 Some(class) => io.quarantine.hold(d, class, now).map(|()| Some(class)),
@@ -490,7 +490,7 @@ impl VioletReader {
         // cas-b94d: a historical or unknown-time admission is withheld before
         // anything else, so recovery never resumes old text (nor rebinds it).
         if recovery["mode"].as_str() == Some("resume")
-            && let Some(class) = self.withheld(&delivery.target)
+            && let Some(class) = self.classify(port, &delivery.target)
         {
             return self.hold(delivery, class, io, now);
         }
@@ -529,7 +529,7 @@ impl VioletReader {
         io: &ReaderIo<'_>,
         now: DateTime<Utc>,
     ) -> Result<Walked, NamedRefusal> {
-        if let Some(class) = self.withheld(&delivery.target) {
+        if let Some(class) = self.classify(port, &delivery.target) {
             return self.hold(delivery, class, io, now);
         }
         let text = io.body.fetch_body(&delivery.target)?;
@@ -541,6 +541,30 @@ impl VioletReader {
         self.typed.insert(delivery.id.clone());
         io.typer.type_into(self.session_for(&delivery.id), delivery, &text)?;
         receipt(port, actor, delivery, "consumed", now).map(|()| Walked::Typed)
+    }
+
+    /// Read the bindings' activation for this registration. A failure keeps
+    /// whatever was read before.
+    fn read_activations(&mut self, port: &dyn CloudCoordinationPort) -> Result<(), NamedRefusal> {
+        self.activation_read_this_tick = true;
+        let registration_id = self.registration_id.clone().unwrap_or_default();
+        let payload = completed(port.get(ACTIVATION_PATH, &[("registration_id", &registration_id)], CALL_REMOTE_BUDGET))?;
+        self.activations = Some(parse_activations(&payload));
+        Ok(())
+    }
+
+    /// [`Self::withheld`], but a delivery on a channel the cached activation
+    /// lacks or shows unactivated re-reads activation, at most once per tick,
+    /// so a binding added or activated after the first read is not held as
+    /// unknown until a restart.
+    fn classify(&mut self, port: &dyn CloudCoordinationPort, target: &Value) -> Option<Withheld> {
+        let channel = target["external_ref"]["channel_id"].as_str().unwrap_or_default();
+        let activated = self.activations.as_ref().is_some_and(|a| matches!(a.get(channel), Some(Some(_))));
+        if !activated && !self.activation_read_this_tick {
+            // A refused re-read leaves the delivery unknown, as before.
+            let _ = self.read_activations(port);
+        }
+        self.withheld(target)
     }
 
     fn withheld(&self, target: &Value) -> Option<Withheld> {

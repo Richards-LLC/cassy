@@ -291,7 +291,7 @@ fn flagless_hub_lifecycle_publishes_and_host_opt_out_removes_serve() {
             "start",
             "--port",
             "0",
-            "--no-tailscale-serve",
+            "--loopback",
         ])
         .output()
         .unwrap();
@@ -302,6 +302,73 @@ fn flagless_hub_lifecycle_publishes_and_host_opt_out_removes_serve() {
     );
     assert!(paths.read_process_record().unwrap().public_url.is_none());
     assert!(!home.path().join("mock-route").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn signed_out_hub_start_requires_explicit_loopback() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    install_tailscale_mock(
+        home.path(),
+        &bin.join("tailscale"),
+        "#!/bin/sh\nprintf '%s' '{\"BackendState\":\"NeedsLogin\",\"Self\":{}}'\n",
+    );
+    let start = cas_command(home.path(), bin.as_os_str())
+        .args(["hub", "start", "--port", "0"])
+        .output()
+        .unwrap();
+    assert!(!start.status.success(), "signed-out start must fail");
+    assert!(String::from_utf8_lossy(&start.stderr).contains("--loopback"));
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    assert!(paths.read_process_record().is_err(), "refused start must not leave a hub");
+    let loopback = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "start", "--port", "0", "--loopback"])
+        .output()
+        .unwrap();
+    assert!(loopback.status.success(), "{}", String::from_utf8_lossy(&loopback.stderr));
+    assert!(paths.read_process_record().unwrap().public_url.is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn stopped_tailscale_diagnostic_names_cli_and_socket() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let tailscale = bin.join("tailscale");
+    install_tailscale_mock(home.path(), &tailscale,
+        "#!/bin/sh\ncase \"$1\" in *missing.socket) exit 1 ;; esac\nprintf '%s' '{\"BackendState\":\"Stopped\",\"Self\":{\"DNSName\":\"stopped.tail.example.\"}}'\n");
+    let socket = home.path().join("selected.socket");
+    let start = cas_command(home.path(), bin.as_os_str())
+        .args(["hub", "start", "--port", "0", "--no-tailscale-serve"])
+        .output().unwrap();
+    assert!(start.status.success());
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let mut record = paths.read_process_record().unwrap();
+    record.launched_by = Some("service".into());
+    record.tailscale_cli = Some(tailscale.display().to_string());
+    record.transport_warning = Some("tailscale is not logged in or has no MagicDNS name".into());
+    paths.write_process_record(&record).unwrap();
+    let mut receipt: Value = serde_json::from_str(include_str!("../src/hub/fixtures/tailscale-serve-v2.60.0.json")).unwrap();
+    receipt["socket"] = Value::String(socket.display().to_string());
+    fs::write(paths.root().join("tailscale-serve.json"), serde_json::to_vec(&receipt).unwrap()).unwrap();
+    for explicit in [None, Some(home.path().join("override.socket")), Some(home.path().join("missing.socket"))] {
+        let selected = explicit.as_ref().unwrap_or(&socket);
+        for args in [vec!["hub", "status"], vec!["hub", "restart", "--port", "0"]] {
+            let mut command = cas_command(home.path(), bin.as_os_str());
+            if let Some(explicit) = &explicit { command.env("TAILSCALE_SOCKET", explicit); }
+            let output = command.args(args).output().unwrap();
+            assert!(!output.status.success());
+            let text = format!("{}{}", String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr));
+            let cause = if selected.ends_with("missing.socket") { "probe failed" } else { "Stopped" };
+            for expected in [cause, "TAILSCALE_SOCKET", tailscale.to_str().unwrap(), selected.to_str().unwrap()] {
+                assert!(text.contains(expected), "missing {expected}: {text}");
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -813,6 +880,144 @@ fn real_launchd_service_update_restarts_stale_then_preserves_current_pid() {
     }
 }
 
+/// No real Tailscale state or operator launchd label is used by this journey.
+#[cfg(target_os = "macos")]
+#[test]
+fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
+    let home = private_home();
+    let binary = home.path().join("cas");
+    fs::copy(cas::test_paths::cas_binary(), &binary).unwrap();
+    let tailscale = home.path().join("tailscale");
+    let script = format!("#!/bin/sh\n[ \"${{TAILSCALE_BE_CLI:-}}\" = 1 ] || exit 9\ncase \"$1\" in \"--socket=$HOME/fixture.socket\"|\"--socket=$HOME/updated.socket\") ;; *) exit 9 ;; esac\nprintf '%s' \"$1\" > \"$HOME/socket-used\"\nshift\n{}",
+        include_str!("fixtures/hub_update_mock_tailscale.sh").trim_start_matches("#!/bin/sh\n"));
+    install_tailscale_mock(home.path(), &tailscale, &script);
+    fs::write(home.path().join("mock-port"), "10046").unwrap();
+    fs::write(home.path().join("mock-dns-name"), "launchd-proof.invalid.").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let label = format!("dev.cas.lifecycle-proof-{}", std::process::id());
+    let target = format!("gui/{}/{label}", unsafe { libc::geteuid() });
+    let socket = std::cell::Cell::new(Some("fixture.socket"));
+    let command = |args: &[&str]| {
+        let mut command = ProcessCommand::new(&binary);
+        command.env_clear()
+            .env("HOME", home.path()).env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("TAILSCALE", &tailscale).env("CAS_SKIP_FACTORY_TOOLING", "1")
+            .env("CAS_HUB_LAUNCHD_LABEL", &label)
+            .env("CAS_HUB_SERVICE_PORT", port.to_string());
+        if let Some(socket) = socket.get() {
+            command.env("TAILSCALE_SOCKET", home.path().join(socket));
+        }
+        command.args(args).output().unwrap()
+    };
+    struct Cleanup<'a>(&'a dyn Fn(&[&str]) -> std::process::Output);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) { let _ = (self.0)(&["hub", "service", "uninstall"]); }
+    }
+    let _cleanup = Cleanup(&command);
+    assert!(command(&["--version"]).status.success());
+    let install = command(&["hub", "service", "install", "--tailscale-serve-port", "10046"]);
+    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if paths.read_process_record().is_ok_and(|record| record.public_url.is_some())
+            && ureq::get(&format!("http://127.0.0.1:{port}/v1/health"))
+                .timeout(Duration::from_millis(100)).call().is_ok() { break; }
+        assert!(Instant::now() < deadline, "isolated launchd hub did not become ready");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let initial_pid = paths.read_process_record().unwrap().pid;
+    let keep = command(&["hub", "start", "--port", &port.to_string()]);
+    assert!(keep.status.success(), "{}", String::from_utf8_lossy(&keep.stderr));
+    assert_eq!(paths.read_process_record().unwrap().pid, initial_pid);
+    let loopback = command(&["hub", "start", "--loopback", "--port", &port.to_string()]);
+    assert!(loopback.status.success(), "{}", String::from_utf8_lossy(&loopback.stderr));
+    let local = paths.read_process_record().unwrap();
+    assert!(local.public_url.is_none());
+    assert_eq!(local.launched_by.as_deref(), Some("service"));
+    assert!(!home.path().join("mock-route").exists());
+    let publish = command(&["hub", "start"]);
+    assert!(publish.status.success(), "{}", String::from_utf8_lossy(&publish.stderr));
+    let first_pid = paths.read_process_record().unwrap().pid;
+    assert_eq!(paths.read_process_record().unwrap().launched_by.as_deref(), Some("service"));
+    assert!(paths.read_process_record().unwrap().public_url.is_some());
+    socket.set(None);
+    let stopped_at = Instant::now();
+    let stop = command(&["hub", "stop"]);
+    assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
+    assert!(stopped_at.elapsed() < Duration::from_secs(15));
+    // An absent bootstrap job cannot respawn, regardless of launchd throttle timing.
+    assert!(!ProcessCommand::new("/bin/launchctl").args(["print", &target])
+        .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success());
+    assert!(paths.read_process_record().is_err());
+    assert!(!home.path().join("mock-route").exists());
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    let plist = home.path().join(format!("Library/LaunchAgents/{label}.plist"));
+    assert!(plist.is_file(), "stop must keep the installed service definition");
+    assert!(command(&["hub", "stop"]).status.success(), "stop is idempotent");
+    socket.set(Some("updated.socket"));
+    let restarted_at = Instant::now();
+    let restart = command(&["hub", "restart"]);
+    assert!(restart.status.success(), "{}", String::from_utf8_lossy(&restart.stderr));
+    assert!(restarted_at.elapsed() < Duration::from_secs(15));
+    let record = paths.read_process_record().unwrap();
+    assert_ne!(record.pid, first_pid);
+    assert_eq!(record.public_url.as_deref(), Some("https://launchd-proof.invalid:10046/"));
+    let selected_socket = home.path().join("updated.socket");
+    let definition_socket = ProcessCommand::new("/usr/bin/plutil")
+        .args(["-extract", "EnvironmentVariables.TAILSCALE_SOCKET", "raw", "-o", "-"])
+        .arg(&plist).output().unwrap();
+    assert!(definition_socket.status.success());
+    assert_eq!(String::from_utf8_lossy(&definition_socket.stdout).trim(),
+        selected_socket.to_str().unwrap());
+    assert_eq!(fs::read_to_string(home.path().join("socket-used")).unwrap(),
+        format!("--socket={}", selected_socket.display()));
+    socket.set(None);
+    assert!(command(&["hub", "status"]).status.success(), "plain status must use the recorded socket");
+    let mut stale = record;
+    stale.version = "old-launchd-proof".into();
+    paths.write_process_record(&stale).unwrap();
+    let receipt_path = home.path().join("update.json");
+    let updated_at = Instant::now();
+    let update = command(&["--json", "update", "--post-swap", "--from", "old-launchd-proof",
+        "--refresh-receipt", receipt_path.to_str().unwrap()]);
+    assert!(update.status.success(), "{}", String::from_utf8_lossy(&update.stderr));
+    assert!(updated_at.elapsed() < Duration::from_secs(15));
+    let receipt: Value = serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
+    assert_eq!(receipt["hub_restart"]["verified"], true);
+    assert_eq!(paths.read_process_record().unwrap().public_url.as_deref(),
+        Some("https://launchd-proof.invalid:10046/"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn service_start_retries_tailscale_before_publication() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let script = format!("#!/bin/sh\nif [ \"$*\" = 'status --json' ]; then\n count=0\n if [ -f \"$HOME/probes\" ]; then count=$(/bin/cat \"$HOME/probes\"); fi\n count=$((count + 1))\n printf '%s' \"$count\" > \"$HOME/probes\"\n if [ \"$count\" -lt 3 ]; then printf '%s' '{{\"BackendState\":\"Stopped\",\"Self\":{{}}}}'; exit 0; fi\nfi\n{}",
+        include_str!("fixtures/hub_update_mock_tailscale.sh").trim_start_matches("#!/bin/sh\n"));
+    install_tailscale_mock(home.path(), &bin.join("tailscale"), &script);
+    fs::write(home.path().join("mock-port"), "10047").unwrap();
+    let mut child = cas_process_command(home.path(), bin.as_os_str())
+        .args(["hub", "serve", "--port", "0", "--launched-by", "service",
+            "--tailscale-serve-port", "10047"])
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    let _cleanup = LegacyHubCleanup(vec![child.id()]);
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if paths.read_lock_owner().is_some_and(|owner| owner.phase == "running") { break; }
+        assert!(Instant::now() < deadline && child.try_wait().unwrap().is_none(),
+            "service never completed publication");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(paths.read_process_record().unwrap().public_url.as_deref(),
+        Some("https://localhost:10047/"));
+}
+
 #[cfg(unix)]
 #[test]
 fn foreground_start_carries_legacy_target_across_process_record_write() {
@@ -1019,9 +1224,7 @@ fn detached_hub_uses_app_bundle_override_with_no_parent_term() {
     let app_cli = home.path().join("Applications/Tailscale.app/Contents/MacOS/Tailscale");
     fs::create_dir_all(app_cli.parent().unwrap()).unwrap();
     let script = format!(
-        // /bin/sh adds SHLVL=1 even when its parent omitted SHLVL. Treat
-        // that synthetic level as absent from the executable's input.
-        "#!/bin/sh\nif [ -z \"${{TERM+x}}\" ] && [ \"${{SHLVL:-1}}\" -le 1 ]; then echo 'The Tailscale GUI failed to start' >&2; exit 1; fi\n{}",
+        "#!/bin/sh\nif [ \"${{TAILSCALE_BE_CLI:-}}\" != 1 ]; then echo 'The Tailscale GUI failed to start'; exit 0; fi\n[ \"$1\" = \"--socket=$HOME/fixture.socket\" ] || exit 9\nshift\n{}",
         include_str!("fixtures/hub_update_mock_tailscale.sh").trim_start_matches("#!/bin/sh\n")
     );
     install_tailscale_mock(home.path(), &app_cli, &script);
@@ -1030,6 +1233,7 @@ fn detached_hub_uses_app_bundle_override_with_no_parent_term() {
     let command = |args: &[&str]| {
         cas_command(home.path(), OsStr::new("/usr/bin:/bin"))
             .env("TAILSCALE", &app_cli)
+            .env("TAILSCALE_SOCKET", home.path().join("fixture.socket"))
             .args(args)
             .output()
             .unwrap()

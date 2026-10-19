@@ -309,11 +309,15 @@ test("HUB-J12 network switch: slow session attach keeps machine connected and se
 
 async function refusalAfter(clock: ProtocolClock, hub: HubDouble, held: Locator, delay: number): Promise<void> {
   const count = hub.upstreamRefusals.length;
-  // Deliberate negative boundary: retries must respect backoff, not resend early.
-  await clock.advance(delay - 1);
-  expect(hub.upstreamRefusals).toHaveLength(count);
+  const refusal = hub.waitFor(() => hub.upstreamRefusals.length === count + 1);
+  // Deliberate negative boundary: the protocol clock must reach delay - 1
+  // before the next refusal arrives; don't sample the mutable count at that edge.
+  const beforeDeadline = clock.advance(delay - 1);
+  const arrivedEarly = await Promise.race([refusal.then(() => true), beforeDeadline.then(() => false)]);
+  await beforeDeadline;
+  expect(arrivedEarly, "retry must respect its full backoff").toBe(false);
   await clock.advance(1);
-  await hub.waitFor(() => hub.upstreamRefusals.length === count + 1);
+  await refusal;
   await expect(held).toHaveCount(1); // refusal processed before the next timer
 }
 

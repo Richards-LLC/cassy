@@ -912,6 +912,23 @@ pub(super) fn hub_state_remedy(state: HubDisplayState, pid: u32) -> String {
     }
 }
 
+/// The hub-line remedy for a hub with a runtime record. An exited hub that
+/// recorded Serve gives the same single command as the Serve line, so the
+/// post-reboot screen offers one remedy rather than two (cas-ea2b).
+pub(super) fn hub_record_remedy(record: &HubProcessRecord, state: HubDisplayState) -> String {
+    if state == HubDisplayState::Exited && tailscale_enabled(record) {
+        "Run `cas hub restart --tailscale-serve`.".to_owned()
+    } else {
+        hub_state_remedy(state, record.pid)
+    }
+}
+
+fn hub_record_state_json(record: &HubProcessRecord, state: HubDisplayState) -> serde_json::Value {
+    let mut json = hub_state_json(state, record.pid);
+    json["remedy"] = hub_record_remedy(record, state).into();
+    json
+}
+
 pub(super) fn hub_state_label(state: HubDisplayState, pid: u32) -> String {
     match state {
         HubDisplayState::Exited => format!("last pid {pid} exited"),
@@ -1010,7 +1027,7 @@ fn render_status(
         format!(
             "Cassy hub: {}\n  remedy: {}\n  started by {} at {}\n  version {}, binary: {binary_version}",
             hub_state_label(state, record.pid),
-            hub_state_remedy(state, record.pid),
+            hub_record_remedy(record, state),
             record.launched_by.as_deref().unwrap_or("unknown"),
             record
                 .launched_at
@@ -2342,7 +2359,7 @@ fn status(cli: &Cli) -> Result<()> {
             "{}",
             serde_json::json!({
                 "running": live,
-                "state": hub_state_json(state, record.pid),
+                "state": hub_record_state_json(&record, state),
                 "record": record,
                 "binary": env!("CARGO_PKG_VERSION"),
                 "tailscale_serve": transport,
@@ -4006,6 +4023,14 @@ mod tests {
                 assert_eq!(rendered.contains("sample 42"), cfg!(target_os = "macos"));
             }
         }
+        // cas-ea2b: after a reboot an exited hub that recorded Serve gives the
+        // Serve line's single remedy, never a competing `cas hub start`.
+        let served = self::record("3.4.1", DEFAULT_HUB_PORT, Some(443));
+        let rendered = render_status(&served, HubDisplayState::Exited, "3.7.7");
+        let json = hub_record_state_json(&served, HubDisplayState::Exited);
+        assert!(rendered.contains("remedy: Run `cas hub restart --tailscale-serve`."), "{rendered}");
+        assert!(!rendered.contains("cas hub start"), "{rendered}");
+        assert_eq!(json["remedy"], "Run `cas hub restart --tailscale-serve`.");
     }
 
     #[test]

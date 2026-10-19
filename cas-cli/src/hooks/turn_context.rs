@@ -408,10 +408,10 @@ pub(crate) fn fallback_context_within(
     if let Some(signal) = signal
         && signal > receipt.state.mail_checked_at
     {
-        // Taken before the query: a row committed after it stamps a newer
-        // signal, so the next boundary checks again.
-        receipt.state.mail_checked_at = chrono::Utc::now().timestamp_millis();
-        changed = true;
+        // Taken before the query: later mail stamps a newer signal. Commit
+        // this cursor only after every selected body fits; otherwise the next
+        // tool boundary must retry the overflow even without another enqueue.
+        let checked_at = chrono::Utc::now().timestamp_millis();
         // cas-a1ed: deep in a long turn its first line is outside the tail;
         // look further back before checking mail without a turn.
         let deep;
@@ -429,10 +429,14 @@ pub(crate) fn fallback_context_within(
                 prompt: prompt.as_str(),
             })
         });
-        if let Some(mail) =
+        if let Some(outcome) =
             surface_factory_inbox_after_tool_result(Some(root), input, current, &mut budget)
         {
-            parts.push(mail);
+            parts.extend(outcome.text);
+            if outcome.complete {
+                receipt.state.mail_checked_at = checked_at;
+                changed = true;
+            }
         }
     }
 

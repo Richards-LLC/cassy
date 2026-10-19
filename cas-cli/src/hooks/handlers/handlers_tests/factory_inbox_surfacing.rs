@@ -77,7 +77,7 @@ fn cas_7af8_assert_hook_expiry(kind: &str) {
             let hook = input("supervisor");
             let surfaced = if tool_boundary {
                 let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
-                crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(Some(temp.path()), &hook, None, &mut budget)
+                crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(Some(temp.path()), &hook, None, &mut budget).and_then(|outcome| outcome.text)
             } else {
                 crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(Some(temp.path()), &hook)
             };

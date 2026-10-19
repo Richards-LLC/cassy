@@ -2004,6 +2004,7 @@ fn cas_abad_pull_echo_cleanup_previews_then_removes_only_cloud_identical_rows() 
     queue
         .purge_personal_pull_echoes(&cloud_tasks, &cloud_dependencies, &all, false)
         .unwrap();
-    let kept: Vec<_> = queue.list_all(10).unwrap().into_iter().map(|row| row.entity_id).collect();
-    assert_eq!(kept, ["cas-edited", "cas-echo:cas-local:blocks"], "a local edit and a local-only edge remain");
+    let mut kept: Vec<_> = queue.list_all(10).unwrap().into_iter().map(|row| row.entity_id).collect();
+    kept.sort();
+    assert_eq!(kept, ["cas-echo:cas-local:blocks", "cas-edited"], "a local edit and a local-only edge remain");
 }

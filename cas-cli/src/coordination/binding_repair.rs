@@ -163,10 +163,11 @@ impl OrdinaryBindingClient {
                 channel_id: scope.channel_id.clone(),
                 operation_id: pause.operation_id,
                 activation_id,
-                outcome: if settled == ChannelDisposition::Unknown {
-                    RepairOutcome::Unknown
-                } else {
-                    RepairOutcome::Blocked
+                outcome: match settled {
+                    ChannelDisposition::Unknown | ChannelDisposition::Submitting { .. } => {
+                        RepairOutcome::Unknown
+                    }
+                    _ => RepairOutcome::Blocked,
                 },
                 error: Some(response.guidance.clone()),
                 response: Some(response),

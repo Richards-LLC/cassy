@@ -314,7 +314,8 @@ impl IntakeJournal {
     /// still owns the channel (no earlier uncertainty) settles: legacy intake
     /// still active stays paused so the host can go quiet; any other definite
     /// refusal proves no effect and restores legacy intake. An unknown outcome
-    /// or a channel that is already uncertain/managed is never relaxed.
+    /// or a channel that is already uncertain/managed is never relaxed; the
+    /// returned disposition is what the channel holds afterwards.
     pub(super) fn settle_refusal(
         &self,
         operation_id: Uuid,
@@ -323,11 +324,22 @@ impl IntakeJournal {
         use super::binding_reconciliation::ReconciliationReason as Reason;
         let _lock = self.lock()?;
         let mut state = self.read_locked()?;
-        let Some(policy) = state.policies.iter_mut().find(|policy| {
-            policy.disposition == ChannelDisposition::Submitting { operation_id }
-        }) else {
-            return Ok(ChannelDisposition::Unknown);
-        };
+        let scope = state
+            .pauses
+            .iter()
+            .find(|pause| pause.operation_id == operation_id)
+            .ok_or("refusal requires its original pause")?
+            .scope
+            .clone();
+        let policy = state
+            .policies
+            .iter_mut()
+            .find(|policy| policy.scope == scope)
+            .ok_or("refusal requires durable submitting state")?;
+        // Earlier uncertainty or managed evidence is never relaxed here.
+        if policy.disposition != (ChannelDisposition::Submitting { operation_id }) {
+            return Ok(policy.disposition.clone());
+        }
         let request = ReconciliationRequest::new(
             &policy.scope.team_id,
             &policy.scope.canonical_project_id,

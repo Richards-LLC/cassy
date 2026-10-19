@@ -38,6 +38,7 @@ use crate::ui::components::table::Column as TableColumn;
 use crate::ui::components::{Border, Formatter, OutputMode, Renderable, Table, Verdict, Width};
 use crate::ui::theme::{ActiveTheme, Icons};
 
+mod bindings;
 mod findings;
 mod fixture;
 mod live;
@@ -1377,6 +1378,12 @@ impl UncapturedPhase for ProjectPhase {
     }
 }
 
+impl UncapturedPhase for Option<ProjectPhase> {
+    fn uncaptured(reason: String) -> Self {
+        Some(ProjectPhase::Failed(reason))
+    }
+}
+
 impl UncapturedPhase for (ProjectPhase, Vec<SyncSummary>) {
     fn uncaptured(reason: String) -> Self {
         (ProjectPhase::Failed(reason), Vec::new())
@@ -1630,6 +1637,21 @@ fn refresh_all_projects_with_user_refresh(
             });
             details.push_str(&output);
             documents.push(("cloud_sync", docs));
+            // cas-9021: Slack channel bindings ride the cloud row; a project
+            // with nothing to reconcile keeps today's receipt shape.
+            let (bindings, binding_output, binding_docs) = capture_phase_documents(cli, || {
+                bindings::reconcile_project_bindings(&cas_root, args.dry_run, cli.json)
+            });
+            let mut output = output;
+            let cloud = match bindings {
+                Some(bindings) => {
+                    details.push_str(&binding_output);
+                    output.push_str(&binding_output);
+                    documents.push(("binding_reconciliation", binding_docs));
+                    with_binding_reconciliation(cloud, bindings)
+                }
+                None => cloud,
+            };
             phase_details.push((cloud.is_ok(), output));
             (search_index, skills, membership, cloud)
         };
@@ -1675,6 +1697,24 @@ fn refresh_all_projects_with_user_refresh(
         first_launch_ms,
         started_at,
     )
+}
+
+/// cas-9021: the cloud row carries binding reconciliation. A cloud problem
+/// keeps its own cause; otherwise a binding warning becomes the row's cause.
+fn with_binding_reconciliation(cloud: ProjectPhase, bindings: ProjectPhase) -> ProjectPhase {
+    match (cloud, bindings) {
+        (ProjectPhase::Ok(cloud), ProjectPhase::Ok(bindings)) => {
+            ProjectPhase::Ok(format!("{cloud}; {bindings}"))
+        }
+        (
+            ProjectPhase::Ok(_) | ProjectPhase::Planned(_),
+            bindings @ (ProjectPhase::Warning(_) | ProjectPhase::Failed(_)),
+        ) => bindings,
+        (ProjectPhase::Planned(cloud), ProjectPhase::Planned(bindings)) => {
+            ProjectPhase::Planned(format!("{cloud}; {bindings}"))
+        }
+        (cloud, _) => cloud,
+    }
 }
 
 /// Keep an existing phase failure and its remedy when maintenance also fails.

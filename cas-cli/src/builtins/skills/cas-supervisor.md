@@ -21,7 +21,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Frame first.** State the project/request fit in one sentence; flag mismatches.
 - **Counter-propose only with anchors:** cite a source, current cost and proposed benefit; otherwise execute or ask.
 - **Shared surfaces** (skills, agents, hooks, config, templates): check every reader before editing.
-- **Tier every spawn.** Pass `lane=<lane>` or a full explicit recipe, never both. Use the active [model routes](references/model-selection.md); `max` requires an explicit request and a recipe that supports it.
+- **Tier every spawn — never fleet-default.** Pass `lane=<lane>` or a full recipe, never both. Active [routes](references/model-selection.md): light Codex/GPT-6 Luna/xhigh; standard Codex/GPT-6.1 Sol/high; taste/supervisor/heavy Claude/Opus 5.5/high. Terra is a standing suspension. `max` requires an explicit request and a supporting recipe.
 - **[Fewest tests](../cas-tdd/SKILL.md#fewest-tests)** in briefs and reviews; bloat is a finding.
 - **Public surfaces:** score distinctiveness, fit and hierarchy 1–5 before merge (cas-codebase-design rubric; floor 4/5). Record exceptions and remedies.
 - **Worker liveness:** poll `factory action=worker_status summary_mode=true`. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read full `worker_status` before recovery ([worker-recovery.md](references/worker-recovery.md)).
@@ -62,4 +62,4 @@ For mixed harnesses and explicit `cli=`/`model=`/`effort=` controls, see [worker
 
 ## On-demand references
 
-[Preflight](references/preflight.md) · [intake](references/intake.md) · [planning](references/planning.md) · [workflow](references/workflow.md) · [epic driving](references/epic-driving.md) · [reminders](references/reminders.md) · [routing](references/reporting-and-routing.md). File operational bugs through the [issue registry](references/filing-cas-bugs.md) before moving on.
+For startup, planning and release, use [workflow](references/workflow.md) and [routing](references/reporting-and-routing.md). File operational bugs through the [issue registry](references/filing-cas-bugs.md) before moving on. [Epic driving](references/epic-driving.md) · [reminders](references/reminders.md).

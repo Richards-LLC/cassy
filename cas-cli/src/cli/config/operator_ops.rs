@@ -329,6 +329,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn issue_repository_set_rejects_invalid_slugs_without_saving_cas_d3e9() {
+        let _env = TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let mut config = Config::load(&root).unwrap();
+        for key in ["issues.repo", "issues.components.cassy", "issues.components.violet", "issues.components.cloud"] {
+            let default = Config::default().get(key).unwrap();
+            set_config_value(&mut config, key, " owner/repo.name-1_2 ", &root, agent).unwrap();
+            assert_eq!(Config::load(&root).unwrap().get(key).as_deref(), Some("owner/repo.name-1_2"));
+            let stored = std::fs::read(root.join("config.toml")).unwrap();
+            for invalid in ["bad/repo/extra", "owner", "/repo", "owner/", "own er/repo", "owner/repo\nother", "https://github.com/owner/repo"] {
+                let error = set_config_value(&mut config, key, invalid, &root, agent)
+                    .expect_err("malformed repository must be refused before saving").to_string();
+                assert!(error.contains("owner/name"), "{key}: {error}");
+                assert_eq!(config.get(key).as_deref(), Some("owner/repo.name-1_2"), "invalid write mutated {key}");
+                assert_eq!(std::fs::read(root.join("config.toml")).unwrap(), stored, "invalid write saved {key}");
+            }
+            set_config_value(&mut config, key, "  ", &root, agent).unwrap();
+            assert_eq!(Config::load(&root).unwrap().get(key).as_deref(), Some(default.as_str()), "blank clears {key}");
+        }
+    }
+
     /// cas-0d4f0: `cas config set` refuses a security-relevant key from an
     /// agent and leaves config.toml unchanged; ordinary keys stay settable,
     /// and the operator at a terminal can still set the key.

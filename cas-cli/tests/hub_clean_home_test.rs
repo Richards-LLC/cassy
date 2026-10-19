@@ -260,6 +260,38 @@ fn signed_out_hub_start_requires_explicit_loopback() {
 
 #[cfg(unix)]
 #[test]
+fn stopped_tailscale_diagnostic_names_cli_and_socket() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let tailscale = bin.join("tailscale");
+    install_tailscale_mock(home.path(), &tailscale,
+        "#!/bin/sh\nprintf '%s' '{\"BackendState\":\"Stopped\",\"Self\":{\"DNSName\":\"stopped.tail.example.\"}}'\n");
+    let socket = home.path().join("selected.socket");
+    let start = cas_command(home.path(), bin.as_os_str())
+        .args(["hub", "start", "--port", "0", "--no-tailscale-serve"])
+        .output().unwrap();
+    assert!(start.status.success());
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let mut record = paths.read_process_record().unwrap();
+    record.launched_by = Some("service".into());
+    record.tailscale_cli = Some(tailscale.display().to_string());
+    record.transport_warning = Some("tailscale is not logged in or has no MagicDNS name".into());
+    paths.write_process_record(&record).unwrap();
+    for args in [vec!["hub", "status"], vec!["hub", "restart", "--port", "0"]] {
+        let output = cas_command(home.path(), bin.as_os_str())
+            .env("TAILSCALE_SOCKET", &socket).args(args).output().unwrap();
+        assert!(!output.status.success());
+        let text = format!("{}{}", String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr));
+        for expected in ["Stopped", "TAILSCALE_SOCKET", tailscale.to_str().unwrap(), socket.to_str().unwrap()] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn post_swap_starts_known_stopped_hub_and_serve_failure_keeps_update_successful() {
     let home = private_home();
     let path = system_path();
@@ -775,8 +807,9 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
     let binary = home.path().join("cas");
     fs::copy(cas::test_paths::cas_binary(), &binary).unwrap();
     let tailscale = home.path().join("tailscale");
-    install_tailscale_mock(home.path(), &tailscale,
-        include_str!("fixtures/hub_update_mock_tailscale.sh"));
+    let script = format!("#!/bin/sh\n[ \"${{TAILSCALE_BE_CLI:-}}\" = 1 ] || exit 9\n[ \"$1\" = \"--socket=$HOME/fixture.socket\" ] || exit 9\nshift\n{}",
+        include_str!("fixtures/hub_update_mock_tailscale.sh").trim_start_matches("#!/bin/sh\n"));
+    install_tailscale_mock(home.path(), &tailscale, &script);
     fs::write(home.path().join("mock-port"), "10046").unwrap();
     fs::write(home.path().join("mock-dns-name"), "launchd-proof.invalid.").unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -788,6 +821,7 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
         ProcessCommand::new(&binary).env_clear()
             .env("HOME", home.path()).env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .env("TAILSCALE", &tailscale).env("CAS_SKIP_FACTORY_TOOLING", "1")
+            .env("TAILSCALE_SOCKET", home.path().join("fixture.socket"))
             .env("CAS_HUB_LAUNCHD_LABEL", &label)
             .env("CAS_HUB_SERVICE_PORT", port.to_string())
             .args(args).output().unwrap()
@@ -1086,9 +1120,7 @@ fn detached_hub_uses_app_bundle_override_with_no_parent_term() {
     let app_cli = home.path().join("Applications/Tailscale.app/Contents/MacOS/Tailscale");
     fs::create_dir_all(app_cli.parent().unwrap()).unwrap();
     let script = format!(
-        // /bin/sh adds SHLVL=1 even when its parent omitted SHLVL. Treat
-        // that synthetic level as absent from the executable's input.
-        "#!/bin/sh\nif [ \"${{TAILSCALE_BE_CLI:-}}\" != 1 ]; then echo 'The Tailscale GUI failed to start'; exit 0; fi\n{}",
+        "#!/bin/sh\nif [ \"${{TAILSCALE_BE_CLI:-}}\" != 1 ]; then echo 'The Tailscale GUI failed to start'; exit 0; fi\n[ \"$1\" = \"--socket=$HOME/fixture.socket\" ] || exit 9\nshift\n{}",
         include_str!("fixtures/hub_update_mock_tailscale.sh").trim_start_matches("#!/bin/sh\n")
     );
     install_tailscale_mock(home.path(), &app_cli, &script);
@@ -1097,6 +1129,7 @@ fn detached_hub_uses_app_bundle_override_with_no_parent_term() {
     let command = |args: &[&str]| {
         cas_command(home.path(), OsStr::new("/usr/bin:/bin"))
             .env("TAILSCALE", &app_cli)
+            .env("TAILSCALE_SOCKET", home.path().join("fixture.socket"))
             .args(args)
             .output()
             .unwrap()

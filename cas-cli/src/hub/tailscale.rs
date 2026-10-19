@@ -973,6 +973,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn gui_launcher_output_has_actionable_cli_error() {
+        let temp = private_tempdir();
+        let binary = temp.path().join("tailscale");
+        crate::test_paths::warm_stub(&binary,
+            "#!/bin/sh\nprintf '%s' 'The Tailscale GUI failed to start: private details'\n");
+        let manager = TailscaleServeManager::with_executable(temp.path().join("hub"), &binary);
+        let error = manager.ensure(4173, 443).unwrap_err().to_string();
+        assert!(error.contains("GUI") && error.contains("TAILSCALE_BE_CLI"), "{error}");
+        assert!(!error.contains("private details"), "raw GUI output must be sanitized");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn mocked_binary_proves_idempotent_setup_and_owned_teardown() {
 
         let temp = private_tempdir();

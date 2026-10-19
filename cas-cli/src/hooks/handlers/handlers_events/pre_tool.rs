@@ -1973,10 +1973,25 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
     } else {
         shell_statement_words(command)
     };
-    for words in statements {
+    let mut pending_statements = std::collections::VecDeque::from(statements);
+    while let Some(words) = pending_statements.pop_front() {
         let Some(command_index) = unwrapped_command_index(&words) else {
             continue;
         };
+        if shell_word_basename(&words[command_index]) == "find" {
+            // find runs each -exec/-execdir payload as a command. Inspect
+            // these scopes before later statements can change shell_cwd.
+            for (index, word) in words.iter().enumerate().rev() {
+                if matches!(word.as_str(), "-exec" | "-execdir") {
+                    let payload = &words[index + 1..];
+                    let end = payload.iter()
+                        .position(|word| word == ";" || word == "+")
+                        .unwrap_or(payload.len());
+                    pending_statements.push_front(payload[..end].to_vec());
+                }
+            }
+            continue;
+        }
         if words[command_index] == "cd" {
             if let Some(path) = words.get(command_index + 1).filter(|path| path.as_str() != "--") {
                 shell_cwd = resolve_worker_cd_path(&shell_cwd, path);

@@ -527,14 +527,14 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         Ok(NotifyIdempotentResult::AlreadyExists {
             id,
             prompt_delivered: true,
-        }) => {
+        }) if supervisor.id != "operator" => {
             return WorkerAttentionRelayOutcome::Persisted {
                 notification_id: id,
             };
         }
         Ok(NotifyIdempotentResult::AlreadyExists {
             id,
-            prompt_delivered: false,
+            ..
         }) => id,
         Err(error) => {
             tracing::error!(task_id, pr_number, %error, "merge-queue ejection durable enqueue failed");
@@ -548,25 +548,36 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     let supervisor_body = format!(
         "<worker-attention kind=\"merge_queue_ejected\" worker=\"{worker}\" task_id=\"{task_id}\" notification_id=\"{notification_id}\">\n{detail}{next_step}\n</worker-attention>"
     );
-    let supervisor_body = if supervisor.id == "operator" {
-        match crate::supervisor_notices::operator_prompt(&supervisor_body, "merge queue ejected") {
-            Ok(body) => body,
-            Err(_) => return WorkerAttentionRelayOutcome::Pending,
+    if supervisor.id == "operator" {
+        // A departed factory's direct prompt cannot reach a Commander on
+        // another daemon. Reuse the project operator outbox and its existing
+        // adoption tick, including when a prior live-owner relay was stamped.
+        if let Err(error) = crate::supervisor_notices::enqueue(
+            cas_dir,
+            &supervisor,
+            "merge_queue_ejected",
+            &format!("{detail}\nNo live supervisor is available.{next_step}"),
+            &format!("{task_id}:{pr_number}:{occurrence}"),
+        ) {
+            tracing::warn!(task_id, pr_number, %error, "merge-queue operator escalation remains pending");
+            return WorkerAttentionRelayOutcome::Pending;
         }
     } else {
-        supervisor_body
-    };
-    let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
-    if prompt_queue.enqueue_idempotent(
-        &source,
-        &supervisor.name,
-        &supervisor_body,
-        supervisor.session.as_deref(),
-        Some(&format!("merge queue ejected: {task_id} PR #{pr_number}")),
-        Some(NotificationPriority::High),
-        &format!("merge-queue-ejection-outbox:{notification_id}"),
-        Some(&cas_store::QueueOrigin::Daemon),
-    ).is_err() || (!worker.is_empty() && prompt_queue.enqueue_idempotent(
+        let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
+        if prompt_queue.enqueue_idempotent(
+            &source,
+            &supervisor.name,
+            &supervisor_body,
+            supervisor.session.as_deref(),
+            Some(&format!("merge queue ejected: {task_id} PR #{pr_number}")),
+            Some(NotificationPriority::High),
+            &format!("merge-queue-ejection-outbox:{notification_id}"),
+            Some(&cas_store::QueueOrigin::Daemon),
+        ).is_err() {
+            return WorkerAttentionRelayOutcome::Pending;
+        }
+    }
+    if !worker.is_empty() && prompt_queue.enqueue_idempotent(
         "merge-queue-ejection",
         worker,
         &format!("{detail}\nWait for the supervisor's merge recovery instructions before starting other work."),
@@ -575,7 +586,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         Some(NotificationPriority::High),
         &format!("merge-queue-ejection-worker:{key}"),
         Some(&cas_store::QueueOrigin::Daemon),
-    ).is_err()) {
+    ).is_err() {
         return WorkerAttentionRelayOutcome::Pending;
     }
     let Ok(task_store) = crate::store::open_task_store_cached(cas_dir) else {

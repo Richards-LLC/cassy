@@ -170,6 +170,23 @@ fn ct2_p3_dead_owner_notice_rerouted() {
             agents.unregister(&peer.id).unwrap();
         }
     }
+    // The original relay was stamped while the owner was alive. Replaying
+    // the same CI observation after that owner ends must still alert the
+    // operator, once; a delivered-to-outbox stamp is not a human receipt.
+    for _ in 0..2 {
+        let replay = enqueue_merge_queue_ejection_relay(
+            &root, "cas-route-1", "", 12, Some(1), "run-1",
+            Some("Fast Validation › publication fixture"),
+        );
+        assert!(matches!(replay, WorkerAttentionRelayOutcome::Persisted { .. }));
+        crate::supervisor_notices::adopt_operator_notices(&root, "connected-observer-session")
+            .unwrap();
+    }
+    let rows = queue.peek_all(100).unwrap();
+    let alerts: Vec<_> = rows.iter().filter(|r| r.target == "operator").collect();
+    assert_eq!(alerts.len(), 2, "one alert for each distinct orphaned ejection");
+    assert!(alerts.iter().any(|r| r.prompt.contains("cas-route-1")));
+    assert!(alerts.iter().all(|r| r.factory_session.as_deref() == Some("connected-observer-session")));
 }
 
 #[test]

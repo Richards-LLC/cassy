@@ -1754,17 +1754,7 @@ pub(crate) fn is_worker_commit_allowed_branch(branch: &str) -> bool {
 /// Intentionally conservative: false-negatives (missed commands) are safe
 /// because LAYER 2 (pre-commit hook) is the hard floor.
 pub(crate) fn looks_like_git_write_op(cmd: &str) -> bool {
-    super::attribution::split_shell_statements(cmd)
-        .into_iter()
-        .any(|words| {
-            let Some(git_index) = words
-                .iter()
-                .position(|word| word == "git" || word.ends_with("/git"))
-            else {
-                return false;
-            };
-            git_history_write_operation(&words[git_index + 1..]).is_some()
-        })
+    !git_write_targets(".", cmd).is_empty()
 }
 
 /// Return true when a shell command invokes `git push origin`.
@@ -1920,12 +1910,24 @@ fn resolve_git_option_path(base: &std::path::Path, value: &str) -> std::path::Pa
 }
 
 fn git_history_write_operation(git_words: &[String]) -> Option<usize> {
-    let operation_index = git_words.iter().position(|word| {
-        matches!(
-            word.as_str(),
-            "commit" | "merge" | "push" | "rebase" | "cherry-pick" | "reset" | "checkout" | "add"
-        )
-    })?;
+    // Only the subcommand can change history, never a global option's value
+    // or a read command's operand (e.g. `git log --grep commit`).
+    let mut operation_index = 0;
+    while let Some(word) = git_words.get(operation_index) {
+        match word.as_str() {
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env" => {
+                operation_index += 2;
+            }
+            "-h" | "--help" | "-v" | "--version" | "--exec-path" | "--html-path"
+            | "--man-path" | "--info-path" => return None,
+            "--" => {
+                operation_index += 1;
+                break;
+            }
+            _ if word.starts_with('-') => operation_index += 1,
+            _ => break,
+        }
+    }
     let operation = git_words.get(operation_index)?.as_str();
     let args = &git_words[operation_index + 1..];
     let is_write = match operation {
@@ -1961,24 +1963,24 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
     let mut targets = Vec::new();
     let mut shell_cwd = default_target.cwd.clone();
 
-    for words in super::attribution::split_shell_statements(command) {
-        if words.first().is_some_and(|word| word == "cd") {
-            if let Some(path) = words.get(1).filter(|path| path.as_str() != "--") {
+    for words in shell_statement_words(command) {
+        let Some(command_index) = unwrapped_command_index(&words) else {
+            continue;
+        };
+        if words[command_index] == "cd" {
+            if let Some(path) = words.get(command_index + 1).filter(|path| path.as_str() != "--") {
                 shell_cwd = resolve_worker_cd_path(&shell_cwd, path);
-            } else if words.get(1).is_some_and(|path| path == "--") {
-                if let Some(path) = words.get(2) {
+            } else if words.get(command_index + 1).is_some_and(|path| path == "--") {
+                if let Some(path) = words.get(command_index + 2) {
                     shell_cwd = resolve_worker_cd_path(&shell_cwd, path);
                 }
             }
             continue;
         }
-        let Some(git_index) = words
-            .iter()
-            .position(|word| word == "git" || word.ends_with("/git"))
-        else {
+        if shell_word_basename(&words[command_index]) != "git" {
             continue;
-        };
-        let git_words = &words[git_index + 1..];
+        }
+        let git_words = &words[command_index + 1..];
         let Some(write_index) = git_history_write_operation(git_words) else {
             continue;
         };
@@ -2032,11 +2034,7 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
         targets.push(target);
     }
 
-    if targets.is_empty() {
-        vec![default_target]
-    } else {
-        targets
-    }
+    targets
 }
 
 fn git_command_at_target(target: &GitCommandTarget) -> std::process::Command {

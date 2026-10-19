@@ -89,7 +89,7 @@ fn record_project_warning(entity_kind: &str, project: &str, message: &str) {
 /// error. Pull payloads are raw JSON specifically so one malformed row does
 /// not abort the rest of a sync; without this boundary the resulting warning
 /// was un-actionable because it named neither the row nor its entity type.
-fn deserialize_pulled_entity<T: DeserializeOwned>(
+pub(crate) fn deserialize_pulled_entity<T: DeserializeOwned>(
     mut raw: serde_json::Value,
     entity_type: &str,
 ) -> Result<T, String> {
@@ -814,14 +814,14 @@ impl CloudSyncer {
     /// `types=task_dependencies` (the plural wire key) with no `since` is the
     /// only supported full-snapshot request; the cloud has no `full=1` flag and
     /// no per-entity count/hash endpoint to diff against instead.
-    fn fetch_dependency_snapshot(
+    pub(crate) fn fetch_dependency_snapshot(
         &self,
         team_id: Option<&str>,
         project_id: &str,
     ) -> Result<Vec<serde_json::Value>, CasError> {
         self.fetch_collection_snapshot(team_id, project_id, "task_dependencies")
     }
-    fn fetch_task_snapshot(
+    pub(crate) fn fetch_task_snapshot(
         &self,
         team_id: Option<&str>,
         project_id: &str,
@@ -2073,6 +2073,15 @@ impl CloudSyncer {
         let (raw_body, project_id) = self.fetch_pull_json(None, &params)?;
         let body: PullResponse = serde_json::from_value(raw_body)
             .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?;
+        // cas-abad: a team-owned project's personal envelope is empty by
+        // design. Applying it is a no-op, and healing local edges against it
+        // staged every edge and endpoint task for a personal push the cloud
+        // refuses. Team scope (`pull_team`) owns this project's rows.
+        if body.team_owned_project.is_some() {
+            tracing::debug!(project = %project_id, "personal pull skipped: project is team-owned");
+            result.duration_ms = start.elapsed().as_millis() as u64;
+            return Ok(result);
+        }
 
         // Use the already-resolved project ID for client-side entity validation
         let current_project_id = &project_id;

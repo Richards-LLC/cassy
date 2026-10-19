@@ -198,6 +198,7 @@ fn channel_result(channel_name: String, report: RepairReport) -> ChannelResult {
         .as_ref()
         .map(|response| (response.code, response.next_action))
         .unzip();
+    let retry_after = report.response.as_ref().and_then(|response| response.retry_after_secs);
     let outcome = match report.outcome {
         RepairOutcome::Managed => "managed",
         RepairOutcome::Blocked => "blocked",
@@ -208,7 +209,7 @@ fn channel_result(channel_name: String, report: RepairReport) -> ChannelResult {
         (RepairOutcome::Unknown, _) => Some(
             "rerun `cas update` to retry this channel; legacy intake stays paused until Cloud confirms".into(),
         ),
-        (_, Some(action)) => Some(remedy(action, &report.channel_id)),
+        (_, Some(action)) => Some(remedy(action, &report.channel_id, retry_after)),
         (_, None) => Some("resolve the cause above, then rerun `cas update`".into()),
     };
     let wire = |value: serde_json::Value| value.as_str().map(str::to_owned);
@@ -225,9 +226,13 @@ fn channel_result(channel_name: String, report: RepairReport) -> ChannelResult {
     }
 }
 
-fn remedy(action: NextAction, channel: &str) -> String {
+/// Cloud's own quiet window, not a client constant, says how long to wait.
+fn remedy(action: NextAction, channel: &str, retry_after_secs: Option<u64>) -> String {
+    let wait = retry_after_secs.map_or_else(|| "a few minutes".to_owned(), |secs| format!("{secs}s"));
     match action {
-        NextAction::StopLegacyIntake => "wait 5 minutes for legacy intake on every machine to go quiet, then rerun `cas update`".into(),
+        NextAction::StopLegacyIntake => format!(
+            "wait {wait} for legacy intake on every machine to go quiet, then rerun `cas update`"
+        ),
         NextAction::InviteViolet => format!("run `/invite @Violet` in channel {channel}, then rerun `cas update`"),
         NextAction::Authenticate => "run `cas login`, then rerun `cas update`".into(),
         NextAction::RestoreMembership => "check your Cassy Cloud team membership, then rerun `cas update`".into(),
@@ -236,7 +241,9 @@ fn remedy(action: NextAction, channel: &str) -> String {
             "resolve the mapping with `cas integrate violet --channel {channel}`, then rerun `cas update`"
         ),
         NextAction::UpgradeClient => "run `cas update` again after installing the newest Cassy".into(),
-        NextAction::RetryLater | NextAction::FixRequest | NextAction::None => "retry `cas update` later".into(),
+        NextAction::RetryLater | NextAction::FixRequest | NextAction::None => {
+            format!("retry `cas update` after {wait}")
+        }
     }
 }
 

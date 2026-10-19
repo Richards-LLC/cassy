@@ -295,22 +295,7 @@ fn create_and_log_in_new_profile(home: &Path, profile: &str) -> Result<String> {
         )
     })?;
 
-    // cas-e1f4: once accounts share a base folder, a new account links to
-    // it; before that, it is seeded from ~/.claude as it always was.
-    if crate::accounts::Provider::Claude.base_dir(home).is_dir() {
-        let linked =
-            crate::accounts::link_new_account(crate::accounts::Provider::Claude, home, &profile_dir)?;
-        eprintln!("Linked shared config from ~/.cas/claude-base: {}", linked.join(", "));
-        eprintln!("Credentials and account identity remain private to this profile.");
-    } else {
-        let seeding = seed_profile_dir(
-            &home.join(".claude"),
-            &profile_dir,
-            &SHARED_PROFILE_ENTRIES,
-            &PRIVATE_PROFILE_ENTRIES,
-        )?;
-        report_seeding(&seeding, "~/.claude");
-    }
+    link_or_seed_new_profile(home, &profile_dir)?;
 
     eprintln!(
         "Logging in Claude account config: {}",
@@ -332,6 +317,100 @@ fn create_and_log_in_new_profile(home: &Path, profile: &str) -> Result<String> {
     }
 
     Ok(profile)
+}
+
+/// cas-f4ea: the HOME-level canonical copy of the operator's personal `/finish`
+/// command, kept beside the Codex user skill that carries the same text.
+const PERSONAL_FINISH_REFERENCE: &str = ".agents/skills/finish/references/finish.md";
+
+/// Equip a newly created account: link it to the shared base when one exists
+/// (cas-e1f4), otherwise seed it from `~/.claude` as the picker always has.
+/// Both the picker and `cas claude login` use this, so neither path can leave
+/// a new account without the shared command surface.
+fn link_or_seed_new_profile(home: &Path, profile_dir: &Path) -> Result<()> {
+    if crate::accounts::Provider::Claude.base_dir(home).is_dir() {
+        let linked = crate::accounts::link_new_account(
+            crate::accounts::Provider::Claude,
+            home,
+            profile_dir,
+        )?;
+        if !linked.is_empty() {
+            eprintln!(
+                "Linked shared config from ~/.cas/claude-base: {}",
+                linked.join(", ")
+            );
+            eprintln!("Credentials and account identity remain private to this profile.");
+        }
+    } else {
+        let seeding = seed_profile_dir(
+            &home.join(".claude"),
+            profile_dir,
+            &SHARED_PROFILE_ENTRIES,
+            &PRIVATE_PROFILE_ENTRIES,
+        )?;
+        report_seeding(&seeding, "~/.claude");
+    }
+    seed_missing_personal_finish(home, profile_dir)
+}
+
+/// cas-f4ea: when the account's own `commands/` (not a link into `~/.claude`
+/// or the shared base) has no `finish.md`, copy the HOME reference there.
+/// Never replaces a file, never writes through a link, and does nothing when
+/// the reference is absent.
+fn seed_missing_personal_finish(home: &Path, profile_dir: &Path) -> Result<()> {
+    use std::io::Write;
+
+    let reference = home.join(PERSONAL_FINISH_REFERENCE);
+    let commands = profile_dir.join("commands");
+    let target = commands.join("finish.md");
+    let commands_linked =
+        std::fs::symlink_metadata(&commands).is_ok_and(|meta| meta.file_type().is_symlink());
+    if commands_linked || std::fs::symlink_metadata(&target).is_ok() || !reference.is_file() {
+        return Ok(());
+    }
+    let bytes = std::fs::read(&reference)
+        .with_context(|| format!("could not read {}", reference.display()))?;
+    std::fs::create_dir_all(&commands)
+        .with_context(|| format!("could not create {}", commands.display()))?;
+    // create_new: a file that appeared meanwhile is the operator's and stays.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+    {
+        Ok(mut file) => file
+            .write_all(&bytes)
+            .with_context(|| format!("could not write {}", target.display()))?,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not create {}", target.display()));
+        }
+    }
+    eprintln!("Added your personal /finish from ~/{PERSONAL_FINISH_REFERENCE}.");
+    Ok(())
+}
+
+/// `cas claude login <profile>`: create the profile directory and, for a new
+/// named account, equip it like a picker-created one (cas-f4ea). An existing
+/// account is left as it is, except that it still links to a shared base when
+/// one exists (cas-e1f4 QA F07); `main` is `~/.claude` itself.
+fn prepare_login_profile(home: &Path, profile: &str) -> Result<PathBuf> {
+    let profile_dir = resolve_profile_dir(home, profile);
+    let created = std::fs::symlink_metadata(&profile_dir).is_err();
+    std::fs::create_dir_all(&profile_dir).with_context(|| {
+        format!(
+            "could not create Claude profile directory {}",
+            profile_dir.display()
+        )
+    })?;
+    eprintln!(
+        "Logging in Claude account config: {}",
+        profile_dir.display()
+    );
+    if profile != "main" && (created || crate::accounts::Provider::Claude.base_dir(home).is_dir()) {
+        link_or_seed_new_profile(home, &profile_dir)?;
+    }
+    Ok(profile_dir)
 }
 
 /// Shared configuration surface symlinked into a freshly created profile.
@@ -607,29 +686,7 @@ fn execute_command(command: &ClaudeCommand) -> Result<()> {
         ClaudeCommand::Login { profile, args } => {
             let home =
                 dirs::home_dir().context("cannot determine home directory for Claude profiles")?;
-            let profile_dir = resolve_profile_dir(&home, profile);
-            std::fs::create_dir_all(&profile_dir).with_context(|| {
-                format!(
-                    "could not create Claude profile directory {}",
-                    profile_dir.display()
-                )
-            })?;
-            eprintln!(
-                "Logging in Claude account config: {}",
-                profile_dir.display()
-            );
-            // cas-e1f4 QA F07: a login creates an account dir too, and it
-            // links to the shared base like one the picker creates.
-            if profile != "main" && crate::accounts::Provider::Claude.base_dir(&home).is_dir() {
-                let linked = crate::accounts::link_new_account(
-                    crate::accounts::Provider::Claude,
-                    &home,
-                    &profile_dir,
-                )?;
-                if !linked.is_empty() {
-                    eprintln!("Linked shared config from ~/.cas/claude-base: {}", linked.join(", "));
-                }
-            }
+            let profile_dir = prepare_login_profile(&home, profile)?;
 
             let login_args = std::iter::once(OsString::from("auth"))
                 .chain(std::iter::once(OsString::from("login")))
@@ -995,5 +1052,42 @@ mod tests {
         assert_eq!(explicit.workers, 3);
         assert!(explicit.start_new);
         assert!(explicit.no_worktrees);
+    }
+
+    /// cas-f4ea: `cas claude login` used to create a bare account dir, so a new
+    /// account had no shared skills and no personal `/finish`. It now equips the
+    /// account like the picker and copies only a missing `/finish`.
+    #[cfg(unix)]
+    #[test]
+    fn login_equips_new_accounts_and_keeps_existing_commands_cas_f4ea() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let write = |path: &Path, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(&home.join(PERSONAL_FINISH_REFERENCE), "FINISH");
+        write(&home.join(".claude/skills/s/SKILL.md"), "shared skill");
+        write(&home.join(".claude-old@x.com/commands/finish.md"), "MINE");
+
+        let fresh = prepare_login_profile(&home, "fresh@x.com").unwrap();
+        assert_eq!(
+            std::fs::read_link(fresh.join("skills")).unwrap(),
+            home.join(".claude/skills")
+        );
+        assert_eq!(
+            std::fs::read_to_string(fresh.join("commands/finish.md")).unwrap(),
+            "FINISH"
+        );
+
+        let old = prepare_login_profile(&home, "old@x.com").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(old.join("commands/finish.md")).unwrap(),
+            "MINE"
+        );
+        assert!(
+            std::fs::symlink_metadata(old.join("skills")).is_err(),
+            "an existing account is not reseeded"
+        );
     }
 }

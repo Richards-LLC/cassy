@@ -15,7 +15,7 @@ spec.loader.exec_module(gate)
 
 BREACHES = (
     ("UPDATE prompt_queue SET highest_stage='abandoned' WHERE id=1", 'false-abandon'),
-    ("UPDATE operator_delivery_outbox SET relay_receipt=NULL,retained_at=NULL", 'operator-relay-receipts'),
+    ("UPDATE operator_cloud_outbox SET receipt_kind=NULL,receipt_at=NULL", 'operator-relay-receipts'),
     ("UPDATE communication_body_observations SET body_count=2", 'duplicate-body-reads'),
     # Observations that predate the epoch leave duplicate coverage unknown.
     ("UPDATE communication_observation_epoch SET started_at='2026-01-03T00:00:00Z'", 'duplicate-body-reads'),

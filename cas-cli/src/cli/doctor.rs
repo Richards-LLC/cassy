@@ -238,6 +238,7 @@ impl CheckGroup {
             "host"
             | "user-level store"
             | "known repos"
+            | "canonical id collision"
             | "host proxy"
             | "hub service"
             | "hub transport"
@@ -258,7 +259,6 @@ impl CheckGroup {
             | "code index copies"
             | "code history index" => Self::Indexes,
             "canonical id"
-            | "canonical id collision"
             | "cloud identity metadata"
             | "project aliases"
             | "cloud sync queue"
@@ -1064,6 +1064,7 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
     checks.push(host_proxy_check());
     #[cfg(not(feature = "mcp-proxy"))]
     checks.push(Check::new("host proxy", CheckStatus::Ok, "proxy integration unavailable in this build"));
+    checks.extend(canonical_id_collision_checks(current, collect_local_root_identities));
     checks.extend(registered_project_root_checks(current.unwrap_or_else(|| Path::new(""))));
     checks.push(scratchpad_policy_check());
     checks.push(slack_transport::check());
@@ -2169,6 +2170,61 @@ fn prompt_queue_read_failure(error: &str) -> &'static str {
     }
 }
 
+fn schema_check(cas_root: &Path) -> Check {
+    let shape = rusqlite::Connection::open_with_flags(
+        cas_root.join("cas.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| e.to_string())
+    .and_then(|conn| cas_store::missing_prompt_queue_columns(&conn).map_err(|e| e.to_string()));
+    match shape {
+        Ok(missing) if !missing.is_empty() => {
+            return Check {
+                name: "schema".into(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "prompt_queue is missing columns: {}; Run `cas update --schema-only`, then `cas doctor`",
+                    missing.join(", ")
+                ),
+            };
+        }
+        Err(error) => {
+            return Check {
+                name: "schema".into(),
+                status: CheckStatus::Warning,
+                message: format!("UNKNOWN prompt_queue schema: {error}"),
+            };
+        }
+        Ok(_) => {}
+    }
+    match crate::migration::check_migrations_read_only(cas_root) {
+        Ok(status) => {
+            if status.has_pending() {
+                Check {
+                    name: "schema".to_string(),
+                    status: CheckStatus::Warning,
+                    message: format!(
+                        "v{} ({} migration(s) pending). Run 'cas update --schema-only'",
+                        status.current_version,
+                        status.pending_count()
+                    ),
+                }
+            } else {
+                Check {
+                    name: "schema".to_string(),
+                    status: CheckStatus::Ok,
+                    message: format!("v{} (up to date)", status.current_version),
+                }
+            }
+        }
+        Err(e) => Check {
+            name: "schema".to_string(),
+            status: CheckStatus::Error,
+            message: format!("Cannot check migrations: {e}"),
+        },
+    }
+}
+
 fn supervisor_relay_check(cas_root: &Path) -> Check {
     if prompt_queue_absent(cas_root) {
         return Check {
@@ -2470,34 +2526,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     recorder.mark("store and database", &checks);
     // Check 3: Schema migrations
-    match check_migrations(&cas_root) {
-        Ok(status) => {
-            if status.has_pending() {
-                checks.push(Check {
-                    name: "schema".to_string(),
-                    status: CheckStatus::Warning,
-                    message: format!(
-                        "v{} ({} migration(s) pending). Run 'cas update --schema-only'",
-                        status.current_version,
-                        status.pending_count()
-                    ),
-                });
-            } else {
-                checks.push(Check {
-                    name: "schema".to_string(),
-                    status: CheckStatus::Ok,
-                    message: format!("v{} (up to date)", status.current_version),
-                });
-            }
-        }
-        Err(e) => {
-            checks.push(Check {
-                name: "schema".to_string(),
-                status: CheckStatus::Error,
-                message: format!("Cannot check migrations: {e}"),
-            });
-        }
-    }
+    checks.push(schema_check(&cas_root));
 
     recorder.mark("schema migrations", &checks);
     // Check 3a: Undelivered supervisor lifecycle relays (cas-7787, GH #160).
@@ -2968,13 +2997,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // instructions that no test in this repo can reach.
     recorder.mark("user skills", &checks);
 
-    // Check 14: cloud canonical id — which bucket this project syncs into,
-    // and whether any other known local project lands in the same bucket
-    // (cas-f699 / GH #134).
-    checks.extend(canonical_id_checks(
-        &cas_root,
-        collect_local_root_identities(),
-    ));
+    // Project identity stays local; host-wide collisions belong to doctor --host.
+    checks.extend(canonical_id_checks(&cas_root));
     if args.fix {
         if let Some(check) = canonical_alias_fix(&cas_root, args, cli) {
             checks.push(check);
@@ -4254,12 +4278,6 @@ fn registered_project_root_checks(current_project_root: &Path) -> Vec<Check> {
     checks
 }
 
-/// Build the canonical-id doctor rows. Pure given the resolved root list, so
-/// the collision warning is testable without touching the host registry.
-///
-/// `known_roots` carries the registry read outcome, not just its rows: an
-/// `Err` becomes a Warning row naming the failure, so a skipped collision
-/// check can never masquerade as a clean one.
 /// A moved origin is diagnostic, never an automatic remote rewrite.
 fn github_origin_check(project: &Path) -> Option<Check> {
     let timeout = Duration::from_secs(2);
@@ -4295,10 +4313,7 @@ fn github_origin_check(project: &Path) -> Option<Check> {
     )
 }
 
-fn canonical_id_checks(
-    cas_root: &Path,
-    known_roots: Result<Vec<crate::cloud::LocalRootIdentity>, String>,
-) -> Vec<Check> {
+fn canonical_id_checks(cas_root: &Path) -> Vec<Check> {
     let mut checks = Vec::new();
 
     let Some((canonical_id, source)) = crate::cloud::resolve_canonical_id_with_source(cas_root)
@@ -4326,42 +4341,72 @@ fn canonical_id_checks(
         message,
     });
 
-    let known_roots = match known_roots {
+    checks
+}
+
+/// Registry identity findings are host-scoped, including the read itself.
+/// Pins record local intent, not verified alias bindings or equal store data.
+/// No server confirmation is available here: a shared explicit pin stays an
+/// unknown identity-review warning, never a confirmed-fold informational row.
+fn canonical_id_collision_checks(
+    current_project: Option<&Path>,
+    known_roots: impl FnOnce() -> Result<Vec<crate::cloud::LocalRootIdentity>, String>,
+) -> Vec<Check> {
+    if current_project.is_some() {
+        return Vec::new();
+    }
+    let known_roots = match known_roots() {
         Ok(roots) => roots,
-        Err(e) => {
-            checks.push(Check {
-                name: "canonical id collision".to_string(),
-                status: CheckStatus::Warning,
-                message: format!(
-                    "Could not read the known-repos registry: {e} — canonical-id collision \
-                     check SKIPPED. This is not a clean result: other local projects may share \
-                     bucket `{canonical_id}` and go unreported. Run `cas known-repos list` to \
-                     confirm the registry is readable."
+        Err(error) => {
+            return vec![Check::new(
+                "canonical id collision",
+                CheckStatus::Warning,
+                format!(
+                    "Could not read the host known-repos registry: {error} — canonical-id \
+                     collision check SKIPPED. This is not a clean result: local projects may \
+                     share a cloud bucket and go unreported. Run `cas known-repos list` \
+                     to confirm the registry is readable."
                 ),
-            });
-            return checks;
+            )];
         }
     };
-
+    let mut checks = Vec::new();
     for collision in crate::cloud::detect_canonical_id_collisions(&known_roots) {
         let roots = collision
             .roots
             .iter()
-            .map(|p| p.display().to_string())
+            .map(|path| path.display().to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        checks.push(Check {
-            name: "canonical id collision".to_string(),
-            status: CheckStatus::Warning,
-            message: format!(
-                "DIFFERENT repositories share cloud bucket `{}`: {roots}. Every sync merges \
-                 them into each other. Give each one its own id with `cas cloud project set \
-                 <unique-id>` (run it inside each project).",
-                collision.canonical_id
-            ),
-        });
+        let unpinned = collision
+            .roots
+            .iter()
+            .filter(|root| {
+                crate::cloud::canonical_id_from_config_toml(&root.join(".cas"))
+                    .as_deref() != Some(collision.canonical_id.as_str())
+            })
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        let message = if unpinned.is_empty() {
+            format!(
+                "Shared explicit cloud pin `{}` across different repository identities: \
+                 {roots}. Identity review required: alias binding is unverified; matching \
+                 pins and local aliases do not prove equivalence. Inspect `cas cloud projects` \
+                 and ask the cloud owner to confirm these identities before changing any pin.",
+                collision.canonical_id,
+            )
+        } else {
+            format!(
+                "Different repository identities share cloud bucket `{}`: {roots}. Inspect \
+                 `cas cloud projects` and confirm which roots are unrelated. Only for \
+                 unrelated unpinned roots, run `cas cloud project set <unique-id>` inside: {}. \
+                 Keep deliberate pins unchanged pending identity confirmation.",
+                collision.canonical_id,
+                unpinned.join(", "),
+            )
+        };
+        checks.push(Check::new("canonical id collision", CheckStatus::Warning, message));
     }
-
     checks
 }
 
@@ -5795,8 +5840,16 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         .collect::<Vec<_>>()
         .join(", ");
     let registration_conflicts = cloud_queue_registration_conflicts(&conn);
-    let remediation = "Run `cas cloud queue --retry`, then `cas cloud push` to deliver pending work; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately.";
     let rejections = cloud_queue_rejections(&conn);
+    let remediation = if rejections.is_empty()
+        || rejections
+            .iter()
+            .any(|(reason, _)| crate::cloud::push_rejection_is_retryable(reason))
+    {
+        "Run `cas cloud queue --retry`, then `cas cloud push` to deliver pending work; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately."
+    } else {
+        "Run `cas cloud push` to deliver other pending work; resolve the rejection-specific blockers below before retrying their rows; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately."
+    };
 
     if !registration_conflicts.is_empty() {
         let parked = registration_conflicts
@@ -6334,6 +6387,9 @@ mod tests {
                 .map(|table| (table.name, table.columns, table.row_count))
                 .collect::<Vec<_>>()
         };
+        crate::migration::run_migrations(&root, false).unwrap();
+        assert!(!crate::migration::detector::table_exists(&conn,"prompt_queue"));
+        assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
         let before = schema();
         let counts_before = counts();
         let cli = Cli::parse_from(["cas", "--json", "doctor"]);
@@ -6383,17 +6439,68 @@ mod tests {
         // A queue that exists but can't be read is still a warning, said
         // without SQL error text: here an older queue missing the columns the
         // checks read.
-        let temp = TempDir::new().unwrap();
-        let db = temp.path().join("cas.db");
-        rusqlite::Connection::open(&db)
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("legacy");
+        fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        let db = root.join("cas.db");
+        // A complete numbered ledger must not conceal an old lazy queue.
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE prompt_queue (
+                    id INTEGER PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,
+                    prompt TEXT NOT NULL, created_at TEXT NOT NULL, processed_at TEXT,
+                    factory_session TEXT, summary TEXT, acked_at TEXT, acked_via TEXT
+                );
+                INSERT INTO prompt_queue VALUES
+                  (91,'supervisor','worker','retained message','2026-01-01',NULL,
+                   'legacy-session','retained summary','2026-01-02','inferred_from_reply');
+            INSERT INTO prompt_queue VALUES
+              (92,'supervisor','worker','legacy processed','2026-07-21T12:00:00Z',
+               '2026-07-21T12:00:01Z','legacy-session',NULL,NULL,NULL);
+            INSERT INTO prompt_queue VALUES
+              (93,'supervisor','worker','changed processed time','2026-07-21T12:00:00Z',
+               '2026-07-21T12:00:01Z','legacy-session',NULL,NULL,NULL);
+            INSERT INTO prompt_queue VALUES
+              (94,'supervisor','worker','advanced lifecycle','2026-07-21T12:00:00Z',
+               '2026-07-21T12:00:01Z','legacy-session',NULL,NULL,NULL);
+                CREATE INDEX legacy_queue_source ON prompt_queue(source);
+                CREATE TRIGGER legacy_queue_preserve BEFORE DELETE ON prompt_queue
+                  BEGIN SELECT RAISE(IGNORE); END;",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO operator_delivery_outbox
+                    (event_id,prompt_id,payload_snapshot,created_at)
+                    VALUES ('retained-event',9001,'retained outbox bytes','2026-01-01');",
+        )
+        .unwrap();
+        let before = get_schema_summary(&root)
             .unwrap()
-            .execute_batch("CREATE TABLE prompt_queue(id INTEGER PRIMARY KEY);")
-            .unwrap();
-        let before = fs::read(&db).unwrap();
-        for check in [
-            supervisor_relay_check(temp.path()),
-            delivery_retries_check(temp.path()),
-        ] {
+            .tables
+            .into_iter()
+            .map(|t| (t.name, t.columns, t.row_count))
+            .collect::<Vec<_>>();
+        let schema = schema_check(&root);
+        assert!(
+            matches!(schema.status, CheckStatus::Warning),
+            "{}",
+            schema.message
+        );
+        for column in ["kind", "highest_stage", "delivery_attempts"] {
+            assert!(
+                schema.message.contains(column),
+                "missing {column}: {}",
+                schema.message
+            );
+        }
+        assert!(!schema.message.contains("up to date"), "{}", schema.message);
+        assert!(
+            schema.message.contains("cas update --schema-only"),
+            "{}",
+            schema.message
+        );
+        for check in [supervisor_relay_check(&root), delivery_retries_check(&root)] {
             assert!(
                 matches!(check.status, CheckStatus::Warning),
                 "{}",
@@ -6408,7 +6515,203 @@ mod tests {
                 assert!(!check.message.contains(sql), "{}", check.message);
             }
         }
-        assert_eq!(fs::read(&db).unwrap(), before);
+        assert_eq!(
+            get_schema_summary(&root)
+                .unwrap()
+                .tables
+                .into_iter()
+                .map(|t| (t.name, t.columns, t.row_count))
+                .collect::<Vec<_>>(),
+            before
+        );
+        // Repair is explicit and runs the actual numbered migration path.
+        conn.execute("DELETE FROM cas_migrations WHERE id=279", [])
+            .unwrap();
+        // Reserved snapshot collisions are refused without overwriting data.
+        conn.execute_batch(
+            "CREATE TABLE cas_prompt_queue_legacy_processed(unrelated TEXT);
+                INSERT INTO cas_prompt_queue_legacy_processed VALUES ('retain collision');",
+        )
+        .unwrap();
+        assert!(crate::migration::run_migrations(&root, false).is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT unrelated FROM cas_prompt_queue_legacy_processed",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "retain collision"
+        );
+        assert!(!crate::migration::detector::column_exists(
+            &conn,
+            "prompt_queue",
+            "highest_stage"
+        ));
+        conn.execute_batch(
+            "DROP TABLE cas_prompt_queue_legacy_processed;
+                CREATE TRIGGER refuse_snapshot_commit BEFORE INSERT ON cas_migrations
+                WHEN NEW.id=279 BEGIN SELECT RAISE(ABORT,'fixture refusal'); END;",
+        )
+        .unwrap();
+        assert!(crate::migration::run_migrations(&root, false).is_err());
+        assert!(!crate::migration::detector::table_exists(
+            &conn,
+            "cas_prompt_queue_legacy_processed"
+        ));
+        assert!(!crate::migration::detector::column_exists(
+            &conn,
+            "prompt_queue",
+            "highest_stage"
+        ));
+        conn.execute_batch("DROP TRIGGER refuse_snapshot_commit")
+            .unwrap();
+        let result = crate::migration::run_migrations(&root, false).unwrap();
+        assert!(result.errors.is_empty(), "{result:?}");
+        assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
+        for check in [supervisor_relay_check(&root), delivery_retries_check(&root)] {
+            assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+        }
+        cas_store::communication_slo::read_session(&root, "legacy-session", chrono::Utc::now())
+            .expect("communication query must measure after supported repair");
+        let row: (String, Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT prompt,acked_at,acked_via,highest_stage FROM prompt_queue WHERE id=91",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "retained message".into(),
+                Some("2026-01-02".into()),
+                Some("inferred_from_reply".into()),
+                None
+            ),
+            "repair must not demote historical receipts"
+        );
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('legacy_queue_source','legacy_queue_preserve')", [], |r|r.get::<_,i64>(0)).unwrap(),2);
+        assert_eq!(
+            conn.query_row(
+                "SELECT payload_snapshot FROM operator_delivery_outbox WHERE event_id='retained-event'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "retained outbox bytes"
+        );
+        assert_eq!(
+            crate::migration::run_migrations(&root, false)
+                .unwrap()
+                .applied_count,
+            0
+        );
+        // Explicit schema repair must not consume runtime's legacy delivery
+        // compatibility sentinel. Later mark_processed calls remain distinct.
+        let queue = crate::store::SqlitePromptQueueStore::open(&root).unwrap();
+        let later = queue
+            .enqueue("supervisor", "worker", "post-repair drain")
+            .unwrap();
+        queue.mark_processed(later).unwrap();
+        conn.execute_batch(
+            "UPDATE prompt_queue SET processed_at='2026-07-21T12:00:02Z' WHERE id=93;
+                UPDATE prompt_queue SET highest_stage='selected' WHERE id=94;",
+        )
+        .unwrap();
+        // Runtime consumes neither changed timestamps nor advanced stages.
+        queue.init().unwrap();
+        let legacy = queue.message_delivery_report(92).unwrap().unwrap();
+        assert_eq!(
+            legacy.stage,
+            cas_store::DeliveryStage::Delivered,
+            "migration before runtime init must retain legacy delivery compatibility"
+        );
+        assert_eq!(
+            legacy.delivered_at.unwrap().to_rfc3339(),
+            "2026-07-21T12:00:01+00:00"
+        );
+        assert!(legacy.confirmed_at.is_none());
+        assert_eq!(
+            queue.message_delivery_report(later).unwrap().unwrap().stage,
+            cas_store::DeliveryStage::Enqueued,
+            "new mark_processed is not transport evidence"
+        );
+        assert_eq!(
+            queue.message_delivery_report(93).unwrap().unwrap().stage,
+            cas_store::DeliveryStage::Enqueued
+        );
+        assert_eq!(
+            queue.message_delivery_report(94).unwrap().unwrap().stage,
+            cas_store::DeliveryStage::Selected
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM cas_prompt_queue_legacy_processed",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        conn.execute_batch("UPDATE prompt_queue SET processed_at='2026-07-21T12:00:01Z' WHERE id=93;")
+            .unwrap();
+        queue.init().unwrap();
+        assert!(
+            queue
+                .message_delivery_report(93)
+                .unwrap()
+                .unwrap()
+                .delivered_at
+                .is_none(),
+            "consumed stale evidence must not reactivate after timestamp reversal"
+        );
+        assert!(
+            queue
+                .message_delivery_report(later)
+                .unwrap()
+                .unwrap()
+                .delivered_at
+                .is_none()
+        );
+
+        // A previously recorded repair is replayable, and failure to record
+        // its receipt rolls back the DDL in the same owned transaction.
+        conn.execute_batch(
+            "ALTER TABLE prompt_queue DROP COLUMN first_attempt_at;
+                    CREATE TRIGGER refuse_repair_receipt BEFORE INSERT ON cas_migration_reconciliations
+                    WHEN NEW.migration_id=279 BEGIN SELECT RAISE(ABORT,'fixture refusal'); END;",
+        )
+        .unwrap();
+        assert!(crate::migration::run_migrations(&root, false).is_err());
+        assert!(!crate::migration::detector::column_exists(
+            &conn,
+            "prompt_queue",
+            "first_attempt_at"
+        ));
+        conn.execute_batch("DROP TRIGGER refuse_repair_receipt")
+            .unwrap();
+        crate::migration::run_migrations(&root, false).unwrap();
+        assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
+        // A detected-but-unrecorded row is computed, never written by doctor.
+        conn.execute("DELETE FROM cas_migrations WHERE id=279", [])
+            .unwrap();
+        assert!(matches!(schema_check(&root).status, CheckStatus::Ok));
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM cas_migrations WHERE id=279",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        let unreadable = env.home().join("unreadable");
+        fs::create_dir_all(&unreadable).unwrap();
+        fs::write(unreadable.join("cas.db"), b"not a database").unwrap();
+        let unknown = schema_check(&unreadable);
+        assert!(matches!(unknown.status, CheckStatus::Warning));
+        assert!(unknown.message.starts_with("UNKNOWN prompt_queue schema:"));
         assert_eq!(
             prompt_queue_read_failure("database is locked"),
             "the database is in use by another process; run cas doctor again in a moment"
@@ -8327,6 +8630,24 @@ mod tests {
             "a row with no cloud verdict is not a rejection: {}",
             check.message
         );
+
+        for (reason, retry_now) in [
+            ("invalid_json_nul", false),
+            ("version_gate", false),
+            ("unknown_server_reason", false),
+            ("timeout", true),
+        ] {
+            conn.execute("UPDATE sync_queue SET last_reason = ?1 WHERE id IN (1, 2)", [reason]).unwrap();
+            let check = cloud_queue_check(&cas_root);
+            assert!(matches!(check.status, CheckStatus::Warning));
+            assert_eq!(
+                check.message.contains("Run `cas cloud queue --retry`, then"),
+                retry_now,
+                "{reason}: blocked-only rejection advice must not prescribe an immediate broad retry: {}", check.message
+            );
+            assert!(check.message.contains(crate::cloud::push_reason_hint(reason)), "{}", check.message);
+            assert!(check.message.contains("cas cloud push"), "other pending work still needs a push: {}", check.message);
+        }
     }
 
     #[test]
@@ -9082,7 +9403,7 @@ mod tests {
         let cas_root = temp.path().join("gabber-studio/.cas");
         fs::create_dir_all(&cas_root).unwrap();
 
-        let checks = canonical_id_checks(&cas_root, Ok(Vec::new()));
+        let checks = canonical_id_checks(&cas_root);
         let msg = messages(&checks, "canonical id").join("");
         assert!(msg.contains("gabber-studio"), "got: {msg}");
         assert!(msg.contains("folder name"), "got: {msg}");
@@ -9331,30 +9652,60 @@ mod tests {
     #[test]
     fn canonical_id_check_warns_loudly_on_a_shared_bucket() {
         let temp = TempDir::new().unwrap();
-        let cas_root = temp.path().join("accounting/.cas");
-        fs::create_dir_all(&cas_root).unwrap();
-
-        let known = vec![
+        let mut known = vec![
             crate::cloud::LocalRootIdentity {
-                project_root: "/home/u/client-one/accounting".into(),
+                project_root: temp.path().join("client-one/accounting"),
                 canonical_id: "accounting".to_string(),
                 git_remote: Some("github.com/client-one/accounting".to_string()),
             },
             crate::cloud::LocalRootIdentity {
-                project_root: "/home/u/client-two/accounting".into(),
+                project_root: temp.path().join("client-two/accounting"),
                 canonical_id: "accounting".to_string(),
                 git_remote: Some("gitlab.com/client-two/accounting".to_string()),
             },
         ];
-        let checks = canonical_id_checks(&cas_root, Ok(known));
+        for root in &known {
+            let cas = root.project_root.join(".cas");
+            fs::create_dir_all(&cas).unwrap();
+            fs::write(cas.join("config.toml"), "[project]\ncanonical_id = \"accounting\"\n").unwrap();
+        }
+        let checks = canonical_id_collision_checks(None, || Ok(known.clone()));
         let collision = checks
             .iter()
             .find(|c| c.name == "canonical id collision")
-            .expect("collision row must be present");
+            .expect("shared explicit pins still require identity review");
         assert!(matches!(collision.status, CheckStatus::Warning));
-        assert!(collision.message.contains("client-one/accounting"));
-        assert!(collision.message.contains("client-two/accounting"));
-        assert!(collision.message.contains("cas cloud project set"));
+        assert!(collision.message.contains("unverified"), "{}", collision.message);
+        assert!(!collision.message.contains("cas cloud project set"), "{}", collision.message);
+        assert_eq!(checks.len(), 1);
+        assert!(matches!(collision.group(), CheckGroup::Host));
+
+        // A fallback root must not authorize splitting the explicitly pinned one.
+        fs::remove_file(known[1].project_root.join(".cas/config.toml")).unwrap();
+        known[1].git_remote = None;
+        let mixed = canonical_id_collision_checks(None, || Ok(known.clone()));
+        assert_eq!(mixed.len(), 1);
+        let remedy = mixed[0].message.split("inside: ").nth(1).unwrap();
+        assert!(remedy.contains(&known[1].project_root.display().to_string()));
+        assert!(!remedy.contains(&known[0].project_root.display().to_string()));
+
+        fs::remove_file(known[0].project_root.join(".cas/config.toml")).unwrap();
+        known[0].git_remote = None;
+        let fallback = canonical_id_collision_checks(None, || Ok(known.clone()));
+        assert_eq!(fallback.len(), 1);
+        assert!(matches!(fallback[0].status, CheckStatus::Warning));
+        assert!(fallback[0].message.contains("cas cloud project set <unique-id>"));
+        for root in &known {
+            assert!(fallback[0].message.contains(&root.project_root.display().to_string()));
+        }
+    }
+
+    #[test]
+    fn project_doctor_does_not_scan_host_canonical_id_collisions() {
+        let checks = canonical_id_collision_checks(Some(Path::new("project")), || {
+            panic!("a project report must not read host collision identities")
+        });
+        assert!(checks.is_empty());
     }
 
     #[test]
@@ -9367,7 +9718,7 @@ mod tests {
         let cas_root = temp.path().join("some-project/.cas");
         fs::create_dir_all(&cas_root).unwrap();
 
-        let checks = canonical_id_checks(&cas_root, Err("disk I/O error".to_string()));
+        let checks = canonical_id_collision_checks(None, || Err("disk I/O error".to_string()));
         let row = checks
             .iter()
             .find(|c| c.name == "canonical id collision")
@@ -9377,7 +9728,7 @@ mod tests {
         assert!(row.message.contains("SKIPPED"), "{}", row.message);
         // The bucket row is still reported — the skip is scoped to the
         // collision check, not the whole diagnostic.
-        assert_eq!(messages(&checks, "canonical id").len(), 1);
+        assert_eq!(messages(&canonical_id_checks(&cas_root), "canonical id").len(), 1);
     }
 
     #[test]
@@ -9426,7 +9777,7 @@ mod tests {
                 .unwrap();
         }
 
-        let checks = canonical_id_checks(&cas_root, Ok(Vec::new()));
+        let checks = canonical_id_checks(&cas_root);
         let msg = messages(&checks, "canonical id").join("");
         assert!(msg.contains("github.com/acme/renamed"), "got: {msg}");
         assert!(

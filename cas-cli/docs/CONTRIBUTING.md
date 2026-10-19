@@ -94,6 +94,21 @@ database at a guessed path. Writable prompt-queue opens remove a regular empty
 files, symlinks and sidecar-backed artifacts remain untouched for investigation.
 Read-only queue opens never perform this cleanup.
 
+`cas doctor` inspects legacy `prompt_queue` columns without initializing the
+queue or recording migration detections. If required health-check columns are
+missing, its schema finding names them and points to `cas update --schema-only`.
+That explicit migration reuses the queue's canonical additive DDL on the
+migration transaction's connection, preserving messages, receipts and outboxes.
+Before adding lifecycle columns, it copies legacy processed-row identities and
+timestamps into reserved compatibility metadata in the same transaction. It
+does not change original messages, acknowledgements, receipts or outboxes.
+Runtime queue initialization later hydrates delivery stage/time only for those
+unchanged candidates, consuming stale candidates too; later `mark_processed`
+calls do not become transport evidence. The repair itself does not run runtime
+acknowledgement demotion or lifecycle hydration. A store that has never created
+a prompt queue keeps it absent. Run `cas doctor` again
+after repair to measure communication, relay and retry health.
+
 A parked task can merge its pushed delivery while its worker checkout holds
 uncommitted work for a later task. With `cleanup=false`, `worktree_merge` checks
 that the local source and a fresh origin fetch both equal the parked anchor,
@@ -347,9 +362,27 @@ These reads never save the inferred value. Raw `Config::get`/`list`, editing,
 serialization and `config diff` retain stored values. Legacy `report_cas_bug`,
 automatic issue triage and release-report GitHub intake retain their explicit
 configuration contracts; they do not infer a project target from origin.
-`report_cas_bug` continues using its explicit legacy override or the Cassy
-component repository. Only project initialization may persist a discovered
-origin; routine reads and updates do not backfill it.
+`report_cas_bug` uses effective `issues.components.cassy`, including the
+compiled Cassy repository (`Richards-LLC/cassy`) when that component is absent.
+For example, `issues.repo = "example/downstream"` alone still files Cassy bugs
+in `Richards-LLC/cassy`, agreeing with `cas config get issues.components.cassy`.
+The checkout's inferred origin is never a Cassy filing target.
+
+Legacy opt-out: a raw, explicitly blank or whitespace-only
+`[issues.components] cassy` value in config.toml permits a nonblank stored
+`issues.repo` fallback. If the project override is also blank or absent, the
+compiled Cassy default applies. This opt-out differs from clearing the component
+with `cas config set issues.components.cassy ""`, which removes the raw override
+and restores the default. Configure a nonblank component explicitly for a fork.
+
+It validates the selected destination as `owner/name` before any GitHub call;
+an invalid selected value never falls through to another tracker. Instead the
+report is durably staged under the task's artifacts directory and the response
+names the selected key and `cas config set <key> owner/name` remedy. Correct
+that setting before retrying; a staged report has not been filed. Existing
+credential failures and label degradation retain their filing behavior.
+Only project initialization may persist a discovered origin; routine reads
+and updates do not backfill it.
 
 ## Canonical install path
 
@@ -738,6 +771,38 @@ the worker still starts. A name also listed in `supervisor_only_env` stays
 denied, with the conflict named in the same warning. An operation needing an
 unavailable credential then fails visibly; one missing token does not stop the
 fleet. Supervisors keep their own credentials and configuration.
+
+### Tool-cache paths in Codex children
+
+Cassy forwards these four tool-owned variables through Codex's restricted
+`cas serve` MCP environment: `NODE_COMPILE_CACHE`, `PWTEST_CACHE_DIR`,
+`PYTEST_DEBUG_TEMPROOT`, and `V8_COMPILE_CACHE_CACHE_DIR`. Servers started through
+that MCP process inherit them. Export the desired paths before starting the
+factory or its owning daemon, for example:
+
+```sh
+export NODE_COMPILE_CACHE="$HOME/.cache/node-compile"
+export PWTEST_CACHE_DIR="$HOME/.cache/playwright-tests"
+export PYTEST_DEBUG_TEMPROOT="$HOME/.cache/pytest-temp"
+export V8_COMPILE_CACHE_CACHE_DIR="$HOME/.cache/v8-compile"
+```
+
+Factory spawns forward the final pane values, including explicit overrides;
+`supervisor_only_env` removals still win. Changing a shell or user-manager
+environment does not change an already running process's environment. Cassy
+does not read these paths back from shell profiles or the user manager.
+
+`cas init` and `cas update` also append these names to the managed
+`mcp_servers.cs.env_vars` array in Codex configuration, preserving existing
+entries and explicit `cs.env` settings. Only names are stored there, so each
+Codex launch reads its own environment. An unset variable adds no value or
+default; an explicitly configured MCP value retains its existing behavior.
+No other cache, credential, or account variables gain passthrough.
+
+The forwarding policy uses Codex configuration on supported factory platforms;
+it does not depend on systemd. Paths, spaces and Unicode are forwarded without
+expansion or rewriting. The consuming tool determines platform support, cache
+creation and cleanup. Cassy does not migrate existing caches or restart servers.
 
 ## Testing
 
@@ -1565,7 +1630,21 @@ terminal task ownership loses its warm-cache reservation. Cleanup rechecks that
 ownership and holds the lane, Cargo and lifetime locks; recent writes, live
 users and uncertain evidence still preserve the cache. Missing-gitdir checkouts
 are measured with newest-write timestamps and manual-review guidance, but are
-never adopted or selected automatically.
+never adopted or selected automatically. An operator can authorize one exact
+unknown-owner cache with `factory action=gc_cleanup
+reclaim_unknown_target=/absolute/checkout/target force=true dry_run=false`.
+The opt-in also supports the exact retired `.cas/merge-sweeps/assembly-target`.
+Parents, patterns, aliases and arbitrary paths do not grant ownership or consent.
+The named operation runs only target-cache GC: source, task evidence, processes
+and journey recordings are untouched. It cannot combine `artifacts=true` or
+prompt expiry. Omit either destructive flag to preview with a refusal reason.
+
+Named reclaim still requires a positive `factory.target_cache_min_idle_secs`
+(default 7200 seconds), same-user nonsymlink files, no native process/open-handle
+use (opaque evidence refuses), and the existing lane, Cargo and lifetime guards.
+It rechecks recent writes under those guards and the target/worktree identities
+before and after quarantine. Neither path conventions nor explicit consent
+create an ownership/adoption record.
 
 
 Assembly and release scratch uses an owner record, PID start-time identity and
@@ -1991,6 +2070,19 @@ A read-only no-code task also closes on portable PR or artifact evidence when
 its allocated task branch contains only foreign commits. An earlier false park
 on those commits is retired; allocating a branch does not establish ownership.
 Named task commits and unclaimed unmerged changes still require delivery proof.
+A live registered supervisor can close a verification-only task whose throwaway
+CI commits must never merge with `evidence_only=true` and
+`evidence_only_reference=never-merge:branch:<proof-ref>`, retaining the required
+task-root artifact and rationale. Cassy measures the reference, retained anchors
+and task lanes against the fresh target, with a combined 256-commit limit.
+Only regular YAML files directly under `.github/workflows/` may be declared
+non-delivery; product paths, executable files, symlinks, merges, unknown anchors
+and code methodologies refuse this disposition. The proof reference must be
+unmerged. Its immutable SHA and measured commits are audited, while evidence
+records the target SHA with no delivery paths. The explicit never-merge
+declaration does not predict or authorize a future Git merge. Ordinary evidence
+references and negative-result closes retain their existing rules. Stale-anchor
+recovery suggests a replacement receipt only when its tip belongs to the task.
 QA classification of an integrated merge receipt uses that merge's own
 first-parent diff. Later PR merges cannot add their UI paths to the receipt's
 evidence requirements or hide UI that the receipt itself delivered.

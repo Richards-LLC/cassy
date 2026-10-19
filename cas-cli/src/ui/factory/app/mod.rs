@@ -1561,6 +1561,7 @@ impl FactoryApp {
             facts,
             session: session_progress,
             mut merge_alerts,
+            worker_ci_waits,
         } = inputs;
         let session_progress = session_progress.unwrap_or_default();
         // cas-223f review M3: revalidation joins the fresh read's store facts
@@ -1632,13 +1633,23 @@ impl FactoryApp {
                     return Some(event.clone());
                 }
                 if let DirectorEvent::WorkerIdle { worker, .. } = event {
-                    revalidate_event_for_delivery_with_context(
+                    let current = revalidate_event_for_delivery_with_context(
                         event,
                         &unfiltered_data,
                         &self.supervisor_name,
                         focused_epic_id,
                         self.event_detector.worker_idle_since(worker),
-                    )
+                    )?;
+                    if let DirectorEvent::WorkerIdle { active_task: Some(task), .. } = &current
+                        && let Some((waiting_task, tip)) = worker_ci_waits.get(worker)
+                        && *waiting_task == task.task_id
+                        && task.task_status == cas_types::TaskStatus::InProgress
+                    {
+                        tracing::debug!(worker = %worker, task = %waiting_task, tip = %tip,
+                            "suppressing idle relay while pushed-tip CI is pending");
+                        return None;
+                    }
+                    Some(current)
                 } else if matches!(event, DirectorEvent::SupervisorStalled { .. }) {
                     let evidence = evidence.clone().unwrap_or_default();
                     self.supervisor_stall_event_is_current(

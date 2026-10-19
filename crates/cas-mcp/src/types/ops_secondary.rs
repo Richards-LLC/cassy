@@ -744,9 +744,15 @@ pub struct FactoryRequest {
     pub dry_run: Option<bool>,
 
     /// Explicitly opt into deleting durable task artifacts.
-    #[schemars(description = "gc_cleanup: artifact deletion (off by default); force=true dry_run=false plus retention checks.")]
+    #[schemars(description = "gc_cleanup: opt-in; force=true dry_run=false; retention applies.")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub artifacts: Option<bool>,
+
+    /// gc_cleanup only: exact absolute unknown-owner cache path authorized for reclaim.
+    /// Requires force=true, dry_run=false and the configured positive quiet window.
+    #[schemars(description = "gc_cleanup: exact unknown-owner target; force=true dry_run=false.")]
+    #[serde(default)]
+    pub reclaim_unknown_target: Option<String>,
 
     /// Clear the pinned epic focus for focus_epic
     #[schemars(description = "Clear the pinned epic focus (focus_epic only)")]
@@ -1000,7 +1006,7 @@ pub struct CoordinationRequest {
     pub request_id: Option<String>,
 
     /// External-work claim resource; accept_claim instead uses handoff_id.
-    #[schemars(description = "release_claim/transfer_claim only: external-work resource id")]
+    #[schemars(description = "release/transfer/renew_claim, reply_intent: claim resource id")]
     #[serde(default)]
     pub resource_id: Option<String>,
 
@@ -1010,7 +1016,7 @@ pub struct CoordinationRequest {
     pub handoff_id: Option<String>,
 
     /// Current claim generation required for release, transfer, and accept.
-    #[schemars(description = "release_claim/transfer_claim/accept_claim: required current generation")]
+    #[schemars(description = "release/transfer/accept/renew_claim, reply_intent: current generation")]
     #[serde(default, deserialize_with = "deser::option_u64")]
     pub expected_generation: Option<u64>,
 
@@ -1024,20 +1030,25 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_u32")]
     pub offer_ttl_secs: Option<u32>,
 
+    /// cas-f869: reply_intent's optional Cloud occurrence id.
+    #[schemars(description = "reply_intent: optional occurrence id")]
+    #[serde(default)]
+    pub occurrence_id: Option<String>,
+
     /// Task ID (for loop_start, worktree_create, spawn_workers, server_start,
     /// server_list, remind, or a
     /// merge_request message).
     /// A reminder linked to this task is quarantined when it closes unless
     /// `cross_session=true` explicitly keeps it.
     #[schemars(
-        description = "Task ID. loop_start/worktree_create: the task the loop or worktree is scoped to. spawn_workers: pre-assign it to the single spawned worker; an open task_id also authorizes the spawn without an active EPIC. server_start: owning task; server_list: owning-task filter. remind: bind stale-context cleanup to it (close quarantines it unless cross_session=true). message with merge_request=true: the parked merge delivery."
+        description = "Task ID. loop_start/worktree_create: the loop's or worktree's task. spawn_workers: pre-assign to the one spawned worker; an open task_id also authorizes a spawn without an active EPIC. server_start: owning task; server_list: owner filter. remind: bind stale-context cleanup (close quarantines it unless cross_session=true). message with merge_request=true: the parked merge delivery."
     )]
     #[serde(default)]
     pub task_id: Option<String>,
 
     /// Factory delivery route for spawn_workers/focus_epic.
     #[schemars(
-        description = "Factory delivery mode: 'push_branch' (default) or 'local_merge' (supervisor merges local worker branches)"
+        description = "Delivery mode: 'push_branch' (default) or 'local_merge' (supervisor merges local worker branches)"
     )]
     #[serde(default)]
     pub delivery_mode: Option<String>,
@@ -1125,7 +1136,7 @@ pub struct CoordinationRequest {
 
     /// Force operation (shutdown, worktree cleanup/merge, gc_cleanup, sync_all_workers)
     #[schemars(
-        description = "Override the dirty/in-progress guard. shutdown_workers: required to stop a mid-task, dirty or unpushed worker (check its worktree first). worktree_cleanup/worktree_merge: proceed with uncommitted changes; never authorizes trunk (allow_trunk does). sync_all_workers: rebase a stale or offline worker that is dirty (WIP stashed and restored) or mid-task; a live worker's worktree is always skipped and a mid-rebase one refused, even with force=true."
+        description = "Override the dirty/in-progress guard. shutdown_workers: required to stop a mid-task, dirty or unpushed worker (check its worktree first). worktree_cleanup/worktree_merge: proceed despite uncommitted changes; never authorizes trunk (allow_trunk does). sync_all_workers: rebase a stale or offline worker that is dirty (WIP stashed, restored) or mid-task; a live worker's worktree is always skipped and a mid-rebase one refused, even with force=true."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub force: Option<bool>,
@@ -1299,7 +1310,7 @@ pub struct CoordinationRequest {
 
     /// Whether workers need isolated git worktrees
     #[schemars(
-        description = "Give each worker its own git worktree (branch and directory); prefer true. false or omitted shares one mutable checkout across workers and is contamination-prone: HEAD can switch between tool calls, commits can land on a foreign worker's branch, HEAD:<mine> pushes can graft foreign commits, and skill files can change mid-session. Such spawn receipts warn."
+        description = "Give each worker its own git worktree (branch and directory); prefer true. false or omitted shares one mutable checkout and risks contamination: HEAD can switch between tool calls, commits can land on another worker's branch, HEAD:<mine> pushes can graft foreign commits, skill files can change mid-session. Such spawn receipts warn."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub isolate: Option<bool>,
@@ -1339,7 +1350,7 @@ pub struct CoordinationRequest {
     /// Account directory override for spawn_workers: CLAUDE_CONFIG_DIR for
     /// Claude workers, CODEX_HOME for Codex workers.
     #[schemars(
-        description = "spawn_workers account directory: CLAUDE_CONFIG_DIR for Claude workers (e.g. '~/.claude-alt'; an explicit value drops an inherited ANTHROPIC_API_KEY so the OAuth account is used), CODEX_HOME for Codex (must hold auth.json); Grok has no account plumbing and warns. Omitted: the supervisor's own directory for that harness, captured at enqueue and never crossed between providers."
+        description = "spawn_workers account directory: CLAUDE_CONFIG_DIR for Claude (e.g. '~/.claude-alt'; an explicit value drops an inherited ANTHROPIC_API_KEY so the OAuth account is used), CODEX_HOME for Codex (must hold auth.json); Grok has no account plumbing and warns. Omitted: the supervisor's own directory for that harness, captured at enqueue, never crossed between providers."
     )]
     #[serde(default)]
     pub config_dir: Option<String>,
@@ -1436,15 +1447,21 @@ pub struct CoordinationRequest {
 
     /// Preview cleanup without making changes.
     #[schemars(
-        description = "Preview cleanup without making changes (worktree_cleanup; gc_cleanup target caches default to preview unless explicitly false)"
+        description = "Preview cleanup; gc_cleanup caches default to true."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub dry_run: Option<bool>,
 
     /// Explicitly opt into deleting durable task artifacts.
-    #[schemars(description = "gc_cleanup: artifact deletion (off by default); force=true dry_run=false plus retention checks.")]
+    #[schemars(description = "gc_cleanup: opt-in; force=true dry_run=false; retention applies.")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub artifacts: Option<bool>,
+
+    /// gc_cleanup only: exact absolute unknown-owner cache path authorized for reclaim.
+    /// Requires force=true, dry_run=false and the configured positive quiet window.
+    #[schemars(description = "gc_cleanup: exact unknown-owner target; force=true dry_run=false.")]
+    #[serde(default)]
+    pub reclaim_unknown_target: Option<String>,
 
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
@@ -1594,6 +1611,7 @@ impl CoordinationRequest {
             reason: self.reason.clone(),
             dry_run: self.dry_run,
             artifacts: self.artifacts,
+            reclaim_unknown_target: self.reclaim_unknown_target.clone(),
             clear: self.clear,
             branch: self.branch.clone(),
             older_than_secs: self.older_than_secs,

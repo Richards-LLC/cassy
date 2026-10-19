@@ -7046,6 +7046,28 @@ impl CasService {
         use cas_types::{AgentRole, AgentStatus, WorktreeStatus};
         use std::path::Path;
 
+        if let Some(path) = req.reclaim_unknown_target.as_deref() {
+            // Exact cache consent never invokes process reaping, task/artifact
+            // retention, journey cleanup or any other GC mutation.
+            if req.artifacts == Some(true) || req.older_than_secs.is_some() {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "Named unknown-cache reclaim cannot combine artifacts or prompt expiry; no cleanup performed"));
+            }
+            let config = crate::config::Config::load(&self.inner.cas_root)
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("Cannot establish cache policy: {error}")))?;
+            let agents = open_agent_store(&self.inner.cas_root)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            let worktrees = open_worktree_store(&self.inner.cas_root)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            let live = live_target_cache_worktrees(agents.as_ref(), &self.inner.cas_root);
+            let report = cleanup_target_cache_report(&self.inner.cas_root, &config, agents.as_ref(),
+                worktrees.as_ref(), &live, req.force == Some(true) && req.dry_run == Some(false), Some(Path::new(path)));
+            return Ok(Self::success(match report {
+                Ok(report) => format!("Named unknown-owner cache reclaim.{}", render_target_cache_report(&report)),
+                Err(error) => format!("Named cache reclaim refused (fail-closed): {error}"),
+            }));
+        }
+
         let prompt_expiry_age = req.older_than_secs;
         let stale_after = prompt_expiry_age.unwrap_or(120);
         let agent_store = open_agent_store(&self.inner.cas_root).map_err(|e| {
@@ -7301,33 +7323,10 @@ impl CasService {
                 inventory
             }
         };
-        let target_cache_result = {
-            let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
-            let known_roots = known_target_cache_worktrees(
-                &self.inner.cas_root,
-                &config,
-                agent_store.as_ref(),
-                worktree_store.as_ref(),
-            );
-            crate::factory_target_cache::inspect(
-                &self.inner.cas_root,
-                policy,
-                &known_roots,
-                &live_target_cache_roots,
-                !target_cache_mutation_authorized,
-            )
-            .and_then(|mut report| {
-                if target_cache_mutation_authorized {
-                    crate::factory_target_cache::cleanup_selected(
-                        &self.inner.cas_root,
-                        &mut report,
-                        policy,
-                        &live_target_cache_roots,
-                    )?;
-                }
-                Ok(report)
-            })
-        };
+        let target_cache_result = cleanup_target_cache_report(
+            &self.inner.cas_root, &config, agent_store.as_ref(), worktree_store.as_ref(),
+            &live_target_cache_roots, target_cache_mutation_authorized, None,
+        );
 
         let mut output = format!(
             "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nOrphan worker process groups reaped: {orphan_process_groups_reaped}\nLive-owned process groups skipped: {live_owned_process_groups_skipped}\nUnverifiable process-group records preserved: {}\nStale process-group records removed: {stale_process_group_records_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries pruned: {cleared_prompts}{prompt_retention_note}\nPrompt queue episode rows retained: {prompt_episode_rows_retained}\nStale skill markers removed: {stale_skill_markers_removed}\nOrphan processes killed: {}\nStale server registrations cleared: {}\nOrphan candidates spared or refused: {}",
@@ -7384,30 +7383,7 @@ impl CasService {
             }
         }
         match target_cache_result {
-            Ok(report) => {
-                output.push_str(&format!(
-                    "\n\nCargo target caches: mode={} candidates={} bytes={} selected_bytes={} reclaimed_bytes={}",
-                    if report.dry_run { "dry-run" } else { "cleanup" },
-                    report.caches.len(),
-                    report.candidate_bytes,
-                    report.selected_bytes,
-                    report.reclaimed_bytes,
-                ));
-                for cache in &report.caches {
-                    output.push_str(&format!(
-                        "\n  - {} bytes={} scan_ms={} state={:?} reason={}",
-                        cache.path.display(),
-                        cache.bytes,
-                        cache.scan_elapsed_ms,
-                        cache.disposition,
-                        cache.reason,
-                    ));
-                }
-                output.push_str(&format!(
-                    "\nTARGET_CACHE_STATUS_JSON={}",
-                    report.machine_json()
-                ));
-            }
+            Ok(report) => output.push_str(&render_target_cache_report(&report)),
             Err(error) => output.push_str(&format!(
                 "\n\nCargo target caches: unavailable (fail-closed; none deleted): {error}"
             )),
@@ -7415,6 +7391,40 @@ impl CasService {
 
         Ok(Self::success(output))
     }
+}
+
+/// Both ordinary and explicitly named GC use this one inventory/admission/
+/// quarantine pipeline. The caller decides whether unrelated GC is in scope.
+fn cleanup_target_cache_report(
+    cas_root: &std::path::Path,
+    config: &crate::config::Config,
+    agents: &dyn cas_store::AgentStore,
+    worktrees: &dyn cas_store::WorktreeStore,
+    live: &[std::path::PathBuf],
+    authorized: bool,
+    unknown: Option<&std::path::Path>,
+) -> std::io::Result<crate::factory_target_cache::TargetCacheReport> {
+    let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
+    let known = known_target_cache_worktrees(cas_root, config, agents, worktrees);
+    let mut report = crate::factory_target_cache::inspect(cas_root, policy, &known, live, !authorized)?;
+    if authorized || unknown.is_some() {
+        crate::factory_target_cache::cleanup_selected_with_opt_in(cas_root, &mut report, policy, live, unknown)?;
+    }
+    Ok(report)
+}
+
+fn render_target_cache_report(report: &crate::factory_target_cache::TargetCacheReport) -> String {
+    let mut output = format!(
+        "\n\nCargo target caches: mode={} candidates={} bytes={} selected_bytes={} reclaimed_bytes={}",
+        if report.dry_run { "dry-run" } else { "cleanup" }, report.caches.len(),
+        report.candidate_bytes, report.selected_bytes, report.reclaimed_bytes,
+    );
+    for cache in &report.caches {
+        output.push_str(&format!("\n  - {} bytes={} scan_ms={} state={:?} reason={}",
+            cache.path.display(), cache.bytes, cache.scan_elapsed_ms, cache.disposition, cache.reason));
+    }
+    output.push_str(&format!("\n{}\nTARGET_CACHE_STATUS_JSON={}", report.remediation, report.machine_json()));
+    output
 }
 
 /// A registration's PID denotes its MCP child, not the harness. Verify its

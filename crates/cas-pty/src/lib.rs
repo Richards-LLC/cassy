@@ -56,9 +56,11 @@ pub use claude_trust::{
     CLAUDE_TRUST_FIELD, ClaudeTrustOutcome, claude_global_config_path,
     ensure_claude_project_trusted_in,
 };
+pub use codex_hook_warning::{CapabilityState, CodexCapabilityEvidence, detect_codex_capabilities};
 pub use codex_trust::{
     CODEX_HOOK_REVIEW_FAILURE, CODEX_HOOK_REVIEW_MARKER, CODEX_PRE_TOOL_TIMEOUT_SECS,
-    CODEX_TRUST_TIMEOUT_HINT, CodexTrustOutcome, codex_home,
+    CODEX_TRUST_TIMEOUT_HINT, CodexHookReadiness, CodexHookTrust, CodexLaunchReadiness,
+    CodexTrustOutcome, codex_home, codex_launch_readiness,
     ensure_cas_hooks_trusted, ensure_cas_hooks_trusted_in, ensure_project_trusted,
     ensure_project_trusted_in, prepare_cas_tool_hooks_in, prepare_codex_project_hooks_in,
     update_codex_config_locked,
@@ -77,7 +79,7 @@ pub use pty::{
     ContractRole, PROTECTED_OPERATOR_ENV, claude_supervisor_contract, claude_worker_contract,
     missing_contract_elements, rendered_contract_surface,
 };
-pub use pty::{Pty, PtyConfig, PtyEvent, TeamsSpawnConfig, WORKER_CREDENTIAL_WARNING_ENV};
+pub use pty::{Pty, PtyConfig, PtyEvent, TOOL_CACHE_ENV, TeamsSpawnConfig, WORKER_CREDENTIAL_WARNING_ENV};
 
 #[cfg(test)]
 #[path = "../../../cas-cli/src/test_env_guard.rs"]

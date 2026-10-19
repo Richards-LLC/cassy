@@ -268,6 +268,8 @@ pub use surfaced_artifact_store::{
 // Prompt queue store for supervisor → worker communication
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
+    PROMPT_QUEUE_HEALTH_SCHEMA_DETECT, missing_prompt_queue_columns,
+    repair_legacy_prompt_queue_schema,
     AdmissionOutcome, OperatorCommandAdmission,
     BudgetedSurface, InboxHandoffState, HOOK_SURFACE_BUDGET_CHARS, HOOK_SURFACE_ROW_OVERHEAD_CHARS, HookDrain,
     NOTICE_DIGEST_KIND, PEER_COPY_KIND,

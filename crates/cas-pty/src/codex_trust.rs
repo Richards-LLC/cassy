@@ -93,17 +93,55 @@ fn escape_toml_basic(value: &str) -> String {
     out
 }
 
-/// The two CAS-native Codex handlers whose hash state CAS owns. Codex's trust
+/// The CAS-native Codex handlers whose hash state CAS owns. Codex's trust
 /// key also includes a positional matcher-group and handler index, so the
 /// values are discovered from the generated `hooks.json` before writing state.
-const CAS_CODEX_HOOKS: [(&str, &str, &str); 2] = [
-    (
-        "PreToolUse",
-        "pre_tool_use",
-        "CAS_HOOK_HARNESS=codex cas hook PreToolUse",
-    ),
-    ("PostToolUse", "post_tool_use", "cas hook PostToolUse"),
+///
+/// The tool guards are required in every file CAS generates. The lifecycle
+/// handlers (cas-d0fe) are written only to the user-level `hooks.json`, so a
+/// project file without them is still a complete CAS file.
+const CAS_CODEX_HOOKS: [CasCodexHook; 4] = [
+    CasCodexHook {
+        event: "PreToolUse",
+        event_key: "pre_tool_use",
+        command: "CAS_HOOK_HARNESS=codex cas hook PreToolUse",
+        required: true,
+    },
+    CasCodexHook {
+        event: "PostToolUse",
+        event_key: "post_tool_use",
+        command: "cas hook PostToolUse",
+        required: true,
+    },
+    CasCodexHook {
+        event: "SessionStart",
+        event_key: "session_start",
+        command: "CAS_HOOK_HARNESS=codex cas hook SessionStart",
+        required: false,
+    },
+    CasCodexHook {
+        event: "Stop",
+        event_key: "stop",
+        command: "CAS_HOOK_HARNESS=codex cas hook Stop",
+        required: false,
+    },
 ];
+
+/// One CAS-owned Codex hook handler.
+#[derive(Debug, Clone, Copy)]
+struct CasCodexHook {
+    event: &'static str,
+    event_key: &'static str,
+    command: &'static str,
+    required: bool,
+}
+
+/// Codex events whose `matcher` is ignored. Codex 0.163 `hooks/list` reports
+/// them with `matcher: null` and leaves the key out of their trust identity,
+/// even when `hooks.json` spells `"matcher": ""` (cas-d0fe).
+fn event_ignores_matcher(event_key: &str) -> bool {
+    matches!(event_key, "stop" | "user_prompt_submit")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HookTrustEntry {
@@ -115,7 +153,8 @@ struct HookTrustEntry {
 ///
 /// Captured against Codex CLI 0.147.0 using its `hooks/list` RPC and confirmed
 /// against the upstream `NormalizedHookIdentity` implementation: SHA-256 of
-/// canonical JSON for `{ event_name, matcher, hooks: [handler] }`.
+/// canonical JSON for `{ event_name, matcher, hooks: [handler] }`. Events that
+/// ignore matchers omit the `matcher` key (Codex 0.163 `hooks/list`, cas-d0fe).
 fn codex_command_hook_hash(
     event_name: &str,
     matcher: &str,
@@ -123,9 +162,8 @@ fn codex_command_hook_hash(
     timeout: u64,
     runs_async: bool,
 ) -> String {
-    let identity = serde_json::json!({
+    let mut identity = serde_json::json!({
         "event_name": event_name,
-        "matcher": matcher,
         "hooks": [{
             "type": "command",
             "command": command,
@@ -133,6 +171,9 @@ fn codex_command_hook_hash(
             "async": runs_async,
         }],
     });
+    if !event_ignores_matcher(event_name) {
+        identity["matcher"] = matcher.into();
+    }
     // `serde_json::Map` is a BTreeMap in our configuration, so this emits the
     // recursively sorted canonical form Codex hashes. The regression below pins
     // the two hashes returned by the real CLI.
@@ -169,16 +210,22 @@ fn cas_hook_trust_entries(hooks_path: &Path) -> io::Result<Vec<HookTrustEntry>> 
         })?;
 
     let mut entries = Vec::with_capacity(CAS_CODEX_HOOKS.len());
-    for (event, event_key, expected_command) in CAS_CODEX_HOOKS {
-        let groups = root
-            .get(event)
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("hooks.json is missing CAS {event} hook groups"),
-                )
-            })?;
+    for CasCodexHook {
+        event,
+        event_key,
+        command: expected_command,
+        required,
+    } in CAS_CODEX_HOOKS
+    {
+        let Some(groups) = root.get(event).and_then(serde_json::Value::as_array) else {
+            if !required {
+                continue;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("hooks.json is missing CAS {event} hook groups"),
+            ));
+        };
         let mut found = None;
         for (group_index, group) in groups.iter().enumerate() {
             let matcher = group
@@ -220,12 +267,16 @@ fn cas_hook_trust_entries(hooks_path: &Path) -> io::Result<Vec<HookTrustEntry>> 
                 break;
             }
         }
-        entries.push(found.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("hooks.json does not contain canonical CAS {event} command"),
-            )
-        })?);
+        match found {
+            Some(entry) => entries.push(entry),
+            None if !required => {}
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("hooks.json does not contain canonical CAS {event} command"),
+                ));
+            }
+        }
     }
     Ok(entries)
 }
@@ -343,7 +394,8 @@ fn cas_pre_tool_handlers(
         })
         .flatten()
         .filter(|handler| {
-            handler.get("command").and_then(serde_json::Value::as_str) == Some(CAS_CODEX_HOOKS[0].2)
+            handler.get("command").and_then(serde_json::Value::as_str)
+                == Some(CAS_CODEX_HOOKS[0].command)
         })
 }
 
@@ -494,6 +546,216 @@ pub fn prepare_codex_project_hooks_in(config: &Path, cwd: &Path) -> io::Result<(
     }
     prepare_cas_tool_hooks(config, &own, true)?;
     Ok(())
+}
+
+/// How Codex will judge one command hook handler at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexHookTrust {
+    /// The stored hash equals the handler's current identity; it runs.
+    Trusted,
+    /// No stored hash; Codex skips it or parks on "Hooks need review".
+    Untrusted,
+    /// A stored hash for a different definition; treated like untrusted.
+    Modified,
+    /// Explicitly disabled in config; it never runs and never prompts.
+    Disabled,
+}
+
+/// One handler from a `hooks.json` Codex may load for the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexHookReadiness {
+    /// Codex's trust key: `<source>:<event>:<group>:<handler>`.
+    pub key: String,
+    pub command: String,
+    /// Whether this is one of CAS's own handlers (exact command match).
+    pub cas_owned: bool,
+    pub trust: CodexHookTrust,
+}
+
+/// Read-only verdict on whether a Codex launch will start without parking on
+/// a trust prompt (cas-d0fe). Only CAS's own handlers and the directory trust
+/// are launch requirements; any other hook is reported, never trusted by CAS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexLaunchReadiness {
+    pub cwd: PathBuf,
+    pub project_trusted: bool,
+    pub hooks: Vec<CodexHookReadiness>,
+}
+
+impl CodexLaunchReadiness {
+    /// Reasons this launch would park: an untrusted directory, or a CAS
+    /// handler that is untrusted or modified. A disabled CAS handler is an
+    /// operator choice and does not prompt, so it is not a reason.
+    pub fn blocking(&self) -> Vec<String> {
+        let mut reasons = Vec::new();
+        if !self.project_trusted {
+            reasons.push(format!(
+                "directory {} is not trusted in Codex [projects]",
+                self.cwd.display()
+            ));
+        }
+        for hook in self.hooks.iter().filter(|hook| hook.cas_owned) {
+            if matches!(
+                hook.trust,
+                CodexHookTrust::Untrusted | CodexHookTrust::Modified
+            ) {
+                reasons.push(format!("CAS hook {} is {:?}", hook.key, hook.trust));
+            }
+        }
+        reasons
+    }
+
+    /// Enabled hooks CAS does not own whose definitions are not trusted. CAS
+    /// never trusts these; the operator reviews them in Codex `/hooks`.
+    pub fn foreign_needing_review(&self) -> Vec<&CodexHookReadiness> {
+        self.hooks
+            .iter()
+            .filter(|hook| {
+                !hook.cas_owned
+                    && matches!(
+                        hook.trust,
+                        CodexHookTrust::Untrusted | CodexHookTrust::Modified
+                    )
+            })
+            .collect()
+    }
+}
+
+/// `PreToolUse` → `pre_tool_use`, the event spelling Codex uses in trust keys.
+fn codex_event_key(event: &str) -> String {
+    let mut key = String::with_capacity(event.len() + 4);
+    for (index, ch) in event.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 {
+                key.push('_');
+            }
+            key.push(ch.to_ascii_lowercase());
+        } else {
+            key.push(ch);
+        }
+    }
+    key
+}
+
+/// Every command handler in `hooks_path`, judged against `config`'s state.
+fn hook_file_readiness(
+    config: &toml::Value,
+    hooks_path: &Path,
+) -> io::Result<Vec<CodexHookReadiness>> {
+    let contents = match std::fs::read_to_string(hooks_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let hooks: serde_json::Value = serde_json::from_str(&contents).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to parse {}: {error}", hooks_path.display()),
+        )
+    })?;
+    let state = config.get("hooks").and_then(|hooks| hooks.get("state"));
+    let mut out = Vec::new();
+    let Some(events) = hooks.get("hooks").and_then(serde_json::Value::as_object) else {
+        return Ok(out);
+    };
+    for (event, groups) in events {
+        let event_key = codex_event_key(event);
+        for (group_index, group) in groups.as_array().into_iter().flatten().enumerate() {
+            let matcher = group
+                .get("matcher")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let handlers = group.get("hooks").and_then(serde_json::Value::as_array);
+            for (handler_index, handler) in handlers.into_iter().flatten().enumerate() {
+                if handler.get("type").and_then(serde_json::Value::as_str) != Some("command") {
+                    continue;
+                }
+                let Some(command) = handler.get("command").and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                let timeout = handler
+                    .get("timeout")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(600)
+                    .max(1);
+                let runs_async = handler
+                    .get("async")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let key = format!(
+                    "{}:{event_key}:{group_index}:{handler_index}",
+                    hooks_path.display()
+                );
+                let hash =
+                    codex_command_hook_hash(&event_key, matcher, command, timeout, runs_async);
+                let entry = state.and_then(|state| state.get(&key));
+                let trust = if entry
+                    .and_then(|entry| entry.get("enabled"))
+                    .and_then(toml::Value::as_bool)
+                    == Some(false)
+                {
+                    CodexHookTrust::Disabled
+                } else {
+                    match entry
+                        .and_then(|entry| entry.get("trusted_hash"))
+                        .and_then(toml::Value::as_str)
+                    {
+                        Some(stored) if stored == hash => CodexHookTrust::Trusted,
+                        Some(_) => CodexHookTrust::Modified,
+                        None => CodexHookTrust::Untrusted,
+                    }
+                };
+                out.push(CodexHookReadiness {
+                    key,
+                    command: command.to_string(),
+                    cas_owned: CAS_CODEX_HOOKS.iter().any(|hook| hook.command == command),
+                    trust,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Judge, without writing anything, the trust state Codex will see for a
+/// session in `cwd` under `codex_home`: directory trust plus every handler in
+/// the user `hooks.json`, `<cwd>/.codex/hooks.json`, and the main checkout's
+/// `.codex/hooks.json` for a linked worktree (the file Codex 0.162+ loads).
+pub fn codex_launch_readiness(
+    config_path: &Path,
+    codex_home: &Path,
+    cwd: &Path,
+) -> io::Result<CodexLaunchReadiness> {
+    let contents = match std::fs::read_to_string(config_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let config: toml::Value = toml::from_str(&contents)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    let project_trusted = candidate_keys(cwd).iter().any(|key| {
+        config
+            .get("projects")
+            .and_then(|projects| projects.get(key))
+            .and_then(|project| project.get("trust_level"))
+            .and_then(toml::Value::as_str)
+            == Some("trusted")
+    });
+    let mut files = vec![codex_home.join("hooks.json"), cwd.join(".codex/hooks.json")];
+    if let Some(main) = linked_worktree_main_checkout(cwd) {
+        files.push(main.join(".codex/hooks.json"));
+    }
+    files.dedup();
+    let mut hooks = Vec::new();
+    for file in &files {
+        hooks.extend(hook_file_readiness(&config, file)?);
+    }
+    Ok(CodexLaunchReadiness {
+        cwd: cwd.to_path_buf(),
+        project_trusted,
+        hooks,
+    })
 }
 
 /// The main checkout of the linked git worktree containing `cwd`, if any.
@@ -1090,6 +1352,127 @@ mod tests {
         assert_eq!(
             codex_command_hook_hash("post_tool_use", "^Bash$", "cas hook PostToolUse", 3, false),
             "sha256:94c125201a0019ec158d7abb96cd3fc0d8282bb499aa506f202ce794748cdb2b"
+        );
+        // cas-d0fe: recorded from `codex app-server` hooks/list with codex-cli
+        // 0.163.0. Matcher-ignored events report `matcher: null` and hash
+        // without the key, even though hooks.json spelled `"matcher": ""`.
+        let canary = "/usr/bin/python3 -I /mnt/rewind/cas/scratch/d0fe-canary.V68n7o/bin/hook.py";
+        assert_eq!(
+            codex_command_hook_hash("stop", "", &format!("{canary} Stop"), 30, false),
+            "sha256:bff64b2c90c0cb52b8a199adffcc99cf6fe22551237a209f8a9878d1330d42ea"
+        );
+        assert_eq!(
+            codex_command_hook_hash(
+                "user_prompt_submit",
+                "",
+                &format!("{canary} UserPromptSubmit"),
+                30,
+                false
+            ),
+            "sha256:b40740aab62ccfbbeee73a15cec823c1a1b2f46862ebfc4f2ad742fac8791f2d"
+        );
+    }
+
+    fn readiness_fixture(dir: &TempDir, stop_hash: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let home = dir.join("codex");
+        let cwd = dir.join("project");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let hooks = home.join("hooks.json");
+        std::fs::write(
+            &hooks,
+            r#"{"hooks":{
+  "PreToolUse":[{"matcher":"^(Bash|apply_patch)$","hooks":[{"type":"command","command":"CAS_HOOK_HARNESS=codex cas hook PreToolUse","timeout":120}]}],
+  "Stop":[{"hooks":[{"type":"command","command":"CAS_HOOK_HARNESS=codex cas hook Stop","timeout":60}]}],
+  "UserPromptSubmit":[{"hooks":[{"type":"command","command":"/opt/operator/audit.sh","timeout":5}]}],
+  "PostToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"/opt/operator/off.sh","timeout":5}]}]
+}}"#,
+        )
+        .unwrap();
+        let key = |event: &str| format!("{}:{event}:0:0", hooks.display());
+        let pre = codex_command_hook_hash(
+            "pre_tool_use",
+            "^(Bash|apply_patch)$",
+            "CAS_HOOK_HARNESS=codex cas hook PreToolUse",
+            120,
+            false,
+        );
+        let config = home.join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[projects.\"{}\"]\ntrust_level = \"trusted\"\n\n\
+                 [hooks.state.\"{}\"]\ntrusted_hash = \"{pre}\"\n\n\
+                 [hooks.state.\"{}\"]\ntrusted_hash = \"{stop_hash}\"\n\n\
+                 [hooks.state.\"{}\"]\nenabled = false\n",
+                cwd.display(),
+                key("pre_tool_use"),
+                key("stop"),
+                key("post_tool_use"),
+            ),
+        )
+        .unwrap();
+        (config, home, cwd)
+    }
+
+    #[test]
+    fn launch_readiness_blocks_a_modified_cas_handler_cas_d0fe() {
+        // A Stop trust hash written with the pre-cas-d0fe identity (matcher
+        // included) is `modified` to Codex 0.163, which parks the pane.
+        let dir = TempDir::new();
+        let stale = {
+            let identity = serde_json::json!({
+                "event_name": "stop", "matcher": "",
+                "hooks": [{"type": "command", "command": "CAS_HOOK_HARNESS=codex cas hook Stop", "timeout": 60, "async": false}],
+            });
+            format!(
+                "sha256:{:x}",
+                Sha256::digest(serde_json::to_vec(&identity).unwrap())
+            )
+        };
+        let (config, home, cwd) = readiness_fixture(&dir, &stale);
+        let readiness = codex_launch_readiness(&config, &home, &cwd).unwrap();
+        let blocking = readiness.blocking();
+        assert_eq!(blocking.len(), 1, "{blocking:?}");
+        assert!(
+            blocking[0].contains(":stop:0:0") && blocking[0].contains("Modified"),
+            "{blocking:?}"
+        );
+    }
+
+    #[test]
+    fn launch_readiness_reports_but_never_blocks_on_foreign_hooks_cas_d0fe() {
+        let dir = TempDir::new();
+        let stop = codex_command_hook_hash(
+            "stop",
+            "",
+            "CAS_HOOK_HARNESS=codex cas hook Stop",
+            60,
+            false,
+        );
+        let (config, home, cwd) = readiness_fixture(&dir, &stop);
+        let readiness = codex_launch_readiness(&config, &home, &cwd).unwrap();
+        assert!(
+            readiness.blocking().is_empty(),
+            "{:?}",
+            readiness.blocking()
+        );
+        // The untrusted operator hook is reported for review; the disabled one
+        // is inactive and neither blocks nor needs review.
+        let review: Vec<_> = readiness
+            .foreign_needing_review()
+            .iter()
+            .map(|h| h.command.clone())
+            .collect();
+        assert_eq!(review, ["/opt/operator/audit.sh"]);
+        assert!(readiness.hooks.iter().any(|h| h.command == "/opt/operator/off.sh" && h.trust == CodexHookTrust::Disabled));
+        let config_before = std::fs::read_to_string(&config).unwrap();
+        codex_launch_readiness(&config, &home, &cwd).unwrap();
+        // pin: readiness is read-only, so the config bytes must be identical.
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            config_before,
+            "readiness never writes"
         );
     }
 

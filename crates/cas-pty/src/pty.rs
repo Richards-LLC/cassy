@@ -451,6 +451,16 @@ pub struct PtyConfig {
     pub cols: u16,
 }
 
+/// Tool-owned cache paths allowed through Codex's restricted Cassy MCP child
+/// environment. Keep this exact list shared with managed Codex configuration;
+/// no credential or account variables are included.
+pub const TOOL_CACHE_ENV: &[&str] = &[
+    "NODE_COMPILE_CACHE",
+    "PWTEST_CACHE_DIR",
+    "PYTEST_DEBUG_TEMPROOT",
+    "V8_COMPILE_CACHE_CACHE_DIR",
+];
+
 /// Operator credentials that never cross the factory worker boundary through
 /// inherited environment state. A task-scoped provider or proxy grant is
 /// explicit only when the factory builder adds authenticated grant metadata;
@@ -987,6 +997,32 @@ fn push_codex_machine_credential_env(args: &mut Vec<String>) {
 }
 
 impl PtyConfig {
+    /// Mirror only the effective pane values, after launch policy has removed
+    /// denied variables. Literal overrides leave operator `cs.env_vars` intact;
+    /// constructor-time snapshots could reintroduce values denied later by mux.
+    fn forward_codex_tool_caches(&mut self) {
+        for &name in TOOL_CACHE_ENV {
+            if self.env_remove.iter().any(|removed| removed == name) {
+                continue;
+            }
+            let value = self
+                .env
+                .iter()
+                .rev()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+                .or_else(|| std::env::var(name).ok());
+            if let Some(value) = value {
+                let value = serde_json::to_string(&value)
+                    .expect("serializing a cache path string cannot fail");
+                self.args.extend([
+                    "-c".to_string(),
+                    format!("mcp_servers.cs.env.{name}={value}"),
+                ]);
+            }
+        }
+    }
+
     /// Executable behind the optional `nice` wrapper, without inspecting harness
     /// arguments such as `--model`. Accept short/long adjustment options and `--`;
     /// an incomplete or unknown wrapper option leaves the command as `nice`.
@@ -2473,6 +2509,9 @@ impl Pty {
         config.hydrate_violet_environment();
         let id = id.into();
         let is_codex = config.effective_command() == "codex";
+        if is_codex {
+            config.forward_codex_tool_caches();
+        }
 
         // cas-bbc2 preflight: a Codex agent's CAS MCP server is spawn-injected as
         // `mcp_servers.cs.command=cas`, but Codex can only launch it if the `cas`
@@ -4181,7 +4220,7 @@ mod tests {
     /// `.codex/config.toml`. Mirrors `configure_codex_mcp_server`.
     #[tokio::test]
     async fn test_pty_config_codex_worker_injects_cas_mcp_server() {
-        let _env = TestEnvGuard::new();
+        let mut env = TestEnvGuard::temp_home();
         let config = PtyConfig::codex(
             "test-worker",
             "worker",
@@ -4215,6 +4254,116 @@ mod tests {
                 && !all_args.contains("code_mode=false"),
             "CAS projection must not disable Codex code mode; got: {all_args}"
         );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let temp = tempfile::tempdir().unwrap();
+            let args_file = temp.path().join("args");
+            let codex = temp.path().join("codex");
+            std::fs::write(
+                &codex,
+                format!(
+                    "#!/bin/sh\n[ -z \"${{GITHUB_TOKEN-}}\" ] && [ -z \"${{OPENAI_API_KEY-}}\" ] || exit 91\nprintf '%s\\0' \"$@\" > {}\n",
+                    shell_quote(&args_file.to_string_lossy())
+                ),
+            ).unwrap();
+            std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(temp.path().join("cas"), "fixture preflight only").unwrap();
+            env.set("PATH", temp.path());
+            env.set("GITHUB_TOKEN", "fixture-secret-never-forward");
+            env.set("OPENAI_API_KEY", "fixture-account-never-forward");
+            let keys = [
+                "NODE_COMPILE_CACHE",
+                "PWTEST_CACHE_DIR",
+                "PYTEST_DEBUG_TEMPROOT",
+                "V8_COMPILE_CACHE_CACHE_DIR",
+            ];
+            let values: Vec<_> = keys
+                .iter()
+                .map(|key| format!("/cache space/\"quoted\"/λ/{key}"))
+                .collect();
+            for (key, value) in keys.iter().zip(&values) {
+                env.set(key, value);
+            }
+            for control in ["present", "removed", "unset"] {
+                let mut config = PtyConfig::codex(
+                    "cache-probe",
+                    "worker",
+                    temp.path().to_path_buf(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+                config
+                    .env
+                    .push(("CAS_FACTORY_CODEX_HOME_SOURCE".into(), "fixture".into()));
+                config.args.extend([
+                    "-c".into(),
+                    "mcp_servers.cs.env_vars=[\"OPERATOR_EXTRA\"]".into(),
+                ]);
+                let explicit = "/explicit cache/\"pytest\"";
+                if control != "unset" {
+                    config.env.push((keys[2].into(), explicit.into()));
+                }
+                if control == "removed" {
+                    // A late removal must beat both inherited and explicitly granted values.
+                    config.env_remove.extend([keys[0].into(), keys[2].into()]);
+                }
+                if control == "unset" {
+                    // Remove after constructing the config: do not snapshot the parent early.
+                    for key in keys {
+                        env.remove(key);
+                    }
+                }
+                let mut pty = Pty::spawn("cache-probe", config).unwrap();
+                let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+                loop {
+                    match next_pty_event_until(&mut pty, deadline).await {
+                        Some(PtyEvent::Exited(code)) => {
+                            assert_eq!(code, Some(0));
+                            break;
+                        }
+                        Some(PtyEvent::Output(_)) => {}
+                        event => panic!("cache launch did not complete: {event:?}"),
+                    }
+                }
+                let bytes = std::fs::read(&args_file).unwrap();
+                let args: Vec<_> = bytes
+                    .split(|byte| *byte == 0)
+                    .filter(|arg| !arg.is_empty())
+                    .map(|arg| std::str::from_utf8(arg).unwrap())
+                    .collect();
+                assert!(args.contains(&"mcp_servers.cs.env_vars=[\"OPERATOR_EXTRA\"]"));
+                for (index, key) in keys.iter().enumerate() {
+                    let prefix = format!("mcp_servers.cs.env.{key}=");
+                    let forwarded = args.iter().find(|arg| arg.starts_with(&prefix));
+                    if control == "unset" || (control == "removed" && [0, 2].contains(&index)) {
+                        assert!(forwarded.is_none(), "{control}: {key} was rehydrated");
+                    } else {
+                        let parsed: toml::Value = toml::from_str(
+                            forwarded.unwrap_or_else(|| panic!("{control}: missing {key}")),
+                        )
+                        .unwrap();
+                        let expected = if index == 2 { explicit } else { &values[index] };
+                        assert_eq!(
+                            parsed["mcp_servers"]["cs"]["env"][key].as_str(),
+                            Some(expected)
+                        );
+                    }
+                }
+                assert!(
+                    !args
+                        .iter()
+                        .any(|arg| arg.contains("fixture-secret-never-forward")
+                            || arg.contains("fixture-account-never-forward"))
+                );
+            }
+        }
     }
 
     #[tokio::test]

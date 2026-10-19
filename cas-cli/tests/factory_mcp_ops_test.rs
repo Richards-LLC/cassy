@@ -491,6 +491,7 @@ fn factory_req(action: &str) -> FactoryRequest {
         reason: None,
         dry_run: None,
         artifacts: None,
+        reclaim_unknown_target: None,
         // allow_trunk is CoordinationRequest/worktree_merge only — not FactoryRequest
         clear: None,
         branch: None,
@@ -534,6 +535,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         resource_id: None,
         handoff_id: None,
         expected_generation: None,
+        occurrence_id: None,
         to_slot_id: None,
         offer_ttl_secs: None,
         task_id: None,
@@ -596,6 +598,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         orphans: None,
         dry_run: None,
         artifacts: None,
+        reclaim_unknown_target: None,
         command: None,
         cwd: None,
         port: None,
@@ -5985,6 +5988,18 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         "{report_text}"
     );
 
+    // Named cache consent must never enter ordinary GC's evidence-retention
+    // or process-reaping paths, even when the named path is refused.
+    let mut named = factory_req("gc_cleanup");
+    named.force = Some(true);
+    named.dry_run = Some(false);
+    named.reclaim_unknown_target = Some(env.cas_root.join("unknown/target").display().to_string());
+    let refused = env.service.factory_request(Parameters(named)).await.unwrap();
+    assert!(get_text(&refused).contains("Refused"), "{}", get_text(&refused));
+    for name in ["trace.zip", "video.webm", "proof.txt"] {
+        assert!(root.join(&closed_id).join(name).is_file(), "named cache reclaim deleted durable {name}");
+    }
+
     let mut preview = factory_req("gc_cleanup");
     preview.force = Some(true);
     preview.dry_run = Some(false);
@@ -7077,6 +7092,7 @@ fn coord_msg(
         resource_id: None,
         handoff_id: None,
         expected_generation: None,
+        occurrence_id: None,
         to_slot_id: None,
         offer_ttl_secs: None,
         task_id: None,
@@ -7139,6 +7155,7 @@ fn coord_msg(
         orphans: None,
         dry_run: None,
         artifacts: None,
+        reclaim_unknown_target: None,
         command: None,
         cwd: None,
         port: None,

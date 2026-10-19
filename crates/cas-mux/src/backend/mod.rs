@@ -61,6 +61,11 @@ pub trait Backend: Sync {
 
     fn capabilities(&self) -> HarnessCapabilities;
 
+    /// Contextual optional-feature evidence, collected only on a real launch.
+    fn runtime_capability_evidence(&self, _config: &PtyConfig) -> Option<cas_pty::CodexCapabilityEvidence> {
+        None
+    }
+
     /// Map a shared effort level to this CLI's accepted value spelling.
     fn effort_arg(&self, effort: Effort) -> &'static str;
 

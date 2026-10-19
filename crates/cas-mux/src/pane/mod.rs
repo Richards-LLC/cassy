@@ -24,6 +24,12 @@ use tokio::sync::Mutex;
 
 use cas_recording::{RecordingWriter, WriterConfig};
 
+fn record_runtime_capabilities(cli: SupervisorCli, config: &PtyConfig) {
+    if let Some(evidence) = cli.backend().runtime_capability_evidence(config) {
+        tracing::info!(?evidence, "Contextual Codex feature declarations; trust and native invocation are separate");
+    }
+}
+
 /// `Pane::mouse_modes` bit: X11 press/release reporting (`ESC [ ? 1000 h`).
 const MOUSE_MODE_X11: u8 = 1 << 0;
 /// `Pane::mouse_modes` bit: button-event (drag) reporting (`ESC [ ? 1002 h`).
@@ -442,6 +448,7 @@ impl Pane {
             active_workers,
         );
         push_factory_session_env(&mut config, cli, factory_session);
+        record_runtime_capabilities(cli, &config);
         let session_id = cas_session_id_from_config(&config);
         let pty = Pty::spawn(name, config)?;
         let pane = Self::with_pty(name, PaneKind::Worker, pty, rows, cols, cli)?;
@@ -506,6 +513,7 @@ impl Pane {
             teams,
         );
         push_factory_session_env(&mut config, cli, factory_session);
+        record_runtime_capabilities(cli, &config);
         let session_id = cas_session_id_from_config(&config);
         let pty = Pty::spawn(name, config)?;
         let pane = Self::with_pty(name, PaneKind::Supervisor, pty, rows, cols, cli)?;

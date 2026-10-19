@@ -521,6 +521,7 @@ fn project_table_plain_uses_phase_glyphs_and_compact_project_names() {
         membership: ProjectPhase::Ok("2 memberships".to_owned()),
         cloud: ProjectPhase::Failed("timeout".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: Vec::new(),
     }];
 
@@ -553,6 +554,7 @@ fn project_table_phase_headers_are_not_truncated_at_supported_widths() {
         membership: ProjectPhase::Ok("up to date".to_owned()),
         cloud: ProjectPhase::Ok("up to date".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: Vec::new(),
     }];
 
@@ -588,6 +590,7 @@ fn non_ok_phase_details_include_phase_summary_when_capture_is_empty() {
         membership: ProjectPhase::Ok("up to date".to_owned()),
         cloud: ProjectPhase::Warning("12 queued".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: vec![
             (true, String::new()),
             (true, String::new()),
@@ -618,6 +621,7 @@ fn cloud_warning_summary_stays_under_the_non_ok_project_row() {
         membership: ProjectPhase::Ok("up to date".to_owned()),
         cloud: ProjectPhase::Warning("4 queued".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: vec![
             (true, String::new()),
             (true, String::new()),
@@ -691,6 +695,33 @@ fn capture_phase_collects_both_stdout_and_stderr() {
     assert_eq!(value, 42);
     assert!(output.contains("captured stdout"), "output was: {output:?}");
     assert!(output.contains("captured stderr"), "output was: {output:?}");
+}
+
+/// cas-be05 review: `--json` never runs a phase it cannot capture, because
+/// that phase's documents would reach stdout beside the one receipt.
+#[cfg(unix)]
+#[test]
+fn json_phase_is_not_run_when_its_output_cannot_be_captured_cas_be05() {
+    let _output_lock = update_output_lock();
+    let mut ran = false;
+    let ((phase, output, documents), stdout) = capture_phase(true, || {
+        capture_phase_documents_with(
+            &update_test_cli(true),
+            || Err(std::io::Error::other("descriptor limit")),
+            || {
+                ran = true;
+                println!("{{\"leaked\":true}}");
+                ProjectPhase::Ok("ran uncaptured".to_owned())
+            },
+        )
+    });
+    assert!(!ran, "an uncapturable --json phase must not run");
+    assert!(
+        matches!(&phase, ProjectPhase::Failed(detail) if detail.contains("not run") && detail.contains("descriptor limit")),
+        "{phase:?}"
+    );
+    assert!(output.is_empty() && documents.is_empty());
+    assert!(stdout.trim().is_empty(), "nothing reaches stdout: {stdout:?}");
 }
 
 /// Create a directory that looks exactly like an initialized Cassy project:
@@ -1106,6 +1137,19 @@ fn post_swap_refresh_runs_on_the_installed_binary_and_reports_its_version() {
     assert!(args.contains("--post-swap"), "{args}");
     assert!(args.contains("3.15.1"), "{args}");
     assert!(args.contains("--json"), "{args}");
+
+    // cas-be05: a child from before the one-document receipt prints each
+    // phase's document first; the parent still takes the refresh receipt.
+    let old_child = temp_dir.path().join("cas-old");
+    write_stub_binary(
+        &old_child,
+        "#!/bin/sh\n\
+         printf '%s\\n' '{\"store\":\"/x/.cas\",\"schema_status\":\"current\"}'\n\
+         printf '%s\\n' '{\"refresh_binary_version\":\"9.9.8-old\",\"projects\":[],\"skipped_unregistered\":[]}'\n",
+    );
+    let receipt = run_post_swap_refresh(&old_child, "3.15.1", "9.9.8-old", true)
+        .expect("a multi-document child still yields its refresh receipt");
+    assert_eq!(receipt["refresh_binary_version"], "9.9.8-old", "{receipt}");
 }
 
 #[cfg(unix)]
@@ -1311,6 +1355,7 @@ fn refresh_receipt_records_partial_failure_before_refresh_returns_error() {
         membership: ProjectPhase::Ok("membership".to_owned()),
         cloud: ProjectPhase::Failed("cloud sync: project registration missing".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: Vec::new(),
     }];
     let receipt = project_refresh_receipt_json(
@@ -2067,6 +2112,7 @@ fn skipped_phases_print_no_details_block_snapshot_cas_8030() {
         membership: ProjectPhase::Skipped("not cloud-linked".to_owned()),
         cloud: ProjectPhase::Skipped("not cloud-linked".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: vec![
             (true, "[OK] Migrations current".to_owned()),
             (false, "[SKIP] membership: not cloud-linked".to_owned()),
@@ -2083,6 +2129,7 @@ fn skipped_phases_print_no_details_block_snapshot_cas_8030() {
         membership: ProjectPhase::Ok("2 memberships".to_owned()),
         cloud: ProjectPhase::Ok("synced".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: vec![
             (true, "[OK] Migrations current".to_owned()),
             (false, "[WARN] search index: index busy, retry later".to_owned()),
@@ -2125,6 +2172,7 @@ fn dry_run_planned_phases_keep_their_details_block_cas_937a() {
         membership: ProjectPhase::Skipped("dry run".to_owned()),
         cloud: ProjectPhase::Skipped("dry run".to_owned()),
         details: String::new(),
+        documents: Vec::new(),
         phase_details: vec![(
             false,
             "[DRY RUN] migration: would apply 2 migrations\n".to_owned(),
@@ -2577,10 +2625,16 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
             .lines()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .collect::<Vec<_>>();
-        let managed = rows
-            .iter()
-            .find_map(|row| row.get("managed_files"))
-            .expect("managed-file receipt");
+        assert_eq!(rows.len(), 1, "{mode}: expected one JSON receipt:\n{output}");
+        let receipt = &rows[0];
+        // cas-fd1e: the all-projects receipt owns each phase's documents;
+        // sync still reports managed files directly. Both preserve the refusal.
+        let managed = if mode == "all-projects" {
+            receipt.pointer("/projects/0/phase_documents/skills/0/managed_files")
+        } else {
+            receipt.get("managed_files")
+        }
+        .unwrap_or_else(|| panic!("{mode}: missing managed-file receipt:\n{output}"));
         assert_eq!(managed["outcome"], "commit_failed", "{output}");
         assert!(
             managed["conflicts"].as_array().unwrap().is_empty(),
@@ -2594,10 +2648,6 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
             "{reason}"
         );
         if mode == "all-projects" {
-            let receipt = rows
-                .iter()
-                .find(|row| row.get("refresh_status").is_some())
-                .unwrap();
             assert_eq!(receipt["refresh_status"], "refresh_failed", "{output}");
             assert!(
                 receipt["projects"][0]["skills"]

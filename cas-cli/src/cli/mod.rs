@@ -869,7 +869,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         }
         Commands::Integrate(cmd) => integrate::execute(cmd, cli),
         Commands::Memory(cmd) => memory::execute(cmd, cli, require_cas_root(cas_root)?),
-        Commands::KnownRepos(cmd) => known_repos::execute(cmd),
+        Commands::KnownRepos(cmd) => known_repos::execute(cmd, cli.json),
         Commands::Worktree(cmd) => worktree::execute(cmd),
         Commands::SweepAll(args) => sweep::execute_sweep_all(args),
         Commands::RetrievalParity(cmd) => retrieval_parity::execute(cmd, cas_root),

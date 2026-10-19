@@ -58,6 +58,26 @@ pub enum ExternalWorkCommands {
         #[arg(long)]
         request_id: Option<String>,
     },
+    /// Extend a live claim's idle lease before it lapses.
+    RenewClaim {
+        #[arg(long)]
+        resource_id: String,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        request_id: Option<String>,
+    },
+    /// Register a reply intent and print its violet_post fields.
+    ReplyIntent {
+        #[arg(long)]
+        resource_id: String,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        occurrence_id: Option<String>,
+        #[arg(long)]
+        request_id: Option<String>,
+    },
 }
 
 pub fn execute(
@@ -147,6 +167,26 @@ fn to_command(command: &ExternalWorkCommands) -> ExternalWorkCommand {
         } => ExternalWorkCommand::AcceptClaim {
             handoff_id: handoff_id.clone(),
             expected_generation: *expected_generation,
+            request_id: request_id.clone(),
+        },
+        ExternalWorkCommands::RenewClaim {
+            resource_id,
+            expected_generation,
+            request_id,
+        } => ExternalWorkCommand::RenewClaim {
+            resource_id: resource_id.clone(),
+            expected_generation: *expected_generation,
+            request_id: request_id.clone(),
+        },
+        ExternalWorkCommands::ReplyIntent {
+            resource_id,
+            expected_generation,
+            occurrence_id,
+            request_id,
+        } => ExternalWorkCommand::ReplyIntent {
+            resource_id: resource_id.clone(),
+            expected_generation: *expected_generation,
+            occurrence_id: occurrence_id.clone(),
             request_id: request_id.clone(),
         },
     }

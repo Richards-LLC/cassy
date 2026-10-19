@@ -698,17 +698,29 @@ pub(crate) const CODEX_CAS_SERVER_KEY: &str = "cs";
 /// were needed.
 pub fn configure_codex_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     let codex_dir = project_root.join(".codex");
-    configure_codex_dir(&codex_dir)
+    configure_codex_dir(&codex_dir, CodexHookLayer::Project)
 }
 
 /// Configure the Codex files in an explicit config directory. The user-level
 /// distribution path uses this with `~/.codex`; project provisioning uses the
 /// public project-root wrapper above.
 pub fn configure_codex_user_config(codex_dir: &Path) -> anyhow::Result<bool> {
-    configure_codex_dir(codex_dir)
+    configure_codex_dir(codex_dir, CodexHookLayer::User)
 }
 
-fn configure_codex_dir(codex_dir: &Path) -> anyhow::Result<bool> {
+/// Which Codex hook layer a generated `hooks.json` belongs to (cas-d0fe).
+///
+/// Codex runs every matching handler from the user and project layers, so a
+/// lifecycle handler in both would run twice per event. Lifecycle handlers and
+/// the MCP policy matcher therefore live only in the user layer; the project
+/// layer, usually tracked in git, keeps the tool guards it always had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexHookLayer {
+    Project,
+    User,
+}
+
+fn configure_codex_dir(codex_dir: &Path, layer: CodexHookLayer) -> anyhow::Result<bool> {
     let config_path = codex_dir.join("config.toml");
 
     if !codex_dir.exists() {
@@ -827,7 +839,32 @@ fn configure_codex_dir(codex_dir: &Path) -> anyhow::Result<bool> {
         }
     }
 
-    let hooks_changed = configure_codex_tool_hooks(&codex_dir)?;
+    // Codex's stdio MCP environment is curated. Keep names (not operator path
+    // values) in managed files, appending without replacing existing grants or
+    // explicit env settings. The same exact list is used by factory spawns.
+    let entry = mcp_servers
+        .get_mut(CODEX_CAS_SERVER_KEY)
+        .and_then(toml::Value::as_table_mut)
+        .expect("Cassy MCP entry was normalized above");
+    let env_vars = entry
+        .entry("env_vars")
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| {
+            anyhow::anyhow!("mcp_servers.{CODEX_CAS_SERVER_KEY}.env_vars is not an array")
+        })?;
+    for &name in cas_pty::TOOL_CACHE_ENV {
+        let present = env_vars.iter().any(|value| {
+            value.as_str() == Some(name)
+                || value.get("name").and_then(toml::Value::as_str) == Some(name)
+        });
+        if !present {
+            env_vars.push(toml::Value::String(name.to_string()));
+            changed = true;
+        }
+    }
+
+    let hooks_changed = configure_codex_tool_hooks(&codex_dir, layer)?;
 
     if changed {
         let generated: toml_edit::DocumentMut = toml::to_string_pretty(&config)?.parse()?;
@@ -900,14 +937,63 @@ pub fn provision_codex_user_config(codex_dir: &Path) -> anyhow::Result<bool> {
     Ok(configured)
 }
 
-/// Install Cassy's command guards and task-anchor hook using Codex's native
-/// `hooks.json` schema.
+/// Codex seconds for the lifecycle handlers (cas-d0fe). SessionStart builds
+/// the orientation context; Stop may record a session summary. Both stay well
+/// under Codex's 600-second default so a wedged handler cannot hold a turn.
+const CODEX_SESSION_START_TIMEOUT_SECS: u64 = 30;
+const CODEX_STOP_TIMEOUT_SECS: u64 = 60;
+
+/// One Cassy-owned handler in a generated Codex `hooks.json`.
+struct CodexHandlerSpec {
+    event: &'static str,
+    command: &'static str,
+    /// `None` writes no `matcher` key (events whose matcher Codex ignores).
+    matcher: Option<String>,
+    timeout: u64,
+}
+
+/// The Cassy handlers for `layer`. Both layers carry the tool guards; only the
+/// user layer adds SessionStart/Stop and the MCP policy matcher (cas-d0fe).
+fn codex_handler_specs(layer: CodexHookLayer) -> Vec<CodexHandlerSpec> {
+    let mut specs = vec![
+        CodexHandlerSpec {
+            event: "PreToolUse",
+            command: "CAS_HOOK_HARNESS=codex cas hook PreToolUse",
+            matcher: Some(codex_hook_matcher("PreToolUse", layer)),
+            timeout: cas_pty::CODEX_PRE_TOOL_TIMEOUT_SECS,
+        },
+        CodexHandlerSpec {
+            event: "PostToolUse",
+            command: "cas hook PostToolUse",
+            matcher: Some(codex_hook_matcher("PostToolUse", layer)),
+            timeout: 3,
+        },
+    ];
+    if layer == CodexHookLayer::User {
+        specs.push(CodexHandlerSpec {
+            event: "SessionStart",
+            command: "CAS_HOOK_HARNESS=codex cas hook SessionStart",
+            matcher: Some("startup|resume|clear|compact".to_string()),
+            timeout: CODEX_SESSION_START_TIMEOUT_SECS,
+        });
+        specs.push(CodexHandlerSpec {
+            event: "Stop",
+            command: "CAS_HOOK_HARNESS=codex cas hook Stop",
+            matcher: None,
+            timeout: CODEX_STOP_TIMEOUT_SECS,
+        });
+    }
+    specs
+}
+
+/// Install Cassy's command guards, task-anchor hook and (user layer only)
+/// lifecycle handlers using Codex's native `hooks.json` schema.
 ///
 /// PreToolUse gets a generous response budget; PostToolUse remains three
 /// seconds. Codex timeout units are seconds, unlike Claude's settings. Existing
 /// non-Cassy hook groups are preserved, while older Cassy entries are converged to these exact matchers and
 /// handlers.
-fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
+fn configure_codex_tool_hooks(codex_dir: &Path, layer: CodexHookLayer) -> anyhow::Result<bool> {
     let hooks_path = codex_dir.join("hooks.json");
     let existing_content = if hooks_path.exists() {
         Some(std::fs::read_to_string(&hooks_path)?)
@@ -927,13 +1013,9 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("hooks.json `hooks` is not an object"))?;
-    for (event, command) in [
-        (
-            "PreToolUse",
-            "CAS_HOOK_HARNESS=codex cas hook PreToolUse",
-        ),
-        ("PostToolUse", "cas hook PostToolUse"),
-    ] {
+    for spec in codex_handler_specs(layer) {
+        let event = spec.event;
+        let command = spec.command;
         let groups = hooks
             .entry(event)
             .or_insert_with(|| serde_json::json!([]))
@@ -949,15 +1031,23 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
                 handlers.retain(|handler| !matches!(handler.get("command").and_then(|v| v.as_str()), Some(existing) if existing == command || existing == legacy_command));
             }
         }
-        groups.retain(|group| !group.get("hooks").and_then(|h| h.as_array()).is_some_and(Vec::is_empty));
-        groups.push(serde_json::json!({
-            "matcher": codex_hook_matcher(event),
+        groups.retain(|group| {
+            !group
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .is_some_and(Vec::is_empty)
+        });
+        let mut group = serde_json::json!({
             "hooks": [{
                 "type": "command",
                 "command": command,
-                "timeout": if event == "PreToolUse" { cas_pty::CODEX_PRE_TOOL_TIMEOUT_SECS } else { 3 }
+                "timeout": spec.timeout
             }]
-        }));
+        });
+        if let Some(matcher) = spec.matcher {
+            group["matcher"] = matcher.into();
+        }
+        groups.push(group);
     }
 
     let formatted = canonical_json_pretty(&config)?;
@@ -972,11 +1062,18 @@ fn configure_codex_tool_hooks(codex_dir: &Path) -> anyhow::Result<bool> {
 /// `apply_patch`, Codex's file-edit tool, so the worker write guard covers
 /// edits and not only shell commands. Codex reports those calls with
 /// `tool_name: "apply_patch"` whichever matcher selects them.
-fn codex_hook_matcher(event: &str) -> &'static str {
-    if event == "PreToolUse" {
-        "^(Bash|apply_patch)$"
-    } else {
-        "^Bash$"
+///
+/// cas-d0fe: Codex 0.163 PreToolUse also sees MCP calls as
+/// `mcp__<server>__<tool>`, so the user layer adds Claude's Slack/Violet
+/// policy alternation and the transport guard covers Codex MCP writes.
+fn codex_hook_matcher(event: &str, layer: CodexHookLayer) -> String {
+    match (event, layer) {
+        ("PreToolUse", CodexHookLayer::User) => format!(
+            "^(Bash|apply_patch)$|{}",
+            crate::config::hooks::SLACK_POLICY_MATCHER
+        ),
+        ("PreToolUse", CodexHookLayer::Project) => "^(Bash|apply_patch)$".to_string(),
+        _ => "^Bash$".to_string(),
     }
 }
 
@@ -987,8 +1084,30 @@ mod codex_provision_tests {
 
     #[test]
     fn codex_pre_tool_hook_also_guards_apply_patch_cas_49c0() {
-        assert_eq!(codex_hook_matcher("PreToolUse"), "^(Bash|apply_patch)$");
-        assert_eq!(codex_hook_matcher("PostToolUse"), "^Bash$");
+        assert_eq!(
+            codex_hook_matcher("PreToolUse", CodexHookLayer::Project),
+            "^(Bash|apply_patch)$"
+        );
+        assert_eq!(
+            codex_hook_matcher("PostToolUse", CodexHookLayer::User),
+            "^Bash$"
+        );
+        // cas-d0fe: the user layer also routes Slack/Violet MCP calls through
+        // the same policy Claude's PreToolUse matcher covers.
+        let user = codex_hook_matcher("PreToolUse", CodexHookLayer::User);
+        let re = regex::Regex::new(&user).unwrap();
+        for tool in [
+            "Bash",
+            "apply_patch",
+            "mcp__violet__violet_post",
+            "mcp__cs__artifact",
+        ] {
+            assert!(
+                re.is_match(tool),
+                "{tool} must reach the Codex PreToolUse policy"
+            );
+        }
+        assert!(!re.is_match("mcp__cs__task"));
     }
 
     #[test]
@@ -1045,6 +1164,41 @@ mod codex_provision_tests {
         let post_key = format!("{}:post_tool_use:0:0", hooks_path.display());
         assert!(state.get(&pre_key).is_some());
         assert!(state.get(&post_key).is_some());
+
+        // cas-d0fe: the user layer carries the lifecycle handlers, Stop without
+        // a matcher key, and Codex would start them without a review prompt.
+        let hooks: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        assert_eq!(
+            hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            "CAS_HOOK_HARNESS=codex cas hook SessionStart"
+        );
+        assert!(hooks["hooks"]["Stop"][0].get("matcher").is_none());
+        let readiness = cas_pty::codex_launch_readiness(
+            &codex_dir.path().join("config.toml"),
+            codex_dir.path(),
+            codex_dir.path(),
+        )
+        .unwrap();
+        let cas_hooks: Vec<_> = readiness
+            .hooks
+            .iter()
+            .filter(|hook| hook.cas_owned)
+            .collect();
+        assert_eq!(cas_hooks.len(), 4, "{cas_hooks:?}");
+        assert!(
+            cas_hooks
+                .iter()
+                .all(|hook| hook.trust == cas_pty::CodexHookTrust::Trusted),
+            "{cas_hooks:?}"
+        );
+
+        // The project layer (usually tracked) never duplicates them.
+        let project = TempDir::new().unwrap();
+        configure_codex_mcp_server(project.path()).unwrap();
+        let project_hooks =
+            std::fs::read_to_string(project.path().join(".codex/hooks.json")).unwrap();
+        assert!(!project_hooks.contains("SessionStart") && !project_hooks.contains("\"Stop\""));
     }
 }
 

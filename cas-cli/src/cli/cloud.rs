@@ -3528,7 +3528,13 @@ pub(crate) fn render_sync_summary(
                     if parts.is_empty() {
                         parts.push("queued rows remain".to_string());
                     }
-                    parts.push("run cas cloud queue --retry".to_string());
+                    if reasons.is_empty()
+                        || reasons
+                            .iter()
+                            .any(|(reason, _)| crate::cloud::push_rejection_is_retryable(reason))
+                    {
+                        parts.push("run cas cloud queue --retry".to_string());
+                    }
                     fmt.warning(&format!("Push incomplete · {}", parts.join(" · ")))?;
                 }
                 // cas-25c1: never let a clean team receipt stand alone over a
@@ -8447,6 +8453,37 @@ mod team_cmd_tests {
             !output.contains("rows failed"),
             "every terminal row here has a named reason: {output}"
         );
+
+        for (reason, retry_now) in [
+            ("invalid_json_nul", false),
+            ("version_gate", false),
+            ("unknown_server_reason", false),
+            ("timeout", true),
+        ] {
+            let mut backlog = crate::cloud::PushBacklog {
+                pending: 0,
+                failed: 1,
+                ..Default::default()
+            };
+            backlog.rejected_by_reason.insert(reason.into(), 1);
+            let summary = SyncSummary::push(
+                &crate::cloud::SyncResult {
+                    remaining_backlog: backlog,
+                    ..Default::default()
+                },
+                crate::cloud::PushScope::All,
+                None,
+            );
+            let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(400);
+            render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+            let output = tf.output();
+            assert_eq!(
+                output.contains(" · run cas cloud queue --retry"),
+                retry_now,
+                "{reason}: blocked-only rejection advice must not prescribe an immediate broad retry: {output}"
+            );
+            assert!(output.contains(crate::cloud::push_reason_hint(reason)), "{output}");
+        }
     }
 
     /// Verbose output spends a line per reason so each refusal carries its own

@@ -31,8 +31,14 @@ REQUIRED_FIELDS = {
     ("verification", "add"): ("dispatch_id",),
     ("task", "create"): ("title",),
 }
-# The task-verifier's dispatch id comes from its server-bound capability.
-DISPATCH_ID_FROM_CAPABILITY = ("agents/task-verifier.md", "agents/task-verifier.body.md")
+# The canonical verifier body explains when dispatch_id must be supplied; its
+# generated projections share that conditional template. Runtime authority is
+# still required, including for native Codex roles that cannot mint a handoff.
+VERIFIER_DISPATCH_TEMPLATES = (
+    "agents/task-verifier.md",
+    "agents/task-verifier.body.md",
+    "builtins/codex/agents/task-verifier.toml",
+)
 # `task action=create` needs `risk` unless the type is exempt.
 RISK_EXEMPT_TASK_TYPES = {"epic", "spike", "chore", "gate"}
 # Format-string variables that stand for a prefixed tool in runtime text.
@@ -115,7 +121,7 @@ def lint(text: str, origin: str, surface: dict) -> list[tuple[int, str, str]]:
             defects += [f"unknown field {key}" for key in keys if key not in surface[tool]["fields"]]
             if keys:
                 for field in REQUIRED_FIELDS.get((tool, action), ()):
-                    if field == "dispatch_id" and origin.endswith(DISPATCH_ID_FROM_CAPABILITY):
+                    if field == "dispatch_id" and origin.endswith(VERIFIER_DISPATCH_TEMPLATES):
                         continue
                     if field not in keys:
                         defects.append(f"missing {field}")

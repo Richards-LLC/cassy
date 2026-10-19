@@ -5,7 +5,7 @@ use super::{
     finish_worker_config, push_plain_factory_session, sanitize_toml_arg,
 };
 use crate::error::Error;
-use crate::harness::HarnessCapabilities;
+use crate::harness::{CapabilityState, HarnessCapabilities};
 use crate::pty::PtyConfig;
 use crate::{Effort, Result};
 
@@ -20,12 +20,16 @@ impl Backend for Codex {
 
     fn capabilities(&self) -> HarnessCapabilities {
         HarnessCapabilities {
-            supports_hooks: false,
-            supports_subagents: false,
+            supports_hooks: CapabilityState::Unknown,
+            supports_subagents: CapabilityState::Unknown,
             supports_textbox_submit: false,
             requires_bracketed_paste_injection: true,
             tool_prefix: "mcp__cs__",
         }
+    }
+
+    fn runtime_capability_evidence(&self, config: &PtyConfig) -> Option<cas_pty::CodexCapabilityEvidence> {
+        Some(cas_pty::detect_codex_capabilities(config))
     }
 
     fn effort_arg(&self, effort: Effort) -> &'static str {
@@ -140,6 +144,26 @@ impl Backend for Codex {
             // Codex 0.162 loads a linked worktree's hooks from its main
             // checkout; trust every file a supported version may load.
             cas_pty::prepare_codex_project_hooks_in(&config, cwd)?;
+            // cas-d0fe: verify, read-only, that Codex will start without
+            // parking on its "Hooks need review" prompt. Only the directory and
+            // CAS's own handlers are launch requirements; any other hook is
+            // reported for operator review and never trusted here.
+            let readiness = cas_pty::codex_launch_readiness(&config, &home, cwd)?;
+            for hook in readiness.foreign_needing_review() {
+                tracing::warn!(
+                    key = %hook.key,
+                    trust = ?hook.trust,
+                    "Codex hook not owned by CAS needs operator review in /hooks"
+                );
+            }
+            let blocking = readiness.blocking();
+            if !blocking.is_empty() {
+                return Err(Error::pty(format!(
+                    "refusing to launch Codex: its trust is not ready and it would park on \
+                     \"Hooks need review\": {}",
+                    blocking.join("; ")
+                )));
+            }
         }
         Ok(())
     }

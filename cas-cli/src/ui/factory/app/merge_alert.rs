@@ -116,6 +116,52 @@ pub(super) fn task_id(event: &DirectorEvent) -> Option<&str> {
     }
 }
 
+/// Active-task idle events can be rebound to an in-progress delivery during
+/// fresh revalidation, so they need the same external lane as merge reads.
+pub(super) fn needs_ci_read(event: &DirectorEvent) -> bool {
+    matches!(event, DirectorEvent::WorkerIdle { active_task: Some(_), .. })
+}
+
+/// Positive evidence only: the live worker/task and its exact pushed tip have
+/// unfinished CI. Unknown, unpushed and settled states keep the lifecycle relay.
+/// Runs with the existing delivery Git/CI job, never on the control/read lane.
+pub(super) fn read_worker_ci_wait(
+    event: &DirectorEvent,
+    data: &DirectorData,
+    repo: &Path,
+) -> Option<(String, (String, String))> {
+    let DirectorEvent::WorkerIdle { worker, active_task: Some(_), .. } = event else {
+        return None;
+    };
+    // Match delivery-time rebinding: an old parked idle event can now refer
+    // to the worker's next task, whose own tip is the only relevant CI.
+    let active = data.agents.iter().find(|agent| agent.name == *worker)?
+        .active_lease.as_ref()?;
+    let task = data.in_progress_tasks.iter().find(|task| {
+        task.id == active.task_id && task.status == cas_types::TaskStatus::InProgress
+            && task.assignee.as_deref().is_some_and(|assignee| {
+                assignee == worker || data.agent_id_to_name.get(assignee) == Some(worker)
+            })
+    })?;
+    let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo, branch)
+        .or_else(|| crate::git_evidence::resolve_ref_commit_sha(repo, &format!("origin/{branch}")));
+    let (branch, tip) = crate::ui::factory::director::task_delivery_ref(
+        &task.id, worker, None, None, resolve, |_, _| false,
+    );
+    let tip = tip?;
+    if crate::git_evidence::fetch_parent_branch_result(repo, &branch)
+        != crate::git_evidence::BoundedFetch::Succeeded
+        || crate::git_evidence::resolve_ref_commit_sha(repo, &format!("origin/{branch}"))
+            .as_deref() != Some(tip.as_str())
+    {
+        return None;
+    }
+    let pending = crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(&tip, repo) == "pending";
+    // Do not borrow a running old tip if the worker committed during the probe.
+    (pending && resolve(&branch).as_deref() == Some(tip.as_str()))
+        .then(|| (worker.clone(), (task.id.clone(), tip)))
+}
+
 /// Runs off the loop. No result means defer; it never consumes the dedupe key.
 pub(super) fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Option<Ready> {
     let MergeAlertFreshness::Fresh(evidence) = check_merge_alert_freshness(event, data, repo)

@@ -130,6 +130,8 @@ pub fn handle_hook(event_name: &str, mut input: HookInput) -> Result<HookOutput,
     // CAS_ROOT env var priority for factory mode compatibility.
     let cas_root: Option<PathBuf> = find_cas_root().ok();
 
+    normalize_codex_factory_session(&mut input);
+
     // The harness submits a raw prompt string. The delivery authority records
     // a one-shot typed envelope keyed to that exact string before it injects
     // machine traffic. Consume the envelope before prompt capture; do not
@@ -179,6 +181,22 @@ pub fn handle_hook(event_name: &str, mut input: HookInput) -> Result<HookOutput,
     result
 }
 
+/// cas-d0fe: a Codex factory pane's native hook `session_id` is its thread
+/// UUID, while Cassy registered the pane under `CAS_SESSION_ID` (Claude panes
+/// are launched with `--session-id`, so for them the two coincide). Using the
+/// registered id for every event keeps a Codex SessionStart from minting a
+/// second agent row under the same name, and keeps Stop/SessionEnd acting on
+/// the identity the factory knows.
+fn normalize_codex_factory_session(input: &mut HookInput) {
+    let var = |key: &str| cas_core::env_overlay::var(key).ok();
+    if var("CAS_HOOK_HARNESS").is_some_and(|value| value.eq_ignore_ascii_case("codex"))
+        && var("CAS_FACTORY_MODE").as_deref() == Some("1")
+        && let Some(session_id) = var("CAS_SESSION_ID").filter(|id| !id.trim().is_empty())
+    {
+        input.session_id = session_id;
+    }
+}
+
 #[cfg(test)]
 mod internal_llm_tests {
     use super::*;
@@ -206,6 +224,45 @@ mod internal_llm_tests {
         );
         let agents = crate::store::open_agent_store(&parent_store).unwrap();
         assert!(agents.list(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn codex_factory_session_start_registers_only_the_cas_session_identity_cas_d0fe() {
+        let project = tempfile::tempdir().expect("project");
+        let cas_root = crate::store::init_cas_dir(project.path()).expect("cas root");
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_ROOT", Some(cas_root.to_str().expect("utf8 cas root"))),
+            ("CAS_HOOK_HARNESS", Some("codex")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_AGENT_ROLE", Some("supervisor")),
+            ("CAS_AGENT_NAME", Some("true-leopard-45")),
+            ("CAS_SESSION_ID", Some("codex-true-leopard-45-registered")),
+            (crate::internal_llm::INTERNAL_LLM_ENV, None),
+        ]);
+        // Codex 0.163 sends its thread UUID as the hook session_id.
+        handle_hook(
+            "SessionStart",
+            HookInput {
+                session_id: "01a14bb6-a0a5-75c1-ac0f-cb08b8ea56a5".into(),
+                cwd: project.path().to_string_lossy().into_owned(),
+                hook_event_name: "SessionStart".into(),
+                source: Some("startup".into()),
+                ..HookInput::default()
+            },
+        )
+        .expect("codex session start");
+        let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
+        let ids: Vec<String> = agents
+            .list(None)
+            .expect("agents")
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(
+            ids,
+            ["codex-true-leopard-45-registered"],
+            "no ghost row under the thread id"
+        );
     }
 
     #[test]

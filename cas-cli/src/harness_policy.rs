@@ -226,24 +226,19 @@ pub fn mirror_receipts_across_aliases_with_source(
 
 /// Factory verification matrix.
 ///
-/// - Subtasks: required only when worker harness supports subagents.
-/// - Epics: required only when supervisor harness supports subagents.
+/// Review requirements are independent of optional native subagent settings.
+/// Codex uses the registered supervisor/reviewer route when native dispatch
+/// cannot supply an authenticated verifier; disabling a feature cannot bypass
+/// independent review. Explicit operator verification settings are applied by
+/// the caller, as before.
 pub fn verification_policy(supervisor: SupervisorCli, worker: SupervisorCli) -> VerificationPolicy {
-    let task_mode = if worker.backend().capabilities().supports_subagents {
-        VerificationMode::Required
-    } else {
-        VerificationMode::Bypassed
+    let mode = |harness| match harness {
+        SupervisorCli::Claude | SupervisorCli::Codex | SupervisorCli::Grok => VerificationMode::Required,
+        SupervisorCli::OpenCode => VerificationMode::Bypassed,
     };
-
-    let epic_mode = if supervisor.backend().capabilities().supports_subagents {
-        VerificationMode::Required
-    } else {
-        VerificationMode::Bypassed
-    };
-
     VerificationPolicy {
-        task_mode,
-        epic_mode,
+        task_mode: mode(worker),
+        epic_mode: mode(supervisor),
     }
 }
 
@@ -255,12 +250,11 @@ pub fn verification_required_for_task_type(task_type: TaskType) -> bool {
     }
 }
 
-pub fn is_worker_without_subagents_from_env() -> bool {
+/// Native role discovery is not proof of Cassy's sealed child handoff.
+/// Until that protocol is supported, Codex keeps its supervisor review route.
+pub fn worker_needs_supervisor_verification_from_env() -> bool {
     is_worker_from_env()
-        && !worker_harness_from_env()
-            .backend()
-            .capabilities()
-            .supports_subagents
+        && matches!(worker_harness_from_env(), SupervisorCli::Codex | SupervisorCli::OpenCode)
 }
 
 /// Returns the MCP coordination tool name appropriate for the current factory
@@ -648,7 +642,7 @@ mod tests {
     #[test]
     fn matrix_claude_codex() {
         let p = verification_policy(SupervisorCli::Claude, SupervisorCli::Codex);
-        assert!(!p.task_required());
+        assert!(p.task_required());
         assert!(p.epic_required());
     }
 
@@ -656,14 +650,19 @@ mod tests {
     fn matrix_codex_claude() {
         let p = verification_policy(SupervisorCli::Codex, SupervisorCli::Claude);
         assert!(p.task_required());
-        assert!(!p.epic_required());
+        assert!(p.epic_required());
     }
 
     #[test]
     fn matrix_codex_codex() {
         let p = verification_policy(SupervisorCli::Codex, SupervisorCli::Codex);
-        assert!(!p.task_required());
-        assert!(!p.epic_required());
+        assert!(p.task_required());
+        assert!(p.epic_required());
+        let _env = TestEnvGuard::with_vars(&[
+            ("CAS_AGENT_ROLE", "worker"),
+            ("CAS_FACTORY_WORKER_CLI", "codex"),
+        ]);
+        assert!(worker_needs_supervisor_verification_from_env());
     }
 
     #[test]

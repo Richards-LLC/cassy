@@ -883,13 +883,17 @@ pub(super) fn installed_service_exists() -> Result<bool> {
 /// Unload before signaling a launchd-owned hub: KeepAlive must no longer
 /// own a restart while the ordinary stop path waits for process teardown.
 /// Keep the plist so an explicit restart can bootstrap it again.
+pub(super) fn stop_deadline() -> crate::bounded_process::Deadline {
+    crate::bounded_process::Deadline::after(Duration::from_secs(5))
+}
+
 pub(super) fn stop_supervised() -> Result<()> {
     if native_platform() != ServicePlatform::Launchd || !launchd_path()?.is_file() {
         return Ok(());
     }
     let target = format!("{}/{}", launchd_domain()?, launchd_label());
     let timeout = Duration::from_secs(5);
-    let deadline = crate::bounded_process::Deadline::after(timeout);
+    let deadline = stop_deadline();
     if !probe_manager_with_timeout("launchctl", ["print", &target], deadline.remaining()).require_observed()? {
         return Ok(());
     }
@@ -1729,6 +1733,14 @@ fn manual_linux_instructions() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launchd_unload_after_five_seconds_uses_whole_stop_budget() {
+        let unloaded_at = Instant::now() + Duration::from_millis(5_050);
+        wait_for_manager_unload(stop_deadline(), |_| {
+            ManagerProbe::Observed(Instant::now() < unloaded_at)
+        }).expect("a launchd job disappearing after five seconds must fit the fifteen-second Stop budget");
+    }
 
     #[test]
     fn successful_bootout_waits_for_loaded_job_to_disappear() {

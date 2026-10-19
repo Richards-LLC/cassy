@@ -9921,21 +9921,25 @@ mod worker_commit_guard_tests {
             ("CAS_AGENT_NAME", Some("linked-worker")),
         ]);
 
-        let input = hook_git_write_input(
-            &repo_path,
-            &format!("git -C '{linked_path}' commit -m work"),
-        );
-        let out = handle_pre_tool_use(&input, None).expect("handler ok");
-        let val = serde_json::to_value(&out).unwrap();
-        let decision = val
-            .get("hookSpecificOutput")
-            .and_then(|h| h.get("permissionDecision"))
-            .and_then(|v| v.as_str());
-        assert_ne!(
-            decision,
-            Some("deny"),
-            "linked worktree branch must be honored: {val}"
-        );
+        let artifacts = tempfile::tempdir().unwrap();
+        let cwd = artifacts.path().display().to_string();
+        let ledger = "cat > LEDGER.md <<'EOF'\ngit config\ncommit failed; commits normally\nEOF";
+        let mut mismatches = Vec::new();
+        for (command, denied) in [
+            (ledger.to_string(), false),
+            ("printf '%s' git commit".to_string(), false),
+            (format!("git -C '{repo_path}' log --grep commit"), false),
+            (format!("git -C '{linked_path}' commit -m work"), false),
+            (format!("{ledger}\ngit -C '{repo_path}' commit -m work"), true),
+        ] {
+            let input = hook_git_write_input(&cwd, &command);
+            let out = handle_pre_tool_use(&input, None).expect("handler ok");
+            let val = serde_json::to_value(&out).unwrap();
+            if (val["hookSpecificOutput"]["permissionDecision"] == "deny") != denied {
+                mismatches.push(format!("{command}: expected denied={denied}: {val}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     #[test]

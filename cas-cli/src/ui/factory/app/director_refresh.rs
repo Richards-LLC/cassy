@@ -93,6 +93,10 @@ pub(crate) struct DirectorRefreshLoad {
     /// non-live (cas-e98e), classified here because liveness checks each
     /// agent's process.
     phantom_workers: Option<Vec<PhantomWorkerTarget>>,
+    /// cas-df315: the project identity re-resolved with this read, when it
+    /// differs from the scope the request carried (an identity correction
+    /// while the factory runs). The loop adopts it as its project scope.
+    project_id: Option<String>,
 }
 
 impl DirectorRefreshLoad {
@@ -123,13 +127,22 @@ impl DirectorRefreshRequest {
     ) -> DirectorRefreshLoad {
         let fingerprint = CasDbFingerprint::from_cas_dir(&self.cas_dir);
         let db_changed = self.previous_fingerprint != Some(fingerprint);
-        let director = if db_changed {
+        // cas-df315: the identity was resolved once at startup, so a corrected
+        // [project] pin or remote kept the factory scoped to the old project
+        // and hid the pinned epic. Re-resolve it here, off the loop, with a
+        // database change or on the git cadence; a change forces a full read.
+        let corrected = (self.project_id.is_some() && (db_changed || self.git_due))
+            .then(|| crate::cloud::resolve_canonical_id(&self.cas_dir))
+            .flatten()
+            .filter(|resolved| self.project_id.as_deref() != Some(resolved.as_str()));
+        let project_id = corrected.as_deref().or(self.project_id.as_deref());
+        let director = if db_changed || corrected.is_some() {
             DirectorLoad::Loaded(DirectorData::load_with_stores_for_project(
                 &self.cas_dir,
                 self.worktree_root.as_deref(),
                 self.git_due,
                 stores,
-                self.project_id.as_deref(),
+                project_id,
             ))
         } else if self.git_due {
             DirectorLoad::GitOnly(DirectorData::load_git_changes_with_stores(
@@ -189,6 +202,7 @@ impl DirectorRefreshRequest {
             focus,
             all_agents,
             phantom_workers,
+            project_id: corrected,
         }
     }
 }
@@ -516,6 +530,8 @@ pub(crate) struct DeliverabilityRequest {
     cas_dir: PathBuf,
     worktree_root: Option<PathBuf>,
     repo_root: PathBuf,
+    /// cas-df315: the app's current scope, not the read lane's startup copy.
+    project_id: Option<String>,
 }
 
 impl DeliverabilityRequest {
@@ -527,11 +543,12 @@ impl DeliverabilityRequest {
         if !prompts.iter().any(prompt_needs_fresh_recheck) {
             return vec![true; prompts.len()];
         }
-        let fresh = DirectorData::load_with_stores(
+        let fresh = DirectorData::load_with_stores_for_project(
             &self.cas_dir,
             self.worktree_root.as_deref(),
             false,
             stores,
+            self.project_id.as_deref(),
         );
         prompts
             .iter()
@@ -681,6 +698,7 @@ impl FactoryApp {
             cas_dir: self.cas_dir.clone(),
             worktree_root: self.worktree_manager.as_ref().map(|m| m.worktree_root()),
             repo_root: self.delivery_repo_root(),
+            project_id: self.project_scope(),
         }
     }
 
@@ -698,6 +716,12 @@ impl FactoryApp {
             return Ok(Vec::new());
         }
         let git_due = load.git_due;
+        if let Some(project_id) = load.project_id
+            && let Some(stores) = self.director_stores.as_mut()
+        {
+            tracing::info!(%project_id, previous = ?stores.project_id, "cas-df315: factory project scope follows the corrected identity");
+            stores.project_id = Some(project_id);
+        }
         if let Some(facts) = load.facts {
             self.parked_facts = facts;
         }

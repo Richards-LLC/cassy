@@ -523,20 +523,21 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
       await page.emulateMedia({ colorScheme: "dark" });
       await page.evaluate(() => { document.documentElement.dataset.scheme = "dark"; });
       const fieldTokens = await reply.evaluate((field) => {
-        const reference = document.createElement("textarea");
-        const composer = document.createElement("form");
-        composer.className = "conversation-composer";
-        composer.append(reference);
-        document.body.append(composer);
+        const expected = document.createElement("textarea");
+        expected.style.background = "var(--panel)";
+        expected.style.border = "var(--line-width) solid var(--line-strong)";
+        expected.style.borderRadius = "23px";
+        expected.style.color = "var(--ink)";
+        document.body.append(expected);
         const actualStyle = getComputedStyle(field);
-        const referenceStyle = getComputedStyle(reference);
+        const expectedStyle = getComputedStyle(expected);
         const matches = {
-          background: actualStyle.backgroundColor === referenceStyle.backgroundColor,
-          border: actualStyle.borderColor === referenceStyle.borderColor && actualStyle.borderStyle === referenceStyle.borderStyle && actualStyle.borderWidth === referenceStyle.borderWidth,
-          radius: actualStyle.borderRadius === referenceStyle.borderRadius,
-          color: actualStyle.color === referenceStyle.color,
+          background: actualStyle.backgroundColor === expectedStyle.backgroundColor,
+          border: actualStyle.borderColor === expectedStyle.borderColor && actualStyle.borderStyle === expectedStyle.borderStyle && actualStyle.borderWidth === expectedStyle.borderWidth,
+          radius: actualStyle.borderRadius === expectedStyle.borderRadius,
+          color: actualStyle.color === expectedStyle.color,
         };
-        composer.remove();
+        expected.remove();
         return matches;
       });
       expect(fieldTokens).toEqual({ background: true, border: true, radius: true, color: true });

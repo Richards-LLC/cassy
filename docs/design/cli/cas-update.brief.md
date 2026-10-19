@@ -20,6 +20,16 @@
 - The `Current version: / Latest version:` pairs, each in accent colour, are gone; versions
   are plain text in the row.
 
+### Binary installation failure JSON (cas-929d)
+
+Before a binary swap, a failed updater setup, release lookup, download or extraction
+emits one JSON object and exits nonzero. It retains `binary_updated: false` and
+`version` for the running binary, adds `binary_status: "failed"`,
+`refresh_status: "not_run"`, and `error: {phase: "binary", message: <cause>}`.
+No project, hub or refresh result is claimed. Stderr retains the existing diagnostic.
+Successful updates and post-swap failures retain their existing receipts; a failure
+after a successful swap must never be described as `binary_updated: false`.
+
 ### Service-managed hub refresh
 
 After a binary swap, the hub restart is represented in JSON as `hub_restart` with
@@ -38,7 +48,7 @@ files (`cli/update.rs`, `cli/update/`, `ui/components`, `ui/theme`) are byte-ide
 | First two lines | The binary phase line says whether Cassy is current, what it was updated to, or that an install was cancelled. The projects phase line says how many projects failed, warned or were skipped, with a failed user-level store named on its own. A current binary never reads as a failed update. |
 | Scannable | Two phase lines with the mark first, a `[n/N]` counter, a fixed label column and right-aligned elapsed time. Then one finding per failure or warning: mark, who, phase, cause, and one `→` remedy. Healthy projects collapse to one counted line. |
 | Readable | The wrapped cause of each finding, and the names under a finding shared by several projects. |
-| Machine output | `--json` is unchanged: the combined receipt (`binary_updated`, `version`, `hub_restart`), then the refresh receipt (`projects[]`, `refresh_status`, `user_level_store`, `skipped_unregistered`). No phase lines, spinner, prompt or findings. |
+| Machine output | `--json` emits one combined receipt: binary state (`binary_updated`, `version`, `hub_restart`) together with the refresh receipt (`projects[]`, `refresh_status`, `user_level_store`, `skipped_unregistered`). Pre-install errors use the binary-failure contract above. No phase lines, spinner, prompt or findings. |
 | Omitted | self_update's own output: release-check chatter, its release-status block and prompt, and its download bar. Also every phase's captured transcript, the per-project phase table, repeated conflict paths and Cloud explanations that only restate a reason. The table and transcripts appear under `--verbose`; a dry run keeps its table, because the plan is its result. |
 
 ### Rendering decisions

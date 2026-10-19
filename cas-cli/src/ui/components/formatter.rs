@@ -327,11 +327,11 @@ impl<'w> Formatter<'w> {
         self.newline()
     }
 
-    /// Print a success status: `✓ message`
+    /// Print a success status with a locale-appropriate mark.
     pub fn success(&mut self, message: &str) -> io::Result<()> {
         let color = self.theme.palette.text_success;
         if self.mode == OutputMode::Styled {
-            self.write_colored(&format!("{} {message}", Icons::CHECK), color)?;
+            self.write_colored(&format!("{} {message}", Verdict::Ok.label(self.glyphs())), color)?;
         } else {
             write!(self.writer, "[OK] {message}")?;
         }
@@ -689,23 +689,34 @@ mod tests {
     }
 
     #[test]
-    fn test_error_renderer_uses_text_error_mark_and_ascii_fallback_under_c_locale() {
+    fn test_styled_status_marks_use_ascii_fallback_under_c_locale() {
         let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C")]);
         env.remove("NO_COLOR");
         let theme = ActiveTheme::default_light();
         let RatatuiColor::Rgb(r, g, b) = theme.palette.text_error else {
             panic!("text_error must use a concrete theme color");
         };
-        let mut buf = Vec::new();
+        let mut error_buf = Vec::new();
         {
-            let mut fmt = Formatter::styled(&mut buf, theme);
+            let mut fmt = Formatter::styled(&mut error_buf, theme.clone());
             fmt.error("configuration failed").unwrap();
         }
-
-        let output = String::from_utf8(buf).unwrap();
         assert_eq!(
-            output,
+            String::from_utf8(error_buf).unwrap(),
             format!("\x1b[38;2;{r};{g};{b}m[ERROR]\x1b[0m configuration failed\n")
+        );
+
+        let RatatuiColor::Rgb(sr, sg, sb) = theme.palette.text_success else {
+            panic!("text_success must use a concrete theme color");
+        };
+        let mut success_buf = Vec::new();
+        {
+            let mut fmt = Formatter::styled(&mut success_buf, theme);
+            fmt.success("sync complete").unwrap();
+        }
+        assert_eq!(
+            String::from_utf8(success_buf).unwrap(),
+            format!("\x1b[38;2;{sr};{sg};{sb}m[OK] sync complete\x1b[0m\n")
         );
     }
 

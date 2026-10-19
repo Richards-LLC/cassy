@@ -116,9 +116,10 @@ fn ct2_p3_dead_owner_notice_rerouted() {
         (3, "operator", Some("connected-observer-session")),
     ] {
         let id = format!("cas-route-{stage}");
-        tasks
-            .add(&Task::new(id.clone(), "Ejected PR".into()))
-            .unwrap();
+        let mut epic = Task::new(id.clone(), "Ejected PR".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = Some("epic/release".into());
+        tasks.add(&epic).unwrap();
         let result = enqueue_merge_queue_ejection_relay(
             &root,
             &id,

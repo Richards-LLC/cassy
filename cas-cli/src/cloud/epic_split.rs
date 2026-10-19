@@ -1000,6 +1000,107 @@ pub fn renew_split_claims(cas_root: &Path, claims: &PeerClaims, agent_id: &str, 
 mod tests {
     use super::*;
 
+    fn test_supervisor(root: &Path, id: &str, name: &str, heartbeat_age_secs: i64) -> Agent {
+        let mut agent = Agent::new_with_role(
+            id.to_string(),
+            name.to_string(),
+            crate::types::AgentRole::Supervisor,
+        );
+        agent.last_heartbeat = Utc::now() - chrono::Duration::seconds(heartbeat_age_secs);
+        crate::store::open_agent_store(root)
+            .unwrap()
+            .register(&agent)
+            .unwrap();
+        agent
+    }
+
+    fn accepted_split(root: &Path, owner_id: &str) {
+        let now = Utc::now();
+        insert_epic_split(
+            root,
+            &EpicSplit {
+                id: "split-2c91dc59".into(),
+                epic_id: "cas-5c13".into(),
+                local_agent_id: owner_id.into(),
+                peer_agent_id: "true-leopard-45".into(),
+                peer_name: "true-leopard-45".into(),
+                peer_machine: "soundwave".into(),
+                direction: SplitDirection::Outgoing,
+                mine: vec!["cas-bdfc".into()],
+                theirs: vec!["cas-c4a52".into()],
+                state: SplitState::Accepted,
+                reason: None,
+                message_id: None,
+                expires_at: now + chrono::Duration::days(1),
+                created_at: now,
+                decided_at: Some(now),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_live_supervisor_can_release_an_accepted_split_of_a_gone_supervisor() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let owner = test_supervisor(root, "daring-leopard-21", "daring-leopard-21", 120);
+        let caller = test_supervisor(root, "swift-heron-11", "swift-heron-11", 0);
+        let mut retired_owner = owner;
+        retired_owner.status = crate::types::AgentStatus::Shutdown;
+        crate::store::open_agent_store(root)
+            .unwrap()
+            .update(&retired_owner)
+            .unwrap();
+        accepted_split(root, &retired_owner.id);
+
+        let result = cancel(
+            root,
+            &Caller {
+                id: caller.id,
+                name: caller.name,
+            },
+            "split-2c91dc59",
+            Some("epic cas-5c13 is closed; release cas-bdfc"),
+        )
+        .unwrap();
+
+        assert!(result.contains("released"), "{result}");
+        assert!(result.contains("daring-leopard-21"), "{result}");
+        let split = get_epic_split(root, "split-2c91dc59").unwrap().unwrap();
+        assert_eq!(split.state, SplitState::Cancelled);
+        let audit = split.reason.unwrap();
+        assert!(audit.contains("swift-heron-11"), "{audit}");
+        assert!(audit.contains("daring-leopard-21"), "{audit}");
+        assert!(audit.contains("epic cas-5c13 is closed"), "{audit}");
+        assert!(split_hold_for(root, "cas-bdfc").is_none());
+    }
+
+    #[test]
+    fn a_live_supervisor_cannot_release_another_live_supervisors_split() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let owner = test_supervisor(root, "daring-leopard-21", "daring-leopard-21", 0);
+        let caller = test_supervisor(root, "swift-heron-11", "swift-heron-11", 0);
+        accepted_split(root, &owner.id);
+
+        let error = cancel(
+            root,
+            &Caller {
+                id: caller.id,
+                name: caller.name,
+            },
+            "split-2c91dc59",
+            Some("attempted takeover"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("still live"), "{error}");
+        let split = get_epic_split(root, "split-2c91dc59").unwrap().unwrap();
+        assert_eq!(split.state, SplitState::Accepted);
+        assert_eq!(split.reason, None);
+        assert!(split_hold_for(root, "cas-bdfc").is_some());
+    }
+
     #[test]
     fn the_split_line_round_trips_and_is_read_only_from_the_first_line() {
         let line = SplitMessage {

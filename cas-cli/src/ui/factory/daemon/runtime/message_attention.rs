@@ -74,7 +74,12 @@ impl AttentionInputs {
             // never unanswered mail. The same server-stamped facts (never the
             // text) that card it for the pane decide here; it stays unread
             // and unacked in the inbox.
-            if crate::ui::factory::daemon::runtime::delivery::compact_routine_supervisor_body(row).is_some() {
+            // The stall scan's rows omit the stamped kind; classify the full row.
+            let stamped = queue.queued_prompt(row.id).ok().flatten();
+            if stamped.as_ref().is_some_and(|row| {
+                crate::ui::factory::daemon::runtime::delivery::compact_routine_supervisor_body(row)
+                    .is_some()
+            }) {
                 decisions.insert(row.id, MessageAttention::Satisfied);
                 continue;
             }

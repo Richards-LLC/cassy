@@ -2243,7 +2243,14 @@ fn run_project_phase(
 // Deliberate staging remains inspectable; an attempted commit failure is an error.
 fn check_managed_commit(report: crate::cli::project_files::Report) -> anyhow::Result<()> {
     if let Some(error) = report.commit_error {
-        anyhow::bail!(error);
+        // Main owns the one final error. Leave room for its widest mark;
+        // preserve full Git stderr and hook paths in the JSON report.
+        let (lines, shortened) = findings::wrap(&error, 80 - "[ERROR] ".len(), false);
+        let mut message = lines.join("\n  ");
+        if shortened {
+            message.push_str("\n  Full details: cas update --sync --json");
+        }
+        anyhow::bail!(message);
     }
     Ok(())
 }
@@ -5150,8 +5157,8 @@ fn report_managed_files(
     if cli.json {
         println!("{}", serde_json::json!({"managed_files": report}));
     } else {
-        let message = if let Some(error) = &report.commit_error {
-            error.clone()
+        let message = if report.commit_error.is_some() {
+            "Managed files: commit failed (details below)".to_string()
         } else if !report.conflicts.is_empty() {
             format!(
                 "Managed files: {} conflicts preserved; cas update --sync --json for paths",

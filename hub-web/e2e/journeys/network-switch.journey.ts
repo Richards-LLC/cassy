@@ -657,6 +657,7 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
   const log = page.getByRole("log");
   const bubble = (text: string) => log.locator(".bub").filter({ hasText: text });
   const stored = async () => JSON.stringify(await journalRows(page, "sends"));
+  let releaseAttach: (() => void) | undefined;
   await journey.stage("One message goes out and its receipt never comes; the next waits for the session", async () => {
     const first = hub.nextSend();
     await sendNow(page, "Did this one land?");
@@ -669,6 +670,7 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     expect(sentTimes(hub, "Send this when it's back")).toBe(0);
   });
   await journey.stage("The tab reloads: both are still there, saying what they are", async () => {
+    releaseAttach = hub.holdAttach(PELICAN);
     await page.reload();
     await chooseConversation(page);
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
@@ -678,9 +680,10 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     expect(sentTimes(hub, "Send this when it's back")).toBe(0);
   });
   await journey.stage("The session is back: the waiting one goes out once, the other is not resent", async () => {
-    hub.upstreamBack(PELICAN);
     const next = hub.nextSend();
-    await clock.advance(10_000); // the reattach retry ceiling, in protocol time
+    hub.upstreamBack(PELICAN);
+    releaseAttach!();
+    await clock.advance(1_000); // settle the held attach and its send, in protocol time
     expect((await next).text).toBe("Send this when it's back");
     await expect(held).toHaveCount(0);
     hub.deliverLatest(PELICAN);

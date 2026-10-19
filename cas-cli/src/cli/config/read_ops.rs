@@ -24,6 +24,17 @@ fn origin_note(config: &Config, key: &str, value: &str) -> &'static str {
     }
 }
 
+fn blank_component_note(config: &Config, key: &str) -> Option<&'static str> {
+    if key != "issues.components.cassy" { return None; }
+    let raw = config.issues.as_ref()?.components.as_ref()?.cassy.as_deref()?;
+    if !raw.trim().is_empty() { return None; }
+    Some(if config.cassy_issue_legacy_repo().is_some() {
+        "(blank: legacy issues.repo fallback)"
+    } else {
+        "(blank: issues.repo unset; using component default)"
+    })
+}
+
 fn with_issue_repo_source(
     mut json: serde_json::Value,
     config: &Config,
@@ -40,7 +51,35 @@ fn with_issue_repo_source(
         });
         json["configured"] = serde_json::json!(config.issue_repo_registry().project.is_some());
     }
+    if blank_component_note(config, key).is_some() {
+        let legacy = config.cassy_issue_legacy_repo();
+        json["raw_blank"] = serde_json::json!(true);
+        json["report_repo"] = serde_json::json!(legacy.map(str::to_owned)
+            .unwrap_or_else(|| config.issue_repo_registry().cassy));
+        json["report_source"] = serde_json::json!(if legacy.is_some() {
+            "issues.repo"
+        } else {
+            "issues.components.cassy"
+        });
+    }
     json
+}
+
+fn get_output(
+    config: &Config, key: &str, value: &str, json: bool,
+) -> anyhow::Result<(String, Option<&'static str>)> {
+    if json {
+        let meta = registry().get(key);
+        let json = serde_json::json!({
+            "key": key, "value": value,
+            "type": meta.map(|m| m.value_type.name()),
+            "default": meta.map(|m| m.default),
+            "modified": meta.map(|m| m.is_modified(value)).unwrap_or(false)
+        });
+        Ok((serde_json::to_string_pretty(&with_issue_repo_source(json, config, key, value))?, None))
+    } else {
+        Ok((value.to_owned(), blank_component_note(config, key)))
+    }
 }
 
 pub(crate) fn execute_get(args: &ConfigGetArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
@@ -55,21 +94,10 @@ fn execute_get_internal(
     cas_root: &Path,
 ) -> anyhow::Result<()> {
     if let Some(value) = config.get_resolved(key, cas_root) {
-        if cli.json {
-            let meta = registry().get(key);
-            let json = serde_json::json!({
-                "key": key,
-                "value": value,
-                "type": meta.map(|m| m.value_type.name()),
-                "default": meta.map(|m| m.default),
-                "modified": meta.map(|m| m.is_modified(&value)).unwrap_or(false)
-            });
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&with_issue_repo_source(json, config, key, &value))?
-            );
-        } else {
-            println!("{value}");
+        let (output, note) = get_output(config, key, &value, cli.json)?;
+        println!("{output}");
+        if let Some(note) = note {
+            eprintln!("{note}");
         }
         Ok(())
     } else {
@@ -612,4 +640,53 @@ pub(crate) fn execute_search(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_get_explains_raw_blank_cassy_filing_fallback_cas_02a3() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let key = "issues.components.cassy";
+        let default = crate::config::DEFAULT_CASSY_ISSUES_REPO;
+        for (component, project, note, report_repo, report_source) in [
+            (Some(""), Some("example/project"), Some("legacy issues.repo fallback"), "example/project", "issues.repo"),
+            (Some("  "), None, Some("issues.repo unset"), default, key),
+            (None, Some("example/project"), None, default, key),
+            (Some("example/component"), Some("example/project"), None, "example/component", key),
+        ] {
+            // Raw configuration is the documented legacy opt-out; config set
+            // with blank intentionally clears the override instead.
+            let mut config = Config::default();
+            let issues = config.issues.get_or_insert_with(Default::default);
+            issues.repo = project.map(str::to_string);
+            issues.components.get_or_insert_with(Default::default).cassy = component.map(str::to_string);
+            config.save(dir.path()).unwrap();
+            let before = std::fs::read(dir.path().join("config.toml")).unwrap();
+            let config = Config::load(dir.path()).unwrap();
+            let value = config.get_resolved(key, dir.path()).unwrap();
+            let (scalar, explanation) = get_output(&config, key, &value, false).unwrap();
+            // pin: config get scalars are consumed by shell substitutions.
+            assert_eq!(scalar, component.filter(|value| !value.trim().is_empty()).unwrap_or(default));
+            match note {
+                Some(expected) => assert!(explanation.is_some_and(|text| text.contains(expected)), "blank opt-out lost: {explanation:?}"),
+                None => assert_eq!(explanation, None),
+            }
+            let (document, stderr) = get_output(&config, key, &value, true).unwrap();
+            let document: serde_json::Value = serde_json::from_str(&document).unwrap();
+            assert!(stderr.is_none());
+            assert_eq!(document["value"], scalar);
+            if note.is_some() {
+                assert_eq!(document["raw_blank"], true);
+                assert_eq!(document["report_repo"], report_repo);
+                assert_eq!(document["report_source"], report_source);
+            } else {
+                assert!(document.get("raw_blank").is_none());
+            }
+            assert_eq!(std::fs::read(dir.path().join("config.toml")).unwrap(), before);
+        }
+    }
 }

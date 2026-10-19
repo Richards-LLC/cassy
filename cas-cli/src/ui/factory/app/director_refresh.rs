@@ -314,7 +314,8 @@ impl DeliveryInputs {
 }
 
 impl DeliveryRequest {
-    /// Merge reads run on the external lane because they fetch Git and query CI.
+    /// Merge and supervisor-stall reads may query CI or peer claims, so they
+    /// belong on the external lane rather than the shared store read lane.
     pub(crate) fn needs_external_lane(&self) -> bool { !self.merge_events.is_empty() || self.stall.is_some() }
     /// Move the idle-worker liveness out of this read, for a job of its own
     /// on the blocking lane. `None` when no `WorkerIdle` event needs it.
@@ -659,8 +660,8 @@ impl FactoryApp {
         ))
     }
 
-    /// The `CiStatus` job for the parked deliveries the last snapshot read,
-    /// or `None` when none needs git evidence (cas-223f review M1).
+    /// External evidence for parked deliveries and ready assignment candidates.
+    /// With neither, there is no job (cas-223f review M1, cas-7806).
     pub(crate) fn ci_status_request(&self) -> Option<CiStatusRequest> {
         let assignment = self.stall_evidence_request().and_then(|stall| stall.assignment_request(None));
         CiStatusRequest::for_stall(

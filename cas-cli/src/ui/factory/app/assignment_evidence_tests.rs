@@ -96,8 +96,40 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
         });
         assert_eq!(classify(&mut app), expected(&["cas-expired", "cas-free", "cas-own"]),
             "binding peer split and live peer claim cannot be assigned here; expired/local claims stay available");
+        // A split accepted after detection must retract the old assignment at
+        // delivery, even while the loop still has its earlier ownership evidence.
+        let detected = app.supervisor_actionable_from_evidence(&app.unfiltered_director_data,
+            &Default::default(), &HashSet::new(), now).unwrap();
+        let event = DirectorEvent::SupervisorStalled {
+            next_step: detected, occurrence: now.to_rfc3339(), actionable_idle_secs: 600,
+        };
+        let mut later = cas_store::open_epic_splits(&cas).unwrap().remove(0);
+        later.id = "split-after-detection".into();
+        later.theirs = vec!["cas-free".into()];
+        later.mine.clear();
+        cas_store::insert_epic_split(&cas, &later).unwrap();
+        let request = app.delivery_request(std::slice::from_ref(&event));
+        assert!(request.needs_external_lane(), "claim reads cannot run on the shared read lane");
+        let inputs = request.read(Some(&stores));
+        let progress = SessionProgressRead {
+            progress: Some((None, Default::default())), held_workers: Some(HashSet::new()),
+        };
+        assert!(!app.supervisor_stall_event_is_current(&event, inputs.data.as_ref().unwrap(),
+            &Default::default(), &progress, inputs.assignment.as_ref()),
+            "fresh delivery ownership must override the older assign set");
+        cas_store::decide_epic_split(&cas, "split-after-detection", &[cas_store::SplitState::Accepted], cas_store::SplitState::Cancelled, None, now).unwrap();
         // Accepted ownership survives proposal expiry, but cancellation releases it without task edits.
         cas_store::decide_epic_split(&cas, "split-peer", &[cas_store::SplitState::Accepted], cas_store::SplitState::Cancelled, None, now).unwrap();
         assert_eq!(classify(&mut app), expected(&["cas-expired", "cas-free", "cas-own", "cas-split"]));
+        // With only the peer's claimed task still open there is no assign
+        // nudge; it remains an active child, not an assemble-ready epic.
+        for id in ["cas-expired", "cas-free", "cas-own", "cas-split"] {
+            let mut task = stores.task_store.get(id).unwrap();
+            task.status = TaskStatus::Closed;
+            stores.task_store.update(&task).unwrap();
+        }
+        app.unfiltered_director_data = DirectorData::load_fast(&cas).unwrap();
+        assert_eq!(classify(&mut app), None);
+
     }).await.unwrap();
 }

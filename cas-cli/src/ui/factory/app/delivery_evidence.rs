@@ -318,9 +318,8 @@ impl StallEvidenceRequest {
     }
 }
 
-/// The `CiStatus` job: the git half of the evidence. Runs `git` and `gh`
-/// (2 s timeouts each), so it belongs on the external lane, never the read
-/// lane.
+/// External stall evidence: delivery Git/CI plus ready-task ownership. Git,
+/// `gh` and bounded peer-claim reads belong here, never on the shared read lane.
 #[derive(Debug, Clone)]
 pub(crate) struct CiStatusRequest {
     assignment: Option<AssignmentRequest>,

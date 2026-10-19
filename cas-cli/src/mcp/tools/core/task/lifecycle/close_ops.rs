@@ -27458,7 +27458,7 @@ mod merge_state_gate_tests {
         }
 
         let started = std::time::Instant::now();
-        let request: crate::mcp::tools::TaskRequest = serde_json::from_value(serde_json::json!({
+        let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
             "action": "close",
             "id": epic.id,
             "supervisor_override": !owner_verification && ci.is_none_or(|(_, override_requested)| override_requested),

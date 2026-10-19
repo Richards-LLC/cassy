@@ -150,14 +150,14 @@ impl RuntimeInventory {
                 runtime.block_on(async {
                     tokio::time::timeout(remaining, tokio::net::UnixStream::connect(path))
                         .await
-                        .map_err(|_| "runtime Unix connect timed out; pause retained")?
-                        .map_err(|_| "runtime Unix control unavailable; pause retained")?
+                        .map_err(|_| "runtime Unix connect timed out")?
+                        .map_err(|_| "runtime Unix control unavailable")?
                         .into_std()
-                        .map_err(|_| "runtime Unix control unavailable; pause retained")
+                        .map_err(|_| "runtime Unix control unavailable")
                 })
             })
             .join()
-            .map_err(|_| "runtime Unix connector failed; pause retained")??;
+            .map_err(|_| "runtime Unix connector failed")??;
             stream
                 .set_nonblocking(false)
                 .map_err(|_| "runtime Unix mode unavailable")?;
@@ -193,7 +193,7 @@ impl RuntimeInventory {
                     })
                     .map_err(|e| e.to_string())?,
                 )
-                .map_err(|_| "runtime control write failed; pause retained")?;
+                .map_err(|_| "runtime control write failed")?;
             let mut acknowledged = false;
             for _ in 0..128 {
                 if let DaemonMessage::BindingIntake { reply } = receive(&mut stream, deadline)? {
@@ -218,7 +218,7 @@ impl RuntimeInventory {
                 }
             }
             if !acknowledged {
-                return Err("runtime drain message budget exhausted; pause retained".into());
+                return Err("runtime drain message budget exhausted".into());
             }
         }
         Ok(())
@@ -227,7 +227,7 @@ impl RuntimeInventory {
 fn receive(stream: &mut UnixStream, deadline: Instant) -> Result<DaemonMessage, String> {
     let remaining = deadline
         .checked_duration_since(Instant::now())
-        .ok_or("runtime drain deadline expired; pause retained")?;
+        .ok_or("runtime drain deadline expired")?;
     let _ = remaining;
     let mut header = [0; 4];
     read_exact_until(stream, &mut header, deadline)?;
@@ -238,7 +238,7 @@ fn receive(stream: &mut UnixStream, deadline: Instant) -> Result<DaemonMessage, 
     let mut bytes = vec![0; length];
     read_exact_until(stream, &mut bytes, deadline)?;
     serde_json::from_slice(&bytes)
-        .map_err(|_| "unknown/corrupt runtime control response; pause retained".into())
+        .map_err(|_| "unknown/corrupt runtime control response".into())
 }
 
 fn read_exact_until(
@@ -249,15 +249,15 @@ fn read_exact_until(
     while !bytes.is_empty() {
         let remaining = deadline
             .checked_duration_since(Instant::now())
-            .ok_or("runtime drain deadline expired; pause retained")?;
+            .ok_or("runtime drain deadline expired")?;
         stream
             .set_read_timeout(Some(remaining))
             .map_err(|e| e.to_string())?;
         let read = stream
             .read(bytes)
-            .map_err(|_| "runtime drain read failed/timed out; pause retained")?;
+            .map_err(|_| "runtime drain read failed/timed out")?;
         if read == 0 {
-            return Err("runtime control closed before complete drain; pause retained".into());
+            return Err("runtime control closed before complete drain".into());
         }
         bytes = &mut bytes[read..];
     }

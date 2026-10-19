@@ -201,5 +201,10 @@ fn cas_9021_old_or_unknown_actual_runtime_preflight_sends_zero_post() {
         server.try_recv().unwrap().is_none(),
         "no GET/POST may escape unsafe actual-runtime preflight"
     );
-    assert!(!IntakeJournal::new(&root).legacy_allowed().unwrap());
+    let state = IntakeJournal::new(&root).read().unwrap();
+    assert_eq!(state.pauses.len(), 1, "each rerun re-arms the same pause");
+    assert!(
+        state.legacy_claims_allowed(),
+        "a pause that never reached Cloud must not keep project claims shut"
+    );
 }

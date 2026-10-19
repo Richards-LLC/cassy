@@ -1,7 +1,7 @@
 //! One ordinary authenticated invocation: durable gate -> actual local drain ->
 //! submitting -> direct HTTP response -> validated immutable receipt storage.
 use super::{
-    binding_intake::{IntakeJournal, IntakeScope},
+    binding_intake::{ChannelDisposition, IntakeJournal, IntakeScope},
     binding_reconciliation::{ReconciliationCode, ReconciliationRequest, ReconciliationResponse},
     binding_runtime::RuntimeInventory,
 };
@@ -102,21 +102,24 @@ impl OrdinaryBindingClient {
         }
         let journal = IntakeJournal::new(cas_dir);
         let state = journal.read()?;
-        let pause = match state
+        // Reusing the scope's pause re-arms one an earlier blocked run released.
+        let operation_id = state
             .pauses
             .iter()
             .rev()
             .find(|pause| &pause.scope == scope)
-        {
-            Some(pause) => pause.clone(),
-            None => journal.pause(scope.clone(), Uuid::new_v4(), state.generation)?,
+            .map_or_else(Uuid::new_v4, |pause| pause.operation_id);
+        let pause = journal.pause(scope.clone(), operation_id, state.generation)?;
+        let blocked_before_submit = |error: String| -> Result<RepairReport, String> {
+            journal.release_unsubmitted(scope)?;
+            Ok(RepairReport::blocked(scope, pause.operation_id, error))
         };
         let inventory = match RuntimeInventory::discover(cas_dir).and_then(|inventory| {
             inventory.drain(scope, &pause)?;
             Ok(inventory)
         }) {
             Ok(inventory) => inventory,
-            Err(error) => return Ok(RepairReport::blocked(scope, pause.operation_id, error)),
+            Err(error) => return blocked_before_submit(error),
         };
         drop(inventory);
         if let Err(error) = crate::cloud::TeamRegistration::new(
@@ -128,11 +131,7 @@ impl OrdinaryBindingClient {
         .with_timeout(Duration::from_secs(20))
         .verify_registered()
         {
-            return Ok(RepairReport::blocked(
-                scope,
-                pause.operation_id,
-                error.reason,
-            ));
+            return blocked_before_submit(error.reason);
         }
         // This durable transition precedes request construction/send. Every
         // transport/parser/refusal path retains it; no negative observation can
@@ -159,11 +158,16 @@ impl OrdinaryBindingClient {
         };
         let activation_id = response.activation_id.clone();
         if response.code != ReconciliationCode::Completed {
+            let settled = journal.settle_refusal(pause.operation_id, &response)?;
             return Ok(RepairReport {
                 channel_id: scope.channel_id.clone(),
                 operation_id: pause.operation_id,
                 activation_id,
-                outcome: RepairOutcome::Blocked,
+                outcome: if settled == ChannelDisposition::Unknown {
+                    RepairOutcome::Unknown
+                } else {
+                    RepairOutcome::Blocked
+                },
                 error: Some(response.guidance.clone()),
                 response: Some(response),
             });

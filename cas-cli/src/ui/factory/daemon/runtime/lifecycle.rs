@@ -3455,8 +3455,9 @@ impl FactoryDaemon {
 
                 self.binding_intake.reap_sweep().await;
                 if let Some(violet) = violet_wake.as_ref() {
+                    // cas-9021: each tick and sweep reads the durable intake
+                    // gate per channel; the v2 managed reader is never gated.
                     if self.binding_intake.tick.is_none()
-                        && crate::coordination::binding_intake::IntakeJournal::new(self.app.cas_dir()).legacy_allowed().unwrap_or(false)
                         && last_violet_poll.elapsed() >= super::violet_activity::POLL_INTERVAL
                     {
                         let violet = std::sync::Arc::clone(violet);
@@ -3487,7 +3488,6 @@ impl FactoryDaemon {
                                 if let Some(presence) = presence
                                     && !sweeps.is_empty()
                                     && self.binding_intake.sweep.is_none()
-                                    && crate::coordination::binding_intake::IntakeJournal::new(self.app.cas_dir()).legacy_allowed().unwrap_or(false)
                                 {
                                     let violet = std::sync::Arc::clone(violet);
                                     let cas_dir = self.app.cas_dir().to_path_buf();

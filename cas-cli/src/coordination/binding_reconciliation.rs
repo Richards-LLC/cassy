@@ -123,7 +123,7 @@ pub enum ReconciliationReason {
 }
 
 impl ReconciliationReason {
-    fn contract(self) -> (u16, ReconciliationCode, NextAction) {
+    pub(super) fn contract(self) -> (u16, ReconciliationCode, NextAction) {
         use NextAction as A;
         use ReconciliationCode as C;
         match self {

@@ -520,6 +520,26 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
     await journey.stage("The existing phone can reply without signing out or pairing again", async () => {
       const reply = inbox.getByRole("textbox", { name: /Reply — soundwave/ });
       await expect(reply).toBeVisible({ timeout: 15_000 });
+      await page.emulateMedia({ colorScheme: "dark" });
+      await page.evaluate(() => { document.documentElement.dataset.scheme = "dark"; });
+      const fieldTokens = await reply.evaluate((field) => {
+        const reference = document.createElement("textarea");
+        const composer = document.createElement("form");
+        composer.className = "conversation-composer";
+        composer.append(reference);
+        document.body.append(composer);
+        const actualStyle = getComputedStyle(field);
+        const referenceStyle = getComputedStyle(reference);
+        const matches = {
+          background: actualStyle.backgroundColor === referenceStyle.backgroundColor,
+          border: actualStyle.borderColor === referenceStyle.borderColor && actualStyle.borderStyle === referenceStyle.borderStyle && actualStyle.borderWidth === referenceStyle.borderWidth,
+          radius: actualStyle.borderRadius === referenceStyle.borderRadius,
+          color: actualStyle.color === referenceStyle.color,
+        };
+        composer.remove();
+        return matches;
+      });
+      expect(fieldTokens).toEqual({ background: true, border: true, radius: true, color: true });
       await reply.fill("Thanks, I can reply now.");
       await inbox.getByRole("button", { name: "Queue reply", exact: true }).press("Enter");
       await expect(inbox.getByText("Thanks, I can reply now.", { exact: true })).toBeVisible();

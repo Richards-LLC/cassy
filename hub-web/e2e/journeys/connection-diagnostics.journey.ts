@@ -77,15 +77,15 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     await page.keyboard.press("Enter");
     await expect(page.locator(".connection-log-technical")).not.toHaveAttribute("open", /.*/);
   });
-  for (const width of [1280, 390]) for (const scheme of ["light", "dark"] as const) {
-    await journey.stage(`Named evidence at ${width}px ${scheme}`, async () => {
+  await journey.stage("Named connection evidence fits desktop and phone layouts", async () => {
+    for (const width of [1280, 390]) for (const scheme of ["light", "dark"] as const) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
       await page.emulateMedia({ colorScheme: scheme });
       await expect(page.getByRole("button", { name: "Export safe diagnostics" })).toBeInViewport();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       expect(await page.locator("#connection-log").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
-    });
-  }
+    }
+  });
   await journey.stage("Keyboard close restores focus; successful recovery is recorded", async () => {
     await page.keyboard.press("Escape");
     await expect(page.getByRole("button", { name: "Connection details", exact: true })).toBeFocused();
@@ -99,8 +99,8 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     blocked = false; await clock.advance(10_000);
     await expect(page.locator(".connection-log-summary")).toContainText("Atlas · Linux: nothing is failing now.");
   });
-  for (const setting of ["reducedMotion", "forcedColors", "contrast"] as const) {
-    await journey.stage(`Accessible log with ${setting}`, async () => {
+  await journey.stage("Connection log remains usable across accessibility modes", async () => {
+    for (const setting of ["reducedMotion", "forcedColors", "contrast"] as const) {
       await page.emulateMedia(Object.assign({ forcedColors: null, reducedMotion: null, contrast: null },
         setting === "reducedMotion" ? { reducedMotion: "reduce" as const } : setting === "forcedColors" ? { forcedColors: "active" as const } : { contrast: "more" as const },
       ));
@@ -109,8 +109,8 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
       await page.screenshot({ path: join(RECEIPTS, `connection-log-${setting}.png`) });
       await expect(page.getByRole("button", { name: "Close connection log" })).toBeInViewport();
       await expect(page.getByRole("button", { name: "Export safe diagnostics" })).toBeEnabled();
-    });
-  }
+    }
+  });
 });
 
 

@@ -738,37 +738,45 @@ test("HUB-J12 network switch: a reload while the machine is unreachable reopens 
 // can't send a fresh one. Whether the network is gone or the hub answers its
 // retryable 503, the list keeps its supervisors as last known, agreeing with
 // the open conversation and the footer; only a catalog the machine sends
-// empties the list.
+// empties the list. cas-c552: when only one of two machines is past its
+// freshness, the footer counts only its conversations as last known.
 test("HUB-J12 network switch: an outage past the catalog's freshness keeps the list, footer and conversation in agreement (cas-6c7a)", journeyPart, async ({ page, journey }) => {
-  const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session })) };
-  const { hub, clock, header } = await connected(page, true, [machine]);
-  const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
+  const atlas = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session })) };
+  const studio = { ...STUDIO, sessions: STUDIO.sessions.map(session => ({ ...session })) };
+  const { hub, clock, header } = await connected(page, true, [atlas, studio]);
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const row = list.getByRole("button", { name: /cas-src/ });
+  const studioRow = list.getByRole("button", { name: /gabber-studio/ });
   const footer = page.locator(".hub-footer-meta");
   const empty = page.getByText(/No live supervisors listed/);
   const outages = [
-    ["The machine stays down past its catalog's freshness: the network is gone", { sockets: "close" }],
-    ["The machine stays down past its catalog's freshness: the hub answers 503 auth_store_unavailable", { sockets: "close", http: "auth_store_unavailable" }],
+    ["The network is gone past both catalogs' freshness: every row and the whole count are last known", ["atlas", "studio"], { sockets: "close" }, "2 conversations, last known"],
+    ["Only Atlas stays down, its hub answering 503 auth_store_unavailable: only its conversation is last known", ["atlas"], { sockets: "close", http: "auth_store_unavailable" }, "2 conversations · 1 last known"],
   ] as const;
-  for (const [stage, outage] of outages) {
+  for (const [stage, down, outage, count] of outages) {
     await journey.stage(stage, async () => {
-      await hub.down("atlas", outage);
+      for (const id of down) await hub.down(id, outage);
       await expect(header).toHaveText(" · Reconnecting");
       for (let elapsed = 0; elapsed < 60_000; elapsed += 5_000) await clock.advance(5_000);
       await expect(header).toHaveText(" · Reconnecting");
       await expect(row).toContainText("Reconnecting · last known");
+      if (down.length === 1) await expect(studioRow).not.toContainText("last known");
+      else await expect(studioRow).toContainText("last known");
       await expect(empty).toHaveCount(0);
-      await expect(footer).toContainText("1 conversation, last known");
-      await hub.up("atlas");
+      await expect(footer).toContainText(new RegExp(`^${count}Hub `));
+      for (const id of down) await hub.up(id);
       await clock.advance(10_000);
       await expect(header).toHaveText(" · Live");
-      await expect(row).not.toContainText("last known");
-      await expect(footer).toContainText(/^1 conversationHub /);
+      await expect(list).not.toContainText("last known");
+      await expect(footer).toContainText(/^2 conversationsHub /);
     });
   }
-  await journey.stage("The machine answers with no live supervisors: the list is empty", async () => {
-    machine.sessions.length = 0;
+  await journey.stage("The machines answer with no live supervisors: the list is empty", async () => {
+    atlas.sessions.length = 0;
+    studio.sessions.length = 0;
     await clock.advance(30_000);
     await expect(row).toHaveCount(0);
+    await expect(studioRow).toHaveCount(0);
     await expect(empty).toBeVisible();
     await expect(footer).toContainText(/^0 conversationsHub /);
   });

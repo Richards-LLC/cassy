@@ -217,7 +217,10 @@ impl CasService {
     fn resolve_reminder_target(
         &self,
         target: &str,
+        owner_id: &str,
     ) -> std::result::Result<(String, String), McpError> {
+        use crate::mcp::tools::service::agent_search_system::message::
+            resolve_worker_supervisor_target;
         use crate::store::open_agent_store;
         use cas_types::AgentStatus;
 
@@ -227,6 +230,39 @@ impl CasService {
                 format!("Failed to open agent store: {e}"),
             )
         })?;
+
+        if target.eq_ignore_ascii_case("supervisor")
+            && let Ok(caller) = store.get(owner_id)
+            && caller.role == cas_types::AgentRole::Worker
+        {
+            // Match message's authenticated worker resolution: the caller's
+            // registered factory session wins, with the environment retained
+            // only as the same compatibility fallback used by message_send.
+            let factory_session = caller
+                .factory_session
+                .as_deref()
+                .filter(|session| !session.trim().is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    std::env::var("CAS_FACTORY_SESSION")
+                        .ok()
+                        .filter(|session| !session.trim().is_empty())
+                });
+            let supervisor = resolve_worker_supervisor_target(
+                store.as_ref(),
+                factory_session.as_deref(),
+            )
+            .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Cannot resolve 'supervisor' for factory session {}: no live supervisor belongs to this worker's session",
+                        factory_session.as_deref().unwrap_or("none")
+                    ),
+                )
+            })?;
+            return Ok((supervisor.agent_id, supervisor.name));
+        }
 
         // Try exact ID match first
         if let Ok(agent) = store.get(target) {
@@ -297,7 +333,7 @@ impl CasService {
 
         // Resolve target: if provided, look up agent by name/ID; otherwise self-reminder
         let (target_id, target_display) = if let Some(ref target_name) = req.target {
-            let (id, name) = self.resolve_reminder_target(target_name)?;
+            let (id, name) = self.resolve_reminder_target(target_name, &owner_id)?;
             (Some(id), Some(name))
         } else {
             (None, None)

@@ -882,7 +882,15 @@ pub(super) fn inactive_detached_warning(
     paths: &HubRuntimePaths,
     record: Option<&HubProcessRecord>,
 ) -> Result<Option<&'static str>> {
-    let (installed, active) = match native_platform() {
+    inactive_detached_warning_on(native_platform(), paths, record)
+}
+
+fn inactive_detached_warning_on(
+    platform: ServicePlatform,
+    paths: &HubRuntimePaths,
+    record: Option<&HubProcessRecord>,
+) -> Result<Option<&'static str>> {
+    let (installed, active) = match platform {
         ServicePlatform::Launchd => {
             let path = launchd_path()?;
             let domain = launchd_domain()?;
@@ -1802,7 +1810,19 @@ exit 0
         let manager = fixture.path().join("systemctl");
         crate::test_paths::warm_stub(&manager, "#!/bin/sh\nexit 1\n");
         env.set(SYSTEMCTL_PATH_ENV, &manager);
+        env.set("PATH", fixture.path());
         let paths = HubRuntimePaths::default_for_user().unwrap();
+        // Exercise the actual launchd observation path with no launchctl,
+        // including on Linux, so an absent service cannot become an error.
+        assert_eq!(
+            inactive_detached_warning_on(ServicePlatform::Launchd, &paths, None).unwrap(),
+            None,
+        );
+        write_service_file(&launchd_path().unwrap(), "fixture launch agent").unwrap();
+        assert_eq!(
+            inactive_detached_warning_on(ServicePlatform::Launchd, &paths, None).unwrap(),
+            Some(MANAGER_UNAVAILABLE_WARNING),
+        );
         assert_eq!(inactive_detached_warning(&paths, None).unwrap(), None);
         write_service_file(&systemd_path().unwrap(), LEGACY_SYSTEMD_UNIT).unwrap();
         assert_eq!(inactive_detached_warning(&paths, None).unwrap(), Some(MANAGER_UNAVAILABLE_WARNING));

@@ -20,6 +20,16 @@
 - The `Current version: / Latest version:` pairs, each in accent colour, are gone; versions
   are plain text in the row.
 
+### Binary installation failure JSON (cas-929d)
+
+Before a binary swap, a failed updater setup, release lookup, download or extraction
+emits one JSON object and exits nonzero. It retains `binary_updated: false` and
+`version` for the running binary, adds `binary_status: "failed"`,
+`refresh_status: "not_run"`, and `error: {phase: "binary", message: <cause>}`.
+No project, hub or refresh result is claimed. Stderr retains the existing diagnostic.
+Successful updates and post-swap failures retain their existing receipts; a failure
+after a successful swap must never be described as `binary_updated: false`.
+
 ### Service-managed hub refresh
 
 After a binary swap, the hub restart is represented in JSON as `hub_restart` with

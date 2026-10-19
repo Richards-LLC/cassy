@@ -90,11 +90,11 @@ enter awaiting supervisor review:
    Omit `kind`: `kind=status|ready` cannot accompany `blocker=true`.
 3. Save the notification ID; wait for the review reply. Record its ID and actual
    decision/action, then `task action=start id=<task-id>` before resuming.
-   Queued/delivered/received is not a model action: mark unobserved action
-   NOT VERIFIED with the supervisor as proof owner.
+   Track transport delivery and inbox receipt separately with `message_status`.
+   Mark unobserved model action NOT VERIFIED; the supervisor owns that proof.
 
 Other blockers use the same sequence. Finished deliveries follow MERGE REQUIRED.
-Wake eligibility never guarantees a turn; keep transport and action proof separate.
+Wake eligibility never guarantees a turn.
 
 ## Browser checks
 

@@ -888,19 +888,35 @@ pub(super) fn stop_supervised() -> Result<()> {
         return Ok(());
     }
     let target = format!("{}/{}", launchd_domain()?, launchd_label());
-    if !probe_manager("launchctl", ["print", &target]).require_observed()? {
+    let timeout = Duration::from_secs(5);
+    let deadline = crate::bounded_process::Deadline::after(timeout);
+    if !probe_manager_with_timeout("launchctl", ["print", &target], deadline.remaining()).require_observed()? {
         return Ok(());
     }
     let mut command = manager_command("launchctl");
     command.args(["bootout", &target]);
-    let timeout = Duration::from_secs(5);
     let output = crate::bounded_process::run_command(
-        &mut command, crate::bounded_process::Deadline::after(timeout), timeout,
+        &mut command, deadline, timeout,
     ).map_err(|_| anyhow::anyhow!("launchctl bootout did not complete; refusing to race hub supervision"))?;
     ensure!(output.status.success(), "launchctl refused to unload the Cassy hub service");
-    ensure!(!probe_manager("launchctl", ["print", &target]).require_observed()?,
-        "Cassy hub service is still loaded after launchctl bootout");
-    Ok(())
+    wait_for_manager_unload(deadline, |remaining| {
+        probe_manager_with_timeout("launchctl", ["print", &target], remaining)
+    })
+}
+
+fn wait_for_manager_unload(
+    deadline: crate::bounded_process::Deadline,
+    mut probe: impl FnMut(Duration) -> ManagerProbe,
+) -> Result<()> {
+    loop {
+        let remaining = deadline.remaining();
+        ensure!(!remaining.is_zero(), "Cassy hub service is still loaded after launchctl bootout");
+        if !probe(remaining).require_observed()? {
+            return Ok(());
+        }
+        // A successful bootout can precede removal from launchd's namespace.
+        std::thread::sleep(Duration::from_millis(25).min(deadline.remaining()));
+    }
 }
 
 #[cfg(test)]
@@ -1386,7 +1402,14 @@ fn run_manager_vec(command: &str, args: &[String]) -> Result<()> {
 /// runtime receipt collector. Mutating manager operations retain their own
 /// lifecycle semantics; an unknown diagnostic is never an inactive service.
 fn probe_manager<const N: usize>(command: &str, args: [&str; N]) -> ManagerProbe {
-    let deadline = Instant::now() + MANAGER_PROBE_TIMEOUT;
+    probe_manager_with_timeout(command, args, MANAGER_PROBE_TIMEOUT)
+}
+
+fn probe_manager_with_timeout<const N: usize>(command: &str, args: [&str; N], timeout: Duration) -> ManagerProbe {
+    if timeout.is_zero() {
+        return ManagerProbe::TimedOut;
+    }
+    let deadline = Instant::now() + MANAGER_PROBE_TIMEOUT.min(timeout);
     let Ok(mut child) = manager_command(command)
         .args(args)
         .stdin(Stdio::null())
@@ -1706,6 +1729,25 @@ fn manual_linux_instructions() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn successful_bootout_waits_for_loaded_job_to_disappear() {
+        let mut calls = 0;
+        wait_for_manager_unload(crate::bounded_process::Deadline::after(Duration::from_secs(1)), |_| {
+            calls += 1;
+            ManagerProbe::Observed(calls == 1)
+        }).unwrap();
+        assert_eq!(calls, 2);
+
+        let error = wait_for_manager_unload(crate::bounded_process::Deadline::after(Duration::from_millis(10)), |_| {
+            ManagerProbe::Observed(true)
+        }).unwrap_err();
+        assert!(error.to_string().contains("still loaded after launchctl bootout"));
+        let error = wait_for_manager_unload(crate::bounded_process::Deadline::after(Duration::from_secs(1)), |_| {
+            ManagerProbe::TimedOut
+        }).unwrap_err();
+        assert!(error.to_string().contains("unknown (timed out)"));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

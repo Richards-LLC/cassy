@@ -62,7 +62,9 @@ pub(super) fn reconcile_project_bindings(
     reconcile_with(
         cas_root,
         &config,
-        cmcp_core::config::violet_hub_url(),
+        // cas-types owns the hub URL; the proxy crate only re-exports it and is
+        // absent from `--no-default-features` builds.
+        cas_types::violet_compatibility::violet_hub_url(),
         dry_run,
         json,
     )

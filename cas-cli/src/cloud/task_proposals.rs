@@ -454,17 +454,34 @@ fn validate_create_response(
         return Err(contract("create returned a non-proposed state"));
     }
     let proposal = proposal_from_create_response(response);
-    validate_task_proposal(
-        &proposal,
-        team_id,
-        Some(&request.origin_project_canonical_id),
-        Some(&request.target_project_canonical_id),
-        Some("proposed"),
-    )?;
-    if response.provenance.server_attested.client_request_id != request.client_request_id {
+    validate_task_proposal(&proposal, team_id, None, None, Some("proposed"))?;
+    let server = &response.provenance.server_attested;
+    if server.client_request_id != request.client_request_id {
         return Err(contract(
             "create response client_request_id did not match request",
         ));
+    }
+    // cas-a968 (GH #1281): this response is Cloud's receipt for this attempt,
+    // so the proposal is persisted. When Cloud attests a different project
+    // identity (for example a registry alias), still refuse to confirm it, but
+    // return the receipt so the caller never resends it as a new attempt.
+    if server.origin_project_canonical_id != request.origin_project_canonical_id
+        || server.target_project_canonical_id != request.target_project_canonical_id
+    {
+        return Err(TaskProposalError::Contract(format!(
+            "Refusing untrusted cloud proposal response: proposal response project identity did not match the request. \
+             Cloud persisted proposal {} (target task {}) for proposal_attempt_id {}, attesting origin {} and target {}; \
+             the request named origin {} and target {}. It is not confirmed here and no local blocker was recorded. \
+             Do not create it again under a new attempt id: a retry with the same proposal_attempt_id returns this \
+             receipt, and the target project's proposal_inbox lists the proposal.",
+            response.proposal_id,
+            response.target_task_id,
+            server.client_request_id,
+            server.origin_project_canonical_id,
+            server.target_project_canonical_id,
+            request.origin_project_canonical_id,
+            request.target_project_canonical_id,
+        )));
     }
     Ok(())
 }

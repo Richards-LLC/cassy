@@ -175,9 +175,12 @@ cas violet read   --channel <name> --since <RFC3339> | --thread <message_id> | -
   (`content_omitted: true`); sizes and hashes stay.
 
 Human output is a verdict line, the message and file receipts (`message_id`,
-permalink, file ids, `sha256_verified`) and a hint. `--json` prints the hub's
-receipt, or its error receipt, as one document. Every `ok: false` exits
-non-zero, and the hub's own codes (`not_member`, `file_too_large`,
+`part_ids` when present, permalink, file ids, `sha256_verified`) and a hint.
+Multipart messages show `part_ids` on an additional line; each thread entry in
+`posted[]` follows the same rule. `message_id` remains the last part, and a
+split root's `thread_id` remains the first. `--json` prints the hub's receipt,
+or its error receipt, as one document, preserving additive fields. Every
+`ok: false` exits non-zero, and the hub's own codes (`not_member`, `file_too_large`,
 `file_integrity_mismatch`, …) pass through unchanged. The command's own codes:
 
 | Code | Meaning |

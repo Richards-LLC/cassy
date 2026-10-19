@@ -5877,7 +5877,6 @@ impl CasCore {
             cas_store::worker_delivery_transaction_id(&receipt.id),
         );
         let owner_id = self.verification_dispatch_owner(&caller.id)?;
-        let was_existing = existing_delivery.is_some();
         let transaction = if let Some((_, transaction)) = existing_delivery {
             transaction
         } else {
@@ -5963,28 +5962,44 @@ impl CasCore {
             }
         }
 
-        let projection_coherent = was_existing
-            && task.status == projected_status
-            && task.pending_verification == projected_pending_verification
-            && task.deliverables.pre_close_hook.as_ref() == Some(&hook_evidence)
-            && task.deliverables.factory_branch_anchor.as_deref()
-                == Some(input.commit_sha.as_str())
-            && task.deliverables.parked_branch.as_deref() == Some(input.source_branch.as_str());
-        if !projection_coherent {
+        let projection_coherent = |current: &cas_types::Task| {
+            current.status == projected_status
+                && current.pending_verification == projected_pending_verification
+                && current.deliverables.pre_close_hook.as_ref() == Some(&hook_evidence)
+                && current.deliverables.factory_branch_anchor.as_deref()
+                    == Some(input.commit_sha.as_str())
+                && current.deliverables.parked_branch.as_deref()
+                    == Some(input.source_branch.as_str())
+        };
+        if !projection_coherent(task) {
             let expected = task.clone();
             task.status = projected_status;
             task.pending_verification = projected_pending_verification;
-            task.deliverables.pre_close_hook = Some(hook_evidence);
+            task.deliverables.pre_close_hook = Some(hook_evidence.clone());
             task.deliverables.factory_branch_anchor = Some(input.commit_sha.clone());
             task.deliverables.parked_branch = Some(input.source_branch.clone());
             task.updated_at = chrono::Utc::now();
-            task.updated_at = task_store.update_if_current(task, &expected).map_err(|error| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!(
-                    "Failed to project worker delivery state onto task: {error}"
-                )),
-                data: None,
-            })?;
+            match task_store.update_if_current(task, &expected) {
+                Ok(updated_at) => task.updated_at = updated_at,
+                Err(error) => {
+                    // Concurrent exact receipt submissions share one immutable
+                    // boundary. The other call may already have projected it.
+                    // Accept that postcondition without writing the stale row;
+                    // request_changes clears the anchor and cannot match it.
+                    match task_store.get(&task.id) {
+                        Ok(current) if projection_coherent(&current) => *task = current,
+                        _ => {
+                            return Err(McpError {
+                                code: ErrorCode::INTERNAL_ERROR,
+                                message: Cow::from(format!(
+                                    "Failed to project worker delivery state onto task: {error}"
+                                )),
+                                data: None,
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         let next = match transaction.state {

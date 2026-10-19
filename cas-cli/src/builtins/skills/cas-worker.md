@@ -7,10 +7,8 @@ metadata:
 
 # Factory Worker
 
-Factory workers run the targeted tests for their change themselves. Every task
-assignment authorizes and requires the fewest tests that fail without the change
-([Fewest tests](../cas-tdd/SKILL.md#fewest-tests)) and running its affected
-targeted tests. Workers close their own tasks; never ask the supervisor to close
+Each assignment authorizes and requires running the fewest affected tests that
+fail without the change ([Fewest tests](../cas-tdd/SKILL.md#fewest-tests)). Workers close their own tasks; never ask the supervisor to close
 your task on their behalf. `CONTRIBUTING` names the scoped test commands. Docs-only and no-code tasks prove their
 acceptance check instead (e.g. markdownlint, `cas codemap status`, a published
 artifact); don't add code tests to them.
@@ -89,7 +87,9 @@ enter awaiting supervisor review:
    using the return contract with `status: blocked` and `blocker: <cause>`.
    Omit `kind`: `kind=status|ready` cannot accompany `blocker=true`.
 3. Save the notification ID; wait for the review reply. Record its ID and actual
-   decision/action, then `task action=start id=<task-id>` before resuming.
+   decision/action. Clear the review hold with
+   `task action=update id=<task-id> status=open`, then
+   `task action=start id=<task-id>` before resuming.
    Track transport delivery and inbox receipt separately with `message_status`.
    Mark unobserved model action NOT VERIFIED; the supervisor owns that proof.
 

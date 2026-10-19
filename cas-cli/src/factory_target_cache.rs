@@ -2411,8 +2411,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     impl Drop for NativeHandleChild {
         fn drop(&mut self) {
-            let _ = self.0.kill();
-            self.0.wait().unwrap();
+            if !matches!(self.0.try_wait(), Ok(Some(_))) {
+                let _ = self.0.kill();
+            }
+            let _ = self.0.wait();
         }
     }
 
@@ -2520,6 +2522,8 @@ mod tests {
         ] {
             #[cfg(target_os = "macos")]
             if scenario == "opaque" {
+                // This case depends on deprecated macOS sandbox-exec; the
+                // required command below fails loudly if the tool disappears.
                 let output = std::process::Command::new("/usr/bin/sandbox-exec")
                     .args(["-p", "(version 1)(allow default)(deny process-exec (literal \"/usr/sbin/lsof\"))"])
                     .arg(std::env::current_exe().unwrap())

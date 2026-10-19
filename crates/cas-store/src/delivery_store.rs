@@ -962,7 +962,7 @@ mod tests {
         );
 
         let stale_writer = SqliteTaskStore::open(root.path()).unwrap();
-        let refused = stale_writer.update(&stale_park)
+        let refused = stale_writer.update_if_current(&stale_park, &stale_park)
             .expect_err("a stale re-park must not erase request_changes");
         assert!(refused.to_string().contains("task changed"), "{refused}");
 
@@ -1018,6 +1018,27 @@ mod tests {
             Utc::now() + chrono::Duration::minutes(10),
         )
         .expect("a new corrective commit opens a fresh delivery cycle");
+
+        // A fresh corrective cycle may park. A stale retry from the original
+        // cycle must still fail even though status is awaiting_merge again.
+        let mut corrective = reopened.clone();
+        corrective.status = TaskStatus::InProgress;
+        task_store.update(&corrective).unwrap();
+        let expected = task_store.get(&task.id).unwrap();
+        corrective = expected.clone();
+        corrective.status = TaskStatus::AwaitingMerge;
+        corrective.deliverables.factory_branch_anchor = Some(corrected_input.commit_sha);
+        let parked_at = task_store.update_if_current(&corrective, &expected).unwrap();
+        assert!(stale_writer.update_if_current(&stale_park, &stale_park).is_err());
+        let retained = task_store.get(&task.id).unwrap();
+        assert_eq!(retained.updated_at, parked_at);
+        assert_eq!(retained.deliverables.factory_branch_anchor,
+            corrective.deliverables.factory_branch_anchor);
+        // Opposite ordering: when park commits first, request_changes wins.
+        crate::request_changes_for_parked_delivery(
+            root.path(), &task.id, "supervisor-session", "Corrective delivery also needs changes",
+        ).unwrap();
+        assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::Open);
     }
 
     /// GH #55 case 1: post-merge review returns AMENDMENT REQUIRED while the

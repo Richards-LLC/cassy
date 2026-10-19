@@ -6172,7 +6172,7 @@ impl CasCore {
         merge_conflicted: bool,
         measured_branch: Option<String>,
         close_reason: Option<&str>,
-    ) {
+    ) -> cas_store::Result<()> {
         let mut parked = task.clone();
         let now = chrono::Utc::now();
         parked.status = TaskStatus::AwaitingMerge;
@@ -6220,13 +6220,14 @@ impl CasCore {
             format!("{}\n\n{}", parked.notes, audit)
         };
 
-        match task_store.update(&parked) {
+        match task_store.update_if_current(&parked, task) {
             Err(e) => {
                 tracing::warn!(
                     task_id = %task.id,
                     error = %e,
                     "failed to park task awaiting merge after close rejection"
                 );
+                return Err(e);
             }
             // cas-ec74: `updated_at` is store-owned; derive the occurrence from
             // the stamp the store persisted, not from the pre-write value.
@@ -6278,6 +6279,7 @@ impl CasCore {
         }
 
         self.record_close_rejection_activity(&task.id, reason, message);
+        Ok(())
     }
 
     /// Advance a parked task's delivery boundary when its worker continues
@@ -6536,7 +6538,7 @@ impl CasCore {
             parking.deliverables.factory_branch_anchor =
                 advanced.deliverables.factory_branch_anchor;
             parking.notes = advanced.notes;
-            parking.updated_at = advanced.updated_at;
+            // Keep the original store clock for the guarded park below.
         }
         parking
     }
@@ -6614,15 +6616,15 @@ impl CasCore {
         repo_path: &std::path::Path,
         parent_branch: &str,
         factory_branch_anchor: Option<&str>,
-    ) {
+    ) -> cas_store::Result<()> {
         let Some(factory_branch_anchor) = factory_branch_anchor else {
-            return;
+            return Ok(());
         };
         // A worker can have an explicitly parked task while doing a later
         // task on the same mutable factory branch. Query task ownership, not
         // the caller's lease: a supervisor may be the one retrying A's close.
         let Ok(in_progress) = task_store.list(Some(TaskStatus::InProgress)) else {
-            return;
+            return Ok(());
         };
         let same_worker = |other: &Task| {
             other.id != task.id
@@ -6634,17 +6636,17 @@ impl CasCore {
                 })
         };
         if in_progress.iter().any(|other| same_worker(other)) {
-            return;
+            return Ok(());
         }
         let Ok(other_parked) = task_store.list(Some(TaskStatus::AwaitingMerge)) else {
-            return;
+            return Ok(());
         };
         if other_parked.iter().any(|other| {
             same_worker(other)
                 && other.deliverables.factory_branch_anchor.as_deref()
                     == Some(factory_branch_anchor)
         }) {
-            return;
+            return Ok(());
         }
         // cas-ba4a: a tip that does not descend from the parked anchor, or
         // that carries another task's commits, never replaces it.
@@ -6655,7 +6657,7 @@ impl CasCore {
             parent_branch,
             Some(factory_branch_anchor),
         ) else {
-            return;
+            return Ok(());
         };
         let factory_branch_anchor = factory_branch_anchor.as_str();
         // cas-44e93: a move that does not descend from the recorded anchor is
@@ -6675,7 +6677,7 @@ impl CasCore {
             Some(parent_branch),
         )
         else {
-            return;
+            return Ok(());
         };
         if rebound {
             let reason = " The prior anchor was never on origin, so this close re-anchored to the pushed tip.";
@@ -6683,13 +6685,14 @@ impl CasCore {
             advanced.notes.push_str(reason);
         }
 
-        match task_store.update(&advanced) {
+        match task_store.update_if_current(&advanced, task) {
             Err(error) => {
                 tracing::warn!(
                     task_id = %task.id,
                     error = %error,
                     "failed to advance parked task delivery anchor after close retry"
                 );
+                return Err(error);
             }
             Ok(persisted_at) => {
                 let actor = self.get_agent_id().unwrap_or_else(|_| "unknown".into());
@@ -6720,6 +6723,7 @@ impl CasCore {
                 }
             }
         }
+        Ok(())
     }
 
     fn apply_awaiting_merge_anchor_advance(
@@ -6800,9 +6804,10 @@ impl CasCore {
         if task.status != TaskStatus::AwaitingMerge || task.deliverables.merge_conflicted {
             return;
         }
+        let expected = task.clone();
         task.deliverables.merge_conflicted = true;
         task.updated_at = chrono::Utc::now();
-        if let Err(e) = task_store.update(&task) {
+        if let Err(e) = task_store.update_if_current(&task, &expected) {
             tracing::warn!(
                 task_id = %task_id,
                 error = %e,
@@ -8302,7 +8307,7 @@ impl CasCore {
                         // tip so later retries anchor to THIS task's own
                         // commit range, not whatever HEAD drifts to if a
                         // second task starts on the same branch.
-                        self.park_task_awaiting_merge(
+                        if let Err(error) = self.park_task_awaiting_merge(
                             task_store.as_ref(),
                             &parking,
                             "MERGE REQUIRED",
@@ -8311,19 +8316,23 @@ impl CasCore {
                             merge_conflicted,
                             measured_branch.clone(),
                             req.reason.as_deref(),
-                        );
+                        ) {
+                            return Ok(Self::tool_error(format!("PARK REFUSED: {error}")));
+                        }
                     } else {
                         // GH #744 / #743: a worker may push again after the
                         // first park. Re-anchor before the retry returns its
                         // merge-required refusal so the queued request and
                         // supervisor status describe the current tip.
-                        self.advance_awaiting_merge_anchor(
+                        if let Err(error) = self.advance_awaiting_merge_anchor(
                             task_store.as_ref(),
                             &task,
                             &close_project_root,
                             &resolved_parent_branch,
                             anchor.as_deref(),
-                        );
+                        ) {
+                            return Ok(Self::tool_error(format!("PARK REFUSED: {error}")));
+                        }
                         if merge_conflicted && !task.deliverables.merge_conflicted {
                             // Already parked (a retry), but a fresh preflight now
                             // shows a genuine conflict or cannot be evaluated.
@@ -16277,7 +16286,7 @@ mod awaiting_merge_anchor_tests {
                 temp.path(),
                 "main",
                 Some("task-b-tip"),
-            );
+            ).unwrap();
             assert_eq!(
                 store.get(&parked.id).unwrap().deliverables.factory_branch_anchor,
                 Some("task-a-tip".to_string()),
@@ -25333,7 +25342,7 @@ mod merge_state_gate_tests {
             &tasks, &task, "MERGE REQUIRED", "delivery is ready for merge",
             Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
             Some("PASS delivery-tip: relay fixture"),
-        );
+        ).unwrap();
         let parked = tasks.get(&task.id).unwrap();
         assert_eq!(parked.status, TaskStatus::AwaitingMerge);
         assert_eq!(
@@ -25350,6 +25359,22 @@ mod merge_state_gate_tests {
         let prompts = cas_store::SqlitePromptQueueStore::open(dir.path()).unwrap().peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
         assert!(prompts[0].prompt.contains("task_awaiting_merge"));
+
+        cas_store::request_changes_for_parked_delivery(
+            dir.path(), &task.id, "relay-supervisor-id", "Correct the delivery before parking again",
+        ).unwrap();
+        let refused = core.park_task_awaiting_merge(
+            &tasks, &task, "MERGE REQUIRED", "stale close still running",
+            Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
+            Some("PASS delivery-tip: stale close"),
+        ).expect_err("GH #1276: a stale close cannot erase the review rejection");
+        assert!(refused.to_string().contains("task changed"));
+        let reopened = tasks.get(&task.id).unwrap();
+        assert_eq!(reopened.status, TaskStatus::Open);
+        assert!(reopened.notes.contains("Correct the delivery"));
+        assert!(reopened.deliverables.factory_branch_anchor.is_none());
+        assert_eq!(queue.peek("relay-supervisor-id", 10).unwrap().len(), 1,
+            "a refused park cannot enqueue another relay");
     }
 
     #[tokio::test]
@@ -30555,7 +30580,7 @@ esac
             next.id = "cas-b0b0".to_string();
             next.status = status;
             let store = crate::store::mock::MockTaskStore::with_tasks(vec![parked.clone(), next]);
-            core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&next_tip));
+            core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&next_tip)).unwrap();
             assert_eq!(
                 store
                     .get(&parked.id)
@@ -30570,7 +30595,7 @@ esac
         git(p, &["reset", "-q", "--hard", &base]);
         let forced = commit_local(p, "c.rs", "untagged work");
         let store = crate::store::mock::MockTaskStore::with_tasks(vec![parked.clone()]);
-        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&forced));
+        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&forced)).unwrap();
         assert_eq!(
             store
                 .get(&parked.id)
@@ -30583,7 +30608,7 @@ esac
 
         git(p, &["reset", "-q", "--hard", &parked_at]);
         let own = commit_local(p, "a2.rs", "fix(cas-a0a0): review follow-up");
-        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own));
+        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own)).unwrap();
         assert_eq!(
             store
                 .get(&parked.id)

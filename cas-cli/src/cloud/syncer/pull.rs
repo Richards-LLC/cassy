@@ -974,6 +974,30 @@ fn unique_complete_provenance_block(notes: &str) -> Option<(usize, usize)> {
     .then_some((start, end))
 }
 
+/// cas-8a252 (GH #1275): the project an accepted cross-project task executes
+/// in. `origin_project` keeps the proposing project, so the attested target is
+/// read back from the provenance block [`render_task_proposal_provenance`]
+/// writes. Answers only for exactly one complete block whose server-attested
+/// `target_task_id` is this task and whose attested origin is this row's
+/// `origin_project`; a missing, duplicated or contradicting block is `None`.
+pub(crate) fn accepted_proposal_execution_project(task: &cas_types::Task) -> Option<String> {
+    let origin = task.origin_project.as_deref()?;
+    let (start, end) = unique_complete_provenance_block(&task.notes)?;
+    let block = &task.notes[start..end];
+    let server = &block[..block.find("--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---")?];
+    let field = |name: &str| -> Option<String> {
+        let prefix = format!("{name}: ");
+        let mut values = server.lines().filter_map(|line| line.trim_start().strip_prefix(prefix.as_str()));
+        let value = values.next()?;
+        values.next().is_none().then_some(())?;
+        serde_json::from_str::<String>(value).ok()
+    };
+    (field("target_task_id")? == task.id
+        && canonical_project_ids_match(&field("origin_project_canonical_id")?, origin))
+    .then(|| field("target_project_canonical_id"))
+    .flatten()
+}
+
 /// Persist proposal provenance visibly in the ordinary local task record.
 /// The cloud proposal row remains authoritative; this rendering is explicitly
 /// labeled and is refreshed whenever the materialized task is pulled.

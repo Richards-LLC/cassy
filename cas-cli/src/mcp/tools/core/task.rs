@@ -15,7 +15,13 @@ pub(crate) fn current_project_id(cas_root: &std::path::Path) -> Option<String> {
 }
 
 pub(crate) fn task_belongs_to_project(task: &cas_types::Task, project_id: Option<&str>) -> bool {
-    project_id.is_some_and(|project_id| task.origin_project.as_deref() == Some(project_id))
+    project_id.is_some_and(|project_id| {
+        task.origin_project.as_deref() == Some(project_id)
+            // cas-8a252 (GH #1275): an accepted cross-project task keeps its
+            // proposer in origin_project and executes in its attested target.
+            || crate::cloud::syncer::accepted_proposal_execution_project(task)
+                .is_some_and(|target| crate::cloud::project_ids_match(&target, project_id))
+    })
 }
 
 /// Task board reads retain legacy rows that have no origin attribution. Rows

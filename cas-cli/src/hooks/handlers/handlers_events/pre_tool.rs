@@ -7990,6 +7990,14 @@ mod workspace_contract_tests {
             ("sh -c \"printf x $UNKNOWN_SCRIPT\"", true),
             ("sh -c 'printf \"%s\" \"$(cat src/new.rs)\"'", false),
             ("sh -c 'printf \"%s\" \"$(touch ../../config.toml)\"'", true),
+            // cas-9623: a quoted cat heredoc is literal argument data. Its
+            // quotes, substitutions and parentheses must not become syntax.
+            ("gh issue comment 1290 --body \"$(cat <<'EOF'\nIt's done: $(touch /etc/cas-literal) (\nEOF\n)\"", false),
+            ("gh issue comment 1290 --body \"$(cat <<\"EOF\"\nIt's done\nEOF\n)\"", false),
+            ("gh issue comment 1290 --body \"$(cat <<'EOF'\ntext\nEOF\n)\" > ../../ordinary-data.txt", true),
+            ("gh issue comment 1290 --body \"$(cat > ../../ordinary-data.txt <<'EOF'\nIt's done\nEOF\n)\"", true),
+            ("gh issue comment 1290 --body \"$(cat <<EOF\n$(touch ../../ordinary-data.txt)\nEOF\n)\"", true),
+            ("bash -c \"$(cat <<'EOF'\ntouch ../../ordinary-data.txt\nEOF\n)\"", true),
             ("sh -c \"printf '%s' $?\"", false),
             ("B=$PWD/target/debug/cas; $B --version", false),
             ("R='env -i PATH=/usr/bin /bin/true'; $R", false),
@@ -8030,6 +8038,13 @@ mod workspace_contract_tests {
             let decision = value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("");
             if (decision == "deny") != denied {
                 mismatches.push(format!("{command}: expected denied={denied}, got {value}"));
+            }
+            if command.starts_with("gh issue comment") && denied
+                && value["hookSpecificOutput"]["permissionDecisionReason"].as_str()
+                    .is_some_and(|reason| reason.contains("an unresolved shell payload")
+                        && !reason.contains("--body-file"))
+            {
+                mismatches.push(format!("unresolved gh body needs --body-file guidance: {value}"));
             }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");

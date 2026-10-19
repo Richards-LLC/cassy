@@ -8450,7 +8450,10 @@ impl CasCore {
                 // Ownership admits this caller; the assembled epic still needs
                 // its own dispatch/verdict. Epics normally have no assignee,
                 // which is not orphan recovery and cannot imply verification.
-                if req.supervisor_override.or(req.legacy_bypass_code_review).unwrap_or(false) {
+                if req.supervisor_override
+                    .or(req.legacy_bypass_code_review)
+                    .unwrap_or(false)
+                {
                     VerificationSkipReason::SupervisorBypass
                 } else {
                     VerificationSkipReason::None
@@ -27386,7 +27389,11 @@ mod merge_state_gate_tests {
         env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         std::fs::write(
             cas_dir.join("config.toml"),
-            if owner_verification { "[verification]\nenabled = true\n" } else { "[verification]\nenabled = false\n" },
+            if owner_verification {
+                "[verification]\nenabled = true\n"
+            } else {
+                "[verification]\nenabled = false\n"
+            },
         )
         .unwrap();
         open_store(&cas_dir).unwrap().init().unwrap();
@@ -27459,11 +27466,18 @@ mod merge_state_gate_tests {
         .unwrap();
         let mut response = service.task(Parameters(request.clone())).await.unwrap();
         if owner_verification {
-            assert_ne!(store.get(&epic.id).unwrap().status, TaskStatus::Closed,
-                "epic ownership and assembly proof must not replace the epic verdict: {response:?}");
+            assert_ne!(
+                store.get(&epic.id).unwrap().status,
+                TaskStatus::Closed,
+                "epic ownership and assembly proof must not replace the epic verdict: {response:?}"
+            );
             let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &epic.id)
-                .unwrap().expect("owner close must mint the active proof boundary");
-            assert_eq!(dispatch.repository.as_ref().unwrap().head_commit, rev_parse_local(p, "HEAD"));
+                .unwrap()
+                .expect("owner close must mint the active proof boundary");
+            assert_eq!(
+                dispatch.repository.as_ref().unwrap().head_commit,
+                rev_parse_local(p, "HEAD")
+            );
             let reject = serde_json::from_value(serde_json::json!({
                 "action": "add", "task_id": epic.id, "dispatch_id": dispatch.id,
                 "verification_type": "epic", "status": "rejected",
@@ -27471,8 +27485,11 @@ mod merge_state_gate_tests {
             })).unwrap();
             let verdict = service.verification(Parameters(reject)).await.unwrap();
             assert_ne!(verdict.is_error, Some(true), "{verdict:?}");
-            let latest = crate::store::open_verification_store(&cas_dir).unwrap()
-                .get_latest_for_task_by_type(&epic.id, VerificationType::Epic).unwrap().unwrap();
+            let latest = crate::store::open_verification_store(&cas_dir)
+                .unwrap()
+                .get_latest_for_task_by_type(&epic.id, VerificationType::Epic)
+                .unwrap()
+                .unwrap();
             assert_eq!(latest.status, VerificationStatus::Rejected);
             assert_eq!(latest.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
             assert_ne!(store.get(&epic.id).unwrap().status, TaskStatus::Closed);
@@ -27480,8 +27497,14 @@ mod merge_state_gate_tests {
             // A rejected walk remains in the audit log. A corrected evidence
             // review gets a new exact dispatch, rather than reusing rejection.
             response = service.task(Parameters(request.clone())).await.unwrap();
-            assert_ne!(store.get(&epic.id).unwrap().status, TaskStatus::Closed, "{response:?}");
-            let fresh = cas_store::get_latest_verification_dispatch(&cas_dir, &epic.id).unwrap().unwrap();
+            assert_ne!(
+                store.get(&epic.id).unwrap().status,
+                TaskStatus::Closed,
+                "{response:?}"
+            );
+            let fresh = cas_store::get_latest_verification_dispatch(&cas_dir, &epic.id)
+                .unwrap()
+                .unwrap();
             assert_ne!(fresh.id, dispatch.id);
             let approve = serde_json::from_value(serde_json::json!({
                 "action": "add", "task_id": epic.id, "dispatch_id": fresh.id,

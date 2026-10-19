@@ -1961,3 +1961,50 @@ fn reopen_reads_only_and_writes_wait_for_a_foreign_lock_cas_0e57() {
         .expect("a briefly held write lock is waited out");
     release.join().unwrap();
 }
+
+/// cas-abad: only personal upserts equal to the team's current row (apart from
+/// the local apply clock) are pull echoes; a genuine local edit stays queued.
+#[test]
+fn cas_abad_pull_echo_cleanup_previews_then_removes_only_cloud_identical_rows() {
+    let (temp, queue) = create_test_queue();
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    let echo = crate::types::Task::new("cas-echo".into(), "unchanged".into());
+    let mut edited = crate::types::Task::new("cas-edited".into(), "cloud title".into());
+    let cloud_row = |task: &crate::types::Task| {
+        let mut row = serde_json::to_value(task).unwrap();
+        row["updated_at"] = serde_json::json!("2026-10-01T00:00:00Z");
+        row["project_id"] = serde_json::json!("p");
+        row["team_id"] = serde_json::json!("team-1");
+        row["revision"] = serde_json::json!("7");
+        row
+    };
+    let cloud_tasks = vec![cloud_row(&echo), cloud_row(&edited)];
+    edited.title = "local edit".into();
+    let edge = |to: &str| serde_json::json!({
+        "from_id": "cas-echo", "to_id": to, "dep_type": "blocks",
+        "created_at": "2026-09-01T00:00:00Z", "origin_project": "p",
+    });
+    let cloud_dependencies = vec![edge("cas-edited")];
+    for (kind, id, payload) in [
+        (EntityType::Task, "cas-echo", serde_json::to_string(&echo).unwrap()),
+        (EntityType::Task, "cas-edited", serde_json::to_string(&edited).unwrap()),
+        (EntityType::TaskDependency, "cas-echo:cas-edited:blocks", edge("cas-edited").to_string()),
+        (EntityType::TaskDependency, "cas-echo:cas-local:blocks", edge("cas-local").to_string()),
+    ] {
+        queue.enqueue(kind, id, SyncOperation::Upsert, Some(&payload)).unwrap();
+    }
+    let preview = queue
+        .purge_personal_pull_echoes(&cloud_tasks, &cloud_dependencies, &[], true)
+        .unwrap();
+    let eligible: Vec<_> = preview.iter().filter(|row| row.eligible).map(|row| row.entity_id.as_str()).collect();
+    assert_eq!(eligible, ["cas-echo", "cas-echo:cas-edited:blocks"], "{preview:?}");
+    assert_eq!(queue.list_all(10).unwrap().len(), 4, "a preview removes nothing");
+    assert!(queue.purge_personal_pull_echoes(&cloud_tasks, &cloud_dependencies, &[], false).is_err());
+    let all: Vec<i64> = preview.iter().map(|row| row.id).collect();
+    queue
+        .purge_personal_pull_echoes(&cloud_tasks, &cloud_dependencies, &all, false)
+        .unwrap();
+    let mut kept: Vec<_> = queue.list_all(10).unwrap().into_iter().map(|row| row.entity_id).collect();
+    kept.sort();
+    assert_eq!(kept, ["cas-echo:cas-local:blocks", "cas-edited"], "a local edit and a local-only edge remain");
+}

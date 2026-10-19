@@ -1996,7 +1996,7 @@ fn cas_abad_pull_echo_cleanup_previews_then_removes_only_cloud_identical_rows() 
         .purge_personal_pull_echoes(&cloud_tasks, &cloud_dependencies, &[], true)
         .unwrap();
     let eligible: Vec<_> = preview.iter().filter(|row| row.eligible).map(|row| row.entity_id.as_str()).collect();
-    assert_eq!(eligible, ["cas-echo", "cas-echo:cas-edited:blocks"]);
+    assert_eq!(eligible, ["cas-echo", "cas-echo:cas-edited:blocks"], "{preview:?}");
     assert_eq!(queue.list_all(10).unwrap().len(), 4, "a preview removes nothing");
     assert!(queue.purge_personal_pull_echoes(&cloud_tasks, &cloud_dependencies, &[], false).is_err());
     let all: Vec<i64> = preview.iter().map(|row| row.id).collect();

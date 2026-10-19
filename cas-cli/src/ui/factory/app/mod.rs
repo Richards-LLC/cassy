@@ -4961,6 +4961,61 @@ mod tests {
         assert!(!app.event_detector.is_worker_held(worker));
     }
 
+    /// cas-df315: the project identity is corrected while the factory runs.
+    /// The next snapshot read re-resolves it off the loop, the loop adopts it
+    /// as the project scope, and the pinned epic of the corrected project
+    /// replaces the old project's in-progress epic, without a restart.
+    #[test]
+    fn df315_corrected_identity_rescopes_the_live_factory_to_its_pinned_epic() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let session = "identity-corrected";
+        let _guard = TestEnvGuard::with_vars(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("CAS_FACTORY_SESSION", session),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let pin = |canonical: &str| {
+            std::fs::write(cas_dir.join("config.toml"), format!("[project]\ncanonical_id = {canonical:?}\n")).unwrap()
+        };
+        pin("richards-llc-accounting");
+        let store = crate::store::open_task_store_local(&cas_dir).unwrap();
+        for (id, origin, status) in [
+            ("cas-6e2a", "richards-llc-accounting", TaskStatus::InProgress),
+            ("cas-1229", "accounting-personal", TaskStatus::Open),
+        ] {
+            let mut epic = Task::new(id.into(), format!("epic {id}"));
+            epic.task_type = TaskType::Epic;
+            epic.status = status;
+            epic.origin_project = Some(origin.into());
+            store.add(&epic).unwrap();
+        }
+        let path = crate::ui::factory::session::metadata_path(session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut metadata = crate::ui::factory::session::create_metadata(session, 1, "supervisor", &[], None, None, None);
+        metadata.pinned_epic_id = Some("cas-1229".into());
+        std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+
+        let mut app = super::FactoryApp::for_test();
+        app.cas_dir = cas_dir.clone();
+        app.factory_session = Some(session.to_string());
+        app.git_refresh_interval = std::time::Duration::ZERO;
+        app.director_stores = Some(
+            crate::ui::factory::director::DirectorStores::open(&cas_dir)
+                .unwrap()
+                .with_project_id(crate::cloud::resolve_canonical_id(&cas_dir)),
+        );
+        let load = app.director_refresh_request().read(None);
+        app.apply_director_refresh(load).unwrap();
+        assert_eq!(app.epic_state.epic_id(), Some("cas-6e2a"), "the pinned foreign epic is out of scope");
+
+        pin("accounting-personal");
+        let load = app.director_refresh_request().read(None);
+        app.apply_director_refresh(load).unwrap();
+        assert_eq!(app.project_scope().as_deref(), Some("accounting-personal"));
+        assert_eq!(app.epic_state.epic_id(), Some("cas-1229"), "the pin now resolves in the corrected project");
+    }
+
     /// cas-4491f: applying a full snapshot reads nothing on the loop. The
     /// registered agents (session mappings, phantom panes) and the session's
     /// epic focus arrive with the snapshot job, and a phantom pane's teardown

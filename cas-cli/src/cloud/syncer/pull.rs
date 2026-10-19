@@ -974,6 +974,30 @@ fn unique_complete_provenance_block(notes: &str) -> Option<(usize, usize)> {
     .then_some((start, end))
 }
 
+/// cas-8a252 (GH #1275): the project an accepted cross-project task executes
+/// in. `origin_project` keeps the proposing project, so the attested target is
+/// read back from the provenance block [`render_task_proposal_provenance`]
+/// writes. Answers only for exactly one complete block whose server-attested
+/// `target_task_id` is this task and whose attested origin is this row's
+/// `origin_project`; a missing, duplicated or contradicting block is `None`.
+pub(crate) fn accepted_proposal_execution_project(task: &cas_types::Task) -> Option<String> {
+    let origin = task.origin_project.as_deref()?;
+    let (start, end) = unique_complete_provenance_block(&task.notes)?;
+    let block = &task.notes[start..end];
+    let server = &block[..block.find("--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---")?];
+    let field = |name: &str| -> Option<String> {
+        let prefix = format!("{name}: ");
+        let mut values = server.lines().filter_map(|line| line.trim_start().strip_prefix(prefix.as_str()));
+        let value = values.next()?;
+        values.next().is_none().then_some(())?;
+        serde_json::from_str::<String>(value).ok()
+    };
+    (field("target_task_id")? == task.id
+        && canonical_project_ids_match(&field("origin_project_canonical_id")?, origin))
+    .then(|| field("target_project_canonical_id"))
+    .flatten()
+}
+
 /// Persist proposal provenance visibly in the ordinary local task record.
 /// The cloud proposal row remains authoritative; this rendering is explicitly
 /// labeled and is refreshed whenever the materialized task is pulled.
@@ -1035,12 +1059,34 @@ pub(crate) fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
         .unwrap_or_default();
     let updated = if let Some((start, end)) = unique_complete_provenance_block(notes) {
         format!("{}{}{}", &notes[..start], rendered, &notes[end..])
+    } else if notes.split("\n\n").any(is_provenance_paragraph) {
+        // cas-a8e2: a row that already holds several (or partial) copies is
+        // normalised to the one freshly rendered block, kept where the first was.
+        let mut kept = Vec::new();
+        for paragraph in notes.split("\n\n") {
+            if !is_provenance_paragraph(paragraph) {
+                kept.push(paragraph);
+            } else if !kept.contains(&rendered.as_str()) {
+                kept.push(rendered.as_str());
+            }
+        }
+        kept.join("\n\n")
     } else if notes.is_empty() {
         rendered
     } else {
         format!("{}\n\n{}", notes.trim_end(), rendered)
     };
     raw["notes"] = serde_json::Value::String(updated);
+}
+
+/// cas-a8e2: one section (server-attested or client-asserted) of a rendered
+/// provenance block, as one `\n\n`-separated notes paragraph.
+fn is_provenance_paragraph(paragraph: &str) -> bool {
+    let paragraph = paragraph.trim();
+    (paragraph.starts_with(PROPOSAL_PROVENANCE_BEGIN)
+        && paragraph.ends_with("--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---"))
+        || (paragraph.starts_with("--- BEGIN CLIENT-ASSERTED PROPOSAL PROVENANCE ---")
+            && paragraph.ends_with(PROPOSAL_PROVENANCE_END))
 }
 
 /// Build a project-scoped `/api/sync/pull` URL, **failing closed** when the
@@ -1392,11 +1438,19 @@ fn reconcile_web_close(
 /// Merge append-only task-note blocks without allowing a whole-row conflict
 /// resolution to discard one machine's timeline.
 fn merge_task_notes(local: &str, remote: &str) -> String {
+    // cas-a8e2: the remote row's provenance is rendered fresh from Cloud's
+    // attested record, so it replaces the local copy. A union would keep both
+    // whenever a field's formatting differs (received_at did) and leave two
+    // server-attested sections, which no reader can trust.
+    let remote_has_provenance = remote.split("\n\n").any(is_provenance_paragraph);
     let mut blocks = Vec::<(Option<chrono::NaiveDateTime>, usize, String)>::new();
-    for notes in [local, remote] {
+    for (is_local, notes) in [(true, local), (false, remote)] {
         for block in notes.split("\n\n") {
             let block = block.trim();
-            if block.is_empty() || blocks.iter().any(|(_, _, existing)| existing == block) {
+            if block.is_empty()
+                || (is_local && remote_has_provenance && is_provenance_paragraph(block))
+                || blocks.iter().any(|(_, _, existing)| existing == block)
+            {
                 continue;
             }
             let timestamp = block
@@ -1992,11 +2046,14 @@ impl CloudSyncer {
         let Ok(project_id) = self.personal_push_project_id() else {
             return;
         };
+        // cas-092e: resolve the record in the scope this checkout syncs in.
+        let team_id = self.cloud_config.active_team_id();
         match crate::cloud::refresh_project_alias_record(
             &cas_root,
             &self.cloud_config.endpoint,
             token,
             &project_id,
+            team_id.as_deref(),
             self.config.timeout,
         ) {
             Ok(aliases) if !aliases.is_empty() => {

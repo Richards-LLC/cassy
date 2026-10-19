@@ -6,8 +6,9 @@
 //! - cancel: `id=<split> decision=cancel [reason]`
 //! - list: no arguments
 //!
-//! Only a registered supervisor may act, and only for itself: each side
-//! claims and releases only its own share (cas-604d).
+//! A registered supervisor may cancel its own split. A live supervisor may
+//! also supersede an accepted split when its registered owner is no longer live
+//! past the heartbeat TTL; that cancellation records both identities.
 
 use crate::cloud::epic_split::{self, Caller};
 use crate::mcp::tools::service::imports::*;

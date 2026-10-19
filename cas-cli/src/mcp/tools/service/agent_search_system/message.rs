@@ -3070,38 +3070,6 @@ impl CasService {
                 format!("Failed to open prompt queue: {error}"),
             )
         })?;
-        // cas-d047 (GH #69): a freshly spawned worker must never be handed a
-        // months-old item addressed to a recycled name. The daemon sweeps
-        // these too, but a worker can poll in a session with no daemon tick
-        // yet (or none at all), so quarantine on the read path as well — the
-        // store keeps the row and its forensics, it just stops being
-        // deliverable, and every withheld row is named in the log.
-        match queue.expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS) {
-            Ok(stale) => {
-                for row in &stale {
-                    tracing::warn!(
-                        target: "cas::coordination",
-                        stage = "stale_quarantine",
-                        prompt_id = row.id,
-                        source = %row.source,
-                        target_agent = %row.target,
-                        created_at = %row.created_at.to_rfc3339(),
-                        age_secs = (chrono::Utc::now() - row.created_at).num_seconds(),
-                        recipient = %recipient,
-                        "cas-d047: withheld stale queue item from inbox delivery"
-                    );
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "cas::coordination",
-                    stage = "stale_quarantine",
-                    %error,
-                    "cas-d047: stale queue sweep failed; stale rows remain filtered out of this poll"
-                );
-            }
-        }
-
         // The store records recipient-seen state in the same transaction that
         // selects the rows, before this MCP response is handed back. That
         // prevents concurrent duplicate delivery; a later poll does not replay
@@ -3145,6 +3113,43 @@ impl CasService {
                 if !messages.iter().any(|existing| existing.id == row.id) {
                     messages.push(row);
                 }
+            }
+        }
+        // cas-8cbe (GH #123): named reads are the recipient's explicit request
+        // for a retained row. Surface that id before the stale quarantine
+        // sweep; otherwise the sweep terminally abandons it before the
+        // store's NamedRead eligibility can return it. Automatic polling
+        // below still has its own stale cutoff, and the sweep quarantines
+        // every other stale pending row before that automatic drain.
+        // cas-d047 (GH #69): a freshly spawned worker must never be handed a
+        // months-old item addressed to a recycled name. The daemon sweeps
+        // these too, but a worker can poll in a session with no daemon tick
+        // yet (or none at all), so quarantine on the read path as well — the
+        // store keeps the row and its forensics, it just stops being
+        // deliverable, and every withheld row is named in the log.
+        match queue.expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS) {
+            Ok(stale) => {
+                for row in &stale {
+                    tracing::warn!(
+                        target: "cas::coordination",
+                        stage = "stale_quarantine",
+                        prompt_id = row.id,
+                        source = %row.source,
+                        target_agent = %row.target,
+                        created_at = %row.created_at.to_rfc3339(),
+                        age_secs = (chrono::Utc::now() - row.created_at).num_seconds(),
+                        recipient = %recipient,
+                        "cas-d047: withheld stale queue item from inbox delivery"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "cas::coordination",
+                    stage = "stale_quarantine",
+                    %error,
+                    "cas-d047: stale queue sweep failed; stale rows remain filtered out of this poll"
+                );
             }
         }
         for alias in &aliases {
@@ -4956,6 +4961,74 @@ mod cas_89e1_post_merge_message_type_tests {
             "message": "Route this message to the intended live supervisor.",
         }))
         .expect("static routing message request")
+    }
+
+    /// cas-66c9: a card's explicit read-in-full command must reach a retained
+    /// row even when the ordinary inbox TTL has elapsed; the same poll must
+    /// still keep other stale rows out of automatic delivery.
+    #[tokio::test(flavor = "current_thread")]
+    async fn named_inbox_read_survives_stale_ttl_without_auto_surfacing_stale_rows() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_SESSION", "factory-a");
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agents = core.open_agent_store().expect("agent store");
+        let mut supervisor = Agent::new("supervisor-id".into(), "supervisor".into());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some("factory-a".into());
+        agents.register(&supervisor).expect("register supervisor");
+        core.set_agent_id_for_testing(supervisor.id.clone());
+
+        let queue = crate::store::open_prompt_queue_store(&cas_root).expect("prompt queue");
+        let full_body = "retained merge decision details";
+        let named = queue
+            .enqueue_with_session("worker-a", "supervisor", full_body, "factory-a")
+            .expect("enqueue named row");
+        let automatic_body = "stale row must stay out of automatic delivery";
+        let automatic = queue
+            .enqueue_with_session("worker-b", "supervisor", automatic_body, "factory-a")
+            .expect("enqueue automatic control row");
+        rusqlite::Connection::open(cas_root.join("cas.db"))
+            .expect("database")
+            .execute(
+                "UPDATE prompt_queue SET created_at = ?1 WHERE id IN (?2, ?3)",
+                rusqlite::params![
+                    (chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339(),
+                    named,
+                    automatic,
+                ],
+            )
+            .expect("age both rows past the stale TTL");
+        let quarantined = queue
+            .expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS)
+            .expect("simulate the daemon stale sweep");
+        assert_eq!(
+            quarantined.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![named, automatic],
+            "the daemon has already retained and quarantined both stale rows"
+        );
+
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let response = response_text(
+            service
+                .inbox_poll(
+                    serde_json::from_value(serde_json::json!({
+                        "action": "inbox_poll",
+                        "notification_id": named,
+                    }))
+                    .unwrap(),
+                )
+                .await
+                .expect("named read succeeds"),
+        );
+        assert!(response.contains(full_body), "{response}");
+        assert!(!response.contains(automatic_body), "{response}");
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -33,12 +33,15 @@ on:
   # required contexts must report on that ref or queue entries time out rather
   # than proving the tree that will actually land.
   merge_group:
+  # cas-32e9: factory/** pushes start in lane.yml. A slim lane runs there
+  # alone; with CAS_LANE_SLIM unset, lane.yml calls this workflow, so the
+  # factory conditions below still apply to those pushes.
+  workflow_call:
   push:
     branches:
       - main
       - staging
       - "epic/**"
-      - "factory/**"
     tags:
       - "v*"
   schedule:
@@ -76,11 +79,7 @@ jobs:
   # cheap docs check.
   ci-diff:
     name: Classify CI diff
-    # cas-14e0: a slim factory push only classifies, checks out and reports,
-    # so it runs on the local runners instead of waiting for a hosted slot.
-    # Only push to refs/heads/factory/** routes there (never pull_request or a
-    # fork); rollback is unsetting CASSY_LANE_SELF_HOSTED.
-    runs-on: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && vars.CAS_LANE_SLIM == 'true' && vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-ci-32core"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     outputs:
       comparison-base: ${{ steps.classify-diff.outputs.comparison-base }}
       class: ${{ steps.classify-diff.outputs.class }}
@@ -119,11 +118,7 @@ jobs:
       || github.event_name == 'merge_group'
       || github.event_name == 'push')
     needs: ci-diff
-    # cas-14e0: a slim factory push only classifies, checks out and reports,
-    # so it runs on the local runners instead of waiting for a hosted slot.
-    # Only push to refs/heads/factory/** routes there (never pull_request or a
-    # fork); rollback is unsetting CASSY_LANE_SELF_HOSTED.
-    runs-on: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && vars.CAS_LANE_SLIM == 'true' && vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-ci-32core"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -348,11 +343,7 @@ jobs:
     concurrency:
       group: scoped-validation-fast-${{ github.ref }}
       cancel-in-progress: true
-    # cas-14e0: a slim factory push only classifies, checks out and reports,
-    # so it runs on the local runners instead of waiting for a hosted slot.
-    # Only push to refs/heads/factory/** routes there (never pull_request or a
-    # fork); rollback is unsetting CASSY_LANE_SELF_HOSTED.
-    runs-on: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && vars.CAS_LANE_SLIM == 'true' && vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-ci-32core"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -537,11 +528,7 @@ jobs:
     concurrency:
       group: scoped-validation-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
-    # cas-14e0: a slim factory push only classifies, checks out and reports,
-    # so it runs on the local runners instead of waiting for a hosted slot.
-    # Only push to refs/heads/factory/** routes there (never pull_request or a
-    # fork); rollback is unsetting CASSY_LANE_SELF_HOSTED.
-    runs-on: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && vars.CAS_LANE_SLIM == 'true' && vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-ci-32core"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:

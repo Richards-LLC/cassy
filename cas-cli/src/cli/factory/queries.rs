@@ -774,10 +774,7 @@ pub(super) fn execute_message(
     let payload = if no_wrap {
         message.to_string()
     } else {
-        let response_hint = format!(
-            "To respond, use: coordination action=message target={} summary=\"...\" message=\"...\"\n\nDO NOT USE SENDMESSAGE.",
-            from.trim()
-        );
+        let response_hint = crate::ui::factory::external_response_hint(&cas_root, from);
         format!("{}\n\n{}", message.trim_end(), response_hint)
     };
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();

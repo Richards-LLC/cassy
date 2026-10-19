@@ -1754,17 +1754,7 @@ pub(crate) fn is_worker_commit_allowed_branch(branch: &str) -> bool {
 /// Intentionally conservative: false-negatives (missed commands) are safe
 /// because LAYER 2 (pre-commit hook) is the hard floor.
 pub(crate) fn looks_like_git_write_op(cmd: &str) -> bool {
-    super::attribution::split_shell_statements(cmd)
-        .into_iter()
-        .any(|words| {
-            let Some(git_index) = words
-                .iter()
-                .position(|word| word == "git" || word.ends_with("/git"))
-            else {
-                return false;
-            };
-            git_history_write_operation(&words[git_index + 1..]).is_some()
-        })
+    !git_write_targets(".", cmd).is_empty()
 }
 
 /// Return true when a shell command invokes `git push origin`.
@@ -1920,12 +1910,24 @@ fn resolve_git_option_path(base: &std::path::Path, value: &str) -> std::path::Pa
 }
 
 fn git_history_write_operation(git_words: &[String]) -> Option<usize> {
-    let operation_index = git_words.iter().position(|word| {
-        matches!(
-            word.as_str(),
-            "commit" | "merge" | "push" | "rebase" | "cherry-pick" | "reset" | "checkout" | "add"
-        )
-    })?;
+    // Only the subcommand can change history, never a global option's value
+    // or a read command's operand (e.g. `git log --grep commit`).
+    let mut operation_index = 0;
+    while let Some(word) = git_words.get(operation_index) {
+        match word.as_str() {
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env" => {
+                operation_index += 2;
+            }
+            "-h" | "--help" | "-v" | "--version" | "--exec-path" | "--html-path"
+            | "--man-path" | "--info-path" => return None,
+            "--" => {
+                operation_index += 1;
+                break;
+            }
+            _ if word.starts_with('-') => operation_index += 1,
+            _ => break,
+        }
+    }
     let operation = git_words.get(operation_index)?.as_str();
     let args = &git_words[operation_index + 1..];
     let is_write = match operation {
@@ -1961,24 +1963,49 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
     let mut targets = Vec::new();
     let mut shell_cwd = default_target.cwd.clone();
 
-    for words in super::attribution::split_shell_statements(command) {
-        if words.first().is_some_and(|word| word == "cd") {
-            if let Some(path) = words.get(1).filter(|path| path.as_str() != "--") {
+    // Strip only literal heredoc data for this allowance. Expanding bodies
+    // can run $(git ...); retain the raw subprocess scopes in that case.
+    let expanding_heredoc = shell_command_without_heredoc_bodies(command).lines().any(|line| {
+        heredoc_delimiters(line).iter().any(|delimiter| !delimiter.literal_body)
+    });
+    let statements = if expanding_heredoc {
+        super::attribution::split_shell_statements(command)
+    } else {
+        shell_statement_words(command)
+    };
+    let mut pending_statements = std::collections::VecDeque::from(statements);
+    while let Some(words) = pending_statements.pop_front() {
+        let Some(command_index) = unwrapped_command_index(&words) else {
+            continue;
+        };
+        if shell_word_basename(&words[command_index]) == "find" {
+            // find runs each -exec/-execdir payload as a command. Inspect
+            // these scopes before later statements can change shell_cwd.
+            for (index, word) in words.iter().enumerate().rev() {
+                if matches!(word.as_str(), "-exec" | "-execdir") {
+                    let payload = &words[index + 1..];
+                    let end = payload.iter()
+                        .position(|word| word == ";" || word == "+")
+                        .unwrap_or(payload.len());
+                    pending_statements.push_front(payload[..end].to_vec());
+                }
+            }
+            continue;
+        }
+        if words[command_index] == "cd" {
+            if let Some(path) = words.get(command_index + 1).filter(|path| path.as_str() != "--") {
                 shell_cwd = resolve_worker_cd_path(&shell_cwd, path);
-            } else if words.get(1).is_some_and(|path| path == "--") {
-                if let Some(path) = words.get(2) {
+            } else if words.get(command_index + 1).is_some_and(|path| path == "--") {
+                if let Some(path) = words.get(command_index + 2) {
                     shell_cwd = resolve_worker_cd_path(&shell_cwd, path);
                 }
             }
             continue;
         }
-        let Some(git_index) = words
-            .iter()
-            .position(|word| word == "git" || word.ends_with("/git"))
-        else {
+        if shell_word_basename(&words[command_index]) != "git" {
             continue;
-        };
-        let git_words = &words[git_index + 1..];
+        }
+        let git_words = &words[command_index + 1..];
         let Some(write_index) = git_history_write_operation(git_words) else {
             continue;
         };
@@ -2032,11 +2059,7 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
         targets.push(target);
     }
 
-    if targets.is_empty() {
-        vec![default_target]
-    } else {
-        targets
-    }
+    targets
 }
 
 fn git_command_at_target(target: &GitCommandTarget) -> std::process::Command {
@@ -3164,6 +3187,7 @@ fn expand_factory_shell_word(
 struct HeredocDelimiter {
     value: String,
     strip_leading_tabs: bool,
+    literal_body: bool,
 }
 
 /// Find heredoc delimiters on one shell command line without interpreting
@@ -3232,6 +3256,7 @@ fn heredoc_delimiters(line: &str) -> Vec<HeredocDelimiter> {
                     delimiters.push(HeredocDelimiter {
                         value,
                         strip_leading_tabs,
+                        literal_body: matches!(first, '\'' | '"'),
                     });
                 }
                 index = next_index;
@@ -10014,21 +10039,26 @@ mod worker_commit_guard_tests {
             ("CAS_AGENT_NAME", Some("linked-worker")),
         ]);
 
-        let input = hook_git_write_input(
-            &repo_path,
-            &format!("git -C '{linked_path}' commit -m work"),
-        );
-        let out = handle_pre_tool_use(&input, None).expect("handler ok");
-        let val = serde_json::to_value(&out).unwrap();
-        let decision = val
-            .get("hookSpecificOutput")
-            .and_then(|h| h.get("permissionDecision"))
-            .and_then(|v| v.as_str());
-        assert_ne!(
-            decision,
-            Some("deny"),
-            "linked worktree branch must be honored: {val}"
-        );
+        let artifacts = tempfile::tempdir().unwrap();
+        let cwd = artifacts.path().display().to_string();
+        let ledger = format!("cat > LEDGER.md <<'EOF'\ngit config\ncommit failed; commits normally\n$(git -C '{repo_path}' commit -m inert)\nEOF");
+        let mut mismatches = Vec::new();
+        for (command, denied) in [
+            (ledger.to_string(), false),
+            ("printf '%s' git commit".to_string(), false),
+            (format!("git -C '{repo_path}' log --grep commit"), false),
+            (format!("git -C '{linked_path}' commit -m work"), false),
+            (format!("{ledger}\ngit -C '{repo_path}' commit -m work"), true),
+            (format!("cat > LEDGER.md <<EOF\n$(git -C '{repo_path}' commit -m work)\nEOF"), true),
+        ] {
+            let input = hook_git_write_input(&cwd, &command);
+            let out = handle_pre_tool_use(&input, None).expect("handler ok");
+            let val = serde_json::to_value(&out).unwrap();
+            if (val["hookSpecificOutput"]["permissionDecision"] == "deny") != denied {
+                mismatches.push(format!("{command}: expected denied={denied}: {val}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     #[test]
@@ -10136,20 +10166,25 @@ mod worker_commit_guard_tests {
             ("CAS_CLONE_PATH", Some(&p)),
         ]);
 
-        let mut input = crate::hooks::handlers::HookInput::default();
-        input.hook_event_name = "PreToolUse".to_string();
-        input.tool_name = Some("Bash".to_string());
-        input.cwd = p.clone();
-        input.tool_input = Some(serde_json::json!({"command": "git commit -m 'oops'"}));
-
-        let out = handle_pre_tool_use(&input, None).expect("handler ok");
-        let val = serde_json::to_value(&out).unwrap();
-        let decision = val
-            .get("hookSpecificOutput")
-            .and_then(|h| h.get("permissionDecision"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(decision, "deny", "expected deny, got: {val}");
+        let mut mismatches = Vec::new();
+        for command in [
+            "git commit -m 'oops'",
+            r"find . -exec git commit -m x \;",
+            r"find . -execdir git commit -m x \;",
+            "command git commit -m x",
+            "sudo git commit -m x",
+            "exec git commit",
+            "builtin git -C . commit -m x",
+            "xargs -I{} git commit",
+        ] {
+            let input = hook_git_write_input(&p, command);
+            let out = handle_pre_tool_use(&input, None).expect("handler ok");
+            let val = serde_json::to_value(&out).unwrap();
+            if val["hookSpecificOutput"]["permissionDecision"] != "deny" {
+                mismatches.push(format!("{command}: expected deny: {val}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     #[test]

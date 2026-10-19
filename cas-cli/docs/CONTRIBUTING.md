@@ -1183,15 +1183,18 @@ product inputs change. Do not add lane-merge compile checks, park re-runs or a
 separate assembly journey run. If more than two merge-queue ejections per epic
 follow from this, unset `CAS_LANE_SLIM`: that one setting is the D1 rollback.
 
-With `CAS_LANE_SLIM=true` and the repository variable `CASSY_LANE_SELF_HOSTED`
-set to `enabled` (cas-14e0), a factory push's remaining lane jobs (Classify CI
-diff, Docs Lint, Scoped Validation fast and factory/PR) run on the local
-self-hosted runners (`cas-ci-32core`, `Nice=10`, `CPUWeight=25`) instead of
-waiting for a hosted slot; they skip submodules and the sccache report. Only
-`push` to `refs/heads/factory/**` routes there: pull requests (including
-forks), the merge queue, `main`, `epic/**`, tags and schedules keep their
-runners, and `scripts/ci_tiers/test-policy.py` pins that. Rollback is one
-setting: `gh variable delete CASSY_LANE_SELF_HOSTED --repo Richards-LLC/cassy`.
+Factory pushes start in `.github/workflows/lane.yml` (cas-32e9), also named
+`CI`. With `CAS_LANE_SLIM=true` it runs only Classify CI diff, the two Scoped
+Validation checks (Docs Lint for a docs-only diff) under their usual names, so a
+lane is not held up by dozens of skipped `ci.yml` jobs. Unset, it calls `ci.yml`
+and the lane runs exactly as before. When the repository variable
+`CASSY_LANE_SELF_HOSTED` is `enabled` (cas-14e0), those slim jobs run on the
+local self-hosted runners (`cas-ci-32core`, `Nice=10`, `CPUWeight=25`) instead
+of waiting for a hosted slot. `lane.yml` has no pull request trigger, so forks
+never reach those runners; `scripts/ci_tiers/test-policy.py` pins the routing.
+Rollback is one setting: `gh variable delete CASSY_LANE_SELF_HOSTED --repo
+Richards-LLC/cassy` keeps the slim lane on hosted runners, and unsetting
+`CAS_LANE_SLIM` restores the full lane.
 
 The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
 epic close gate accepts a local `ASSEMBLY_PROOF`, it covers the Rust build and

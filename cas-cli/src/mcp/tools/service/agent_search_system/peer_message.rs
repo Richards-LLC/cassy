@@ -190,8 +190,8 @@ impl CasService {
         let discovery = tokio::task::spawn_blocking(move || discover_peers(&root, Some(&self_id)))
             .await
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-        let (peers, hidden) = match discovery {
-            Ok(PeerDiscovery::Found { peers, hidden, .. }) => (peers, hidden),
+        let (peers, hidden, workers) = match discovery {
+            Ok(PeerDiscovery::Found { peers, hidden, workers, .. }) => (peers, hidden, workers),
             Ok(PeerDiscovery::NotLoggedIn) => {
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
@@ -230,6 +230,29 @@ impl CasService {
             }
             crate::cloud::peers::SameRepoTarget::NotFound => None,
         };
+        // cas-9f53: a live worker in a peer's session takes instructions only
+        // from its own supervisor. Name that supervisor instead of "no such
+        // worker", so a lane takeover has a channel.
+        if peer.is_none()
+            && let Some(worker) = workers.iter().find(|worker| worker.matches(&wanted))
+        {
+            let owner = &worker.supervisor;
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                format!(
+                    "{}@{} is a worker in peer supervisor {}@{}'s factory session ({}); peer \
+                     workers take messages only from their own supervisor. Message target={}@{} \
+                     to relay it. Nothing was enqueued.",
+                    worker.name,
+                    worker.machine,
+                    owner.name,
+                    owner.machine,
+                    owner.session.as_deref().unwrap_or("unknown"),
+                    owner.name,
+                    owner.machine
+                ),
+            ));
+        }
         let Some(peer) = peer else {
             // cas-2a5a: not a supervisor of this repo; perhaps one of
             // another project of the same user. Unknown stays local.

@@ -4958,6 +4958,66 @@ mod cas_89e1_post_merge_message_type_tests {
         .expect("static routing message request")
     }
 
+    /// cas-66c9: a card's explicit read-in-full command must reach a retained
+    /// row even when the ordinary inbox TTL has elapsed; the same poll must
+    /// still keep other stale rows out of automatic delivery.
+    #[tokio::test(flavor = "current_thread")]
+    async fn named_inbox_read_survives_stale_ttl_without_auto_surfacing_stale_rows() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_SESSION", "factory-a");
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agents = core.open_agent_store().expect("agent store");
+        let mut supervisor = Agent::new("supervisor-id".into(), "supervisor".into());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some("factory-a".into());
+        agents.register(&supervisor).expect("register supervisor");
+        core.set_agent_id_for_testing(supervisor.id.clone());
+
+        let queue = crate::store::open_prompt_queue_store(&cas_root).expect("prompt queue");
+        let full_body = "retained merge decision details";
+        let named = queue
+            .enqueue_with_session("worker-a", "supervisor", full_body, "factory-a")
+            .expect("enqueue named row");
+        let automatic_body = "stale row must stay out of automatic delivery";
+        let automatic = queue
+            .enqueue_with_session("worker-b", "supervisor", automatic_body, "factory-a")
+            .expect("enqueue automatic control row");
+        rusqlite::Connection::open(cas_root.join("cas.db"))
+            .expect("database")
+            .execute(
+                "UPDATE prompt_queue SET created_at = ?1 WHERE id IN (?2, ?3)",
+                rusqlite::params![
+                    (chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339(),
+                    named,
+                    automatic,
+                ],
+            )
+            .expect("age both rows past the stale TTL");
+
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let response = response_text(
+            service
+                .inbox_poll(
+                    serde_json::from_value(serde_json::json!({
+                        "action": "inbox_poll",
+                        "notification_id": named,
+                    }))
+                    .unwrap(),
+                )
+                .await
+                .expect("named read succeeds"),
+        );
+        assert!(response.contains(full_body), "{response}");
+        assert!(!response.contains(automatic_body), "{response}");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn post_merge_suppression_requires_the_explicit_merge_request_type() {
         let mut env = TestEnvGuard::temp_home();

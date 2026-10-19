@@ -1166,10 +1166,12 @@ fn cas_9c34_acting_on_a_merge_request_retires_both_alarms_for_that_task_only() {
     );
     let alarms = f.scan();
     assert!(
+        // pin: alarms name the exact unread row id; the acted-on one is gone.
         alarms.iter().all(|row| !row.prompt.contains(&format!("message {acted}"))),
         "{alarms:?}"
     );
     assert!(
+        // pin: another task's request still names its row in the alarm.
         alarms.iter().any(|row| row.prompt.contains(&format!("message {waiting}"))),
         "{alarms:?}"
     );
@@ -1223,6 +1225,7 @@ fn cas_37b8_fyi_rows_left_unread_raise_no_alarm_and_stay_unacked() {
     age_all(&f);
     let alarms = f.scan();
     assert!(
+        // pin: the typed worker-attention kind routes the unread alarm.
         alarms.iter().all(|row| !row.prompt.contains("kind=\"supervisor_unread\"")
             && row.source != "delivery-watchdog"),
         "{alarms:?}"

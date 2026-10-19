@@ -162,6 +162,20 @@ pub const WORKER_CONTRACT_ELEMENTS: &[ContractElement] = &[
         ],
         all: true,
     },
+    // pin: every worker launch must route a mandatory review wait through
+    // task state and the authenticated blocker API, rather than prose status.
+    ContractElement {
+        id: "required-supervisor-review",
+        markers: &[
+            "required supervisor review or approval",
+            "action=update",
+            "status=blocked",
+            "task_id=",
+            "blocker=true",
+            "action=start",
+        ],
+        all: true,
+    },
     ContractElement {
         id: "one-task-ownership",
         markers: &["one task at a time", "exactly one task"],
@@ -6978,6 +6992,11 @@ mod tests {
                 );
             }
         }
+        assert!(
+            !missing_contract_elements(OPENCODE_WORKER_INSTRUCTIONS, ContractRole::Worker)
+                .contains(&"required-supervisor-review"),
+            "OpenCode must carry the same required-review blocker workflow"
+        );
     }
 
     /// AC-1/AC-2: every one of the six launch shapes (Claude/Codex/Grok ×

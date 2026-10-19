@@ -3,6 +3,17 @@ use crate::prompt_revalidation::{
     assignment_solicited_task_id, assignment_stale_task, urgent_assignment_task_id,
 };
 
+pub(crate) fn resolve_worker_supervisor_target(
+    agent_store: &dyn cas_store::AgentStore,
+    factory_session: Option<&str>,
+) -> Option<crate::mcp::tools::core::task::lifecycle::supervisor_push::OwningSupervisor> {
+    let session = factory_session.map(str::trim).filter(|session| !session.is_empty())?;
+    crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_worker_supervisor(
+        agent_store,
+        Some(session),
+    )
+}
+
 fn resolve_inbox_recipient(
     registered_name: Option<String>,
     environment_name: Option<String>,
@@ -1040,11 +1051,8 @@ impl CasService {
             {
                 // Do not let CAS_SUPERVISOR_NAME or roster order override a
                 // worker's registered factory owner.
-                return crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_worker_supervisor(
-                    store.as_ref(),
-                    Some(session),
-                )
-                .map(|supervisor| supervisor.name);
+                return resolve_worker_supervisor_target(store.as_ref(), Some(session))
+                    .map(|supervisor| supervisor.name);
             }
             if let Ok(name) = std::env::var("CAS_SUPERVISOR_NAME") {
                 if !name.trim().is_empty() {

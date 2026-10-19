@@ -11,7 +11,9 @@
 **Omitted:** The plist or systemd unit body is omitted from the default human preview and is available with `--full`.
 
 ## Critique
+
 terminal-qa: PASS cas hub service install --dry-run · 12 runs · 0 fail · 0 warn · 0 allowed · /Users/pippenz/.cas/artifacts/cassy-ee10031b42e3c2024023c076dfb2edd8118e39b8baee6f0832367b9e8ef4c205/cas-0051/terminal-qa/after/report.json
+
 | Dimension | Score | Evidence |
 | --- | ---: | --- |
 | Hierarchy | 4 | Line 1 says the dry run changed no files or manager state; line 2 names the proposed service path, and line 4 gives one `--full` command. |

@@ -69,6 +69,15 @@ impl AttentionInputs {
                 decisions.insert(row.id, MessageAttention::Satisfied);
                 continue;
             }
+            // cas-37b8: a store-stamped peer copy or a daemon-stamped
+            // non-waking lifecycle relay asks nothing of its reader, so it is
+            // never unanswered mail. The same server-stamped facts (never the
+            // text) that card it for the pane decide here; it stays unread
+            // and unacked in the inbox.
+            if super::delivery::compact_routine_supervisor_body(row).is_some() {
+                decisions.insert(row.id, MessageAttention::Satisfied);
+                continue;
+            }
             let report = match queue.message_delivery_report(row.id) {
                 Ok(Some(report)) => report,
                 _ => {

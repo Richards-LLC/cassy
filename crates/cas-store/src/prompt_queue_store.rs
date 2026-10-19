@@ -2937,6 +2937,17 @@ pub trait PromptQueueStore: Send + Sync {
     /// Acknowledge receipt of a prompt (target agent confirms delivery)
     fn ack(&self, prompt_id: i64) -> Result<()>;
 
+    /// cas-9c34: unacknowledged rows to any of `targets` in `factory_session`
+    /// whose body contains `needle`, newest first. A caller that acted on
+    /// the matter they name decides which to acknowledge.
+    fn unacked_for_targets_naming(
+        &self,
+        targets: &[&str],
+        factory_session: &str,
+        needle: &str,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>>;
+
     /// cas-6ccb (GH #1215): settle rows an `inbox_poll` claimed for
     /// `recipients` but deliberately handled otherwise than as a first
     /// delivery (withheld as already done, named as an older delivery not
@@ -7001,6 +7012,41 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             )?;
             Ok(())
         }) // with_write_retry
+    }
+
+    fn unacked_for_targets_naming(
+        &self,
+        targets: &[&str],
+        factory_session: &str,
+        needle: &str,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>> {
+        if targets.is_empty() || needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let targets = serde_json::to_string(
+            &targets.iter().map(|t| t.to_ascii_lowercase()).collect::<Vec<_>>(),
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT id, source, target, prompt, created_at, processed_at,
+                    summary, priority, acked_at, urgent, factory_session,
+                    origin_agent_id, origin_kind, operator_label,
+                    operator_device_id, operator_device_label, operator_scopes,
+                    operator_verified, recipient_device_id, kind, attachments
+               FROM prompt_queue
+              WHERE acked_at IS NULL AND factory_session = ?1
+                AND lower(target) IN (SELECT value FROM json_each(?2))
+                AND instr(prompt, ?3) > 0
+              ORDER BY id DESC LIMIT ?4",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![factory_session, targets, needle, limit as i64],
+                Self::prompt_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     fn ack(&self, prompt_id: i64) -> Result<()> {

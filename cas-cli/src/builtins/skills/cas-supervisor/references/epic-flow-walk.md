@@ -49,9 +49,11 @@ Run one pass per epic when any child has a non-empty `demo_statement`:
    depth, close returns the pending dispatch ID and bound head; ownership and
    assembly proof do not replace an epic verdict. Use that exact dispatch for
    the sealed task-verifier review (`verification_type=epic`), or an authorized
-   registered supervisor-direct `verification action=add task_id=<epic-id>
-   dispatch_id=<dispatch-id> verification_type=epic status=approved|rejected
-   summary="<evidence verdict>"`. Require the evidence note and task-verifier
+   registered supervisor-direct verdict, for example:
+
+   `verification action=add task_id=<epic-id> dispatch_id=<dispatch-id> verification_type=epic status=rejected summary="<evidence verdict>"`
+
+   Use `status=approved` only after accepting the evidence. Require the evidence note and task-verifier
    Step 0A REJECT table before reading the close reason. If the assembled tip
    changes, the receipt is stale: record `status=rejected` against the active
    dispatch, report the mismatch and owed work, and retain genuine deployment

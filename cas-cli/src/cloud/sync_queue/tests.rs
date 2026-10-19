@@ -1966,7 +1966,8 @@ fn reopen_reads_only_and_writes_wait_for_a_foreign_lock_cas_0e57() {
 /// the local apply clock) are pull echoes; a genuine local edit stays queued.
 #[test]
 fn cas_abad_pull_echo_cleanup_previews_then_removes_only_cloud_identical_rows() {
-    let (_temp, queue) = create_test_queue();
+    let (temp, queue) = create_test_queue();
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let echo = crate::types::Task::new("cas-echo".into(), "unchanged".into());
     let mut edited = crate::types::Task::new("cas-edited".into(), "cloud title".into());
     let cloud_row = |task: &crate::types::Task| {

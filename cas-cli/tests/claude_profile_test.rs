@@ -26,13 +26,12 @@ fn cas_cmd(home: &std::path::Path) -> Command {
     cmd
 }
 
-/// A home dir with `~/.claude-alt` logged in and `~/.claude-work` not.
-fn home_with_profiles() -> TempDir {
-    let home = TempDir::new().unwrap();
-    let alt = home.path().join(".claude-alt");
+/// Configure a home dir with `~/.claude-alt` logged in and `~/.claude-work` not.
+fn setup_home_with_profiles(home: &std::path::Path) {
+    let alt = home.join(".claude-alt");
     std::fs::create_dir_all(&alt).unwrap();
-    std::fs::create_dir_all(home.path().join(".claude-work")).unwrap();
-    let bin = home.path().join("bin");
+    std::fs::create_dir_all(home.join(".claude-work")).unwrap();
+    let bin = home.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let claude = bin.join("claude");
     cas::test_paths::warm_stub(
@@ -60,6 +59,12 @@ printf 'BARE_SECURE_STORAGE=%s\n' "$CLAUDE_SECURESTORAGE_CONFIG_DIR"
 exit 0
 "#,
     );
+}
+
+/// A temporary home dir with the normal Claude profile fixtures.
+fn home_with_profiles() -> TempDir {
+    let home = TempDir::new().unwrap();
+    setup_home_with_profiles(home.path());
     home
 }
 
@@ -174,9 +179,11 @@ fn help_documents_profile_and_factory_passthrough() {
 
 #[test]
 fn login_subcommand_binds_auth_flow_to_named_profile() {
-    let home = home_with_profiles();
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join(format!("login-home-{}", "x".repeat(48)));
+    setup_home_with_profiles(&home);
 
-    let mut cmd = cas_cmd(home.path());
+    let mut cmd = cas_cmd(&home);
     for key in CREDENTIAL_OVERRIDES {
         cmd.env(key, "fixture-override");
     }
@@ -186,15 +193,24 @@ fn login_subcommand_binds_auth_flow_to_named_profile() {
         .success()
         .stdout(predicate::str::contains(format!(
             "LOGIN_CONFIG={}\n",
-            home.path().join(".claude-alt").display()
+            home.join(".claude-alt").display()
         )))
         .stdout(predicate::str::contains(format!(
             "LOGIN_SECURE_STORAGE={}\n",
-            home.path().join(".claude-alt").display()
+            home.join(".claude-alt").display()
         )))
         .stdout(predicate::str::contains(
             "LOGIN_ARGS=auth login --email alt@example.com",
         ));
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        stderr.contains("Logging in Claude account config: ~/.claude-alt\n"),
+        "login announcement should use a recoverable HOME-relative path; got {stderr:?}"
+    );
+    assert!(
+        stderr.lines().all(|line| line.chars().count() <= 80),
+        "login announcement should fit 80 columns; got {stderr:?}"
+    );
     for key in CREDENTIAL_OVERRIDES {
         assert!(
             String::from_utf8_lossy(&assertion.get_output().stdout)

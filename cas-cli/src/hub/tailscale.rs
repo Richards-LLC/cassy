@@ -46,6 +46,9 @@ pub struct TailscaleServeReceipt {
     /// receipt did not record this diagnostic-only detail.
     #[serde(default)]
     pub executable: String,
+    /// Explicit daemon selection survives later CLI invocations and stops.
+    #[serde(default)]
+    pub socket: Option<String>,
     pub status_before: Value,
     pub status_after: Value,
     pub recorded_at: String,
@@ -57,6 +60,8 @@ struct TailscaleTeardownReceipt {
     public_url: String,
     local_target: String,
     https_port: u16,
+    #[serde(default)]
+    socket: Option<String>,
     status_before: Value,
     status_after: Value,
     recorded_at: String,
@@ -66,6 +71,8 @@ struct TailscaleTeardownReceipt {
 pub struct TailscaleServeManager {
     executable: OsString,
     state_dir: PathBuf,
+    socket: Option<OsString>,
+    deadline: Option<Deadline>,
 }
 
 impl TailscaleServeManager {
@@ -74,18 +81,78 @@ impl TailscaleServeManager {
     }
 
     pub fn new(state_dir: impl AsRef<Path>) -> Self {
-        Self::with_executable(state_dir, tailscale_executable())
+        let mut manager = Self::with_executable(state_dir, tailscale_executable());
+        // Even an explicitly empty environment value chooses the CLI default.
+        // Never turn the diagnostic executable receipt into execution authority.
+        if env::var_os("TAILSCALE_SOCKET").is_none() {
+            let socket = match manager.owned_receipt().ok().flatten() {
+                Some(receipt) => receipt.socket,
+                None => fs::read(manager.state_dir.join(TEARDOWN_RECEIPT_FILE)).ok()
+                    .and_then(|bytes| serde_json::from_slice::<TailscaleTeardownReceipt>(&bytes).ok())
+                    .and_then(|receipt| receipt.socket),
+            };
+            manager.socket = socket.filter(|socket| !socket.is_empty()).map(OsString::from);
+        }
+        manager
     }
 
     pub fn with_executable(state_dir: impl AsRef<Path>, executable: impl AsRef<OsStr>) -> Self {
         Self {
             executable: executable.as_ref().to_owned(),
             state_dir: state_dir.as_ref().to_path_buf(),
+            socket: env::var_os("TAILSCALE_SOCKET").filter(|socket| !socket.is_empty()),
+            deadline: None,
         }
     }
 
     pub fn executable_display(&self) -> String {
         self.executable.to_string_lossy().into_owned()
+    }
+
+    pub(crate) fn socket(&self) -> Option<&OsStr> {
+        self.socket.as_deref()
+    }
+
+    pub(crate) fn within_deadline(mut self, deadline: Deadline) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    pub(crate) fn last_https_port(&self) -> Option<u16> {
+        fs::read(self.state_dir.join(TEARDOWN_RECEIPT_FILE)).ok()
+            .and_then(|bytes| serde_json::from_slice::<TailscaleTeardownReceipt>(&bytes).ok())
+            .map(|receipt| receipt.https_port).filter(|port| *port != 0)
+    }
+
+    pub(crate) fn cli_available(&self) -> bool {
+        Path::new(&self.executable).is_file()
+            || self.executable.to_str().and_then(executable_on_path).is_some()
+    }
+
+    /// Service startup races the local Tailscale daemon after login. All
+    /// attempts share the existing startup deadline, including CLI commands.
+    pub(crate) async fn ensure_for_service(
+        &self,
+        local_port: u16,
+        https_port: u16,
+        prior_target: Option<(u16, String)>,
+    ) -> Result<TailscaleServeReceipt> {
+        let mut manager = self.clone();
+        let deadline = Deadline::after(Self::successful_ensure_budget());
+        manager.deadline = Some(deadline);
+        let mut delays = [1, 2, 4].into_iter();
+        loop {
+            match manager.ensure_with_prior_target(local_port, https_port, prior_target.clone()) {
+                Ok(receipt) => return Ok(receipt),
+                Err(error) => {
+                    let Some(delay) = delays.next().map(Duration::from_secs)
+                        .filter(|delay| deadline.remaining() > *delay)
+                    else { return Err(error); };
+                    tracing::warn!(%error, ?delay, "retrying Tailscale Serve service startup");
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
     }
 
     pub fn ensure(&self, local_port: u16, https_port: u16) -> Result<TailscaleServeReceipt> {
@@ -102,6 +169,9 @@ impl TailscaleServeManager {
     ) -> Result<TailscaleServeReceipt> {
         let local_target = format!("http://127.0.0.1:{local_port}");
         let status = self.status()?;
+        if let Some(issue) = self.login_issue_for(&status) {
+            anyhow::bail!("{issue}");
+        }
         let dns_name = status
             .get("Self")
             .and_then(|value| value.get("DNSName"))
@@ -182,6 +252,7 @@ impl TailscaleServeManager {
                 https_port,
                 created_by_cas,
                 executable: self.executable_display(),
+                socket: self.socket.as_ref().map(|socket| socket.to_string_lossy().into_owned()),
                 status_before: before,
                 status_after: after,
                 recorded_at: chrono::Utc::now().to_rfc3339(),
@@ -222,6 +293,7 @@ impl TailscaleServeManager {
             https_port,
             created_by_cas: true,
             executable: self.executable_display(),
+            socket: self.socket.as_ref().map(|socket| socket.to_string_lossy().into_owned()),
             status_before: before.clone(),
             status_after: Value::Null,
             recorded_at: chrono::Utc::now().to_rfc3339(),
@@ -328,6 +400,7 @@ impl TailscaleServeManager {
                 https_port,
                 created_by_cas: true,
                 executable: self.executable_display(),
+                socket: self.socket.as_ref().map(|socket| socket.to_string_lossy().into_owned()),
                 status_before: Value::Null,
                 status_after: before.clone(),
                 recorded_at: chrono::Utc::now().to_rfc3339(),
@@ -337,6 +410,7 @@ impl TailscaleServeManager {
             None => return Ok(None),
         };
         if handlers.is_empty() {
+            self.write_teardown(&receipt, before.clone(), before)?;
             remove_receipt_if_present(&path)?;
             return Ok(None);
         }
@@ -359,18 +433,23 @@ impl TailscaleServeManager {
             handlers_on_port(&after, receipt.https_port).is_empty(),
             "tailscale Serve did not remove the Cassy mapping"
         );
+        self.write_teardown(&receipt, before, after)?;
+        remove_receipt_if_present(&path)?;
+        Ok(Some(receipt))
+    }
+
+    fn write_teardown(&self, receipt: &TailscaleServeReceipt, before: Value, after: Value) -> Result<()> {
         let teardown = TailscaleTeardownReceipt {
             schema_version: 1,
             public_url: receipt.public_url.clone(),
             local_target: receipt.local_target.clone(),
             https_port: receipt.https_port,
+            socket: self.socket.as_ref().map(|socket| socket.to_string_lossy().into_owned()),
             status_before: before,
             status_after: after,
             recorded_at: chrono::Utc::now().to_rfc3339(),
         };
-        write_private_json(&self.state_dir.join(TEARDOWN_RECEIPT_FILE), &teardown)?;
-        remove_receipt_if_present(&path)?;
-        Ok(Some(receipt))
+        write_private_json(&self.state_dir.join(TEARDOWN_RECEIPT_FILE), &teardown)
     }
 
     /// Load Cassy's current ownership receipt, if there is one.
@@ -410,12 +489,39 @@ impl TailscaleServeManager {
     /// This uses the same bounded `status --json` probe as Serve setup, so a
     /// missing or wedged CLI cannot make doctor hang.
     pub fn is_logged_in(&self) -> Result<bool> {
-        let status = self.status()?;
-        Ok(status
+        Ok(self.login_issue()?.is_none())
+    }
+
+    pub(crate) fn socket_display(&self) -> String {
+        self.socket.as_ref().map(|socket| socket.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "CLI default".to_owned())
+    }
+
+    pub(crate) fn login_issue(&self) -> Result<Option<String>> {
+        let status = self.status().map_err(|error| anyhow::anyhow!(
+            "Tailscale: probe failed\nCLI: {}\nSocket: {}\nCause: {error}",
+            self.executable_display(), self.socket_display()))?;
+        Ok(self.login_issue_for(&status))
+    }
+
+    fn login_issue_for(&self, status: &Value) -> Option<String> {
+        let dns_available = status
             .get("Self")
             .and_then(|value| value.get("DNSName"))
             .and_then(Value::as_str)
-            .is_some_and(|name| valid_dns_name(name.trim_end_matches('.'))))
+            .is_some_and(|name| valid_dns_name(name.trim_end_matches('.')));
+        let cause = match status.get("BackendState").and_then(Value::as_str) {
+            Some(state) if state != "Running" => match state {
+                "Stopped" => "Stopped",
+                "NeedsLogin" => "NeedsLogin",
+                "NeedsMachineAuth" => "NeedsMachineAuth",
+                _ => "not running",
+            },
+            _ if !dns_available => "no MagicDNS name",
+            _ => return None,
+        };
+        Some(format!("Tailscale: {cause}\nCLI: {}\nSocket: {}",
+            self.executable_display(), self.socket_display()))
     }
 
     fn serve_status(&self) -> Result<Value> {
@@ -424,18 +530,20 @@ impl TailscaleServeManager {
 
     fn run_json(&self, args: &[String]) -> Result<Value> {
         let output = self.run(args)?;
+        anyhow::ensure!(!String::from_utf8_lossy(&output).contains("Tailscale GUI failed to start"),
+            "Tailscale entered GUI mode; TAILSCALE_BE_CLI=1 is required for CLI commands");
         serde_json::from_slice(&output).context("tailscale returned invalid status JSON")
     }
 
     fn run(&self, args: &[String]) -> Result<Vec<u8>> {
-        let mut command = tailscale_command(&self.executable);
-        if let Some(socket) = env::var_os("TAILSCALE_SOCKET").filter(|socket| !socket.is_empty()) {
+        let mut command = tailscale_command_with_term(&self.executable, env::var_os("TERM"));
+        if let Some(socket) = &self.socket {
             command.arg(format!("--socket={}", socket.to_string_lossy()));
         }
         command.args(args);
         let output = bounded_process::run_command(
             &mut command,
-            Deadline::after(COMMAND_TIMEOUT),
+            self.deadline.unwrap_or_else(|| Deadline::after(COMMAND_TIMEOUT)),
             COMMAND_TIMEOUT,
         )
         .map_err(|error| match error {
@@ -452,11 +560,16 @@ impl TailscaleServeManager {
 }
 
 pub(super) fn tailscale_command(executable: &OsStr) -> Command {
-    tailscale_command_with_term(executable, env::var_os("TERM"))
+    let mut command = tailscale_command_with_term(executable, env::var_os("TERM"));
+    if let Some(socket) = env::var_os("TAILSCALE_SOCKET").filter(|socket| !socket.is_empty()) {
+        command.arg(format!("--socket={}", socket.to_string_lossy()));
+    }
+    command
 }
 
 fn tailscale_command_with_term(executable: &OsStr, term: Option<OsString>) -> Command {
     let mut command = Command::new(executable);
+    command.env("TAILSCALE_BE_CLI", "1");
     if term.is_none() {
         command.env("TERM", "dumb");
     }
@@ -923,6 +1036,11 @@ mod tests {
             Some(OsString::from("xterm-256color")),
         );
         assert!(command.get_envs().all(|(key, _)| key != OsStr::new("TERM")));
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("TAILSCALE_SOCKET", "/operator/selected.socket");
+        let command = tailscale_command(OsStr::new("tailscale"));
+        assert_eq!(command.get_args().collect::<Vec<_>>(),
+            vec![OsStr::new("--socket=/operator/selected.socket")]);
     }
 
     #[test]
@@ -969,6 +1087,19 @@ mod tests {
         let error = manager.ensure(4173, 443).unwrap_err().to_string();
         assert!(error.contains("tailscale CLI is unavailable"));
         assert!(!error.contains(temp.path().to_string_lossy().as_ref()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gui_launcher_output_has_actionable_cli_error() {
+        let temp = private_tempdir();
+        let binary = temp.path().join("tailscale");
+        crate::test_paths::warm_stub(&binary,
+            "#!/bin/sh\nprintf '%s' 'The Tailscale GUI failed to start: private details'\n");
+        let manager = TailscaleServeManager::with_executable(temp.path().join("hub"), &binary);
+        let error = manager.ensure(4173, 443).unwrap_err().to_string();
+        assert!(error.contains("GUI") && error.contains("TAILSCALE_BE_CLI"), "{error}");
+        assert!(!error.contains("private details"), "raw GUI output must be sanitized");
     }
 
     #[cfg(unix)]
@@ -1029,6 +1160,7 @@ mod tests {
         let manager = TailscaleServeManager::with_executable(&hub, &binary);
 
         let legacy = manager.owned_receipt().unwrap().unwrap();
+        assert!(legacy.socket.is_none(), "legacy receipts use the CLI default socket");
         assert!(legacy.executable.is_empty(), "legacy CLI is unknown");
         assert_eq!(
             serde_json::to_value(&legacy).unwrap()["executable"],
@@ -1063,6 +1195,7 @@ mod tests {
             "fixtures/tailscale-serve-teardown-v2.60.0.json"
         ))
         .unwrap();
+        assert!(receipt.socket.is_none(), "legacy teardown uses the CLI default socket");
         assert_eq!(receipt.local_target, "http://127.0.0.1:4173");
         assert_eq!(receipt.https_port, 443);
         assert!(receipt.status_after.as_object().unwrap().is_empty());

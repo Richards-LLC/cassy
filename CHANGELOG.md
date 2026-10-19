@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.65.0] - 2026-10-19
+
 ### Fixed — managed Slack replies
 
 - **Historical backlog** — Was: managed replay typed deliveries that predate a binding's activation, and recovered backlog ahead of fresh claims. → Now: pre-activation and unknown-time deliveries are quarantined as metadata only (no body, prompt or receipt); fresh claims are walked first, and activation is re-read once per tick for unknown channels.

@@ -321,8 +321,10 @@ test("HUB-J12 network switch: legacy upstream backs off and resets after uninter
   await journey.stage("Once the session has stayed live for 10 s, the next drop retries after about 1 s again", async () => {
     const { hub, clock, header, held } = await connected(page, false);
     hub.upstreamLost(PELICAN);
+    const firstRefusal = hub.waitFor(() => hub.upstreamRefusals.length === 1);
     await sendNow(page, "Through repeated refusals");
     await expect(held).toHaveCount(1);
+    await firstRefusal;
     for (const delay of [1_000, 2_000, 4_000]) await refusalAfter(clock, hub, held, delay);
     expect(hub.upstreamRefusals).toHaveLength(4);
     hub.upstreamBack(PELICAN);
@@ -334,8 +336,10 @@ test("HUB-J12 network switch: legacy upstream backs off and resets after uninter
     // No delivery receipt is sent: 10 s of healthy session time resets the streak.
     await clock.advance(10_000);
     hub.upstreamLost(PELICAN);
+    const refusalAfterReset = hub.waitFor(() => hub.upstreamRefusals.length === 5);
     await sendNow(page, "After healthy session time");
     await expect(held).toHaveCount(1);
+    await refusalAfterReset;
     await refusalAfter(clock, hub, held, 1_000);
     hub.upstreamBack(PELICAN);
     const retried = hub.nextSend();
@@ -350,8 +354,10 @@ test("HUB-J12 network switch: a reheld send expires at its original two-minute d
   await journey.stage("Past the two-minute hold, the message reads Not sent with Retry, and Retry sends it once", async () => {
     const { hub, clock, header, held } = await connected(page);
     hub.upstreamLost(PELICAN);
+    const firstRefusal = hub.waitFor(() => hub.upstreamRefusals.length === 1);
     await sendNow(page, "While the daemon stays down");
     await expect(held).toHaveCount(1);
+    await firstRefusal;
     // Exercise reholding, which must preserve the ORIGINAL expiry.
     for (const delay of [1_000, 2_000, 4_000]) await refusalAfter(clock, hub, held, delay);
     await clock.advance(112_999);

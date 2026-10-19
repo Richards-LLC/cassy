@@ -599,7 +599,23 @@ async fn a_claim_held_by_a_local_agent_moves_with_the_local_lease() {
         let cloud = FakeCloud::start();
         let alpha = machine(&cloud.url, PROJECT, "alpha-sup");
         alpha.put_task("cas-p008", TaskType::Task);
-        start(&alpha.core, "cas-p008", false).await.unwrap();
+        let repo = alpha.cas_dir.parent().unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git").args(args).current_dir(repo).status().unwrap().success());
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-q", "--allow-empty", "-m", "seed"]);
+        for branch in ["factory/prior-1", "factory/prior-2", "factory/prior-3", "factory/prior-4", "factory/prior-5"] {
+            git(&["branch", branch]);
+        }
+        let tasks = open_task_store(&alpha.cas_dir).unwrap();
+        let mut task = tasks.get("cas-p008").unwrap();
+        task.notes = (0..78).map(|i| format!("[2026-10-18] Progress {i}: {}", "x".repeat(650))).collect::<Vec<_>>().join("\n\n");
+        task.deliverables.work_target = Some(cas::types::WorkTarget {
+            repo_selector: format!("project:{PROJECT}"), target_branch: "main".into(),
+        });
+        tasks.update(&task).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), start(&alpha.core, "cas-p008", false)).await.unwrap().unwrap();
         // The local lease is dropped without touching the cloud (a crashed path).
         open_agent_store(&alpha.cas_dir).unwrap().release_lease("cas-p008", &alpha.agent_id).unwrap();
         let mut task = open_task_store(&alpha.cas_dir).unwrap().get("cas-p008").unwrap();
@@ -640,18 +656,27 @@ async fn a_claim_held_by_a_local_agent_moves_with_the_local_lease() {
 async fn start_write_failure_leaves_no_new_lease_cas_d5f4() {
     let mut env = TestEnvGuard::temp_home();
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
-    let cloud = FakeCloud::start();
-    let alpha = machine(&cloud.url, PROJECT, "start-worker");
-    alpha.put_task("cas-start-rollback", TaskType::Task);
-    let db = rusqlite::Connection::open(alpha.cas_dir.join("cas.db")).unwrap();
-    db.execute_batch("CREATE TRIGGER refuse_start BEFORE UPDATE OF status ON tasks
-        WHEN NEW.id = 'cas-start-rollback' AND NEW.status = 'in_progress'
-        BEGIN SELECT RAISE(ABORT, 'injected start write failure'); END;").unwrap();
-    let error = start(&alpha.core, "cas-start-rollback", false).await.unwrap_err();
-    assert!(error.contains("injected start write failure"), "{error}");
-    assert_eq!(open_task_store(&alpha.cas_dir).unwrap().get("cas-start-rollback").unwrap().status, TaskStatus::Open);
-    assert!(open_agent_store(&alpha.cas_dir).unwrap().list_agent_leases(&alpha.agent_id).unwrap().is_empty(),
-        "a failed status write must release only the lease this start acquired");
+    for fail_lease in [false, true] {
+        let cloud = FakeCloud::start();
+        let alpha = machine(&cloud.url, PROJECT, "start-worker");
+        alpha.put_task("cas-start-rollback", TaskType::Task);
+        let db = rusqlite::Connection::open(alpha.cas_dir.join("cas.db")).unwrap();
+        let trigger = if fail_lease {
+            "CREATE TRIGGER refuse_start BEFORE INSERT ON task_leases
+             WHEN NEW.task_id = 'cas-start-rollback'
+             BEGIN SELECT RAISE(ABORT, 'injected start write failure'); END;"
+        } else {
+            "CREATE TRIGGER refuse_start BEFORE UPDATE OF status ON tasks
+             WHEN NEW.id = 'cas-start-rollback' AND NEW.status = 'in_progress'
+             BEGIN SELECT RAISE(ABORT, 'injected start write failure'); END;"
+        };
+        db.execute_batch(trigger).unwrap();
+        let error = start(&alpha.core, "cas-start-rollback", false).await.unwrap_err();
+        assert!(error.contains("injected start write failure"), "{error}");
+        assert_eq!(open_task_store(&alpha.cas_dir).unwrap().get("cas-start-rollback").unwrap().status, TaskStatus::Open);
+        assert!(open_agent_store(&alpha.cas_dir).unwrap().list_agent_leases(&alpha.agent_id).unwrap().is_empty(),
+            "a failed local start must not leave a new lease or an InProgress task");
+    }
 }
 
 /// A pulled task in progress under an assignee from another machine names

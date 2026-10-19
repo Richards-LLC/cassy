@@ -41,16 +41,32 @@ class BundleTests(unittest.TestCase):
         }))
         return directory
 
-    def fold(self):
+    def fold(self, suite_exit=0):
         with patch.object(bundles, "trace_actions", return_value="trace actions"), contextlib.redirect_stdout(io.StringIO()):
-            return bundles.main([str(self.artifacts), "tree", "commit", "0", "hub", "1.63"])
+            return bundles.main([str(self.artifacts), "tree", "commit", str(suite_exit), "hub", "1.63"])
 
     def test_refuses_overwritten_result_with_stale_stage_screenshots(self):
-        # F34: the extra three-stage test overwrote the ten-stage main result.
-        self.receipt("HUB-J13", "start a new session", stages=10)
-        self.receipt("HUB-J13", "reconnecting machine", stages=3)
+        # A previous longer attempt left one screenshot beyond this passing result.
+        self.receipt("HUB-J13", "start a new session", stages=8)
+        self.receipt("HUB-J13", "reconnecting machine", stages=7)
         with self.assertRaisesRegex(ValueError, "HUB-J13.*stale|mixed"):
             self.fold()
+
+    def test_preserves_a_timeout_screenshot_as_incomplete_failed_stage_evidence(self):
+        self.receipt("HUB-J19", "machine alerts", part="forced-colors", status="FAIL", stages=7)
+        part = self.artifacts / "journeys/HUB-J19/parts/forced-colors"
+        (part / "J08.png").write_text("screenshot completed before the timed-out stage receipt")
+        main = self.receipt("HUB-J19", "machine alerts")
+
+        self.assertEqual(self.fold(suite_exit=1), 0)
+        bundle = json.loads((main / "bundle.json").read_text())
+        self.assertEqual(bundle["verdict"], "FAIL")
+        self.assertIn("parts/forced-colors/J08.png", bundle["files"]["cells"])
+        self.assertEqual(bundle["incomplete_stages"], [{
+            "screenshot": "parts/forced-colors/J08.png",
+            "status": "INCOMPLETE",
+            "reason": "suite timed out after screenshot write and before stage receipt",
+        }])
 
     def test_parts_keep_each_tests_media_trace_and_cells_and_one_catalog_row(self):
         main = self.receipt("HUB-J13", "start a new session", stages=10)

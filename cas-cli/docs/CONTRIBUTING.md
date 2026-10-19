@@ -2354,11 +2354,15 @@ of reach. A hard boundary needs agents running as a separate Unix user.
 ## Cloud reader slots
 
 Supervisor registration derives a stable Cloud `factory_id` from the machine id,
-canonical project id and supervisor role, so `/clear` and full relaunches retain
-the reader slot. For a second supervisor on the same repo and machine, set
-`factory.slot_id` to a distinct value and keep it across relaunches. An explicit
-override also lets a successor on another machine address that same slot.
-Without enough identity to derive a slot, registration falls back to
+canonical project id, supervisor role and the registered agent's factory session.
+Concurrent factory sessions on one clone receive separate slots. A successor
+agent after `/clear` or a restart of the same named factory session keeps its
+slot. Non-factory supervisors retain the legacy machine/project/role slot.
+
+Set `factory.slot_id` to retain a particular slot across different factory
+sessions or machines. Sharing an explicit override intentionally supersedes the
+earlier registration, so concurrent supervisors should use the default session
+slots. Without enough identity to derive a slot, registration falls back to
 `CAS_FACTORY_ID`, then the agent's factory session. Local
 `metadata.factory_session` still names the actual launch for fleet routing.
 

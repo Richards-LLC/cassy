@@ -696,23 +696,27 @@ mod tests {
         let RatatuiColor::Rgb(r, g, b) = theme.palette.text_error else {
             panic!("text_error must use a concrete theme color");
         };
+        let mut error_buf = Vec::new();
+        {
+            let mut fmt = Formatter::styled(&mut error_buf, theme.clone());
+            fmt.error("configuration failed").unwrap();
+        }
+        assert_eq!(
+            String::from_utf8(error_buf).unwrap(),
+            format!("\x1b[38;2;{r};{g};{b}m[ERROR]\x1b[0m configuration failed\n")
+        );
+
         let RatatuiColor::Rgb(sr, sg, sb) = theme.palette.text_success else {
             panic!("text_success must use a concrete theme color");
         };
-        let mut buf = Vec::new();
+        let mut success_buf = Vec::new();
         {
-            let mut fmt = Formatter::styled(&mut buf, theme);
-            fmt.error("configuration failed").unwrap();
+            let mut fmt = Formatter::styled(&mut success_buf, theme);
             fmt.success("sync complete").unwrap();
         }
-
-        let output = String::from_utf8(buf).unwrap();
         assert_eq!(
-            output,
-            format!(
-                "\x1b[38;2;{r};{g};{b}m[ERROR]\x1b[0m configuration failed\n\
-                 \x1b[38;2;{sr};{sg};{sb}m[OK] sync complete\x1b[0m\n"
-            )
+            String::from_utf8(success_buf).unwrap(),
+            format!("\x1b[38;2;{sr};{sg};{sb}m[OK] sync complete\x1b[0m\n")
         );
     }
 

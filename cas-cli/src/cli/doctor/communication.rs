@@ -21,10 +21,28 @@ pub(super) fn check(cas_dir: &Path) -> Check {
             "communication SLOs",
             CheckStatus::Warning,
             format!(
-                "UNKNOWN communication: cannot measure last session: {error}\nRun cas update --schema-only; then cas doctor"
+                "UNKNOWN communication: cannot measure last session: {}\nRun cas update --schema-only; then cas doctor",
+                human_database_error(&error)
             ),
         ),
     }
+}
+
+/// cas-884c: SQLite's prepare errors carry the whole statement, so a failing
+/// metrics query printed metrics.sql (its internal review comment included,
+/// with a non-ASCII section sign) into doctor output. Keep SQLite's message,
+/// which names the missing table or column, drop the statement, and escape
+/// anything outside printable ASCII so C-locale terminals stay readable.
+fn human_database_error(error: &cas_store::StoreError) -> String {
+    let text = match error {
+        cas_store::StoreError::Database(rusqlite::Error::SqlInputError { msg, .. }) => {
+            format!("database error: {msg}")
+        }
+        other => other.to_string(),
+    };
+    text.chars()
+        .map(|c| if c == ' ' || c.is_ascii_graphic() { c.to_string() } else { c.escape_unicode().to_string() })
+        .collect()
 }
 
 #[cfg(test)]

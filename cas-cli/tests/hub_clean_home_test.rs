@@ -2430,6 +2430,12 @@ fn hub_status_bounds_never_finishing_manager_and_reports_unknown_cas_8ee8() {
         &manager,
         "#!/bin/sh\nprintf '%s\\n' \"$$\" >> \"$CAS_MANAGER_PID_LOG\"\nexec /usr/bin/tail -f /dev/null\n",
     );
+    // The manager's answer matters only for an installed unit: with none,
+    // status rightly ignores the manager (cas-6033), so this fixture installs
+    // one for the hung diagnostic to block on.
+    let unit = home.path().join(".config/systemd/user/cas-hub.service");
+    fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    fs::write(&unit, "[Service]\nExecStart=/nonexistent/cas hub serve --launched-by service\n").unwrap();
     let started = Instant::now();
     let output = cas_command(home.path(), &system_path())
         .env("CAS_HUB_SYSTEMCTL", &manager)

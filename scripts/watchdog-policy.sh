@@ -43,9 +43,13 @@ watchdog_timestamp_epoch() {
 # Keep retries bounded; callers choose whether exhausted reads abort the sweep
 # or skip one run.
 watchdog_api_read() {
-    local attempt delay=1
+    local attempt delay=1 response
     for ((attempt = 1; attempt <= WATCHDOG_API_READ_ATTEMPTS; attempt++)); do
-        if gh api "$@"; then
+        # gh can write an API error document to stdout even when it exits
+        # non-zero. Keep each failed response local so it cannot be combined
+        # with the next attempt's successful JSON in the caller's substitution.
+        if response="$(gh api "$@")"; then
+            printf '%s\n' "$response"
             return 0
         fi
         if (( attempt < WATCHDOG_API_READ_ATTEMPTS )); then

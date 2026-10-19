@@ -4600,7 +4600,8 @@ impl CasCore {
 #[cfg(test)]
 mod tests {
     use super::{
-        CI_ADVISORY_POLICY_NOTICE, DeliveryMergePreflight, GhApiOutput, admit_branch_ci,
+        BranchCiState, CI_ADVISORY_POLICY_NOTICE, DeliveryMergePreflight, GhApiOutput,
+        admit_branch_ci, require_code_validation,
         authorize_explicit_task_for_system_b_worker, ci_override_note,
         classify_delivery_merge_preflight, declared_system_b_merge_target,
         derive_delivery_supervisor_authority, describe_branch_ci_state, describe_target_push_state,

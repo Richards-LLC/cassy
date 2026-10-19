@@ -2293,96 +2293,355 @@ mod tests {
         }
         assert_eq!(fs::read(worker.join("source.rs")).unwrap(), source);
     }
-    #[cfg(target_os = "linux")]
-    fn unknown_cache_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, TargetCachePolicy) {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn unknown_cache_fixture() -> (
+        tempfile::TempDir,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        TargetCachePolicy,
+    ) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let cas = crate::store::init_cas_dir(&root).unwrap();
         let checkout = cas.join("epic-missing-gitdir");
         let target = checkout.join("target");
         fs::create_dir_all(target.join("debug")).unwrap();
-        fs::write(checkout.join(".git"), "gitdir: /nonexistent-cas-49b9/git-admin\n").unwrap();
+        fs::write(
+            checkout.join(".git"),
+            "gitdir: /nonexistent-cas-49b9/git-admin\n",
+        )
+        .unwrap();
         fs::write(checkout.join("source.rs"), b"uncommitted WIP").unwrap();
         fs::write(target.join("debug/output.rlib"), b"regenerable").unwrap();
         fs::write(target.join("debug/.cargo-lock"), b"").unwrap();
         fs::create_dir_all(cas.join("artifacts/cas-proof")).unwrap();
-        fs::write(cas.join("artifacts/cas-proof/LEDGER.md"), b"durable evidence").unwrap();
+        fs::write(
+            cas.join("artifacts/cas-proof/LEDGER.md"),
+            b"durable evidence",
+        )
+        .unwrap();
         let retired = cas.join("merge-sweeps/assembly-target");
         fs::create_dir_all(&retired).unwrap();
         fs::write(retired.join("output.rlib"), b"scratch").unwrap();
-        fs::write(retired.parent().unwrap().join("source.rs"), b"keep assembly source").unwrap();
+        fs::write(
+            retired.parent().unwrap().join("source.rs"),
+            b"keep assembly source",
+        )
+        .unwrap();
         let old = SystemTime::now() - Duration::from_secs(4 * 3600);
         for cache in [&target, &retired] {
             for entry in WalkDir::new(cache).contents_first(true) {
                 let path = entry.unwrap().into_path();
-                fs::File::open(path).unwrap().set_times(fs::FileTimes::new().set_modified(old)).unwrap();
+                fs::File::open(path)
+                    .unwrap()
+                    .set_times(fs::FileTimes::new().set_modified(old))
+                    .unwrap();
             }
         }
         let proc = root.join("proc");
         fs::create_dir_all(&proc).unwrap();
-        let policy = TargetCachePolicy { min_idle_secs: 2 * 3600, retention_count: 0, ..policy() };
+        let policy = TargetCachePolicy {
+            min_idle_secs: 2 * 3600,
+            retention_count: 0,
+            ..policy()
+        };
         (temp, cas, target, proc, policy)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn cleanup_unknown_fixture(
+        cas: &Path,
+        report: &mut TargetCacheReport,
+        policy: TargetCachePolicy,
+        opt_in: Option<&Path>,
+        proc: &Path,
+    ) {
+        #[cfg(target_os = "linux")]
+        cleanup_selected_using(cas, report, policy, &[], opt_in, proc).unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            // The public entry point must use native lsof/ps, never the fake
+            // Linux process table returned by the shared fixture.
+            let _ = proc;
+            cleanup_selected_with_opt_in(cas, report, policy, &[], opt_in).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    struct NativeHandleChild(std::process::Child);
+
+    #[cfg(target_os = "macos")]
+    impl NativeHandleChild {
+        fn holding(path: &Path) -> Self {
+            use std::io::BufRead;
+            use std::process::{Command, Stdio};
+            // FD 2 holds the artifact without putting its path in argv. The
+            // readiness pipe proves the shell is running; stdin keeps it live.
+            let child = Command::new("/bin/sh")
+                .args(["-c", "printf 'ready\\n'; read release"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(fs::File::open(path).unwrap())
+                .spawn()
+                .unwrap();
+            let mut child = Self(child);
+            let mut ready = String::new();
+            std::io::BufReader::new(child.0.stdout.take().unwrap())
+                .read_line(&mut ready)
+                .unwrap();
+            assert_eq!(ready, "ready\n");
+            let output = Command::new("/usr/sbin/lsof")
+                .args(["-nP", "-F0pfn", "-p", &child.0.id().to_string()])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success() && output.stderr.is_empty(),
+                "native child FD observation failed"
+            );
+            assert!(
+                lsof_uses_many(&output.stdout, path.parent().unwrap(), path, &[]),
+                "child must really retain the artifact"
+            );
+            child
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for NativeHandleChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            self.0.wait().unwrap();
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn cas_49b9_unknown_target_refuses_without_exact_opt_in_or_with_live_handle() {
+        #[cfg(target_os = "macos")]
+        if std::env::var_os("CAS_C334_DENY_LSOF").is_some() {
+            // Real OS denial, scoped to this disposable subprocess. Neither
+            // parser bytes nor the production command paths are substituted.
+            let error = std::process::Command::new("/usr/sbin/lsof")
+                .args(["-nP", "-F0pfn"])
+                .output()
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            let (_temp, cas, target, proc, policy) = unknown_cache_fixture();
+            let mut report = inspect(&cas, policy, &[], &[], false).unwrap();
+            cleanup_unknown_fixture(&cas, &mut report, policy, Some(&target), &proc);
+            let row = report.caches.iter().find(|row| row.path == target).unwrap();
+            assert_eq!(
+                row.disposition,
+                CacheDisposition::Indeterminate,
+                "{}",
+                row.reason
+            );
+            assert!(
+                row.reason.contains("native process/handle evidence"),
+                "{}",
+                row.reason
+            );
+            assert_eq!(report.reclaimed_bytes, 0);
+            assert_eq!(
+                fs::read(target.join("debug/output.rlib")).unwrap(),
+                b"regenerable"
+            );
+            assert_eq!(
+                fs::read(target.parent().unwrap().join("source.rs")).unwrap(),
+                b"uncommitted WIP"
+            );
+            assert_eq!(
+                fs::read(cas.join("artifacts/cas-proof/LEDGER.md")).unwrap(),
+                b"durable evidence"
+            );
+            return;
+        }
         let (_temp, cas, target, proc, policy) = unknown_cache_fixture();
         for opt_in in [None, Some(target.parent().unwrap())] {
             let mut report = inspect(&cas, policy, &[], &[], false).unwrap();
-            cleanup_selected_using(&cas, &mut report, policy, &[], opt_in, &proc).unwrap();
+            cleanup_unknown_fixture(&cas, &mut report, policy, opt_in, &proc);
             assert!(target.join("debug/output.rlib").is_file());
-            assert_eq!(report.reclaimed_bytes, 0, "absent/ancestor opt-in is review only");
+            assert_eq!(
+                report.reclaimed_bytes, 0,
+                "absent/ancestor opt-in is review only"
+            );
         }
         // A child or build retaining a target handle vetoes explicit consent.
-        let pid = proc.join("123");
-        fs::create_dir_all(pid.join("fd")).unwrap();
-        fs::write(pid.join("stat"), "123 (child) S 1 1 1 0 0 0 0 0 0").unwrap();
-        std::os::unix::fs::symlink("/unrelated", pid.join("cwd")).unwrap();
-        std::os::unix::fs::symlink("/bin/cat", pid.join("exe")).unwrap();
-        fs::write(pid.join("cmdline"), b"cat\0").unwrap();
-        fs::write(pid.join("maps"), b"").unwrap();
-        std::os::unix::fs::symlink(target.join("debug/output.rlib"), pid.join("fd/7")).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            let pid = proc.join("123");
+            fs::create_dir_all(pid.join("fd")).unwrap();
+            fs::write(pid.join("stat"), "123 (child) S 1 1 1 0 0 0 0 0 0").unwrap();
+            std::os::unix::fs::symlink("/unrelated", pid.join("cwd")).unwrap();
+            std::os::unix::fs::symlink("/bin/cat", pid.join("exe")).unwrap();
+            fs::write(pid.join("cmdline"), b"cat\0").unwrap();
+            fs::write(pid.join("maps"), b"").unwrap();
+            std::os::unix::fs::symlink(target.join("debug/output.rlib"), pid.join("fd/7")).unwrap();
+        }
+        #[cfg(target_os = "macos")]
+        let child = NativeHandleChild::holding(&target.join("debug/output.rlib"));
         let mut report = inspect(&cas, policy, &[], &[], false).unwrap();
-        cleanup_selected_using(&cas, &mut report, policy, &[], Some(&target), &proc).unwrap();
+        cleanup_unknown_fixture(&cas, &mut report, policy, Some(&target), &proc);
         let row = report.caches.iter().find(|row| row.path == target).unwrap();
-        assert_eq!(row.disposition, CacheDisposition::LiveProcess, "explicit consent cannot waive a live target handle: {}", row.reason);
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            row.disposition,
+            CacheDisposition::LiveProcess,
+            "explicit consent cannot waive a live target handle: {}",
+            row.reason
+        );
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                row.disposition,
+                CacheDisposition::Indeterminate,
+                "native open handle must refuse: {}",
+                row.reason
+            );
+            assert!(
+                row.reason.contains("native process/handle evidence"),
+                "{}",
+                row.reason
+            );
+            drop(child);
+        }
         assert!(target.exists());
-        for scenario in ["preview", "recent", "zero-window", "opaque", "cargo-lock", "evidence", "symlink"] {
+        for scenario in [
+            "preview",
+            "recent",
+            "zero-window",
+            "opaque",
+            "cargo-lock",
+            "assembly-lock",
+            "evidence",
+            "symlink",
+        ] {
+            #[cfg(target_os = "macos")]
+            if scenario == "opaque" {
+                let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                    .args(["-p", "(version 1)(allow default)(deny process-exec (literal \"/usr/sbin/lsof\"))"])
+                    .arg(std::env::current_exe().unwrap())
+                    .args(["--exact", "factory_target_cache::tests::cas_49b9_unknown_target_refuses_without_exact_opt_in_or_with_live_handle", "--nocapture"])
+                    .env("CAS_C334_DENY_LSOF", "1")
+                    .output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "opaque native child: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+                continue;
+            }
             let (_temp, cas, target, proc, mut policy) = unknown_cache_fixture();
-            let held = fs::OpenOptions::new().read(true).write(true).open(target.join("debug/.cargo-lock")).unwrap();
+            let target = if scenario == "assembly-lock" {
+                cas.join("merge-sweeps/assembly-target")
+            } else {
+                target
+            };
+            let lock_path = if scenario == "assembly-lock" {
+                target.with_file_name("assembly-target.lock")
+            } else {
+                target.join("debug/.cargo-lock")
+            };
+            let held = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .unwrap();
             match scenario {
                 "zero-window" => policy.min_idle_secs = 0,
                 "recent" => fs::write(target.join("debug/output.rlib"), b"just written").unwrap(),
                 "opaque" => fs::remove_dir(&proc).unwrap(),
-                "cargo-lock" => held.lock_exclusive().unwrap(),
+                "cargo-lock" | "assembly-lock" => {
+                    held.lock_exclusive().unwrap();
+                    // lsof may veto the handle before lock admission. Prove
+                    // the real assembly/Cargo guard also refuses this lock.
+                    let scan = scan_cache(target.parent().unwrap(), &target, false).unwrap();
+                    let error = legacy::acquire_explicit(
+                        &cas,
+                        target.parent().unwrap(),
+                        &target,
+                        scan.snapshot.as_ref().unwrap(),
+                    )
+                    .err()
+                    .expect("held lock must refuse admission");
+                    let expected = if scenario == "assembly-lock" {
+                        "assembly target lease"
+                    } else {
+                        "Cargo lock"
+                    };
+                    assert!(error.to_string().contains(expected), "{scenario}: {error}");
+                }
                 "evidence" => {
                     let alias = cas.join("artifact-alias");
                     std::os::unix::fs::symlink(&target, &alias).unwrap();
-                    fs::write(cas.join("config.toml"), format!("[factory]\nartifacts_root = {:?}\n", alias.join("proof").to_str().unwrap())).unwrap();
+                    fs::write(
+                        cas.join("config.toml"),
+                        format!(
+                            "[factory]\nartifacts_root = {:?}\n",
+                            alias.join("proof").to_str().unwrap()
+                        ),
+                    )
+                    .unwrap();
                 }
-                "symlink" => std::os::unix::fs::symlink(target.parent().unwrap().join("source.rs"), target.join("source-link")).unwrap(),
-                _ => {},
+                "symlink" => std::os::unix::fs::symlink(
+                    target.parent().unwrap().join("source.rs"),
+                    target.join("source-link"),
+                )
+                .unwrap(),
+                _ => {}
             }
+            // An open, unlocked fixture descriptor is itself live native
+            // evidence. Keep a descriptor only for the two lock scenarios.
+            let _held = if matches!(scenario, "cargo-lock" | "assembly-lock") {
+                Some(held)
+            } else {
+                drop(held);
+                None
+            };
             let mut report = inspect(&cas, policy, &[], &[], scenario == "preview").unwrap();
-            cleanup_selected_using(&cas, &mut report, policy, &[], Some(&target), &proc).unwrap();
+            cleanup_unknown_fixture(&cas, &mut report, policy, Some(&target), &proc);
             let row = report.caches.iter().find(|row| row.path == target).unwrap();
             let expected = match scenario {
                 "preview" => CacheDisposition::OwnershipUncertain,
                 "recent" | "zero-window" => CacheDisposition::RecentWrite,
-                "opaque" | "cargo-lock" => CacheDisposition::Indeterminate,
+                "opaque" | "cargo-lock" | "assembly-lock" => CacheDisposition::Indeterminate,
                 _ => CacheDisposition::UnsafePath,
             };
             assert_eq!(row.disposition, expected, "{scenario}: {}", row.reason);
             assert!(target.exists(), "{scenario}: refusal must preserve target");
             assert_eq!(report.reclaimed_bytes, 0);
-            assert_eq!(fs::read(target.parent().unwrap().join("source.rs")).unwrap(), b"uncommitted WIP");
-            assert_eq!(fs::read(cas.join("artifacts/cas-proof/LEDGER.md")).unwrap(), b"durable evidence");
+            let (artifact, bytes): (_, &[u8]) = match scenario {
+                "recent" => (target.join("debug/output.rlib"), b"just written"),
+                "assembly-lock" => (target.join("output.rlib"), b"scratch"),
+                _ => (target.join("debug/output.rlib"), b"regenerable"),
+            };
+            assert_eq!(
+                fs::read(artifact).unwrap(),
+                bytes,
+                "{scenario}: artifact bytes changed"
+            );
+            let source: &[u8] = if scenario == "assembly-lock" {
+                b"keep assembly source"
+            } else {
+                b"uncommitted WIP"
+            };
+            assert_eq!(
+                fs::read(target.parent().unwrap().join("source.rs")).unwrap(),
+                source
+            );
+            assert_eq!(
+                fs::read(cas.join("artifacts/cas-proof/LEDGER.md")).unwrap(),
+                b"durable evidence"
+            );
         }
-
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn cas_49b9_exact_unknown_target_opt_in_reclaims_only_quiet_regenerable_subtree() {
         let (_temp, cas, target, proc, policy) = unknown_cache_fixture();
@@ -2391,16 +2650,32 @@ mod tests {
             let mut report = inspect(&cas, policy, &[], &[], false).unwrap();
             let row = report.caches.iter().find(|row| &row.path == cache).unwrap();
             assert_eq!(row.disposition, CacheDisposition::OwnershipUncertain);
-            cleanup_selected_using(&cas, &mut report, policy, &[], Some(cache), &proc).unwrap();
+            cleanup_unknown_fixture(&cas, &mut report, policy, Some(cache), &proc);
             let row = report.caches.iter().find(|row| &row.path == cache).unwrap();
-            assert!(!cache.exists(), "exact opt-in plus proven quietness must reclaim {}: {:?} {}", cache.display(), row.disposition, row.reason);
+            assert!(
+                !cache.exists(),
+                "exact opt-in plus proven quietness must reclaim {}: {:?} {}",
+                cache.display(),
+                row.disposition,
+                row.reason
+            );
             assert_eq!(row.disposition, CacheDisposition::Reclaimed);
             assert_eq!(report.reclaimed_bytes, expected_bytes);
-            if cache == &target { assert!(retired.exists(), "consent names only one cache"); }
+            if cache == &target {
+                assert!(retired.exists(), "consent names only one cache");
+            }
         }
-        assert_eq!(fs::read(retired.parent().unwrap().join("source.rs")).unwrap(), b"keep assembly source");
-        assert_eq!(fs::read(target.parent().unwrap().join("source.rs")).unwrap(), b"uncommitted WIP");
-        assert_eq!(fs::read(cas.join("artifacts/cas-proof/LEDGER.md")).unwrap(), b"durable evidence");
+        assert_eq!(
+            fs::read(retired.parent().unwrap().join("source.rs")).unwrap(),
+            b"keep assembly source"
+        );
+        assert_eq!(
+            fs::read(target.parent().unwrap().join("source.rs")).unwrap(),
+            b"uncommitted WIP"
+        );
+        assert_eq!(
+            fs::read(cas.join("artifacts/cas-proof/LEDGER.md")).unwrap(),
+            b"durable evidence"
+        );
     }
-
 }

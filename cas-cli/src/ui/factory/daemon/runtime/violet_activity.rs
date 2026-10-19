@@ -1711,6 +1711,36 @@ pub(crate) fn violet_activity_envelope(
     kind: &str,
     items: &[WakeItem],
 ) -> String {
+    violet_activity_envelope_with_age(channel_id, channel_name, kind, items, |item| {
+        item.age_secs.to_string()
+    })
+}
+
+/// Managed wakes can lack a trustworthy source age. Keep that uncertainty out
+/// of the legacy numeric WakeItem contract, and render it explicitly instead
+/// of claiming an invalid/future source is freshly observed.
+pub(crate) fn managed_violet_activity_envelope(
+    channel_id: &str,
+    channel_name: &str,
+    kind: &str,
+    item: &WakeItem,
+    source_age_secs: Option<i64>,
+) -> String {
+    let age = source_age_secs
+        .map(|seconds| seconds.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    violet_activity_envelope_with_age(
+        channel_id, channel_name, kind, std::slice::from_ref(item), |_| age.clone(),
+    )
+}
+
+fn violet_activity_envelope_with_age(
+    channel_id: &str,
+    channel_name: &str,
+    kind: &str,
+    items: &[WakeItem],
+    age_text: impl Fn(&WakeItem) -> String,
+) -> String {
     use crate::prompt_revalidation::xml_attribute_value as attr;
     let first = items.first();
     let mut lines = String::new();
@@ -1728,7 +1758,7 @@ pub(crate) fn violet_activity_envelope(
             attr(&item.message_ts),
             attr(&item.thread_ts),
             attr(&item.user),
-            item.age_secs
+            age_text(item)
         ));
     }
     if items.len() > WAKE_LIST_CAP {

@@ -36,7 +36,8 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
         .with_priority(10).mount(&server).await;
     let endpoint = server.uri();
     tokio::task::spawn_blocking(move || {
-        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "fixture");
         let dir = tempfile::tempdir().unwrap();
         let cas = crate::store::init_cas_dir(dir.path()).unwrap();
         crate::cloud::set_canonical_id_in_config_toml(&cas, "github.com/acme/widgets").unwrap();
@@ -44,6 +45,8 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
             .save_to_cas_dir(&cas).unwrap();
         let stores = DirectorStores::open(&cas).unwrap();
         let mut local = Agent::new("id-local".into(), "local".into());
+        local.role = cas_types::AgentRole::Worker;
+        local.factory_session = Some("fixture".into());
         local.registered_at = now - chrono::Duration::hours(1);
         stores.agent_store.register(&local).unwrap();
         for id in ["cas-epic", "cas-split", "cas-claimed", "cas-free", "cas-expired", "cas-own"] {

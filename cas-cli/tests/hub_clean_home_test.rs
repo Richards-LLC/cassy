@@ -878,8 +878,15 @@ fn isolated_launchd_lifecycle_stops_without_respawn_and_restarts() {
     let record = paths.read_process_record().unwrap();
     assert_ne!(record.pid, first_pid);
     assert_eq!(record.public_url.as_deref(), Some("https://launchd-proof.invalid:10046/"));
-    assert!(fs::read_to_string(&plist).unwrap().contains("updated.socket"));
-    assert!(fs::read_to_string(home.path().join("socket-used")).unwrap().ends_with("updated.socket"));
+    let selected_socket = home.path().join("updated.socket");
+    let definition_socket = ProcessCommand::new("/usr/bin/plutil")
+        .args(["-extract", "EnvironmentVariables.TAILSCALE_SOCKET", "raw", "-o", "-"])
+        .arg(&plist).output().unwrap();
+    assert!(definition_socket.status.success());
+    assert_eq!(String::from_utf8_lossy(&definition_socket.stdout).trim(),
+        selected_socket.to_str().unwrap());
+    assert_eq!(fs::read_to_string(home.path().join("socket-used")).unwrap(),
+        format!("--socket={}", selected_socket.display()));
     socket.set(None);
     assert!(command(&["hub", "status"]).status.success(), "plain status must use the recorded socket");
     let mut stale = record;

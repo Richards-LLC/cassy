@@ -1822,31 +1822,52 @@ check_fixture_paths_src() {
 # reference-history ledger need the binary or release prep, so they stay in
 # the full gate's builtin-projections row.
 # cas-e7d4: a cut once stopped at preflight on a Slack draft committed
-# hours earlier (a 26-word Dev punch). Lint the drafts a lane changes at park,
-# with the announce stage's own implementation.
+# hours earlier (a 26-word Dev punch). A Slack suffix identifies the channel,
+# not the workflow: route diary threads and runtime release drafts separately.
 check_release_notes_draft() {
-    local -a drafts=()
+    local -a diary_drafts=() runtime_drafts=()
     local path
     if [[ "$fast_rows" != true ]]; then
         printf 'release-notes-draft: the cut preflight lints this release draft\n'
         return 0
     fi
     while IFS= read -r path; do
-        [[ -f "$path" ]] && drafts+=("$path")
-    done < <(git diff --name-only --diff-filter=ACMR "${fast_base:-HEAD^}" -- ':(glob)docs/release-notes/*-slack.md')
-    if [[ "${#drafts[@]}" -eq 0 ]]; then
+        [[ -f "$path" ]] || continue
+        # Runtime releases and harness diaries both use Slack drafts. Headings
+        # or a thread filename distinguish the diary workflow from runtime.
+        if [[ "$path" == *harness-diary* || "$path" == *-thread.md ]] \
+            || grep -Eq '^## (Parent post|Grok reply|Claude reply|Codex reply)$' "$path"; then
+            diary_drafts+=("$path")
+        else
+            runtime_drafts+=("$path")
+        fi
+    done < <(git diff --name-only --diff-filter=ACMR "${fast_base:-HEAD^}" -- \
+        ':(glob)docs/release-notes/*-slack.md' ':(glob)docs/release-notes/*-thread.md')
+    if [[ "${#diary_drafts[@]}" -eq 0 && "${#runtime_drafts[@]}" -eq 0 ]]; then
         printf 'release-notes-draft: no release-notes draft change\n'
         return 0
     fi
-    local output
-    output="$(python3 scripts/release-train-announce.py --lint "${drafts[@]}" 2>&1)" && {
-        printf '%s\n' "$output"
-        return 0
-    }
-    printf '%s\n' "$output"
-    printf 'FIX: %s; rewrite that body (a top-level punch is at most 25 words, Was → Now), then commit\n' \
-        "$(sed -n 's/^error: //p' <<<"$output" | head -n1)"
-    return 1
+    local output failed=0
+    if [[ "${#diary_drafts[@]}" -gt 0 ]]; then
+        if output="$(python3 scripts/release-diary-thread.py --lint "${diary_drafts[@]}" 2>&1)"; then
+            printf '%s\n' "$output"
+        else
+            printf '%s\n' "$output"
+            printf 'FIX: harness-diary drafts need one parent and exactly three replies ordered Grok, Claude, Codex, with no ticket IDs\n'
+            failed=1
+        fi
+    fi
+    if [[ "${#runtime_drafts[@]}" -gt 0 ]]; then
+        if output="$(python3 scripts/release-train-announce.py --lint "${runtime_drafts[@]}" 2>&1)"; then
+            printf '%s\n' "$output"
+        else
+            printf '%s\n' "$output"
+            printf 'FIX: %s; rewrite that body (a top-level punch is at most 25 words, Was → Now), then commit\n' \
+                "$(sed -n 's/^error: //p' <<<"$output" | head -n1)"
+            failed=1
+        fi
+    fi
+    return "$failed"
 }
 
 check_builtin_projections_src() {
@@ -2311,7 +2332,7 @@ gate_row builtin-projections-src 'task-verifier root projection equals its embed
     check_builtin_projections_src
 gate_row call-shapes 'python3 scripts/check-call-shapes.py (builtin and runtime MCP calls match scripts/mcp-call-surface.json)' \
     check_call_shapes
-gate_row release-notes-draft 'python3 scripts/release-train-announce.py --lint <changed docs/release-notes/*-slack.md> (fast mode; the cut preflight lints the release draft)' \
+gate_row release-notes-draft 'lint changed runtime Slack releases or harness-diary threads with their respective rubrics' \
     check_release_notes_draft
 run_gate_rows
 # After an abort no row after it reports, including the final tree check.

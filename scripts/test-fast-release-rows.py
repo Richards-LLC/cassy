@@ -117,7 +117,8 @@ class FastRows(unittest.TestCase):
                        "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py",
                        "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
                        "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
-                       "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py"):
+                       "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py",
+                       "release-diary-thread.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
         for source_dir in ("scripts/fixtures/communication-slos", "crates/cas-store/src/communication_slo"):
             for source in (ROOT / source_dir).glob("*.sql"):
@@ -820,7 +821,7 @@ Source gaps: none.
         self.base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
         self.refused_at_park("release-notes-draft",
                              {path: draft.replace("no Cassy change is needed", "cas-6718 needs review")},
-                             "diary body contains a ticket, task, or epic ID")
+                             "Grok reply body contains a ticket, task, or epic ID")
 
 
 class Budget(unittest.TestCase):

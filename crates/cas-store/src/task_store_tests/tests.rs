@@ -923,6 +923,35 @@ fn sync_update_rejects_a_local_park_after_the_pull_snapshot() {
     );
 }
 
+/// cas-3122: a replica that applies an older pulled row must keep that row's
+/// clock. Stamping the apply time let a replica re-advertise a stale Open with
+/// a clock newer than the origin's later park, so the origin's pull guard
+/// (`task.updated_at <= local.updated_at`) let the echo regress AwaitingMerge.
+#[test]
+fn sync_update_keeps_the_pulled_clock_so_an_echo_cannot_outrank_a_park_cas_3122() {
+    let (_origin_dir, origin) = create_test_store();
+    let (_replica_dir, replica) = create_test_store();
+    let mut task = Task::new("cas-3122-echo".into(), "parked delivery".into());
+    origin.add(&task).unwrap();
+    replica.add(&origin.get(&task.id).unwrap()).unwrap();
+    let stale = replica.get(&task.id).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.parked_branch = Some("factory/echo".into());
+    let parked_at = origin.update(&task).unwrap();
+    // The replica pulls an older Open row (a note merged, same lifecycle).
+    let mut pulled = stale.clone();
+    pulled.notes = "[2026-10-19 14:10] earlier progress".into();
+    assert!(replica.update_from_sync(&pulled, &stale).unwrap().is_some());
+    let echo = replica.get(&task.id).unwrap();
+    assert_eq!(echo.updated_at, stale.updated_at, "an apply is not a new write");
+    let parked = origin.get(&task.id).unwrap();
+    assert!(
+        !parked.lifecycle_matches(&echo) && echo.updated_at <= parked.updated_at,
+        "the echoed Open ({}) must lose to the park at {parked_at}",
+        echo.updated_at
+    );
+}
+
 fn add_sync_test_delivery(
     root: &std::path::Path,
     task_id: &str,

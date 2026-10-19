@@ -207,7 +207,11 @@ fn set_mtime_secs_ago(path: &Path, secs_ago: u64) {
 #[test]
 fn valid_bundle_passes() {
     let fx = Fixture::new();
-    fx.write_bundle(|_| {});
+    let manifest = fx.write_bundle(|manifest| manifest["producer"] = "journey".into());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
+    assert_eq!(manifest["files"]["trace"], "trace.zip");
+    assert_eq!(manifest["files"]["trace_actions"], "trace-actions.txt");
     let receipt = fx.validate(&fx.notes()).expect("valid bundle");
     assert_eq!(receipt.head_sha, fx.head);
     assert_eq!(receipt.passed_expects, 1);

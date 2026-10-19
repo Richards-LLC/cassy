@@ -42,7 +42,8 @@ class BundleTests(unittest.TestCase):
         return directory
 
     def fold(self, suite_exit=0):
-        with patch.object(bundles, "trace_actions", return_value="trace actions"), contextlib.redirect_stdout(io.StringIO()):
+        actions = '1. 0:00.1 Expect "toHaveText" 2ms'
+        with patch.object(bundles, "trace_actions", return_value=actions), contextlib.redirect_stdout(io.StringIO()):
             return bundles.main([str(self.artifacts), "tree", "commit", str(suite_exit), "hub", "1.63"])
 
     def test_refuses_overwritten_result_with_stale_stage_screenshots(self):
@@ -72,8 +73,9 @@ class BundleTests(unittest.TestCase):
         self.assertTrue((part / "trace.zip").is_file())
         self.assertFalse((self.artifacts / "playwright/HUB-J19/trace.zip").exists())
         self.assertFalse((self.artifacts / "playwright/forced-colors/trace.zip").exists())
-        self.assertEqual(list(self.artifacts.rglob("trace.zip")), [part / "trace.zip"])
-        self.assertNotIn("trace", bundle["files"])
+        self.assertEqual(sorted(main.rglob("trace.zip")), sorted([main / "trace.zip", part / "trace.zip"]))
+        self.assertEqual(bundle["files"]["trace"], "trace.zip")
+        self.assertEqual(bundle["files"]["trace_actions"], "trace-actions.txt")
 
     def test_parts_keep_each_tests_media_and_cells_and_one_catalog_row(self):
         main = self.receipt("HUB-J13", "start a new session", stages=10)
@@ -85,6 +87,13 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(data["verdict"], "PASS")
         self.assertEqual(len(data["files"]["cells"]), 13)
         self.assertEqual(data["files"]["parts"][0]["receipt"], "parts/reconnecting/receipt.webm")
+        self.assertEqual(data["files"]["trace"], "trace.zip")
+        self.assertEqual(data["files"]["trace_actions"], "trace-actions.txt")
+        self.assertIn('Expect "toHaveText"', (main / "trace-actions.txt").read_text())
+        self.assertTrue((main / "trace.zip").is_file())
+        self.assertEqual(list(main.rglob("trace.zip")), [main / "trace.zip"])
+        self.assertFalse((self.artifacts / "playwright/HUB-J13/trace.zip").exists())
+        self.assertFalse((self.artifacts / "playwright/reconnecting/trace.zip").exists())
         rows = (self.artifacts / "journeys/JOURNEYS.md").read_text()
         for ident in ["HUB-J13", "HUB-J14", "HUB-J15", "HUB-J16"]:
             self.assertEqual(rows.count(f"| {ident} |"), 1)

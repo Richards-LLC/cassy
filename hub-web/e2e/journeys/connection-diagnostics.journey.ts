@@ -23,6 +23,7 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
   await page.goto("./"); await hub.seedPaired(); await clock.start(); await page.goto("./");
   await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
   await expect(page.locator("#conversation-connection")).toHaveText(" · Live");
+  await expect(page.locator(".conversation-thread-slot .conversation-reading.thread")).toBeVisible();
   await journey.stage("A healthy public route does not hide an opaque authenticated failure", async () => {
     blocked = true;
     await hub.down("atlas", { sockets: "close" }); await hub.up("atlas");
@@ -169,6 +170,7 @@ test("HUB-J12 retryable auth-store 503 keeps the pairing and names the hub cause
   const header = page.locator("#conversation-connection");
   const summary = page.locator(".connection-log-summary");
   await expect(header).toHaveText(" · Live");
+  await expect(page.locator(".conversation-thread-slot .conversation-reading.thread")).toBeVisible();
   await journey.stage("The hub answers retryable 503 auth_store_unavailable", async () => {
     unavailable = true;
     await hub.down("atlas", { sockets: "close" }); await hub.up("atlas");

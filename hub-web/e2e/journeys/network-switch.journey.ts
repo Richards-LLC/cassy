@@ -61,6 +61,7 @@ async function connected(page: Page, multiplex = true, machines = [ATLAS]) {
   const header = page.locator("#conversation-connection");
   const held = page.getByRole("log").locator(".conversation-held");
   await expect(header).toHaveText(" · Live");
+  await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
   return { hub, clock, header, held };
 }
 

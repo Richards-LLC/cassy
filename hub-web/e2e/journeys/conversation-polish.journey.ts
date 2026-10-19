@@ -20,6 +20,7 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
   await journey.stage("Read a question without supplied choices", async () => {
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     hub.supervisorSays(PELICAN, "**Earlier question:** which **route** is clearer?", { kind: "ask" });
     ask = hub.supervisorSays(PELICAN, "**Which plan** should we use?\n\nExplain your choice in a reply.", { kind: "ask" });
     await expect(page.locator(".pinned-ask")).toBeVisible();

@@ -823,6 +823,78 @@ fn ended_reminder_desc(reminder: &cas_store::Reminder) -> String {
 mod tests {
     use super::validate_external_reminder;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_remind_supervisor_target_uses_owning_factory_session() {
+        use crate::test_support::TestEnvGuard;
+        use cas_types::{Agent, AgentRole};
+
+        let env = TestEnvGuard::temp_home();
+        let sessions = env.home().join(".cas").join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions directory");
+        std::fs::write(
+            sessions.join("factory-a.json"),
+            r#"{"name":"factory-a","supervisor":{"name":"supervisor-a"},"workers":[]}"#,
+        )
+        .expect("session metadata");
+
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let agents = core.open_agent_store().expect("agent store");
+
+        let mut worker = Agent::new("worker-id".into(), "worker-a".into());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some("factory-a".into());
+        agents.register(&worker).expect("register worker");
+
+        let mut supervisor_a = Agent::new("supervisor-a-id".into(), "supervisor-a".into());
+        supervisor_a.role = AgentRole::Supervisor;
+        agents
+            .register(&supervisor_a)
+            .expect("register sessionless owning supervisor");
+
+        let mut supervisor_b = Agent::new("supervisor-b-id".into(), "supervisor-b".into());
+        supervisor_b.role = AgentRole::Supervisor;
+        supervisor_b.factory_session = Some("factory-b".into());
+        agents
+            .register(&supervisor_b)
+            .expect("register sibling supervisor");
+
+        core.set_agent_id_for_testing(worker.id.clone());
+        #[cfg(feature = "mcp-proxy")]
+        let service = crate::mcp::tools::service::CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = crate::mcp::tools::service::CasService::new(core);
+        let request: crate::mcp::tools::service::FactoryRequest =
+            serde_json::from_value(serde_json::json!({
+                "action": "remind",
+                "target": "supervisor",
+                "remind_message": "factory checkpoint",
+                "remind_delay_secs": 60
+            }))
+            .expect("reminder request");
+
+        service
+            .factory_remind(request)
+            .await
+            .expect("worker's supervisor alias resolves");
+
+        let reminders = crate::store::open_reminder_store(&cas_root).expect("reminder store");
+        let targeted = reminders
+            .list_pending_for_target(&supervisor_a.id)
+            .expect("reminders for owning supervisor");
+        assert_eq!(targeted.len(), 1);
+        assert_eq!(targeted[0].owner_id, worker.id);
+        assert!(
+            reminders
+                .list_pending_for_target(&supervisor_b.id)
+                .expect("reminders for sibling supervisor")
+                .is_empty(),
+            "must not target a supervisor from another factory session"
+        );
+    }
+
     #[test]
     fn cas_3349_validated_aliases_are_parseable() {
         use crate::ui::factory::daemon::runtime::ci_watch::{

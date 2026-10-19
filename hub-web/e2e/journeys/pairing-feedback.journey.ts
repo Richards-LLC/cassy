@@ -98,6 +98,7 @@ for (const width of [390, 1280]) {
           expect([...hub.installations.values()][0]!.device_label).toBe("Work laptop");
         });
         await journey.stage("Recognize this browser without reading protocol fields", async () => {
+          await expect(page.locator(".conversation-thread-slot .conversation-reading.thread")).toBeVisible();
           await showConversationList(page);
           await page.locator("#paired-machines-toggle").click();
           await page.getByRole("button", { name: "Browser installations on Atlas", exact: true }).click();

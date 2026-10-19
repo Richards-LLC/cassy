@@ -211,15 +211,21 @@ fi
         """Evaluate a GitHub `if:` expression over a flat context mapping."""
         return bool(cls.gh_value(expression, context))
 
-    def test_slim_factory_lanes_run_only_in_lane_yml_on_opted_in_runners_cas_32e9(self):
+    def test_slim_factory_lanes_run_only_in_lane_yml_on_opted_in_runners_cas_32e9_cas_3b5e(self):
         """cas-14e0/cas-32e9: factory pushes start in lane.yml. Slim on: only
         the named lane jobs run, locally when CASSY_LANE_SELF_HOSTED is enabled.
         Slim off: the full ci.yml is called. No fork-capable trigger reaches
         the local runners, and ci.yml routes nothing else there."""
         lane = policy.load(self.root / '.github/workflows/lane.yml')
         ci = self.ci()
-        local = ['self-hosted', 'Linux', 'X64', 'cas-ci-32core']
+        local = ['self-hosted', 'Linux', 'X64', 'cas-lane-light']
         self.assertEqual((lane['name'], ci['name']), ('CI', 'CI'), 'ci_completed and the CI watcher select runs by name')
+        # cas-3b5e: the light slots take lanes only; the 12-way Rust jobs of the
+        # merge queue and release never select them.
+        for source in ('ci.yml', 'release.yml'):
+            text = (self.root / '.github/workflows' / source).read_text()
+            self.assertNotIn('cas-lane-light', text, source)
+        self.assertNotIn('cas-ci-32core', json.dumps(lane['jobs']))
         self.assertEqual(lane['on'], {'push': {'branches': ['factory/**']}})
         self.assertNotIn('factory/**', ci['on']['push']['branches'])
         self.assertIn('workflow_call', ci['on'])

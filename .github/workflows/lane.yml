@@ -11,7 +11,8 @@
 # With CAS_LANE_SLIM unset, the `full` job calls ci.yml itself, so a factory
 # push validates exactly as before (rollback: unset CAS_LANE_SLIM). Runner
 # placement follows cas-14e0: local runners only when CASSY_LANE_SELF_HOSTED is
-# enabled. This workflow has no pull_request trigger, so a fork can never reach
+# enabled, and only the light lane slots (label cas-lane-light, cas-3b5e), so a
+# burst of lanes never queues behind merge-queue Rust jobs on cas-ci-32core. This workflow has no pull_request trigger, so a fork can never reach
 # the self-hosted runners. scripts/ci_tiers/test-policy.py pins all of this.
 #
 # The workflow name stays "CI": ci_completed reminders and the factory CI
@@ -46,7 +47,7 @@ jobs:
   ci-diff:
     name: Classify CI diff
     if: vars.CAS_LANE_SLIM == 'true'
-    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-ci-32core"]') || 'ubuntu-latest' }}
+    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
       comparison-base: ${{ steps.classify-diff.outputs.comparison-base }}
@@ -76,7 +77,7 @@ jobs:
     name: Docs Lint
     if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.class == 'docs-only'
     needs: ci-diff
-    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-ci-32core"]') || 'ubuntu-latest' }}
+    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -116,7 +117,7 @@ jobs:
     name: Scoped Validation (fast)
     if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.class != 'docs-only'
     needs: ci-diff
-    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-ci-32core"]') || 'ubuntu-latest' }}
+    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -189,7 +190,7 @@ jobs:
       contents: read
       actions: read
       pull-requests: read
-    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-ci-32core"]') || 'ubuntu-latest' }}
+    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

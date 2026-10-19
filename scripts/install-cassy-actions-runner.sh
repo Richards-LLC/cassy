@@ -5,6 +5,9 @@
 #   RUNNER_SLOT=2 SCCACHE_SOURCE="$(command -v sccache)" \
 #     sudo --preserve-env=RUNNER_TOKEN,RUNNER_SLOT,SCCACHE_SOURCE \
 #       scripts/install-cassy-actions-runner.sh
+# Slots 3 and 4 (cas-3b5e) are light lane slots: label cas-lane-light only,
+# no Rust/sccache, CPU-capped units. RUNNER_REGISTRATION=repo registers with a
+# repository token (no organization group) when no org-admin token exists.
 set -euo pipefail
 
 runner_user=cassy-actions
@@ -12,9 +15,12 @@ runner_root=/var/lib/cassy-actions
 runner_slot="${RUNNER_SLOT:-1}"
 runner_version=2.336.0
 runner_archive="actions-runner-linux-x64-${runner_version}.tar.gz"
-runner_url="https://github.com/actions/runner/releases/download/v${runner_version}/${runner_archive}"
+runner_url_archive="https://github.com/actions/runner/releases/download/v${runner_version}/${runner_archive}"
 runner_sha256=04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d
 runner_group=cassy-public-trusted
+runner_labels=cas-ci-32core,trusted-branches
+registration="${RUNNER_REGISTRATION:-org}"
+light=false
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 pruner_source="$repo_root/scripts/prune-cassy-actions-cache.sh"
 pruner_dest=/usr/local/sbin/cassy-actions-cache-prune
@@ -49,10 +55,23 @@ case "$runner_slot" in
         wrapper_source="$repo_root/ops/systemd/run-cassy-actions-runner-2.sh"
         wrapper_dest="$runner_root/run-service-2.sh"
         ;;
+    3|4)
+        # Never cas-ci-32core: merge-queue and release Rust jobs stay off.
+        runner_name="soundwave-cas-lane-$runner_slot"
+        runner_dir="$runner_root/runner-$runner_slot"
+        service_name="cassy-actions-runner-$runner_slot.service"
+        runner_labels=cas-lane-light,trusted-branches
+        light=true
+        ;;
     *)
-        echo "RUNNER_SLOT must be 1 or 2; got $runner_slot" >&2
+        echo "RUNNER_SLOT must be 1, 2, 3 or 4; got $runner_slot" >&2
         exit 1
         ;;
+esac
+case "$registration" in
+    org) runner_url=https://github.com/Richards-LLC ;;
+    repo) runner_url=https://github.com/Richards-LLC/cassy ;;
+    *) echo "RUNNER_REGISTRATION must be org or repo; got $registration" >&2; exit 1 ;;
 esac
 unit_source="$repo_root/ops/systemd/$service_name"
 
@@ -63,6 +82,42 @@ fi
 if [[ -z "${RUNNER_TOKEN:-}" ]]; then
     echo "RUNNER_TOKEN must contain a short-lived Richards-LLC organization runner registration token" >&2
     exit 1
+fi
+if "$light"; then
+    if [[ ! -f "$unit_source" ]]; then
+        echo "light runner unit $unit_source is missing" >&2
+        exit 1
+    fi
+    if ! id "$runner_user" >/dev/null 2>&1; then
+        echo "install slot 1 first: the $runner_user service account is missing" >&2
+        exit 1
+    fi
+    install -d -o "$runner_user" -g "$runner_user" -m 0750 "$runner_dir"
+    tmp_dir="$(mktemp -d)"
+    chmod 0755 "$tmp_dir"
+    trap 'rm -rf "$tmp_dir"' EXIT
+    curl --fail --location --proto '=https' --tlsv1.2 "$runner_url_archive" -o "$tmp_dir/$runner_archive"
+    printf '%s  %s\n' "$runner_sha256" "$tmp_dir/$runner_archive" | sha256sum --check --strict
+    tar -xzf "$tmp_dir/$runner_archive" -C "$runner_dir"
+    chown -R "$runner_user:$runner_user" "$runner_dir"
+    group_args=()
+    [[ "$registration" == org ]] && group_args=(--runnergroup "$runner_group")
+    (
+        cd "$runner_dir"
+        sudo -u "$runner_user" env HOME="$runner_root" \
+            ./config.sh --unattended --replace \
+            --url "$runner_url" \
+            --token "$RUNNER_TOKEN" \
+            --name "$runner_name" \
+            "${group_args[@]}" \
+            --labels "$runner_labels" \
+            --work _work
+    )
+    install -o root -g root -m 0644 "$unit_source" "/etc/systemd/system/$service_name"
+    systemctl daemon-reload
+    systemctl enable --now "$service_name"
+    systemctl --no-pager --full status "$service_name"
+    exit 0
 fi
 if [[ ! -f "$unit_source" || ! -f "$wrapper_source" || ! -x "$pruner_source" ||
       ! -x "$mount_guard_source" || ! -x "$job_lock_source" || ! -f "$process_identity_source" ||
@@ -90,7 +145,7 @@ fi
 tmp_dir="$(mktemp -d)"
 chmod 0755 "$tmp_dir"
 trap 'rm -rf "$tmp_dir"' EXIT
-curl --fail --location --proto '=https' --tlsv1.2 "$runner_url" -o "$tmp_dir/$runner_archive"
+curl --fail --location --proto '=https' --tlsv1.2 "$runner_url_archive" -o "$tmp_dir/$runner_archive"
 printf '%s  %s\n' "$runner_sha256" "$tmp_dir/$runner_archive" | sha256sum --check --strict
 tar -xzf "$tmp_dir/$runner_archive" -C "$runner_dir"
 chown -R "$runner_user:$runner_user" "$runner_dir"
@@ -124,11 +179,11 @@ fi
     sudo -u "$runner_user" env HOME="$runner_root" \
         PATH="$runner_root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
         ./config.sh --unattended --replace \
-        --url https://github.com/Richards-LLC \
+        --url "$runner_url" \
         --token "$RUNNER_TOKEN" \
         --name "$runner_name" \
         --runnergroup "$runner_group" \
-        --labels cas-ci-32core,trusted-branches \
+        --labels "$runner_labels" \
         --work _work
 )
 

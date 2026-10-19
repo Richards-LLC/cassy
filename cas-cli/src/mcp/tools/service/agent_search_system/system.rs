@@ -1118,7 +1118,8 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let mut config = crate::config::Config::default();
             if let Some(repo) = project {
-                config.set("issues.repo", repo).unwrap();
+                // Seed legacy raw configuration; config set now rejects malformed slugs.
+                config.issues.get_or_insert_with(Default::default).repo = Some(repo.to_owned());
             }
             if let Some(repo) = component {
                 // Raw TOML can retain an explicit blank legacy opt-out;
@@ -1173,7 +1174,9 @@ mod tests {
         ] {
             let temp = tempfile::tempdir().unwrap();
             let mut config = crate::config::Config::default();
-            config.set("issues.repo", project).unwrap();
+            // Keep the filing safeguard exercised for malformed raw TOML,
+            // independently of set-time validation (cas-d3e9).
+            config.issues.get_or_insert_with(Default::default).repo = Some(project.to_owned());
             if let Some(repo) = component {
                 // Raw TOML can retain an explicit blank legacy opt-out;
                 // config set with blank clears the override instead.

@@ -5735,7 +5735,7 @@ fn log_write_root_uses(cas_root: &Path, input: &HookInput, uses: &[WriteRootUse]
     }
 }
 
-/// cas-3147: the denial message, naming the operator's write roots in effect.
+/// Name the operator remedy even before any write roots have been configured.
 fn factory_workspace_contract_denial_with_roots(
     input: &HookInput,
     violation: &FactoryWriteViolation,
@@ -5753,12 +5753,13 @@ fn factory_workspace_contract_denial_with_roots(
         worktree_root,
     );
     let roots = policy.describe(task_ids);
-    if roots.is_empty() {
-        return denial;
-    }
+    let roots = if roots.is_empty() {
+        String::new()
+    } else {
+        format!(" Operator write roots in effect: {}.", roots.join("; "))
+    };
     format!(
-        "{denial} Operator write roots in effect: {}. Only the operator can add roots (`cas config set factory.write_roots`) or grants.",
-        roots.join("; ")
+        "{denial}{roots} Only the operator can add directories to `factory.write_roots` in the project's `.cas/config.toml` (`cas config set factory.write_roots`) or add task grants."
     )
 }
 
@@ -6261,6 +6262,7 @@ mod workspace_contract_tests {
         assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny", "{denied}");
         assert!(denied.to_string().contains("factory.write_roots"),
             "an unconfigured refusal must name the operator's remedy: {denied}");
+        assert!(denied.to_string().contains("project's `.cas/config.toml`"), "{denied}");
 
         std::fs::write(cas_root.join("config.toml"), roots).unwrap();
         let admitted = run(&input);

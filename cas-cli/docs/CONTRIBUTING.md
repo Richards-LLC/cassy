@@ -2298,6 +2298,12 @@ skips one that no longer resolves or is unsafe. Roots that 3.50.0 stored in
 set factory.write_roots` moves them into `config.toml` (an empty value clears
 them too).
 
+For a support loop, the operator can include `~/.gabber-support` in the
+owning project's `factory.write_roots`, preserving any existing entries when
+setting the list. This admits `state.json` beneath that directory; a sibling
+such as `~/.gabber-support-other` stays blocked. Setting the key in the user's
+`~/.cas/config.toml` does not grant project writes.
+
 Each grant admits only its modes; a project root admits all three:
 
 - **create**: a new file, an `apply_patch` add or move, or a `cp`, `tee` or

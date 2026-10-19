@@ -327,11 +327,11 @@ impl<'w> Formatter<'w> {
         self.newline()
     }
 
-    /// Print a success status: `✓ message`
+    /// Print a success status with a locale-appropriate mark.
     pub fn success(&mut self, message: &str) -> io::Result<()> {
         let color = self.theme.palette.text_success;
         if self.mode == OutputMode::Styled {
-            self.write_colored(&format!("{} {message}", Icons::CHECK), color)?;
+            self.write_colored(&format!("{} {message}", Verdict::Ok.label(self.glyphs())), color)?;
         } else {
             write!(self.writer, "[OK] {message}")?;
         }

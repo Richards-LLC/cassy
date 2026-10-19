@@ -882,7 +882,15 @@ pub(super) fn inactive_detached_warning(
     paths: &HubRuntimePaths,
     record: Option<&HubProcessRecord>,
 ) -> Result<Option<&'static str>> {
-    let (installed, active) = match native_platform() {
+    inactive_detached_warning_on(native_platform(), paths, record)
+}
+
+fn inactive_detached_warning_on(
+    platform: ServicePlatform,
+    paths: &HubRuntimePaths,
+    record: Option<&HubProcessRecord>,
+) -> Result<Option<&'static str>> {
+    let (installed, active) = match platform {
         ServicePlatform::Launchd => {
             let path = launchd_path()?;
             let domain = launchd_domain()?;
@@ -915,6 +923,10 @@ pub(super) fn inactive_detached_warning(
         }
         ServicePlatform::Unsupported => return Ok(None),
     };
+    // A detached hub needs no service manager when no service is installed.
+    if !installed {
+        return Ok(None);
+    }
     // A hung diagnostic cannot establish either service health or inactivity.
     if let Some(warning) = active.warning() {
         return Ok(Some(warning));
@@ -1800,11 +1812,20 @@ exit 0
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let fixture = tempfile::tempdir().unwrap();
         let manager = fixture.path().join("systemctl");
-        crate::test_paths::warm_stub(&manager, "#!/bin/sh\nexit 1\n");
         env.set(SYSTEMCTL_PATH_ENV, &manager);
         let paths = HubRuntimePaths::default_for_user().unwrap();
+        // Exercise an unavailable manager even when the platform was
+        // resolved before it disappeared, rather than only manual mode.
+        assert_eq!(
+            inactive_detached_warning_on(ServicePlatform::Systemd, &paths, None).unwrap(),
+            None,
+        );
         assert_eq!(inactive_detached_warning(&paths, None).unwrap(), None);
         write_service_file(&systemd_path().unwrap(), LEGACY_SYSTEMD_UNIT).unwrap();
+        assert_eq!(
+            inactive_detached_warning_on(ServicePlatform::Systemd, &paths, None).unwrap(),
+            Some(MANAGER_UNAVAILABLE_WARNING),
+        );
         assert_eq!(inactive_detached_warning(&paths, None).unwrap(), Some(MANAGER_UNAVAILABLE_WARNING));
         let cli = Cli { json: false, full: false, verbose: false, command: None };
         assert!(restart_supervised(&cli, false, 443).unwrap_err().to_string().contains("refusing to launch a detached hub"));

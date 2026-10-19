@@ -113,7 +113,7 @@ fn ct2_p3_dead_owner_notice_rerouted() {
     for (stage, target, session) in [
         (1, "owner", Some("new-session")),
         (2, "peer", Some("peer-session")),
-        (3, "operator", Some("ended-session")),
+        (3, "operator", Some("connected-observer-session")),
     ] {
         let id = format!("cas-route-{stage}");
         tasks
@@ -126,8 +126,14 @@ fn ct2_p3_dead_owner_notice_rerouted() {
             12,
             Some(stage),
             &format!("run-{stage}"),
-            None,
+            Some("Fast Validation › publication fixture"),
         );
+        if stage == 3 {
+            // The ejection outlives its factory. Reuse the existing Commander
+            // adoption tick of another daemon, with no live supervisor.
+            crate::supervisor_notices::adopt_operator_notices(&root, "connected-observer-session")
+                .unwrap();
+        }
         assert!(
             matches!(result, WorkerAttentionRelayOutcome::Persisted { .. }),
             "{result:?}"
@@ -142,6 +148,17 @@ fn ct2_p3_dead_owner_notice_rerouted() {
             "the live receiver must replace dead routing"
         );
         assert_eq!(row.factory_session.as_deref(), session);
+        if stage == 3 {
+            let payload: crate::ui::factory::OperatorReplyPayload =
+                serde_json::from_str(&row.prompt).unwrap();
+            assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
+            assert!(payload.message.contains("#12"));
+            assert!(payload.message.contains("run 3"));
+            assert!(payload.message.contains("Fast Validation › publication fixture"));
+            crate::supervisor_notices::adopt_operator_notices(&root, "connected-observer-session")
+                .unwrap();
+            assert_eq!(queue.peek_all(100).unwrap().iter().filter(|r| r.target == "operator").count(), 1);
+        }
         assert!(rows.iter().all(
             |r| r.target == "operator" || r.factory_session.as_deref() != Some("ended-session")
         ));

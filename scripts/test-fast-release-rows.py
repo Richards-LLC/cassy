@@ -770,6 +770,58 @@ sleep 2
                              {path: draft.replace(punch, punch + " Every operator shell launches again today.")},
                              "dev-top-level top-level punch exceeds 25 words")
 
+    def test_harness_diary_draft_uses_the_thread_rubric_at_park(self):
+        path = "docs/release-notes/2026-10-14-harness-diary-sweep-slack.md"
+        draft = """# 2026-10-14 — Harness diary sweep — #cas-internal thread
+
+## Parent post
+
+```text
+*Dev — Harness diary sweep — 2026-10-14*
+Was: the harness notes stopped at older pins → Now: current installed versions and validated pins are distinguished; no Cassy runtime behavior is announced.
+```
+
+## Grok reply
+
+```text
+• *Range reviewed* — Was: the diary stopped at 1.0.0 → Now: 1.0.1–1.0.2 reviewed, with 1.0.2 installed.
+
+• *Verdict* — Was: compatibility unknown → Now: no Cassy change is needed for the reviewed updates.
+
+Source gaps: none.
+```
+
+## Claude reply
+
+```text
+• *Range reviewed* — Was: the diary stopped at 2.1.0 → Now: 2.1.1–2.1.2 reviewed, with 2.1.2 installed.
+
+• *Verdict* — Was: compatibility unknown → Now: no Cassy change is needed for the reviewed updates.
+
+Source gaps: none.
+```
+
+## Codex reply
+
+```text
+• *Range reviewed* — Was: the diary stopped at 0.1.0 → Now: 0.1.1–0.1.2 reviewed, with 0.1.2 installed.
+
+• *Verdict* — Was: compatibility unknown → Now: no Cassy change is needed for the reviewed updates.
+
+Source gaps: none.
+```
+"""
+        self.write(path, draft)
+        self.commit()
+        result = self.fast()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS release-notes-draft", result.stdout)
+
+        self.base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.refused_at_park("release-notes-draft",
+                             {path: draft.replace("no Cassy change is needed", "cas-6718 needs review")},
+                             "diary body contains a ticket, task, or epic ID")
+
 
 class Budget(unittest.TestCase):
     def test_scales_at_one_to_one_and_a_half_load_per_core_and_caps_extremes(self):

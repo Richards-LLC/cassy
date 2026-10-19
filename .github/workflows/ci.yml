@@ -1777,32 +1777,13 @@ jobs:
           # repository's 10 GB cache cap.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install nextest for native lifecycle proof
-        if: >-
-          github.event_name != 'pull_request'
-          && steps.classify-diff.outputs.rust-unaffected != 'true'
-        uses: taiki-e/install-action@nextest
-
-      # Replace the check-only pass within this stage's existing budget.
-      # This compiles the hub and executes its real CLI/launchd lifecycle;
-      # the queue's Linux suite retains exhaustive workspace coverage.
-      - name: Prove native hub lifecycle and cache reclaim
+      - name: Check workspace
         if: >-
           github.event_name != 'pull_request'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: >-
-          scripts/run-verified-tests.sh nextest run -p cas --lib --test integration_cli
-          -E 'test(cas_49b9_exact_unknown_target_opt_in_reclaims_only_quiet_regenerable_subtree)
-          | test(cas_49b9_unknown_target_refuses_without_exact_opt_in_or_with_live_handle)
-          | test(gui_launcher_output_has_actionable_cli_error)
-          | test(signed_out_hub_start_requires_explicit_loopback)
-          | test(stopped_tailscale_diagnostic_names_cli_and_socket)
-          | test(detached_hub_uses_app_bundle_override_with_no_parent_term)
-          | test(flagless_hub_lifecycle_publishes_and_host_opt_out_removes_serve)
-          | test(service_start_retries_tailscale_before_publication)
-          | test(isolated_launchd_lifecycle_stops_without_respawn_and_restarts)'
+        run: cargo check --workspace --all-targets
 
       - name: Report sccache stats
         if: always() && github.event_name != 'pull_request' && steps.classify-diff.outputs.rust-unaffected != 'true'

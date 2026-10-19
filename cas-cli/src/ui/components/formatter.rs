@@ -706,18 +706,54 @@ mod tests {
             format!("\x1b[38;2;{r};{g};{b}m[ERROR]\x1b[0m configuration failed\n")
         );
 
-        let RatatuiColor::Rgb(sr, sg, sb) = theme.palette.text_success else {
-            panic!("text_success must use a concrete theme color");
-        };
         let mut success_buf = Vec::new();
         {
             let mut fmt = Formatter::styled(&mut success_buf, theme);
             fmt.success("sync complete").unwrap();
         }
+        assert_eq!(String::from_utf8(success_buf).unwrap(), "\x1b[1m[OK]\x1b[0m sync complete\n");
+    }
+
+    #[test]
+    fn test_sync_output_uses_default_text_and_palette_safe_success_mark() {
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
+        env.remove("NO_COLOR");
+        let mut buf = Vec::new();
+        {
+            let mut fmt = Formatter::new(
+                &mut buf,
+                OutputMode::Styled,
+                ActiveTheme::default_dark(),
+                80,
+            );
+            fmt.subheading("Syncing .claude files").unwrap();
+            fmt.success("Updated .mcp.json").unwrap();
+        }
+
         assert_eq!(
-            String::from_utf8(success_buf).unwrap(),
-            format!("\x1b[38;2;{sr};{sg};{sb}m[OK] sync complete\x1b[0m\n")
+            String::from_utf8(buf).unwrap(),
+            "\x1b[1mSyncing .claude files\x1b[0m\n\x1b[38;2;40;145;75m✓\x1b[0m Updated .mcp.json\n"
         );
+
+        let luminance = |(r, g, b): (u8, u8, u8)| {
+            let channel = |c: u8| {
+                let s = f64::from(c) / 255.0;
+                if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        };
+        let mark = luminance((40, 145, 75));
+        for (palette, background) in [
+            ("dark", (30, 30, 30)),
+            ("light", (255, 255, 255)),
+            ("Solarized dark", (0, 43, 54)),
+            ("Solarized light", (253, 246, 227)),
+        ] {
+            let bg = luminance(background);
+            let (high, low) = if mark >= bg { (mark, bg) } else { (bg, mark) };
+            let ratio = (high + 0.05) / (low + 0.05);
+            assert!(ratio >= 3.0, "success mark contrast on {palette}: {ratio:.2}:1");
+        }
     }
 
     #[test]

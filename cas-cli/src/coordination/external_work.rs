@@ -682,7 +682,8 @@ impl ExternalWorkService {
 
     pub fn execute(&self, command: ExternalWorkCommand) -> Result<Value, ExternalWorkError> {
         match command {
-            ExternalWorkCommand::ClaimStatus { request_id } => self.claim_status(&request_id),
+            ExternalWorkCommand::ClaimStatus { request_id } => self.claim_status(&request_id).map(explain_unmanaged),
+            claim @ ExternalWorkCommand::Claim { .. } => self.mutate(claim).map(explain_unmanaged),
             ExternalWorkCommand::ReplyIntent {
                 ref resource_id,
                 expected_generation,
@@ -1373,6 +1374,36 @@ fn call_timeout(deadline: Instant) -> Result<Duration, ExternalWorkError> {
     Ok(left.min(CALL_REMOTE_BUDGET))
 }
 
+/// cas-b1d0 (GH #1266): Cloud refuses a claim with `coordination_scope_required`
+/// / `binding_unverified` when this project has no verified binding on the
+/// channel (Cloud deliberately does not say whether the channel is unbound or
+/// bound elsewhere), and with `binding_unmanaged` when the binding is not
+/// managed. Either way this project has no claim layer there, and supervisors
+/// read the bare refusal and its `link_team_project` as "no reply authority".
+/// Say what it means instead: no claim exists or is needed, and the reply goes
+/// through Violet v1 under Violet's own channel policy. Cloud's guidance and
+/// next action are kept beside it. Every other refusal (unlinked project,
+/// revoked membership, strict activation, transport) is left untouched.
+fn explain_unmanaged(mut result: Value) -> Value {
+    let unmanaged = result["code"] == "coordination_scope_required"
+        && matches!(result["reason"].as_str(), Some("binding_unverified" | "binding_unmanaged"));
+    if !unmanaged {
+        return result;
+    }
+    result["managed"] = json!(false);
+    result["cloud_guidance"] = result["guidance"].take();
+    result["guidance"] = json!(
+        "unmanaged: this project has no managed binding on this Slack channel, so there is no claim to hold \
+         and none is needed. Reply normally through Violet v1 (violet_post), within Violet's own channel policy. \
+         Binding setup is an operator-only Cloud step, not a reply prerequisite; do not escalate it to reply."
+    );
+    if result["receipt"].is_object() {
+        result["receipt"]["cloud_next_action"] = result["receipt"]["next_action"].take();
+        result["receipt"]["next_action"] = json!("reply_via_violet_v1");
+    }
+    result
+}
+
 fn row_response(row: &JournalOperation) -> Result<Value, ExternalWorkError> {
     row.response_json
         .as_deref()
@@ -1676,6 +1707,37 @@ mod tests {
         ExternalWorkCommand::Claim {
             external_ref: external_ref.to_string(),
             request_id: Some(request_id.to_string()),
+        }
+    }
+
+    /// cas-b1d0 (GH #1266): Cloud's unverified-binding claim refusal reads as
+    /// "unmanaged, reply through Violet v1" (claim and claim_status alike),
+    /// with Cloud's own guidance kept; an unlinked project stays a bare refusal.
+    #[test]
+    fn unmanaged_channel_claim_says_reply_via_violet_v1_and_other_refusals_stay_closed_cas_b1d0() {
+        let link = "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456";
+        for (case, unmanaged) in [("ambiguous or unmanaged binding", true), ("unlinked personal project", false)] {
+            let journal = journal();
+            let cloud = Arc::new(FakeCloud::new(journal.clone()));
+            let refusal = case_response("claim", case);
+            *cloud.post_result.lock().unwrap() = Ok(refusal.clone());
+            let service = service(cloud, Arc::new(FakeViolet::ok()), journal);
+            let claimed = service.execute(claim(REQUEST_ID, link)).unwrap();
+            let status = service.execute(ExternalWorkCommand::ClaimStatus { request_id: REQUEST_ID.into() }).unwrap();
+            for result in [claimed, status] {
+                assert_eq!(result["code"], refusal["code"], "{case}");
+                if unmanaged {
+                    assert_eq!(result["managed"], false);
+                    assert_eq!(result["receipt"]["next_action"], "reply_via_violet_v1");
+                    assert_eq!(result["receipt"]["cloud_next_action"], "link_team_project");
+                    assert_eq!(result["cloud_guidance"], refusal["guidance"]);
+                    assert!(result["guidance"].as_str().unwrap().contains("Violet v1"), "{result}");
+                } else {
+                    assert_eq!(result["guidance"], refusal["guidance"], "{case}");
+                    assert_eq!(result["receipt"]["next_action"], refusal["receipt"]["next_action"]);
+                    assert!(result.get("managed").is_none());
+                }
+            }
         }
     }
 

@@ -2390,6 +2390,15 @@ fn render_audit_status(report: &crate::hub::AuditWriterReport) -> String {
         "unknown" => "WARN",
         _ => "OK",
     };
+    // cas-cfea: the healthy idle explanation ("last row Nh ago; a hub writes
+    // rows only for authenticated requests") overran 80 columns on one line.
+    // Keep the verdict and age on the status line and indent the explanation
+    // beneath it; `--json` keeps the one-line message.
+    if report.status == "ok"
+        && let Some((age, why)) = report.message.split_once("; ")
+    {
+        return format!("Audit log: {verdict} - {age}\n  {why}");
+    }
     format!("Audit log: {verdict} - {}", report.message)
 }
 

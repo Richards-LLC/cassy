@@ -882,7 +882,15 @@ pub(super) fn inactive_detached_warning(
     paths: &HubRuntimePaths,
     record: Option<&HubProcessRecord>,
 ) -> Result<Option<&'static str>> {
-    let (installed, active) = match native_platform() {
+    inactive_detached_warning_on(native_platform(), paths, record)
+}
+
+fn inactive_detached_warning_on(
+    platform: ServicePlatform,
+    paths: &HubRuntimePaths,
+    record: Option<&HubProcessRecord>,
+) -> Result<Option<&'static str>> {
+    let (installed, active) = match platform {
         ServicePlatform::Launchd => {
             let path = launchd_path()?;
             let domain = launchd_domain()?;
@@ -915,6 +923,10 @@ pub(super) fn inactive_detached_warning(
         }
         ServicePlatform::Unsupported => return Ok(None),
     };
+    // A detached hub needs no service manager when no service is installed.
+    if !installed {
+        return Ok(None);
+    }
     // A hung diagnostic cannot establish either service health or inactivity.
     if let Some(warning) = active.warning() {
         return Ok(Some(warning));
@@ -1418,6 +1430,59 @@ fn systemd_preview_actions() -> Vec<String> {
     ]
 }
 
+fn human_dry_run(
+    platform: ServicePlatform,
+    path: &Path,
+    definition: &str,
+    actions: &[String],
+    full: bool,
+    utf8: bool,
+) -> String {
+    let (supervision, action_summary) = match platform {
+        ServicePlatform::Launchd => (
+            "launchd",
+            "bootout (if present), bootstrap, kickstart via launchctl",
+        ),
+        ServicePlatform::Systemd => (
+            "systemd-user",
+            "enable lingering, reload, enable service via systemctl",
+        ),
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => {
+            ("none", "no manager steps")
+        }
+    };
+    let dash = if utf8 { "—" } else { "-" };
+    let header = format!(
+        "Cassy hub service ({supervision}) dry run {dash} no files or manager state changed."
+    );
+    if !full {
+        return format!(
+            "{header}\nWould write: {}\nWould run: {action_summary}\nFull definition: cas hub service install --dry-run --full\n",
+            service_file_display_path(platform, path)
+        );
+    }
+    let actions = actions
+        .iter()
+        .map(|action| format!("  {action}\n"))
+        .collect::<String>();
+    format!(
+        "{header}\nWould write: {}\nWould run:\n{actions}\nService definition:\n{definition}\n",
+        path.display()
+    )
+}
+
+fn service_file_display_path(platform: ServicePlatform, path: &Path) -> String {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "service file".into());
+    match platform {
+        ServicePlatform::Launchd => format!("~/Library/LaunchAgents/{file_name}"),
+        ServicePlatform::Systemd => format!("~/.config/systemd/user/{file_name}"),
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => path.display().to_string(),
+    }
+}
+
 fn print_dry_run(
     cli: &Cli,
     platform: ServicePlatform,
@@ -1444,13 +1509,17 @@ fn print_dry_run(
             })
         );
     } else {
-        println!("Cassy hub service ({supervision}) dry run — no files or manager state changed.");
-        println!("Would write: {}", path.display());
-        println!("Would run:");
-        for action in actions {
-            println!("  {action}");
-        }
-        println!("\nService definition:\n{definition}");
+        print!(
+            "{}",
+            human_dry_run(
+                platform,
+                path,
+                definition,
+                actions,
+                cli.full,
+                crate::ui::components::locale_is_utf8(),
+            )
+        );
     }
     Ok(())
 }
@@ -1743,11 +1812,20 @@ exit 0
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let fixture = tempfile::tempdir().unwrap();
         let manager = fixture.path().join("systemctl");
-        crate::test_paths::warm_stub(&manager, "#!/bin/sh\nexit 1\n");
         env.set(SYSTEMCTL_PATH_ENV, &manager);
         let paths = HubRuntimePaths::default_for_user().unwrap();
+        // Exercise an unavailable manager even when the platform was
+        // resolved before it disappeared, rather than only manual mode.
+        assert_eq!(
+            inactive_detached_warning_on(ServicePlatform::Systemd, &paths, None).unwrap(),
+            None,
+        );
         assert_eq!(inactive_detached_warning(&paths, None).unwrap(), None);
         write_service_file(&systemd_path().unwrap(), LEGACY_SYSTEMD_UNIT).unwrap();
+        assert_eq!(
+            inactive_detached_warning_on(ServicePlatform::Systemd, &paths, None).unwrap(),
+            Some(MANAGER_UNAVAILABLE_WARNING),
+        );
         assert_eq!(inactive_detached_warning(&paths, None).unwrap(), Some(MANAGER_UNAVAILABLE_WARNING));
         let cli = Cli { json: false, full: false, verbose: false, command: None };
         assert!(restart_supervised(&cli, false, 443).unwrap_err().to_string().contains("refusing to launch a detached hub"));
@@ -1762,6 +1840,53 @@ exit 0
             Some("Hub launch profile not recorded: malformed host config")
         );
         assert!(capture_launch_profiles_warning(Ok(())).is_none());
+    }
+
+    #[test]
+    fn service_install_dry_run_has_compact_summary_and_full_escape_cas_0051() {
+        let path = Path::new("/Users/test/Library/LaunchAgents/dev.cas.commander-hub.plist");
+        let definition = launchd_plist(
+            Path::new("/Users/test/.local/bin/cas"),
+            Path::new("/Users/test/.cas/hub/hub.log"),
+            true,
+            443,
+        );
+        let actions = launchd_preview_actions(path);
+
+        let summary = human_dry_run(
+            ServicePlatform::Launchd,
+            path,
+            &definition,
+            &actions,
+            false,
+            false,
+        );
+        assert!(
+            !summary.contains(&definition),
+            "the default human preview should not dump the plist"
+        );
+        assert!(
+            summary.contains("Would write: ~/Library/LaunchAgents/dev.cas.commander-hub.plist")
+        );
+        assert!(
+            summary.contains("Would run: bootout (if present), bootstrap, kickstart via launchctl")
+        );
+        assert!(summary.contains("Full definition: cas hub service install --dry-run --full"));
+        assert!(summary.starts_with(
+            "Cassy hub service (launchd) dry run - no files or manager state changed."
+        ));
+        assert!(summary.lines().all(|line| line.len() <= 80), "{summary}");
+
+        let full = human_dry_run(
+            ServicePlatform::Launchd,
+            path,
+            &definition,
+            &actions,
+            true,
+            false,
+        );
+        assert!(full.contains(&definition));
+        assert!(full.contains(path.to_str().unwrap()));
     }
 
     #[test]

@@ -527,14 +527,14 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         Ok(NotifyIdempotentResult::AlreadyExists {
             id,
             prompt_delivered: true,
-        }) => {
+        }) if supervisor.id != "operator" => {
             return WorkerAttentionRelayOutcome::Persisted {
                 notification_id: id,
             };
         }
         Ok(NotifyIdempotentResult::AlreadyExists {
             id,
-            prompt_delivered: false,
+            ..
         }) => id,
         Err(error) => {
             tracing::error!(task_id, pr_number, %error, "merge-queue ejection durable enqueue failed");
@@ -548,25 +548,36 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     let supervisor_body = format!(
         "<worker-attention kind=\"merge_queue_ejected\" worker=\"{worker}\" task_id=\"{task_id}\" notification_id=\"{notification_id}\">\n{detail}{next_step}\n</worker-attention>"
     );
-    let supervisor_body = if supervisor.id == "operator" {
-        match crate::supervisor_notices::operator_prompt(&supervisor_body, "merge queue ejected") {
-            Ok(body) => body,
-            Err(_) => return WorkerAttentionRelayOutcome::Pending,
+    if supervisor.id == "operator" {
+        // A departed factory's direct prompt cannot reach a Commander on
+        // another daemon. Reuse the project operator outbox and its existing
+        // adoption tick, including when a prior live-owner relay was stamped.
+        if let Err(error) = crate::supervisor_notices::enqueue(
+            cas_dir,
+            &supervisor,
+            "merge_queue_ejected",
+            &format!("{detail}\nNo live supervisor is available.{next_step}"),
+            &format!("{task_id}:{pr_number}:{occurrence}"),
+        ) {
+            tracing::warn!(task_id, pr_number, %error, "merge-queue operator escalation remains pending");
+            return WorkerAttentionRelayOutcome::Pending;
         }
     } else {
-        supervisor_body
-    };
-    let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
-    if prompt_queue.enqueue_idempotent(
-        &source,
-        &supervisor.name,
-        &supervisor_body,
-        supervisor.session.as_deref(),
-        Some(&format!("merge queue ejected: {task_id} PR #{pr_number}")),
-        Some(NotificationPriority::High),
-        &format!("merge-queue-ejection-outbox:{notification_id}"),
-        Some(&cas_store::QueueOrigin::Daemon),
-    ).is_err() || (!worker.is_empty() && prompt_queue.enqueue_idempotent(
+        let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
+        if prompt_queue.enqueue_idempotent(
+            &source,
+            &supervisor.name,
+            &supervisor_body,
+            supervisor.session.as_deref(),
+            Some(&format!("merge queue ejected: {task_id} PR #{pr_number}")),
+            Some(NotificationPriority::High),
+            &format!("merge-queue-ejection-outbox:{notification_id}"),
+            Some(&cas_store::QueueOrigin::Daemon),
+        ).is_err() {
+            return WorkerAttentionRelayOutcome::Pending;
+        }
+    }
+    if !worker.is_empty() && prompt_queue.enqueue_idempotent(
         "merge-queue-ejection",
         worker,
         &format!("{detail}\nWait for the supervisor's merge recovery instructions before starting other work."),
@@ -575,7 +586,7 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
         Some(NotificationPriority::High),
         &format!("merge-queue-ejection-worker:{key}"),
         Some(&cas_store::QueueOrigin::Daemon),
-    ).is_err()) {
+    ).is_err() {
         return WorkerAttentionRelayOutcome::Pending;
     }
     let Ok(task_store) = crate::store::open_task_store_cached(cas_dir) else {
@@ -2916,6 +2927,7 @@ impl FactoryDaemon {
             compact_cols: 0,
             compact_rows: 0,
             pending_spawns: VecDeque::new(),
+            binding_intake: Default::default(),
             spawn_task: None,
             spawn_verifications: HashMap::new(),
             cloud_handle,
@@ -3110,14 +3122,6 @@ impl FactoryDaemon {
         let mut last_violet_poll = std::time::Instant::now()
             .checked_sub(super::violet_activity::POLL_INTERVAL)
             .unwrap_or_else(std::time::Instant::now);
-        let mut violet_task: Option<
-            JoinHandle<(
-                super::violet_activity::PollReport,
-                Vec<super::violet_activity::SweepRequest>,
-                Option<super::violet_activity::SupervisorPresence>,
-            )>,
-        > = None;
-        let mut violet_sweep_task: Option<JoinHandle<()>> = None;
         let mut violet_error_reported = false;
         // cas-f9c7: messages from peer supervisors of this repo on other
         // machines, claimed from the Cassy Cloud peer mailbox every 15 s on
@@ -3460,17 +3464,20 @@ impl FactoryDaemon {
                     }
                 }
 
+                self.binding_intake.reap_sweep().await;
                 if let Some(violet) = violet_wake.as_ref() {
-                    if violet_task.is_none()
+                    // cas-9021: each tick and sweep reads the durable intake
+                    // gate per channel; the v2 managed reader is never gated.
+                    if self.binding_intake.tick.is_none()
                         && last_violet_poll.elapsed() >= super::violet_activity::POLL_INTERVAL
                     {
                         let violet = std::sync::Arc::clone(violet);
-                        violet_task =
+                        self.binding_intake.tick =
                             Some(tokio::task::spawn_blocking(move || violet.tick_blocking()));
                         last_violet_poll = std::time::Instant::now();
                     }
-                    if violet_task.as_ref().is_some_and(JoinHandle::is_finished) {
-                        match violet_task.take().expect("checked above").await {
+                    if self.binding_intake.tick.as_ref().is_some_and(JoinHandle::is_finished) {
+                        match self.binding_intake.tick.take().expect("checked above").await {
                             Ok((report, sweeps, presence)) => {
                                 if report.wakes > 0 {
                                     super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
@@ -3491,25 +3498,27 @@ impl FactoryDaemon {
                                 }
                                 if let Some(presence) = presence
                                     && !sweeps.is_empty()
-                                    && violet_sweep_task
-                                        .as_ref()
-                                        .is_none_or(JoinHandle::is_finished)
+                                    && self.binding_intake.sweep.is_none()
                                 {
                                     let violet = std::sync::Arc::clone(violet);
                                     let cas_dir = self.app.cas_dir().to_path_buf();
-                                    violet_sweep_task = Some(tokio::spawn(async move {
-                                        if violet.sweep(sweeps, presence).await > 0 {
+                                    self.binding_intake.sweep = Some(tokio::spawn(async move {
+                                        if violet.sweep(sweeps, presence).await? > 0 {
                                             super::delivery::wake_daemon_after_enqueue(&cas_dir);
                                         }
+                                        Ok(())
                                     }));
                                 }
                             }
                             Err(error) => {
+                                self.binding_intake.failed(format!("legacy tick did not finish: {error}"));
                                 tracing::warn!(%error, "Violet activity poll task failed")
                             }
                         }
                     }
                 }
+
+                self.finish_binding_intake_replies();
 
                 if let Some(report) = peer_mailbox.poll(std::time::Instant::now()).await
                     && report.delivered > 0

@@ -766,3 +766,27 @@ async fn cas_cd42_unavailable_cloud_sections_keep_observation_time_and_no_regist
             .all(|r| r.method.as_str() == "GET")
     );
 }
+
+/// cas-9f53: a worker `peers detail=true` lists under a peer supervisor is
+/// resolvable by name or name@machine, and names that supervisor as relay.
+#[test]
+fn cas_9f53_a_listed_peer_worker_resolves_to_its_owning_supervisor() {
+    let agents = vec![
+        agent("rapid-panther-80", "supervisor", "steady-lynx", "soundwave", REPO, 5),
+        agent("bright-lynx-31", "worker", "steady-lynx", "soundwave", REPO, 5),
+        agent("gone-worker", "worker", "steady-lynx", "soundwave", REPO, 3_600),
+        agent("other-session", "worker", "other-lynx", "soundwave", REPO, 5),
+    ];
+    let supervisors = peers::repo_peers(&agents, REPO, &[], None, Utc::now());
+    let workers = live_peer_workers(&supervisors, &agents, &[], Utc::now());
+    assert_eq!(
+        workers.iter().map(|worker| worker.name.as_str()).collect::<Vec<_>>(),
+        ["bright-lynx-31"],
+        "the same live session members peers lists"
+    );
+    let worker = &workers[0];
+    assert!(worker.matches("bright-lynx-31") && worker.matches("Bright-Lynx-31@soundwave"));
+    assert!(!worker.matches("bright-lynx-31@prowl"));
+    assert_eq!(worker.supervisor.name, "rapid-panther-80");
+    assert_eq!(worker.supervisor.session.as_deref(), Some("steady-lynx"));
+}

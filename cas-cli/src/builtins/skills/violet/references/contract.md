@@ -18,7 +18,7 @@ This is the Cassy-side summary of the hub's `docs/TOOL_CONTRACT.md` (violet_ps,
 | `include_threads` | true |
 | `include_recent_replies_to_older_roots` | true; with `since`, also expands older roots whose latest reply is in the window |
 | `thread_lookback_days` | 7; 1–30, measured before `since` |
-| `include_files` | true |
+| `include_files` | true; when false, every message's `file_ids` is `[]` and `files[]` is empty, so attachment presence is unknown, never absent |
 | `include_channels` | true for compatibility; pass `false` on every read except directory discovery |
 | `file_id` / `file_ids` | only these files (array ≤ 50); history, enrichment and `messages` are skipped |
 | `message_id` | exactly one root or reply |
@@ -57,7 +57,9 @@ and lets the others expand; re-read it with `thread_id`.
 
 **Skipped files.** A file over `max_file_bytes` or the aggregate budget keeps
 its metadata, omits `content_base64`, and sets `skipped: true` with
-`skip_reason` `exceeds_max_file_bytes` or `exceeds_max_bytes`. The hub streams
+`skip_reason` `exceeds_max_file_bytes` or `exceeds_max_bytes`. A file Slack
+refuses is skipped too, with `skip_reason` `access_denied`, `file_not_found` or
+`file_unreadable` and Slack's code or status in `upstream`. The hub streams
 skipped files up to 16 MiB (16777216 bytes) to fill `sha256`; above that cap,
 or when the stream fails, `skip_reason` is `hash_unavailable` and `sha256` is
 absent. `skipped_files` counts them. To verify an upload, read its `file_id`
@@ -169,15 +171,21 @@ cas violet read   --channel <name> --since <RFC3339> | --thread <message_id> | -
   thread go inline up to 1048576 bytes; above that every file is uploaded
   first and its reply carries the external metadata. A failure keeps
   `posted[]`, `failed_index` and `resume_safe`; follow the ordered-thread rules
-  above.
+  above. Each reply's files come back under `posted[i].files`; a thread
+  receipt has no top-level `files`. The run succeeds only when every
+  `--reply-file` is listed there with its own distinct `file_id` and
+  `state: attached`.
 - **read**: `violet_read` with `include_channels: false`. A channel read
   requires `--since`. Downloaded file bytes are dropped from the output
   (`content_omitted: true`); sizes and hashes stay.
 
 Human output is a verdict line, the message and file receipts (`message_id`,
-permalink, file ids, `sha256_verified`) and a hint. `--json` prints the hub's
-receipt, or its error receipt, as one document. Every `ok: false` exits
-non-zero, and the hub's own codes (`not_member`, `file_too_large`,
+`part_ids` when present, permalink, file ids, `sha256_verified`) and a hint.
+Multipart messages show `part_ids` on an additional line; each thread entry in
+`posted[]` follows the same rule. `message_id` remains the last part, and a
+split root's `thread_id` remains the first. `--json` prints the hub's receipt,
+or its error receipt, as one document, preserving additive fields. Every
+`ok: false` exits non-zero, and the hub's own codes (`not_member`, `file_too_large`,
 `file_integrity_mismatch`, …) pass through unchanged. The command's own codes:
 
 | Code | Meaning |
@@ -193,6 +201,8 @@ non-zero, and the hub's own codes (`not_member`, `file_too_large`,
 | `publication_blocked` | the post shares a file while its epic's verification is open ([publication](publication.md)) |
 | `violet_upload_failed` | the direct upload was refused; nothing was shared |
 | `violet_post_failed` | the hub refused without a code of its own |
+| `thread_files_unconfirmed` | the thread posted, but its receipt lists fewer attached files on a reply than were sent; read the thread, and rerun only with the same `--idempotency-key` |
+| `uploaded_not_attached` | the thread posted, but the hub uploaded a reply's files without attaching them (`state: uploaded`); read the thread before posting again |
 
 An error that lists `uploads_begun` means Slack allocated those uploads: check
 the channel before posting again. `cas doctor` shows readiness on its Violet

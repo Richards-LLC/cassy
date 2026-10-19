@@ -1126,3 +1126,111 @@ fn cas_6d5c_task_lifecycle_retires_only_the_related_workers_alarms() {
         );
     }
 }
+
+fn age_all(f: &Fixture) {
+    rusqlite::Connection::open(f.cas_dir.join("cas.db"))
+        .unwrap()
+        .execute(
+            "UPDATE prompt_queue SET created_at=?",
+            rusqlite::params![(chrono::Utc::now() - chrono::Duration::seconds(900)).to_rfc3339()],
+        )
+        .unwrap();
+}
+
+/// cas-9c34: the supervisor's worktree_merge naming the parked task (even
+/// one refused while CI is pending) reads that task's merge request; another
+/// task's request still alarms.
+#[test]
+fn cas_9c34_acting_on_a_merge_request_retires_both_alarms_for_that_task_only() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let request = |task: &str| {
+        let envelope = crate::prompt_revalidation::MergeRequestEnvelope {
+            task_id: task.into(),
+            branch_tip: "delivery-tip".into(),
+            target_branch: "epic/v50".into(),
+            target_branch_tip: "old-target".into(),
+            anchor_tip: None,
+            commits_not_on_target_base: 1,
+            pr_number: None,
+            source_freshness_unavailable: None,
+        };
+        crate::prompt_revalidation::attach_merge_request_envelope("status: ready", &envelope)
+    };
+    let acted = f.aged("worker", "supervisor", &request("cas-b51b"));
+    let waiting = f.aged("worker", "supervisor", &request("cas-other"));
+    let supervisor = open_agent_store(&f.cas_dir).unwrap().get(&format!("{SUPERVISOR}-id")).unwrap();
+    assert_eq!(
+        crate::prompt_revalidation::ack_merge_requests_acted_on(f.queue.as_ref(), &supervisor, "cas-b51b"),
+        1
+    );
+    let alarms = f.scan();
+    assert!(
+        // pin: alarms name the exact unread row id; the acted-on one is gone.
+        alarms.iter().all(|row| !row.prompt.contains(&format!("message {acted}"))),
+        "{alarms:?}"
+    );
+    assert!(
+        // pin: another task's request still names its row in the alarm.
+        alarms.iter().any(|row| row.prompt.contains(&format!("message {waiting}"))),
+        "{alarms:?}"
+    );
+}
+
+/// cas-37b8: a store-stamped peer copy and a daemon non-waking lifecycle
+/// relay ask nothing; left unread they raise no alarm and stay unacked.
+#[test]
+fn cas_37b8_fyi_rows_left_unread_raise_no_alarm_and_stay_unacked() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let lifecycle = f
+        .queue
+        .enqueue_urgent_with_outcome(
+            "lifecycle:19821",
+            SUPERVISOR,
+            "<task-lifecycle transition=\"task_started\" task_id=\"cas-f9b7\" old=\"open\" \
+             new=\"in_progress\" actor=\"worker\" notification_id=\"19821\" \
+             occurrence=\"2026-10-17T15:17:19.585694327+00:00\">\nTask cas-f9b7 — sync\n\
+             Session: provision-test\n</task-lifecycle>",
+            Some(SESSION),
+            Some("cas-f9b7 started"),
+            Some(cas_store::NotificationPriority::Normal),
+            false,
+            Some(&cas_store::QueueOrigin::Daemon),
+        )
+        .unwrap()
+        .id();
+    let body = "cas-f9b7 touches the same store; I will stay read-only.";
+    let copy = crate::mcp::tools::service::agent_search_system::message::peer_copy_text(
+        "worker", "other-worker", body,
+    );
+    let peer = f
+        .queue
+        .enqueue_worker_peer_with_supervisor_copy(
+            "worker",
+            "other-worker",
+            SUPERVISOR,
+            body,
+            &copy,
+            SESSION,
+            Some("collision warning"),
+            None,
+            false,
+            Some(&cas_store::QueueOrigin::RegisteredAgent { agent_id: "worker-id".into() }),
+        )
+        .unwrap();
+    // The peer read its own copy; only the supervisor's FYI copy is unread.
+    f.queue.ack(peer.recipient_id).unwrap();
+    let peer = peer.supervisor_copy_id;
+    age_all(&f);
+    let alarms = f.scan();
+    assert!(
+        // pin: the typed worker-attention kind routes the unread alarm.
+        alarms.iter().all(|row| !row.prompt.contains("kind=\"supervisor_unread\"")
+            && row.source != "delivery-watchdog"),
+        "{alarms:?}"
+    );
+    for id in [lifecycle, peer] {
+        assert!(f.queue.queued_prompt(id).unwrap().unwrap().acked_at.is_none(), "row {id}");
+    }
+}

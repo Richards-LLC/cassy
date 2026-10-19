@@ -1,0 +1,51 @@
+[Unit]
+Description=Cassy trusted-branch GitHub Actions runner (light lane slot 3)
+Documentation=https://github.com/Richards-LLC/cassy/blob/main/docs/ci/self-hosted-runner-pilot.md
+Wants=network-online.target
+After=network-online.target
+
+# cas-3b5e: a light slot runs only slim factory lane jobs (label
+# cas-lane-light, never cas-ci-32core). It compiles no Rust, so it has no
+# sccache server, no shared cargo cache and a hard CPU cap.
+[Service]
+Type=simple
+User=cassy-actions
+Group=cassy-actions
+WorkingDirectory=/var/lib/cassy-actions/runner-3
+ExecStart=/usr/bin/ionice -c 2 -n 7 /var/lib/cassy-actions/runner-3/bin/runsvc.sh
+Restart=always
+RestartSec=10s
+TimeoutStopSec=2min
+KillMode=mixed
+
+Nice=10
+CPUWeight=25
+IOWeight=25
+CPUQuota=200%
+TasksMax=2048
+Environment=HOME=/var/lib/cassy-actions
+Environment=CASSY_ACTIONS_RUNNER_SLOT=3
+Environment=CARGO_HOME=/var/lib/cassy-actions/.cargo
+Environment=RUSTUP_HOME=/var/lib/cassy-actions/.rustup
+Environment=CARGO_TARGET_DIR=/var/lib/cassy-actions/runner-3/cargo-target
+Environment=CARGO_INCREMENTAL=0
+Environment=CARGO_BUILD_JOBS=2
+Environment=PATH=/var/lib/cassy-actions/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+UMask=0027
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/cassy-actions
+
+[Install]
+WantedBy=multi-user.target

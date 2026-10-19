@@ -526,7 +526,12 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
         };
     }
 
-    let mut pending = false;
+    // cas-5132: a re-push cancels a check and starts it again at the same
+    // SHA. Per check name, the latest non-cancelled run is the verdict; a
+    // check whose every run was cancelled is superseded (awaiting its
+    // rerun), never red.
+    let (runs, superseded) = select_latest_check_runs(runs);
+    let mut pending = superseded;
     let mut url = None;
     let mut observed_checks = Vec::new();
     let mut test_checks = Vec::new();
@@ -553,12 +558,7 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
         if matches!(
             conclusion,
             Some(
-                "failure"
-                    | "action_required"
-                    | "cancelled"
-                    | "timed_out"
-                    | "stale"
-                    | "startup_failure"
+                "failure" | "action_required" | "timed_out" | "stale" | "startup_failure"
             )
         ) {
             return BranchCiState::Red {
@@ -580,6 +580,19 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
                 ),
             };
         }
+    }
+    // cas-5132: only the change classifier (or another unfinished check) has
+    // registered; the test jobs it fans out to have not appeared yet.
+    if test_checks.is_empty()
+        && (pending
+            || observed_checks
+                .iter()
+                .any(|name| name.to_ascii_lowercase().contains("classify")))
+    {
+        return BranchCiState::Pending {
+            sha: sha.to_string(),
+            url,
+        };
     }
     if test_checks.is_empty() {
         return BranchCiState::Unknown {
@@ -614,6 +627,41 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
             test_checks: passed_test_checks,
         }
     }
+}
+
+/// The verdict-bearing run of each check: the newest (by id) non-cancelled
+/// run per name. Unnamed runs pass through. Returns whether any check had
+/// only cancelled runs (superseded by a rerun that has not appeared yet).
+fn select_latest_check_runs(runs: &[serde_json::Value]) -> (Vec<&serde_json::Value>, bool) {
+    let cancelled = |run: &serde_json::Value| {
+        run.get("conclusion").and_then(serde_json::Value::as_str) == Some("cancelled")
+    };
+    let id = |run: &serde_json::Value| run.get("id").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let mut latest: Vec<&serde_json::Value> = Vec::new();
+    let mut superseded = false;
+    let mut names: Vec<&str> = Vec::new();
+    for run in runs {
+        let Some(name) = run.get("name").and_then(serde_json::Value::as_str) else {
+            if cancelled(run) {
+                superseded = true;
+            } else {
+                latest.push(run);
+            }
+            continue;
+        };
+        if names.contains(&name) {
+            continue;
+        }
+        names.push(name);
+        let same = runs
+            .iter()
+            .filter(|other| other.get("name").and_then(serde_json::Value::as_str) == Some(name));
+        match same.filter(|run| !cancelled(run)).max_by_key(|run| id(run)) {
+            Some(run) => latest.push(run),
+            None => superseded = true,
+        }
+    }
+    (latest, superseded)
 }
 
 /// A deployment preview is a check-run, but it is not test evidence. Require
@@ -3130,6 +3178,16 @@ impl CasCore {
                 data: None,
             });
         }
+        // cas-9c34: the supervisor is acting on this task's merge request,
+        // whatever this attempt's outcome; it is read.
+        if let Some(task_id) = task_id
+            && let Ok(caller) = self.get_agent_id()
+            && let Some(supervisor) =
+                self.open_agent_store().ok().and_then(|store| store.get(&caller).ok())
+            && let Ok(queue) = crate::store::open_prompt_queue_store(&cas_root)
+        {
+            crate::prompt_revalidation::ack_merge_requests_acted_on(queue.as_ref(), &supervisor, task_id);
+        }
         let config = Config::load(&cas_root).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to load config: {e}")),
@@ -4552,7 +4610,8 @@ impl CasCore {
 #[cfg(test)]
 mod tests {
     use super::{
-        CI_ADVISORY_POLICY_NOTICE, DeliveryMergePreflight, GhApiOutput, admit_branch_ci,
+        BranchCiState, CI_ADVISORY_POLICY_NOTICE, DeliveryMergePreflight, GhApiOutput,
+        admit_branch_ci, require_code_validation,
         authorize_explicit_task_for_system_b_worker, ci_override_note,
         classify_delivery_merge_preflight, declared_system_b_merge_target,
         derive_delivery_supervisor_authority, describe_branch_ci_state, describe_target_push_state,
@@ -5091,6 +5150,30 @@ mod tests {
         assert!(red_receipt.contains("abc123"), "{red_receipt}");
         assert!(red_receipt.contains("actions/runs/42"), "{red_receipt}");
         assert!(!red_receipt.contains("CI state unknown"), "{red_receipt}");
+    }
+
+    /// cas-5132: per check, the newest non-cancelled run at the SHA decides.
+    /// A cancelled run is superseded, never red; a real failure stays red;
+    /// a classifier with no test jobs registered yet is pending.
+    #[test]
+    fn cas_5132_cancelled_runs_are_superseded_and_classifier_only_is_pending() {
+        let state = |runs: &str| {
+            lookup_branch_ci_with("factory/fox", "abc123", |_, _| {
+                gh_output(true, "exit status: 0", format!(r#"{{"check_runs":[{runs}]}}"#).as_bytes(), "")
+            })
+        };
+        let cancelled = r#"{"id":1,"name":"Fast Validation","status":"completed","conclusion":"cancelled"}"#;
+        let success = r#"{"id":2,"name":"Fast Validation","status":"completed","conclusion":"success"}"#;
+        let failure = r#"{"id":3,"name":"Fast Validation","status":"completed","conclusion":"failure"}"#;
+        let classifier = r#"{"id":4,"name":"Classify CI diff","status":"completed","conclusion":"success"}"#;
+        assert!(matches!(state(&format!("{cancelled},{success}")), BranchCiState::Green { .. }));
+        assert!(matches!(state(cancelled), BranchCiState::Pending { .. }));
+        assert!(matches!(state(&format!("{cancelled},{success},{failure}")), BranchCiState::Red { .. }));
+        assert!(matches!(state(classifier), BranchCiState::Pending { .. }));
+        assert!(matches!(
+            require_code_validation(state(classifier)),
+            BranchCiState::CodePending { .. }
+        ));
     }
 
     #[test]

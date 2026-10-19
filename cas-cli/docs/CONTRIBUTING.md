@@ -1181,7 +1181,28 @@ and the only gate to `main`; its required checks, including the Rust suite, run
 once on the exact merged tree. Commander journeys run there only when `hub-web/`
 product inputs change. Do not add lane-merge compile checks, park re-runs or a
 separate assembly journey run. If more than two merge-queue ejections per epic
-follow from this, unset `CAS_LANE_SLIM`: that one setting is the D1 rollback. The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
+follow from this, unset `CAS_LANE_SLIM`: that one setting is the D1 rollback.
+
+Factory pushes start in `.github/workflows/lane.yml` (cas-32e9), also named
+`CI`. With `CAS_LANE_SLIM=true` it runs only Classify CI diff, the two Scoped
+Validation checks (Docs Lint for a docs-only diff) under their usual names, so a
+lane is not held up by dozens of skipped `ci.yml` jobs. Unset, it calls `ci.yml`
+and the lane runs exactly as before. When the repository variable
+`CASSY_LANE_SELF_HOSTED` is `enabled` (cas-14e0), those slim jobs run on the
+local light lane slots instead of waiting for a hosted slot: runner slots 3
+and 4 (cas-3b5e) carry only the `cas-lane-light` label, so merge-queue and
+release Rust jobs keep slots 1 and 2 (`cas-ci-32core`). The light units run at
+`Nice=10`, `CPUWeight=25`, `CPUQuota=200%` and `CARGO_BUILD_JOBS=2`, with no
+sccache; `scripts/install-cassy-actions-runner.sh` provisions them
+(`RUNNER_SLOT=3|4`). `lane.yml` has no pull request trigger, so forks
+never reach those runners; `scripts/ci_tiers/test-policy.py` pins the routing.
+Rollback is one setting: `gh variable delete CASSY_LANE_SELF_HOSTED --repo
+Richards-LLC/cassy` keeps the slim lane on hosted runners, and unsetting
+`CAS_LANE_SLIM` restores the full lane. Retiring the light slots also means
+`systemctl disable --now cassy-actions-runner-3 cassy-actions-runner-4` and
+reverting `lane.yml`'s label.
+
+The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
 epic close gate accepts a local `ASSEMBLY_PROOF`, it covers the Rust build and
 suite only; it does not replace the queue's path to `main` or require a
 journey receipt.
@@ -2297,6 +2318,12 @@ skips one that no longer resolves or is unsafe. Roots that 3.50.0 stored in
 `.cas/operator/write-policy.toml` are still honoured, and the next `cas config
 set factory.write_roots` moves them into `config.toml` (an empty value clears
 them too).
+
+For a support loop, the operator can include `~/.gabber-support` in the
+owning project's `factory.write_roots`, preserving any existing entries when
+setting the list. This admits `state.json` beneath that directory; a sibling
+such as `~/.gabber-support-other` stays blocked. Setting the key in the user's
+`~/.cas/config.toml` does not grant project writes.
 
 Each grant admits only its modes; a project root admits all three:
 

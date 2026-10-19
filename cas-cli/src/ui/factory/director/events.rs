@@ -597,6 +597,31 @@ pub(crate) fn supervisor_actionable_state_with_classifiers(
     held_workers: &HashSet<String>,
     now: DateTime<Utc>,
     idle_after_secs: u64,
+    resolve_delivery: impl FnMut(&TaskSummary, &str) -> (String, Option<String>),
+    classify_merged_close_blocked: impl FnMut(
+        &TaskSummary,
+        &str,
+        &str,
+        Option<&str>,
+    ) -> Option<MergedCloseBlockedTask>,
+    classify_delivery_hold: impl FnMut(&TaskSummary, &str) -> Option<DeliveryHold>,
+) -> Option<SupervisorActionableState> {
+    supervisor_actionable_state_with_ownership(
+        data, focused_epic_id, supervisor_name, held_workers, now, idle_after_secs,
+        resolve_delivery, classify_merged_close_blocked, classify_delivery_hold, |_| true,
+    )
+}
+
+/// The production stall check also requires fresh assignment ownership evidence.
+/// The predicate is a lookup only: split/claim reads belong on the external lane.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn supervisor_actionable_state_with_ownership(
+    data: &DirectorData,
+    focused_epic_id: Option<&str>,
+    supervisor_name: &str,
+    held_workers: &HashSet<String>,
+    now: DateTime<Utc>,
+    idle_after_secs: u64,
     mut resolve_delivery: impl FnMut(&TaskSummary, &str) -> (String, Option<String>),
     mut classify_merged_close_blocked: impl FnMut(
         &TaskSummary,
@@ -605,6 +630,7 @@ pub(crate) fn supervisor_actionable_state_with_classifiers(
         Option<&str>,
     ) -> Option<MergedCloseBlockedTask>,
     mut classify_delivery_hold: impl FnMut(&TaskSummary, &str) -> Option<DeliveryHold>,
+    mut can_assign: impl FnMut(&TaskSummary) -> bool,
 ) -> Option<SupervisorActionableState> {
     let epic_id = focused_epic_id?;
     let epic_is_open = data.epic_tasks.iter().any(|epic| {
@@ -706,6 +732,7 @@ pub(crate) fn supervisor_actionable_state_with_classifiers(
                 && task.status == TaskStatus::Open
                 && task.assignee.is_none()
                 && !data.start_gated_task_ids.contains(&task.id)
+                && can_assign(task)
         })
         .map(|task| task.id.clone())
         .collect::<Vec<_>>();

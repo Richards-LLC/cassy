@@ -281,6 +281,7 @@ pub fn mime_for(path: &Path) -> String {
         "webm" => "video/webm",
         "zip" => "application/zip",
         "gz" | "tgz" => "application/gzip",
+        "xz" => "application/x-xz",
         "yaml" | "yml" => "application/yaml",
         "toml" => "text/plain",
         _ => "application/octet-stream",

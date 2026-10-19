@@ -32,6 +32,8 @@ use crate::worktree::WorktreeManager;
 
 mod branch_visibility;
 pub(crate) mod delivery_evidence;
+#[cfg(test)]
+mod assignment_evidence_tests;
 mod director_refresh;
 mod imports;
 mod init;

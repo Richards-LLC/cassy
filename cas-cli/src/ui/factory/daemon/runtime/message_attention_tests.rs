@@ -1216,8 +1216,10 @@ fn cas_37b8_fyi_rows_left_unread_raise_no_alarm_and_stay_unacked() {
             false,
             Some(&cas_store::QueueOrigin::RegisteredAgent { agent_id: "worker-id".into() }),
         )
-        .unwrap()
-        .supervisor_copy_id;
+        .unwrap();
+    // The peer read its own copy; only the supervisor's FYI copy is unread.
+    f.queue.ack(peer.recipient_id).unwrap();
+    let peer = peer.supervisor_copy_id;
     age_all(&f);
     let alarms = f.scan();
     assert!(

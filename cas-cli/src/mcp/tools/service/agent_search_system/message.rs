@@ -5002,6 +5002,14 @@ mod cas_89e1_post_merge_message_type_tests {
                 ],
             )
             .expect("age both rows past the stale TTL");
+        let quarantined = queue
+            .expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS)
+            .expect("simulate the daemon stale sweep");
+        assert_eq!(
+            quarantined.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![named, automatic],
+            "the daemon has already retained and quarantined both stale rows"
+        );
 
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);

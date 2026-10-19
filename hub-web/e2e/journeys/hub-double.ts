@@ -123,6 +123,10 @@ export type Outage = {
    * a half-open TCP connection does after an interface change (default), or
    * close as a reset would. */
   sockets?: "stall" | "close";
+  /** HTTP fails at the network (default), or the hub answers every
+   * authenticated request with its retryable 503 auth_store_unavailable, as an
+   * EMFILE hub does (cas-cb94). */
+  http?: "abort" | "auth_store_unavailable";
 };
 
 /** The supervisor pane's rendered rows, as the daemon pages them to Raw output (cas-f285). */
@@ -770,7 +774,12 @@ export class HubDouble {
     const machineId = url.hostname.replace(/\.test$/, "");
     const path = url.pathname;
     const method = route.request().method();
-    if (!this.reachable(machineId)) return route.abort("internetdisconnected");
+    if (!this.reachable(machineId)) {
+      if (this.outages.get(machineId)?.http !== "auth_store_unavailable") return route.abort("internetdisconnected");
+      if (path === "/v1/health") return route.fulfill({ json: { ok: true, installation_protocol: 1 } });
+      const reason = "auth_store_unavailable";
+      return route.fulfill({ status: 503, headers: { "retry-after": "2", "x-cas-refusal": reason }, json: { error: reason, reason, retryable: true, server_time: Math.floor(this.now() / 1000) } });
+    }
     if (path === "/v1/auth/pairing/protocol") return route.fulfill({ json: { installation_protocol: 1 } });
     if (path === "/v1/health") return route.fulfill({ json: { ok: true, installation_protocol: 1 } });
     if (path === "/v1/auth/pairing/commit" || path === "/v1/auth/pairing/abort") return this.installationAction(route, machineId, path.endsWith("commit"));

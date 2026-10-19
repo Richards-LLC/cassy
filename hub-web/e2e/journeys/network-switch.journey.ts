@@ -734,6 +734,46 @@ test("HUB-J12 network switch: a reload while the machine is unreachable reopens 
   });
 });
 
+// cas-6c7a: a machine down past its catalog's freshness (30 s in the double)
+// can't send a fresh one. Whether the network is gone or the hub answers its
+// retryable 503, the list keeps its supervisors as last known, agreeing with
+// the open conversation and the footer; only a catalog the machine sends
+// empties the list.
+test("HUB-J12 network switch: an outage past the catalog's freshness keeps the list, footer and conversation in agreement (cas-6c7a)", journeyPart, async ({ page, journey }) => {
+  const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session })) };
+  const { hub, clock, header } = await connected(page, true, [machine]);
+  const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
+  const footer = page.locator(".hub-footer-meta");
+  const empty = page.getByText(/No live supervisors listed/);
+  const outages = [
+    ["The network is gone for longer than the catalog's freshness", { sockets: "close" }],
+    ["The hub answers 503 auth_store_unavailable for as long", { sockets: "close", http: "auth_store_unavailable" }],
+  ] as const;
+  for (const [stage, outage] of outages) {
+    await journey.stage(stage, async () => {
+      await hub.down("atlas", outage);
+      await expect(header).toHaveText(" · Reconnecting");
+      for (let elapsed = 0; elapsed < 60_000; elapsed += 5_000) await clock.advance(5_000);
+      await expect(header).toHaveText(" · Reconnecting");
+      await expect(row).toContainText("Reconnecting · last known");
+      await expect(empty).toHaveCount(0);
+      await expect(footer).toContainText("1 conversation, last known");
+      await hub.up("atlas");
+      await clock.advance(10_000);
+      await expect(header).toHaveText(" · Live");
+      await expect(row).not.toContainText("last known");
+      await expect(footer).toContainText(/^1 conversationHub /);
+    });
+  }
+  await journey.stage("The machine answers with no live supervisors: the list is empty", async () => {
+    machine.sessions.length = 0;
+    await clock.advance(30_000);
+    await expect(row).toHaveCount(0);
+    await expect(empty).toBeVisible();
+    await expect(footer).toContainText(/^0 conversationsHub /);
+  });
+});
+
 // cas-0e14 (journey F29): a code re-pair requests only the default scopes, so
 // a browser that could start sessions loses that. The dialog says so before
 // the code is made, with the command whose link would keep it, and once the

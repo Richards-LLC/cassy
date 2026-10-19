@@ -625,6 +625,10 @@ async fn a_claim_held_by_a_local_agent_moves_with_the_local_lease() {
 
         let worker = alpha.second_agent("delta-worker");
         if cancel_at_handoff {
+            let agents = open_agent_store(&alpha.cas_dir).unwrap();
+            let mut caller = agents.list(None).unwrap().into_iter().find(|a| a.name == "delta-worker").unwrap();
+            caller.metadata.insert("halt_task_work".into(), "1".into());
+            agents.update(&caller).unwrap();
             let (entered, reached) = tokio::sync::oneshot::channel();
             let (resume, wait) = std::sync::mpsc::channel();
             cloud.state.lock().unwrap().release_gate = Some((entered, wait));
@@ -644,6 +648,8 @@ async fn a_claim_held_by_a_local_agent_moves_with_the_local_lease() {
             let lease = agents.get_lease("cas-p008").unwrap().unwrap();
             assert_ne!(lease.agent_id, alpha.agent_id);
             assert_eq!(lease.status, cas::types::LeaseStatus::Active);
+            assert!(!agents.get(&caller.id).unwrap().metadata.contains_key("halt_task_work"),
+                "a committed start must clear its old work halt before a cancellable handoff");
             continue;
         }
         let taken = start(&worker, "cas-p008", false).await.expect("a local holder is not a peer");

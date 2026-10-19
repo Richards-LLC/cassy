@@ -2529,6 +2529,23 @@ impl CasCore {
                 return Err(Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to update: {error}")));
             }
         };
+        // cas-b269 review 2: clear urgent-stop halt ONLY after start fully
+        // succeeds, and only if halt gen is not newer than this start's
+        // ceiling (concurrent urgent stop must win).
+        if let Ok(agent_store) = self.open_agent_store() {
+            if let Ok(mut agent) = agent_store.get(&agent_id) {
+                if stale_close_guard::agent_task_work_halted(&agent.metadata) {
+                    let clear_ceiling = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                    let stored_gen = stale_close_guard::halt_generation(&agent.metadata);
+                    if stale_close_guard::should_clear_halt_at_generation(stored_gen, clear_ceiling)
+                    {
+                        stale_close_guard::clear_halt_metadata(&mut agent.metadata);
+                        let _ = agent_store.update(&agent);
+                    }
+                }
+            }
+        }
+
         // Explicit even when notifications and Cloud syncing are disabled:
         // the receipt belongs to this start's completed local transition.
         crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
@@ -2598,23 +2615,6 @@ impl CasCore {
         } else {
             Some(format!("{}{peer_notes}", claim_info.unwrap_or_default()))
         };
-
-        // cas-b269 review 2: clear urgent-stop halt ONLY after start fully
-        // succeeds, and only if halt gen is not newer than this start's
-        // ceiling (concurrent urgent stop must win).
-        if let Ok(agent_store) = self.open_agent_store() {
-            if let Ok(mut agent) = agent_store.get(&agent_id) {
-                if stale_close_guard::agent_task_work_halted(&agent.metadata) {
-                    let clear_ceiling = chrono::Utc::now().timestamp_millis().max(0) as u64;
-                    let stored_gen = stale_close_guard::halt_generation(&agent.metadata);
-                    if stale_close_guard::should_clear_halt_at_generation(stored_gen, clear_ceiling)
-                    {
-                        stale_close_guard::clear_halt_metadata(&mut agent.metadata);
-                        let _ = agent_store.update(&agent);
-                    }
-                }
-            }
-        }
 
         // cas-062d / cas-17e4: durable outbox push after successful start.
         let actor = agent_store

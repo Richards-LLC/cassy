@@ -491,6 +491,7 @@ fn multipart_post_and_thread_receipts_show_part_ids_human_and_json() {
     let hub = ScriptedHub::with(vec![post_receipt.clone()]);
     let (out, result) = run_cli(&post_args, &hub, false, &no_gate);
     result.unwrap();
+    assert!(out.contains("message 1710000000.000002"), "{out}");
     assert!(
         out.contains("part_ids: 1710000000.000001, 1710000000.000002"),
         "{out}"
@@ -501,6 +502,7 @@ fn multipart_post_and_thread_receipts_show_part_ids_human_and_json() {
     result.unwrap();
     let report: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(report["message"]["message_id"], "1710000000.000002");
+    assert_eq!(report["message"]["thread_id"], "1710000000.000001");
     assert_eq!(report["message"]["part_ids"], part_ids);
 
     let thread_receipt = json!({
@@ -537,10 +539,13 @@ fn multipart_post_and_thread_receipts_show_part_ids_human_and_json() {
     let hub = ScriptedHub::with(vec![thread_receipt.clone()]);
     let (out, result) = run_cli(&thread_args, &hub, false, &no_gate);
     result.unwrap();
+    assert!(out.contains("0 root 1710000000.000002"), "{out}");
     assert!(
         out.contains("part_ids: 1710000000.000001, 1710000000.000002"),
         "{out}"
     );
+    assert_eq!(out.matches("part_ids:").count(), 1, "{out}");
+    assert!(out.contains("1 reply 1710000000.000003"), "{out}");
 
     let hub = ScriptedHub::with(vec![thread_receipt]);
     let (out, result) = run_cli(&thread_args, &hub, true, &no_gate);

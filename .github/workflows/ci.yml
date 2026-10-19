@@ -76,7 +76,11 @@ jobs:
   # cheap docs check.
   ci-diff:
     name: Classify CI diff
-    runs-on: ubuntu-latest
+    # cas-14e0: a slim factory push only classifies, checks out and reports,
+    # so it runs on the local runners instead of waiting for a hosted slot.
+    # Only push to refs/heads/factory/** routes there (never pull_request or a
+    # fork); rollback is unsetting CASSY_LANE_SELF_HOSTED.
+    runs-on: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && vars.CAS_LANE_SLIM == 'true' && vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-ci-32core"]') || 'ubuntu-latest' }}
     outputs:
       comparison-base: ${{ steps.classify-diff.outputs.comparison-base }}
       class: ${{ steps.classify-diff.outputs.class }}
@@ -115,7 +119,11 @@ jobs:
       || github.event_name == 'merge_group'
       || github.event_name == 'push')
     needs: ci-diff
-    runs-on: ubuntu-latest
+    # cas-14e0: a slim factory push only classifies, checks out and reports,
+    # so it runs on the local runners instead of waiting for a hosted slot.
+    # Only push to refs/heads/factory/** routes there (never pull_request or a
+    # fork); rollback is unsetting CASSY_LANE_SELF_HOSTED.
+    runs-on: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && vars.CAS_LANE_SLIM == 'true' && vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-ci-32core"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -340,11 +348,16 @@ jobs:
     concurrency:
       group: scoped-validation-fast-${{ github.ref }}
       cancel-in-progress: true
-    runs-on: ubuntu-latest
+    # cas-14e0: a slim factory push only classifies, checks out and reports,
+    # so it runs on the local runners instead of waiting for a hosted slot.
+    # Only push to refs/heads/factory/** routes there (never pull_request or a
+    # fork); rollback is unsetting CASSY_LANE_SELF_HOSTED.
+    runs-on: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && vars.CAS_LANE_SLIM == 'true' && vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-ci-32core"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # A slim factory push builds nothing that needs the submodules.
+          submodules: ${{ vars.CAS_LANE_SLIM == 'true' && 'false' || 'recursive' }}
           fetch-depth: 0
           ref: ${{ github.sha }}
 
@@ -487,7 +500,8 @@ jobs:
           >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report sccache stats
-        if: always()
+        # A slim factory push compiles nothing; there is no cache to report.
+        if: always() && vars.CAS_LANE_SLIM != 'true'
         run: |
           if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
             ./scripts/ci-sccache-summary.sh "Scoped Validation (fast)"
@@ -523,11 +537,16 @@ jobs:
     concurrency:
       group: scoped-validation-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
-    runs-on: ubuntu-latest
+    # cas-14e0: a slim factory push only classifies, checks out and reports,
+    # so it runs on the local runners instead of waiting for a hosted slot.
+    # Only push to refs/heads/factory/** routes there (never pull_request or a
+    # fork); rollback is unsetting CASSY_LANE_SELF_HOSTED.
+    runs-on: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/') && vars.CAS_LANE_SLIM == 'true' && vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-ci-32core"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # A slim factory push builds nothing that needs the submodules.
+          submodules: ${{ (github.event_name == 'push' && vars.CAS_LANE_SLIM == 'true') && 'false' || 'recursive' }}
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
@@ -707,7 +726,8 @@ jobs:
           fi
 
       - name: Report sccache stats
-        if: always()
+        # A slim factory push compiles nothing; there is no cache to report.
+        if: always() && (github.event_name != 'push' || vars.CAS_LANE_SLIM != 'true')
         run: |
           # Version skew (cas-3e14): the workflow can come from a newer main
           # while the checkout is an older head that predates this script.

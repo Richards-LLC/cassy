@@ -33,7 +33,7 @@ use cas_store::{NotificationPriority, PromptQueueStore, QueueOrigin};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-use super::violet_activity::{PollReport, VIOLET_ACTIVITY_ENVELOPE_CLOSE, WakeItem, violet_activity_envelope};
+use super::violet_activity::{PollReport, VIOLET_ACTIVITY_ENVELOPE_CLOSE, WakeItem, managed_violet_activity_envelope, slack_ts_instant};
 use crate::coordination::external_work::{
     CALL_REMOTE_BUDGET, CONTRACT_SCHEMA, CloudCoordinationPort, HttpCloudCoordinationPort, RemoteError,
 };
@@ -181,6 +181,8 @@ pub(crate) struct ReaderReport {
     pub held: usize,
     /// `(delivery id, why it was not typed)`.
     pub not_typed: Vec<(String, NamedRefusal)>,
+    /// cas-6ace: the highest `delivery_generation` this claim leased.
+    pub generation: Option<u64>,
 }
 
 /// What walking one delivery did.
@@ -320,7 +322,11 @@ impl VioletReader {
         self.managed = true;
         let deliveries: Vec<ClaimedDelivery> =
             claim["deliveries"].as_array().into_iter().flatten().filter_map(parse_delivery).collect();
-        let mut report = ReaderReport { claimed: deliveries.len(), ..ReaderReport::default() };
+        let mut report = ReaderReport {
+            claimed: deliveries.len(),
+            generation: deliveries.iter().map(|d| d.delivery_generation).max(),
+            ..ReaderReport::default()
+        };
         // cas-b94d: without the bindings' activation the reader cannot tell
         // history from a fresh ask, so it admits nothing this tick: leases go
         // back to Cloud unread and the recovery listing waits.
@@ -644,8 +650,38 @@ const RECOVERY_NOTICE: &str = "Recovery notice: an earlier supervisor session ma
      this message before it stopped, so it is not re-sent. Read the thread before replying, and never \
      reply twice.\n";
 
+/// Source age in complete seconds, independent of observation/delivery delay.
+/// Accept nonnegative Unix seconds with an optional 1–6 digit Slack fraction.
+/// Invalid or future sources are unknown (not clamped to a fresh zero). Missing
+/// identity is still refused by enqueue_at before formatting. Keep the shared
+/// legacy parser unchanged; validate here so it cannot silently truncate an
+/// invalid suffix or a sub-microsecond future timestamp into apparent freshness.
+fn managed_message_age_secs(message_ts: &str, now: DateTime<Utc>) -> Option<i64> {
+    let (seconds, fraction) = message_ts
+        .split_once('.')
+        .map_or((message_ts, None), |(seconds, fraction)| {
+            (seconds, Some(fraction))
+        });
+    if seconds.is_empty() || !seconds.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if fraction.is_some_and(|fraction| {
+        fraction.is_empty()
+            || fraction.len() > 6
+            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    }) {
+        return None;
+    }
+    let source = slack_ts_instant(message_ts)?;
+    (source <= now).then(|| (now - source).num_seconds())
+}
+
 impl PromptQueueTyper<'_> {
     fn enqueue(&self, session: &str, delivery: &ClaimedDelivery, kind: &str, text: &str, key: &str) -> Result<(), NamedRefusal> {
+        self.enqueue_at(session, delivery, kind, text, key, Utc::now())
+    }
+
+    fn enqueue_at(&self, session: &str, delivery: &ClaimedDelivery, kind: &str, text: &str, key: &str, now: DateTime<Utc>) -> Result<(), NamedRefusal> {
         let target = &delivery.target;
         let field = |value: &Value| value.as_str().filter(|text| !text.is_empty()).map(str::to_string);
         let (Some(channel), Some(thread_ts), Some(message_ts)) = (
@@ -655,8 +691,11 @@ impl PromptQueueTyper<'_> {
         ) else {
             return Err(NamedRefusal::new("invalid_target", "claim target lacks channel, thread or message"));
         };
-        let item = WakeItem { message_ts, thread_ts, user: String::new(), age_secs: 0, human_mentions: Vec::new() };
-        let mut prompt = violet_activity_envelope(&channel, &channel, kind, &[item]);
+        let source_age = managed_message_age_secs(&message_ts, now);
+        // The managed formatter uses source_age, including explicit unknown;
+        // the legacy numeric carrier is unchanged for its other producers.
+        let item = WakeItem { message_ts, thread_ts, user: String::new(), age_secs: source_age.unwrap_or_default(), human_mentions: Vec::new() };
+        let mut prompt = managed_violet_activity_envelope(&channel, &channel, kind, &item, source_age);
         prompt.insert_str(prompt.len() - VIOLET_ACTIVITY_ENVELOPE_CLOSE.len(), text);
         self.0
             .enqueue_idempotent(
@@ -753,13 +792,31 @@ pub(crate) fn read_managed(
 ) -> Option<PollReport> {
     let token = cloud.token.as_deref().map(str::trim).filter(|token| !token.is_empty())?;
     let port = HttpCloudCoordinationPort::new(cloud.endpoint.clone(), token);
-    let mut reader = reader.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let body = super::violet_body::VioletBodySource(|args| super::violet_body::read(cas_dir, registration_id, factory_session, args));
     let quarantine = FileQuarantine(cas_dir.join("violet").join("quarantine.jsonl"));
     let io = ReaderIo { body: &body, typer: &PromptQueueTyper(queue), quarantine: &quarantine };
-    let outcome = reader.tick(&port, registration_id, &io, now);
+    read_managed_on(reader, &port, registration_id, cas_dir, &io, now)
+}
+
+/// [`read_managed`] against any port and reader I/O.
+fn read_managed_on(
+    reader: &Mutex<VioletReader>,
+    port: &dyn CloudCoordinationPort,
+    registration_id: &str,
+    cas_dir: &std::path::Path,
+    io: &ReaderIo<'_>,
+    now: DateTime<Utc>,
+) -> Option<PollReport> {
+    let mut reader = reader.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let outcome = reader.tick(port, registration_id, io, now);
     if !reader.managed() {
         return None;
+    }
+    if let Some(receipt) = ClaimReceipt::of(registration_id, &outcome, now)
+        && let Err(error) = receipt.append(cas_dir)
+    {
+        // The receipt only observes the tick; losing one never changes it.
+        tracing::debug!(%error, "cas-6ace: Violet claim receipt not written");
     }
     let mut report = PollReport::default();
     match outcome {
@@ -773,6 +830,117 @@ pub(crate) fn read_managed(
         ClaimOutcome::Unmanaged => {}
     }
     Some(report)
+}
+
+/// cas-6ace: claim receipts kept, newest last.
+const CLAIM_RECEIPTS_KEPT: usize = 20;
+/// cas-6ace: receipts named in the doctor line, newest first.
+const CLAIM_RECEIPTS_SHOWN: usize = 5;
+
+fn claim_receipts_path(cas_dir: &std::path::Path) -> std::path::PathBuf {
+    cas_dir.join("violet").join("claim-receipts.json")
+}
+
+/// cas-6ace: one managed claim, as `cas doctor` shows it. Codes and counts
+/// only: never a message body, Cloud's guidance or reason text, a header or a
+/// token. The coordination port does not expose the HTTP status, so Cloud's
+/// `code` stands for it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ClaimReceipt {
+    at: DateTime<Utc>,
+    registration_id: String,
+    path: String,
+    code: String,
+    claimed: usize,
+    typed: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    not_typed: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<u64>,
+}
+
+impl ClaimReceipt {
+    /// `None` when the tick sent no claim (a stopped reader).
+    fn of(registration_id: &str, outcome: &ClaimOutcome, at: DateTime<Utc>) -> Option<Self> {
+        let (code, read) = match outcome {
+            ClaimOutcome::Read(read) => ("completed", Some(read)),
+            ClaimOutcome::Unmanaged => ("coordination_scope_required", None),
+            ClaimOutcome::Refused(why) => (why.code.as_str(), None),
+            ClaimOutcome::Stopped(_) => return None,
+        };
+        Some(Self {
+            at,
+            registration_id: registration_id.to_string(),
+            path: CLAIM_PATH.to_string(),
+            code: code.to_string(),
+            claimed: read.map_or(0, |read| read.claimed),
+            typed: read.map_or(0, |read| read.typed),
+            not_typed: read.map_or_else(Vec::new, |read| read.not_typed.iter().map(|(_, why)| why.code.clone()).collect()),
+            generation: read.and_then(|read| read.generation),
+        })
+    }
+
+    /// Append, keep the newest [`CLAIM_RECEIPTS_KEPT`], and replace the file
+    /// atomically. An unreadable old file starts a fresh list.
+    fn append(self, cas_dir: &std::path::Path) -> std::io::Result<()> {
+        let path = claim_receipts_path(cas_dir);
+        let mut kept = read_claim_receipts(&path).unwrap_or_default();
+        kept.push(self);
+        let excess = kept.len().saturating_sub(CLAIM_RECEIPTS_KEPT);
+        kept.drain(..excess);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::write(&tmp, serde_json::to_vec(&kept).map_err(std::io::Error::other)?)?;
+        std::fs::rename(&tmp, &path)
+    }
+}
+
+fn read_claim_receipts(path: &std::path::Path) -> Option<Vec<ClaimReceipt>> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// cas-6ace: the doctor line for the last claim receipts, and whether the
+/// newest claim completed with every delivery typed. `None` before the
+/// managed reader has written one.
+pub(crate) fn claim_receipts_summary(cas_dir: &std::path::Path, now: DateTime<Utc>) -> Option<(bool, String)> {
+    let path = claim_receipts_path(cas_dir);
+    let kept = read_claim_receipts(&path)?;
+    let last = kept.last()?;
+    let recent: Vec<String> = kept
+        .iter()
+        .rev()
+        .take(CLAIM_RECEIPTS_SHOWN)
+        .map(|receipt| {
+            let mut line = format!(
+                "{} {} claimed={} typed={}",
+                receipt.at.format("%H:%M:%SZ"),
+                receipt.code,
+                receipt.claimed,
+                receipt.typed
+            );
+            if let Some(generation) = receipt.generation {
+                line.push_str(&format!(" gen={generation}"));
+            }
+            if !receipt.not_typed.is_empty() {
+                line.push_str(&format!(" not_typed={}", receipt.not_typed.join(",")));
+            }
+            line
+        })
+        .collect();
+    Some((
+        last.code == "completed" && last.not_typed.is_empty(),
+        format!(
+            "last claim {}s ago: {} · recent: {} · registration {} · {} · {}",
+            (now - last.at).num_seconds().max(0),
+            last.code,
+            recent.join("; "),
+            last.registration_id,
+            last.path,
+            path.display()
+        ),
+    ))
 }
 
 #[cfg(test)]

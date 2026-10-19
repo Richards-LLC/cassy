@@ -923,6 +923,10 @@ fn inactive_detached_warning_on(
         }
         ServicePlatform::Unsupported => return Ok(None),
     };
+    // A detached hub needs no service manager when no service is installed.
+    if !installed {
+        return Ok(None);
+    }
     // A hung diagnostic cannot establish either service health or inactivity.
     if let Some(warning) = active.warning() {
         return Ok(Some(warning));

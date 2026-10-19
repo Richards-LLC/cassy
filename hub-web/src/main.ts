@@ -5359,9 +5359,12 @@ function renderMachineRegister(): void {
     // reload during an outage), the count is unknown, not "0 conversations".
     const counted = machines.size === 0 || [...machines.keys()].some((id) => fleetCatalogUpdatedAt.has(id));
     // cas-9846: before any machine answers, a kept catalog is counted as last
-    // known, as is one kept past its freshness while its machine reconnects (cas-6c7a).
-    const lastKnown = (!counted && cachedCatalogs.size > 0) || [...machines.keys()].some((id) => visibleSessions(id).some((session) => session.stale));
-    const total = [...machines.keys()].reduce((sum, id) => sum + visibleSessions(id).filter(session => supervisorTarget(session)).length, 0);
+    // known. Past its freshness while its machine reconnects (cas-6c7a), only
+    // that machine's conversations are, beside a live machine's (cas-c552).
+    const counts = [...machines.keys()].map((id) => visibleSessions(id).filter(session => supervisorTarget(session)));
+    const total = counts.reduce((sum, listed) => sum + listed.length, 0);
+    const stale = counts.reduce((sum, listed) => sum + listed.filter((session) => session.stale).length, 0);
+    const lastKnown = (!counted && cachedCatalogs.size > 0) || stale;
     const markup = machineFooterMarkup(rows, counted || lastKnown ? total : undefined, __HUB_BUILD__, !machineCatalogLoaded, lastKnown);
     // Preserve the opener itself: dialog Escape must return focus after a catalog tick.
     const button = footer.querySelector<HTMLButtonElement>('#paired-machines-toggle');

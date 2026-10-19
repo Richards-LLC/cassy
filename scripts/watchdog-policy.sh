@@ -7,6 +7,8 @@
 # shellcheck source=scripts/release-portable.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-portable.sh"
 
+WATCHDOG_API_READ_ATTEMPTS=3
+
 watchdog_policy_init() {
     WATCHDOG_REPOSITORY="${GITHUB_REPOSITORY:-}"
     WATCHDOG_THRESHOLD_SECONDS="${CASSY_WATCHDOG_STALE_SECONDS:-1200}"
@@ -35,6 +37,23 @@ watchdog_policy_init() {
 # existing Linux parser; BSD date lacks -d, so use Python's UTC-aware parser.
 watchdog_timestamp_epoch() {
     release_portable_timestamp_epoch "$1"
+}
+
+# GitHub API reads can fail briefly during Actions or API/network interruptions.
+# Keep retries bounded; callers choose whether exhausted reads abort the sweep
+# or skip one run.
+watchdog_api_read() {
+    local attempt delay=1
+    for ((attempt = 1; attempt <= WATCHDOG_API_READ_ATTEMPTS; attempt++)); do
+        if gh api "$@"; then
+            return 0
+        fi
+        if (( attempt < WATCHDOG_API_READ_ATTEMPTS )); then
+            sleep "$delay"
+            delay=$((delay * 2))
+        fi
+    done
+    return 1
 }
 
 watchdog_cancel_run() {

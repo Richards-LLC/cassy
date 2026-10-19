@@ -44,6 +44,14 @@ cat >"$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${FAKE_GH_LOG:?}"
+if [[ "${FAKE_GH_FAILURE:-}" == list-once && "$*" == *'actions/runs?status=queued&per_page=100'* ]]; then
+    count_file="${FAKE_GH_STATE:?}/list-once-count"; count=0; [[ -f "$count_file" ]] && count="$(<"$count_file")"
+    echo $((count + 1)) >"$count_file"
+    if (( count == 0 )); then
+        echo 'gh: transient network error' >&2
+        exit 1
+    fi
+fi
 if [[ "${FAKE_GH_FAILURE:-}" == list && "$*" == *'actions/runs?status=queued&per_page=100'* ]] ||
    [[ "${FAKE_GH_FAILURE:-}" == status && "$*" == *'actions/runs/101 --jq .status'* ]] ||
    [[ "${FAKE_GH_FAILURE:-}" == cancel && "$*" == *'actions/runs/101/cancel'* ]]; then

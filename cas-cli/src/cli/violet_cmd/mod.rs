@@ -817,6 +817,16 @@ fn receipt_files(receipt: &Value) -> Vec<&Value> {
     }
 }
 
+fn part_ids(message: &Value) -> Option<String> {
+    let ids = message
+        .get("part_ids")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    (!ids.is_empty()).then(|| ids.join(", "))
+}
+
 fn render_post(out: &mut dyn Write, route: Route, receipt: &Value) {
     let files = receipt_files(receipt);
     let detail = match route {
@@ -843,6 +853,9 @@ fn render_post(out: &mut dyn Write, route: Route, receipt: &Value) {
             let _ = writeln!(out, "     message id not resolved by the hub");
         }
     }
+    if let Some(ids) = receipt.get("message").and_then(part_ids) {
+        let _ = writeln!(out, "     part_ids: {ids}");
+    }
     for file in files {
         let _ = writeln!(out, "     {}", file_line(file));
     }
@@ -866,6 +879,9 @@ fn posted_lines(out: &mut dyn Write, receipt: &Value) {
         let id = str_at(item, "/message_id").unwrap_or("?");
         let link = str_at(item, "/permalink").unwrap_or("");
         let _ = writeln!(out, "     {index} {role} {id}  {link}");
+        if let Some(ids) = part_ids(item) {
+            let _ = writeln!(out, "         part_ids: {ids}");
+        }
         for file in item
             .get("files")
             .and_then(Value::as_array)

@@ -5971,13 +5971,14 @@ impl CasCore {
                 == Some(input.commit_sha.as_str())
             && task.deliverables.parked_branch.as_deref() == Some(input.source_branch.as_str());
         if !projection_coherent {
+            let expected = task.clone();
             task.status = projected_status;
             task.pending_verification = projected_pending_verification;
             task.deliverables.pre_close_hook = Some(hook_evidence);
             task.deliverables.factory_branch_anchor = Some(input.commit_sha.clone());
             task.deliverables.parked_branch = Some(input.source_branch.clone());
             task.updated_at = chrono::Utc::now();
-            task_store.update(task).map_err(|error| McpError {
+            task.updated_at = task_store.update_if_current(task, &expected).map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!(
                     "Failed to project worker delivery state onto task: {error}"
@@ -17831,6 +17832,7 @@ fn append_close_decision_note(task_store: &dyn cas_store::TaskStore, task: &mut 
     if task.notes.contains(note) {
         return;
     }
+    let expected = task.clone();
     let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
     let formatted = format!("[{timestamp}] {note}");
     task.notes = if task.notes.is_empty() {
@@ -17838,13 +17840,15 @@ fn append_close_decision_note(task_store: &dyn cas_store::TaskStore, task: &mut 
     } else {
         format!("{}\n\n{formatted}", task.notes)
     };
-    task.updated_at = chrono::Utc::now();
-    if let Err(error) = task_store.update(task) {
-        tracing::warn!(
-            task_id = %task.id,
-            error = %error,
-            "failed to persist close decision note"
-        );
+    match task_store.update_if_current(task, &expected) {
+        Ok(persisted_at) => task.updated_at = persisted_at,
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task.id,
+                error = %error,
+                "failed to persist close decision note"
+            );
+        }
     }
 }
 
@@ -25363,8 +25367,11 @@ mod merge_state_gate_tests {
         cas_store::request_changes_for_parked_delivery(
             dir.path(), &task.id, "relay-supervisor-id", "Correct the delivery before parking again",
         ).unwrap();
+        let mut stale_close = task.clone();
+        append_close_decision_note(&tasks, &mut stale_close, "stale pre-park audit");
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Open);
         let refused = core.park_task_awaiting_merge(
-            &tasks, &task, "MERGE REQUIRED", "stale close still running",
+            &tasks, &stale_close, "MERGE REQUIRED", "stale close still running",
             Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
             Some("PASS delivery-tip: stale close"),
         ).expect_err("GH #1276: a stale close cannot erase the review rejection");

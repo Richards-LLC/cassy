@@ -2053,7 +2053,8 @@ exit 0
             true,
             8443,
         );
-        let legacy = current.replace("    <key>TERM</key>\n    <string>dumb</string>\n", "");
+        let legacy = current.replace("    <key>TERM</key>\n    <string>dumb</string>\n", "")
+            .replace("    <key>TAILSCALE_BE_CLI</key>\n    <string>1</string>\n", "");
         assert_eq!(ensure_launchd_cli_environment(&legacy).unwrap(), current);
         let legacy = current.replace(
             &format!("  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n    <key>TERM</key>\n    <string>dumb</string>\n    <key>TAILSCALE_BE_CLI</key>\n    <string>1</string>\n  </dict>\n"),

@@ -2046,11 +2046,14 @@ impl CloudSyncer {
         let Ok(project_id) = self.personal_push_project_id() else {
             return;
         };
+        // cas-092e: resolve the record in the scope this checkout syncs in.
+        let team_id = self.cloud_config.active_team_id();
         match crate::cloud::refresh_project_alias_record(
             &cas_root,
             &self.cloud_config.endpoint,
             token,
             &project_id,
+            team_id.as_deref(),
             self.config.timeout,
         ) {
             Ok(aliases) if !aliases.is_empty() => {

@@ -750,8 +750,8 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
   const footer = page.locator(".hub-footer-meta");
   const empty = page.getByText(/No live supervisors listed/);
   const outages = [
-    ["The network is gone past both catalogs' freshness: every row and the whole count are last known", ["atlas", "studio"], { sockets: "close" }, "2 conversations, last known"],
-    ["Only Atlas stays down, its hub answering 503 auth_store_unavailable: only its conversation is last known", ["atlas"], { sockets: "close", http: "auth_store_unavailable" }, "2 conversations · 1 last known"],
+    ["The machine stays down past its catalog's freshness: the network is gone for both machines, so every row and the whole count are last known", ["atlas", "studio"], { sockets: "close" }, "2 conversations, last known"],
+    ["The machine stays down past its catalog's freshness: only Atlas, its hub answering 503 auth_store_unavailable, so only its conversation is last known", ["atlas"], { sockets: "close", http: "auth_store_unavailable" }, "2 conversations · 1 last known"],
   ] as const;
   for (const [stage, down, outage, count] of outages) {
     await journey.stage(stage, async () => {

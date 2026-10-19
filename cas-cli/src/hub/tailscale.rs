@@ -113,6 +113,11 @@ impl TailscaleServeManager {
         self.socket.as_deref()
     }
 
+    pub(crate) fn within_deadline(mut self, deadline: Deadline) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
     pub(crate) fn last_https_port(&self) -> Option<u16> {
         fs::read(self.state_dir.join(TEARDOWN_RECEIPT_FILE)).ok()
             .and_then(|bytes| serde_json::from_slice::<TailscaleTeardownReceipt>(&bytes).ok())

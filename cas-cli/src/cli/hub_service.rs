@@ -880,27 +880,26 @@ pub(super) fn installed_service_exists() -> Result<bool> {
     }
 }
 
+/// One end-state budget shared by launchd unload, process exit and Serve teardown.
+pub(super) fn stop_deadline() -> crate::bounded_process::Deadline {
+    crate::bounded_process::Deadline::after(Duration::from_secs(15))
+}
+
 /// Unload before signaling a launchd-owned hub: KeepAlive must no longer
 /// own a restart while the ordinary stop path waits for process teardown.
 /// Keep the plist so an explicit restart can bootstrap it again.
-pub(super) fn stop_deadline() -> crate::bounded_process::Deadline {
-    crate::bounded_process::Deadline::after(Duration::from_secs(5))
-}
-
-pub(super) fn stop_supervised() -> Result<()> {
+pub(super) fn stop_supervised(deadline: crate::bounded_process::Deadline) -> Result<()> {
     if native_platform() != ServicePlatform::Launchd || !launchd_path()?.is_file() {
         return Ok(());
     }
     let target = format!("{}/{}", launchd_domain()?, launchd_label());
-    let timeout = Duration::from_secs(5);
-    let deadline = stop_deadline();
     if !probe_manager_with_timeout("launchctl", ["print", &target], deadline.remaining()).require_observed()? {
         return Ok(());
     }
     let mut command = manager_command("launchctl");
     command.args(["bootout", &target]);
     let output = crate::bounded_process::run_command(
-        &mut command, deadline, timeout,
+        &mut command, deadline, deadline.remaining(),
     ).map_err(|_| anyhow::anyhow!("launchctl bootout did not complete; refusing to race hub supervision"))?;
     ensure!(output.status.success(), "launchctl refused to unload the Cassy hub service");
     wait_for_manager_unload(deadline, |remaining| {

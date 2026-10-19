@@ -609,15 +609,17 @@ fn wait_for_stop_or_satisfying_hub(
     timeout: Duration,
     relaunch: Option<&RelaunchIntent<'_>>,
     force: bool,
+    stop_deadline: Option<crate::bounded_process::Deadline>,
 ) -> Result<Option<HubProcessRecord>> {
     let deadline = Instant::now() + timeout;
     loop {
+        ensure_stop_budget(stop_deadline)?;
         let holder = paths
             .lock_holders()
             .into_iter()
             .find(|holder| force || Some(holder.pid) != settle_pid);
         if let Some(holder) = holder.as_ref() && force {
-            terminate_lock_holder(paths, holder)?;
+            terminate_lock_holder_before(paths, holder, stop_deadline)?;
             continue;
         }
         let lock = paths.try_acquire_instance_lock()?;
@@ -649,7 +651,7 @@ fn wait_for_stop_or_satisfying_hub(
             if let Some(holder) = holder.as_ref()
                 && (force || !holder.is_stopping())
             {
-                terminate_lock_holder(paths, holder)?;
+                terminate_lock_holder_before(paths, holder, stop_deadline)?;
                 continue;
             }
             match settle_pid {
@@ -668,6 +670,14 @@ fn wait_for_stop_or_satisfying_hub(
 }
 
 fn terminate_lock_holder(paths: &HubRuntimePaths, holder: &HubLockHolder) -> Result<()> {
+    terminate_lock_holder_before(paths, holder, None)
+}
+
+fn terminate_lock_holder_before(
+    paths: &HubRuntimePaths,
+    holder: &HubLockHolder,
+    stop_deadline: Option<crate::bounded_process::Deadline>,
+) -> Result<()> {
     anyhow::ensure!(
         holder.pid != std::process::id(),
         "refusing to terminate the current cas hub lifecycle process"
@@ -694,7 +704,7 @@ fn terminate_lock_holder(paths: &HubRuntimePaths, holder: &HubLockHolder) -> Res
             .context("terminate wedged cas hub lock holder")?;
     }
 
-    let graceful_deadline = Instant::now() + HUB_CONNECTION_DRAIN_TIMEOUT;
+    let graceful_deadline = Instant::now() + stop_wait_budget(stop_deadline, HUB_CONNECTION_DRAIN_TIMEOUT);
     while Instant::now() < graceful_deadline {
         if let Some(lock) = paths.try_acquire_instance_lock()? {
             drop(lock);
@@ -723,7 +733,7 @@ fn terminate_lock_holder(paths: &HubRuntimePaths, holder: &HubLockHolder) -> Res
             .context("force-terminate wedged cas hub lock holder")?;
     }
 
-    let kill_deadline = Instant::now() + HUB_CONNECTION_DRAIN_TIMEOUT;
+    let kill_deadline = Instant::now() + stop_wait_budget(stop_deadline, HUB_CONNECTION_DRAIN_TIMEOUT);
     while Instant::now() < kill_deadline {
         if let Some(lock) = paths.try_acquire_instance_lock()? {
             drop(lock);
@@ -2533,10 +2543,11 @@ fn lock_holder_json(holder: &HubLockHolder) -> serde_json::Value {
 }
 
 fn stop(cli: &Cli, force: bool) -> Result<()> {
-    super::hub_service::stop_supervised()?;
+    let deadline = super::hub_service::stop_deadline();
+    super::hub_service::stop_supervised(deadline)?;
     // No relaunch intent: a live hub can never mean success here, so this
     // keeps the pre-cas-bf90 behaviour exactly.
-    stop_with_output(cli, true, None, force).map(|_| ())
+    stop_with_output_before(cli, true, None, force, Some(deadline)).map(|_| ())
 }
 
 /// Stop a live hub that is outside the installed service before the service
@@ -2551,11 +2562,36 @@ fn stop_with_output(
     relaunch: Option<RelaunchIntent<'_>>,
     force: bool,
 ) -> Result<StopOutcome> {
+    stop_with_output_before(cli, emit_output, relaunch, force, None)
+}
+
+fn stop_wait_budget(deadline: Option<crate::bounded_process::Deadline>, cap: Duration) -> Duration {
+    deadline.map_or(cap, |deadline| deadline.remaining().min(cap))
+}
+
+fn ensure_stop_budget(deadline: Option<crate::bounded_process::Deadline>) -> Result<()> {
+    anyhow::ensure!(deadline.is_none_or(|deadline| !deadline.remaining().is_zero()),
+        "cas hub stop exceeded its 15s end-state budget");
+    Ok(())
+}
+
+fn stop_with_output_before(
+    cli: &Cli,
+    emit_output: bool,
+    relaunch: Option<RelaunchIntent<'_>>,
+    force: bool,
+    stop_deadline: Option<crate::bounded_process::Deadline>,
+) -> Result<StopOutcome> {
+    ensure_stop_budget(stop_deadline)?;
     let paths = HubRuntimePaths::default_for_user()?;
     let record = paths.read_process_record().ok();
     let stale_pid = record.as_ref().map(|record| record.pid);
     let hub_cgroup = record.as_ref().and_then(|record| record.cgroup.clone());
-    let tailscale_manager = TailscaleServeManager::new(paths.root());
+    let manager = TailscaleServeManager::new(paths.root());
+    let tailscale_manager = match stop_deadline {
+        Some(deadline) => manager.within_deadline(deadline),
+        None => manager,
+    };
     // Capture the exact mapping we own before asking the hub to exit. The
     // foreground process now always tears it down on SIGTERM, so stop must
     // judge the final outcome instead of which process issued `serve off`.
@@ -2575,9 +2611,10 @@ fn stop_with_output(
             &paths,
             Some(record.pid),
             stale_pid,
-            HUB_LIFECYCLE_TIMEOUT,
+            stop_wait_budget(stop_deadline, HUB_LIFECYCLE_TIMEOUT),
             relaunch.as_ref(),
             force,
+            stop_deadline,
         )? {
             return Ok(StopOutcome::AlreadySatisfied(Box::new(satisfying)));
         }
@@ -2588,9 +2625,10 @@ fn stop_with_output(
             &paths,
             None,
             stale_pid,
-            HUB_LIFECYCLE_TIMEOUT,
+            stop_wait_budget(stop_deadline, HUB_LIFECYCLE_TIMEOUT),
             relaunch.as_ref(),
             force,
+            stop_deadline,
         )? {
             return Ok(StopOutcome::AlreadySatisfied(Box::new(satisfying)));
         }
@@ -2618,6 +2656,7 @@ fn stop_with_output(
         Err(error) => Err(error),
     };
     paths.remove_process_record()?;
+    ensure_stop_budget(stop_deadline)?;
     if emit_output && cli.json {
         println!(
             "{}",

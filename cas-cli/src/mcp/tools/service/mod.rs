@@ -571,7 +571,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Agent identity, messaging and reminders in factory mode. interrupt=message urgent=true; inbox=inbox_poll; peers lists this repo's supervisors. Fleet, worktree, server, database, loop/queue and Slack-thread authority use factory; legacy coordination calls still forward for one release with a deprecation note. Per-action rules are on parameters."
+        description = "Factory-mode identity, messaging and reminders. Actions: register, unregister, whoami, heartbeat, session_start, session_end, inbox_poll (alias inbox), message, interrupt (message urgent=true), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (repo supervisors). Fleet, worktree, server, database, loop/queue and Slack-thread authority use factory; legacy control calls forward here for one release with a deprecation note. Per-action rules are on parameters."
     )]
     pub async fn coordination(
         &self,

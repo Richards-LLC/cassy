@@ -490,6 +490,7 @@ fn decide_live_start(
     tailscale_serve: bool,
     tailscale_port: u16,
     binary_version: &str,
+    tailscale_cli_available: bool,
 ) -> HubStartDecision {
     let version_drift = record.version != binary_version;
     let tailscale_flags_differ = tailscale_enabled(record) != tailscale_serve
@@ -497,8 +498,8 @@ fn decide_live_start(
             && record
                 .tailscale_serve_port
                 .is_some_and(|port| port != tailscale_port));
-    let target_missing = tailscale_serve
-        && (record.tailscale_serve_target.is_none() || record.transport_warning.is_some());
+    let target_missing =
+        tailscale_serve && !serve_request_settled(record, tailscale_cli_available);
     let flags_differ = record.bind != args.bind.to_string()
         || record.port != args.port
         || tailscale_flags_differ
@@ -541,6 +542,7 @@ fn running_hub_satisfies_request(
     tailscale_serve: bool,
     tailscale_port: u16,
     binary_version: &str,
+    tailscale_cli_available: bool,
 ) -> bool {
     if record.version != binary_version || record.bind != args.bind.to_string() {
         return false;
@@ -560,12 +562,30 @@ fn running_hub_satisfies_request(
     {
         return false;
     }
-    if tailscale_serve
-        && (record.tailscale_serve_target.is_none() || record.transport_warning.is_some())
-    {
+    if tailscale_serve && !serve_request_settled(record, tailscale_cli_available) {
         return false;
     }
     true
+}
+
+/// Has a live hub reached the end state of its Serve request?
+///
+/// A published target without a warning always has. A loopback fallback
+/// (`transport_warning`) is final only when no Tailscale CLI can publish. With
+/// a CLI present it is a failed publication that `hub start` retries and the
+/// launch waiter refuses. Without one it is the documented loopback fallback,
+/// which a concurrent lifecycle command must accept rather than wait out the
+/// machine lock (cas-bf90).
+fn serve_request_settled(record: &HubProcessRecord, tailscale_cli_available: bool) -> bool {
+    match (&record.tailscale_serve_target, &record.transport_warning) {
+        (Some(_), None) => true,
+        (_, Some(_)) => !tailscale_cli_available,
+        (None, None) => false,
+    }
+}
+
+fn tailscale_cli_available(paths: &HubRuntimePaths) -> bool {
+    TailscaleServeManager::new(paths.root()).cli_available()
 }
 
 /// What the caller intends to do once the hub is stopped.
@@ -642,6 +662,7 @@ fn wait_for_stop_or_satisfying_hub(
                 intent.tailscale_serve,
                 intent.tailscale_port,
                 env!("CARGO_PKG_VERSION"),
+                tailscale_cli_available(paths),
             )
             && record_is_ready(paths, &record)
         {
@@ -786,6 +807,7 @@ fn wait_for_lock_or_satisfying_hub(
                 tailscale_serve,
                 tailscale_port,
                 env!("CARGO_PKG_VERSION"),
+                tailscale_cli_available(paths),
             )
             && record_is_ready(paths, &record)
         {
@@ -1156,7 +1178,10 @@ fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: 
         if record.as_ref().is_some_and(|record| {
             record.launched_by.as_deref() == Some("service")
                 && record_is_ready(&paths, record)
-                && running_hub_satisfies_request(record, &request, enabled, port, env!("CARGO_PKG_VERSION"))
+                && running_hub_satisfies_request(
+                    record, &request, enabled, port, env!("CARGO_PKG_VERSION"),
+                    tailscale_cli_available(&paths),
+                )
         }) {
             return status(cli);
         }
@@ -1225,6 +1250,7 @@ fn start_with_output_resolved(
                 tailscale_serve,
                 tailscale_port,
                 env!("CARGO_PKG_VERSION"),
+                tailscale_cli_available(&paths),
             ) {
                 HubStartDecision::Keep => {
                     if emit_output {
@@ -3698,7 +3724,8 @@ mod tests {
                 &ephemeral_args(),
                 false,
                 TS_PORT,
-                VERSION
+                VERSION,
+                false
             ));
         }
 
@@ -3712,7 +3739,8 @@ mod tests {
                 &args,
                 false,
                 TS_PORT,
-                VERSION
+                VERSION,
+                false
             ));
         }
 
@@ -3726,7 +3754,8 @@ mod tests {
                 &ephemeral_args(),
                 false,
                 TS_PORT,
-                VERSION
+                VERSION,
+                false
             ));
         }
 
@@ -3740,7 +3769,8 @@ mod tests {
                 &ephemeral_args(),
                 false,
                 TS_PORT,
-                VERSION
+                VERSION,
+                false
             ));
             // Wanted Serve, found plain.
             assert!(!running_hub_satisfies_request(
@@ -3748,7 +3778,8 @@ mod tests {
                 &ephemeral_args(),
                 true,
                 TS_PORT,
-                VERSION
+                VERSION,
+                false
             ));
             // Wanted Serve, found Serve on the same port.
             assert!(running_hub_satisfies_request(
@@ -3756,7 +3787,8 @@ mod tests {
                 &ephemeral_args(),
                 true,
                 TS_PORT,
-                VERSION
+                VERSION,
+                false
             ));
         }
 
@@ -3768,7 +3800,8 @@ mod tests {
                 &ephemeral_args(),
                 true,
                 TS_PORT,
-                VERSION
+                VERSION,
+                false
             ));
         }
 
@@ -3781,7 +3814,36 @@ mod tests {
                 &ephemeral_args(),
                 false,
                 TS_PORT,
-                VERSION
+                VERSION,
+                false
+            ));
+        }
+
+        #[test]
+        fn a_loopback_fallback_settles_serve_only_without_a_tailscale_cli() {
+            // The hub asked for Serve and fell back to loopback with a warning.
+            let mut fallback = record(VERSION, 35053, None);
+            fallback.tailscale_cli = Some("tailscale".to_owned());
+            fallback.transport_warning = Some("tailscale CLI not found".to_owned());
+            let args = ephemeral_args();
+            // No CLI can publish: the fallback is final, so a concurrent
+            // command accepts it instead of timing out on the machine lock.
+            assert!(running_hub_satisfies_request(
+                &fallback, &args, true, TS_PORT, VERSION, false
+            ));
+            // A CLI is present: the failed publication must be retried.
+            assert!(!running_hub_satisfies_request(
+                &fallback, &args, true, TS_PORT, VERSION, true
+            ));
+            let mut keep_args = args;
+            keep_args.port = 35053;
+            assert_eq!(
+                decide_live_start(&fallback, &keep_args, true, TS_PORT, VERSION, false),
+                HubStartDecision::Keep
+            );
+            assert!(matches!(
+                decide_live_start(&fallback, &keep_args, true, TS_PORT, VERSION, true),
+                HubStartDecision::Restart { flags_differ: true, .. }
             ));
         }
     }
@@ -3844,6 +3906,7 @@ mod tests {
                     tailscale_serve,
                     tailscale_port,
                     env!("CARGO_PKG_VERSION"),
+                    false,
                 ),
                 expected,
                 "case: {name}"

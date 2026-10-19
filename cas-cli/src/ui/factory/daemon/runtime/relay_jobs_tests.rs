@@ -991,8 +991,8 @@ async fn cas_ff42_crash_stale_mark_writes_nothing_inside_the_enforced_step() {
     settle_relays(&mut daemon).await;
     let exit = &daemon.recent_worker_exits[0];
     assert!(!exit.recording, "the record reported");
-    assert!(exit.death.is_some(), "the death was recorded on the store worker");
     let agent = crate::store::open_agent_store(&cas_dir).unwrap().get("w-1").unwrap();
+    assert!(exit.death.is_some(), "the death was recorded on the store worker: {exit:?}; w-1 {agent:?}");
     assert_eq!(agent.status, cas_types::AgentStatus::Stale, "the registration is stale");
 }
 
@@ -1130,8 +1130,8 @@ async fn cas_58a3_worker_exit_writes_nothing_inside_the_enforced_step() {
     settle_relays(&mut daemon).await;
     let exit = &daemon.recent_worker_exits[0];
     assert!(!exit.recording, "recorded and cleaned");
-    assert!(exit.death.is_some(), "the death was recorded off the loop");
     let agent = crate::store::open_agent_store(&cas_dir).unwrap().get("w-1").unwrap();
+    assert!(exit.death.is_some(), "the death was recorded off the loop: {exit:?}; w-1 {agent:?}");
     assert_eq!(agent.status, cas_types::AgentStatus::Stale);
     let row = crate::store::open_prompt_queue_store(&cas_dir)
         .unwrap()

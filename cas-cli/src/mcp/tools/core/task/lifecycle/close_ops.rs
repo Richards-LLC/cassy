@@ -27338,7 +27338,7 @@ mod merge_state_gate_tests {
         checker: &str,
         setup: impl FnOnce(&std::path::Path) -> (String, String),
     ) -> EpicCloseRun {
-        run_epic_close_fixture_cas_7e91e(children, checker, setup, None).await
+        run_epic_close_fixture_cas_7e91e(children, checker, setup, None, false).await
     }
 
     #[cfg(unix)]
@@ -27347,6 +27347,7 @@ mod merge_state_gate_tests {
         checker: &str,
         setup: impl FnOnce(&std::path::Path) -> (String, String),
         ci: Option<(&str, bool)>,
+        owner_verification: bool,
     ) -> EpicCloseRun {
         use crate::mcp::CasService;
         use crate::store::{
@@ -27394,7 +27395,7 @@ mod merge_state_gate_tests {
         env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         std::fs::write(
             cas_dir.join("config.toml"),
-            "[verification]\nenabled = false\n",
+            if owner_verification { "[verification]\nenabled = true\n" } else { "[verification]\nenabled = false\n" },
         )
         .unwrap();
         open_store(&cas_dir).unwrap().init().unwrap();
@@ -27412,6 +27413,11 @@ mod merge_state_gate_tests {
                 AgentRole::Supervisor,
             ))
             .unwrap();
+        if owner_verification {
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+            git(p, &["checkout", "-q", &epic_branch]);
+        }
         let core = CasCore::with_daemon(cas_dir.clone(), None, None);
         core.set_agent_id_for_testing(actor.into());
         let service = CasService::new(core, None);
@@ -27426,6 +27432,7 @@ mod merge_state_gate_tests {
             branch: Some(epic_branch),
             risk: vec![TaskRisk::None],
             notes: epic_notes,
+            epic_verification_owner: owner_verification.then(|| actor.to_string()),
             ..Default::default()
         };
         epic.deliverables.files_changed = vec!["delivery.rs".to_string()];
@@ -27451,15 +27458,49 @@ mod merge_state_gate_tests {
         }
 
         let started = std::time::Instant::now();
-        let request = serde_json::from_value(serde_json::json!({
+        let request: crate::mcp::tools::TaskRequest = serde_json::from_value(serde_json::json!({
             "action": "close",
             "id": epic.id,
-            "supervisor_override": ci.is_none_or(|(_, override_requested)| override_requested),
+            "supervisor_override": !owner_verification && ci.is_none_or(|(_, override_requested)| override_requested),
             "reason": "inspected every terminal child delivery against main",
             "stranded_branch_override": "inspected every child lane: each factory branch and anchor is deleted locally and on origin after its delivery shipped",
         }))
         .unwrap();
-        let response = service.task(Parameters(request)).await.unwrap();
+        let mut response = service.task(Parameters(request.clone())).await.unwrap();
+        if owner_verification {
+            assert_ne!(store.get(&epic.id).unwrap().status, TaskStatus::Closed,
+                "epic ownership and assembly proof must not replace the epic verdict: {response:?}");
+            let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &epic.id)
+                .unwrap().expect("owner close must mint the active proof boundary");
+            assert_eq!(dispatch.repository.as_ref().unwrap().head_commit, rev_parse_local(p, "HEAD"));
+            let reject = serde_json::from_value(serde_json::json!({
+                "action": "add", "task_id": epic.id, "dispatch_id": dispatch.id,
+                "verification_type": "epic", "status": "rejected",
+                "summary": "Step 0A: REJECT stale epic flow walk; assembled tip differs from the recorded walk. Live deployment evidence is retained; current-tip evidence is owed.",
+            })).unwrap();
+            let verdict = service.verification(Parameters(reject)).await.unwrap();
+            assert_ne!(verdict.is_error, Some(true), "{verdict:?}");
+            let latest = crate::store::open_verification_store(&cas_dir).unwrap()
+                .get_latest_for_task_by_type(&epic.id, VerificationType::Epic).unwrap().unwrap();
+            assert_eq!(latest.status, VerificationStatus::Rejected);
+            assert_eq!(latest.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+            assert_ne!(store.get(&epic.id).unwrap().status, TaskStatus::Closed);
+
+            // A rejected walk remains in the audit log. A corrected evidence
+            // review gets a new exact dispatch, rather than reusing rejection.
+            response = service.task(Parameters(request.clone())).await.unwrap();
+            assert_ne!(store.get(&epic.id).unwrap().status, TaskStatus::Closed, "{response:?}");
+            let fresh = cas_store::get_latest_verification_dispatch(&cas_dir, &epic.id).unwrap().unwrap();
+            assert_ne!(fresh.id, dispatch.id);
+            let approve = serde_json::from_value(serde_json::json!({
+                "action": "add", "task_id": epic.id, "dispatch_id": fresh.id,
+                "verification_type": "epic", "status": "approved",
+                "summary": "Fixture: current-tip assembly and epic walk accepted after the recorded stale-walk rejection.",
+            })).unwrap();
+            let verdict = service.verification(Parameters(approve)).await.unwrap();
+            assert_ne!(verdict.is_error, Some(true), "{verdict:?}");
+            response = service.task(Parameters(request)).await.unwrap();
+        }
         let elapsed = started.elapsed();
         let text = response
             .content
@@ -27514,6 +27555,7 @@ esac
                 ("epic/landed".into(), String::new())
             },
             Some((&gh, override_requested)),
+            false,
         )
         .await
     }
@@ -27665,7 +27707,7 @@ esac
                 git(p, &["push", "-q", "origin", "main"]);
                 let head = if current { rev_parse_local(p, "main") } else { old };
                 ("epic/landed".into(), format!("ASSEMBLY_PROOF: head={head} result=PASS command=integrated-suite log=assembly.log"))
-            }, Some((&gh, false))).await;
+            }, Some((&gh, false)), false).await;
                 let closes = current || queue == r#"{"data":null}"#;
                 assert_eq!(run.is_error, !closes, "{}", run.text);
                 assert_eq!(
@@ -27766,13 +27808,13 @@ esac
     #[cfg(unix)]
     #[tokio::test]
     async fn epic_with_covering_assembly_proof_defers_build_proof_cas_74cb() {
-        let run = run_epic_override_close_cas_74cb(8, FAST_REQUIRING_CHECKER_CAS_74CB, |p| {
+        let run = run_epic_close_fixture_cas_7e91e(8, FAST_REQUIRING_CHECKER_CAS_74CB, |p| {
             let tip = unreleased_epic_lane_cas_74cb(p);
             let notes = format!(
                 "[2026-10-02 20:00] PROGRESS ASSEMBLY_PROOF: head={tip} result=PASS command=assembly-proof log=/tmp/assembly.log"
             );
             ("epic/unreleased".to_string(), notes)
-        })
+        }, None, true)
         .await;
         assert!(!run.is_error, "{}", run.text);
         assert_eq!(run.task.status, TaskStatus::Closed, "{}", run.text);

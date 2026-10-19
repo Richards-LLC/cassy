@@ -356,7 +356,7 @@
           "reason": "Preserve a command, schema, receipt or markup token consumed by report evidence guidance prefers safe sources."
         },
         {
-          "text": "read-only backlog visibility \u2014 not self-dispatch",
+          "text": "read-only backlog visibility — not self-dispatch",
           "reason": "Preserve the operational safety boundary documented by worker never self dispatch guidance present and mirrored."
         },
         {
@@ -1077,7 +1077,7 @@
           "reason": "Retain the load-bearing policy term from builtin skills contains mcp integration."
         },
         {
-          "text": "## Symptom \u2192 cause",
+          "text": "## Symptom → cause",
           "reason": "Retain the load-bearing policy term from mcp and viktor guidance use the cassy surface."
         }
       ],
@@ -1456,7 +1456,7 @@
           "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas ui craft and design language."
         },
         {
-          "text": "each \u2265 4",
+          "text": "each ≥ 4",
           "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
         },
         {
@@ -1501,7 +1501,7 @@
       ],
       "contains": [
         {
-          "text": "each \u2265 4",
+          "text": "each ≥ 4",
           "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
         },
         {
@@ -2292,7 +2292,7 @@
           "case_sensitive": false
         },
         {
-          "text": "Was \u2192 Now",
+          "text": "Was → Now",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains release notes rubric."
         },
         {
@@ -2383,7 +2383,7 @@
       ],
       "contains": [
         {
-          "text": "was \u2192 now",
+          "text": "was → now",
           "reason": "Retain the load-bearing policy term from builtin skills contains release notes rubric.",
           "case_sensitive": false,
           "unicode_case": true
@@ -3825,7 +3825,7 @@
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by design spec adopts the design md spec and its linter."
         },
         {
-          "text": "`radius` \u2014",
+          "text": "`radius` —",
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by design spec adopts the design md spec and its linter."
         }
       ],
@@ -4228,11 +4228,11 @@
           "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
         },
         {
-          "text": "30\u00b0",
+          "text": "30°",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
         },
         {
-          "text": "150\u00b0",
+          "text": "150°",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
         },
         {

@@ -5,7 +5,7 @@
 //! proposed close reason is inspected; historical notes are not new assertions.
 
 use regex::Regex;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::sync::OnceLock;
 
 struct Grammar {
@@ -131,12 +131,17 @@ fn local_paths(clause: &str) -> Vec<&str> {
         };
         for token in tokens {
             let path = super::strip_path_punctuation(token);
+            let has_path_component = |candidate: &str| {
+                Path::new(candidate)
+                    .components()
+                    .any(|component| matches!(component, Component::Normal(_)))
+            };
             if !path.contains("://")
                 && !path.to_ascii_lowercase().starts_with("/actions/runs/")
-                && (path.starts_with('/')
-                    || path.starts_with("~/")
-                    || path.starts_with("./")
-                    || path.starts_with("../")
+                && ((path.starts_with('/') && has_path_component(path))
+                    || ["~/", "./", "../"]
+                        .iter()
+                        .any(|prefix| path.strip_prefix(*prefix).is_some_and(has_path_component))
                     || (path.contains('/') && Path::new(path).extension().is_some()))
             {
                 paths.push(path);

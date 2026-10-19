@@ -1418,6 +1418,29 @@ fn systemd_preview_actions() -> Vec<String> {
     ]
 }
 
+fn human_dry_run(
+    platform: ServicePlatform,
+    path: &Path,
+    definition: &str,
+    actions: &[String],
+    _full: bool,
+    _utf8: bool,
+) -> String {
+    let supervision = match platform {
+        ServicePlatform::Launchd => "launchd",
+        ServicePlatform::Systemd => "systemd-user",
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => "none",
+    };
+    let actions = actions
+        .iter()
+        .map(|action| format!("  {action}\n"))
+        .collect::<String>();
+    format!(
+        "Cassy hub service ({supervision}) dry run — no files or manager state changed.\nWould write: {}\nWould run:\n{actions}\nService definition:\n{definition}\n",
+        path.display()
+    )
+}
+
 fn print_dry_run(
     cli: &Cli,
     platform: ServicePlatform,
@@ -1444,13 +1467,17 @@ fn print_dry_run(
             })
         );
     } else {
-        println!("Cassy hub service ({supervision}) dry run — no files or manager state changed.");
-        println!("Would write: {}", path.display());
-        println!("Would run:");
-        for action in actions {
-            println!("  {action}");
-        }
-        println!("\nService definition:\n{definition}");
+        print!(
+            "{}",
+            human_dry_run(
+                platform,
+                path,
+                definition,
+                actions,
+                cli.full,
+                crate::ui::components::locale_is_utf8(),
+            )
+        );
     }
     Ok(())
 }
@@ -1762,6 +1789,48 @@ exit 0
             Some("Hub launch profile not recorded: malformed host config")
         );
         assert!(capture_launch_profiles_warning(Ok(())).is_none());
+    }
+
+    #[test]
+    fn service_install_dry_run_has_compact_summary_and_full_escape_cas_0051() {
+        let path = Path::new("/Users/test/Library/LaunchAgents/dev.cas.commander-hub.plist");
+        let definition = launchd_plist(
+            Path::new("/Users/test/.local/bin/cas"),
+            Path::new("/Users/test/.cas/hub/hub.log"),
+            true,
+            443,
+        );
+        let actions = launchd_preview_actions(path);
+
+        let summary = human_dry_run(
+            ServicePlatform::Launchd,
+            path,
+            &definition,
+            &actions,
+            false,
+            false,
+        );
+        assert!(
+            !summary.contains(&definition),
+            "the default human preview should not dump the plist"
+        );
+        assert!(summary.contains("Would write: ~/Library/LaunchAgents/dev.cas.commander-hub.plist"));
+        assert!(summary.contains("Full definition: cas hub service install --dry-run --full"));
+        assert!(summary.starts_with(
+            "Cassy hub service (launchd) dry run - no files or manager state changed."
+        ));
+        assert!(summary.lines().all(|line| line.len() <= 80), "{summary}");
+
+        let full = human_dry_run(
+            ServicePlatform::Launchd,
+            path,
+            &definition,
+            &actions,
+            true,
+            false,
+        );
+        assert!(full.contains(&definition));
+        assert!(full.contains(path.to_str().unwrap()));
     }
 
     #[test]

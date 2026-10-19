@@ -3777,7 +3777,13 @@ mod tests {
         std::fs::write(temp.path().join(crate::hub::AUDIT_LOG_FILE), b"{}\n").unwrap();
         let quiet = crate::hub::audit_writer_report(temp.path(), now + chrono::Duration::hours(18));
         assert!(!quiet.is_failure());
-        assert!(render_audit_status(&quiet).starts_with("Audit log: OK - last row 1"), "{}", render_audit_status(&quiet));
+        let quiet_text = render_audit_status(&quiet);
+        assert!(quiet_text.starts_with("Audit log: OK - last row 1"), "{quiet_text}");
+        // cas-cfea: the healthy idle line keeps its explanation within 80 columns;
+        // --json still carries the one-line message.
+        assert!(quiet_text.contains("authenticated requests"), "{quiet_text}");
+        assert!(quiet_text.lines().all(|line| line.chars().count() <= 80), "{quiet_text}");
+        assert!(serde_json::to_value(&quiet).unwrap()["message"].as_str().unwrap().contains("; a hub writes rows only"));
         let failure = crate::hub::AuditHealth {
             failing_since: now,
             last_failure_at: now,

@@ -336,6 +336,11 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await expect(page.locator(".conversation-reading.thread")).toBeFocused();
     // The "connected" toast sits below the thread header, never over the
     // back link, project and host (cas-002e).
+    await toast.evaluate(async (element) => {
+      await document.fonts.ready;
+      await Promise.all(element.getAnimations().map((animation) => animation.finished));
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    });
     const [notice, heading] = await Promise.all([toast.boundingBox(), page.locator(".conversation-heading").boundingBox()]);
     expect(notice!.y, "toast below the thread header").toBeGreaterThanOrEqual(heading!.y + heading!.height);
   });

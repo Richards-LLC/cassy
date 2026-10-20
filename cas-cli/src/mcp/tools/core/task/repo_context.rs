@@ -8,6 +8,8 @@ use cas_types::WorkTarget;
 
 use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 
+mod candidate_probe;
+
 /// Host-local repository evidence resolved fresh for one lifecycle mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RepoContext {
@@ -17,8 +19,8 @@ pub(crate) struct RepoContext {
     pub target_branch: String,
 }
 
-/// Preflight-only repository probe. Lifecycle mutations retain their existing
-/// resolver; preflight supplies one absolute deadline across every Git call.
+/// Repository Git probe sharing one absolute deadline across every command.
+/// Preflight and lifecycle candidate discovery supply their own budgets.
 #[derive(Debug, Clone)]
 pub(crate) struct BoundedRepoProbe {
     deadline: Deadline,
@@ -739,23 +741,27 @@ pub(crate) fn unanchored_task_start_warning(
     )
 }
 
-fn candidate_paths(cas_root: &Path) -> Vec<PathBuf> {
-    let mut raw = Vec::new();
+fn candidate_paths(cas_root: &Path) -> Result<Vec<candidate_probe::Candidate>, String> {
+    let deadline = Deadline::after(candidate_probe::SCAN_BUDGET);
+    let mut raw = vec![cas_root.to_path_buf()];
     if let Ok(store) = crate::store::known_repos::open_host_known_repo_store()
         && let Ok(known) = store.list()
     {
         raw.extend(known.into_iter().map(|repo| repo.path));
     }
-    raw.push(cas_root.to_path_buf());
     let mut seen = HashSet::new();
-    raw.into_iter()
-        // The host registry intentionally retains historical checkouts. Avoid
-        // one failed `git` process per deleted TempDir/stale path during
-        // bounded preflight and lifecycle resolution.
-        .filter(|path| path.exists())
-        .filter_map(|path| git_layout(&path).ok().map(|(root, _)| root))
-        .filter(|root| seen.insert(root.clone()))
-        .collect()
+    let mut candidates = Vec::new();
+    for path in raw {
+        if deadline.remaining().is_zero() {
+            return Err("WORK TARGET REPOSITORY UNAVAILABLE: known-root scan exceeded its 5s budget; retry after storage access recovers".to_string());
+        }
+        if let Some(candidate) = candidate_probe::probe(&path, deadline)?
+            && seen.insert(candidate.repo_root.clone())
+        {
+            candidates.push(candidate);
+        }
+    }
+    Ok(candidates)
 }
 
 fn bounded_registry_paths(candidate_limit: usize) -> Result<Vec<PathBuf>, BoundedRepoError> {
@@ -917,13 +923,12 @@ pub(crate) fn resolve_repo_context(
     }
     let mut matches = Vec::new();
     let mut observed = Vec::new();
-    for candidate in candidate_paths(cas_root) {
-        let identities = repo_identities(&candidate);
+    for candidate in candidate_paths(cas_root)? {
+        let identities = candidate.identities;
         if identities.iter().any(|identity| {
             canonical_selector(identity) == canonical_selector(&target.repo_selector)
-        }) && let Ok((repo_root, git_common_dir)) = git_layout(&candidate)
-        {
-            matches.push((repo_root, git_common_dir));
+        }) {
+            matches.push((candidate.repo_root, candidate.git_common_dir));
         }
         // cas-1a1c: report each checkout's identities as one GROUP rather than
         // flattening them. When the mismatch is the pin-vs-remote shape, seeing
@@ -1396,7 +1401,8 @@ mod tests {
         crate::store::known_repos::ensure_host_schema().unwrap();
         for mode in ["git", "config"] {
             // The parent owns fixtures so even the red timeout cleans them up.
-            let fixtures = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+            let fixtures =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let healthy = fixtures.path().join("healthy");
             let blocked = fixtures.path().join("blocked");
             for repo in [&healthy, &blocked] {

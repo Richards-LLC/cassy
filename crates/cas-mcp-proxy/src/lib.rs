@@ -1477,7 +1477,15 @@ impl ProxyEngine {
                     text.text = value.to_string();
                 }
             }
-            result.content.push(rmcp::model::Content::text(warning));
+            if result.content.is_empty()
+                && let Some(structured) = &result.structured_content
+            {
+                // execute's text projection must retain structured-only
+                // receipts when adding the warning creates the first content.
+                result.content.push(rmcp::model::Content::text(structured.to_string()));
+            } else {
+                result.content.push(rmcp::model::Content::text(warning));
+            }
         }
 
         // The receipted external-verification lane owns its own polling and

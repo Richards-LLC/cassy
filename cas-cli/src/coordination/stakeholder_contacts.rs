@@ -2,7 +2,7 @@
 //! The existing request journal holds only local receipt evidence for warnings.
 
 use super::external_work::{
-    CloudCoordinationPort, HttpCloudCoordinationPort, SqliteRequestJournal,
+    CloudCoordinationPort, HttpCloudCoordinationPort, JournalError, SqliteRequestJournal,
 };
 use crate::config::{Config, StakeholderContactPolicy};
 use cmcp_core::{PreparedProxyCall, ProxyCallEvent, ProxyCallInterceptor, ProxyCaller};
@@ -153,7 +153,11 @@ impl StakeholderContacts {
         let local_id = format!("stakeholder-reservation:{id}");
         if let Err(error) = journal.prepare(&local_id, "stakeholder_reservation", &payload) {
             prepared.response = Some(refusal(
-                "idempotency_conflict",
+                if matches!(error, JournalError::IdempotencyConflict { .. }) {
+                    "idempotency_conflict"
+                } else {
+                    "authority_unavailable"
+                },
                 &error.to_string(),
                 json!({"request_id":id}),
             ));

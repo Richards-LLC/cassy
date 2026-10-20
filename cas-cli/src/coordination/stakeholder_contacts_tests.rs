@@ -180,6 +180,20 @@ async fn stakeholder_shared_window_refuses_second_supervisor_before_dispatch() {
         receipt_payload(&serde_json::to_value(response).unwrap()).unwrap()["error"]["code"],
         "idempotency_conflict"
     );
+    let pending = StakeholderContacts {
+        root: first.path().into(),
+        project_id: Some("shared-project".into()),
+        cloud: Some(Arc::new(Authority {
+            capable: true,
+            requests: Mutex::new(Vec::new()),
+            admission: json!({"schema":SCHEMA,"code":"outcome_unknown","message":"Reconcile original dispatch"}),
+        })),
+    };
+    let response = pending.prepare_post(&caller("machine-one"), json!({"kind":"message","text":"<@U123>","channel":"dev","request_id":"10000000-0000-4000-8000-000000000003"}).as_object().cloned()).unwrap().response.unwrap();
+    assert_eq!(
+        receipt_payload(&serde_json::to_value(response).unwrap()).unwrap()["error"]["code"],
+        "outcome_unknown"
+    );
     let journal = SqliteRequestJournal::open(first.path()).unwrap();
     assert!(
         !journal.has_due(i64::MAX / 2).unwrap(),
@@ -225,7 +239,7 @@ for line in sys.stdin:
   if a.get('step')=='begin': p={'ok':True,'upload_url':'https://example.invalid/upload'}
   elif a.get('kind')=='thread': p={'ok':False,'posted':[{'index':0,'message_id':'1792513380.123456','permalink':'https://example.slack.com/root'}],'failed_index':1}
   else: p={'ok':False,'error':{'code':'refused','message':'no dispatch'}}
-  r={'content':[{'type':'text','text':json.dumps(p)}],'isError':not p['ok']}
+  r={'content':[],'structuredContent':p,'isError':not p['ok']} if a.get('kind')=='thread' else {'content':[{'type':'text','text':json.dumps(p)}],'isError':not p['ok']}
  else: r={}
  print(json.dumps({'jsonrpc':'2.0','id':i,'result':r}),flush=True)
 "#).unwrap();
@@ -260,12 +274,10 @@ for line in sys.stdin:
         service.status()["contacts"][0]["last_contact_at"].is_null(),
         "staging and refusals never stamp"
     );
-    let result =
-        call(json!({"kind":"thread","text":"<@U123>","channel":"dev","replies":["fail"]})).await;
+    let result = engine.execute(&who, &json!({"server":"violet","tool":"violet_post","args":{"kind":"thread","text":"<@U123>","channel":"dev","replies":["fail"]}}).to_string(), None).await.unwrap();
     assert!(
-        serde_json::to_string(&result)
-            .unwrap()
-            .contains("shared exclusion is unavailable")
+        result.text.contains("shared exclusion is unavailable")
+            && result.text.contains("1792513380.123456")
     );
     let status = service.status();
     assert_eq!(status["state"], "local_warning");

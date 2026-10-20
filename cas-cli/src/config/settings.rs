@@ -79,10 +79,10 @@ impl StakeholderContactPolicy {
         let slack_id = |id: &str, prefix: char| {
             id.starts_with(prefix) && id.len() > 1 && id.bytes().all(|b| b.is_ascii_alphanumeric())
         };
-        if !slack_id(&self.workspace_id, 'T') || !slack_id(&self.user_id, 'U')
+        if !slack_id(&self.workspace_id, 'T') || !(slack_id(&self.user_id, 'U') || slack_id(&self.user_id, 'W'))
             || self.minimum_interval_secs == 0 || self.minimum_interval_secs > i64::MAX as u64
         {
-            return Err("stakeholder_contacts requires Slack workspace T…, user U…, and a positive minimum_interval_secs".into());
+            return Err("stakeholder_contacts requires Slack workspace T…, user U…/W…, and a positive minimum_interval_secs".into());
         }
         Ok(())
     }

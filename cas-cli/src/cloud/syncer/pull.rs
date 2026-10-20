@@ -4395,15 +4395,18 @@ mod web_close_tests {
         );
 
         let mut local = Task::new("cas-conflict".to_string(), "local title".to_string());
-        local.notes = "[2026-08-09 10:30] 📝 PROGRESS local note".to_string();
+        local.notes = "[2026-08-09 09:00] 📝 PROGRESS local first".to_string();
         store.add(&local).unwrap();
+        store.append_trusted_note(&local.id, "[2026-08-09 10:00] published\nARTIFACT_PROOF: trusted").unwrap();
+        store.append_note(&local.id, "[2026-08-09 11:00] 📝 PROGRESS local last").unwrap();
+        let local = store.get(&local.id).unwrap();
         queue
             .enqueue(EntityType::Task, &local.id, SyncOperation::Upsert, None)
             .unwrap();
 
         let mut remote = local.clone();
         remote.title = "remote title".to_string();
-        remote.notes = "[2026-08-09 09:30] 📝 PROGRESS remote note".to_string();
+        remote.notes = "[2026-08-09 10:30] 📝 PROGRESS remote note".to_string();
         remote.updated_at += chrono::Duration::minutes(1);
         assert!(matches!(
             syncer.upsert_task(&*store, remote, "sync-test", "personal_pull"),
@@ -4414,12 +4417,13 @@ mod web_close_tests {
         assert_eq!(merged.title, "remote title");
         assert_eq!(
             merged.notes,
-            "[2026-08-09 09:30] 📝 PROGRESS remote note\n\n[2026-08-09 10:30] 📝 PROGRESS local note"
+            "[2026-08-09 09:00] 📝 PROGRESS local first\n\n[2026-08-09 10:00] published\nARTIFACT_PROOF: trusted\n\n[2026-08-09 10:30] 📝 PROGRESS remote note\n\n[2026-08-09 11:00] 📝 PROGRESS local last"
         );
+        assert!(merged.notes.lines().any(|line| line == "ARTIFACT_PROOF: trusted"));
         let conflicts = queue.list_conflicts(1).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].winner_side, "merged");
-        assert!(conflicts[0].discarded_row_json.contains("local note"));
+        assert!(conflicts[0].discarded_row_json.contains("local first"));
     }
 
     #[test]

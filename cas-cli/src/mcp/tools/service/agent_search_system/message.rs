@@ -6071,6 +6071,79 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(error.message.contains("summary required"), "{error:?}");
     }
 
+    fn assignment_message_fixture() -> (tempfile::TempDir, CasService) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        for (id, name, role) in [
+            ("supervisor-id", "supervisor", AgentRole::Supervisor),
+            ("worker-id", "eager-cobra-57", AgentRole::Worker),
+        ] {
+            let mut agent = Agent::new(id.into(), name.into());
+            agent.role = role;
+            agent.factory_session = Some("assignment-test".into());
+            agents.register(&agent).unwrap();
+        }
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        for (id, status) in [("cas-3e24", TaskStatus::Closed), ("cas-fba9", TaskStatus::Open)] {
+            let mut task = Task::new(id.into(), "assignment regression".into());
+            task.status = status;
+            task.assignee = Some("eager-cobra-57".into());
+            tasks.add(&task).unwrap();
+        }
+        let core = crate::mcp::server::CasCore::with_daemon(root, None, None);
+        core.set_agent_id_for_testing("supervisor-id".into());
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        (temp, service)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn next_assignment_survives_closed_task_preamble_cas_baf6b() {
+        let _env = TestEnvGuard::temp_home();
+        let (_temp, service) = assignment_message_fixture();
+        let root = &service.inner.cas_root;
+        let queue = crate::store::open_prompt_queue_store(root).unwrap();
+        // Notification 4202032: a closed-task receipt precedes the next assignment.
+        for (task_id, message) in [
+            (None, "cas-3e24 is closed (ver-019d84ba844b). You're assigned cas-fba9; read its task and start."),
+            (Some("cas-fba9"), "cas-3e24 is closed (old brief: action=start id=cas-3e24). You're assigned cas-fba9."),
+            (None, "cas-3e24 is closed. You're assigned the next task; see your task list."),
+        ] {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "message", "target": "eager-cobra-57", "task_id": task_id,
+                "summary": "next assignment", "message": message,
+            })).unwrap();
+            service.message_send(request).await.expect("new assignment must be queued");
+            let row = queue.poll_all(10).unwrap().into_iter()
+                .max_by_key(|row| row.id).expect("row");
+            assert_eq!(
+                crate::ui::factory::daemon::runtime::delivery::assignment_stale_status(
+                    root, &row.prompt, &row.target,
+                ),
+                None,
+                "a closed-task preamble must not withdraw the next assignment: {}", row.prompt,
+            );
+            assert_eq!(assignment_solicited_task_id(&row.prompt).as_deref(), Some("cas-fba9"));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_assignment_send_is_an_explicit_refusal_cas_baf6b() {
+        let _env = TestEnvGuard::temp_home();
+        let (_temp, service) = assignment_message_fixture();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "message", "target": "eager-cobra-57", "task_id": "cas-3e24",
+            "summary": "stale assignment", "message": "You're assigned cas-fba9.",
+        })).unwrap();
+        let error = service.message_send(request).await.expect_err("explicit closed task must refuse the send");
+        assert!(error.message.contains("cas-3e24") && error.message.contains("closed"), "{error:?}");
+        assert!(crate::store::open_prompt_queue_store(&service.inner.cas_root)
+            .unwrap().poll_all(10).unwrap().is_empty(), "a refused send must not enqueue");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn message_cap_rejects_before_queueing() {
         let _env = TestEnvGuard::temp_home();

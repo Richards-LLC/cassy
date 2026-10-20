@@ -3009,6 +3009,10 @@ pub trait PromptQueueStore: Send + Sync {
     /// Returns `Err` if required timestamps are corrupt (never fabricates `now`).
     fn message_delivery_report(&self, prompt_id: i64) -> Result<Option<MessageDeliveryReport>>;
 
+    /// Whether this is a trusted recovery notice containing historical message
+    /// content, which must not be interpreted as a fresh task assignment.
+    fn is_abandonment_recovery(&self, prompt_id: i64) -> Result<bool>;
+
     /// Read one queue row, including its stamped origin and device recipient.
     /// Unlike a pending peek this also finds rows already transported to an
     /// agent, which lets a supervisor securely answer that exact message.
@@ -7346,6 +7350,17 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(prompts)
+    }
+
+    fn is_abandonment_recovery(&self, prompt_id: i64) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM prompt_queue
+              WHERE id = ? AND origin_kind = 'daemon' AND source = 'delivery-watchdog'
+                AND dedupe_key GLOB 'delivery-abandoned-recovery:*')",
+            params![prompt_id],
+            |row| row.get(0),
+        )?)
     }
 
     fn message_status(&self, prompt_id: i64) -> Result<Option<MessageStatus>> {

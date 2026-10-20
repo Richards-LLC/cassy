@@ -2692,7 +2692,11 @@ pub(crate) fn read_row_facts(
     let mut facts = RowFacts {
         wake_gate: queue.wake_gate_state(row.id).ok(),
         deferred_inbox: queue.deferred_inbox_state(row.id).ok().flatten(),
-        assignment_stale: super::delivery::assignment_stale_status(cas_dir, &row.prompt, &row.target),
+        assignment_stale: if queue.is_abandonment_recovery(row.id).unwrap_or(false) {
+            None
+        } else {
+            super::delivery::assignment_stale_status(cas_dir, &row.prompt, &row.target)
+        },
         ..RowFacts::default()
     };
     if let Some(envelope) = crate::prompt_revalidation::parse_lifecycle_envelope(&row.prompt)

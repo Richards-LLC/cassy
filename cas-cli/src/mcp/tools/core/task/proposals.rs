@@ -867,6 +867,72 @@ mod tests {
         assert_eq!(stored.door, Some(cas_types::TaskDoor::TwoWay));
     }
 
+    /// cas-8a252 (GH #1275): an accepted proposal's task starts in its
+    /// attested target project with the proposer kept as origin_project and
+    /// the provenance unchanged. The same row in a third project, and a
+    /// foreign row without the attested block, are still refused.
+    #[tokio::test]
+    async fn accepted_proposal_starts_in_its_target_and_foreign_rows_stay_fenced_cas_8a252() {
+        // CI has none of these; clear them so a local run cannot pass on an
+        // ambient session (CAS_SESSION_ID auto-registers a caller).
+        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[
+            ("CAS_SESSION_ID", None),
+            ("CAS_AGENT_NAME", None),
+            ("CAS_AGENT_ROLE", None),
+            ("CAS_FACTORY_SESSION", None),
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_SUPERVISOR_NAME", None),
+            ("CAS_ROOT", None),
+        ]);
+        const ORIGIN: &str = "github.com/fixture/proposer";
+        const TARGET: &str = "github.com/fixture/target";
+        let proposal: TaskProposal = serde_json::from_value(serde_json::json!({
+            "proposal_id": "proposal-8a252",
+            "target_task_id": "cas-0123456789abcdef",
+            "state": "accepted",
+            "task": {"title": "Accepted work"},
+            "provenance": {
+                "server_attested": {
+                    "proposal_id": "proposal-8a252",
+                    "target_task_id": "cas-0123456789abcdef",
+                    "creator_user_id": "user-1",
+                    "team_id": "team-1",
+                    "origin_project_canonical_id": ORIGIN,
+                    "target_project_canonical_id": TARGET,
+                    "received_at": "2026-10-17T19:40:00Z",
+                    "client_request_id": "request-1"
+                },
+                "client_asserted": {}
+            }
+        }))
+        .unwrap();
+        let accepted = materialize_accepted_proposal(&proposal, TARGET).unwrap();
+        let mut unattested = accepted.clone();
+        unattested.notes.clear();
+        for (project, task, starts) in [
+            (TARGET, &accepted, true),
+            ("github.com/fixture/bystander", &accepted, false),
+            (TARGET, &unattested, false),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+            std::fs::write(cas_root.join("config.toml"), format!("[project]\ncanonical_id = {project:?}\n")).unwrap();
+            let store = crate::store::open_task_store_local(&cas_root).unwrap();
+            store.add(task).unwrap();
+            // A registered caller, so the start never depends on ambient CAS_* state.
+            let agents = crate::store::open_agent_store(&cas_root).unwrap();
+            let worker = cas_types::Agent::new("worker-8a252".into(), "worker-8a252".into());
+            agents.register(&worker).unwrap();
+            let core = CasCore::with_daemon(cas_root, None, None);
+            core.set_agent_id_for_testing(worker.id);
+            let started = core.cas_task_start(Parameters(IdRequest { id: task.id.clone() })).await;
+            assert_eq!(started.is_ok(), starts, "{project}, notes={}: {:?}", !task.notes.is_empty(), started.err());
+            let stored = store.get(&task.id).unwrap();
+            assert_eq!(stored.origin_project.as_deref(), Some(ORIGIN), "the proposer stays the origin");
+            assert_eq!(stored.notes.matches("proposal_id: \"proposal-8a252\"").count(), usize::from(!task.notes.is_empty()));
+        }
+    }
+
     fn accepted_proposal_with_task(task: serde_json::Value) -> TaskProposal {
         serde_json::from_value(serde_json::json!({
             "proposal_id": "proposal-null-1",

@@ -97,6 +97,16 @@ impl ConfigMeta {
 impl ConfigMeta {
     /// Validate a value against this config's constraints
     pub fn validate(&self, value: &str) -> Result<(), String> {
+        // Issue destinations use the same owner/name grammar as filing. Check
+        // here so set and editor paths refuse invalid input before mutation.
+        // Empty values still clear an override and restore existing defaults.
+        if matches!(self.key, "issues.repo" | "issues.components.cassy"
+            | "issues.components.violet" | "issues.components.cloud")
+            && !value.trim().is_empty()
+            && crate::gh_graphql::split_repo(value).is_err()
+        {
+            return Err(format!("Invalid {}: use owner/name or empty to clear", self.key));
+        }
         // First check type
         match self.value_type {
             ConfigType::Bool => {

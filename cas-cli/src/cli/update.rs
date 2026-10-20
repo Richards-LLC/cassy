@@ -39,6 +39,7 @@ use crate::ui::components::{Border, Formatter, OutputMode, Renderable, Table, Ve
 use crate::ui::theme::{ActiveTheme, Icons};
 
 mod discovery_probe;
+mod bindings;
 mod findings;
 mod fixture;
 mod live;
@@ -1378,6 +1379,12 @@ impl UncapturedPhase for ProjectPhase {
     }
 }
 
+impl UncapturedPhase for Option<ProjectPhase> {
+    fn uncaptured(reason: String) -> Self {
+        Some(ProjectPhase::Failed(reason))
+    }
+}
+
 impl UncapturedPhase for (ProjectPhase, Vec<SyncSummary>) {
     fn uncaptured(reason: String) -> Self {
         (ProjectPhase::Failed(reason), Vec::new())
@@ -1631,6 +1638,21 @@ fn refresh_all_projects_with_user_refresh(
             });
             details.push_str(&output);
             documents.push(("cloud_sync", docs));
+            // cas-9021: Slack channel bindings ride the cloud row; a project
+            // with nothing to reconcile keeps today's receipt shape.
+            let (bindings, binding_output, binding_docs) = capture_phase_documents(cli, || {
+                bindings::reconcile_project_bindings(&cas_root, args.dry_run, cli.json)
+            });
+            let mut output = output;
+            let cloud = match bindings {
+                Some(bindings) => {
+                    details.push_str(&binding_output);
+                    output.push_str(&binding_output);
+                    documents.push(("binding_reconciliation", binding_docs));
+                    with_binding_reconciliation(cloud, bindings)
+                }
+                None => cloud,
+            };
             phase_details.push((cloud.is_ok(), output));
             (search_index, skills, membership, cloud)
         };
@@ -1676,6 +1698,24 @@ fn refresh_all_projects_with_user_refresh(
         first_launch_ms,
         started_at,
     )
+}
+
+/// cas-9021: the cloud row carries binding reconciliation. A cloud problem
+/// keeps its own cause; otherwise a binding warning becomes the row's cause.
+fn with_binding_reconciliation(cloud: ProjectPhase, bindings: ProjectPhase) -> ProjectPhase {
+    match (cloud, bindings) {
+        (ProjectPhase::Ok(cloud), ProjectPhase::Ok(bindings)) => {
+            ProjectPhase::Ok(format!("{cloud}; {bindings}"))
+        }
+        (
+            ProjectPhase::Ok(_) | ProjectPhase::Planned(_),
+            bindings @ (ProjectPhase::Warning(_) | ProjectPhase::Failed(_)),
+        ) => bindings,
+        (ProjectPhase::Planned(cloud), ProjectPhase::Planned(bindings)) => {
+            ProjectPhase::Planned(format!("{cloud}; {bindings}"))
+        }
+        (cloud, _) => cloud,
+    }
 }
 
 /// Keep an existing phase failure and its remedy when maintenance also fails.
@@ -2204,7 +2244,14 @@ fn run_project_phase(
 // Deliberate staging remains inspectable; an attempted commit failure is an error.
 fn check_managed_commit(report: crate::cli::project_files::Report) -> anyhow::Result<()> {
     if let Some(error) = report.commit_error {
-        anyhow::bail!(error);
+        // Main owns the one final error. Leave room for its widest mark;
+        // preserve full Git stderr and hook paths in the JSON report.
+        let (lines, shortened) = findings::wrap(&error, 80 - "[ERROR] ".len(), false);
+        let mut message = lines.join("\n  ");
+        if shortened {
+            message.push_str("\n  Full details: cas update --sync --json");
+        }
+        anyhow::bail!(message);
     }
     Ok(())
 }
@@ -4028,6 +4075,19 @@ fn running_factory_update_notice(sessions: &[(String, bool)], version: &str) -> 
     Some(notice)
 }
 
+/// Pre-swap failures have no refresh receipt. Preserve their original error
+/// for stderr; post-swap failures already own a receipt claiming the new binary.
+fn binary_install_failure(cli: &Cli, current: &str, error: anyhow::Error) -> anyhow::Error {
+    if cli.json {
+        let mut receipt = combined_update_receipt(current, false, None, None, None);
+        receipt["binary_status"] = serde_json::json!("failed");
+        receipt["refresh_status"] = serde_json::json!("not_run");
+        receipt["error"] = serde_json::json!({"phase": "binary", "message": format!("{error:#}")});
+        println!("{receipt}");
+    }
+    error
+}
+
 /// Download and install the latest (or specified) version
 fn perform_update(
     args: &UpdateArgs,
@@ -4037,15 +4097,18 @@ fn perform_update(
     use self_update::Status;
     use self_update::update::ReleaseUpdate;
 
-    let updater = configure_updater(args, current_version, cli, io::stdin().is_terminal())?;
-    let updater = updater.build()?;
+    let updater = configure_updater(args, current_version, cli, io::stdin().is_terminal())
+        .map_err(|error| binary_install_failure(cli, current_version, error))?;
+    let updater = updater.build()
+        .map_err(|error| binary_install_failure(cli, current_version, error.into()))?;
     // self_update resolves its install destination before the replacement.
     // Keep that stable path: after a Linux rename swap, current_exe() can
     // report the old process image as `/path/cas (deleted)`.
     let installed_binary = strip_deleted_suffix(updater.bin_install_path());
 
     // Check what we're updating to
-    let latest = updater.get_latest_release()?;
+    let latest = updater.get_latest_release()
+        .map_err(|error| binary_install_failure(cli, current_version, error.into()))?;
     let target_version = args
         .version
         .as_ref()
@@ -4075,7 +4138,11 @@ fn perform_update(
         let _download = live::during_open_phase(format!("downloading Cassy {target_version}"));
         updater.update()
     }
-    .map_err(|error| install_error(&error, current_version, &target_version))?;
+    .map_err(|error| binary_install_failure(
+        cli,
+        current_version,
+        install_error(&error, current_version, &target_version),
+    ))?;
     if matches!(&status, Status::Updated(_)) {
         // A new updater can remove quarantine before the first child launch.
         // An older parent cannot, so execute_post_swap repeats this before
@@ -5124,8 +5191,8 @@ fn report_managed_files(
     if cli.json {
         println!("{}", serde_json::json!({"managed_files": report}));
     } else {
-        let message = if let Some(error) = &report.commit_error {
-            error.clone()
+        let message = if report.commit_error.is_some() {
+            "Managed files: commit failed (details below)".to_string()
         } else if !report.conflicts.is_empty() {
             format!(
                 "Managed files: {} conflicts preserved; cas update --sync --json for paths",

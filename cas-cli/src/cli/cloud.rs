@@ -394,6 +394,7 @@ fn clear_foreign_identity_metadata(
 }
 
 #[derive(Parser)]
+#[command(group(clap::ArgGroup::new("purge").args(["purge_team_owned", "purge_pull_echoes"])))]
 pub struct CloudQueueArgs {
     #[command(subcommand)]
     pub command: Option<CloudQueueCommand>,
@@ -401,11 +402,15 @@ pub struct CloudQueueArgs {
     /// Ownership rejection alone is not proof; unproven transport is retained.
     #[arg(long, conflicts_with_all = ["prune", "clear", "retry"])]
     pub purge_team_owned: bool,
-    /// Preview IDs and delivery-proof eligibility without deleting queue rows.
-    #[arg(long, requires = "purge_team_owned")]
+    /// Remove selected personal upserts a pull staged as copies of the team's
+    /// own rows (cas-abad). Reads the team snapshot; never changes task data.
+    #[arg(long, conflicts_with_all = ["prune", "clear", "retry"])]
+    pub purge_pull_echoes: bool,
+    /// Preview IDs and eligibility without deleting queue rows.
+    #[arg(long, requires = "purge")]
     pub dry_run: bool,
     /// Exact personal queue IDs to inspect or clean up (comma-separated).
-    #[arg(long, value_delimiter = ',', requires = "purge_team_owned")]
+    #[arg(long, value_delimiter = ',', requires = "purge")]
     pub ids: Vec<i64>,
     /// Show detailed list of queued items
     #[arg(long, short)]
@@ -2636,16 +2641,38 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
     let queue = SyncQueue::open(cas_root)?;
     queue.init()?;
 
-    if args.purge_team_owned {
+    if args.purge_team_owned || args.purge_pull_echoes {
         let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
         let team_id = config.active_team_id().unwrap_or_default();
         let project_id = crate::cloud::resolve_canonical_id_for_sync(cas_root).unwrap_or_default();
-        let rows = queue.purge_team_owned_personal_rejections(
-            &team_id,
-            &project_id,
-            &args.ids,
-            args.dry_run,
-        )?;
+        let (flag, reason) = if args.purge_pull_echoes {
+            ("--purge-pull-echoes", "pull_echo")
+        } else {
+            ("--purge-team-owned", "team_owned_project")
+        };
+        let rows = if args.purge_pull_echoes {
+            if team_id.is_empty() || project_id.is_empty() {
+                anyhow::bail!("--purge-pull-echoes compares against this project's team rows; no active team/project");
+            }
+            // Read-only: the team's current rows for this project.
+            let syncer = crate::cloud::CloudSyncer::new_for_project(
+                std::sync::Arc::new(SyncQueue::open(cas_root)?),
+                config.clone(),
+                crate::cloud::CloudSyncerConfig::default(),
+                project_id.clone(),
+                cas_root,
+            );
+            let tasks = syncer.fetch_task_snapshot(Some(&team_id), &project_id)?;
+            let dependencies = syncer.fetch_dependency_snapshot(Some(&team_id), &project_id)?;
+            queue.purge_personal_pull_echoes(&tasks, &dependencies, &args.ids, args.dry_run)?
+        } else {
+            queue.purge_team_owned_personal_rejections(
+                &team_id,
+                &project_id,
+                &args.ids,
+                args.dry_run,
+            )?
+        };
         let eligible = rows.iter().filter(|row| row.eligible).count();
         let purged = if args.dry_run { 0 } else { eligible };
         if cli.json {
@@ -2653,7 +2680,7 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
                 "{}",
                 serde_json::json!({
                     "status": "ok", "purged": purged, "scope": "personal",
-                    "reason": "team_owned_project", "dry_run": args.dry_run,
+                    "reason": reason, "dry_run": args.dry_run,
                     "rows": rows,
                 })
             );
@@ -2667,7 +2694,11 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
                 if args.dry_run { "Preview" } else { "Cleanup" },
                 rows.len() - eligible
             ))?;
-            fmt.write_raw("Ownership rejection alone does not prove team delivery.\n")?;
+            fmt.write_raw(if args.purge_pull_echoes {
+                "Only rows equal to the team's current row are eligible; local edits are retained.\n"
+            } else {
+                "Ownership rejection alone does not prove team delivery.\n"
+            })?;
             for row in rows.iter().take(args.limit) {
                 fmt.write_raw(&format!(
                     "{} {}: {}\n",
@@ -2681,7 +2712,7 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
             }
             if args.dry_run && eligible > 0 {
                 let first_id = rows.iter().find(|row| row.eligible).unwrap().id;
-                fmt.write_raw(&format!("cas cloud queue --purge-team-owned --ids {first_id}\n"))?;
+                fmt.write_raw(&format!("cas cloud queue {flag} --ids {first_id}\n"))?;
             }
         }
         return Ok(());

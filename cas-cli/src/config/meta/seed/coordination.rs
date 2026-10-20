@@ -5,7 +5,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     // Runtime FactoryConfig fields must also be discoverable and settable.
     for (key, name, description, value_type, default, constraint) in [
         ("factory.slot_id", "Cloud Supervisor Slot",
-         "Stable Cloud reader slot override for a second supervisor on the same repo and machine. Empty derives the slot from machine id, canonical project id and supervisor role; keep the override across relaunches.",
+         "Stable Cloud reader slot override. Empty derives the slot from machine id, canonical project id, supervisor role and factory session. Use an override to retain a slot across different factory sessions or machines; sharing an override intentionally supersedes the earlier registration.",
          ConfigType::String, "", Constraint::None),
         ("factory.warn_stale_assignment", "Warn on Stale Worker Assignment",
          "Warn when assigning a task to a worker whose worktree is behind its sync target.",

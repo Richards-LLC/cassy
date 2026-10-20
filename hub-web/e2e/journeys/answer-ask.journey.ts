@@ -335,6 +335,7 @@ test("HUB-J7 double-tapping the bookmark jumps without answering (cas-450b, cas-
   await journey.stage("Read a question on a short phone screen", async () => {
     await page.setViewportSize({ width: 390, height: 440 }); await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     ask = hub.supervisorSays(PELICAN, "Open the PR and cut a release?", { kind: "ask", options: ["Open PR", "Hold release"] });
     await expect(page.locator(".pinned-expand")).toBeVisible();
   });

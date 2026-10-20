@@ -70,5 +70,8 @@ describe("footer count before any machine answers (cas-9846)", () => {
     expect(meta(machineFooterMarkup([], 1, "b", false, true))).toBe("1 conversation, last known");
     expect(meta(machineFooterMarkup([], 3, "b", false, true))).toBe("3 conversations, last known");
     expect(meta(machineFooterMarkup([], 3, "b"))).toBe("3 conversations");
+    // cas-c552: a live machine's conversations are not last known beside a reconnecting one's.
+    expect(meta(machineFooterMarkup([], 2, "b", false, 1))).toBe("2 conversations · 1 last known");
+    expect(meta(machineFooterMarkup([], 2, "b", false, 2))).toBe("2 conversations, last known");
   });
 });

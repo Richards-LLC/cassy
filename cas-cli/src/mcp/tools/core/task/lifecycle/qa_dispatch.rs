@@ -611,7 +611,7 @@ impl CasCore {
                 &repo_root,
                 &target_branch,
                 Some(tip),
-            );
+            ).map_err(|error| format!("PARK REFUSED: {error}"))?;
             if let Ok(fresh) = store.get(&task.id)
                 && fresh.deliverables.factory_branch_anchor.as_deref() == Some(tip)
             {
@@ -2510,7 +2510,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
         )
         .unwrap();
         f.core
-            .advance_awaiting_merge_anchor(tasks.as_ref(), &f.task, repo, "main", Some(&f.tip));
+            .advance_awaiting_merge_anchor(tasks.as_ref(), &f.task, repo, "main", Some(&f.tip)).unwrap();
         let parked = tasks.get(&f.task.id).unwrap();
         assert_eq!(
             parked.deliverables.factory_branch_anchor.as_deref(),

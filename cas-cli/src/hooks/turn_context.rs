@@ -408,10 +408,10 @@ pub(crate) fn fallback_context_within(
     if let Some(signal) = signal
         && signal > receipt.state.mail_checked_at
     {
-        // Taken before the query: a row committed after it stamps a newer
-        // signal, so the next boundary checks again.
-        receipt.state.mail_checked_at = chrono::Utc::now().timestamp_millis();
-        changed = true;
+        // Taken before the query: later mail stamps a newer signal. Commit
+        // this cursor only after every selected body fits; otherwise the next
+        // tool boundary must retry the overflow even without another enqueue.
+        let checked_at = chrono::Utc::now().timestamp_millis();
         // cas-a1ed: deep in a long turn its first line is outside the tail;
         // look further back before checking mail without a turn.
         let deep;
@@ -429,10 +429,14 @@ pub(crate) fn fallback_context_within(
                 prompt: prompt.as_str(),
             })
         });
-        if let Some(mail) =
+        if let Some(outcome) =
             surface_factory_inbox_after_tool_result(Some(root), input, current, &mut budget)
         {
-            parts.push(mail);
+            parts.extend(outcome.text);
+            if outcome.complete {
+                receipt.state.mail_checked_at = checked_at;
+                changed = true;
+            }
         }
     }
 
@@ -797,12 +801,11 @@ mod tests {
     /// hex subagent of the supervisor stays a child.
     #[test]
     fn ct2_p1_teams_supervisor_owns_inbox_but_its_subagent_does_not() {
-        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[
-            ("CAS_AGENT_ROLE", Some("supervisor")),
-            ("CAS_AGENT_NAME", Some("lead-sup")),
-            ("CAS_FACTORY_SESSION", Some("sess-7bfa")),
-            (crate::internal_llm::INTERNAL_LLM_ENV, None),
-        ]);
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_AGENT_NAME", "lead-sup");
+        env.set("CAS_FACTORY_SESSION", "sess-7bfa");
+        env.remove(crate::internal_llm::INTERNAL_LLM_ENV);
         let dir = tempfile::tempdir().unwrap();
         let transcript = dir.path().join("session.jsonl");
         fs::write(
@@ -811,23 +814,46 @@ mod tests {
         )
         .unwrap();
         let queue = crate::store::open_prompt_queue_store(dir.path()).unwrap();
-        let id = queue
-            .enqueue_with_session("worker-7bfa", "supervisor", "ready: cas-x", "sess-7bfa")
-            .unwrap();
-        assert!(queue.claim_recipient_transport(id, "supervisor").unwrap());
-        queue.record_deferred_inbox(id, 0).unwrap();
+        // cas-ca02: two status messages arrive at one busy supervisor tool
+        // boundary. Both fit an empty block; only one fits this block.
+        let bodies = [
+            format!("Candidate already prepared: {}", "a".repeat(3_000)),
+            format!("Final green tip ready for candidate; Cargo released: {}", "b".repeat(3_000)),
+        ];
+        let ids: Vec<_> = bodies.iter().map(|body| {
+            let id = queue.enqueue_with_session("worker-7bfa", "supervisor", body, "sess-7bfa").unwrap();
+            assert!(queue.claim_recipient_transport(id, "supervisor").unwrap());
+            queue.record_deferred_inbox(id, 0).unwrap();
+            id
+        }).collect();
 
         assert!(
             fallback_context(dir.path(), &teams_input(&transcript, "b81f0c2e9d4a7735e")).is_none(),
             "the supervisor's subagent never drains the supervisor's inbox"
         );
         assert_eq!(
-            queue.message_delivery_report(id).unwrap().unwrap().recipient_receipt,
+            queue.message_delivery_report(ids[0]).unwrap().unwrap().recipient_receipt,
             Some(cas_store::SurfacingSource::TransportClaimed)
         );
-        let mail = fallback_context(dir.path(), &teams_input(&transcript, "supervisor@sess-7bfa"))
+        let hook = teams_input(&transcript, "supervisor@sess-7bfa");
+        let mail = fallback_context(dir.path(), &hook)
             .expect("supervisor@<session> is the supervisor itself");
-        assert!(mail.contains("ready: cas-x"), "{mail}");
+        assert!(mail.contains(&bodies[0]), "{mail}");
+        assert!(!mail.contains(&bodies[1]), "second row exceeds this block's body budget");
+        assert_eq!(
+            queue.message_delivery_report(ids[1]).unwrap().unwrap().recipient_receipt,
+            Some(cas_store::SurfacingSource::TransportClaimed),
+            "an overflow row is not rendered or confirmed"
+        );
+        let next = fallback_context(dir.path(), &hook)
+            .expect("the busy supervisor's next tool boundary must retry overflow without new mail");
+        assert!(next.contains(&bodies[1]), "{next}");
+        assert!(!next.contains(&bodies[0]), "a rendered row is never repeated");
+        assert_eq!(
+            queue.message_delivery_report(ids[1]).unwrap().unwrap().recipient_receipt,
+            Some(cas_store::SurfacingSource::HookSurfaced)
+        );
+        assert!(fallback_context(dir.path(), &hook).is_none(), "both rows were rendered once");
     }
 
     /// cas-7bfa review: a Teams member now reaches the inbox-signal check, so

@@ -249,7 +249,8 @@ pub fn required_scope(message: &ClientMessage) -> Option<Scope> {
         // The legacy focused-pane interrupt is intentionally never exposed.
         // Commander never sizes a pane (cas-0546, cas-f285): pane geometry
         // belongs to the operator's local dashboard, so no viewer may set it.
-        ClientMessage::Interrupt | ClientMessage::ResizePane { .. } => None,
+        ClientMessage::Interrupt | ClientMessage::ResizePane { .. }
+        | ClientMessage::BindingIntakePause { .. } | ClientMessage::BindingIntakeStatus { .. } => None,
         ClientMessage::Attach { .. }
         | ClientMessage::Detach
         | ClientMessage::GetState

@@ -6615,6 +6615,18 @@ impl CasService {
             out.push_str(&format!("Active Cassy root placement: {message}\n"));
         }
 
+        // cas-75a8 (GH #1296): task-named simulators, read-only here.
+        if crate::task_simulators::supported() {
+            let tasks = crate::store::open_task_store(&self.inner.cas_root)
+                .and_then(|store| store.list(None).map_err(Into::into))
+                .unwrap_or_default();
+            out.push_str(&crate::task_simulators::render(&crate::task_simulators::inventory(
+                &crate::task_simulators::Simctl::default(),
+                &tasks,
+                chrono::Utc::now(),
+            )));
+        }
+
         if !live_viktor_watches.is_empty() {
             out.push_str("\nLive Viktor watches:\n");
             for watch in &live_viktor_watches {
@@ -7311,7 +7323,7 @@ impl CasService {
                 .as_ref()
                 .map_err(|error| error.clone())
                 .and_then(|tasks| {
-                    eligible_artifact_tasks(&self.inner.cas_root, tasks, chrono::Utc::now())
+                    crate::artifacts::retention::eligible_artifact_tasks(&self.inner.cas_root, tasks, chrono::Utc::now(), crate::artifacts::retention::MIN_RETENTION_DAYS)
                 })
         } else {
             Ok(Default::default())
@@ -7345,6 +7357,25 @@ impl CasService {
             orphan_process_summary.skipped,
         );
         output.push_str(&artifact_cleanup.render());
+        // cas-75a8 (GH #1296): task-named simulators share the artifacts=true
+        // opt-in; without it they are listed, never deleted.
+        if crate::task_simulators::supported() {
+            let simctl = crate::task_simulators::Simctl::default();
+            // Every task, not only closed ones, so an open task's device is
+            // named as kept rather than as unknown.
+            let simulators = crate::store::open_task_store(&self.inner.cas_root)
+                .map_err(anyhow::Error::from)
+                .and_then(|store| store.list(None).map_err(anyhow::Error::from))
+                .and_then(|tasks| crate::task_simulators::inventory(&simctl, &tasks, chrono::Utc::now()));
+            output.push_str(&crate::task_simulators::render(&simulators));
+            if artifact_authorized && let Ok(simulators) = &simulators {
+                let (deleted, failed) = crate::task_simulators::reclaim(&simctl, simulators);
+                output.push_str(&format!("  Task simulators deleted: {}\n", deleted.len()));
+                for failure in failed {
+                    output.push_str(&format!("  Task simulator delete failed: {failure}\n"));
+                }
+            }
+        }
         match trace_cleanup {
             Ok((files, bytes)) => output.push_str(&format!(
                 "\nJourney recordings: removed_files={files} reclaimed_bytes={bytes} (closed >=24h; force=true dry_run=false required)\n"
@@ -7684,39 +7715,7 @@ struct FactoryArtifactInventory {
     error: Option<String>,
     removed: usize,
     dry_run: bool,
-    review_roots: Vec<(std::path::PathBuf, ArtifactRootUsage)>,
-}
-
-#[derive(Default)]
-struct ArtifactRootUsage {
-    bytes: u64,
-    regenerable: Vec<std::path::PathBuf>,
-    error: Option<String>,
-}
-
-fn artifact_root_usage(root: &std::path::Path) -> ArtifactRootUsage {
-    let mut usage = ArtifactRootUsage::default();
-    for entry in walkdir::WalkDir::new(root).follow_links(false) {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                usage.error = Some(error.to_string());
-                continue;
-            }
-        };
-        if entry.file_type().is_file() {
-            match entry.metadata() {
-                Ok(metadata) => usage.bytes = usage.bytes.saturating_add(metadata.len()),
-                Err(error) => usage.error = Some(error.to_string()),
-            }
-        } else if entry.file_type().is_dir()
-            && (entry.file_name() == "DerivedData" || entry.file_name() == "target")
-        {
-            usage.regenerable.push(entry.path().to_path_buf());
-        }
-    }
-    usage.regenerable.sort();
-    usage
+    review_roots: Vec<(std::path::PathBuf, crate::artifacts::retention::ArtifactRootUsage)>,
 }
 
 impl FactoryArtifactInventory {
@@ -7739,7 +7738,7 @@ impl FactoryArtifactInventory {
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .map(|entry| {
                 let path = entry.path();
-                let usage = artifact_root_usage(&path);
+                let usage = crate::artifacts::retention::artifact_root_usage(&path);
                 (path, usage)
             })
             .collect();
@@ -7828,52 +7827,6 @@ fn factory_artifact_inventory(
     inventory.closed.sort();
     inventory.stray.sort();
     inventory
-}
-
-/// Keep at least seven days of evidence after close. Any nonterminal task,
-/// or task updated in that window (including appended notes), can keep older
-/// evidence alive by citing its task/path or a published artifact alias.
-fn eligible_artifact_tasks(
-    cas_root: &std::path::Path,
-    tasks: &[cas_types::Task],
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<std::collections::BTreeSet<String>, String> {
-    let cutoff = now - chrono::Duration::days(7);
-    let references = serde_json::to_string(
-        &tasks
-            .iter()
-            .filter(|task| !task.is_terminal() || task.updated_at >= cutoff)
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|error| error.to_string())?;
-    let artifacts =
-        cas_store::SqliteArtifactStore::open(cas_root).map_err(|error| error.to_string())?;
-    let mut eligible = std::collections::BTreeSet::new();
-    for task in tasks.iter().filter(|task| {
-        task.status == cas_types::TaskStatus::Closed
-            && task.closed_at.is_some_and(|closed| closed <= cutoff)
-    }) {
-        if references.contains(&task.id) {
-            continue;
-        }
-        let published = artifacts
-            .list_for_task(&task.id)
-            .map_err(|error| error.to_string())?;
-        let referenced = published.iter().any(|artifact| {
-            std::iter::once(Some(artifact.id.as_str()))
-                .chain([
-                    artifact.cloud_artifact_id.as_deref(),
-                    artifact.cloud_url.as_deref(),
-                    artifact.slack_permalink.as_deref(),
-                ])
-                .flatten()
-                .any(|alias| !alias.is_empty() && references.contains(alias))
-        });
-        if !referenced {
-            eligible.insert(task.id.clone());
-        }
-    }
-    Ok(eligible)
 }
 
 /// Trace/video recordings are bulky scratch; receipts keep the separate

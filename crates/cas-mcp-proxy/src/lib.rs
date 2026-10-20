@@ -94,8 +94,20 @@ pub trait ProxyCallInterceptor: Send + Sync {
         arguments: Option<serde_json::Map<String, Value>>,
     ) -> futures::future::BoxFuture<'a, Result<PreparedProxyCall>>;
 
-    /// Non-authoritative local evidence only; a remote gateway owns effects.
-    fn call_succeeded(&self, _event: ProxyCallEvent<'_>) {}
+    /// Opt in by route before the transport converts a result to JSON.
+    /// Preparation-only interceptors never pay for result conversion.
+    fn observes_result(&self, _server: &str, _tool: &str) -> bool {
+        false
+    }
+
+    /// Await non-authoritative evidence without blocking the async executor.
+    /// Recording failures must not turn an accepted upstream call into a retry.
+    fn call_succeeded<'a>(
+        &'a self,
+        _event: ProxyCallEvent<'a>,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
 }
 
 pub struct PreparedProxyCall {
@@ -1455,12 +1467,14 @@ impl ProxyEngine {
             None => result?,
         };
 
-        if let Some(interceptor) = interceptor {
+        if let Some(interceptor) = interceptor
+            .filter(|interceptor| interceptor.observes_result(server_name, tool_name))
+        {
             let serialized = serde_json::to_value(&result).unwrap_or(Value::Null);
             interceptor.call_succeeded(ProxyCallEvent {
                 caller, server: server_name, tool: tool_name,
                 arguments: &arguments, result: &serialized,
-            });
+            }).await;
         }
         if let Some(warning) = prepared.warning {
             // Keep warnings in JSON receipts too: CLI and artifact callers
@@ -2888,6 +2902,37 @@ mod tests {
         // No upstream exists, so either missed dispatch path fails above.
     }
 
+    #[tokio::test]
+    async fn interceptor_leaves_non_violet_results_byte_identical() {
+        struct VioletOnly;
+        impl ProxyCallInterceptor for VioletOnly {
+            fn prepare<'a>(&'a self, _: &'a ProxyCaller, _: &'a str, _: &'a str,
+                arguments: Option<serde_json::Map<String, Value>>,
+            ) -> futures::future::BoxFuture<'a, Result<PreparedProxyCall>> {
+                Box::pin(async move { Ok(PreparedProxyCall::forward(arguments)) })
+            }
+            fn call_succeeded<'a>(&'a self, _: ProxyCallEvent<'a>) -> futures::future::BoxFuture<'a, ()> {
+                panic!("unrelated result must not reach the interceptor's result conversion");
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ProxyEngine::from_configs(HashMap::from([("fake".into(), fake_upstream(dir.path()))])).await.unwrap();
+        let caller = registered_worker_caller();
+        let expected: rmcp::model::CallToolResult = serde_json::from_value(serde_json::json!({
+            "content":[{"type":"text","text":"  { \"raw\": [1, 2] }\nλ\tend  "},
+                {"type":"image","data":"AAECAw==","mimeType":"image/png"}],
+            "structuredContent":{"nested":[null,false,3.5]},"isError":false,
+            "_meta":{"opaque":"preserve me"}
+        })).unwrap();
+        let args = serde_json::json!({"result":expected}).as_object().cloned();
+        let baseline = engine.call_tool_raw(&caller, ProxyDispatchKind::Direct, "fake", "echo", args.clone()).await.unwrap();
+        assert_eq!(serde_json::to_vec(&baseline).unwrap(), serde_json::to_vec(&expected).unwrap());
+        engine.set_call_interceptor(Arc::new(VioletOnly)).await;
+        let intercepted = engine.call_tool_raw(&caller, ProxyDispatchKind::Direct, "fake", "echo", args).await.unwrap();
+        assert_eq!(serde_json::to_vec(&intercepted).unwrap(), serde_json::to_vec(&baseline).unwrap());
+        engine.shutdown().await;
+    }
+
     /// GH #988: `supervisor:` routes admit supervisors and plain sessions,
     /// refuse workers and the director with a named reason, and stay visible
     /// in the catalog as supervisor-only.
@@ -3343,8 +3388,9 @@ for line in sys.stdin:
             os._exit(0)
         if name == "hang":
             time.sleep(30)
-        send({"jsonrpc": "2.0", "id": ident, "result": {
-            "content": [{"type": "text", "text": "ok"}], "isError": False}})
+        result = message["params"].get("arguments", {}).get("result", {
+            "content": [{"type": "text", "text": "ok"}], "isError": False})
+        send({"jsonrpc": "2.0", "id": ident, "result": result})
     elif ident is not None:
         send({"jsonrpc": "2.0", "id": ident, "result": {}})
 "#,

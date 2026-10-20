@@ -160,7 +160,7 @@ it renders `local_warning` with machine-local evidence and explicit unknowns.
 
 ```sh
 cas config set slack.stakeholder_contacts '[{"workspace_id":"T123","user_id":"U123","minimum_interval_secs":3600,"mode":"refuse"}]'
-cas violet post --channel dev --text '<@U123> review ready' --request-id 10000000-0000-4000-8000-000000000001
+cas violet post --channel dev --text '<@U123> review ready'
 cas factory peers --detail
 ```
 
@@ -171,3 +171,10 @@ administration remains operator-authorized in Cloud. Cassy includes degraded
 or granted warn-mode evidence as `dispatch_warning` in JSON receipts and human
 output. Local fallback evidence is derived from provider timestamps, never the
 machine clock; other machines and uncertain sends remain unknown.
+
+The current Violet schema documents `request_id` as managed-reply-only. Cassy's
+CLI therefore requires `--reply-to` with `--request-id` and forwards it only
+with a managed reply intent. Root reservation IDs in this proposed contract
+are future capability-gated adapter metadata, not a supported top-level CLI
+flag. Before rollout, use the existing thread `idempotency_key` for thread
+reconciliation and the reservation receipt's ID only on the shared capability.

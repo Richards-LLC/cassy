@@ -62,8 +62,8 @@ pub struct PostArgs {
     /// Local file to attach, read from disk (repeatable, up to 10)
     #[arg(long = "file", value_name = "PATH")]
     pub files: Vec<PathBuf>,
-    /// Reuse a stable request ID for a stakeholder root or managed reply retry
-    #[arg(long = "request-id", value_name = "UUID")]
+    /// Reuse a stable request ID for a managed reply retry
+    #[arg(long = "request-id", value_name = "UUID", requires = "reply_to")]
     pub request_id: Option<String>,
 }
 
@@ -297,7 +297,7 @@ fn run_post(
             "expected_generation": block["expected_generation"],
             "request_id": request_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         })
-    }).or_else(|| request_id.as_ref().map(|id| json!({"request_id":id})));
+    });
     let mut hub = (context.connect)()?;
     let receipt = post_files_claimed(hub.as_mut(), &channel, text, reply_to, claim.as_ref(), &files)?;
     if context.json {

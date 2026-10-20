@@ -20,6 +20,46 @@ const PASS_LATENCY_LIMIT: Duration = Duration::from_millis(100);
 const SLOW_READ: Duration = Duration::from_millis(500);
 
 #[tokio::test]
+async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
+    let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+    let cas_dir = fixture.app.cas_dir().to_path_buf();
+    fixture.app.set_supervisor_cli_for_test(cas_mux::SupervisorCli::Claude);
+    let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(
+        std::slice::from_ref(&fixture.event),
+    );
+    assert_eq!(prompts.len(), 1);
+    // pin: the incident's CI-success teammate emitter is the route under test.
+    assert!(prompts[0].text.contains("CI completed successfully for delivery"));
+    assert!(prompts[0].retract_task.is_some());
+    let verdicts = fixture.app.deliverability_request().read(None, &prompts);
+    assert_eq!(verdicts, vec![true], "the merge is genuinely outstanding at the batch check");
+
+    let mut daemon = daemon_on_lanes(&cas_dir);
+    std::mem::swap(&mut daemon.app, &mut fixture.app);
+    let teams = super::super::teams::TeamsManager::new(&daemon.session_name);
+    teams.init_team_config(&[], cas_dir.parent().unwrap(), &Default::default(), "lead").unwrap();
+    let inbox = teams.teams_dir().join("inboxes/supervisor.json");
+    daemon.teams = Some(teams);
+
+    // The already successful read is in flight back to the control loop when
+    // worktree_merge's equivalent merge+push completes. Do not recompute it.
+    fixture.advance_target(true);
+    daemon.inject_rechecked_batch(
+        super::super::factory_jobs::DeliverabilityBatch {
+            prompts: prompts.into_iter().zip(verdicts).collect(),
+            assignments: vec![crate::ui::factory::app::AssignmentRead::NotAssignment],
+            events: vec![fixture.event.clone()],
+            refresh_started: Instant::now(),
+        },
+        super::super::store_worker::global(),
+    ).await;
+    assert!(daemon.queue_jobs.drain_for_shutdown(&cas_dir, Duration::from_secs(10)));
+    let rows: Vec<super::super::teams::InboxMessage> =
+        serde_json::from_str(&std::fs::read_to_string(inbox).unwrap()).unwrap();
+    assert!(rows.is_empty(), "a completed merge must suppress the stale director teammate message: {rows:?}");
+}
+
+#[tokio::test]
 async fn cas_9efb_merge_ci_probe_runs_on_external_lane_without_blocking_control() {
     let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
     let cas_dir = fixture.app.cas_dir().to_path_buf();

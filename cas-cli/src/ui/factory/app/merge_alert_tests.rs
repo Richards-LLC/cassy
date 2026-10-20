@@ -142,7 +142,7 @@ impl Fixture {
             .1
     }
 
-    fn advance_target(&self, merge: bool) {
+    pub(crate) fn advance_target(&self, merge: bool) {
         let integration = tempfile::tempdir().unwrap();
         git(
             integration.path(),

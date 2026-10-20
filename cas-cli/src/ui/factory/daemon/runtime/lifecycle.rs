@@ -4856,6 +4856,9 @@ impl FactoryDaemon {
             self.submit_director_prompt_enqueue(store_worker, &prompt, "director_prompt_queued");
             return;
         }
+        if self.submit_merge_alert_inbox(&prompt) {
+            return;
+        }
         // cas-f9e8 telemetry: measure director prompt
         // injection latency from the start of this refresh
         // tick to the completion of the inbox write. This

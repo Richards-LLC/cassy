@@ -439,7 +439,7 @@ impl DirectorRefresh {
                     tracing::debug!(generation, "late CI status ignored");
                 }
             }
-            FactoryJobOutput::ReminderScan => {}
+            FactoryJobOutput::ReminderScan | FactoryJobOutput::MergeAlertInbox => {}
         }
     }
 

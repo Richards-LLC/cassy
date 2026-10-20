@@ -51,9 +51,10 @@ impl VioletThreadResolver for ProxyVioletThreadResolver {
             Ok(Err(error)) => {
                 let detail = cmcp_core::describe_upstream_call_error(&error);
                 let message = format!("Violet could not resolve the Slack permalink: {detail}");
-                // cas-5fe0 (GH #1292): a dropped upstream that the proxy is
-                // reconnecting is worth a bounded retry; anything else is not.
-                Err(if violet_upstream_reconnecting(&detail) {
+                // cas-5fe0/cas-8ccd (GH #1292): a dropped upstream that the
+                // proxy is reconnecting is worth a bounded retry; the proxy
+                // classifies it structurally, not by this text.
+                Err(if cmcp_core::upstream_call_is_reconnectable(&error) {
                     RemoteError::reconnecting(message)
                 } else {
                     RemoteError::unavailable(message)
@@ -62,16 +63,6 @@ impl VioletThreadResolver for ProxyVioletThreadResolver {
             Err(_) => Err(RemoteError::timeout("Violet thread resolution timed out")),
         }
     }
-}
-
-/// cas-5fe0 (GH #1292): the proxy's wording for a dropped Violet connection
-/// it is reconnecting ("Transport closed" mid-call, then "is absent: its
-/// connection dropped … reconnects with backoff"). Credential, executable and
-/// configuration failures do not match and are not retried.
-#[cfg_attr(not(feature = "mcp-proxy"), allow(dead_code))]
-fn violet_upstream_reconnecting(detail: &str) -> bool {
-    detail.contains("Transport closed")
-        || (detail.contains("connection dropped") && detail.contains("reconnects with backoff"))
 }
 
 #[cfg(not(feature = "mcp-proxy"))]
@@ -255,22 +246,5 @@ fn command_from_request(request: &CoordinationRequest) -> Result<ExternalWorkCom
             "unsupported external-work action {}",
             request.action
         )),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    /// cas-5fe0 (GH #1292): only the proxy's dropped-connection wording is
-    /// retried, never a credential, executable or configuration failure.
-    #[test]
-    fn only_a_reconnecting_violet_upstream_is_retryable_cas_5fe0() {
-        assert!(super::violet_upstream_reconnecting("tool call 'violet_read' on 'violet' failed: Transport closed"));
-        assert!(super::violet_upstream_reconnecting(
-            "MCP upstream 'violet' is absent: its connection dropped (connection_failed); Cassy reconnects with backoff on the next call after 3s"
-        ));
-        assert!(!super::violet_upstream_reconnecting(
-            "MCP upstream 'violet' is absent: its credential is unavailable or was rejected (authentication_required); restore its credential, then retry"
-        ));
-        assert!(!super::violet_upstream_reconnecting("no MCP proxy is configured, so Violet cannot be reached"));
     }
 }

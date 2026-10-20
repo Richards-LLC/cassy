@@ -256,6 +256,9 @@ fn preflight_codex_model_support(
 ) -> Result<(), String> {
     use crate::factory_auth_health::{CodexModelSupport, codex_account_model_support};
     let mut seen = std::collections::BTreeSet::new();
+    // cas-49d3: the codex that will run the worker, probed once and only when
+    // a Codex spec names a model; the catalogue is judged against it.
+    let mut installed_codex: Option<Option<String>> = None;
     for spec in specs {
         if spec.cli != cas_mux::SupervisorCli::Codex {
             continue;
@@ -275,8 +278,9 @@ fn preflight_codex_model_support(
         let Some(home) = codex_home_path(account_dir.as_deref()) else {
             continue;
         };
+        let installed = installed_codex.get_or_insert_with(installed_codex_version).as_deref();
         if let CodexModelSupport::Unsupported { catalog, listed } =
-            codex_account_model_support(&home, model, now)
+            codex_account_model_support(&home, model, now, installed)
         {
             let account = account_dir
                 .as_deref()
@@ -292,6 +296,20 @@ fn preflight_codex_model_support(
         }
     }
     Ok(())
+}
+
+/// `codex --version` of the codex on `PATH` (the binary a worker spawn runs),
+/// bounded so a hung binary cannot stall a spawn; `None` when it cannot be read.
+fn installed_codex_version() -> Option<String> {
+    let budget = std::time::Duration::from_secs(3);
+    let output = crate::bounded_process::run_command(
+        std::process::Command::new("codex").arg("--version"),
+        crate::bounded_process::Deadline::after(budget),
+        budget,
+    )
+    .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !text.is_empty()).then_some(text)
 }
 
 /// The `CODEX_HOME` a Codex worker runs against: its account directory with
@@ -12080,6 +12098,7 @@ mod spawn_lifecycle_tests {
         std::fs::write(home.path().join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
         std::fs::write(home.path().join("models_cache.json"), serde_json::json!({
             "fetched_at": chrono::Utc::now(),
+            "client_version": "99.0.0",
             "models": [{"slug": "gpt-6-sol"}]
         }).to_string()).unwrap();
         let (specs, recipe, _) = build_lane_spawn_specs(

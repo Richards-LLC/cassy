@@ -29,6 +29,9 @@ pub const META_CANONICAL_ID: &str = "canonical_id";
 pub const META_ROLE: &str = "role";
 /// Metadata key carrying the supervisor's epic focus.
 pub const META_FOCUS: &str = "focus";
+/// Metadata key carrying the title of the focused epic (cas-8522), so a
+/// peer's declared ownership reads without a lookup in its store.
+pub const META_FOCUS_TITLE: &str = "focus_title";
 /// Metadata key carrying the factory session name.
 pub const META_FACTORY_SESSION: &str = "factory_session";
 /// Metadata key carrying the machine's hostname, for display.
@@ -58,6 +61,9 @@ pub struct Peer {
     pub session: Option<String>,
     pub canonical_id: Option<String>,
     pub focus: Option<String>,
+    /// Title of the focused epic, when the supervisor published it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_title: Option<String>,
     pub last_heartbeat: DateTime<Utc>,
     pub heartbeat_age_secs: i64,
     pub live: bool,
@@ -81,6 +87,16 @@ pub struct Peer {
 }
 
 impl Peer {
+    /// The supervisor's declared ownership (cas-8522): its focused epic id
+    /// and title, or `none`.
+    pub fn epic_label(&self) -> String {
+        match (self.focus.as_deref(), self.focus_title.as_deref()) {
+            (Some(id), Some(title)) => format!("{id} \"{title}\""),
+            (Some(id), None) => id.to_string(),
+            (None, _) => "none".to_string(),
+        }
+    }
+
     /// The short project name people type (`violet` for
     /// `github.com/Richards-LLC/violet`), from the registered canonical id.
     pub fn project_name(&self) -> Option<String> {
@@ -203,6 +219,7 @@ fn supervisor_peer(agent: &AgentInfo, now: DateTime<Utc>) -> Option<Peer> {
         session: agent_meta(agent, META_FACTORY_SESSION),
         canonical_id: agent_meta(agent, META_CANONICAL_ID),
         focus: agent_meta(agent, META_FOCUS),
+        focus_title: agent_meta(agent, META_FOCUS).and(agent_meta(agent, META_FOCUS_TITLE)),
         last_heartbeat,
         heartbeat_age_secs,
         // The cloud computes `stale` live (cloud PR #153).
@@ -392,7 +409,7 @@ pub fn render_peers(canonical_id: &str, peers: &[Peer]) -> String {
             age(peer.heartbeat_age_secs),
             owner_label(peer),
             peer.session.as_deref().unwrap_or("-"),
-            peer.focus.as_deref().unwrap_or("-"),
+            peer.epic_label(),
         ));
     }
     out
@@ -465,6 +482,9 @@ pub enum PeerDiscovery {
         /// Supervisors the `own` scope excluded (cas-d58d), so a send to one
         /// can be refused by name rather than falling through.
         hidden: Vec<Peer>,
+        /// Live workers in the listed peers' sessions (cas-9f53), so a send
+        /// to one names the supervisor to relay through.
+        workers: Vec<crate::cloud::peers_detail::PeerWorkerRef>,
     },
     /// Not logged in to Cassy Cloud: cross-machine peers are unknowable.
     NotLoggedIn,
@@ -533,10 +553,13 @@ pub fn discover_peers(
     });
     mark_own(&mut peers, viewer.as_deref());
     let (peers, hidden) = apply_same_repo_scope(peers, same_repo_scope(cas_root));
+    let workers =
+        crate::cloud::peers_detail::live_peer_workers(&peers, &agents, &alias_class, Utc::now());
     Ok(PeerDiscovery::Found {
         canonical_id,
         peers,
         hidden,
+        workers,
     })
 }
 
@@ -613,19 +636,16 @@ pub fn render_user_peers(peers: &[Peer], verbose: bool) -> String {
         out.push_str("  no other supervisors of your account seen in the last 24h\n");
         return out;
     }
+    // cas-8522: each row declares what its supervisor owns.
     let row = |peer: &Peer| {
-        let focus = peer
-            .focus
-            .as_deref()
-            .map(|focus| format!(" | focus {focus}"))
-            .unwrap_or_default();
         format!(
-            "  {} {} on {}, seen {} ago\n    session {}{focus}\n",
+            "  {} {} on {}, seen {} ago\n    session {} | epic {}\n",
             peer.name,
             project(peer),
             peer.machine,
             age(peer.heartbeat_age_secs),
             peer.session.as_deref().unwrap_or("-"),
+            peer.epic_label(),
         )
     };
     if live.is_empty() {
@@ -666,6 +686,8 @@ pub fn render_user_peers(peers: &[Peer], verbose: bool) -> String {
             name != "unknown" && live.iter().filter(|other| project(other) == name).count() <= 1;
         let target = if unique {
             format!("supervisor:{name}")
+        } else if let Some(epic) = peer.focus.as_deref() {
+            format!("supervisor:{epic}")
         } else {
             format!("{}@{}", peer.name, peer.machine)
         };
@@ -773,6 +795,7 @@ fn peers_discovery_section(cas_root: &Path, self_id: Option<&str>) -> String {
             canonical_id,
             peers,
             hidden,
+            ..
         }) => format!(
             "{}{}",
             render_peers(&canonical_id, &peers),

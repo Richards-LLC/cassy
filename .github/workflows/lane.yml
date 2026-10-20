@@ -1,0 +1,246 @@
+# Factory-branch lane CI (cas-32e9).
+#
+# Every push to refs/heads/factory/** lands here; ci.yml no longer triggers on
+# those pushes directly. With CAS_LANE_SLIM=true a slim lane runs only the jobs
+# that still do work: classify, the two "Scoped Validation" checks (Docs Lint
+# for a docs-only diff). Their job names match ci.yml's, so worktree_merge's
+# admission and the CI watchers read them unchanged. Skipped ci.yml jobs used
+# to resolve one by one (~30 s each, 13.3 min for run 39285508460 that did 21 s
+# of work); this workflow has none to wait for.
+#
+# With CAS_LANE_SLIM unset, the `full` job calls ci.yml itself, so a factory
+# push validates exactly as before (rollback: unset CAS_LANE_SLIM). Runner
+# placement follows cas-14e0: local runners only when CASSY_LANE_SELF_HOSTED is
+# enabled, and only the light lane slots (label cas-lane-light, cas-3b5e), so a
+# burst of lanes never queues behind merge-queue Rust jobs on cas-ci-32core. This workflow has no pull_request trigger, so a fork can never reach
+# the self-hosted runners. scripts/ci_tiers/test-policy.py pins all of this.
+#
+# The workflow name stays "CI": ci_completed reminders and the factory CI
+# watcher select runs by that name.
+name: CI
+
+on:
+  push:
+    branches:
+      - "factory/**"
+
+# A newer push to the same branch cancels the run it supersedes. Distinct from
+# ci.yml's group so the called workflow never waits on its own caller.
+concurrency:
+  group: lane-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  full:
+    name: Full lane
+    if: vars.CAS_LANE_SLIM != 'true'
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    uses: ./.github/workflows/ci.yml
+
+  ci-diff:
+    name: Classify CI diff
+    if: vars.CAS_LANE_SLIM == 'true'
+    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    outputs:
+      comparison-base: ${{ steps.classify-diff.outputs.comparison-base }}
+      class: ${{ steps.classify-diff.outputs.class }}
+      web-check-needed: ${{ steps.classify-diff.outputs.web-check-needed }}
+      bridge-check-needed: ${{ steps.classify-diff.outputs.bridge-check-needed }}
+      fast-admission: ${{ steps.classify-diff.outputs.fast-admission }}
+      fast-admission-reason: ${{ steps.classify-diff.outputs.fast-admission-reason }}
+    steps:
+      # Classification needs the merge base with the epic parent, so history
+      # stays complete; a warm self-hosted workspace fetches incrementally.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - id: classify-diff
+        uses: ./.github/actions/classify-required-diff
+        with:
+          base-sha: ${{ github.event.before }}
+          zero-base-ref: origin/${{ github.event.repository.default_branch }}
+
+      - name: Check Violet references before queue admission
+        run: bash scripts/test-no-mecha-references.sh
+
+  docs-lint:
+    name: Docs Lint
+    if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.class == 'docs-only'
+    needs: ci-diff
+    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      # Same check as ci.yml's Docs Lint; the worker's pre-push fast rows
+      # already ran Markdown lint and the release-note draft check.
+      - name: Instruction files are current and within the size cap
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CAS_SKIP_FACTORY_TOOLING: "1"
+        run: |
+          set -euo pipefail
+          # Grok truncates each instruction file at 10,000 characters.
+          for file in AGENTS.md CLAUDE.md; do
+            chars="$(wc -m < "$file")"
+            if (( chars >= 10000 )); then
+              echo "::error file=$file::$file is $chars characters; Grok truncates at 10,000"
+              exit 1
+            fi
+          done
+          # A CLAUDE.md that imports @AGENTS.md makes AGENTS.md canonical
+          # (skills audit D3): there is nothing generated to compare.
+          if grep -qx '@AGENTS.md' CLAUDE.md; then
+            echo 'AGENTS.md is canonical (CLAUDE.md imports it).'
+            exit 0
+          fi
+          bin_dir="$RUNNER_TEMP/cas-bin"
+          mkdir -p "$bin_dir" "$RUNNER_TEMP/cas-home"
+          gh release download --repo "$GITHUB_REPOSITORY" \
+            --pattern cas-x86_64-unknown-linux-gnu.tar.gz --dir "$RUNNER_TEMP"
+          tar -xzf "$RUNNER_TEMP/cas-x86_64-unknown-linux-gnu.tar.gz" -C "$bin_dir"
+          HOME="$RUNNER_TEMP/cas-home" "$bin_dir/cas" sync agents-md --check
+
+  scoped-validation-fast:
+    name: Scoped Validation (fast)
+    if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.class != 'docs-only'
+    needs: ci-diff
+    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Detect runner lock fixture changes
+        id: runner-lock-diff
+        env:
+          BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          runner_base="$BASE_SHA"
+          if [[ -z "$runner_base" || "$runner_base" =~ ^0+$ ]] \
+            || ! git rev-parse --verify --quiet "$runner_base^{commit}" >/dev/null; then
+            runner_base="$(git merge-base HEAD origin/$DEFAULT_BRANCH)"
+          fi
+          changed=false
+          if [[ -n "$(git diff --name-only "$runner_base" HEAD -- \
+            'scripts/cassy-actions-*' 'scripts/test-cassy-actions-*' \
+            'scripts/install-cassy-actions-runner.sh')" ]]; then
+            changed=true
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+      - name: Test runner cache job lock lifecycle
+        if: steps.runner-lock-diff.outputs.changed == 'true'
+        run: ./scripts/test-cassy-actions-cache-job-lock.sh
+
+      - name: Report full-tier routing
+        if: needs.ci-diff.outputs.fast-admission != 'true'
+        env:
+          FAST_ADMISSION_REASON: ${{ needs.ci-diff.outputs.fast-admission-reason }}
+        run: >-
+          echo "Fast tier skipped: $FAST_ADMISSION_REASON;
+          Scoped Validation (factory/PR) owns this delta."
+
+      - name: Typecheck and test Commander web assets
+        if: >-
+          needs.ci-diff.outputs.fast-admission == 'true'
+          && needs.ci-diff.outputs.web-check-needed == 'true'
+        working-directory: hub-web
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+
+      - name: Build and test the Slack bridge
+        if: >-
+          needs.ci-diff.outputs.fast-admission == 'true'
+          && needs.ci-diff.outputs.bridge-check-needed == 'true'
+        working-directory: slack-bridge
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Report Rust test ownership
+        run: >-
+          echo "No Rust tests ran here: worker focused-test receipts at this
+          SHA (checked at park) and the merge-queue full suite own them."
+          >> "$GITHUB_STEP_SUMMARY"
+
+  scoped-validation:
+    name: Scoped Validation (factory/PR)
+    if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.class != 'docs-only'
+    needs: ci-diff
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    runs-on: ${{ vars.CASSY_LANE_SELF_HOSTED == 'enabled' && fromJSON('["self-hosted","Linux","X64","cas-lane-light"]') || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      # As in ci.yml: stand down when a pull request event already validates
+      # this exact head SHA.
+      - id: pr-dedupe
+        name: Skip when a pull request event validates this head SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-ci-pr-event-coverage.sh
+
+      - name: Test portable installer fixtures
+        if: >-
+          steps.pr-dedupe.outputs.covered != 'true'
+          && needs.ci-diff.outputs.fast-admission != 'true'
+        run: ./scripts/test-cas-install.sh
+
+      # Larger pushes own these checks here; small pushes ran them in the fast job.
+      - name: Typecheck and test Commander web assets
+        if: >-
+          steps.pr-dedupe.outputs.covered != 'true'
+          && needs.ci-diff.outputs.fast-admission != 'true'
+          && needs.ci-diff.outputs.web-check-needed == 'true'
+        working-directory: hub-web
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+
+      - name: Build and test the Slack bridge
+        if: >-
+          steps.pr-dedupe.outputs.covered != 'true'
+          && needs.ci-diff.outputs.fast-admission != 'true'
+          && needs.ci-diff.outputs.bridge-check-needed == 'true'
+        working-directory: slack-bridge
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Report why no Rust work ran
+        env:
+          PR_COVERED: ${{ steps.pr-dedupe.outputs.covered }}
+        run: |
+          if [[ "$PR_COVERED" == "true" ]]; then
+            echo "Skipped: a pull request event is validating this exact head SHA." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Skipped: CAS_LANE_SLIM; worker focused-test receipts (checked at park) and the merge-queue full suite own Rust." >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -8,7 +8,8 @@ SPEC = importlib.util.spec_from_file_location(
     "script_tests", Path(__file__).resolve().parent / "ci-script-tests-for-diff.py")
 SELECTOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SELECTOR)
-TIER = ["python3 scripts/test-worker-memory.py", "python3 scripts/test-example.py"]
+TIER = ["python3 scripts/test-worker-memory.py", "python3 scripts/test-example.py",
+        "python3 scripts/test-release-portable.py"]
 
 
 class Selection(unittest.TestCase):
@@ -20,6 +21,15 @@ class Selection(unittest.TestCase):
         self.assertIn("AdmissionTests.test_cas_4cb9_weights_follow_shell_and_actual_package_scripts",
                       selected[0][1])
         self.assertEqual(SELECTOR.select(TIER, ["hub-web/src/app.ts"]), [])
+
+    def test_release_train_sources_select_release_portability_tests(self):
+        selected = SELECTOR.select(TIER, [
+            "scripts/release-train.sh",
+            "scripts/release-train.d/post-publication.sh",
+        ])
+        self.assertEqual(selected, [
+            ("scripts/test-release-portable.py", "python3 scripts/test-release-portable.py")
+        ])
 
 
 if __name__ == "__main__":

@@ -414,10 +414,21 @@ fn cas_9efb_docs_only_and_cancelled_ci_have_terminal_decisions() {
         1,
         "Docs Lint is sufficient for a docs-only delivery"
     );
+    let now = Utc::now();
+    f.app.merge_alert_retries.now = Some(now);
     f.ci(Some("cancelled"));
-    let cancelled = f.relay();
-    assert_eq!(cancelled.len(), 1);
-    assert!(cancelled[0].text.contains("CI failed"));
+    assert!(
+        f.relay().is_empty(),
+        "cas-5132: cancelled-only CI is superseded/pending, never red"
+    );
+    let retry_at = now + chrono::Duration::minutes(1);
+    let retries = f.app.merge_alert_retry_events_at(retry_at);
+    assert_eq!(retries.len(), 1, "cancelled-only CI must still be retried");
+    f.app.merge_alert_retries.now = Some(retry_at);
+    f.ci(Some("failure"));
+    let (_, failed, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
+    assert_eq!(failed.len(), 1, "the later real failure needs a decision");
+    assert!(failed[0].text.contains("CI failed"));
     assert!(f.relay().is_empty());
 }
 

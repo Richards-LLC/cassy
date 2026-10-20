@@ -61,13 +61,21 @@ pub struct ProjectAliasRecord {
 /// **or** to one of its aliases — the second case is exactly the machine that
 /// is still pinned to a legacy spelling after the server merged it.
 ///
-/// Returns `Ok(None)` when the account has no record for this project (not an
-/// error: personal-scope projects are simply not exposed by this endpoint).
-/// Returns `Err` when two different projects claim the same identity, because
-/// silently picking one would re-home rows onto the wrong bucket.
+/// cas-092e: the body lists personal projects (`team_id` null) beside team
+/// projects, and the server resolves an identity inside one scope only
+/// (petra-stella-cloud `resolveProjectIdentity`). So when matches span scopes,
+/// the record in `team_id`'s scope wins, then the personal one; a legacy
+/// personal `accounting` bucket no longer contradicts the team project that
+/// folded `accounting` as an alias.
+///
+/// Returns `Ok(None)` when the account has no record for this project.
+/// Returns `Err` when two different projects claim the identity inside the
+/// chosen scope, because silently picking one would re-home rows onto the
+/// wrong bucket.
 pub fn select_alias_record(
     body: &serde_json::Value,
     project_id: &str,
+    team_id: Option<&str>,
 ) -> Result<Option<ProjectAliasRecord>, CasError> {
     let Some(project_id) = canonical_project_id(project_id) else {
         return Ok(None);
@@ -78,7 +86,7 @@ pub fn select_alias_record(
         ));
     };
 
-    let mut matches: Vec<ProjectAliasRecord> = Vec::new();
+    let mut matches: Vec<(Option<String>, ProjectAliasRecord)> = Vec::new();
     for project in projects {
         let Some(canonical_id) = project
             .get("canonical_id")
@@ -103,36 +111,63 @@ pub fn select_alias_record(
         aliases.dedup();
 
         if canonical_id == project_id || aliases.iter().any(|alias| *alias == project_id) {
-            matches.push(ProjectAliasRecord {
-                canonical_id,
-                aliases,
-            });
+            let scope = project
+                .get("team_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            matches.push((scope, ProjectAliasRecord { canonical_id, aliases }));
         }
     }
 
-    matches.sort_by(|a, b| a.canonical_id.cmp(&b.canonical_id));
+    matches.sort_by(|a, b| (&a.1.canonical_id, &a.0).cmp(&(&b.1.canonical_id, &b.0)));
     matches.dedup();
-    match matches.len() {
+    let distinct = |records: &[&(Option<String>, ProjectAliasRecord)]| {
+        let mut ids: Vec<&str> = records.iter().map(|(_, record)| record.canonical_id.as_str()).collect();
+        ids.dedup();
+        ids.len()
+    };
+    let all: Vec<_> = matches.iter().collect();
+    let team_scope: Vec<_> = all
+        .iter()
+        .copied()
+        .filter(|(scope, _)| scope.is_some() && scope.as_deref() == team_id)
+        .collect();
+    let personal_scope: Vec<_> = all.iter().copied().filter(|(scope, _)| scope.is_none()).collect();
+    let chosen = [team_scope, personal_scope]
+        .into_iter()
+        .find(|scope| !scope.is_empty())
+        .unwrap_or(all);
+    match distinct(&chosen) {
         0 => Ok(None),
-        1 => Ok(matches.pop()),
-        _ => Err(CasError::Other(format!(
-            "identity `{project_id}` is claimed by {} cloud projects ({}); refusing to \
-             attribute rows until the registry is disambiguated",
-            matches.len(),
-            matches
-                .iter()
-                .map(|m| m.canonical_id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
+        1 => Ok(chosen.first().map(|(_, record)| record.clone())),
+        _ => {
+            let in_scope = chosen;
+            Err(CasError::Other(format!(
+                "identity `{project_id}` is claimed by {} cloud projects ({}); refusing to \
+                 attribute rows until the registry is disambiguated. Pin this checkout to the \
+                 project that owns it with `cas cloud project set <canonical-id>`, or have the \
+                 cloud owner retire the alias on the other project",
+                distinct(&in_scope),
+                in_scope
+                    .iter()
+                    .map(|(scope, record)| match scope {
+                        Some(team) => format!("{} in team {team}", record.canonical_id),
+                        None => format!("{} (personal)", record.canonical_id),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )))
+        }
     }
 }
 
-/// Fetch the record for `project_id` from `GET {endpoint}/api/account/projects`.
+/// Fetch the record for `project_id` from `GET {endpoint}/api/account/projects`,
+/// resolved in `team_id`'s scope (personal when `None`).
 pub fn fetch_project_alias_record(
     endpoint: &str,
     token: &str,
     project_id: &str,
+    team_id: Option<&str>,
     timeout: Duration,
 ) -> Result<Option<ProjectAliasRecord>, CasError> {
     let url = format!("{}/api/account/projects", endpoint.trim_end_matches('/'));
@@ -143,7 +178,7 @@ pub fn fetch_project_alias_record(
         .map_err(|e| CasError::Other(format!("/api/account/projects failed: {e}")))?
         .into_json()
         .map_err(|e| CasError::Other(format!("/api/account/projects is not JSON: {e}")))?;
-    select_alias_record(&body, project_id)
+    select_alias_record(&body, project_id, team_id)
 }
 
 fn union_project_aliases(local: &[String], server: &[String]) -> Vec<String> {
@@ -169,9 +204,10 @@ pub fn refresh_project_alias_record(
     endpoint: &str,
     token: &str,
     project_id: &str,
+    team_id: Option<&str>,
     timeout: Duration,
 ) -> Result<Vec<String>, CasError> {
-    match fetch_project_alias_record(endpoint, token, project_id, timeout)? {
+    match fetch_project_alias_record(endpoint, token, project_id, team_id, timeout)? {
         Some(record) => {
             let local = crate::cloud::config::project_aliases_from_config_toml(cas_root);
             set_project_aliases_in_config_toml(
@@ -209,7 +245,7 @@ mod tests {
 
     #[test]
     fn selects_the_record_by_canonical_id() {
-        let record = select_alias_record(&account_projects(), "ozer")
+        let record = select_alias_record(&account_projects(), "ozer", None)
             .unwrap()
             .expect("ozer is registered");
         assert_eq!(record.canonical_id, "ozer");
@@ -226,6 +262,7 @@ mod tests {
         let record = select_alias_record(
             &account_projects(),
             "git@GitHub.com:Richards-LLC/Ozer-Health.git",
+            None,
         )
         .unwrap()
         .expect("the remote spelling is a registered alias");
@@ -234,7 +271,7 @@ mod tests {
 
     #[test]
     fn a_project_with_no_registered_aliases_reports_an_empty_list_not_a_guess() {
-        let record = select_alias_record(&account_projects(), "cas-src")
+        let record = select_alias_record(&account_projects(), "cas-src", None)
             .unwrap()
             .expect("cas-src is registered");
         assert!(record.aliases.is_empty());
@@ -245,7 +282,7 @@ mod tests {
     #[test]
     fn an_unknown_project_yields_no_record() {
         assert_eq!(
-            select_alias_record(&account_projects(), "gabber-studio").unwrap(),
+            select_alias_record(&account_projects(), "gabber-studio", None).unwrap(),
             None
         );
     }
@@ -258,15 +295,38 @@ mod tests {
                 { "canonical_id": "two", "aliases": ["shared"] }
             ]
         });
-        let error = select_alias_record(&body, "shared")
+        let error = select_alias_record(&body, "shared", None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("claimed by 2 cloud projects"), "{error}");
+        assert!(error.contains("one (personal), two (personal)") && error.contains("cas cloud project set"), "{error}");
+    }
+
+    /// cas-092e: the live registry lists a legacy personal `accounting` bucket
+    /// beside team project `richards-llc-accounting`, which folded
+    /// `accounting` as an alias. Resolution stays inside the sync's scope.
+    #[test]
+    fn an_identity_claimed_in_two_scopes_resolves_in_the_sync_scope_cas_092e() {
+        let body = serde_json::json!({
+            "projects": [
+                { "team_id": null, "canonical_id": "accounting", "aliases": ["accounting"] },
+                {
+                    "team_id": "team-1",
+                    "canonical_id": "richards-llc-accounting",
+                    "aliases": ["accounting", "petra-stella-accounting", "richards-llc-accounting"]
+                }
+            ]
+        });
+        let team = select_alias_record(&body, "accounting", Some("team-1")).unwrap().unwrap();
+        assert_eq!(team.canonical_id, "richards-llc-accounting");
+        assert_eq!(team.aliases, vec!["accounting", "petra-stella-accounting"]);
+        let personal = select_alias_record(&body, "accounting", None).unwrap().unwrap();
+        assert_eq!(personal.canonical_id, "accounting");
     }
 
     #[test]
     fn a_malformed_body_is_an_error_rather_than_an_empty_record() {
-        assert!(select_alias_record(&serde_json::json!({}), "cas-src").is_err());
+        assert!(select_alias_record(&serde_json::json!({}), "cas-src", None).is_err());
     }
 
     #[test]

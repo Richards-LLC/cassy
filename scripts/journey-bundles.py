@@ -5,8 +5,9 @@ Usage: journey-bundles.py <artifact-dir> <dist-tree> <commit> <suite-exit> <hub-
 
 Called by scripts/journey-eval.sh after the `journeys` project ran with
 JOURNEY_RECEIPTS=<artifact-dir>/journeys. For every <ID>/result.json it:
-  - copies the test's trace.zip into the bundle
-  - writes trace-actions.txt (`npx playwright trace actions`)
+  - keeps one passing trace per journey bundle for qa_evidence
+  - moves failed or incomplete traces into the bundle once
+  - writes trace-actions.txt for a retained trace
   - writes bundle.json (producer "journey"; contract: cas-qa-craft evidence bundle v1)
 Then writes <artifact-dir>/journeys/JOURNEYS.md, the run summary the evaluator reads.
 """
@@ -36,16 +37,70 @@ def trace_actions(bundle: Path, hub: str) -> str:
     return actions.stdout + actions.stderr
 
 
-def read_result(result: Path, ident: str) -> dict:
+def read_result(result: Path, ident: str, suite_failed: bool = False) -> dict:
     data = json.loads(result.read_text())
     if data["id"] != ident:
         raise ValueError(f"{ident}: mixed receipt id {data['id']} in {result}")
     screenshots = [stage["screenshot"] for stage in data.get("stages", [])]
     actual = {path.name for path in result.parent.glob("J*.png")}
     if len(screenshots) != len(set(screenshots)) or set(screenshots) != actual:
-        raise ValueError(f"{ident}: stale or mixed stage receipts in {result.parent}; "
-                         f"declared={sorted(screenshots)}, actual={sorted(actual)}")
+        expected = [f"J{index:02}.png" for index in range(1, len(screenshots) + 1)]
+        extra = actual - set(screenshots)
+        pending = f"J{len(screenshots) + 1:02}.png"
+        # journey-eval archives prior runs and the receipt owner clears files
+        # on retries. A lone next screenshot beside a failed current result is
+        # therefore the capture interrupted before journey.ts appended a stage.
+        if (suite_failed and data.get("status") == "FAIL" and screenshots == expected
+                and set(screenshots) <= actual and extra == {pending}):
+            data["incomplete_stages"] = [{
+                "screenshot": pending,
+                "status": "INCOMPLETE",
+                "reason": "suite timed out after screenshot write and before stage receipt",
+            }]
+            data.setdefault("stages", []).append({
+                "title": "Incomplete stage screenshot (timeout before stage receipt)",
+                "slug": "incomplete-stage-capture",
+                "ms": 0,
+                "screenshot": pending,
+                "status": "INCOMPLETE",
+            })
+        else:
+            raise ValueError(f"{ident}: stale or mixed stage receipts in {result.parent}; "
+                             f"declared={sorted(screenshots)}, actual={sorted(actual)}")
     return data
+
+
+def is_clean_pass(data: dict) -> bool:
+    incomplete = data.get("incomplete_stages", [])
+    incomplete = incomplete or [
+        stage for stage in data.get("stages", [])
+        if stage.get("status") == "INCOMPLETE"
+    ]
+    return data.get("status") == "PASS" and not incomplete
+
+
+def bundle_trace(data: dict, bundle: Path, hub: str, target: Path | None) -> dict[str, str]:
+    """Move one selected trace into its canonical bundle path, or discard it."""
+    output_dir = data.get("output_dir")
+    source = Path(output_dir) / "trace.zip" if output_dir else None
+    if target is None:
+        if source is not None:
+            source.unlink(missing_ok=True)
+        return {}
+
+    if source is None or not source.is_file():
+        return {}
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.resolve() != target.resolve():
+        target.unlink(missing_ok=True)
+        shutil.move(str(source), str(target))
+    actions = target.with_name("trace-actions.txt")
+    actions.write_text(trace_actions(target.parent, hub))
+    return {
+        "trace": target.relative_to(bundle).as_posix(),
+        "trace_actions": actions.relative_to(bundle).as_posix(),
+    }
 
 
 def main(argv: list[str]) -> int:
@@ -63,39 +118,51 @@ def main(argv: list[str]) -> int:
         bundle = journeys / ident
         result = bundle / "result.json"
         parts = sorted(bundle.glob("parts/*/result.json"))
-        data = read_result(result, ident) if result.is_file() else None
+        data = read_result(result, ident, suite_failed=status != 0) if result.is_file() else None
         stages = [dict(stage) for stage in (data or {}).get("stages", [])]
+        incomplete_stages = [dict(stage) for stage in (data or {}).get("incomplete_stages", [])]
         files: dict[str, object] = {"cells": [stage["screenshot"] for stage in stages]}
+        passing_trace: dict[str, str] = {}
+        diagnostics = []
         if data is not None:
             files.update({"receipt": "receipt.webm", "aria_yaml": "final.aria.yml", "aria_json": "final.aria.json"})
-            trace = Path(data.get("output_dir", "")) / "trace.zip"
-            if trace.is_file():
-                if trace.resolve() != (bundle / "trace.zip").resolve():
-                    shutil.copyfile(trace, bundle / "trace.zip")
-                (bundle / "trace-actions.txt").write_text(trace_actions(bundle, hub))
-                files["trace"] = "trace.zip"
-                files["trace_actions"] = "trace-actions.txt"
+            if is_clean_pass(data):
+                passing_trace = bundle_trace(data, bundle, hub, bundle / "trace.zip")
+                files.update(passing_trace)
+            else:
+                diagnostic = bundle_trace(data, bundle, hub, bundle / "diagnostics/main/trace.zip")
+                if diagnostic:
+                    diagnostics.append(diagnostic)
         verdicts = [data["status"]] if data is not None else []
         folded = []
         for part_result in parts:
             part_dir = part_result.parent
             rel = part_dir.relative_to(bundle).as_posix()
-            part = read_result(part_result, ident)
+            part = read_result(part_result, ident, suite_failed=status != 0)
             verdicts.append(part["status"])
             part_files = {"receipt": f"{rel}/receipt.webm", "aria_yaml": f"{rel}/final.aria.yml", "aria_json": f"{rel}/final.aria.json"}
-            part_trace = Path(part.get("output_dir", "")) / "trace.zip"
-            if part_trace.is_file():
-                if part_trace.resolve() != (part_dir / "trace.zip").resolve():
-                    shutil.copyfile(part_trace, part_dir / "trace.zip")
-                (part_dir / "trace-actions.txt").write_text(trace_actions(part_dir, hub))
-                part_files.update({"trace": f"{rel}/trace.zip", "trace_actions": f"{rel}/trace-actions.txt"})
+            if is_clean_pass(part):
+                if not passing_trace:
+                    passing_trace = bundle_trace(part, bundle, hub, bundle / "trace.zip")
+                    files.update(passing_trace)
+                else:
+                    bundle_trace(part, bundle, hub, None)
+            else:
+                trace = bundle_trace(part, bundle, hub, part_dir / "trace.zip")
+                part_files.update(trace)
             for stage in part.get("stages", []):
                 stage = dict(stage, screenshot=f"{rel}/{stage['screenshot']}")
                 stages.append(stage)
                 files["cells"].append(stage["screenshot"])
+            incomplete_stages.extend(
+                dict(stage, screenshot=f"{rel}/{stage['screenshot']}")
+                for stage in part.get("incomplete_stages", [])
+            )
             folded.append({"title": part.get("title"), "project": part.get("project"), "title_path": part.get("title_path"), "verdict": part["status"], "label": part.get("label", "real-bundle, protocol-double"), **part_files})
         if folded:
             files["parts"] = folded
+        if diagnostics:
+            files["diagnostic_traces"] = diagnostics
         if data is None:
             data = {"id": ident, "title": json.loads(parts[0].read_text()).get("title", ident)}
         labels = {item.strip() for row in [data, *folded] for item in row.get("label", "" if row is data and not result.is_file() else "real-bundle, protocol-double").split(",") if item.strip()}
@@ -117,6 +184,7 @@ def main(argv: list[str]) -> int:
             "visual_change": False,
             "visual_qa_status": "unavailable",
             "files": files,
+            "incomplete_stages": incomplete_stages,
         }, indent=2) + "\n")
         total = sum(stage.get("ms", 0) for stage in stages)
         slow = max(stages, key=lambda stage: stage.get("ms", 0)) if stages else {"title": "-", "ms": 0}

@@ -1183,6 +1183,34 @@ pub(crate) fn parse_merge_request_envelope(prompt: &str) -> Option<MergeRequestE
     serde_json::from_str(&prompt[start..end]).ok()
 }
 
+/// cas-9c34: a supervisor acting on a parked task (worktree_merge, even one
+/// refused while CI is pending, or request_changes) has read that task's
+/// merge request. Acknowledge each unacked merge_request envelope for
+/// `task_id` addressed to `supervisor` in its factory session, so neither the
+/// supervisor_unread alarm nor the sender's stall bounce calls it unread.
+/// Only typed envelopes for exactly this task qualify; other mail is untouched.
+pub(crate) fn ack_merge_requests_acted_on(
+    queue: &dyn cas_store::PromptQueueStore,
+    supervisor: &cas_types::Agent,
+    task_id: &str,
+) -> usize {
+    let Some(session) = supervisor.factory_session.as_deref() else {
+        return 0;
+    };
+    if supervisor.role != cas_types::AgentRole::Supervisor || task_id.trim().is_empty() {
+        return 0;
+    }
+    let rows = queue
+        .unacked_for_targets_naming(&[supervisor.name.as_str(), "supervisor"], session, task_id, 50)
+        .unwrap_or_default();
+    rows.into_iter()
+        .filter(|row| {
+            parse_merge_request_envelope(&row.prompt).is_some_and(|envelope| envelope.task_id == task_id)
+        })
+        .filter(|row| queue.ack(row.id).is_ok())
+        .count()
+}
+
 /// A worker's CAS-framed blocker escalation (cas-8725).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BlockerEnvelope {

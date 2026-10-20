@@ -411,7 +411,7 @@ pub fn assemble_peer_details(
                 .and_then(|a| meta(a, "branch"))
                 .map(str::to_string);
             let mut detail = PeerDetail {
-                outcome: if supervisor.live { "live" } else { "stale" }.into(),
+                outcome: peer_outcome(&supervisor).into(),
                 owner: supervisor.name.clone(),
                 work: PeerWork::new(&supervisor, owner, visibility, now),
                 supervisor,
@@ -547,7 +547,7 @@ pub fn discover_peer_report(
         report.peers = supervisors
             .into_iter()
             .map(|supervisor| PeerDetail {
-                outcome: if supervisor.live { "live" } else { "stale" }.into(),
+                outcome: peer_outcome(&supervisor).into(),
                 owner: supervisor.name.clone(),
                 work: PeerWork::new(
                     &supervisor,
@@ -724,6 +724,10 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
             ));
             line(format!("  Epic    {}", peer.epic_label()));
             line(format!("  Heartbeat {}s ago", peer.heartbeat_age_secs));
+            // GH #1319: it heartbeats, but nothing it receives is read.
+            if let Some(failure) = peer.harness_auth_failed.as_deref() {
+                line(format!("  Harness logged out: \"{failure}\"; messages to it are refused"));
+            }
             if !report.detail {
                 continue;
             }
@@ -874,6 +878,16 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
         out.push_str("--json for untruncated values (MCP: json=true)\n");
     }
     out
+}
+
+/// A peer's headline state. A supervisor whose harness is logged out
+/// heartbeats like a live one but reads nothing (GH #1319).
+fn peer_outcome(peer: &peers::Peer) -> &'static str {
+    match (peer.harness_auth_failed.is_some(), peer.live) {
+        (true, _) => "logged out",
+        (false, true) => "live",
+        (false, false) => "stale",
+    }
 }
 
 #[cfg(test)]

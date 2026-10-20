@@ -974,6 +974,23 @@ fn unique_complete_provenance_block(notes: &str) -> Option<(usize, usize)> {
     .then_some((start, end))
 }
 
+/// cas-3556: the target project an accepted proposal was materialized for,
+/// read back from the server-attested block `render_task_proposal_provenance`
+/// writes into the task's notes. `None` unless the block is unique, complete
+/// and attests this very task id.
+pub(crate) fn accepted_proposal_target_project(task_id: &str, notes: &str) -> Option<String> {
+    let (start, end) = unique_complete_provenance_block(notes)?;
+    let field = |name: &str| {
+        notes[start..end].lines().find_map(|line| {
+            line.trim()
+                .strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix(": "))
+                .and_then(|value| serde_json::from_str::<String>(value).ok())
+        })
+    };
+    (field("target_task_id")? == task_id).then(|| field("target_project_canonical_id"))?
+}
+
 /// Persist proposal provenance visibly in the ordinary local task record.
 /// The cloud proposal row remains authoritative; this rendering is explicitly
 /// labeled and is refreshed whenever the materialized task is pulled.

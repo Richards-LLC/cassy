@@ -184,8 +184,23 @@ impl TaskProposalClient {
         request: &CreateTaskProposalRequest,
     ) -> Result<CreateTaskProposalResponse, TaskProposalError> {
         let url = self.team_url("task-proposals");
-        let response = self.post_json(&url, request)?;
-        validate_create_response(&response, &self.team_id, request)?;
+        let response: CreateTaskProposalResponse = self.post_json(&url, request)?;
+        // cas-3556: the server folds an aliased target (a repository URL) into
+        // the project's canonical id. Accept that fold only when the cloud
+        // alias registry confirms it, so the receipt still names one project.
+        let requested = &request.target_project_canonical_id;
+        let attested = &response.provenance.server_attested.target_project_canonical_id;
+        let expected_target = if attested == requested {
+            requested.clone()
+        } else {
+            crate::cloud::fetch_project_alias_record(&self.endpoint, &self.token, requested, self.timeout)
+                .ok()
+                .flatten()
+                .map(|record| record.canonical_id)
+                .filter(|canonical| canonical == attested)
+                .unwrap_or_else(|| requested.clone())
+        };
+        validate_create_response(&response, &self.team_id, request, &expected_target)?;
         Ok(response)
     }
 
@@ -449,6 +464,7 @@ fn validate_create_response(
     response: &CreateTaskProposalResponse,
     team_id: &str,
     request: &CreateTaskProposalRequest,
+    expected_target: &str,
 ) -> Result<(), TaskProposalError> {
     if response.state != "proposed" {
         return Err(contract("create returned a non-proposed state"));
@@ -458,7 +474,7 @@ fn validate_create_response(
         &proposal,
         team_id,
         Some(&request.origin_project_canonical_id),
-        Some(&request.target_project_canonical_id),
+        Some(expected_target),
         Some("proposed"),
     )?;
     if response.provenance.server_attested.client_request_id != request.client_request_id {

@@ -1255,15 +1255,29 @@ pub(super) fn merge_tip_content_presence(
     }
 }
 
+/// The changed lines of a unified patch: the `+`/`-` lines inside its `@@`
+/// hunks. `---`/`+++` are file headers only before a file's first hunk; inside
+/// one they are real content such as `++i;` or a removed `-- note` (cas-e594).
+fn hunk_lines(patch: &str) -> impl Iterator<Item = &str> {
+    let mut in_hunk = false;
+    patch.lines().filter(move |line| {
+        if line.starts_with("diff --git ") {
+            in_hunk = false;
+        } else if line.starts_with("@@") {
+            in_hunk = true;
+            return false;
+        }
+        in_hunk
+    })
+}
+
 /// cas-18aa: whether `commit` adds a line with a letter or digit to `path`:
 /// a replacement, not only a deletion. Unreadable history is no.
 fn adds_meaningful_lines(repo: &Path, commit: &str, path: &str) -> bool {
     git_text(repo, &["diff", "--unified=0", "--no-renames", &format!("{commit}^1"), commit, "--", path])
         .is_some_and(|patch| {
-            patch.lines().any(|line| {
-                !line.starts_with("+++")
-                    && line.strip_prefix('+').is_some_and(|line| line.chars().any(char::is_alphanumeric))
-            })
+            hunk_lines(&patch)
+                .any(|line| line.strip_prefix('+').is_some_and(|line| line.chars().any(char::is_alphanumeric)))
         })
 }
 
@@ -1298,10 +1312,7 @@ fn draft_retired_by_delivery(
     let meaningful = |line: &str| line.trim().chars().any(char::is_alphanumeric);
     let mut added = Vec::new();
     let mut removed = Vec::new();
-    for line in patch.lines() {
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
+    for line in hunk_lines(&patch) {
         if let Some(line) = line.strip_prefix('+') {
             added.push(line);
         } else if let Some(line) = line.strip_prefix('-') {
@@ -1601,9 +1612,7 @@ fn resolution_has_novel_lines(
         ],
     )?;
     Some(
-        patch
-            .lines()
-            .filter(|line| !line.starts_with("+++"))
+        hunk_lines(&patch)
             .filter_map(|line| line.strip_prefix('+'))
             .map(str::trim)
             .any(|line| line.chars().any(|c| c.is_alphanumeric()) && !parent_lines.contains(line)),

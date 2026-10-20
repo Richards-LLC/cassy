@@ -63,6 +63,7 @@ fi
         release = self.run_helper('verify-release')
         self.assertNotEqual(release.returncode, 0)
         self.assertIn('MACOS_SIGNING_CERT_P12_BASE64', release.stderr)
+        # pin: This is an executed OS-tool trace; no new calls proves refusal before signing.
         self.assertEqual(self.log.read_text(), calls, 'release must refuse before touching bytes')
 
     def test_release_identity_is_imported_verified_and_cleaned_up(self):
@@ -98,6 +99,7 @@ fi
                 self.log.write_text('')
                 result = self.run_helper('candidate', SIGN_TEST_IDENTITIES=present)
                 self.assertEqual(result.returncode, 0, result.stderr)
+                # pin: The executed codesign argv must select the preferred certificate fingerprint.
                 self.assertIn(f'--sign {expected}', self.log.read_text())
                 self.assertEqual((result.stdout + result.stderr).count('::warning::'), int(expected == '-'))
 

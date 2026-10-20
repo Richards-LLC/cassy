@@ -14958,14 +14958,14 @@ mod tests {
         );
         assert_eq!(refused.kind.as_str(), "wake_declined_by_policy");
 
-        // Ordinary chatter on the same quiet pane: nothing is wrong.
+        // A pure acknowledgement on the same quiet pane deliberately stays quiet.
         let routine = FactoryDaemon::supervisor_wake_decision(
             &data,
             "cosmic-bear-43",
             "cosmic-bear-43",
             &worker_sender("swift-fox"),
             "swift-fox",
-            "status: still building",
+            "thanks, received",
             quiet_pane(),
             now,
         );
@@ -16408,9 +16408,9 @@ mod tests {
         );
     }
 
-    /// Only genuine lifecycle wake rows enter the throttle — the daemon gates
-    /// on `row_is_supervisor_wake`, so ordinary traffic keeps its existing
-    /// delivery semantics untouched.
+    /// The wake-row cadence covers authenticated directed messages as well
+    /// as lifecycle events. Quiet acknowledgements and untrusted sources do
+    /// not acquire wake bookkeeping (cas-1e7e2).
     #[test]
     fn the_throttle_only_covers_genuine_lifecycle_wake_rows() {
         use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
@@ -16428,13 +16428,22 @@ mod tests {
             "the storm rows (lifecycle-wake source + lifecycle envelope) must be throttled"
         );
         assert!(
-            !FactoryDaemon::row_is_supervisor_wake(
+            FactoryDaemon::row_is_supervisor_wake(
                 &worker_sender("swift-fox"),
                 "cosmic-bear-43",
                 "supervisor",
                 "plain worker message"
             ),
-            "an ordinary message must not be routed through the lifecycle throttle"
+            "an authenticated directed message shares the bounded wake retry cadence"
+        );
+        assert!(
+            !FactoryDaemon::row_is_supervisor_wake(
+                &worker_sender("swift-fox"),
+                "cosmic-bear-43",
+                "swift-fox",
+                "thanks, received"
+            ),
+            "a pure acknowledgement must not acquire wake bookkeeping"
         );
         assert!(
             !FactoryDaemon::row_is_supervisor_wake(
@@ -20889,7 +20898,8 @@ mod supervisor_notice_wake_tests {
                 "supervisor-notice:42",
                 body
             ),
-            None
+            Some(SupervisorWakeClass::DirectedMessage),
+            "an authenticated worker may wake, but cannot borrow the daemon's Blocker class"
         );
         assert_eq!(
             FactoryDaemon::supervisor_wake_class(

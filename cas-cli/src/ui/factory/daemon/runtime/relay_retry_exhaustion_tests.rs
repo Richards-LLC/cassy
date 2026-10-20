@@ -16,6 +16,11 @@ async fn exhausted_message(body: String, summary: &str, context: &[&str]) {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (_root, mut daemon) = super::super::supervisor_single_turn_tests::fixture().await;
     let cas = daemon.app.cas_dir().to_path_buf();
+    // This fixture exercises an already-exhausted retry budget, past the
+    // independent directed-message debounce. Keep that stage deterministic.
+    let mut config = crate::config::Config::load(&cas).unwrap();
+    config.set("factory.supervisor_message_debounce_secs", "0").unwrap();
+    config.save(&cas).unwrap();
     let mut worker = cas_types::Agent::new_with_role(
         "retry-worker".into(),
         "worker".into(),

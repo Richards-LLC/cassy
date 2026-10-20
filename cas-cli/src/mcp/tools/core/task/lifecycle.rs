@@ -4314,6 +4314,24 @@ mod related_recall_response_tests {
     }
 
     #[tokio::test]
+    async fn epic_create_preserves_open_feature_duplicate_warning_cas_dea7() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None), ("CAS_FACTORY_SESSION", None),
+        ]);
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let scope = "Migrate refund readers in payments.service.ts:412 and refunds.controller.ts:88 to read paymentIntentId from the payments table";
+        let mut feature = described_task_request("Consolidate paymentIntentId refund readers", scope);
+        feature.task_type = "feature".into();
+        core.cas_task_create(Parameters(feature)).await.unwrap();
+        let warning = core.cas_task_create(Parameters(epic_request(
+            "EPIC: unify refund payment lookup", scope,
+        ))).await.expect_err("epic creation must still check open features");
+        assert!(warning.message.contains("DUPLICATE TASK WARNING") && warning.message.contains("Consolidate paymentIntentId refund readers"), "{warning:?}");
+        assert_eq!(core.open_task_store().unwrap().list(None).unwrap().len(), 1, "refusal must not create the epic");
+    }
+
+    #[tokio::test]
     async fn epic_create_requires_confirmation_when_cloud_inventory_is_unavailable_cas_dea7() {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4326,6 +4344,10 @@ mod related_recall_response_tests {
         let core = CasCore::with_daemon(root.to_path_buf(), None, None);
         let store = core.open_task_store().unwrap();
         store.init().unwrap();
+        let mut local = Task::new("cas-local-search".into(), "Restore the product search index".into());
+        local.task_type = TaskType::Epic;
+        local.epic_verification_owner = Some("search-supervisor".into());
+        store.add(&local).unwrap();
         let server = MockServer::start().await;
         crate::cloud::CloudConfig {
             endpoint: server.uri(), token: Some("fixture-token".into()),
@@ -4335,10 +4357,12 @@ mod related_recall_response_tests {
             .expect(1).mount(&server).await;
         let request = epic_request("Restore the product search index", "Rebuild missing conversation search documents.");
         let warning = core.cas_task_create(Parameters(request.clone())).await.unwrap_err();
-        assert!(warning.message.contains("EPIC INVENTORY WARNING") && warning.message.contains("confirm_warning=true"), "{warning:?}");
-        assert!(store.list(None).unwrap().is_empty());
+        for required in ["EPIC INVENTORY WARNING", "DUPLICATE EPIC WARNING", "cas-local-search", "search-supervisor", "confirm_warning=true"] {
+            assert!(warning.message.contains(required), "missing {required}: {warning:?}");
+        }
+        assert_eq!(store.list(None).unwrap().len(), 1, "outage and local overlap must both be reported before writing");
         core.cas_task_create_with_target(request, None, None, true).await.unwrap();
-        assert_eq!(store.list(None).unwrap().len(), 1);
+        assert_eq!(store.list(None).unwrap().len(), 2);
     }
 
     #[tokio::test]

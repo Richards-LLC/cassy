@@ -163,6 +163,9 @@ fn idle_transcript_replaying_a_finished_call(root: &tempfile::TempDir, daemon: &
     let mut supervisor = agents.get("single-sup").unwrap();
     let clone = root.path().to_str().unwrap().to_string();
     supervisor.metadata.insert("clone_path".into(), clone.clone());
+    // A live Claude supervisor stays registered Active between turns; the wake
+    // read only consults the transcript of an Active (or Stale) registration.
+    supervisor.status = cas_types::AgentStatus::Active;
     agents.register(&supervisor).unwrap();
     let slug: String = clone.chars().map(|c| if matches!(c, '/' | '.') { '-' } else { c }).collect();
     let dir = dirs::home_dir().unwrap().join(".claude/projects").join(slug);

@@ -10061,6 +10061,13 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
     }
 
     let task_b = child_task_of_epic(&env, "cas-3b7c", "work needing fresh base");
+    let store = env.task_store();
+    let mut targeted = store.get(&task_b).unwrap();
+    targeted.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:active-project".to_string(),
+        target_branch: "epic/requested".to_string(),
+    });
+    store.update(&targeted).unwrap();
     let mut active = Task::new("cas-active".to_string(), "prior active work".to_string());
     active.assignee = Some(worker.to_string());
     active.status = TaskStatus::InProgress;

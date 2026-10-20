@@ -501,10 +501,10 @@ impl TaskStore for SyncingTaskStore {
             .queue
             .lock_task_sync_mutations(&[&task.id])
             .map_err(queue_error_before_local_commit)?;
-        let intent = self.stage_upsert(task, "add", None, None)?;
+        let intent = self.stage_upsert(&task, "add", None, None)?;
         if let Err(error) = self
             .inner
-            .add_with_mutation_receipt(task, &intent.mutation_id)
+            .add_with_mutation_receipt(&task, &intent.mutation_id)
         {
             self.cancel_staged_after_local_failure(&intent);
             return Err(error);
@@ -527,9 +527,9 @@ impl TaskStore for SyncingTaskStore {
             .queue
             .lock_task_sync_mutations(&[&task.id])
             .map_err(queue_error_before_local_commit)?;
-        let intent = self.stage_upsert(task, "create_atomic", None, None)?;
+        let intent = self.stage_upsert(&task, "create_atomic", None, None)?;
         if let Err(error) = self.inner.create_atomic_with_mutation_receipt(
-            task,
+            &task,
             blocked_by,
             epic_id,
             created_by,
@@ -541,7 +541,7 @@ impl TaskStore for SyncingTaskStore {
         crate::mcp::tools::service::mutation_receipt::task_committed(&task.id);
         let task_sync_result = self.fulfill_upsert(&intent);
         let persisted = self
-            .persisted_for_queue(task)
+            .persisted_for_queue(&task)
             .map_err(|error| degraded_sync_error(&intent, error.to_string()))?;
         for dep in self.inner.get_dependencies(&task.id)? {
             self.queue_dependency_upsert(&dep, &persisted);
@@ -572,10 +572,10 @@ impl TaskStore for SyncingTaskStore {
         let previous = self.inner.get(&task.id)?;
         let previous_updated_at = previous.updated_at.to_rfc3339();
         let intent =
-            self.stage_upsert(task, "update", Some(&previous_updated_at), Some(&previous))?;
+            self.stage_upsert(&task, "update", Some(&previous_updated_at), Some(&previous))?;
         let persisted_at = match self
             .inner
-            .update_with_mutation_receipt(task, &intent.mutation_id)
+            .update_with_mutation_receipt(&task, &intent.mutation_id)
         {
             Ok(persisted_at) => persisted_at,
             Err(error) => {

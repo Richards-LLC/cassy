@@ -713,11 +713,14 @@ struct OpenTaskOverlap {
 /// A child created with `epic=X` naturally repeats X's identifiers, so X is
 /// never a duplicate candidate for its own child. X's other children are still
 /// compared, but a match among them only warns.
+/// Epic creates exclude epic candidates here: the project-wide epic matcher
+/// already owns those, while feature/task/bug candidates still need this gate.
 fn open_task_similarity(
     task_store: &dyn cas_store::TaskStore,
     title: &str,
     description: &str,
     epic_id: Option<&str>,
+    exclude_epics: bool,
 ) -> Result<OpenTaskOverlap, String> {
     let siblings: std::collections::HashSet<String> = match epic_id {
         Some(epic) => task_store
@@ -733,6 +736,7 @@ fn open_task_similarity(
     for task in task_store.list(None).map_err(|error| error.to_string())? {
         if matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled)
             || epic_id == Some(task.id.as_str())
+            || (exclude_epics && task.task_type == TaskType::Epic)
         {
             continue;
         }
@@ -1020,6 +1024,7 @@ impl CasCore {
         // decomposing the same epic. Refuse the write until the caller makes a
         // conscious override; no task row or dependency is created on this path.
         if !confirm_warning {
+            let mut blocking_warnings = Vec::new();
             if task_type == TaskType::Epic {
                 let warning = epic_overlap::warning(
                     self, task_store.as_ref(), &req.title,
@@ -1029,10 +1034,7 @@ impl CasCore {
                     message: Cow::from(message), data: None,
                 })?;
                 if let Some(message) = warning {
-                    return Err(McpError {
-                        code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(message), data: None,
-                    });
+                    blocking_warnings.push(message);
                 }
             }
             if let (Some(epic), Some(creator)) = (epic_id.as_deref(), created_by.as_deref()) {
@@ -1058,43 +1060,45 @@ impl CasCore {
                 }
             }
 
-            // Epic admission already compared the complete project inventory.
-            // The task/sibling matcher has different prose and scope rules.
-            if task_type != TaskType::Epic {
-                let overlap = open_task_similarity(
-                    task_store.as_ref(),
-                    &req.title,
-                    req.description.as_deref().unwrap_or_default(),
-                    epic_id.as_deref(),
-                )
-                .map_err(|error| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!("Failed to inspect open task overlap: {error}")),
+            // Epic admission owns epic-to-epic comparisons. Keep checking
+            // features, tasks and bugs for every create, including epics.
+            let overlap = open_task_similarity(
+                task_store.as_ref(),
+                &req.title,
+                req.description.as_deref().unwrap_or_default(),
+                epic_id.as_deref(),
+                task_type == TaskType::Epic,
+            )
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to inspect open task overlap: {error}")),
+                data: None,
+            })?;
+            if let Some(existing) = &overlap.sibling {
+                let (existing_id, existing_title, score, _) = existing;
+                let (identifier_note, overlap_subject) = overlap_description(existing);
+                sibling_warning = format!(
+                    "\n\n⚠️ SIBLING OVERLAP: {existing_id} ({existing_title:?}), under the same epic, \
+                     overlaps this {overlap_subject} at {:.0}%{identifier_note}. Created anyway; check \
+                     the two do not duplicate each other's scope.",
+                    score * 100.0,
+                );
+            }
+            if let Some(existing) = &overlap.blocking {
+                let (existing_id, existing_title, score, _) = existing;
+                let (identifier_note, overlap_subject) = overlap_description(existing);
+                blocking_warnings.push(format!(
+                    "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this {overlap_subject} \
+                     at {:.0}%{identifier_note}. Review or reuse it; if this is intentional, retry with confirm_warning=true.",
+                    score * 100.0,
+                ));
+            }
+            if !blocking_warnings.is_empty() {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(blocking_warnings.join("\n\n")),
                     data: None,
-                })?;
-                if let Some(existing) = &overlap.sibling {
-                    let (existing_id, existing_title, score, _) = existing;
-                    let (identifier_note, overlap_subject) = overlap_description(existing);
-                    sibling_warning = format!(
-                        "\n\n⚠️ SIBLING OVERLAP: {existing_id} ({existing_title:?}), under the same epic, \
-                         overlaps this {overlap_subject} at {:.0}%{identifier_note}. Created anyway; check \
-                         the two do not duplicate each other's scope.",
-                        score * 100.0,
-                    );
-                }
-                if let Some(existing) = &overlap.blocking {
-                    let (existing_id, existing_title, score, _) = existing;
-                    let (identifier_note, overlap_subject) = overlap_description(existing);
-                    return Err(McpError {
-                        code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(format!(
-                            "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this {overlap_subject} \
-                             at {:.0}%{identifier_note}. Review or reuse it; if this is intentional, retry with confirm_warning=true.",
-                            score * 100.0,
-                        )),
-                        data: None,
-                    });
-                }
+                });
             }
         }
 

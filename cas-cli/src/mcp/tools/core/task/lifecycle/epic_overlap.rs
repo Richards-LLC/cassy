@@ -55,6 +55,59 @@ fn open(task: &Task) -> bool {
     !matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled)
 }
 
+#[derive(Default)]
+struct CloudInventory {
+    tasks: Vec<Task>,
+    edges: Vec<serde_json::Value>,
+}
+
+async fn cloud_inventory(
+    root: &std::path::Path,
+    project: Option<&str>,
+) -> Result<CloudInventory, String> {
+    let config = CloudConfig::load_from_cas_dir(root).map_err(|_| inventory_warning())?;
+    if !config.is_logged_in() {
+        return Ok(CloudInventory::default());
+    }
+    config
+        .validate_team_only()
+        .map_err(|_| inventory_warning())?;
+    let project = project.ok_or_else(inventory_warning)?.to_owned();
+    let root = root.to_owned();
+    let budget = crate::cloud::peer_claims::PeerBudget::new(Duration::from_secs(5));
+    let (project, remote_tasks, edges) = budget
+        .run(move || {
+            let queue = Arc::new(SyncQueue::open_read_only(&root)?);
+            let team = config.active_team_id();
+            let syncer = CloudSyncer::new(
+                queue,
+                config,
+                CloudSyncerConfig {
+                    timeout: Duration::from_secs(2),
+                    ..Default::default()
+                },
+            );
+            let tasks = syncer.fetch_task_snapshot(team.as_deref(), &project)?;
+            let edges = syncer.fetch_dependency_snapshot(team.as_deref(), &project)?;
+            Ok::<_, crate::error::CasError>((project, tasks, edges))
+        })
+        .await
+        .map_err(|_| inventory_warning())?
+        .map_err(|_| inventory_warning())?;
+    let mut tasks = Vec::new();
+    for raw in remote_tasks {
+        if !crate::cloud::entity_matches_project(&raw, &project, "task") {
+            continue;
+        }
+        let task: Task = crate::cloud::syncer::pull::deserialize_pulled_entity(raw, "task")
+            .map_err(|_| inventory_warning())?;
+        if task.scope == Scope::Project {
+            tasks.push(task);
+        }
+    }
+    Ok(CloudInventory { tasks, edges })
+}
+
 /// Return an actionable warning before the caller creates a row or a lane.
 /// Cloud is optional, but a configured inventory that cannot be read requires
 /// the same explicit override as an overlap; never silently call that checked.
@@ -79,55 +132,24 @@ pub(super) async fn warning(
         })
         .map(|task| (task.id.clone(), task))
         .collect();
-    let mut remote_edges = Vec::new();
-    let config = CloudConfig::load_from_cas_dir(&core.cas_root).map_err(|_| inventory_warning())?;
-    if config.is_logged_in() {
-        config
-            .validate_team_only()
-            .map_err(|_| inventory_warning())?;
-        let project = project.as_ref().ok_or_else(inventory_warning)?.clone();
-        let root = core.cas_root.clone();
-        let budget = crate::cloud::peer_claims::PeerBudget::new(Duration::from_secs(5));
-        let snapshot = budget
-            .run(move || {
-                let queue = Arc::new(SyncQueue::open_read_only(&root)?);
-                let team = config.active_team_id();
-                let syncer = CloudSyncer::new(
-                    queue,
-                    config,
-                    CloudSyncerConfig {
-                        timeout: Duration::from_secs(2),
-                        ..Default::default()
-                    },
-                );
-                let tasks = syncer.fetch_task_snapshot(team.as_deref(), &project)?;
-                let edges = syncer.fetch_dependency_snapshot(team.as_deref(), &project)?;
-                Ok::<_, crate::error::CasError>((project, tasks, edges))
-            })
-            .await
-            .map_err(|_| inventory_warning())?
-            .map_err(|_| inventory_warning())?;
-        let (project, remote_tasks, edges) = snapshot;
-        for raw in remote_tasks {
-            if !crate::cloud::entity_matches_project(&raw, &project, "task") {
-                continue;
+    let (remote_edges, outage) = match cloud_inventory(&core.cas_root, project.as_deref()).await {
+        Ok(inventory) => {
+            for task in inventory.tasks {
+                // Keep newer unsynced local changes, including a locally closed
+                // epic; otherwise the fresh Cloud state wins over a stale cache.
+                if tasks
+                    .get(&task.id)
+                    .is_none_or(|local| task.updated_at >= local.updated_at)
+                {
+                    tasks.insert(task.id.clone(), task);
+                }
             }
-            let task: Task = crate::cloud::syncer::pull::deserialize_pulled_entity(raw, "task")
-                .map_err(|_| inventory_warning())?;
-            if task.scope != Scope::Project {
-                continue;
-            }
-            // Keep newer unsynced local changes, including a locally closed
-            // epic; otherwise the fresh Cloud state wins over a stale cache.
-            if tasks
-                .get(&task.id)
-                .is_none_or(|local| task.updated_at >= local.updated_at)
-            {
-                tasks.insert(task.id.clone(), task);
-            }
+            (inventory.edges, None)
         }
-        remote_edges = edges;
-    }
+        // An outage is a separate refusal, not an early return: local scope
+        // must still be checked and shown before an override is requested.
+        Err(warning) => (Vec::new(), Some(warning)),
+    };
 
     let Some((epic, score)) = tasks
         .values()
@@ -135,7 +157,7 @@ pub(super) async fn warning(
         .filter_map(|task| similarity(title, description, task).map(|score| (task, score)))
         .max_by(|(a, x), (b, y)| x.total_cmp(y).then_with(|| b.id.cmp(&a.id)))
     else {
-        return Ok(None);
+        return Ok(outage);
     };
 
     let mut children: BTreeSet<String> = store
@@ -176,7 +198,7 @@ pub(super) async fn warning(
         .as_deref()
         .or(epic.assignee.as_deref())
         .unwrap_or("unrecorded");
-    Ok(Some(format!(
+    let overlap = format!(
         "DUPLICATE EPIC WARNING: open epic {} ({:?}) overlaps this plan at {:.0}%.\n\
          Owner supervisor: {owner}\nOpen children:\n{}\n\
          Review or reuse that epic and agree scope with its owner. If this is intentional, retry with confirm_warning=true.",
@@ -188,11 +210,16 @@ pub(super) async fn warning(
         } else {
             children.join("\n")
         },
-    )))
+    );
+    Ok(Some(match outage {
+        Some(outage) => format!("{outage}\n\n{overlap}"),
+        None => overlap,
+    }))
 }
 
 fn inventory_warning() -> String {
-    "EPIC INVENTORY WARNING: could not read the current project's Cloud epic inventory. \
-     No epic was created. Restore Cloud access and retry, or explicitly accept the unchecked peer scope with confirm_warning=true."
+    "EPIC INVENTORY WARNING (CLOUD UNAVAILABLE): could not read the current project's Cloud epic inventory. \
+     Local epic scope was still checked; any overlap is reported separately below. No epic was created. \
+     Restore Cloud access and retry, or explicitly accept the unchecked peer scope with confirm_warning=true."
         .into()
 }

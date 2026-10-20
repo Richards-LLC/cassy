@@ -891,7 +891,9 @@ async fn cas_596d_successful_team_push_rearms_only_transient_exhausted_rows_once
             queue.mark_failed(row_id, error).unwrap();
         }
         if let Some(outcome) = outcome {
-            queue.record_row_outcome(row_id, outcome, Some("test")).unwrap();
+            queue
+                .record_row_outcome(row_id, outcome, Some("test"))
+                .unwrap();
         }
     }
 
@@ -934,7 +936,10 @@ async fn cas_596d_successful_team_push_rearms_only_transient_exhausted_rows_once
             .unwrap()
     };
     let dns = row("entry-dns-exhausted");
-    assert_eq!(dns.retry_count, 0, "a successful Cloud push re-arms DNS failures");
+    assert_eq!(
+        dns.retry_count, 0,
+        "a successful Cloud push re-arms DNS failures"
+    );
     assert!(dns.last_error.is_none());
     for id in [
         "entry-auth-exhausted",

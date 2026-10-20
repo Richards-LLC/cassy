@@ -117,6 +117,54 @@ fn page_operator_for_idle_supervisor(
     }
 }
 
+/// How far back an expired verification dispatch is still escalated, so an
+/// upgrade does not page for old history.
+const EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS: i64 = 24;
+
+/// cas-7456 (GH #1302 B): a verification dispatch whose deadline passed with
+/// no verdict wakes the supervisor through a durable worker-attention relay,
+/// one per dispatch (the relay is keyed on the dispatch id, so each sweep's
+/// repeat is idempotent). Its lifecycle-wake source puts it under the GH #894
+/// watchdog, which tells the operator if the supervisor never receives it.
+/// Returns how many expired dispatches have a persisted relay.
+pub(super) fn escalate_expired_verification_dispatches(
+    cas_dir: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> usize {
+    let since = now - chrono::Duration::hours(EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS);
+    let expired = match cas_store::expired_verification_dispatches(cas_dir, since, now, 20) {
+        Ok(expired) => expired,
+        Err(error) => {
+            tracing::warn!(%error, "cas-7456: expired verification dispatches unavailable");
+            return 0;
+        }
+    };
+    expired
+        .iter()
+        .filter(|dispatch| {
+            let detail = format!(
+                "Verification dispatch {} for {} passed its deadline {} with no verdict. Re-dispatch the verifier (or verify directly), then finish the close.",
+                dispatch.id,
+                dispatch.task_id,
+                dispatch.deadline_at.to_rfc3339()
+            );
+            let overdue = (now - dispatch.deadline_at).num_seconds().max(0) as u64;
+            matches!(
+                enqueue_worker_attention_relay_detail(
+                    cas_dir,
+                    "verification_dispatch_expired",
+                    "supervisor",
+                    Some(&dispatch.task_id),
+                    Some(overdue),
+                    &detail,
+                    &dispatch.id,
+                ),
+                WorkerAttentionRelayOutcome::Persisted { .. }
+            )
+        })
+        .count()
+}
+
 fn enqueue_worker_attention_relay_for_episode(
     cas_dir: &std::path::Path,
     event: &crate::ui::factory::director::DirectorEvent,
@@ -1649,6 +1697,39 @@ mod worker_attention_tests {
             rows[0].prompt
         );
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+    }
+
+    /// cas-7456 (GH #1302 B): a verification dispatch expired overnight with
+    /// no escalation. The sweep wakes the supervisor once per expired
+    /// dispatch, and leaves due-later and day-old dispatches alone.
+    #[test]
+    fn an_expired_verification_dispatch_wakes_the_supervisor_once_gh1302() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "dispatch-expiry-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "dispatch-expiry-test");
+        let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        for id in ["cas-b4d8", "cas-ancient", "cas-due-later"] {
+            tasks.add(&cas_types::Task::new(id.into(), id.into())).unwrap();
+        }
+        let now = chrono::Utc::now();
+        let dispatch = |task: &str, deadline| {
+            cas_store::create_verification_dispatch(&cas_dir, task, "worker-id", "supervisor-id", deadline)
+                .unwrap()
+        };
+        let expired = dispatch("cas-b4d8", now - chrono::Duration::minutes(5));
+        dispatch("cas-ancient", now - chrono::Duration::hours(30));
+        dispatch("cas-due-later", now + chrono::Duration::minutes(10));
+
+        assert_eq!(escalate_expired_verification_dispatches(&cas_dir, now), 1);
+        escalate_expired_verification_dispatches(&cas_dir, now);
+        let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1, "one wake per expired dispatch, repeat sweeps included: {rows:?}");
+        assert!(rows[0].prompt.contains(&expired.id) && rows[0].prompt.contains("cas-b4d8"), "{}", rows[0].prompt);
+        assert!(rows[0].source.starts_with("lifecycle-wake:worker-attention:"), "{}", rows[0].source);
     }
 
     /// cas-7456 (GH #1302 D): a supervisor-idle page flagged for the operator

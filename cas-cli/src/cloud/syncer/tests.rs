@@ -731,13 +731,8 @@ async fn nul_rejection_preserves_task_payload_and_explains_cloud_blocker() {
         diagnostic.contains("PostgreSQL jsonb cannot store U+0000"),
         "{diagnostic}"
     );
-    assert!(diagnostic.contains("lossless"), "{diagnostic}");
     assert!(
-        diagnostic.contains("petra-stella-cloud/issues/184"),
-        "{diagnostic}"
-    );
-    assert!(
-        diagnostic.contains("cas cloud queue --retry --retry-reason invalid_json_nul"),
+        diagnostic.contains("cas cloud queue --repair-task-note-nuls --apply"),
         "{diagnostic}"
     );
     let requests = server.received_requests().await.unwrap();

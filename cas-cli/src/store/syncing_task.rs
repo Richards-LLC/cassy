@@ -1736,7 +1736,7 @@ mod tests {
         queue.clear().unwrap();
 
         store
-            .append_note(&task.id, "synced task note")
+            .append_note(&task.id, "sync\u{0}ed task note")
             .expect("append note should commit locally and stage sync");
 
         let pending = queue.pending(10, 5).unwrap();
@@ -1752,6 +1752,10 @@ mod tests {
                 .count(),
             1
         );
+        let pushed: crate::types::Task =
+            serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(pushed.notes, "synced task note");
+        assert!(!pushed.notes.contains('\0'));
         assert_eq!(
             store
                 .get(&task.id)
@@ -1761,6 +1765,7 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(store.get(&task.id).unwrap().notes, "synced task note");
     }
 
     #[test]

@@ -135,14 +135,29 @@ fn path_references_store(reference: &str, cwd: &Path, include_parent: bool) -> b
         return false;
     }
     let roots = store_roots(cwd);
-    if let Some(candidate) = resolve_path(reference, cwd) {
+    let path = if include_parent {
+        path_prefix_before_glob(reference)
+    } else {
+        reference
+    };
+    if let Some(candidate) = resolve_path(path, cwd) {
         if roots.iter().any(|root| {
             candidate.starts_with(root) || (include_parent && root.starts_with(&candidate))
         }) {
             return true;
         }
     }
-    alias_references_store(reference, include_parent)
+    alias_references_store(path, include_parent)
+}
+
+fn path_prefix_before_glob(reference: &str) -> &str {
+    let Some(glob_at) = reference.find(['*', '?', '[']) else {
+        return reference;
+    };
+    reference[..glob_at]
+        .rfind('/')
+        .map(|slash| &reference[..slash])
+        .unwrap_or(".")
 }
 
 fn store_roots(cwd: &Path) -> Vec<PathBuf> {
@@ -265,7 +280,7 @@ fn alias_references_store(reference: &str, include_parent: bool) -> bool {
         };
         if suffixes.iter().any(|suffix| {
             (suffix.is_empty() && !rest.is_empty())
-                || rest == suffix
+                || rest == *suffix
                 || rest.starts_with(&format!("{suffix}/"))
                 || (include_parent && suffix.starts_with(&format!("{rest}/")))
         }) {

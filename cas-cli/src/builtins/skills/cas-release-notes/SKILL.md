@@ -1,6 +1,6 @@
 ---
 name: cas-release-notes
-description: Use when a merge reaches staging or main, or when the user asks to draft or post release notes, Slack updates, or a release-notes rubric.
+description: Use when a merge reaches staging or main, or when asked to draft or post release notes for the team or for customers, Slack updates or a release-notes rubric.
 metadata:
   managed_by: cas
 ---

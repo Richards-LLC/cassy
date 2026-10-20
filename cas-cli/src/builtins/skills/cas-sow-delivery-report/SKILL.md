@@ -1,6 +1,6 @@
 ---
 name: cas-sow-delivery-report
-description: Use when a statement of work (SOW) is believed complete and needs a client-branded delivery report with before/after screenshots, a feedback-round tracker and the PM handoff; not version releases (cas-release-report).
+description: Use when a statement of work (SOW) is believed complete, or the client's next feedback round is done, and needs a client-branded delivery report with before/after screenshots, a round tracker and the PM handoff.
 metadata:
   managed_by: cas
 ---

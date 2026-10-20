@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.66.0] - 2026-10-20
+
 ### Added — safer setup and cleanup
 
 - **Neon workspace setup** — Was: initialization checked only root-level

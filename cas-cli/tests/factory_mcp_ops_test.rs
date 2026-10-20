@@ -10035,7 +10035,7 @@ async fn test_assignment_is_not_blocked_by_the_workers_own_merged_lane_cas_f8bc(
 }
 
 #[tokio::test]
-async fn test_assignment_still_refuses_a_genuinely_stale_worker_cas_f8bc() {
+async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
     let home = TempDir::new().expect("home tempdir");
     let _guard = EnvGuard::set_optional(&[
         ("CAS_FACTORY_MODE", Some("1")),
@@ -10043,15 +10043,14 @@ async fn test_assignment_still_refuses_a_genuinely_stale_worker_cas_f8bc() {
         ("HOME", Some(home.path().to_str().unwrap())),
     ]);
     let env = FactoryTestEnv::new();
-    let worker = "f8bc-stale-worker";
-    // init_sync_repo leaves epic/requested one real commit ahead of the
-    // worker's branch, and nothing of the worker's has been merged.
+    let worker = "c54f-idle-worker";
+    // The worker's clean branch is one real commit behind its task's epic.
     let worker_path = init_sync_repo(&env, worker);
     add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
 
     {
         let store = env.agent_store();
-        let mut agent = Agent::new(Agent::generate_fallback_id(), worker.to_string());
+        let mut agent = Agent::new("test-agent-id".to_string(), worker.to_string());
         agent.role = AgentRole::Worker;
         agent.factory_session = Some("session-f8bc-stale".to_string());
         agent.metadata.insert(
@@ -10062,12 +10061,37 @@ async fn test_assignment_still_refuses_a_genuinely_stale_worker_cas_f8bc() {
     }
 
     let task_b = child_task_of_epic(&env, "cas-3b7c", "work needing fresh base");
-    let error = assign(&env, &task_b, worker)
+    let mut active = Task::new("cas-active".to_string(), "prior active work".to_string());
+    active.assignee = Some(worker.to_string());
+    active.status = TaskStatus::InProgress;
+    env.task_store().add(&active).unwrap();
+    let busy = assign(&env, &task_b, worker)
         .await
-        .expect_err("a worker missing real epic commits must still be refused");
-    assert!(
-        error.contains("commits behind") && error.contains("epic/requested"),
-        "the genuine staleness guard must survive the exemption: {error}"
+        .expect_err("a mid-task worker must still be refused");
+    assert!(busy.contains("commits behind"), "{busy}");
+    active.status = TaskStatus::Closed;
+    env.task_store().update(&active).unwrap();
+
+    std::fs::write(worker_path.join("README"), "uncommitted work\n").unwrap();
+    let dirty = assign(&env, &task_b, worker)
+        .await
+        .expect_err("a dirty worker must still be refused");
+    assert!(dirty.contains("commits behind"), "{dirty}");
+    git_stdout(&worker_path, &["checkout", "--", "README"]);
+
+    let assigned = assign(&env, &task_b, worker)
+        .await
+        .expect("a clean idle worker may accept work behind its target");
+    assert!(assigned.contains("assignee"), "{assigned}");
+    let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "start", "id": task_b
+    }))
+    .unwrap();
+    let started = get_text(&env.service.task(Parameters(start)).await.unwrap());
+    assert!(started.contains("REUSED FACTORY BRANCH RESET"), "{started}");
+    assert_eq!(
+        git_stdout(&worker_path, &["rev-parse", "HEAD"]),
+        git_stdout(&worker_path, &["rev-parse", "epic/requested"])
     );
 }
 

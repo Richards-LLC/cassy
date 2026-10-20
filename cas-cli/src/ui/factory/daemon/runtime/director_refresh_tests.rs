@@ -21,7 +21,9 @@ const SLOW_READ: Duration = Duration::from_millis(500);
 
 #[tokio::test]
 async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
-    for scenario in ["merged", "positive", "missing"] {
+    let mut shutdown_delivered = false;
+    let mut stale_fallback_suppressed = false;
+    for scenario in ["merged", "positive", "missing", "shutdown", "merged_fallback"] {
         let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
         let cas_dir = fixture.app.cas_dir().to_path_buf();
         fixture
@@ -57,7 +59,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
         let expected_task = prompts[0].retract_task.clone();
         let expected_text = prompts[0].text.lines().next().unwrap().to_string();
         let capture = cas_dir.join("fallback.txt");
-        if scenario == "missing" {
+        if matches!(scenario, "missing" | "shutdown" | "merged_fallback") {
             let tree = daemon.teams.as_ref().unwrap().teams_dir().to_path_buf();
             std::fs::remove_dir_all(&tree).unwrap();
             // A missing live tree with no saved roster exercises the real ENOENT path.
@@ -119,19 +121,20 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let mut refresh = DirectorRefresh::new();
-        daemon
-            .director_refresh_pass(
-                &mut refresh,
-                false,
-                super::super::store_worker::global(),
+        if scenario == "merged_fallback" {
+            // The failed native write already finished, but the PTY fallback has not run.
+            fixture.advance_target(true);
+        }
+        if scenario == "shutdown" {
+            let _ = refresh.drain_deliverability(&mut daemon.queue_jobs, Duration::from_secs(10)).await;
+            daemon.finish_shutdown_writes(super::super::store_worker::global(), Duration::from_secs(10));
+        } else {
+            daemon.director_refresh_pass(
+                &mut refresh, false, super::super::store_worker::global(),
                 &super::super::loop_watchdog::LoopProgress::new(),
-            )
-            .await;
-        assert!(
-            daemon
-                .queue_jobs
-                .drain_for_shutdown(&cas_dir, Duration::from_secs(10))
-        );
+            ).await;
+            assert!(daemon.queue_jobs.drain_for_shutdown(&cas_dir, Duration::from_secs(10)));
+        }
         let rows: Vec<super::super::teams::InboxMessage> =
             serde_json::from_str(&std::fs::read_to_string(inbox).unwrap_or_else(|_| "[]".into()))
                 .unwrap();
@@ -147,6 +150,21 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
                 "a genuine merge alert must reach the native inbox exactly once"
             );
             assert_eq!(rows[0].retract_task, expected_task);
+        } else if scenario == "merged_fallback" {
+            // A later marker on the same PTY proves all earlier queued payloads
+            // have reached cat before absence of the stale body is judged.
+            let name = daemon.app.supervisor_name().to_string();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while daemon.app.mux.pane_submit_pending(&name) && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let marker = "fallback-check-finished";
+            daemon.app.mux.inject(&name, marker).await.unwrap();
+            while !std::fs::read_to_string(&capture).unwrap_or_default().contains(marker) && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let written = std::fs::read_to_string(&capture).unwrap_or_default();
+            stale_fallback_suppressed = written.contains(marker) && !written.contains(&expected_text);
         } else {
             let deadline = Instant::now() + Duration::from_secs(2);
             while !std::fs::read_to_string(&capture)
@@ -156,21 +174,23 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            // pin: the actual emitted body must reach the PTY capture, not just a success return.
-            assert!(
-                std::fs::read_to_string(capture)
-                    .unwrap_or_default()
-                    .contains(&expected_text),
-                "the genuine alert must fall back to the actual supervisor PTY"
-            );
+            let delivered = std::fs::read_to_string(capture).unwrap_or_default().contains(&expected_text);
+            if scenario == "shutdown" {
+                shutdown_delivered = delivered;
+            } else {
+                assert!(delivered, "the genuine alert must fall back to the actual supervisor PTY");
+            }
             let db = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
             let incidents: i64 = db.query_row("SELECT COUNT(*) FROM prompt_queue WHERE source = 'teams-recovery' AND target = 'operator'", [], |row| row.get(0)).unwrap();
-            assert_eq!(
-                incidents, 1,
-                "missing team files must publish one durable incident"
-            );
+            if scenario == "shutdown" {
+                shutdown_delivered &= incidents == 1;
+            } else {
+                assert_eq!(incidents, 1, "missing team files must publish one durable incident");
+            }
         }
     }
+    assert!(shutdown_delivered, "shutdown must consume the completed native failure and deliver its PTY fallback plus incident");
+    assert!(stale_fallback_suppressed, "a merge after the native error must suppress the PTY fallback");
 }
 
 #[tokio::test]

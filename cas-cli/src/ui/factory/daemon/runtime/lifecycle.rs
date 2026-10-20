@@ -51,6 +51,72 @@ fn enqueue_worker_attention_relay(
     enqueue_worker_attention_relay_for_episode(cas_dir, event, Some(chrono::DateTime::UNIX_EPOCH))
 }
 
+/// cas-7456 (GH #1302 D): the supervisor has left its idle page unanswered
+/// past [`SUPERVISOR_IDLE_OPERATOR_PAGE_SECS`] while work waits, so the
+/// operator hears it too. One durable operator turn per page, deduped on the
+/// page's occurrence; the stall tracker raises at most one per silence.
+///
+/// [`SUPERVISOR_IDLE_OPERATOR_PAGE_SECS`]: crate::ui::factory::director::SUPERVISOR_IDLE_OPERATOR_PAGE_SECS
+fn page_operator_for_idle_supervisor(
+    cas_dir: &std::path::Path,
+    next_step: &crate::ui::factory::director::SupervisorActionableState,
+    occurrence: &str,
+) {
+    let session = std::env::var("CAS_FACTORY_SESSION").unwrap_or_default();
+    let supervisor = crate::store::open_agent_store(cas_dir)
+        .map(|agents| {
+            crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_notice_recipient(
+                agents.as_ref(),
+                (!session.is_empty()).then_some(session.as_str()),
+            )
+            .name
+        })
+        .unwrap_or_else(|_| "the supervisor".to_string());
+    let hours = crate::ui::factory::director::SUPERVISOR_IDLE_OPERATOR_PAGE_SECS / 3600;
+    let summary = format!("Supervisor {supervisor} idle {hours}h+ with work waiting");
+    let message = format!(
+        "Supervisor {supervisor} has taken no action for over {hours} hours and has not answered its idle pages, while work waits:\n{}\nType in its pane to wake it, or take the work over.",
+        next_step.next_step_text()
+    );
+    let Ok(queue) = crate::store::open_prompt_queue_store(cas_dir) else {
+        tracing::warn!("cas-7456: prompt queue unavailable; supervisor-idle operator page skipped");
+        return;
+    };
+    let payload = match serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
+        schema_version: 2,
+        reply_to: None,
+        message,
+        summary: summary.clone(),
+        device_id: "*".to_string(),
+        operator_label: None,
+        kind: crate::ui::factory::OperatorTurnKind::Blocker,
+        attachments: Vec::new(),
+        reply_to_session: None,
+    }) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(%error, "cas-7456: failed to encode the supervisor-idle operator page");
+            return;
+        }
+    };
+    if let Err(error) = queue.record_operator_turn(&cas_store::OperatorTurn {
+        source: "supervisor-idle-watchdog",
+        target: "operator",
+        prompt: &payload,
+        factory_session: (!session.is_empty()).then_some(session.as_str()),
+        metadata: cas_store::OperatorTurnMetadata {
+            summary: Some(summary.as_str()),
+            priority: Some(cas_store::NotificationPriority::High),
+            origin: Some(&cas_store::QueueOrigin::Daemon),
+            kind: Some("blocker"),
+            dedupe_key: Some(&format!("supervisor-idle-page:{session}:{occurrence}")),
+            ..Default::default()
+        },
+    }) {
+        tracing::warn!(%error, "cas-7456: failed to record the supervisor-idle operator page");
+    }
+}
+
 fn enqueue_worker_attention_relay_for_episode(
     cas_dir: &std::path::Path,
     event: &crate::ui::factory::director::DirectorEvent,
@@ -60,8 +126,12 @@ fn enqueue_worker_attention_relay_for_episode(
         next_step,
         occurrence,
         actionable_idle_secs,
+        page_operator,
     } = event
     {
+        if *page_operator {
+            page_operator_for_idle_supervisor(cas_dir, next_step, occurrence);
+        }
         if next_step.merged_close_blocked_relay_key().is_some() {
             // Each delivery owns one durable notice, even when the mixed queue
             // gains another task or the supervisor/daemon starts a new turn.
@@ -1560,6 +1630,7 @@ mod worker_attention_tests {
                     },
                 occurrence: "episode-1".into(),
                 actionable_idle_secs: 600,
+                page_operator: false,
             },
         );
         assert!(matches!(
@@ -1578,6 +1649,37 @@ mod worker_attention_tests {
             rows[0].prompt
         );
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+    }
+
+    /// cas-7456 (GH #1302 D): a supervisor-idle page flagged for the operator
+    /// becomes one durable operator turn naming the waiting work, alongside
+    /// the supervisor's own wake; a retried page does not page twice.
+    #[test]
+    fn an_operator_flagged_idle_page_reaches_the_operator_once_gh1302() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "idle-page-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "idle-page-test");
+        let event = crate::ui::factory::director::DirectorEvent::SupervisorStalled {
+            next_step: crate::ui::factory::director::SupervisorActionableState::AssignReadyWork {
+                task_ids: vec!["cas-ready".into()],
+                idle_workers: vec!["calm-owl".into()],
+            },
+            occurrence: "2026-10-20T03:05:00Z".into(),
+            actionable_idle_secs: 7200,
+            page_operator: true,
+        };
+        for _ in 0..2 {
+            enqueue_worker_attention_relay(&cas_dir, &event);
+        }
+        let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+        let operator = rows.iter().filter(|row| row.target == "operator").collect::<Vec<_>>();
+        assert_eq!(operator.len(), 1, "{rows:?}");
+        assert!(operator[0].prompt.contains("cas-ready") && operator[0].prompt.contains("calm-owl"), "{}", operator[0].prompt);
+        assert!(rows.iter().any(|row| row.target != "operator"), "the supervisor is still woken: {rows:?}");
     }
 
     #[test]
@@ -2260,6 +2362,7 @@ mod worker_attention_tests {
                     },
                 occurrence: "episode-1".into(),
                 actionable_idle_secs: 600,
+                page_operator: false,
             };
             if harness == "codex" {
                 // Replay a durable-only notification after the registered
@@ -2442,6 +2545,7 @@ mod worker_attention_tests {
                 next_step: next_step.clone(),
                 occurrence: "2026-09-11T02:40:00Z".to_string(),
                 actionable_idle_secs: 600,
+                page_operator: false,
             },
         );
         let replay = enqueue_worker_attention_relay(
@@ -2450,6 +2554,7 @@ mod worker_attention_tests {
                 next_step,
                 occurrence: "2026-09-11T02:50:00Z".to_string(),
                 actionable_idle_secs: 1200,
+                page_operator: false,
             },
         );
         assert!(matches!(
@@ -2491,6 +2596,7 @@ mod worker_attention_tests {
         };
         let event = |state, occurrence: &str| DirectorEvent::SupervisorStalled {
             next_step: state, occurrence: occurrence.into(), actionable_idle_secs: 600,
+            page_operator: false,
         };
         assert!(matches!(enqueue_worker_attention_relay(&cas_dir, &event(
             SupervisorActionableState::MergeCloseBlocked { tasks: vec![delivery.clone()] }, "first")),

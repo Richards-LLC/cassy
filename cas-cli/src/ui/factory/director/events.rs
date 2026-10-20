@@ -17,6 +17,11 @@ use chrono::{DateTime, Utc};
 /// so a silent supervisor is nudged without producing a notification storm.
 pub(crate) const SUPERVISOR_STALL_REFIRE_SECS: i64 = 10 * 60;
 
+/// cas-7456 (GH #1302 D): silence after which an unanswered supervisor-idle
+/// page also reaches the operator, once per silence episode. Two supervisors
+/// idled 11–12 h overnight while the page re-fired into a pane nobody read.
+pub(crate) const SUPERVISOR_IDLE_OPERATOR_PAGE_SECS: i64 = 2 * 60 * 60;
+
 /// Concrete next action the supervisor owns while a focused epic is stalled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupervisorActionableState {
@@ -215,12 +220,18 @@ pub struct SupervisorStallTracker {
     /// delivery must not refire the same close demand every ten minutes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_merged_close_blocked_key: Option<String>,
+    /// cas-7456: the supervisor activity whose silence already paged the
+    /// operator, so one silence episode pages at most once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_paged_for: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SupervisorStallObservation {
     pub wake: Option<SupervisorActionableState>,
     pub actionable_idle_secs: u64,
+    /// This wake must also reach the operator (GH #1302 D).
+    pub page_operator: bool,
 }
 
 impl SupervisorStallTracker {
@@ -283,10 +294,21 @@ impl SupervisorStallTracker {
             }
             None
         };
+        // cas-7456 (GH #1302 D): a page the supervisor has left unanswered
+        // for hours goes to the operator too, once per silence episode.
+        let silent_for_operator = last_supervisor_mcp_call_at
+            .is_some_and(|last| (now - last).num_seconds() >= SUPERVISOR_IDLE_OPERATOR_PAGE_SECS);
+        let page_operator = wake.is_some()
+            && silent_for_operator
+            && self.operator_paged_for != last_supervisor_mcp_call_at;
+        if page_operator {
+            self.operator_paged_for = last_supervisor_mcp_call_at;
+        }
 
         SupervisorStallObservation {
             wake,
             actionable_idle_secs: current_secs,
+            page_operator,
         }
     }
 
@@ -894,6 +916,9 @@ pub enum DirectorEvent {
         next_step: SupervisorActionableState,
         occurrence: String,
         actionable_idle_secs: u64,
+        /// The supervisor has stayed silent past the operator threshold, so
+        /// this page also reaches the operator (cas-7456, GH #1302 D).
+        page_operator: bool,
     },
     /// A task was assigned to a worker
     TaskAssigned {
@@ -1125,6 +1150,7 @@ impl DirectorEvent {
                 next_step,
                 occurrence,
                 actionable_idle_secs,
+                ..
             } => serde_json::json!({
                 "next_step": next_step.next_step_text(),
                 "occurrence": occurrence,

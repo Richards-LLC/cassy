@@ -206,7 +206,10 @@ fn cas_hook_trust_entries(hooks_path: &Path) -> io::Result<Vec<HookTrustEntry>> 
         .get("hooks")
         .and_then(serde_json::Value::as_object)
         .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "hooks.json has no hooks object")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} has no hooks object", hooks_path.display()),
+            )
         })?;
 
     let mut entries = Vec::with_capacity(CAS_CODEX_HOOKS.len());
@@ -223,7 +226,7 @@ fn cas_hook_trust_entries(hooks_path: &Path) -> io::Result<Vec<HookTrustEntry>> 
             }
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("hooks.json is missing CAS {event} hook groups"),
+                format!("{} is missing CAS {event} hook groups", hooks_path.display()),
             ));
         };
         let mut found = None;
@@ -273,7 +276,10 @@ fn cas_hook_trust_entries(hooks_path: &Path) -> io::Result<Vec<HookTrustEntry>> 
             None => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("hooks.json does not contain canonical CAS {event} command"),
+                    format!(
+                        "{} does not contain canonical CAS {event} command",
+                        hooks_path.display()
+                    ),
                 ));
             }
         }
@@ -399,12 +405,35 @@ fn cas_pre_tool_handlers(
         })
 }
 
+/// Parse a hooks file this module read, naming it on failure (cas-10af): a
+/// bare serde error says only "EOF while parsing a value at line 1 column 0".
+fn parse_hooks_json(path: &Path, source: &str) -> io::Result<serde_json::Value> {
+    if source.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "codex_hooks_json_missing: {} is missing or empty; Codex would launch this \
+                 worker without CAS hooks, so restore it before spawning",
+                path.display()
+            ),
+        ));
+    }
+    serde_json::from_str(source).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "codex_hooks_json_invalid: {} does not parse as JSON ({error})",
+                path.display()
+            ),
+        )
+    })
+}
+
 fn ensure_cas_pre_tool_budget(path: &Path) -> io::Result<bool> {
     update_codex_file_locked(
         path,
         |existing| {
-            let mut value: serde_json::Value =
-                serde_json::from_str(existing).map_err(io::Error::other)?;
+            let mut value = parse_hooks_json(path, existing)?;
             let mut changed = false;
             for handler in cas_pre_tool_handlers(&mut value) {
                 // An omitted timeout already inherits Codex's 600-second default.
@@ -420,8 +449,7 @@ fn ensure_cas_pre_tool_budget(path: &Path) -> io::Result<bool> {
             Ok(changed.then(|| serde_json::to_string_pretty(&value).unwrap() + "\n"))
         },
         |read_back| {
-            let mut value: serde_json::Value =
-                serde_json::from_str(read_back).map_err(io::Error::other)?;
+            let mut value = parse_hooks_json(path, read_back)?;
             if cas_pre_tool_handlers(&mut value).any(|handler| {
                 handler
                     .get("timeout")
@@ -432,11 +460,7 @@ fn ensure_cas_pre_tool_budget(path: &Path) -> io::Result<bool> {
             }
             Ok(())
         },
-        |updated| {
-            serde_json::from_str::<serde_json::Value>(updated)
-                .map(|_| ())
-                .map_err(io::Error::other)
-        },
+        |updated| parse_hooks_json(path, updated).map(|_| ()),
     )
 }
 
@@ -1010,7 +1034,12 @@ where
     update_codex_file_locked(config_path, mutate, verify, |updated| {
         toml::from_str::<toml::Value>(updated)
             .map(|_| ())
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: {error}", config_path.display()),
+                )
+            })
     })
 }
 
@@ -1038,10 +1067,13 @@ where
         .ok()
         .unwrap_or_else(|| config_path.to_path_buf());
     let _lock = ConfigLock::acquire(&config_path)?;
+    let named = |error: io::Error| {
+        io::Error::new(error.kind(), format!("{}: {error}", config_path.display()))
+    };
     let existing = match std::fs::read_to_string(&config_path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error),
+        Err(error) => return Err(named(error)),
     };
 
     let changed = if let Some(updated) = mutate(&existing)? {
@@ -1063,7 +1095,7 @@ where
         false
     };
 
-    let read_back = std::fs::read_to_string(&config_path)?;
+    let read_back = std::fs::read_to_string(&config_path).map_err(named)?;
     verify(&read_back)?;
     Ok(changed)
 }
@@ -1534,6 +1566,30 @@ mod tests {
         assert!(!ensure_cas_hooks_trusted_in(&config_path, &hooks_path).unwrap());
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), after_first);
         assert_eq!(std::fs::read_to_string(&hooks_path).unwrap(), hook_source);
+    }
+
+    #[test]
+    fn missing_or_empty_account_hooks_fail_naming_the_file_cas_10af() {
+        // cas-10af: an absent account hooks.json was read as "" and surfaced
+        // only as "EOF while parsing a value at line 1 column 0".
+        let dir = TempDir::new();
+        let config_path = dir.join("config.toml");
+        let hooks_path = dir.join("hooks.json");
+        for present in [false, true] {
+            if present {
+                std::fs::write(&hooks_path, "").unwrap();
+            }
+            let message = ensure_cas_hooks_trusted_in(&config_path, &hooks_path)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                message.starts_with(&format!(
+                    "codex_hooks_json_missing: {} ",
+                    hooks_path.display()
+                )),
+                "{message}"
+            );
+        }
     }
 
     const CURRENT_HOOKS: &str = r#"{"hooks":{

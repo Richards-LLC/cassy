@@ -7566,11 +7566,7 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             .copied()
             .filter(|line| gc_report_is_inventory_item(line))
             .collect::<Vec<_>>();
-        let item_count = if item_lines.is_empty() {
-            detail_lines.len()
-        } else {
-            item_lines.len()
-        };
+        let item_count = item_lines.len();
         summary.push_str(&format!(
             "- {label}: {item_count} items, {} bytes\n",
             section.len()
@@ -7586,12 +7582,7 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
                 gc_report_short_line(context)
             ));
         }
-        let samples = if item_lines.is_empty() {
-            &detail_lines
-        } else {
-            &item_lines
-        };
-        for item in samples.iter().take(GC_REPORT_SAMPLE_ITEMS) {
+        for item in item_lines.iter().take(GC_REPORT_SAMPLE_ITEMS) {
             summary.push_str(&format!("  Sample: {}\n", gc_report_short_line(item)));
         }
     }

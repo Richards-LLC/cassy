@@ -1257,6 +1257,22 @@ mod tests {
     use cas_types::{Agent, EventEntityType, WorkTarget};
     use chrono::{Duration, Utc};
 
+    /// cas-c5ab: a held worker's suspended reminder is listed for the
+    /// director, so its "held" label can appear.
+    #[test]
+    fn director_reminders_include_held_workers_suspended_reminders() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteReminderStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let time = cas_store::ReminderTriggerType::Time;
+        let at = chrono::Utc::now() + chrono::Duration::hours(1);
+        store.create("worker-1", None, "red run done", time, Some(at), None, None, 3600, None).unwrap();
+        store.suspend_pending_for_target("worker-1").unwrap();
+
+        let statuses: Vec<_> = load_reminders(&store).into_iter().map(|reminder| reminder.status).collect();
+        assert_eq!(statuses, vec![cas_store::ReminderStatus::Suspended]);
+    }
+
     #[test]
     fn task_note_activity_counts_as_recent_worker_activity() {
         let temp_dir = tempfile::tempdir().unwrap();

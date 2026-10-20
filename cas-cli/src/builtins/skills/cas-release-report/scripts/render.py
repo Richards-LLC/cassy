@@ -7,9 +7,13 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 from urllib.parse import quote, urlsplit
 
 REFERENCE_DIR = Path(__file__).resolve().parent.parent / 'references'
+# Eight equal dots fit between the area label (x < 150) and a two-digit count
+# (right-aligned at 337): the last dot's edge is 160 + 7*20 + 7 = 307.
+DOTS_PER_ROW = 8
 SECTION_NAMES = ('Change map', 'Release at a glance', 'What you can do now',
                  'Under the hood', 'Fixes ledger', 'Install', 'Evidence and scope')
 
@@ -133,7 +137,60 @@ def simple(source):
     return '\n'.join(result)
 
 
-def groups(source):
+CAPTURE_BYTES = 400_000  # per image, the same cap as an inlined font face
+CAPTURE_PAIRS = 6        # per report: one representative pair per change
+IMAGE_TYPES = ((b'\x89PNG\r\n\x1a\n', 'image/png'), (b'\xff\xd8\xff', 'image/jpeg'), (b'RIFF', 'image/webp'))
+
+
+def warn(message):
+    print('release report: warning: ' + message, file=sys.stderr)
+
+
+class Captures:
+    """Before | After screenshot pairs for Was -> Now cards, inlined as data URIs.
+
+    A pair renders only when both real captures exist, are PNG, JPEG or WebP and
+    fit the budget; otherwise the change renders without captures and a warning
+    names why. Paths are absolute or relative to the project root.
+    """
+
+    def __init__(self, project_root):
+        self.root, self.pairs = Path(project_root), 0
+
+    def image(self, path):
+        file = Path(path) if Path(path).is_absolute() else self.root / path
+        if not file.is_file():
+            raise ValueError('capture not found: ' + path)
+        data = file.read_bytes()
+        if len(data) > CAPTURE_BYTES:
+            raise ValueError(f'capture over {CAPTURE_BYTES // 1000} kB: ' + path)
+        kind = next((name for magic, name in IMAGE_TYPES if data.startswith(magic)), None)
+        if not kind or kind == 'image/webp' and data[8:12] != b'WEBP':
+            raise ValueError('capture is not a PNG, JPEG or WebP image: ' + path)
+        return 'data:' + kind + ';base64,' + base64.b64encode(data).decode()
+
+    def pair(self, title, before, after):
+        if not before and not after:
+            return ''
+        if not (before and after):
+            warn('change "' + title + '" needs both Before: and After: captures; showing none')
+            return ''
+        if self.pairs >= CAPTURE_PAIRS:
+            warn(f'more than {CAPTURE_PAIRS} capture pairs; showing none for "' + title + '"')
+            return ''
+        try:
+            sides = [(label, self.image(path)) for label, path in (('Before', before), ('After', after))]
+        except ValueError as error:
+            warn(str(error) + '; showing no captures for "' + title + '"')
+            return ''
+        self.pairs += 1
+        return '<figure class="captures">' + ''.join(
+            f'<div class="capture capture-{label.lower()}"><img src="{uri}" alt="{label}: {escape(title)}" decoding="async">'
+            f'<figcaption><span class="state">{label}</span></figcaption></div>' for label, uri in sides) + '</figure>'
+
+
+def groups(source, captures=None):
+    captures = captures or Captures('.')
     parts = re.split(r'^### (.+)\n', source, flags=re.M)
     result = [simple(parts[0])] if parts[0].strip() else []
     for k in range(1, len(parts), 2):
@@ -142,11 +199,11 @@ def groups(source):
         if items[0].strip():
             result.append(simple(items[0]))
         for j in range(1, len(items), 2):
-            match = re.fullmatch(r'\s*Was: (.*?)\n\nNow: (.*?)(\n\nSource:.*)?\s*', items[j + 1], re.S)
+            match = re.fullmatch(r'\s*Was: (.*?)\n\nNow: (.*?)(?:\n\nBefore: (\S+))?(?:\n\nAfter: (\S+))?(\n\nSource:.*)?\s*', items[j + 1], re.S)
             if not match:
                 raise ValueError('change needs Was/Now paragraphs: ' + items[j])
-            was, now, trailing = match.groups()
-            result.append('<article class="change"><h4>' + inline(items[j]) + '</h4><div class="pair"><p class="was"><span class="state">Was</span>' + inline(was.strip()) + '</p><p class="now"><span class="state">Now</span>' + inline(now.strip()) + '</p></div></article>')
+            was, now, before, after, trailing = match.groups()
+            result.append('<article class="change"><h4>' + inline(items[j]) + '</h4><div class="pair"><p class="was"><span class="state">Was</span>' + inline(was.strip()) + '</p><p class="now"><span class="state">Now</span>' + inline(now.strip()) + '</p></div>' + captures.pair(items[j].strip(), before, after) + '</article>')
             if trailing:
                 result.append(simple(trailing))
         result.append('</div></section>')
@@ -189,6 +246,7 @@ def token_json(project_root, token_path):
             '@media print{:root{' + light + ';color-scheme:light}}')
 
 
+DARK_SCHEME = re.compile(r'@media\s*\(\s*prefers-color-scheme\s*:\s*dark\s*\)')
 FONT_FILE = re.compile(r'url\("(\./[\w./-]+\.woff2)"\)')
 
 
@@ -230,7 +288,8 @@ def design_md(project_root):
         content = FONT_FILE.sub(font, content)
         if '</' in content or '@import' in content or re.search(r'url\(\s*(?!["\']?data:)', content):
             raise ValueError('DESIGN.md CSS sources may hold only tokens and local font faces: ' + sheet.name)
-        css.append(content)
+        # Print is always the light set: a dark-scheme block applies on screen only.
+        css.append(DARK_SCHEME.sub('@media screen and (prefers-color-scheme: dark)', content))
     # A role named like its variable is already defined; aliasing it would be a cycle.
     aliases = ';'.join('--' + role + ':var(' + name + ')' for role, name in roles if '--' + role != name)
     mark = re.search(r'^brand-mark:\s*(\S+\.svg)\s*$', head, re.M)
@@ -244,7 +303,13 @@ def token_css(project_root, token_path):
     """Return (CSS, brand-mark data URI): explicit --tokens JSON first, then
     the project's DESIGN.md sources, then design-tokens.json, then defaults."""
     if not token_path:
-        found = design_md(project_root)
+        try:
+            found = design_md(project_root)
+        except ValueError as error:
+            # A downstream project's DESIGN.md source the report cannot carry
+            # offline must not stop its release report: say so and fall back.
+            warn(str(error) + '; using design-tokens.json or the bundled defaults')
+            found = None
         if found:
             return found
     return token_json(project_root, token_path), ''
@@ -327,10 +392,10 @@ def render(source, *, project_root=Path('.'), tokens=None, source_href='source.m
         svg.append(f'<text x="0" y="{y+5}" class="svg-label">{escape(name)}</text>')
         for j, item in enumerate(ids):
             mark = f'data-change="{j+1}"><title>{escape(item)}</title>' if by_change else f'data-issue="{item}"><title>Issue #{item}</title>'
-            svg.append(f'<circle cx="{160+(j%7)*22}" cy="{y+(j//7)*20}" r="7" class="{"decisive" if decisive else "dot"}" {mark}</circle>')
+            svg.append(f'<circle cx="{160+(j%DOTS_PER_ROW)*20}" cy="{y+(j//DOTS_PER_ROW)*20}" r="7" class="{"decisive" if decisive else "dot"}" {mark}</circle>')
         svg.append(f'<text x="337" y="{y+5}" text-anchor="end" class="svg-count">{count}</text></g>')
         description.append(name + ' ' + str(count))
-        y += 34 + max(0, (count-1)//7)*20
+        y += 34 + max(0, (count-1)//DOTS_PER_ROW)*20
     if not shown:
         svg.append(f'<text x="0" y="{y+5}" class="svg-label">{"No changes listed" if by_change else "No GitHub issues closed"}</text>')
         y += 34
@@ -348,6 +413,7 @@ def render(source, *, project_root=Path('.'), tokens=None, source_href='source.m
             raise ValueError('glance table needs measure, value and definition')
         label, value, definition = row
         stats.append('<div class="stat"><span class="stat-value">' + inline(value) + '</span><span class="stat-label">' + inline(label) + '</span><p>' + inline(definition) + '</p></div>')
+    captures = Captures(project_root)
     token_style, mark = token_css(Path(project_root), Path(tokens) if tokens else None)
     rendered_verdict = inline(verdict)
     if emphasis:
@@ -364,7 +430,7 @@ def render(source, *, project_root=Path('.'), tokens=None, source_href='source.m
                   MAP_LINK=escape('See every change' if by_change else 'Read the map data'),
                   STATS='\n'.join(stats), METHOD=simple(leading + '\n\n' + method),
                   MAP_DATA=simple(guide) + simple(map_table) + simple(after),
-                  USERS=groups(sections['What you can do now']), DEV=groups(sections['Under the hood']),
+                  USERS=groups(sections['What you can do now'], captures), DEV=groups(sections['Under the hood'], captures),
                   LEDGER=simple(sections['Fixes ledger']), INSTALL=simple(sections['Install']),
                   PROVENANCE=simple(sections['Evidence and scope']),
                   STITCH=''.join(f'<circle cx="{8+j*23}" cy="8" r="5" fill="currentColor"/>' for j in range(6)),

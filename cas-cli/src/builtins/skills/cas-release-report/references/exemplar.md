@@ -32,6 +32,15 @@ publication date/time line, and a verdict paragraph. Then provide these exact
    definitions; name zero and unmeasured values in the counting note instead.
 3. `What you can do now`: `###` themes and `####` change titles; each change has
    `Was: ...`, a blank line, `Now: ...`, and optional `Source: ...` paragraphs.
+   A change with a real before/after capture pair adds `Before: <path>` and
+   `After: <path>` paragraphs between `Now:` and `Source:`. Before is the earlier
+   capture of the same surface (a previous visual-QA or QA baseline, a base
+   build's run or the prior release's shot); After is the delivery's own
+   capture. Paths are absolute or relative to the project root; PNG, JPEG or
+   WebP up to 400 kB each, at most six pairs per report. The pair is inlined as
+   a labelled Before | After figure inside the change's card. A lone side, a
+   missing or oversized file, or a seventh pair renders no figure and prints a
+   warning. Never mock or reconstruct a before.
 4. `Under the hood`: the same grouped Was/Now structure for developers.
 5. `Fixes ledger`: a Markdown table (`Issue | Title | Closed | Area`) whose first
    column holds one linked issue number per row, without duplicates. These are
@@ -77,8 +86,11 @@ Precedence: explicit `--tokens`, the root `DESIGN.md`, root `design-tokens.json`
 A root `DESIGN.md` is used when its frontmatter has `source: [...]` naming at
 least one existing `.css` file and a `maps:` block of `role: "--variable"`
 lines. Each CSS file is inlined whole; a relative `url("./face.woff2")` becomes
-a data URI (400 kB cap). Any other `url(`, `@import` or `</` fails the render, so
-the report stays offline. Each role becomes `--role: var(--variable)`, except a
+a data URI (400 kB cap). A source holding any other `url(`, `@import` or `</`
+cannot stay offline: the renderer prints a warning and falls back to
+`design-tokens.json` or the bundled defaults. Dark-scheme blocks
+(`@media (prefers-color-scheme: dark)`) are narrowed to `screen`, so print is
+always the light set. Each role becomes `--role: var(--variable)`, except a
 role already named like its variable. An optional `brand-mark:` SVG path is
 inlined beside the product name in the hero. The template reads the Petrastella
 roles below plus optional `hero-band`, `glass-panel`, `glass-panel-strong`,
@@ -104,7 +116,7 @@ string array `data-changes` (the plain titles) and Boolean-string
 `data-emphasis`. Every circle has `data-change` and a `<title>` naming the change.
 Largest groups get equal emphasis, including ties. Each dot means one change;
 areas without changes are not drawn. v1 sources draw `g[data-surface]` with
-`data-issues` and `data-issue` circles instead. Rows wrap at seven dots while
+`data-issues` and `data-issue` circles instead. Rows wrap at eight dots while
 preserving equal area. The SVG description and the open `#map-data` table, which
 opens Release at a glance ahead of the stats, repeat all data. The hero note
 states the GitHub issues closed as a secondary figure. Long labels or large maps

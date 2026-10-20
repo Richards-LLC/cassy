@@ -36,17 +36,7 @@ pub(super) fn references_store(input: &HookInput, tool: &str) -> bool {
         let Some(command) = tool_input.get("command").and_then(Value::as_str) else {
             return false;
         };
-        let recursive = recursively_scans_paths(command);
-        return super::pre_tool::shell_statement_words(command)
-            .iter()
-            .flat_map(|words| words.iter())
-            .any(|word| {
-                path_references_store(word, cwd, recursive)
-                    || script_constructs_store_path(word, cwd)
-            })
-            || super::pre_tool::shell_heredoc_bodies(command)
-                .iter()
-                .any(|body| script_constructs_store_path(body, cwd));
+        return shell_references_store(command, cwd, 0);
     }
 
     if ![
@@ -108,25 +98,174 @@ fn collect_strings<'a>(value: &'a Value, paths: &mut Vec<&'a str>) {
     }
 }
 
-fn recursively_scans_paths(command: &str) -> bool {
-    super::pre_tool::shell_invocations(command)
-        .into_iter()
-        .any(|(name, args)| match name.as_str() {
-            "rg" | "find" => true,
-            "grep" | "egrep" | "fgrep" => args.iter().any(|arg| {
-                matches!(arg.as_str(), "--recursive" | "-r" | "-R")
-                    || (arg.starts_with('-')
-                        && !arg.starts_with("--")
-                        && arg[1..].contains(['r', 'R']))
-            }),
-            "cp" => args.iter().any(|arg| {
-                arg == "--recursive"
-                    || (arg.starts_with('-')
-                        && !arg.starts_with("--")
-                        && arg[1..].contains(['r', 'R']))
-            }),
-            _ => false,
+fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bool {
+    if depth > 3 {
+        return false;
+    }
+    let mut cwd = initial_cwd.to_path_buf();
+    for words in super::pre_tool::shell_statement_words(command) {
+        let Some(command_index) = super::pre_tool::unwrapped_command_index(&words) else {
+            continue;
+        };
+        let executable = Path::new(&words[command_index])
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&words[command_index])
+            .to_ascii_lowercase();
+        let args = &words[command_index + 1..];
+
+        // Inspect shell payloads as nested statement lists so a `cd` inside a
+        // `sh -c` or `bash -c` does not leak into the caller's working dir.
+        if matches!(executable.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
+            for payload in shell_command_payloads(args) {
+                if shell_references_store(payload, &cwd, depth + 1) {
+                    return true;
+                }
+            }
+            continue;
+        }
+        if executable == "eval" && shell_references_store(&args.join(" "), &cwd, depth + 1) {
+            return true;
+        }
+
+        if executable == "cd" {
+            if let Some(target) = cd_target(args) {
+                if path_references_store(target, &cwd, false) {
+                    return true;
+                }
+                if let Some(next_cwd) = resolve_path(target, &cwd) {
+                    cwd = next_cwd;
+                }
+            } else if let Some(home) = std::env::var_os("HOME") {
+                cwd = PathBuf::from(home);
+            }
+            continue;
+        }
+
+        let recursive = invocation_recursively_reads_directories(&executable, args);
+        for arg in args {
+            if shell_argument_is_path(&executable, arg, &cwd)
+                && path_references_store(arg, &cwd, recursive)
+            {
+                return true;
+            }
+        }
+        if is_script_interpreter(&executable)
+            && args
+                .iter()
+                .any(|arg| script_constructs_store_path(arg, &cwd))
+        {
+            return true;
+        }
+    }
+
+    super::pre_tool::shell_heredoc_bodies(command)
+        .iter()
+        .any(|body| script_constructs_store_path(body, &cwd))
+}
+
+fn shell_command_payloads(args: &[String]) -> Vec<&str> {
+    let mut payloads = Vec::new();
+    for (index, arg) in args.iter().enumerate() {
+        let is_command_flag = arg == "--command"
+            || arg == "-c"
+            || (arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains('c'));
+        if is_command_flag && let Some(payload) = args.get(index + 1) {
+            payloads.push(payload.as_str());
+        }
+    }
+    payloads
+}
+
+fn cd_target(args: &[String]) -> Option<&str> {
+    args.iter()
+        .find(|arg| !matches!(arg.as_str(), "-L" | "-P" | "--"))
+        .map(String::as_str)
+}
+
+fn invocation_recursively_reads_directories(name: &str, args: &[String]) -> bool {
+    let has_flag = |long: &str, short_flags: &[char]| {
+        args.iter().any(|arg| {
+            arg == long
+                || (arg.starts_with('-')
+                    && !arg.starts_with("--")
+                    && arg[1..].chars().any(|flag| short_flags.contains(&flag)))
         })
+    };
+    match name {
+        "rg" | "find" => true,
+        "grep" | "egrep" | "fgrep" => has_flag("--recursive", &['r', 'R']),
+        "cp" => has_flag("--recursive", &['a', 'r', 'R']) || has_flag("--archive", &[]),
+        "tar" => !args.iter().any(|arg| arg == "--no-recursion"),
+        "zip" => has_flag("--recurse-paths", &['r']),
+        "rsync" => has_flag("--archive", &['a']) || has_flag("--recursive", &['r']),
+        _ => false,
+    }
+}
+
+fn is_script_interpreter(name: &str) -> bool {
+    matches!(name, "python" | "python2" | "python3" | "node" | "nodejs")
+}
+
+fn shell_argument_is_path(command: &str, argument: &str, cwd: &Path) -> bool {
+    if path_operand_is_path_shaped(argument) {
+        return true;
+    }
+    is_file_path_command(command) && store_roots(cwd).iter().any(|root| cwd.starts_with(root))
+}
+
+fn is_file_path_command(command: &str) -> bool {
+    matches!(
+        command,
+        "cat"
+            | "head"
+            | "tail"
+            | "less"
+            | "more"
+            | "cp"
+            | "mv"
+            | "rsync"
+            | "tar"
+            | "zip"
+            | "base64"
+            | "jq"
+            | "dd"
+            | "od"
+            | "xxd"
+            | "strings"
+            | "sha256sum"
+            | "sha1sum"
+            | "md5sum"
+            | "shasum"
+            | "grep"
+            | "egrep"
+            | "fgrep"
+            | "rg"
+            | "find"
+            | "curl"
+            | "wget"
+            | "sed"
+            | "awk"
+            | "source"
+    )
+}
+
+fn path_operand_is_path_shaped(reference: &str) -> bool {
+    let reference = reference.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '`' | ',' | ';'));
+    let reference = reference
+        .split_once('=')
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(_, value)| value)
+        .unwrap_or(reference);
+    let reference = reference.strip_prefix('@').unwrap_or(reference);
+    !reference.is_empty()
+        && (reference.starts_with('/')
+            || reference == "~"
+            || reference.starts_with("~/")
+            || reference.starts_with('$')
+            || reference.contains('/')
+            || reference.contains(['*', '?', '['])
+            || matches!(reference, "." | ".."))
 }
 
 fn path_references_store(reference: &str, cwd: &Path, include_parent: bool) -> bool {
@@ -136,33 +275,123 @@ fn path_references_store(reference: &str, cwd: &Path, include_parent: bool) -> b
         .filter(|(_, value)| !value.is_empty())
         .map(|(_, value)| value)
         .unwrap_or(reference);
+    let reference = reference.strip_prefix('@').unwrap_or(reference);
     if reference.is_empty() {
         return false;
     }
     let roots = store_roots(cwd);
-    let path = if include_parent {
-        path_prefix_before_glob(reference)
-    } else {
-        reference
-    };
-    if let Some(candidate) = resolve_path(path, cwd) {
-        if roots.iter().any(|root| {
+    if let Some(expanded) = expand_path_prefix(reference) {
+        let candidate = lexical_absolute(Path::new(&expanded), cwd);
+        if candidate.to_string_lossy().contains(['*', '?', '[']) {
+            if roots
+                .iter()
+                .any(|root| glob_path_may_reach_root(&candidate, root, include_parent))
+            {
+                return true;
+            }
+        } else if roots.iter().any(|root| {
             candidate.starts_with(root) || (include_parent && root.starts_with(&candidate))
         }) {
             return true;
         }
     }
-    alias_references_store(path, include_parent)
+    alias_references_store(reference, include_parent)
 }
 
-fn path_prefix_before_glob(reference: &str) -> &str {
-    let Some(glob_at) = reference.find(['*', '?', '[']) else {
-        return reference;
+fn glob_path_may_reach_root(pattern: &Path, root: &Path, include_parent: bool) -> bool {
+    let pattern: Vec<String> = pattern
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let root: Vec<String> = root
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let shared = pattern.len().min(root.len());
+    if !pattern[..shared]
+        .iter()
+        .zip(&root[..shared])
+        .all(|(pattern, component)| glob_component_matches(pattern, component))
+    {
+        return false;
+    }
+    pattern.len() >= root.len() || include_parent
+}
+
+fn glob_component_matches(pattern: &str, value: &str) -> bool {
+    fn visit(
+        pattern: &[char],
+        value: &[char],
+        p: usize,
+        v: usize,
+        memo: &mut std::collections::HashMap<(usize, usize), bool>,
+    ) -> bool {
+        if let Some(result) = memo.get(&(p, v)) {
+            return *result;
+        }
+        let result = if p == pattern.len() {
+            v == value.len()
+        } else {
+            match pattern[p] {
+                '*' => {
+                    visit(pattern, value, p + 1, v, memo)
+                        || (v < value.len() && visit(pattern, value, p, v + 1, memo))
+                }
+                '?' => v < value.len() && visit(pattern, value, p + 1, v + 1, memo),
+                '[' => {
+                    let Some(end) = pattern[p + 1..].iter().position(|ch| *ch == ']') else {
+                        return v < value.len()
+                            && pattern[p] == value[v]
+                            && visit(pattern, value, p + 1, v + 1, memo);
+                    };
+                    let end = p + 1 + end;
+                    v < value.len()
+                        && bracket_class_matches(&pattern[p + 1..end], value[v])
+                        && visit(pattern, value, end + 1, v + 1, memo)
+                }
+                ch => {
+                    v < value.len() && ch == value[v] && visit(pattern, value, p + 1, v + 1, memo)
+                }
+            }
+        };
+        memo.insert((p, v), result);
+        result
+    }
+
+    let pattern: Vec<char> = pattern.chars().collect();
+    let value: Vec<char> = value.chars().collect();
+    visit(
+        &pattern,
+        &value,
+        0,
+        0,
+        &mut std::collections::HashMap::new(),
+    )
+}
+
+fn bracket_class_matches(class: &[char], value: char) -> bool {
+    let (negated, class) = match class.first() {
+        Some('!' | '^') => (true, &class[1..]),
+        _ => (false, class),
     };
-    reference[..glob_at]
-        .rfind('/')
-        .map(|slash| &reference[..slash])
-        .unwrap_or(".")
+    let mut matched = false;
+    let mut index = 0;
+    while index < class.len() {
+        if index + 2 < class.len() && class[index + 1] == '-' {
+            matched |= class[index] <= value && value <= class[index + 2];
+            index += 3;
+        } else {
+            matched |= class[index] == value;
+            index += 1;
+        }
+    }
+    matched != negated
 }
 
 fn store_roots(cwd: &Path) -> Vec<PathBuf> {
@@ -299,7 +528,7 @@ fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
     let strings = quoted_strings(script);
     if strings
         .iter()
-        .any(|part| path_references_store(part, cwd, false))
+        .any(|part| path_operand_is_path_shaped(part) && path_references_store(part, cwd, false))
     {
         return true;
     }
@@ -313,6 +542,7 @@ fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
         "process.env.home",
         "process.env[\"home\"]",
         "process.env['home']",
+        "expanduser",
         "$home",
         "${home}",
     ]

@@ -35,7 +35,7 @@ class SowGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             clean = '# Northwind round 1\n\nEvery outcome is live on staging since mid-2026.\n'
             self.assertEqual(run(tmp, 'clean.md', clean, 'hygiene').returncode, 0)
-            for label in ('cas-ddb0', 'cas-9060', 'cas-1a2b3', 'PROJ-123', 'ENG-1234', 'proj-123', 'eng-1234', 'abc-12f4'):
+            for label in ('cas-ddb0', 'cas-9060', 'cas-1a2b3', 'PROJ-123', 'ENG-1234', 'proj-123', 'eng-1234', 'abc-12f4', 'ISO-123', 'ISO-123456'):
                 with self.subTest(label=label):
                     result = run(tmp, 'planted.md', clean + f'The SHA-256 export shipped in {label}.\n', 'hygiene')
                     self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -44,7 +44,8 @@ class SowGateTests(unittest.TestCase):
     def test_hygiene_accepts_client_prose_and_dates(self):
         with tempfile.TemporaryDirectory() as tmp:
             for prose in ('Self-feed and self-feed work since mid-2026.',
-                          'COVID-19', 'SHA-256', 'UTF-8', 'ISO-9001', 'GPT-4', 'Q3-2026', 'FY-2026'):
+                          'COVID-19', 'SHA-256', 'UTF-8', 'ISO-9001', 'ISO-27001', 'GPT-4',
+                          'Q3-2026', 'FY-2026', 'FY-26', 'SOC-2', 'ASC-606'):
                 with self.subTest(prose=prose):
                     result = run(tmp, 'clean.md', f'# Northwind round 1\n\n{prose}\n', 'hygiene')
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

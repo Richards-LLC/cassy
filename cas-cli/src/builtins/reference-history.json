@@ -1384,7 +1384,8 @@
     "skills/cas-sow-delivery-report/scripts/check-sow.py": [
       "05effcb651e318034fed2f2c0b242b0666255593d6c34f216ea331d043d29ab4",
       "17a48d3405299cda332c0685f1ccca4d68ea0738d8cc77f26b52b19f6826cebb",
-      "aba70fb1de09b1b336759eb986d0f09e47a63c5e7c60a43f22419013b477152f"
+      "aba70fb1de09b1b336759eb986d0f09e47a63c5e7c60a43f22419013b477152f",
+      "d855ea0f2dc341740e02521b8cfe9395b30a3796aa4f5cd0e934605ffa1523c7"
     ],
     "skills/cas-sow-delivery-report/scripts/inline-images.py": [
       "8f77a7308e7093166a1a06d276dbd09e7bc63bd4e19c5f2af516f612569e134c"

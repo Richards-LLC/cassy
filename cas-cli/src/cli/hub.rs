@@ -2359,14 +2359,27 @@ fn status(cli: &Cli) -> Result<()> {
             anyhow::bail!("cas hub runtime record unavailable: {detail}");
         }
     };
-    let state = hub_display_state(&paths, &record);
+    let record_state = hub_display_state(&paths, &record);
+    // A replacement can own the machine lock before publishing its record.
+    // Keep the dead record as history, but report the live holder's identity
+    // and phase, just as `hub service status` does (cas-ebbb).
+    let holder = if record_state == HubDisplayState::Exited {
+        paths.lock_holders().into_iter().next()
+    } else {
+        None
+    };
+    let state = holder.as_ref().map(lock_holder_display_state).unwrap_or(record_state);
+    let pid = holder.as_ref().map(|holder| holder.pid).unwrap_or(record.pid);
     let live = state == HubDisplayState::Running;
     let service_warning = super::hub_service::inactive_detached_warning(&paths, Some(&record))?;
     let transport = hub_transport_report(&paths, Some(&record));
     // cas-0140: a failing audit writer refuses every audited request and
     // used to be visible only as a log that fell silent.
     let audit = crate::hub::audit_writer_report(paths.root(), chrono::Utc::now());
-    let open_files = crate::hub::open_files::OpenFilesReport::for_process(record.pid, record.nofile_limit);
+    let open_files = crate::hub::open_files::OpenFilesReport::for_process(
+        pid,
+        if holder.is_some() { None } else { record.nofile_limit },
+    );
     if cli.json {
         let runtime_receipt = runtime_receipt(
             &paths, Some(&record), Some(state), &transport, probe_window_started_at,
@@ -2375,8 +2388,10 @@ fn status(cli: &Cli) -> Result<()> {
             "{}",
             serde_json::json!({
                 "running": live,
-                "state": hub_record_state_json(&record, state),
+                "state": holder.as_ref().map(lock_holder_state_json)
+                    .unwrap_or_else(|| hub_record_state_json(&record, state)),
                 "record": record,
+                "lock_holder": holder.as_ref().map(lock_holder_json),
                 "binary": env!("CARGO_PKG_VERSION"),
                 "version_warning": version_warning(state, &record.version, env!("CARGO_PKG_VERSION")),
                 "tailscale_serve": transport,
@@ -2388,10 +2403,15 @@ fn status(cli: &Cli) -> Result<()> {
             })
         );
     } else {
-        println!(
-            "{}",
-            render_status(&record, state, env!("CARGO_PKG_VERSION"))
-        );
+        if holder.is_some() {
+            println!("Cassy hub: {}", hub_state_label(state, pid));
+            println!("  remedy: {}", hub_state_remedy(state, pid));
+        } else {
+            println!(
+                "{}",
+                render_status(&record, state, env!("CARGO_PKG_VERSION"))
+            );
+        }
         if let Some(warning) = service_warning {
             println!("ERROR: {warning}");
         }

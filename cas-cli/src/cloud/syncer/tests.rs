@@ -2032,13 +2032,18 @@ async fn team_pull_delivery_transaction_rejects_even_newer_lifecycle_row() {
     local.updated_at = chrono::Utc::now() - chrono::Duration::minutes(2);
     local.pending_worktree_merge = true;
     local.deliverables.parked_branch = Some("factory/replay".into());
-    let raw = team_task_fixture(
+    let mut raw = team_task_fixture(
         &local.id,
         TaskStatus::InProgress,
         project,
         project,
         local.updated_at + chrono::Duration::minutes(1),
     );
+    // A valid remote action reaches the independent live-delivery veto.
+    raw["notes"] = serde_json::json!(format!(
+        "[{}] Decision: changes requested by supervisor. Correct delivery",
+        (local.updated_at + chrono::Duration::minutes(1)).format("%Y-%m-%d %H:%M"),
+    ));
     let (_temp, result, store, queue) = pull_team_fixtures_with_delivery(
         project,
         vec![raw],

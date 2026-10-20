@@ -605,6 +605,9 @@ impl CloudSyncer {
             match item.payload.as_deref() {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
                     Ok(mut v) => {
+                        if entity_type == "tasks" {
+                            super::strip_task_note_nuls(&mut v);
+                        }
                         if let Some(kind) = match entity_type {
                             "entries" => Some(EntityType::Entry),
                             "rules" => Some(EntityType::Rule),

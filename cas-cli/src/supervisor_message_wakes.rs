@@ -671,7 +671,12 @@ mod tests {
             let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
                 .with_max_level(tracing::Level::WARN)
                 .with_writer(move || Capture(sink.clone())).finish();
-            let selected = tracing::subscriber::with_default(subscriber, || select(&cas));
+            let selected = tracing::subscriber::with_default(subscriber, || {
+                let selected = select(&cas);
+                select(&cas);
+                select(&cas);
+                selected
+            });
             for id in [ordinary, lifecycle, blocker, merge] {
                 assert!(selected.rows.iter().any(|row| row.id == id),
                     "{failure}: batching failure must not lose selected row #{id}");
@@ -681,6 +686,40 @@ mod tests {
             // pin: this incident stage identifies the optional batching failure.
             assert!(log.contains("WARN") && log.contains("supervisor_message_batching_failed"),
                 "{failure}: unavailable batching must be visible: {log}");
+            assert_eq!(log.matches("supervisor_message_batching_failed").count(), 1,
+                "{failure}: a persistent error must not log on every queue pass: {log}");
+        }
+    }
+    #[test]
+    fn waiting_leaders_skip_bad_timestamps_without_reloading_rows_cas_626af() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        for corrupt in ["deadline", "unused-created"] {
+            let (_root, cas, peer) = setup();
+            let leader = enqueue(&cas, &peer, "Earlier report");
+            let bad = enqueue(&cas, &peer, "Malformed parked row");
+            let fresh = enqueue(&cas, &peer, "New report");
+            let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+            let row = queue.queued_prompt(fresh).unwrap().unwrap();
+            let now = row.created_at;
+            let deadline = now + chrono::Duration::seconds(5);
+            queue.park_for_busy_recipient(leader, Some(DEBOUNCE_DETAIL), deadline).unwrap();
+            queue.park_for_busy_recipient(bad, Some(DEBOUNCE_DETAIL), now + chrono::Duration::seconds(8)).unwrap();
+            let conn = Connection::open(cas.join("cas.db")).unwrap();
+            if corrupt == "deadline" {
+                conn.execute("UPDATE prompt_queue SET next_attempt_at='zz-invalid' WHERE id=?1", [bad]).unwrap();
+            } else {
+                // Deadline inheritance does not need this field at all. A full
+                // queued_prompt(id) reload would decode it and fail the pass.
+                conn.execute("UPDATE prompt_queue SET created_at='invalid' WHERE id=?1", [bad]).unwrap();
+            }
+            let mut rows = vec![row];
+            let mut facts = HashMap::from([(fresh, RowFacts::default())]);
+            schedule(&cas, "wake-session", "wake-sup", &[peer], &mut rows, &mut facts, now)
+                .expect("one malformed parked timestamp must not disable batching");
+            assert!(rows.is_empty(), "the new report should still debounce");
+            let actual: String = conn.query_row("SELECT next_attempt_at FROM prompt_queue WHERE id=?1", [fresh], |row| row.get(0)).unwrap();
+            assert_eq!(DateTime::parse_from_rfc3339(&actual).unwrap().with_timezone(&Utc), deadline,
+                "{corrupt}: the healthy leader's earlier deadline is retained");
         }
     }
     #[test]

@@ -431,15 +431,21 @@ async fn cas_3f90_inline_peer_retains_the_shared_inbox_label() {
 #[tokio::test(flavor = "current_thread")]
 async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {
     if !fixture_child("cas_bc4d_directed_batches_preserve_budget_and_legacy_guards") { return; }
-    for guard in ["budget", "held-leader", "held-passenger", "memory-leader", "memory-passenger"] {
+    for guard in ["budget", "codex-budget", "held-leader", "held-passenger", "memory-leader", "memory-passenger"] {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-        let (root, mut daemon) = fixture().await;
+        let cli = if guard == "codex-budget" { cas_mux::SupervisorCli::Codex } else { cas_mux::SupervisorCli::Claude };
+        let budget = guard.ends_with("budget");
+        let (root, mut daemon) = fixture_for(cli).await;
         let cas = daemon.app.cas_dir().to_path_buf();
+        if cli == cas_mux::SupervisorCli::Codex {
+            daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(cas.clone(), daemon.app.project_scope());
+            daemon.queue_jobs.store(&cas).unwrap();
+        }
         let peer = cas_types::Agent::new_with_role(
             "guard-peer".into(), "peer".into(), cas_types::AgentRole::Supervisor,
         );
         crate::store::open_agent_store(&cas).unwrap().register(&peer).unwrap();
-        let bodies = if guard == "budget" {
+        let bodies = if budget {
             vec![format!("Budget report A {}", "a".repeat(2600)), format!("Budget report B {}", "b".repeat(2600))]
         } else { vec!["First field report".into(), "Second field report".into()] };
         assert!(bodies.iter().all(|body| cas_store::fits_hook_surface(body)));
@@ -447,7 +453,7 @@ async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {
             cas_store::QueueOrigin::RegisteredAgent { agent_id: peer.id.clone() })).collect();
         let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
         let held = if guard.ends_with("leader") { 0 } else { 1 };
-        if guard != "budget" {
+        if !budget {
             let row = queue.queued_prompt(ids[held]).unwrap().unwrap();
             let legacy = super::delivery::claude_teams_inbox_text(
                 &format!("{}\n{}", crate::mcp::tools::service::agent_search_system::message::first_message_provenance(&row), row.prompt),
@@ -469,7 +475,24 @@ async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {
         daemon.process_prompt_queue().await.unwrap();
         settle_injected_writes(&mut daemon).await;
         let inbox = teams_messages(&daemon);
-        if guard == "budget" {
+        if guard == "codex-budget" {
+            let typed = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    daemon.process_prompt_queue().await.unwrap();
+                    settle_injected_writes(&mut daemon).await;
+                    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+                    if typed.ends_with('\r') && ids.iter().all(|id|
+                        queue.message_delivery_report(*id).unwrap().unwrap().stage == cas_store::DeliveryStage::Delivered) { break typed; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("oversized Codex directed batch submitted");
+            assert_eq!(typed.matches('\r').count(), 1, "one Codex turn");
+            for (id, body) in ids.iter().zip(&bodies) {
+                assert_eq!(typed.matches(body).count(), 1, "full body without truncation or duplicate passenger");
+                assert!(typed.contains(&format!("[cas #{id} ")));
+            }
+            assert!(inbox.is_empty(), "Codex must not receive a duplicate Teams copy");
+        } else if budget {
             assert_eq!(inbox.len(), 1, "oversized directed burst must use the full-body Teams path");
             let text = inbox[0]["text"].as_str().unwrap();
             for body in &bodies { assert!(text.contains(body), "no truncation or lost passenger"); }

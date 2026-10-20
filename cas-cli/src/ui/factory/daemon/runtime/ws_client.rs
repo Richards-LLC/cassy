@@ -314,7 +314,7 @@ impl FactoryDaemon {
 
     /// Handle a single ClientMessage from a WebSocket client.
     /// Reuses handle_gui_message logic but routes responses to the WS client.
-    async fn handle_ws_message(&mut self, client_id: usize, msg: ClientMessage) {
+    pub(super) async fn handle_ws_message(&mut self, client_id: usize, msg: ClientMessage) {
         // GH #1165: operator commands (replies, history, spawn, inject) may
         // touch the store under the pass wait budget; terminal IO may not.
         let _operator_command =
@@ -349,6 +349,14 @@ impl FactoryDaemon {
         }
 
         match msg {
+            ClientMessage::BindingIntakePause { request: super::violet_intake::PauseRequest { nonce, .. } }
+            | ClientMessage::BindingIntakeStatus { nonce } => {
+                let reply = super::violet_intake::IntakeReply::refused(nonce, "binding intake control requires the local Unix GUI socket; WS/relay refused");
+                if let Some(frame) = ws_encode(&DaemonMessage::BindingIntake { reply })
+                    && let Some(client) = self.ws_clients.get_mut(&client_id) {
+                    let _ = client.sink.feed(frame).now_or_never();
+                }
+            }
             ClientMessage::OperatorReplyPersisted { notification_id, device_id } => {
                 let result = self.persist_operator_reply_receipt(notification_id, &device_id);
                 if let Err(error) = result {

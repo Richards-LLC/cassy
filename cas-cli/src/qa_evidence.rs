@@ -2122,7 +2122,8 @@ pub fn delivery_test_diff(repo: &Path, from: &str, to: &str, paths: &[String]) -
 
 /// The commit range a delivery contributes: `merge-base(target, head)..head`
 /// before it merges; after it merges, the first merge on the ancestry path
-/// from `head` to `target` (`M^1..M`). A merge on the target's first-parent
+/// from `head` to `target` that brings `head` in through a merged parent
+/// (`M^1..M`), skipping the lane's own target syncs. A merge on the target's first-parent
 /// chain is the integration receipt itself and contributes `head^1..head`;
 /// later target merges cannot replace its diff.
 /// `None` when neither can be computed
@@ -2153,11 +2154,29 @@ pub fn delivery_range(repo: &Path, head: &str, target: &str) -> Option<(String, 
                 &format!("{head}..{target}"),
             ],
         )?;
-        let merge = merges.lines().next()?.trim().to_string();
+        // cas-cca7: the integration merge brings `head` in through a merged
+        // (non-first) parent. A merge with `head` on its first-parent side is
+        // the lane syncing its target; its first-parent diff is incoming
+        // target content, so measuring it charges other tasks' files here.
+        let merge = merges
+            .lines()
+            .map(str::trim)
+            .find(|merge| merge_brings_in(repo, merge, head))
+            .or_else(|| merges.lines().next().map(str::trim))?
+            .to_string();
         Some((format!("{merge}^1"), merge))
     } else {
         Some((git(repo, &["merge-base", target, head])?, head.to_string()))
     }
+}
+
+/// Whether `head` reaches `merge` through one of its non-first parents.
+fn merge_brings_in(repo: &Path, merge: &str, head: &str) -> bool {
+    git(repo, &["rev-list", "--parents", "-n", "1", merge]).is_some_and(|line| {
+        line.split_whitespace()
+            .skip(2)
+            .any(|parent| git(repo, &["merge-base", "--is-ancestor", head, parent]).is_some())
+    })
 }
 
 /// Reviewable paths changed over a range; deletions and whitespace-only

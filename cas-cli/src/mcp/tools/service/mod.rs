@@ -345,7 +345,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Task lifecycle and dependencies. Workers run start, then close; if close returns verification-required guidance, follow it. Aliases: get means show; for dep_add/dep_remove, blocked_by means to_id; for close, summary means notes. notes with only id reads a task's notes; add notes= to append (optional note_type). create with an explicit project files a cross-project proposal; pending proposals live in a cloud inbox (proposal_*), never as task rows. cancel is the supervisor's reason-required terminal path for work ended without delivery (optional superseded_by). request_changes is the supervisor's exit from AwaitingMerge when review fails: it reopens the task and keeps its assignee."
+        description = "Task lifecycle/dependencies. Workers start then close; follow verification-required guidance. Aliases: get=show; dep_add/dep_remove blocked_by=to_id; close summary=notes. notes id reads; notes= appends (optional note_type). create project= files a cross-project proposal in the Cloud proposal_* inbox, never a task row. Supervisor cancel requires reason (optional superseded_by) for ended work without delivery. request_changes reopens AwaitingMerge after failed review, retaining assignee."
     )]
     pub async fn task(
         &self,
@@ -573,7 +573,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Agent identity, messaging and reminders; only available in factory mode. Actions: whoami, heartbeat, register, unregister, session_start, session_end, message, interrupt (message with urgent=true), inbox_poll (alias inbox), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (this repo's supervisors). Supervisor fleet, worktree, server, database, loop and queue control moved to the `factory` tool; those actions still work here for one release with a deprecation note. Slack-thread authority is available through `factory`. Per-action rules are on the parameters they govern."
+        description = "Factory-mode identity, messaging and reminders. Actions: register, unregister, whoami, heartbeat, session_start, session_end, inbox_poll (alias inbox), message, interrupt (message urgent=true), message_ack, message_status, remind, remind_list, remind_cancel, my_context, peers (repo supervisors). Fleet, worktree, server, database, loop/queue and Slack-thread authority use factory; legacy control calls forward here for one release with a deprecation note. Per-action rules are on parameters."
     )]
     pub async fn coordination(
         &self,
@@ -802,7 +802,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Published artifacts. Supply a local path; the runtime resolves it, hashes and measures the bytes, records the artifact and uploads it when Cloud storage is live. Never compute a digest or handle an upload URL yourself. publish returns a citable artifact_id even when Cloud storage is unreachable. post shares a committed artifact to Slack via Violet, SHA-256-checked."
+        description = "Published artifacts. Supply a local path; the runtime resolves it, hashes and measures the bytes, records the artifact and uploads it when Cloud storage is live. Never compute a digest or handle an upload URL yourself. publish returns a citable artifact_id even when Cloud storage is unreachable. post shares a committed artifact to Slack via Violet, SHA-256-checked. publish with notes and note_type attaches a portable proof receipt; fetch with task_id and id downloads and verifies its bytes on any machine."
     )]
     pub async fn artifact(
         &self,
@@ -812,12 +812,13 @@ impl CasService {
         panic_catch::dispatch_with_catch("artifact", async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
-            let is_mutating = action == "publish" || action == "post";
+            let is_mutating = matches!(action.as_str(), "publish" | "post" | "fetch");
 
             let result = match action.as_str() {
                 "publish" => this.inner.artifact_publish(Parameters(req)).await,
                 "show" => this.inner.artifact_show(Parameters(req)).await,
                 "list" => this.inner.artifact_list(Parameters(req)).await,
+                "fetch" => this.inner.artifact_fetch(Parameters(req)).await,
                 #[cfg(feature = "mcp-proxy")]
                 "post" => this.artifact_post(req).await,
                 #[cfg(not(feature = "mcp-proxy"))]
@@ -827,7 +828,7 @@ impl CasService {
                 )),
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    format!("Unknown artifact action: {action}. Valid: publish, show, list, post"),
+                    format!("Unknown artifact action: {action}. Valid: publish, show, list, fetch, post"),
                 )),
             };
 

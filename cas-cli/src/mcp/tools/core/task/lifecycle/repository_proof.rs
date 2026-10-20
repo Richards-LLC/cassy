@@ -339,6 +339,38 @@ fn commit_is_reachable_from(worktree_root: &Path, commit: &str, head: &str) -> b
         .is_ok()
 }
 
+/// Recover a parked review only from its immutable delivery, never incidental
+/// supervisor HEAD. A moved worker branch is usable only through the declared
+/// integration branch once that branch actually contains the delivery.
+pub(crate) fn capture_parked_delivery_proof(
+    repository_root: &Path,
+    task: &cas_types::Task,
+    target_branch: Option<&str>,
+) -> Result<RepositoryProofBoundary, String> {
+    let anchor = task
+        .deliverables
+        .factory_branch_anchor
+        .as_deref()
+        .filter(|anchor| !anchor.is_empty() && !anchor.starts_with('-'))
+        .ok_or("parked verification requires an immutable delivery anchor")?;
+    let anchor = rev_parse(repository_root, anchor)?;
+    if let Some(branch) = task.deliverables.parked_branch.as_deref()
+        && let Ok(proof) =
+            capture_repository_proof_at_target(repository_root, branch, vec![anchor.clone()])
+        && proof.head_commit == anchor
+    {
+        return Ok(proof);
+    }
+    if let Some(branch) = target_branch {
+        let proof =
+            capture_repository_proof_at_target(repository_root, branch, vec![anchor.clone()])?;
+        if commit_is_reachable_from(repository_root, &anchor, &proof.head_commit) {
+            return Ok(proof);
+        }
+    }
+    Err("parked delivery tip no longer matches its recorded anchor or declared target; name a fresh dispatch after reviewing the current delivery".into())
+}
+
 /// Ref namespaces that hold a parked delivery after its implementer moves on:
 /// the worker's published factory branch, and the local `parked/<task>` branch
 /// a reused lane keeps when it starts the next task (see `lifecycle.rs`).

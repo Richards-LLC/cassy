@@ -309,20 +309,20 @@ pub(crate) struct CurrentTurn<'a> {
 /// excluded (cas-9568). A row handed off after the turn began reached a busy
 /// recipient mid-turn and is surfaced now, within one tool call, unless its
 /// body is the turn's own prompt. Without a known turn only unmarked rows are
-/// eligible. Rendered bodies spend `budget` (cas-1f0c).
+/// eligible. Rendered bodies spend `budget` (cas-1f0c). Keep the completion
+/// result so an overflow or failed drain is retried at the next boundary.
 pub(crate) fn surface_factory_inbox_after_tool_result(
     cas_root: Option<&Path>,
     input: &HookInput,
     turn: Option<CurrentTurn<'_>>,
     budget: &mut usize,
-) -> Option<String> {
+) -> Option<SurfacingOutcome> {
     surface_factory_inbox_with_transport_delivery(
         cas_root,
         input,
         Surfacing::ToolBoundary(turn),
         budget,
     )
-    .and_then(|outcome| outcome.text)
 }
 
 /// cas-1f0c: what one hook's additional context may hold in total. Claude
@@ -671,7 +671,7 @@ fn surface_factory_inbox_with_transport_delivery(
             .filter(|id| wake_ids.contains(id))
             .collect();
         block_notes.extend(withdrawn_note(&withdrawn));
-        block_notes.extend(over_budget_note(&over_budget));
+        block_notes.extend(over_budget_note(&over_budget, &*queue));
         // cas-1f0c: a named row whose full body was re-sent as a Teams copy
         // is not rendered here (the copy carries it).
         let sent_in_full: Vec<i64> = wake_ids
@@ -806,7 +806,10 @@ fn sent_in_full_note(ids: &[i64]) -> Option<String> {
 }
 
 /// cas-1f0c: rows left unread because their bodies did not fit this block.
-fn over_budget_note(rows: &[(i64, usize)]) -> Option<String> {
+fn over_budget_note(
+    rows: &[(i64, usize)],
+    queue: &dyn cas_store::PromptQueueStore,
+) -> Option<String> {
     if rows.is_empty() {
         return None;
     }
@@ -831,7 +834,40 @@ fn over_budget_note(rows: &[(i64, usize)]) -> Option<String> {
             ids(&no_room)
         ));
     }
-    Some(notes.join("\n"))
+    let mut note = notes.join("\n");
+    // Keep the id/summary list inside the hook's existing notes allowance.
+    let labels: Vec<_> = rows.iter().map(|(id, _)| format!("#{id} ")).collect();
+    let fixed = labels.iter().map(|s| s.chars().count()).sum::<usize>()
+        + rows.len().saturating_sub(1) * 2
+        + "\nPending: ".len();
+    let summary_limit =
+        HOOK_MAIL_NOTES_RESERVE_CHARS.saturating_sub(note.chars().count() + fixed) / rows.len();
+    let named: Vec<_> = rows
+        .iter()
+        .zip(labels)
+        .map(|((id, _), label)| {
+            let summary = match queue.queued_prompt(*id) {
+                Ok(row) => row
+                    .and_then(|row| row.summary)
+                    .unwrap_or_else(|| "no summary".into()),
+                Err(error) => {
+                    tracing::warn!(prompt_id = id, %error, "overflow summary unavailable");
+                    "summary unavailable".into()
+                }
+            };
+            let summary = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+            format!(
+                "{label}{}",
+                summary
+                    .chars()
+                    .take(summary_limit.min(80))
+                    .collect::<String>()
+            )
+        })
+        .collect();
+    note.push_str("\nPending: ");
+    note.push_str(&named.join("; "));
+    Some(note)
 }
 
 fn id_list(ids: &[i64]) -> String {
@@ -1266,9 +1302,11 @@ mod tests {
         input.agent_role = Some("worker".into());
         let at_turn = surface_factory_inbox(Some(temp.path()), &input);
         let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
-        let at_tool = surface_factory_inbox_after_tool_result(Some(temp.path()), &input, None, &mut budget);
+        let at_tool = surface_factory_inbox_after_tool_result(Some(temp.path()), &input, None, &mut budget)
+            .and_then(|outcome| outcome.text);
         let in_turn = surface_factory_inbox_after_tool_result(Some(temp.path()), &input,
-            Some(CurrentTurn { started_at: Utc::now(), prompt: "continue" }), &mut budget);
+            Some(CurrentTurn { started_at: Utc::now(), prompt: "continue" }), &mut budget)
+            .and_then(|outcome| outcome.text);
         assert!(at_turn.is_none() && at_tool.is_none() && in_turn.is_none(),
             "automatic hook surfacing must leave premise-sensitive nudges to the daemon");
         let queued = store.queued_prompt(id).unwrap().unwrap();

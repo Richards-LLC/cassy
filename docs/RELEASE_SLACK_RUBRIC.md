@@ -200,6 +200,9 @@ does not type; table or column names; and the words `watermark`, `metadata`,
 `purge-foreign`, `cloud identity`, `registration`, `registrations`, `harness`,
 `agent`, `factory`, `worker`, `supervisor`, `epic`, and `lane`. Apply a
 read-aloud test: if a bullet needs the codebase to make sense, rewrite it.
+Attach before/after screenshots to the User reply under the
+[release-notes rubric](release-notes/RUBRIC.md)'s before/after rule, with
+`--reply-file` after that reply.
 
 ### Formatting (Slack mrkdwn, glance test)
 

@@ -1,3 +1,4 @@
+use super::audit;
 use crate::mcp::tools::core::imports::*;
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::worktree::GitOperations;
@@ -49,6 +50,7 @@ impl TaskLifecycleGateError {
 
 pub(crate) mod close_ops;
 mod epic_lane;
+mod epic_overlap;
 pub(crate) mod merge_close;
 #[cfg(test)]
 mod gate_error_tests;
@@ -712,11 +714,14 @@ struct OpenTaskOverlap {
 /// A child created with `epic=X` naturally repeats X's identifiers, so X is
 /// never a duplicate candidate for its own child. X's other children are still
 /// compared, but a match among them only warns.
+/// Epic creates exclude epic candidates here: the project-wide epic matcher
+/// already owns those, while feature/task/bug candidates still need this gate.
 fn open_task_similarity(
     task_store: &dyn cas_store::TaskStore,
     title: &str,
     description: &str,
     epic_id: Option<&str>,
+    exclude_epics: bool,
 ) -> Result<OpenTaskOverlap, String> {
     let siblings: std::collections::HashSet<String> = match epic_id {
         Some(epic) => task_store
@@ -732,6 +737,7 @@ fn open_task_similarity(
     for task in task_store.list(None).map_err(|error| error.to_string())? {
         if matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled)
             || epic_id == Some(task.id.as_str())
+            || (exclude_epics && task.task_type == TaskType::Epic)
         {
             continue;
         }
@@ -1019,6 +1025,19 @@ impl CasCore {
         // decomposing the same epic. Refuse the write until the caller makes a
         // conscious override; no task row or dependency is created on this path.
         if !confirm_warning {
+            let mut blocking_warnings = Vec::new();
+            if task_type == TaskType::Epic {
+                let warning = epic_overlap::warning(
+                    self, task_store.as_ref(), &req.title,
+                    req.description.as_deref().unwrap_or_default(),
+                ).await.map_err(|message| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(message), data: None,
+                })?;
+                if let Some(message) = warning {
+                    blocking_warnings.push(message);
+                }
+            }
             if let (Some(epic), Some(creator)) = (epic_id.as_deref(), created_by.as_deref()) {
                 if let Some((other_creator, planned_at)) = recent_other_epic_planner(
                     task_store.as_ref(),
@@ -1042,11 +1061,14 @@ impl CasCore {
                 }
             }
 
+            // Epic admission owns epic-to-epic comparisons. Keep checking
+            // features, tasks and bugs for every create, including epics.
             let overlap = open_task_similarity(
                 task_store.as_ref(),
                 &req.title,
                 req.description.as_deref().unwrap_or_default(),
                 epic_id.as_deref(),
+                task_type == TaskType::Epic,
             )
             .map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
@@ -1066,13 +1088,16 @@ impl CasCore {
             if let Some(existing) = &overlap.blocking {
                 let (existing_id, existing_title, score, _) = existing;
                 let (identifier_note, overlap_subject) = overlap_description(existing);
+                blocking_warnings.push(format!(
+                    "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this {overlap_subject} \
+                     at {:.0}%{identifier_note}. Review or reuse it; if this is intentional, retry with confirm_warning=true.",
+                    score * 100.0,
+                ));
+            }
+            if !blocking_warnings.is_empty() {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
-                        "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this {overlap_subject} \
-                         at {:.0}%{identifier_note}. Review or reuse it; if this is intentional, retry with confirm_warning=true.",
-                        score * 100.0,
-                    )),
+                    message: Cow::from(blocking_warnings.join("\n\n")),
                     data: None,
                 });
             }
@@ -1818,20 +1843,9 @@ impl CasCore {
             }
 
             let now = chrono::Utc::now();
-            let timestamp = now.format("%Y-%m-%d %H:%M");
-            let parked_branch = task
-                .deliverables
-                .parked_branch
-                .as_deref()
+            let parked_branch = task.deliverables.parked_branch.as_deref()
                 .unwrap_or("the parked factory branch");
-            let audit = format!(
-                "[{timestamp}] Decision: resume from awaiting_merge for merge recovery. \
-                 {parked_branch} was flagged with a merge conflict or its conflict \
-                 preflight could not be evaluated, so the task is back in_progress for \
-                 the assigned worker to inspect from inside the worker worktree. Rebase \
-                 {parked_branch} onto the current integration target tip, push the \
-                 rebased factory branch, and re-park it with merge_request=true."
-            );
+            let audit = audit::merge_recovery_note(now, parked_branch);
             task.notes = if task.notes.is_empty() {
                 audit
             } else {
@@ -2256,12 +2270,13 @@ impl CasCore {
             }
         }
 
+        let mut start_lease_epoch = None;
         let claim_info =
             match agent_store.try_claim(&req.id, &agent_id, lease_duration, Some("Task started")) {
-                Ok(ClaimResult::Success(lease)) => Some(format!(
-                    " (claimed until {})",
-                    lease.expires_at.format("%H:%M")
-                )),
+                Ok(ClaimResult::Success(lease)) => {
+                    start_lease_epoch = Some(lease.epoch);
+                    Some(format!(" (claimed until {})", lease.expires_at.format("%H:%M")))
+                }
                 Ok(ClaimResult::AlreadyClaimed {
                     held_by,
                     expires_at,
@@ -2298,79 +2313,15 @@ impl CasCore {
                         ));
                     }
                 }
-                Ok(_) => None, // TaskNotFound, NotClaimable, Unauthorized - log but continue
-                Err(e) => {
-                    // Log but continue - claim is optional enhancement
-                    eprintln!("Warning: Failed to claim task: {e}");
-                    None
-                }
+                Ok(refused) => return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("Cannot start task: local lease refused: {refused:?}"),
+                )),
+                Err(error) => return Err(Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to claim task before start: {error}"),
+                )),
             };
-        // cas-0078: this start won the local lease, so a cloud claim another
-        // agent of this database holds now moves here.
-        if claim_info.is_some()
-            && let (Some(claims), Some(holder)) = (peer_claims.clone(), cloud_local_holder.take())
-        {
-            let (id, agent, name) = (req.id.clone(), agent_id.clone(), agent_name.clone());
-            let kind = task_claim_kind;
-            let _ = peer_budget
-                .run(move || claims.take_from_local(&id, kind, &holder, &agent, &name, cloud_duration))
-                .await;
-        }
-        // cas-5f28: a standard agent's start also focuses the parent epic
-        // (claimed locally below). Mirror that focus, and say when a peer on
-        // another machine already works the same epic. A claim another agent
-        // of this database holds stays with it; renewal moves it to whoever
-        // holds the epic's local lease (cas-0078).
-        if !is_worker && let Some(claims) = peer_claims.as_ref() {
-            let parents: Vec<String> = task_store
-                .get_dependencies(&req.id)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|dep| dep.dep_type == crate::types::DependencyType::ParentChild)
-                .filter_map(|dep| task_store.get(&dep.to_id).ok())
-                .filter(|parent| parent.task_type == crate::types::TaskType::Epic)
-                .map(|parent| parent.id)
-                .collect();
-            if !parents.is_empty() {
-                use crate::cloud::peer_claims::{Acquire, ClaimKind};
-                let (claims, agent, name, local) = (
-                    claims.clone(),
-                    agent_id.clone(),
-                    agent_name.clone(),
-                    std::sync::Arc::clone(&local_agents),
-                );
-                let answers = peer_budget
-                    .run(move || {
-                        parents
-                            .into_iter()
-                            .map(|parent| {
-                                let answer = claims.acquire(
-                                    &parent,
-                                    ClaimKind::Epic,
-                                    &agent,
-                                    &name,
-                                    cloud_duration,
-                                    &|holder| local.contains(holder),
-                                );
-                                (parent, answer)
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .await
-                    .unwrap_or_default();
-                for (parent, answer) in answers {
-                    if let Acquire::PeerHolds(hold) = answer {
-                        peer_notes.push_str(&shared_epic_note(&parent, &hold));
-                    }
-                }
-            }
-        }
-        let claim_info = if peer_notes.is_empty() {
-            claim_info
-        } else {
-            Some(format!("{}{peer_notes}", claim_info.unwrap_or_default()))
-        };
-
         // Record working epic if this task belongs to one
         // This is used by the exit blocker to ensure all epic subtasks are completed
         // Also look up the parent epic's worktree and sibling notes
@@ -2571,12 +2522,27 @@ impl CasCore {
         // cas-ec74: `updated_at` is store-owned. Adopt the stamp the store
         // actually persisted so the lifecycle occurrence below is derived from
         // the same clock read as the stored row, not from a second one.
-        task.updated_at = task_store.update(&task).map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to update: {e}")),
-            data: None,
-        })?;
-
+        // cas-d5f4: there is no await between acquiring the local lease and
+        // persisting InProgress. A response deadline can cancel before this
+        // local transition or after it, never between its two writes.
+        task.updated_at = match task_store.update(&task) {
+            Ok(updated_at) => updated_at,
+            Err(error) => {
+                if matches!(error, crate::store::StoreError::SyncDegradedAfterCommit { .. }) {
+                    // The local status committed, but publishing its sync intent
+                    // failed. Keep the matching lease and report the commit.
+                    crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
+                } else if let Some(epoch) = start_lease_epoch {
+                    agent_store.release_lease_if_owner_epoch(
+                        &req.id, &agent_id, epoch, "Task start status write failed",
+                    ).map_err(|rollback| Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("Failed to start: {error}; lease rollback failed: {rollback}; re-query before retrying"),
+                    ))?;
+                }
+                return Err(Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to update: {error}")));
+            }
+        };
         // cas-b269 review 2: clear urgent-stop halt ONLY after start fully
         // succeeds, and only if halt gen is not newer than this start's
         // ceiling (concurrent urgent stop must win).
@@ -2593,6 +2559,76 @@ impl CasCore {
                 }
             }
         }
+
+        // Explicit even when notifications and Cloud syncing are disabled:
+        // the receipt belongs to this start's completed local transition.
+        crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
+
+        // cas-0078: this start won the local lease, so a cloud claim another
+        // agent of this database holds now moves here.
+        if claim_info.is_some()
+            && let (Some(claims), Some(holder)) = (peer_claims.clone(), cloud_local_holder.take())
+        {
+            let (id, agent, name) = (req.id.clone(), agent_id.clone(), agent_name.clone());
+            let kind = task_claim_kind;
+            let _ = peer_budget
+                .run(move || claims.take_from_local(&id, kind, &holder, &agent, &name, cloud_duration))
+                .await;
+        }
+        // cas-5f28: a standard agent's start also focuses the parent epic
+        // (claimed locally above). Mirror that focus, and say when a peer on
+        // another machine already works the same epic. A claim another agent
+        // of this database holds stays with it; renewal moves it to whoever
+        // holds the epic's local lease (cas-0078).
+        if !is_worker && let Some(claims) = peer_claims.as_ref() {
+            let parents: Vec<String> = task_store
+                .get_dependencies(&req.id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|dep| dep.dep_type == crate::types::DependencyType::ParentChild)
+                .filter_map(|dep| task_store.get(&dep.to_id).ok())
+                .filter(|parent| parent.task_type == crate::types::TaskType::Epic)
+                .map(|parent| parent.id)
+                .collect();
+            if !parents.is_empty() {
+                use crate::cloud::peer_claims::{Acquire, ClaimKind};
+                let (claims, agent, name, local) = (
+                    claims.clone(),
+                    agent_id.clone(),
+                    agent_name.clone(),
+                    std::sync::Arc::clone(&local_agents),
+                );
+                let answers = peer_budget
+                    .run(move || {
+                        parents
+                            .into_iter()
+                            .map(|parent| {
+                                let answer = claims.acquire(
+                                    &parent,
+                                    ClaimKind::Epic,
+                                    &agent,
+                                    &name,
+                                    cloud_duration,
+                                    &|holder| local.contains(holder),
+                                );
+                                (parent, answer)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .await
+                    .unwrap_or_default();
+                for (parent, answer) in answers {
+                    if let Acquire::PeerHolds(hold) = answer {
+                        peer_notes.push_str(&shared_epic_note(&parent, &hold));
+                    }
+                }
+            }
+        }
+        let claim_info = if peer_notes.is_empty() {
+            claim_info
+        } else {
+            Some(format!("{}{peer_notes}", claim_info.unwrap_or_default()))
+        };
 
         // cas-062d / cas-17e4: durable outbox push after successful start.
         let actor = agent_store
@@ -4178,6 +4214,149 @@ mod related_recall_response_tests {
             format!("Created task: {} - Unique no-match epic (P2)", task.id),
             "no-match receipt must remain byte-identical to the legacy response"
         );
+    }
+
+    /// GH #1316: the reworded cas-04f4 plan must see the peer's cas-e88d
+    /// before any local task is written, even when the epic is only in Cloud.
+    #[tokio::test]
+    async fn reworded_epic_warns_before_write_for_cloud_peer_scope_cas_dea7() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None), ("CAS_FACTORY_SESSION", None),
+            ("CAS_SESSION_ID", Some("proud-cheetah-76")),
+            ("CAS_AGENT_NAME", Some("proud-cheetah-76")),
+        ]);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"gabber-studio\"\n").unwrap();
+        let core = CasCore::with_daemon(root.to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let server = MockServer::start().await;
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(), token: Some("fixture-token".into()),
+            team_id: Some("team-1".into()), ..Default::default()
+        }.save_to_cas_dir(root).unwrap();
+        let scope = "Map the live product and retire superseded legacy flows flags and code paths using 38 removal decisions from the live-product map.";
+        let title = "EPIC: Legacy out — the current flow is the product; map every legacy flow, flag and code path it superseded, then retire them";
+        let mut epic = Task::new("cas-e88d".into(), "EPIC: Live-product cleanup — 10 live problems + removal decisions from the live-product map".into());
+        epic.task_type = TaskType::Epic;
+        epic.origin_project = Some("gabber-studio".into());
+        epic.description = scope.into();
+        epic.epic_verification_owner = Some("patient-badger-31".into());
+        let mut child = Task::new("cas-open-child".into(), "Retire superseded legacy routes".into());
+        child.origin_project = Some("gabber-studio".into());
+        let mut closed = child.clone();
+        closed.id = "cas-closed-child".into();
+        closed.status = TaskStatus::Closed;
+        let mut completed = epic.clone();
+        completed.id = "cas-completed-plan".into();
+        completed.title = title.into();
+        completed.status = TaskStatus::Closed;
+        let mut foreign = epic.clone();
+        foreign.id = "cas-foreign-plan".into();
+        foreign.title = title.into();
+        foreign.origin_project = Some("another-project".into());
+        let tasks: Vec<_> = [epic.clone(), child.clone(), closed.clone(), completed.clone(), foreign.clone()].into_iter().map(|task| {
+            let mut raw = serde_json::to_value(task).unwrap();
+            raw["project_id"] = serde_json::json!("gabber-studio");
+            raw
+        }).collect();
+        let edges: Vec<_> = [child.id.clone(), closed.id.clone()].into_iter().map(|id| {
+            let edge = crate::types::Dependency::new(id, epic.id.clone(), crate::types::DependencyType::ParentChild);
+            let mut raw = serde_json::to_value(edge).unwrap();
+            raw["project_id"] = serde_json::json!("gabber-studio");
+            raw
+        }).collect();
+        for (collection, rows) in [("tasks", serde_json::json!(tasks)), ("task_dependencies", serde_json::json!(edges))] {
+            Mock::given(method("GET")).and(path("/api/teams/team-1/sync/pull"))
+                .and(query_param("project_id", "gabber-studio")).and(query_param("types", collection))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({(collection):rows})))
+                .expect(1)
+                .mount(&server).await;
+        }
+        let request = epic_request(
+            title,
+            &format!("The current flow is the product. {scope}"),
+        );
+        let warning = core.cas_task_create(Parameters(request.clone())).await
+            .expect_err("the peer's reworded open epic must warn before writing");
+        for required in ["EPIC", "cas-e88d", "patient-badger-31", "cas-open-child", "Retire superseded legacy routes", "confirm_warning=true"] {
+            assert!(warning.message.contains(required), "missing {required}: {warning:?}");
+        }
+        assert!(!warning.message.contains("cas-closed-child"), "{warning:?}");
+        assert!(store.list(None).unwrap().is_empty(), "warning must not persist the new epic or pulled inventory");
+        // The same check also works offline against the local inventory.
+        crate::cloud::CloudConfig::default().save_to_cas_dir(root).unwrap();
+        for task in [&epic, &child, &closed, &completed, &foreign] {
+            store.add(task).unwrap();
+        }
+        store.add_dependency(&crate::types::Dependency::new(child.id.clone(), epic.id.clone(), crate::types::DependencyType::ParentChild)).unwrap();
+        let local_warning = core.cas_task_create(Parameters(request.clone())).await.unwrap_err();
+        assert!(local_warning.message.contains("cas-e88d") && local_warning.message.contains("cas-open-child"), "{local_warning:?}");
+        core.cas_task_create_with_target(request, None, None, true).await.unwrap();
+        assert_eq!(store.list(None).unwrap().len(), 6, "explicit confirmation permits the intentional epic");
+        // Terminal plans and foreign scopes do not block a new plan.
+        for mut task in store.list(None).unwrap() {
+            if task.id != foreign.id {
+                task.status = TaskStatus::Closed;
+                store.update(&task).unwrap();
+            }
+        }
+        core.cas_task_create(Parameters(epic_request(title, scope))).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn epic_create_preserves_open_feature_duplicate_warning_cas_dea7() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None), ("CAS_FACTORY_SESSION", None),
+        ]);
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let scope = "Migrate refund readers in payments.service.ts:412 and refunds.controller.ts:88 to read paymentIntentId from the payments table";
+        let mut feature = described_task_request("Consolidate paymentIntentId refund readers", scope);
+        feature.task_type = "feature".into();
+        core.cas_task_create(Parameters(feature)).await.unwrap();
+        let warning = core.cas_task_create(Parameters(epic_request(
+            "EPIC: unify refund payment lookup", scope,
+        ))).await.expect_err("epic creation must still check open features");
+        assert!(warning.message.contains("DUPLICATE TASK WARNING") && warning.message.contains("Consolidate paymentIntentId refund readers"), "{warning:?}");
+        assert_eq!(core.open_task_store().unwrap().list(None).unwrap().len(), 1, "refusal must not create the epic");
+    }
+
+    #[tokio::test]
+    async fn epic_create_requires_confirmation_when_cloud_inventory_is_unavailable_cas_dea7() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None), ("CAS_FACTORY_SESSION", None),
+        ]);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"gabber-studio\"\n").unwrap();
+        let core = CasCore::with_daemon(root.to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let mut local = Task::new("cas-local-search".into(), "Restore the product search index".into());
+        local.task_type = TaskType::Epic;
+        local.epic_verification_owner = Some("search-supervisor".into());
+        store.add(&local).unwrap();
+        let server = MockServer::start().await;
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(), token: Some("fixture-token".into()),
+            team_id: Some("team-1".into()), ..Default::default()
+        }.save_to_cas_dir(root).unwrap();
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(503))
+            .expect(1).mount(&server).await;
+        let request = epic_request("Restore the product search index", "Rebuild missing conversation search documents.");
+        let warning = core.cas_task_create(Parameters(request.clone())).await.unwrap_err();
+        for required in ["EPIC INVENTORY WARNING", "DUPLICATE EPIC WARNING", "cas-local-search", "search-supervisor", "confirm_warning=true"] {
+            assert!(warning.message.contains(required), "missing {required}: {warning:?}");
+        }
+        assert_eq!(store.list(None).unwrap().len(), 1, "outage and local overlap must both be reported before writing");
+        core.cas_task_create_with_target(request, None, None, true).await.unwrap();
+        assert_eq!(store.list(None).unwrap().len(), 2);
     }
 
     #[tokio::test]

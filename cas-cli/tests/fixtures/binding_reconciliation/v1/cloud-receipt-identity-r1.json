@@ -1,0 +1,548 @@
+{
+  "clarification_id": "spec-b489/v1-receipt-identity-r1",
+  "wire_schema": "cassy.binding-reconciliation/v1",
+  "status": "Approved design examples; not deployed POST behavior or product-test evidence",
+  "scope": "Invocation-bearing reconcile POST only; registered activation GET global-latest semantics and pre-fence nullable rules unchanged",
+  "invariants": [
+    "For nonnull activation_id, latest_attempt.id equals it even if another attempt commits concurrently; fetch immutable attempt by ID, never global latest",
+    "settled maps latest_attempt.settled; original fence settlement is historical",
+    "completed reason follows invocation outcome; activated additionally ties fence_receipt.id to activation_id",
+    "Every new ordinary invocation has attested_v1_consumers=[]; original ordinary receipt may have []; preserve original admin receipt including nonempty attestations",
+    "Existing wire key set and immutable fence authority unchanged; prior prose reference to 15 fields was a counting error, exact pinned set has 14"
+  ],
+  "cases": [
+    {
+      "name": "activated_ordinary_original_empty_attestations",
+      "expected": "accept",
+      "response": {
+        "schema": "cassy.binding-reconciliation/v1",
+        "code": "completed",
+        "reason": "activated",
+        "guidance": "Authorized binding is managed and evidenced; no work authority is granted.",
+        "scope": {
+          "team_id": "qa-v1-receipt-team",
+          "project_id": "qa.invalid/v1-receipts",
+          "workspace_id": "T0QARECEIPT",
+          "channel_id": "C0QARECEIPT"
+        },
+        "binding": {
+          "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "provider": "slack",
+          "team_id": "qa-v1-receipt-team",
+          "project_id": "qa.invalid/v1-receipts",
+          "workspace_id": "T0QARECEIPT",
+          "channel_id": "C0QARECEIPT",
+          "mode": "managed",
+          "verified": true,
+          "fence_generation": 1,
+          "activated_at": "2026-10-17T16:00:00.000Z",
+          "legacy_fenced_at": "2026-10-17T16:00:00.000Z"
+        },
+        "strict_activation": "evidenced",
+        "activation_id": "11111111-1111-4111-8111-111111111111",
+        "fence_receipt": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "outcome": "activated",
+          "prior_mode": "legacy",
+          "fence_generation": 1,
+          "attempted_at": "2026-10-17T16:00:00.000Z",
+          "quiescence": {
+            "quiet_window_secs": 300,
+            "attested_v1_consumers": [],
+            "blocking_v1_leases": 0,
+            "blocking_v1_consumers": []
+          },
+          "settled": {
+            "migrated_v1_rows": 2,
+            "retired_v1_rows": 1,
+            "invalidated_v1_leases": 0
+          }
+        },
+        "latest_attempt": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "outcome": "activated",
+          "prior_mode": "legacy",
+          "fence_generation": 1,
+          "attempted_at": "2026-10-17T16:00:00.000Z",
+          "quiescence": {
+            "quiet_window_secs": 300,
+            "attested_v1_consumers": [],
+            "blocking_v1_leases": 0,
+            "blocking_v1_consumers": []
+          },
+          "settled": {
+            "migrated_v1_rows": 2,
+            "retired_v1_rows": 1,
+            "invalidated_v1_leases": 0
+          }
+        },
+        "settled": {
+          "migrated": 2,
+          "retired": 1,
+          "invalidated_leases": 0
+        },
+        "blockers": null,
+        "retry_after_secs": null,
+        "next_action": "none"
+      }
+    },
+    {
+      "name": "already_managed_ordinary_original_distinct_invocation",
+      "expected": "accept",
+      "response": {
+        "schema": "cassy.binding-reconciliation/v1",
+        "code": "completed",
+        "reason": "already_managed",
+        "guidance": "Authorized binding is managed and evidenced; no work authority is granted.",
+        "scope": {
+          "team_id": "qa-v1-receipt-team",
+          "project_id": "qa.invalid/v1-receipts",
+          "workspace_id": "T0QARECEIPT",
+          "channel_id": "C0QARECEIPT"
+        },
+        "binding": {
+          "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "provider": "slack",
+          "team_id": "qa-v1-receipt-team",
+          "project_id": "qa.invalid/v1-receipts",
+          "workspace_id": "T0QARECEIPT",
+          "channel_id": "C0QARECEIPT",
+          "mode": "managed",
+          "verified": true,
+          "fence_generation": 1,
+          "activated_at": "2026-10-17T16:00:00.000Z",
+          "legacy_fenced_at": "2026-10-17T16:00:00.000Z"
+        },
+        "strict_activation": "evidenced",
+        "activation_id": "22222222-2222-4222-8222-222222222222",
+        "fence_receipt": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "outcome": "activated",
+          "prior_mode": "legacy",
+          "fence_generation": 1,
+          "attempted_at": "2026-10-17T16:00:00.000Z",
+          "quiescence": {
+            "quiet_window_secs": 300,
+            "attested_v1_consumers": [],
+            "blocking_v1_leases": 0,
+            "blocking_v1_consumers": []
+          },
+          "settled": {
+            "migrated_v1_rows": 2,
+            "retired_v1_rows": 1,
+            "invalidated_v1_leases": 0
+          }
+        },
+        "latest_attempt": {
+          "id": "22222222-2222-4222-8222-222222222222",
+          "outcome": "already_managed",
+          "prior_mode": "managed",
+          "fence_generation": 1,
+          "attempted_at": "2026-10-17T16:01:00.000Z",
+          "quiescence": {
+            "quiet_window_secs": 300,
+            "attested_v1_consumers": [],
+            "blocking_v1_leases": 0,
+            "blocking_v1_consumers": []
+          },
+          "settled": {
+            "migrated_v1_rows": 0,
+            "retired_v1_rows": 0,
+            "invalidated_v1_leases": 0
+          }
+        },
+        "settled": {
+          "migrated": 0,
+          "retired": 0,
+          "invalidated_leases": 0
+        },
+        "blockers": null,
+        "retry_after_secs": null,
+        "next_action": "none"
+      }
+    },
+    {
+      "name": "already_managed_preserves_admin_original_attestations",
+      "expected": "accept",
+      "response": {
+        "schema": "cassy.binding-reconciliation/v1",
+        "code": "completed",
+        "reason": "already_managed",
+        "guidance": "Authorized binding is managed and evidenced; no work authority is granted.",
+        "scope": {
+          "team_id": "qa-v1-receipt-team",
+          "project_id": "qa.invalid/v1-receipts",
+          "workspace_id": "T0QARECEIPT",
+          "channel_id": "C0QARECEIPT"
+        },
+        "binding": {
+          "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "provider": "slack",
+          "team_id": "qa-v1-receipt-team",
+          "project_id": "qa.invalid/v1-receipts",
+          "workspace_id": "T0QARECEIPT",
+          "channel_id": "C0QARECEIPT",
+          "mode": "managed",
+          "verified": true,
+          "fence_generation": 1,
+          "activated_at": "2026-10-17T16:00:00.000Z",
+          "legacy_fenced_at": "2026-10-17T16:00:00.000Z"
+        },
+        "strict_activation": "evidenced",
+        "activation_id": "44444444-4444-4444-8444-444444444444",
+        "fence_receipt": {
+          "id": "33333333-3333-4333-8333-333333333333",
+          "outcome": "activated",
+          "prior_mode": "legacy",
+          "fence_generation": 1,
+          "attempted_at": "2026-10-17T16:00:00.000Z",
+          "quiescence": {
+            "quiet_window_secs": 300,
+            "attested_v1_consumers": [
+              "qa-machine:prior-admin-session"
+            ],
+            "blocking_v1_leases": 0,
+            "blocking_v1_consumers": []
+          },
+          "settled": {
+            "migrated_v1_rows": 2,
+            "retired_v1_rows": 1,
+            "invalidated_v1_leases": 0
+          }
+        },
+        "latest_attempt": {
+          "id": "44444444-4444-4444-8444-444444444444",
+          "outcome": "already_managed",
+          "prior_mode": "managed",
+          "fence_generation": 1,
+          "attempted_at": "2026-10-17T16:01:00.000Z",
+          "quiescence": {
+            "quiet_window_secs": 300,
+            "attested_v1_consumers": [],
+            "blocking_v1_leases": 0,
+            "blocking_v1_consumers": []
+          },
+          "settled": {
+            "migrated_v1_rows": 0,
+            "retired_v1_rows": 0,
+            "invalidated_v1_leases": 0
+          }
+        },
+        "settled": {
+          "migrated": 0,
+          "retired": 0,
+          "invalidated_leases": 0
+        },
+        "blockers": null,
+        "retry_after_secs": null,
+        "next_action": "none"
+      }
+    },
+    {
+      "name": "reject_concurrent_global_latest_substitution",
+      "expected": "reject",
+      "violated_invariant": "latest_attempt.id equals nonnull activation_id",
+      "response": {
+        "schema": "cassy.binding-reconciliation/v1",
+        "code": "completed",
+        "reason": "already_managed",
+        "guidance": "Authorized binding is managed and evidenced; no work authority is granted.",
+        "scope": {
+          "team_id": "qa-v1-receipt-team",
+          "project_id": "qa.invalid/v1-receipts",
+          "workspace_id": "T0QARECEIPT",
+          "channel_id": "C0QARECEIPT"
+        },
+        "binding": {
+          "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "provider": "slack",
+          "team_id": "qa-v1-receipt-team",
+          "project_id": "qa.invalid/v1-receipts",
+          "workspace_id": "T0QARECEIPT",
+          "channel_id": "C0QARECEIPT",
+          "mode": "managed",
+          "verified": true,
+          "fence_generation": 1,
+          "activated_at": "2026-10-17T16:00:00.000Z",
+          "legacy_fenced_at": "2026-10-17T16:00:00.000Z"
+        },
+        "strict_activation": "evidenced",
+        "activation_id": "22222222-2222-4222-8222-222222222222",
+        "fence_receipt": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "outcome": "activated",
+          "prior_mode": "legacy",
+          "fence_generation": 1,
+          "attempted_at": "2026-10-17T16:00:00.000Z",
+          "quiescence": {
+            "quiet_window_secs": 300,
+            "attested_v1_consumers": [],
+            "blocking_v1_leases": 0,
+            "blocking_v1_consumers": []
+          },
+          "settled": {
+            "migrated_v1_rows": 2,
+            "retired_v1_rows": 1,
+            "invalidated_v1_leases": 0
+          }
+        },
+        "latest_attempt": {
+          "id": "55555555-5555-4555-8555-555555555555",
+          "outcome": "already_managed",
+          "prior_mode": "managed",
+          "fence_generation": 1,
+          "attempted_at": "2026-10-17T16:02:00.000Z",
+          "quiescence": {
+            "quiet_window_secs": 300,
+            "attested_v1_consumers": [],
+            "blocking_v1_leases": 0,
+            "blocking_v1_consumers": []
+          },
+          "settled": {
+            "migrated_v1_rows": 0,
+            "retired_v1_rows": 0,
+            "invalidated_v1_leases": 0
+          }
+        },
+        "settled": {
+          "migrated": 0,
+          "retired": 0,
+          "invalidated_leases": 0
+        },
+        "blockers": null,
+        "retry_after_secs": null,
+        "next_action": "none"
+      }
+    },
+    {
+      "name": "reject_original_fence_settlement",
+      "expected": "reject",
+      "violated_invariant": "settled maps invocation receipt, not original fence",
+      "response": {
+        "schema": "cassy.binding-reconciliation/v1",
+        "code": "completed",
+        "reason": "already_managed",
+        "guidance": "Authorized binding is managed and evidenced; no work authority is granted.",
+        "scope": {
+          "team_id": "qa-v1-receipt-team",
+          "project_id": "qa.invalid/v1-receipts",
+          "workspace_id": "T0QARECEIPT",
+          "channel_id": "C0QARECEIPT"
+        },
+        "binding": {
+          "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "provider": "slack",
+          "team_id": "qa-v1-receipt-team",
+          "project_id": "qa.invalid/v1-receipts",
+          "workspace_id": "T0QARECEIPT",
+          "channel_id": "C0QARECEIPT",
+          "mode": "managed",
+          "verified": true,
+          "fence_generation": 1,
+          "activated_at": "2026-10-17T16:00:00.000Z",
+          "legacy_fenced_at": "2026-10-17T16:00:00.000Z"
+        },
+        "strict_activation": "evidenced",
+        "activation_id": "22222222-2222-4222-8222-222222222222",
+        "fence_receipt": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "outcome": "activated",
+          "prior_mode": "legacy",
+          "fence_generation": 1,
+          "attempted_at": "2026-10-17T16:00:00.000Z",
+          "quiescence": {
+            "quiet_window_secs": 300,
+            "attested_v1_consumers": [],
+            "blocking_v1_leases": 0,
+            "blocking_v1_consumers": []
+          },
+          "settled": {
+            "migrated_v1_rows": 2,
+            "retired_v1_rows": 1,
+            "invalidated_v1_leases": 0
+          }
+        },
+        "latest_attempt": {
+          "id": "22222222-2222-4222-8222-222222222222",
+          "outcome": "already_managed",
+          "prior_mode": "managed",
+          "fence_generation": 1,
+          "attempted_at": "2026-10-17T16:01:00.000Z",
+          "quiescence": {
+            "quiet_window_secs": 300,
+            "attested_v1_consumers": [],
+            "blocking_v1_leases": 0,
+            "blocking_v1_consumers": []
+          },
+          "settled": {
+            "migrated_v1_rows": 0,
+            "retired_v1_rows": 0,
+            "invalidated_v1_leases": 0
+          }
+        },
+        "settled": {
+          "migrated": 2,
+          "retired": 0,
+          "invalidated_leases": 0
+        },
+        "blockers": null,
+        "retry_after_secs": null,
+        "next_action": "none"
+      }
+    },
+    {
+      "name": "reject_ordinary_invocation_exemptions",
+      "expected": "reject",
+      "violated_invariant": "new ordinary invocation has no consumer exemptions",
+      "response": {
+        "schema": "cassy.binding-reconciliation/v1",
+        "code": "completed",
+        "reason": "already_managed",
+        "guidance": "Authorized binding is managed and evidenced; no work authority is granted.",
+        "scope": {
+          "team_id": "qa-v1-receipt-team",
+          "project_id": "qa.invalid/v1-receipts",
+          "workspace_id": "T0QARECEIPT",
+          "channel_id": "C0QARECEIPT"
+        },
+        "binding": {
+          "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "provider": "slack",
+          "team_id": "qa-v1-receipt-team",
+          "project_id": "qa.invalid/v1-receipts",
+          "workspace_id": "T0QARECEIPT",
+          "channel_id": "C0QARECEIPT",
+          "mode": "managed",
+          "verified": true,
+          "fence_generation": 1,
+          "activated_at": "2026-10-17T16:00:00.000Z",
+          "legacy_fenced_at": "2026-10-17T16:00:00.000Z"
+        },
+        "strict_activation": "evidenced",
+        "activation_id": "22222222-2222-4222-8222-222222222222",
+        "fence_receipt": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "outcome": "activated",
+          "prior_mode": "legacy",
+          "fence_generation": 1,
+          "attempted_at": "2026-10-17T16:00:00.000Z",
+          "quiescence": {
+            "quiet_window_secs": 300,
+            "attested_v1_consumers": [],
+            "blocking_v1_leases": 0,
+            "blocking_v1_consumers": []
+          },
+          "settled": {
+            "migrated_v1_rows": 2,
+            "retired_v1_rows": 1,
+            "invalidated_v1_leases": 0
+          }
+        },
+        "latest_attempt": {
+          "id": "22222222-2222-4222-8222-222222222222",
+          "outcome": "already_managed",
+          "prior_mode": "managed",
+          "fence_generation": 1,
+          "attempted_at": "2026-10-17T16:01:00.000Z",
+          "quiescence": {
+            "quiet_window_secs": 300,
+            "attested_v1_consumers": [
+              "qa-machine:caller-selected"
+            ],
+            "blocking_v1_leases": 0,
+            "blocking_v1_consumers": []
+          },
+          "settled": {
+            "migrated_v1_rows": 0,
+            "retired_v1_rows": 0,
+            "invalidated_v1_leases": 0
+          }
+        },
+        "settled": {
+          "migrated": 0,
+          "retired": 0,
+          "invalidated_leases": 0
+        },
+        "blockers": null,
+        "retry_after_secs": null,
+        "next_action": "none"
+      }
+    },
+    {
+      "name": "reject_activated_with_another_original_receipt",
+      "expected": "reject",
+      "violated_invariant": "activated ties invocation and original receipt IDs",
+      "response": {
+        "schema": "cassy.binding-reconciliation/v1",
+        "code": "completed",
+        "reason": "activated",
+        "guidance": "Authorized binding is managed and evidenced; no work authority is granted.",
+        "scope": {
+          "team_id": "qa-v1-receipt-team",
+          "project_id": "qa.invalid/v1-receipts",
+          "workspace_id": "T0QARECEIPT",
+          "channel_id": "C0QARECEIPT"
+        },
+        "binding": {
+          "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "provider": "slack",
+          "team_id": "qa-v1-receipt-team",
+          "project_id": "qa.invalid/v1-receipts",
+          "workspace_id": "T0QARECEIPT",
+          "channel_id": "C0QARECEIPT",
+          "mode": "managed",
+          "verified": true,
+          "fence_generation": 1,
+          "activated_at": "2026-10-17T16:00:00.000Z",
+          "legacy_fenced_at": "2026-10-17T16:00:00.000Z"
+        },
+        "strict_activation": "evidenced",
+        "activation_id": "11111111-1111-4111-8111-111111111111",
+        "fence_receipt": {
+          "id": "66666666-6666-4666-8666-666666666666",
+          "outcome": "activated",
+          "prior_mode": "legacy",
+          "fence_generation": 1,
+          "attempted_at": "2026-10-17T16:00:00.000Z",
+          "quiescence": {
+            "quiet_window_secs": 300,
+            "attested_v1_consumers": [],
+            "blocking_v1_leases": 0,
+            "blocking_v1_consumers": []
+          },
+          "settled": {
+            "migrated_v1_rows": 2,
+            "retired_v1_rows": 1,
+            "invalidated_v1_leases": 0
+          }
+        },
+        "latest_attempt": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "outcome": "activated",
+          "prior_mode": "legacy",
+          "fence_generation": 1,
+          "attempted_at": "2026-10-17T16:00:00.000Z",
+          "quiescence": {
+            "quiet_window_secs": 300,
+            "attested_v1_consumers": [],
+            "blocking_v1_leases": 0,
+            "blocking_v1_consumers": []
+          },
+          "settled": {
+            "migrated_v1_rows": 2,
+            "retired_v1_rows": 1,
+            "invalidated_v1_leases": 0
+          }
+        },
+        "settled": {
+          "migrated": 2,
+          "retired": 1,
+          "invalidated_leases": 0
+        },
+        "blockers": null,
+        "retry_after_secs": null,
+        "next_action": "none"
+      }
+    }
+  ]
+}

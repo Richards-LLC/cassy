@@ -175,6 +175,46 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
+        path: "skills/cas-sow-delivery-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/DELIVERY-template.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/DELIVERY-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/rounds.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/rounds.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/handoff.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/handoff.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-skeleton.html",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-skeleton.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
+    },
+    BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
         content: include_str!("builtins/skills/cas-cut-release/SKILL.md"),
     },
@@ -213,6 +253,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/workflow.md",
         content: include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-supervisor/references/correction-proof.md",
+        content: include_str!("builtins/skills/cas-supervisor/references/correction-proof.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/worker-recovery.md",
@@ -591,6 +635,13 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/violet/references/push-wake.md",
         content: include_str!("builtins/skills/violet/references/push-wake.md"),
     },
+    // slack-formatting (cas-d47fd750acf1df00): readable Slack bodies for every
+    // violet post, thread and push-wake reply, with the operator's hard rules
+    // (attached files only; times in CT).
+    BuiltinFile {
+        path: "skills/slack-formatting/SKILL.md",
+        content: include_str!("builtins/skills/slack-formatting/SKILL.md"),
+    },
     // One-release managed redirect; sync replaces installed legacy bodies.
     // cas-github-issues skill (cas-ff2f, GH #94): the recurring GitHub Issues
     // sweep — dedupe double-filings, verify-and-close fixed claims, task new
@@ -847,6 +898,46 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
+        path: "skills/cas-sow-delivery-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/DELIVERY-template.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/DELIVERY-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/rounds.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/rounds.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/handoff.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/handoff.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-skeleton.html",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-skeleton.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
+    },
+    BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
         content: include_str!("builtins/skills/cas-cut-release/SKILL.md"),
     },
@@ -885,6 +976,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/workflow.md",
         content: include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-supervisor/references/correction-proof.md",
+        content: include_str!("builtins/skills/cas-supervisor/references/correction-proof.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/worker-recovery.md",
@@ -1248,6 +1343,13 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/violet/references/push-wake.md",
         content: include_str!("builtins/skills/violet/references/push-wake.md"),
     },
+    // slack-formatting (cas-d47fd750acf1df00): readable Slack bodies for every
+    // violet post, thread and push-wake reply, with the operator's hard rules
+    // (attached files only; times in CT).
+    BuiltinFile {
+        path: "skills/slack-formatting/SKILL.md",
+        content: include_str!("builtins/skills/slack-formatting/SKILL.md"),
+    },
     // One-release managed redirect; sync replaces installed legacy bodies.
     // cas-github-issues skill (cas-ff2f, GH #94) — codex mirror. Byte-identical
     // to the claude copy except for the harness tool prefix.
@@ -1492,6 +1594,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
     },
     BuiltinFile {
+        path: "skills/cas-supervisor/references/correction-proof.md",
+        content: include_str!("builtins/skills/cas-supervisor/references/correction-proof.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-supervisor/references/model-selection.md",
         content: include_str!("builtins/skills/cas-supervisor/references/model-selection.md"),
     },
@@ -1560,6 +1666,46 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/check-pdf.py",
         content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/DELIVERY-template.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/DELIVERY-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/rounds.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/rounds.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/handoff.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/handoff.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-skeleton.html",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-skeleton.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -1907,6 +2053,13 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/violet/references/push-wake.md",
         content: include_str!("builtins/skills/violet/references/push-wake.md"),
+    },
+    // slack-formatting (cas-d47fd750acf1df00): readable Slack bodies for every
+    // violet post, thread and push-wake reply, with the operator's hard rules
+    // (attached files only; times in CT).
+    BuiltinFile {
+        path: "skills/slack-formatting/SKILL.md",
+        content: include_str!("builtins/skills/slack-formatting/SKILL.md"),
     },
     // One-release managed redirect; sync replaces installed legacy bodies.
     BuiltinFile {
@@ -2284,6 +2437,15 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/violet"),
         codex: Some("skills/violet"),
         grok: Some("skills/violet"),
+        note: "",
+    },
+    RequiredCapability {
+        // cas-d47fd750acf1df00: every harness that posts through Violet
+        // formats its Slack bodies with the same rules.
+        id: "slack-formatting",
+        claude: Some("skills/slack-formatting"),
+        codex: Some("skills/slack-formatting"),
+        grok: Some("skills/slack-formatting"),
         note: "",
     },
     RequiredCapability {
@@ -3714,6 +3876,7 @@ pub const SHIPPED_NON_CAS_SKILL_DIRS: &[&str] = &[
     // /release-notes). Kept so old installs are pruned.
     "release-notes",
     "session-learn",
+    "slack-formatting",
     "verify-before-claim",
     "violet",
 ];

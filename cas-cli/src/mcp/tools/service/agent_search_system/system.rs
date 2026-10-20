@@ -260,18 +260,8 @@ fn filing_failure_reason(error: &str, task_identity_warning: Option<&str>) -> St
 fn resolve_issue_repo(cas_root: &Path) -> Result<String, String> {
     let config = crate::config::Config::load(cas_root)
         .map_err(|error| format!("Failed to load config: {error}"))?;
-    let issues = config.issues.as_ref();
-    let raw_component = issues
-        .and_then(|issues| issues.components.as_ref())
-        .and_then(|components| components.cassy.as_deref());
-    // Match the effective component shown by config get, including its default.
-    // Only a raw, explicitly blank component opts into the legacy project
-    // override; an absent component must not silently choose that tracker.
-    let legacy_project = raw_component
-        .filter(|repo| repo.trim().is_empty())
-        .and_then(|_| issues.and_then(|issues| issues.repo.as_deref()))
-        .map(str::trim)
-        .filter(|repo| !repo.is_empty());
+    // Only a raw blank component selects the stored legacy project tracker.
+    let legacy_project = config.cassy_issue_legacy_repo();
     let (key, repo) = match legacy_project {
         Some(repo) => ("issues.repo", repo.to_owned()),
         None => (
@@ -1118,7 +1108,8 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let mut config = crate::config::Config::default();
             if let Some(repo) = project {
-                config.set("issues.repo", repo).unwrap();
+                // Seed legacy raw configuration; config set now rejects malformed slugs.
+                config.issues.get_or_insert_with(Default::default).repo = Some(repo.to_owned());
             }
             if let Some(repo) = component {
                 // Raw TOML can retain an explicit blank legacy opt-out;
@@ -1173,7 +1164,9 @@ mod tests {
         ] {
             let temp = tempfile::tempdir().unwrap();
             let mut config = crate::config::Config::default();
-            config.set("issues.repo", project).unwrap();
+            // Keep the filing safeguard exercised for malformed raw TOML,
+            // independently of set-time validation (cas-d3e9).
+            config.issues.get_or_insert_with(Default::default).repo = Some(project.to_owned());
             if let Some(repo) = component {
                 // Raw TOML can retain an explicit blank legacy opt-out;
                 // config set with blank clears the override instead.

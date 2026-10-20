@@ -125,6 +125,9 @@ fn render_post(receipt: &PostReceipt, recorded: bool) -> String {
         receipt.sha256,
         receipt.sha256_verified,
     );
+    if let Some(warning) = &receipt.dispatch_warning {
+        out.push_str(&format!("\n[WARN] {warning}\n"));
+    }
     if !receipt.sha256_verified {
         let why = if receipt.size_bytes > crate::artifacts::slack::HUB_HASH_LIMIT {
             "the file is over Violet's 16 MiB hashing limit"
@@ -165,6 +168,7 @@ mod tests {
 
     fn receipt(verified: bool, size_bytes: u64) -> PostReceipt {
         PostReceipt {
+            dispatch_warning: None,
             artifact_id: "art-1148".to_string(),
             channel_id: Some("C123".to_string()),
             message_id: Some("1710000000.000003".to_string()),

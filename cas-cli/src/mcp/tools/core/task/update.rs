@@ -1,3 +1,4 @@
+use super::audit;
 use crate::mcp::tools::core::imports::*;
 
 use crate::cloud::{CloudConfig, TeamRegistration};
@@ -913,13 +914,8 @@ impl CasCore {
                     })
                     .unwrap_or_else(|| "The stale code work target was cleared for this no-code task.".to_string())
             };
-            let note = format!(
-                "[{}] DECISION: proof scope corrected by supervisor {} ({}): {} {} The prior exact proof cycle was invalidated; no failed-review verdict was recorded.",
-                task.updated_at.format("%Y-%m-%d %H:%M"),
-                supervisor.name,
-                supervisor.id,
-                reason,
-                target_description,
+            let note = audit::proof_scope_fix_note(
+                task.updated_at, &supervisor, reason, &target_description,
             );
             task.notes = if task.notes.is_empty() {
                 note

@@ -747,6 +747,38 @@ pub fn with_response_instructions(
     )
 }
 
+/// cas-978b (GH #1264): the reply line appended to a message an external
+/// notifier (`cas factory message --from <label>`, the bridge's POST message)
+/// queues for an agent. Naming the label as the reply target sent agents to
+/// `target=watchdog`, which no registry or peer holds, so the reply was
+/// refused and nothing recorded. The line now names a route that resolves:
+/// the sender itself when it is a registered agent here, the external owner
+/// inbox for OpenClaw, and otherwise says there is no reply route and points
+/// a needed human answer at the authenticated operator channel.
+pub(crate) fn external_response_hint(cas_root: &std::path::Path, from: &str) -> String {
+    let from = from.trim();
+    let registered = crate::store::open_agent_store(cas_root)
+        .ok()
+        .and_then(|agents| agents.list(None).ok())
+        .is_some_and(|agents| {
+            agents
+                .iter()
+                .any(|agent| agent.name.eq_ignore_ascii_case(from) || agent.id.eq_ignore_ascii_case(from))
+        });
+    let route = if registered {
+        format!("To respond, use: coordination action=message target={from} summary=\"...\" message=\"...\"")
+    } else if from.eq_ignore_ascii_case("openclaw") {
+        "To respond, use: coordination action=message target=owner summary=\"...\" message=\"...\"".to_string()
+    } else {
+        format!(
+            "Sender `{from}` is an external notifier, not a registered agent, so it cannot take a reply. \
+             Act on this notice; if a person must answer, use: coordination action=message target=operator \
+             summary=\"...\" message=\"...\""
+        )
+    };
+    format!("{route}\n\nDO NOT USE SENDMESSAGE.")
+}
+
 /// Resolve the harness of the worker a director event is about (cas-dc1b).
 ///
 /// Worker-facing lines (assignment, stall nudge, reply footer) and the
@@ -4768,6 +4800,23 @@ mod tests {
         assert!(wrapped.contains("To respond to this message, use:"));
         assert!(wrapped.contains("mcp__cs__coordination action=message"));
         assert!(wrapped.contains("target=supervisor"));
+    }
+
+    /// cas-978b (GH #1264): an external notifier's reply line names a route
+    /// that resolves: a registered sender, the OpenClaw owner inbox, or, for
+    /// an unregistered label such as `watchdog`, no reply plus the operator.
+    #[test]
+    fn external_response_hint_never_names_an_unregistered_target_cas_978b() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = crate::store::open_agent_store(&cas_root).unwrap();
+        agents.register(&cas_types::Agent::new("agent-1".into(), "swift-fox".into())).unwrap();
+
+        assert!(external_response_hint(&cas_root, "swift-fox").contains("target=swift-fox "));
+        assert!(external_response_hint(&cas_root, "openclaw").contains("target=owner "));
+        let watchdog = external_response_hint(&cas_root, "watchdog");
+        assert!(!watchdog.contains("target=watchdog"), "{watchdog}");
+        assert!(watchdog.contains("not a registered agent") && watchdog.contains("target=operator "), "{watchdog}");
     }
 
     #[test]

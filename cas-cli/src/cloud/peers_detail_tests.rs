@@ -164,6 +164,8 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
         .metadata
         .insert("focus".into(), format!("\u{1b}[31m\n{}", "界".repeat(100)));
     let report = PeerReport {
+        #[cfg(feature = "mcp-proxy")]
+        stakeholder_contacts: serde_json::json!({"state":"shared","contacts":[{"workspace_id":"T123","user_id":"U123","last_contact_at":"2026-10-20T16:23:00Z","last_poster":"peer-on-prowl","permalink":"https://example.slack.com/root","next_allowed_at":"2026-10-20T17:23:00Z","owner":{"registration_id":"new-owner"}}]}),
         hidden_peers: 0,
         overlaps: Vec::new(),
         limitations: Vec::new(),
@@ -203,9 +205,13 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
             assert!(!ascii || text.is_ascii());
             assert!(text.contains("--json for untruncated values"));
             assert!(text.contains("Claims  0") && text.contains("Workers 0 live (read-only)"));
+            #[cfg(feature = "mcp-proxy")]
+            assert!(text.contains("Stakeholder contacts [shared]") && text.contains("Next allowed 2026-10-20T17:23:00Z") && text.contains("Owner new-owner"));
         }
     }
     let encoded = serde_json::to_value(&report).unwrap();
+    #[cfg(feature = "mcp-proxy")]
+    assert_eq!(encoded["stakeholder_contacts"]["contacts"][0]["last_poster"], "peer-on-prowl");
     assert_eq!(
         encoded["peers"][0]["supervisor"]["focus"],
         agents[0].metadata["focus"]
@@ -254,6 +260,8 @@ fn cas_559c_missing_account_identity_never_means_zero_claims() {
     agents[0].team_id = None; // No team authorization signal.
     let peers = peers::repo_peers(&agents, REPO, &[], None, Utc::now());
     let report = PeerReport {
+        #[cfg(feature = "mcp-proxy")]
+        stakeholder_contacts: serde_json::json!({"state":"unconfigured"}),
         hidden_peers: 0,
         overlaps: Vec::new(),
         limitations: Vec::new(),
@@ -358,6 +366,8 @@ fn cas_a81c_claim_copy_uses_scoped_plain_ids_owner_names_and_missing_title_reaso
         lease(&foreign_key, owner_id, LeaseStatus::Active, 600),
     ];
     let report = PeerReport {
+        #[cfg(feature = "mcp-proxy")]
+        stakeholder_contacts: serde_json::json!({"state":"unconfigured"}),
         hidden_peers: 0,
         overlaps: Vec::new(),
         limitations: Vec::new(),
@@ -765,4 +775,28 @@ async fn cas_cd42_unavailable_cloud_sections_keep_observation_time_and_no_regist
             .iter()
             .all(|r| r.method.as_str() == "GET")
     );
+}
+
+/// cas-9f53: a worker `peers detail=true` lists under a peer supervisor is
+/// resolvable by name or name@machine, and names that supervisor as relay.
+#[test]
+fn cas_9f53_a_listed_peer_worker_resolves_to_its_owning_supervisor() {
+    let agents = vec![
+        agent("rapid-panther-80", "supervisor", "steady-lynx", "soundwave", REPO, 5),
+        agent("bright-lynx-31", "worker", "steady-lynx", "soundwave", REPO, 5),
+        agent("gone-worker", "worker", "steady-lynx", "soundwave", REPO, 3_600),
+        agent("other-session", "worker", "other-lynx", "soundwave", REPO, 5),
+    ];
+    let supervisors = peers::repo_peers(&agents, REPO, &[], None, Utc::now());
+    let workers = live_peer_workers(&supervisors, &agents, &[], Utc::now());
+    assert_eq!(
+        workers.iter().map(|worker| worker.name.as_str()).collect::<Vec<_>>(),
+        ["bright-lynx-31"],
+        "the same live session members peers lists"
+    );
+    let worker = &workers[0];
+    assert!(worker.matches("bright-lynx-31") && worker.matches("Bright-Lynx-31@soundwave"));
+    assert!(!worker.matches("bright-lynx-31@prowl"));
+    assert_eq!(worker.supervisor.name, "rapid-panther-80");
+    assert_eq!(worker.supervisor.session.as_deref(), Some("steady-lynx"));
 }

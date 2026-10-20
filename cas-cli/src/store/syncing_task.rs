@@ -577,6 +577,25 @@ impl TaskStore for SyncingTaskStore {
         Ok(persisted_at)
     }
 
+    fn update_if_current(&self, task: &Task, expected: &Task) -> Result<DateTime<Utc>> {
+        let _sync_guard = self.queue.lock_task_sync_mutations(&[&task.id])
+            .map_err(queue_error_before_local_commit)?;
+        let previous_updated_at = expected.updated_at.to_rfc3339();
+        let intent = self.stage_upsert(task, "update", Some(&previous_updated_at), Some(expected))?;
+        let persisted_at = match self.inner.update_if_current_with_mutation_receipt(
+            task, expected, &intent.mutation_id,
+        ) {
+            Ok(persisted_at) => persisted_at,
+            Err(error) => {
+                self.cancel_staged_after_local_failure(&intent);
+                return Err(error);
+            }
+        };
+        crate::mcp::tools::service::mutation_receipt::task_committed(&task.id);
+        self.fulfill_upsert(&intent)?;
+        Ok(persisted_at)
+    }
+
     fn update_from_sync(&self, task: &Task, expected: &Task) -> Result<Option<DateTime<Utc>>> {
         self.inner.update_from_sync(task, expected)
     }
@@ -664,6 +683,15 @@ impl TaskStore for SyncingTaskStore {
 
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>> {
         self.inner.list(status)
+    }
+
+    fn ids_by_assignees_and_statuses(
+        &self,
+        assignees: &[&str],
+        statuses: &[TaskStatus],
+    ) -> Result<Vec<String>> {
+        self.inner
+            .ids_by_assignees_and_statuses(assignees, statuses)
     }
 
     fn epic_for_branch_excluding(&self, branch: &str, excluded: &[String]) -> Result<Option<Task>> {
@@ -1713,8 +1741,13 @@ mod tests {
         // Clear queue
         queue.clear().unwrap();
 
+        let expected = store.get(&task.id).unwrap();
         task.title = "Updated title".to_string();
-        store.update(&task).unwrap();
+        store.update_if_current(&task, &expected).unwrap();
+        let persisted = store.get(&task.id).unwrap();
+        assert!(store.update_if_current(&expected, &expected).is_err());
+        assert_eq!(store.get(&task.id).unwrap().updated_at, persisted.updated_at);
+        assert_eq!(store.reconcile_pending_task_sync().unwrap(), TaskSyncReconcileOutcome::Clean);
 
         let pending = queue.pending(10, 5).unwrap();
         assert_eq!(pending.len(), 1);

@@ -40,6 +40,21 @@ impl CasCore {
         let task_id = required(&req.task_id, "artifact publish requires 'task_id'")?;
         let path = required(&req.path, "artifact publish requires 'path'")?;
 
+        if req.note_type.is_some() && req.notes.is_none() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "note_type requires notes",
+            ));
+        }
+        if let Some(note) = &req.notes {
+            if note.trim().is_empty() {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "proof notes must not be empty",
+                ));
+            }
+            self.open_task_store()?.get(&task_id).map_err(internal)?;
+        }
         let store = self.open_artifact_store()?;
         let config = crate::config::Config::load(&self.cas_root).unwrap_or_default();
         let artifacts_root = crate::config::resolved_factory_artifacts_root(
@@ -58,7 +73,59 @@ impl CasCore {
             Self::error(ErrorCode::INVALID_PARAMS, error.to_string())
         })?;
 
-        Ok(Self::success(render_publish(&outcome)))
+        let mut rendered = render_publish(&outcome);
+        if let Some(note) = req.notes {
+            if !outcome.disposition.is_committed() {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "{rendered}\nProof note was not attached: the log must commit to Cloud before another machine can fetch it. Publish again after resolving the storage outcome."
+                    ),
+                ));
+            }
+            let receipt = format!("{note} {}", outcome.artifact.id);
+            self.cas_task_notes(Parameters(crate::mcp::tools::TaskNotesRequest {
+                id: task_id,
+                note: receipt,
+                note_type: req.note_type.unwrap_or_else(|| "platform_proof".into()),
+                supervisor_override: None,
+                reason: None,
+            }))
+            .await
+            .map_err(|error| {
+                Self::error(
+                    error.code,
+                    format!(
+                        "Published {}; proof note was not attached: {}",
+                        outcome.artifact.id, error.message
+                    ),
+                )
+            })?;
+            rendered.push_str("\nProof note attached with portable artifact reference.\n");
+        }
+        Ok(Self::success(rendered))
+    }
+
+    pub async fn artifact_fetch(
+        &self,
+        Parameters(req): Parameters<ArtifactRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let task_id = required(&req.task_id, "artifact fetch requires 'task_id'")?;
+        let id = required(&req.id, "artifact fetch requires 'id'")?;
+        let root = self.cas_root.clone();
+        let (artifact, path) = tokio::task::spawn_blocking(move || {
+            crate::artifacts::proof::fetch_task(&root, &task_id, &id)
+        })
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+        Ok(Self::success(format!(
+            "Fetched {}\npath: {}\nsha256: {}\nsize_bytes: {}",
+            artifact.id,
+            path.display(),
+            artifact.sha256,
+            artifact.size_bytes
+        )))
     }
 
     pub async fn artifact_show(

@@ -4,7 +4,9 @@
 
 `cas release report <version> --pdf` renders the PDF with Playwright's Chromium in
 print media and light scheme, with disclosures expanded, network requests blocked
-and 15 mm margins, and writes the A4 copy as `v<version>.pdf`. If Playwright is not
+and 15 mm margins, and writes the A4 copy as `v<version>.pdf`. Its running
+folio prints the document title and "n / N" in the page's `--font-mono` stack and
+`--ink-muted` colour. If Playwright is not
 importable it installs it into a disposable workspace. Without the CLI, print the
 HTML from Chromium with the same settings.
 
@@ -23,7 +25,8 @@ python3 <skills-dir>/cas-release-report/scripts/check-pdf.py \
 
 The script needs PyMuPDF (`import pymupdf`). It writes one PNG per page and a
 `receipt.json` with the page count, out-of-bounds text blocks, a
-`footer_only_last_page` flag and link targets. It exits non-zero on a bounds
+`footer_only_last_page` flag and link targets. Text in the bottom margin counts
+as the running folio only when it is the PDF's title and/or "n / N". It exits non-zero on a bounds
 finding or when the last page holds only the closing folio. The template keeps
 that folio inside the final section so print never starts a page with it.
 

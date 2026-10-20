@@ -25,6 +25,52 @@ const WORKER_ACTION_ENVELOPE_OPEN: &str = "<cas-worker-action ";
 const WORKER_ACTION_ENVELOPE_CLOSE: &str = "</cas-worker-action>";
 const VERIFICATION_DISPATCH_ENVELOPE_OPEN: &str = "<cas-verification-dispatch ";
 const VERIFICATION_DISPATCH_ENVELOPE_CLOSE: &str = "</cas-verification-dispatch>";
+const ASSIGNMENT_ENVELOPE_OPEN: &str = "<cas-assignment ";
+
+fn assignment_phrase_end(prompt: &str) -> Option<usize> {
+    let lowered = prompt.to_ascii_lowercase();
+    [
+        "you have been assigned",
+        "you are assigned",
+        "you're assigned",
+        "assigned task",
+        "you were spawned for task",
+    ]
+    .iter()
+    .filter_map(|phrase| lowered.find(phrase).map(|start| (start, phrase.len())))
+    .min_by_key(|(start, _)| *start)
+    .map(|(start, len)| start + len)
+}
+
+/// Preserve the send-time task binding across daemon, hook and inbox delivery.
+/// An ambiguous current assignment has no task id: uncertainty must deliver.
+pub(crate) fn attach_assignment_envelope(message: &str, task_id: Option<&str>) -> String {
+    let task_attribute = task_id
+        .map(|id| format!(" task_id=\"{}\"", xml_attribute_value(id)))
+        .unwrap_or_default();
+    format!("<cas-assignment{task_attribute}/>\n{message}")
+}
+
+/// Caller text cannot supply a durable server assignment binding. Remove
+/// leading lookalikes at ingress before any server-authored framing is added.
+pub(crate) fn strip_assignment_envelopes(mut message: &str) -> &str {
+    loop {
+        let candidate = message.trim_start();
+        if !(candidate.starts_with(ASSIGNMENT_ENVELOPE_OPEN)
+            || candidate.starts_with("<cas-assignment/>"))
+        {
+            return message;
+        }
+        let Some(end) = candidate.find('>') else {
+            return message;
+        };
+        message = candidate[end + 1..].trim_start();
+    }
+}
+
+pub(crate) fn is_assignment_prompt(prompt: &str) -> bool {
+    assignment_phrase_end(prompt).is_some()
+}
 
 /// The task id an assignment-like prompt asks its recipient to start.
 ///
@@ -34,20 +80,16 @@ const VERIFICATION_DISPATCH_ENVELOPE_CLOSE: &str = "</cas-verification-dispatch>
 /// transport. Spawn briefs use the same imperative shape and therefore belong
 /// to this contract too.
 pub(crate) fn assignment_solicited_task_id(prompt: &str) -> Option<String> {
-    let lowered = prompt.to_lowercase();
-    const ASSIGNMENT_PHRASES: [&str; 5] = [
-        "you have been assigned",
-        "you are assigned",
-        "you're assigned",
-        "assigned task",
-        "you were spawned for task",
-    ];
-    if !ASSIGNMENT_PHRASES
-        .iter()
-        .any(|phrase| lowered.contains(phrase))
-    {
-        return None;
+    if prompt.starts_with(ASSIGNMENT_ENVELOPE_OPEN) || prompt.starts_with("<cas-assignment/>") {
+        let tag = prompt.get(..prompt.find('>')?)?;
+        return xml_attribute(tag, "task_id")
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
     }
+    // Legacy/director prompts have no binding. Only inspect the assignment
+    // clause: a prior task's close receipt or quoted start command is context.
+    let prompt = &prompt[assignment_phrase_end(prompt)?..];
+    let lowered = prompt.to_ascii_lowercase();
     for marker in [
         "action=start id=",
         "task id:",
@@ -1181,6 +1223,34 @@ pub(crate) fn parse_merge_request_envelope(prompt: &str) -> Option<MergeRequestE
     let start = prompt.rfind(MERGE_ENVELOPE_OPEN)? + MERGE_ENVELOPE_OPEN.len();
     let end = prompt[start..].find(MERGE_ENVELOPE_CLOSE)? + start;
     serde_json::from_str(&prompt[start..end]).ok()
+}
+
+/// cas-9c34: a supervisor acting on a parked task (worktree_merge, even one
+/// refused while CI is pending, or request_changes) has read that task's
+/// merge request. Acknowledge each unacked merge_request envelope for
+/// `task_id` addressed to `supervisor` in its factory session, so neither the
+/// supervisor_unread alarm nor the sender's stall bounce calls it unread.
+/// Only typed envelopes for exactly this task qualify; other mail is untouched.
+pub(crate) fn ack_merge_requests_acted_on(
+    queue: &dyn cas_store::PromptQueueStore,
+    supervisor: &cas_types::Agent,
+    task_id: &str,
+) -> usize {
+    let Some(session) = supervisor.factory_session.as_deref() else {
+        return 0;
+    };
+    if supervisor.role != cas_types::AgentRole::Supervisor || task_id.trim().is_empty() {
+        return 0;
+    }
+    let rows = queue
+        .unacked_for_targets_naming(&[supervisor.name.as_str(), "supervisor"], session, task_id, 50)
+        .unwrap_or_default();
+    rows.into_iter()
+        .filter(|row| {
+            parse_merge_request_envelope(&row.prompt).is_some_and(|envelope| envelope.task_id == task_id)
+        })
+        .filter(|row| queue.ack(row.id).is_ok())
+        .count()
 }
 
 /// A worker's CAS-framed blocker escalation (cas-8725).

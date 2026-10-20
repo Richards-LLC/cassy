@@ -46,6 +46,18 @@ impl Config {
         };
 
         match key {
+            "slack.stakeholder_contacts" => {
+                let policies: Vec<StakeholderContactPolicy> = serde_json::from_str(value)
+                    .map_err(|error| MemError::Parse(format!("Invalid stakeholder_contacts JSON: {error}")))?;
+                let mut seen = std::collections::BTreeSet::new();
+                for policy in &policies {
+                    policy.validate().map_err(MemError::Parse)?;
+                    if !seen.insert((&policy.workspace_id, &policy.user_id)) {
+                        return Err(MemError::Parse("Duplicate stakeholder workspace/user policy".into()));
+                    }
+                }
+                self.slack.get_or_insert_with(Default::default).stakeholder_contacts = policies;
+            }
             "factory.commander_mirror_enabled" => {
                 self.factory.get_or_insert_with(Default::default).commander_mirror_enabled =
                     value.parse().map_err(|_| MemError::Parse(

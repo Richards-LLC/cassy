@@ -217,10 +217,12 @@ pub use loop_store::{LOOP_SCHEMA, LoopStore, SqliteLoopStore};
 
 // Verification store for task quality gates
 pub use verification_store::{
+    REQUEST_CHANGES_AUDIT_PREFIX, request_changes_audit_note,
     IssuedVerifierCapability, ParentDependencyUpdate, ProofScopeCorrectionOutcome,
     RequestChangesBoundary, RequestChangesOutcome, SqliteVerificationStore,
     TaskReopenLifecycleOutbox, VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT,
     VERIFICATION_SCHEMA, VerificationStore, add_system_verification, add_verification_with_conn,
+    adopt_orphaned_verification_dispatches,
     bind_server_verifier_handoff, bind_server_verifier_handoff_and_register_child,
     bind_verifier_capability, cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
@@ -712,6 +714,24 @@ pub trait TaskStore: Send + Sync {
     /// general write path.
     fn update(&self, task: &Task) -> Result<DateTime<Utc>>;
 
+    /// Apply a local read-modify-write only while the expected status and
+    /// store-owned clock still match. Refusal has no row, event or receipt
+    /// effects. Unlike replication, this may advance an active local delivery.
+    fn update_if_current(&self, task: &Task, expected: &Task) -> Result<DateTime<Utc>> {
+        self.update_if_current_with_mutation_receipt(task, expected, "")
+    }
+
+    /// The same guarded write, with its durable receipt in the transaction.
+    /// Implementations without atomic support must fail closed.
+    fn update_if_current_with_mutation_receipt(
+        &self,
+        _task: &Task,
+        _expected: &Task,
+        _receipt_id: &str,
+    ) -> Result<DateTime<Utc>> {
+        Err(StoreError::Other("atomic guarded task updates are unsupported by this store".into()))
+    }
+
     /// Apply a replicated row only if the expected local clock still matches.
     /// Lifecycle changes are also refused while a local delivery transaction
     /// owns the task. An active execution lease protects InProgress from
@@ -773,6 +793,33 @@ pub trait TaskStore: Send + Sync {
 
     /// List tasks with optional status filter
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>>;
+
+    /// IDs owned by any named assignee in any supplied status. Empty filters
+    /// match nothing. Assignee names are ASCII case-insensitive, like routing.
+    /// SQLite overrides this to avoid decoding the project's task backlog.
+    fn ids_by_assignees_and_statuses(
+        &self,
+        assignees: &[&str],
+        statuses: &[TaskStatus],
+    ) -> Result<Vec<String>> {
+        let mut ids = Vec::new();
+        if assignees.is_empty() {
+            return Ok(ids);
+        }
+        for status in statuses {
+            for task in self.list(Some(*status))? {
+                if task.assignee.as_deref().is_some_and(|owner| {
+                    assignees
+                        .iter()
+                        .any(|name| owner.eq_ignore_ascii_case(name))
+                }) && !ids.contains(&task.id)
+                {
+                    ids.push(task.id);
+                }
+            }
+        }
+        Ok(ids)
+    }
 
     /// Find a lane owner through the store's visibility policy, preferring a
     /// live epic over historical terminal records.

@@ -1,0 +1,112 @@
+use super::*;
+use crate::coordination::binding_intake::ChannelDisposition;
+use std::time::Duration;
+
+const PROJECT: &str = "qa.invalid/v1-receipts";
+const MANAGED: &str = "C0QARECEIPT";
+const FOREIGN: &str = "C0FOREIGN";
+
+/// Cloud's approved r1 example, retargeted to this fixture's team.
+fn receipt_case(index: usize, team: &str) -> String {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/binding_reconciliation/v1/cloud-receipt-identity-r1.json"
+    ))
+    .unwrap();
+    fixture["cases"][index]["response"]
+        .to_string()
+        .replace("qa-v1-receipt-team", team)
+}
+
+/// A definite refusal: Cloud found the channel mapped to another project.
+fn foreign_refusal() -> String {
+    serde_json::json!({
+        "schema": "cassy.binding-reconciliation/v1",
+        "code": "mapping_conflict", "reason": "mapping_project_mismatch",
+        "guidance": "This channel is mapped to another project.",
+        "scope": null, "binding": null, "strict_activation": null, "activation_id": null,
+        "fence_receipt": null, "latest_attempt": null, "settled": null, "blockers": null,
+        "retry_after_secs": null, "next_action": "explicit_relink"
+    })
+    .to_string()
+}
+
+/// Violet lists two mappings for this project (and one for another project);
+/// Cloud refuses the foreign one and manages the other. A second update is
+/// idempotent: the managed channel keeps its original fence evidence.
+#[test]
+fn cas_9021_update_reconciles_violet_mappings_and_names_blockers() {
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let root = env.home().join("project/.cas");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id = {PROJECT:?}\n")).unwrap();
+    let team = uuid::Uuid::new_v4().to_string();
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", server.server_addr());
+    let config = CloudConfig {
+        endpoint: endpoint.clone(),
+        token: Some("ordinary-fixture-user".into()),
+        team_id: Some(team.clone()),
+        ..Default::default()
+    };
+    config.save_to_cas_dir(&root).unwrap();
+
+    let serving = team.clone();
+    let remote = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for managed_case in [0, 1] {
+            let mut answers = vec![
+                serde_json::json!({"channels": [
+                    {"channel_id": MANAGED, "channel_name": "receipts", "project_id": PROJECT},
+                    {"channel_id": FOREIGN, "channel_name": "foreign", "project_id": PROJECT},
+                    {"channel_id": "C0ELSEWHERE", "channel_name": "other", "project_id": "other/project"},
+                ]})
+                .to_string(),
+            ];
+            for body in [foreign_refusal(), receipt_case(managed_case, &serving)] {
+                answers.push(serde_json::json!({"projects": [{"id": "project-id", "canonical_id": PROJECT, "name": "fixture", "contributor_count": 0, "memory_count": 0}]}).to_string());
+                answers.push(body);
+            }
+            for answer in answers {
+                let request = server.recv_timeout(Duration::from_secs(10)).unwrap().expect("request");
+                seen.push(format!("{} {}", request.method(), request.url()));
+                let status = if answer.contains("mapping_project_mismatch") { 409 } else { 200 };
+                request
+                    .respond(
+                        tiny_http::Response::from_string(answer)
+                            .with_status_code(status)
+                            .with_header(tiny_http::Header::from_bytes("Cache-Control", "no-store").unwrap()),
+                    )
+                    .unwrap();
+            }
+        }
+        assert!(server.try_recv().unwrap().is_none(), "no other channel is touched");
+        seen
+    });
+
+    let run = || reconcile_with(&root, &config, &format!("{endpoint}/mcp/slack"), false, true).unwrap();
+    for _ in 0..2 {
+        let ProjectPhase::Warning(detail) = run() else { panic!("a refused channel is a warning") };
+        assert!(detail.starts_with(&format!("Slack {FOREIGN} blocked: ")), "{detail}");
+        assert!(
+            detail.ends_with(&format!("; resolve the mapping with `cas integrate violet --channel {FOREIGN}`, then rerun `cas update`")),
+            "{detail}"
+        );
+    }
+    let seen = remote.join().unwrap();
+    assert_eq!(seen[0], format!("GET /api/channels?project_id={}", PROJECT.replace('/', "%2F")));
+    assert_eq!(seen.iter().filter(|line| line.starts_with("POST ")).count(), 4);
+
+    let state = IntakeJournal::new(&root).read().unwrap();
+    let disposition = |channel: &str| {
+        state.policies.iter().find(|p| p.scope.channel_id == channel).unwrap().disposition.clone()
+    };
+    assert_eq!(disposition(FOREIGN), ChannelDisposition::LegacyAllowed, "a definite refusal leaves legacy intake as it was");
+    let ChannelDisposition::Managed { completion, .. } = disposition(MANAGED) else { panic!("managed") };
+    assert_eq!(completion.activation_id.as_deref(), Some("22222222-2222-4222-8222-222222222222"));
+    assert_eq!(
+        completion.fence_receipt.as_ref().map(|fence| fence.id.as_str()),
+        Some("11111111-1111-4111-8111-111111111111"),
+        "the repeat keeps the original fence"
+    );
+    assert_eq!(state.pauses.len(), 2, "a rerun reuses each channel's pause");
+}

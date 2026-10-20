@@ -107,6 +107,26 @@ request fields naming another worker do not credit that worker. Open harness
 tool calls and live worker-owned child processes continue to count as activity;
 unrelated process trees and persistent MCP sidecars do not.
 
+Claude MCP responses append factory mail only when the call's tool-use id
+belongs to the registered parent's top-level transcript. Subagent and untagged
+Claude calls preserve the parent mailbox. Transport handoff remains provisional:
+the parent's next turn can surface the body without an explicit poll. Overflow
+notes name the unread message id and summary; the next eligible turn or tool
+boundary retries bodies that did not fit. `message_status` reports
+`recipient_receipt` separately for transport handoff and rendered context.
+
+Abandoned queue messages report `undelivered` in the `message_status` header
+and JSON `legacy_status`, even though their queue rows are processed. A sender
+notice preserves the wake-gate refusal when one was recorded. Authenticated
+messages whose sender has ended use the existing local supervisor fallback;
+that supervisor receives each original source, summary and complete body in an
+ordinary inbox row. These recovery notices do not fold into the routine
+ended-worker digest. Large originals remain readable through `inbox_poll`.
+Recovery rows require daemon origin, the delivery-watchdog source and their
+recovery dedupe marker; assignment checks in the daemon and inbox poll treat
+these original bodies as history. A caller-supplied watchdog name cannot claim
+that exemption.
+
 For delivery diagnosis, the `prompt_queue` and its receipt tables live in the
 project's `.cas/cas.db`. Open it read-only to avoid creating a misleading empty
 database at a guessed path. Writable prompt-queue opens remove a regular empty
@@ -157,6 +177,15 @@ reminders; original owner and target IDs stay in the durable reminder record.
 
 Recipient drains revalidate typed lifecycle relays against the task's current
 terminal state before recording surfacing or spending the hook body budget.
+Supervisor assignment messages retain their explicit `task_id`, or the worker's
+unambiguous current assignment, in a durable task binding. When the sole current
+task has started, an assignment clause naming another task binds that next task,
+even before its assignee is updated. Binding and merge selection query only the
+recipient's tasks in the relevant statuses. A previous task's close receipt or a
+caller-supplied `<cas-assignment>` tag cannot change the server binding. A stale
+assignment send returns an explicit refusal naming its task and status and a
+`pass task_id=<id>` hint, including a withdrawal during the sender's first-delivery
+wait.
 An obsolete relay is retained with `superseded_stale`, its task/status reason
 and a terminal-task reconciliation acknowledgement. Hooks, named wakes, inbox
 polls and repeats of earlier polls share this atomic guard; notification ids
@@ -651,6 +680,29 @@ no browsers or Cargo: `python3 scripts/test-worker-memory.py`.
 
 Before claiming a change done, workers must add one pre-close task-note line for every applicable surface (and state `not applicable` for the rest): builtin skill/agent → Claude + Codex + Grok mirrors (`cas-8921`); MCP tool → CLI parity, docs, dispatch; hook/gate → `config_gen` + `.codex/hooks.json`; migration → bootstrap/reconciliation pins + `doctor_snapshot` (`cas-96f9`/m232); behavior contract → grep sibling old-contract tests (`cas-2327`/`cas-bc13`); state transition → reverse states; user-visible behavior → release-notes impact. This compact walk prevents a tested path from silently missing its sibling surfaces.
 
+### Portable proof artifacts
+
+`artifact action=publish task_id=<id> path=<log> note_type=platform_proof
+notes="<platform, command, revision, result>"` publishes and appends a proof note
+in one MCP call. Use `loaded_proof` for loaded evidence. A failed Cloud commit
+keeps the local artifact record but does not append a portable proof claim.
+The note carries the committed record (including Cloud id, size and SHA-256),
+so normal task sync transports it without syncing machine-local paths or a
+new artifact store. An existing committed id cited in `task action=notes` is
+attached the same way. Citing an unpublished artifacts-root path warns the
+writer without discarding the note.
+
+On the receiving machine, `artifact action=fetch task_id=<id> id=<art-id>` or
+`cas artifact fetch --task <id> <art-id>` resolves that note through the existing
+Cloud signed-view endpoint, verifies size and SHA-256 using the artifact
+relay's download path, and atomically writes a local copy under the receiving
+task's scoped artifacts directory. It imports the record into the existing
+artifact ledger, making `show`, `list` and close citations usable there too.
+`--json` returns `artifact_id`, `path`, `sha256` and `size_bytes`. No signed URL
+or bearer is included in the note, output or saved record. Fetch requires the
+synced task and Cloud credentials; proof interpretation remains the verifier's
+responsibility. Task note mutation remains MCP-only; CLI publish is unchanged.
+
 ### Evidence-only task close
 
 Close reasons claiming third-party or future proof must cite a receipt beside
@@ -871,6 +923,16 @@ Task creation excludes common planning words and prose such as `NOT` and
 `before/after` from distinctive identifiers. Generic-only title overlaps
 require near identity; exact duplicate titles and concrete code/path overlap
 still warn. Intentional duplicates retain the `confirm_warning=true` escape.
+
+### Task start cancellation
+
+`task action=start` commits its local lease and InProgress status before awaiting
+Cloud handoff or parent-epic claim work. Those requests share the existing
+8-second peer budget. A response deadline after the local transition reports
+COMMITTED, including when notification and sync wrappers are disabled. Re-query
+the task before retrying. A failed lease acquisition leaves status unchanged;
+a failed status write releases only the lease generation acquired by that start.
+A sync-publication error after the local commit keeps the matching lease.
 
 ### Task lease release
 
@@ -1230,7 +1292,28 @@ and the only gate to `main`; its required checks, including the Rust suite, run
 once on the exact merged tree. Commander journeys run there only when `hub-web/`
 product inputs change. Do not add lane-merge compile checks, park re-runs or a
 separate assembly journey run. If more than two merge-queue ejections per epic
-follow from this, unset `CAS_LANE_SLIM`: that one setting is the D1 rollback. The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
+follow from this, unset `CAS_LANE_SLIM`: that one setting is the D1 rollback.
+
+Factory pushes start in `.github/workflows/lane.yml` (cas-32e9), also named
+`CI`. With `CAS_LANE_SLIM=true` it runs only Classify CI diff, the two Scoped
+Validation checks (Docs Lint for a docs-only diff) under their usual names, so a
+lane is not held up by dozens of skipped `ci.yml` jobs. Unset, it calls `ci.yml`
+and the lane runs exactly as before. When the repository variable
+`CASSY_LANE_SELF_HOSTED` is `enabled` (cas-14e0), those slim jobs run on the
+local light lane slots instead of waiting for a hosted slot: runner slots 3
+and 4 (cas-3b5e) carry only the `cas-lane-light` label, so merge-queue and
+release Rust jobs keep slots 1 and 2 (`cas-ci-32core`). The light units run at
+`Nice=10`, `CPUWeight=25`, `CPUQuota=200%` and `CARGO_BUILD_JOBS=2`, with no
+sccache; `scripts/install-cassy-actions-runner.sh` provisions them
+(`RUNNER_SLOT=3|4`). `lane.yml` has no pull request trigger, so forks
+never reach those runners; `scripts/ci_tiers/test-policy.py` pins the routing.
+Rollback is one setting: `gh variable delete CASSY_LANE_SELF_HOSTED --repo
+Richards-LLC/cassy` keeps the slim lane on hosted runners, and unsetting
+`CAS_LANE_SLIM` restores the full lane. Retiring the light slots also means
+`systemctl disable --now cassy-actions-runner-3 cassy-actions-runner-4` and
+reverting `lane.yml`'s label.
+
+The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
 epic close gate accepts a local `ASSEMBLY_PROOF`, it covers the Rust build and
 suite only; it does not replace the queue's path to `main` or require a
 journey receipt.
@@ -2347,6 +2430,12 @@ skips one that no longer resolves or is unsafe. Roots that 3.50.0 stored in
 set factory.write_roots` moves them into `config.toml` (an empty value clears
 them too).
 
+For a support loop, the operator can include `~/.gabber-support` in the
+owning project's `factory.write_roots`, preserving any existing entries when
+setting the list. This admits `state.json` beneath that directory; a sibling
+such as `~/.gabber-support-other` stays blocked. Setting the key in the user's
+`~/.cas/config.toml` does not grant project writes.
+
 Each grant admits only its modes; a project root admits all three:
 
 - **create**: a new file, an `apply_patch` add or move, or a `cp`, `tee` or
@@ -2413,11 +2502,15 @@ of reach. A hard boundary needs agents running as a separate Unix user.
 ## Cloud reader slots
 
 Supervisor registration derives a stable Cloud `factory_id` from the machine id,
-canonical project id and supervisor role, so `/clear` and full relaunches retain
-the reader slot. For a second supervisor on the same repo and machine, set
-`factory.slot_id` to a distinct value and keep it across relaunches. An explicit
-override also lets a successor on another machine address that same slot.
-Without enough identity to derive a slot, registration falls back to
+canonical project id, supervisor role and the registered agent's factory session.
+Concurrent factory sessions on one clone receive separate slots. A successor
+agent after `/clear` or a restart of the same named factory session keeps its
+slot. Non-factory supervisors retain the legacy machine/project/role slot.
+
+Set `factory.slot_id` to retain a particular slot across different factory
+sessions or machines. Sharing an explicit override intentionally supersedes the
+earlier registration, so concurrent supervisors should use the default session
+slots. Without enough identity to derive a slot, registration falls back to
 `CAS_FACTORY_ID`, then the agent's factory session. Local
 `metadata.factory_session` still names the actual launch for fleet routing.
 

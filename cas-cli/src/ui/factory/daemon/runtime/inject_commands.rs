@@ -120,7 +120,72 @@ impl FactoryDaemon {
     /// in. Called once per loop pass and at the top of each prompt-queue
     /// pass; never waits.
     pub(crate) async fn advance_urgent_injects(&mut self) {
-        let completions = self.app.mux.advance_injects().await;
+        self.advance_urgent_injects_with_ports(std::time::Instant::now(), |write| {
+            super::store_worker::submit_write("blocked PTY write notice", write);
+        })
+        .await;
+    }
+
+    /// The production handler with clock and off-loop persistence boundaries.
+    pub(super) async fn advance_urgent_injects_with_ports(
+        &mut self,
+        now: std::time::Instant,
+        mut persist: impl FnMut(Box<dyn Fn() -> Result<(), String> + Send>),
+    ) {
+        let completions = self.app.mux.advance_injects_at(now).await;
+        // Observe separately from completion. Returning an error or releasing
+        // the claim on this deadline could retry bytes already partly written.
+        for stalled in self
+            .app
+            .mux
+            .take_stalled_injects(now, super::prompt_queue_jobs::INJECT_OUTCOME_TIMEOUT)
+        {
+            let row =
+                self.urgent_injects
+                    .owners
+                    .get(&stalled.ticket)
+                    .and_then(|owner| match owner {
+                        UrgentInject::NormalRow { delivery, .. }
+                        | UrgentInject::Row { delivery, .. } => Some(delivery.queued.id),
+                        UrgentInject::BroadcastMember { row, .. }
+                        | UrgentInject::ContextReset { row, .. } => Some(*row),
+                        UrgentInject::Operator { .. } => None,
+                    });
+            // Include the original pane incarnation: ticket counters restart
+            // with a daemon, and a same-name respawn must be a new episode.
+            let occurrence = serde_json::json!([
+                self.session_name.as_str(),
+                stalled.pane_id.as_str(),
+                format!("{:?}", stalled.pane_spawned_at),
+                stalled.ticket.get(),
+                row,
+            ])
+            .to_string();
+            let pane = stalled.pane_id;
+            let detail = format!(
+                "PTY payload or submit write to pane {pane}, ticket {}, queue row {}, \
+                     was still pending after {}s at detection. The write may be partial. \
+                     CAS retains the original receipt and ownership; do not resend the message. \
+                     Inspect the pane and recover or explicitly close/respawn it if it cannot read. \
+                     Physical completion/failure or pane-incarnation loss releases the command; \
+                     this deadline does not mark it Delivered or prove a turn started.",
+                stalled.ticket.get(),
+                row.map_or_else(|| "operator/unknown".into(), |row| row.to_string()),
+                stalled.pending_for.as_secs(),
+            );
+            let cas_dir = self.app.cas_dir().to_path_buf();
+            persist(Box::new(
+                move || match super::lifecycle::enqueue_blocked_pty_write_relay(
+                    &cas_dir,
+                    &pane,
+                    &detail,
+                    &occurrence,
+                ) {
+                    super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. } => Ok(()),
+                    _ => Err("blocked PTY write relay not yet persisted".to_string()),
+                },
+            ));
+        }
         self.start_operator_backlog().await;
         for completion in completions {
             let Some(owner) = self.urgent_injects.owners.remove(&completion.ticket) else {

@@ -50,6 +50,42 @@ pub struct SlackConfig {
     /// started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub violet_bot_user_ids: Option<Vec<String>>,
+    /// Desired Cloud policies. Until capability negotiation succeeds these
+    /// produce local warnings, never a claim of shared exclusion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stakeholder_contacts: Vec<StakeholderContactPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StakeholderContactPolicy {
+    pub workspace_id: String,
+    pub user_id: String,
+    pub minimum_interval_secs: u64,
+    #[serde(default)]
+    pub mode: StakeholderContactMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StakeholderContactMode {
+    #[default]
+    Refuse,
+    Warn,
+}
+
+impl StakeholderContactPolicy {
+    pub fn validate(&self) -> Result<(), String> {
+        let slack_id = |id: &str, prefix: char| {
+            id.starts_with(prefix) && id.len() > 1 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+        };
+        if !slack_id(&self.workspace_id, 'T') || !(slack_id(&self.user_id, 'U') || slack_id(&self.user_id, 'W'))
+            || self.minimum_interval_secs == 0 || self.minimum_interval_secs > i64::MAX as u64
+        {
+            return Err("stakeholder_contacts requires Slack workspace T…, user U…/W…, and a positive minimum_interval_secs".into());
+        }
+        Ok(())
+    }
 }
 
 impl SlackConfig {
@@ -633,7 +669,7 @@ impl BuildGuardConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactoryConfig {
     /// Stable Cloud reader slot override. Unset derives a supervisor slot
-    /// from machine + canonical project, independent of launch/session ids.
+    /// from machine + canonical project + factory session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot_id: Option<String>,
     /// Claude launch options shared by initial, dynamic and recycled agents.

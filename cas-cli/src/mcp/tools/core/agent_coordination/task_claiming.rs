@@ -1,3 +1,4 @@
+use crate::mcp::tools::core::task::audit;
 use crate::harness_policy::is_supervisor_from_env;
 use crate::mcp::tools::core::imports::*;
 
@@ -751,16 +752,14 @@ impl CasCore {
         let prior_assignee = task.assignee.clone();
         task.status = TaskStatus::Open;
         task.assignee = None;
-        let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
         // cas-86c5: note whether the reset was forced (live worker override).
         let recovery_kind = if req.force.unwrap_or(false) {
             "forced reset (alive-worker guard bypassed)"
         } else {
             "dead-session recovery"
         };
-        let audit = format!(
-            "[{ts}] reset: force-transitioned {prior_status:?}→Open (prior assignee: {}, lease released: {lease_released}) — {recovery_kind}",
-            prior_assignee.as_deref().unwrap_or("<none>")
+        let audit = audit::reset_note(
+            chrono::Utc::now(), prior_status, prior_assignee.as_deref(), lease_released, recovery_kind,
         );
         task.notes = if task.notes.is_empty() {
             audit

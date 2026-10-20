@@ -24,7 +24,7 @@ class PolicyTests(unittest.TestCase):
         for entry in cls.entries + prose:
             cls.files.update(entry['source'].get('files', [entry['source'].get('file')]))
         # Workflow sources the behavioural cases below read beyond the registry.
-        cls.files.update(['.github/actions/setup-rust-linux/action.yml', '.github/workflows/release.yml'])
+        cls.files.update(['.github/actions/setup-rust-linux/action.yml', '.github/workflows/release.yml', '.github/workflows/lane.yml'])
 
     def setUp(self):
         self.owner = tempfile.TemporaryDirectory(prefix='ci-policy-')
@@ -193,16 +193,65 @@ fi
             self.assertFalse(valid(changed))
 
     @staticmethod
-    def gh_expr(expression, context):
-        """Evaluate a GitHub `if:` expression over a flat context mapping."""
+    def gh_value(expression, context):
+        """Evaluate a GitHub expression over a flat context mapping."""
         import re
         body = expression.strip()
         if body.startswith('${{') and body.endswith('}}'):
             body = body[3:-2]
+        elif not any(op in body for op in ('==', '!=', '&&', '||', '(')):
+            return body  # a literal such as runs-on: ubuntu-latest
         body = re.sub(r'\b(?:github|needs|steps|vars)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
         body = body.replace('always()', 'True').replace('&&', ' and ').replace('||', ' or ')
         body = re.sub(r'!(?!=)', ' not ', body)
-        return bool(eval(body, {'__builtins__': {}, 'startsWith': lambda a, b: str(a).startswith(b)}))
+        return eval(body, {'__builtins__': {}, 'startsWith': lambda a, b: str(a).startswith(b), 'fromJSON': json.loads})
+
+    @classmethod
+    def gh_expr(cls, expression, context):
+        """Evaluate a GitHub `if:` expression over a flat context mapping."""
+        return bool(cls.gh_value(expression, context))
+
+    def test_slim_factory_lanes_run_only_in_lane_yml_on_opted_in_runners_cas_32e9_cas_3b5e(self):
+        """cas-14e0/cas-32e9: factory pushes start in lane.yml. Slim on: only
+        the named lane jobs run, locally when CASSY_LANE_SELF_HOSTED is enabled.
+        Slim off: the full ci.yml is called. No fork-capable trigger reaches
+        the local runners, and ci.yml routes nothing else there."""
+        lane = policy.load(self.root / '.github/workflows/lane.yml')
+        ci = self.ci()
+        local = ['self-hosted', 'Linux', 'X64', 'cas-lane-light']
+        self.assertEqual((lane['name'], ci['name']), ('CI', 'CI'), 'ci_completed and the CI watcher select runs by name')
+        # cas-3b5e: the light slots take lanes only; the 12-way Rust jobs of the
+        # merge queue and release never select them.
+        for source in ('ci.yml', 'release.yml'):
+            text = (self.root / '.github/workflows' / source).read_text()
+            self.assertNotIn('cas-lane-light', text, source)
+        self.assertNotIn('cas-ci-32core', json.dumps(lane['jobs']))
+        self.assertEqual(lane['on'], {'push': {'branches': ['factory/**']}})
+        self.assertNotIn('factory/**', ci['on']['push']['branches'])
+        self.assertIn('workflow_call', ci['on'])
+        self.assertNotIn('pull_request_target', ci['on'])
+        jobs = lane['jobs']
+        self.assertEqual(jobs['full']['uses'], './.github/workflows/ci.yml')
+        slim_jobs = {name: job for name, job in jobs.items() if name != 'full'}
+        self.assertEqual(
+            {job['name'] for job in slim_jobs.values()},
+            {'Classify CI diff', 'Docs Lint', 'Scoped Validation (fast)', 'Scoped Validation (factory/PR)'},
+            'merge admission and the CI watchers read these exact check names')
+        for slim in ('true', '', 'false'):
+            ctx = {'vars.CAS_LANE_SLIM': slim, 'needs.ci-diff.outputs.class': 'rust-touched'}
+            self.assertEqual(self.gh_expr(jobs['full']['if'], ctx), slim != 'true', slim)
+            for name in ('ci-diff', 'scoped-validation-fast', 'scoped-validation'):
+                with self.subTest(job=name, slim=slim):
+                    self.assertEqual(self.gh_expr(slim_jobs[name]['if'], ctx), slim == 'true')
+        for name, job in slim_jobs.items():
+            with self.subTest(job=name):
+                runner = lambda enabled: self.gh_value(job['runs-on'], {'vars.CASSY_LANE_SELF_HOSTED': enabled})
+                self.assertEqual(runner('enabled'), local)
+                for off in ('', 'disabled'):
+                    self.assertEqual(runner(off), 'ubuntu-latest')
+        for name, job in ci['jobs'].items():
+            if name != 'fast-validation-runner-route':
+                self.assertNotIn('cas-ci-32core', json.dumps(job.get('runs-on', '')), name)
 
     def test_macos_check_warms_main_cache_but_stays_off_branch_pushes_cas_861c0(self):
         job = self.ci()['jobs']['macos-check']

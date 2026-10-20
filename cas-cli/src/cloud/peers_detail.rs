@@ -114,6 +114,8 @@ pub struct PeerEpicSplit {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerReport {
+    #[cfg(feature = "mcp-proxy")]
+    pub stakeholder_contacts: serde_json::Value,
     pub status: String,
     /// Original Cloud activation read for this registration; status-only, never authority.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,6 +176,8 @@ impl PeerReport {
             })
             .collect();
         Self {
+            #[cfg(feature = "mcp-proxy")]
+            stakeholder_contacts: serde_json::json!({"state":"not_requested"}),
             activation: None,
             observed_at: now,
             limitations: vec![
@@ -262,6 +266,63 @@ fn belongs_to_peer(
                 super::project_ids_match_with_aliases(repo, peer_repo, aliases)
             })
         })
+}
+
+/// A live worker in a peer supervisor's factory session (cas-9f53), as
+/// `peers detail=true` lists it. It takes instructions only from its own
+/// supervisor, so a message for it is relayed through that supervisor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerWorkerRef {
+    pub name: String,
+    pub machine: String,
+    pub supervisor: Peer,
+}
+
+impl PeerWorkerRef {
+    /// Whether `target` (`name` or `name@machine`) addresses this worker.
+    pub fn matches(&self, target: &str) -> bool {
+        let (name, machine) = match target.trim().rsplit_once('@') {
+            Some((name, machine)) => (name, Some(machine)),
+            None => (target.trim(), None),
+        };
+        self.name.eq_ignore_ascii_case(name)
+            && machine.is_none_or(|machine| {
+                self.machine.eq_ignore_ascii_case(machine)
+                    || self
+                        .supervisor
+                        .machine_id
+                        .as_deref()
+                        .is_some_and(|id| id.eq_ignore_ascii_case(machine))
+            })
+    }
+}
+
+/// The live workers `peers detail=true` shows under each supervisor: same
+/// membership and liveness rules, so a name it lists is resolvable here.
+pub fn live_peer_workers(
+    supervisors: &[Peer],
+    agents: &[AgentInfo],
+    aliases: &[String],
+    now: DateTime<Utc>,
+) -> Vec<PeerWorkerRef> {
+    supervisors
+        .iter()
+        .flat_map(|supervisor| {
+            let owner = agents.iter().find(|a| a.id == supervisor.agent_id);
+            agents
+                .iter()
+                .filter(move |agent| belongs_to_peer(agent, supervisor, owner, aliases))
+                .filter(move |agent| {
+                    matches!(agent.status.as_str(), "active" | "idle")
+                        && heartbeat_age(agent, now).is_some_and(|age| age <= peers::PEER_LIVE_SECS)
+                })
+                .map(move |agent| PeerWorkerRef {
+                    name: agent.name.clone(),
+                    machine: supervisor.machine.clone(),
+                    supervisor: supervisor.clone(),
+                })
+        })
+        .collect()
 }
 
 /// Assemble observations from a single agents snapshot and active leases.
@@ -383,6 +444,10 @@ pub fn discover_peer_report(
 ) -> Result<PeerReport, CasError> {
     let detail = detail || selected.is_some();
     let mut report = PeerReport::new(cas_root, self_id, detail);
+    #[cfg(feature = "mcp-proxy")]
+    if detail {
+        report.stakeholder_contacts = crate::coordination::stakeholder_contacts::StakeholderContacts::from_project(cas_root).status();
+    }
     let Some(repo) = report.canonical_id.as_deref() else {
         report.status = "no_project_identity".into();
         report.error = Some("project has no canonical id; configure [project] canonical_id".into());
@@ -665,10 +730,7 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                 "  Session {}",
                 peer.session.as_deref().unwrap_or("-")
             ));
-            line(format!(
-                "  Focus   {}",
-                peer.focus.as_deref().unwrap_or("-")
-            ));
+            line(format!("  Epic    {}", peer.epic_label()));
             line(format!("  Heartbeat {}s ago", peer.heartbeat_age_secs));
             if !report.detail {
                 continue;
@@ -810,6 +872,12 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                     .map(|t| t.to_rfc3339())
                     .unwrap_or_else(|| "unknown".into())
             ));
+        }
+    }
+    #[cfg(feature = "mcp-proxy")]
+    if report.detail {
+        for contact_line in crate::coordination::stakeholder_contacts::render_status(&report.stakeholder_contacts) {
+            line(contact_line);
         }
     }
     for mailbox_line in report.mailbox_status.lines() {

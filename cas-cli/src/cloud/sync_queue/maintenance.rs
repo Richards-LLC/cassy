@@ -4,6 +4,33 @@ use rusqlite::params;
 use crate::cloud::sync_queue::SyncQueue;
 use crate::error::CasError;
 
+const MAX_AUTOMATIC_NETWORK_REARMS: i32 = 1;
+
+fn is_transient_network_error(error: &str) -> bool {
+    let Some(message) = error.strip_prefix("Network error:") else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    if ["auth", "401", "403", "unauthorized", "forbidden", "reject"]
+        .iter()
+        .any(|term| message.contains(term))
+    {
+        return false;
+    }
+
+    [
+        "dns",
+        "resolve",
+        "lookup",
+        "connect",
+        "connection",
+        "timeout",
+        "timed out",
+    ]
+    .iter()
+    .any(|term| message.contains(term))
+}
+
 fn parse_numeric_version(value: &str) -> Option<(u64, u64, u64)> {
     let core = value.trim().strip_prefix('v').unwrap_or(value.trim());
     let core = core.split(['-', '+']).next()?;
@@ -293,7 +320,7 @@ impl SyncQueue {
     pub fn retry_failed(&self, max_retries: i32) -> Result<usize, CasError> {
         let conn = self.conn.lock().unwrap();
         let reset = conn.execute(
-            "UPDATE sync_queue SET retry_count = 0 WHERE retry_count >= ?1",
+            "UPDATE sync_queue SET retry_count = 0, auto_rearm_count = 0 WHERE retry_count >= ?1",
             params![max_retries],
         )?;
         Ok(reset)
@@ -315,13 +342,76 @@ impl SyncQueue {
         let conn = self.conn.lock().unwrap();
         let reset = conn.execute(
             "UPDATE sync_queue
-             SET retry_count = 0
+             SET retry_count = 0, auto_rearm_count = 0
              WHERE retry_count >= ?1
                AND last_error IS NOT NULL
                AND instr(lower(last_error), lower(?2)) > 0",
             params![max_retries, reason],
         )?;
         Ok(reset)
+    }
+
+    /// Re-arm exhausted transient network failures for a team after a Cloud
+    /// push succeeds. Each row gets one automatic retry budget; auth,
+    /// rejections and intentional parks remain terminal until an explicit
+    /// retry or a new local mutation.
+    pub fn rearm_transient_network_failures_after_success(
+        &self,
+        team_id: &str,
+        max_retries: i32,
+    ) -> Result<usize, CasError> {
+        if team_id.trim().is_empty() || max_retries <= 0 {
+            return Ok(0);
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let candidates = {
+            let mut stmt = tx.prepare(
+                r#"
+                SELECT id, last_error
+                FROM sync_queue
+                WHERE team_id = ?1
+                  AND retry_count >= ?2
+                  AND auto_rearm_count < ?3
+                  AND last_error IS NOT NULL
+                  AND COALESCE(last_outcome, '') NOT IN ('rejected', 'parked')
+                "#,
+            )?;
+            stmt.query_map(
+                params![team_id, max_retries, MAX_AUTOMATIC_NETWORK_REARMS],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+
+        let mut rearmed = 0;
+        for (id, error) in candidates {
+            if !is_transient_network_error(&error) {
+                continue;
+            }
+            rearmed += tx.execute(
+                r#"
+                UPDATE sync_queue
+                SET retry_count = 0, last_error = NULL, auto_rearm_count = auto_rearm_count + 1
+                WHERE id = ?1
+                  AND team_id = ?2
+                  AND retry_count >= ?3
+                  AND auto_rearm_count < ?4
+                  AND last_error = ?5
+                  AND COALESCE(last_outcome, '') NOT IN ('rejected', 'parked')
+                "#,
+                params![
+                    id,
+                    team_id,
+                    max_retries,
+                    MAX_AUTOMATIC_NETWORK_REARMS,
+                    error
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(rearmed)
     }
 
     /// Requeue terminal failures caused by a client version gate once this
@@ -364,7 +454,7 @@ impl SyncQueue {
                 continue;
             }
             requeued += tx.execute(
-                "UPDATE sync_queue SET retry_count = 0, last_error = NULL WHERE id = ?1 AND last_error = ?2",
+                "UPDATE sync_queue SET retry_count = 0, last_error = NULL, auto_rearm_count = 0 WHERE id = ?1 AND last_error = ?2",
                 params![id, error],
             )?;
         }

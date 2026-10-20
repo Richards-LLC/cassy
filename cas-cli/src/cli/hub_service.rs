@@ -97,6 +97,7 @@ struct ServiceReport {
     unit_path: Option<String>,
     log_path: Option<String>,
     hub_running: bool,
+    hub_state: &'static str,
     launch_readiness: Vec<LaunchReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<&'static str>,
@@ -108,6 +109,15 @@ struct LaunchReadiness {
     profile: String,
     ready: bool,
     detail: String,
+}
+
+impl ServiceReport {
+    fn after_start(mut self) -> Self {
+        if !self.hub_running {
+            self.hub_state = "starting";
+        }
+        self
+    }
 }
 
 fn launch_readiness() -> Vec<LaunchReadiness> {
@@ -210,7 +220,7 @@ pub(super) fn manage_service(
         HubServiceCommands::Install(args) => {
             install(platform, cli, tailscale_serve, tailscale_port, args.dry_run)
         }
-        HubServiceCommands::Status => status(platform, cli),
+        HubServiceCommands::Status => status(platform, cli, false),
         HubServiceCommands::Uninstall => uninstall(platform, cli),
     }
 }
@@ -275,7 +285,7 @@ fn install(
                 .status();
             run_manager_vec("launchctl", &launchd_bootstrap_args(&domain, &path))?;
             run_manager_vec("launchctl", &launchd_kickstart_args(&domain))?;
-            status(platform, cli)
+            status(platform, cli, true)
         }
         ServicePlatform::Systemd => {
             let path = systemd_path()?;
@@ -303,7 +313,7 @@ fn install(
                 ["--user", "enable", "--now", SYSTEMD_UNIT],
                 None,
             )?;
-            status(platform, cli)
+            status(platform, cli, true)
         }
         ServicePlatform::ManualLinux => print_report(
             cli,
@@ -511,6 +521,14 @@ fn rewrite_launchd_publication_flags(
     ensure_launchd_file_limits(&ensure_launchd_cli_environment(&rewritten)?)
 }
 
+fn launchd_tailscale_environment() -> [(&'static str, Option<std::ffi::OsString>); 3] {
+    [
+        ("TAILSCALE_BE_CLI", Some("1".into())),
+        ("TAILSCALE", std::env::var_os("TAILSCALE").filter(|value| !value.is_empty())),
+        ("TAILSCALE_SOCKET", std::env::var_os("TAILSCALE_SOCKET")),
+    ]
+}
+
 fn ensure_launchd_cli_environment(definition: &str) -> Result<String> {
     if let Some(key_start) = definition.find("<key>EnvironmentVariables</key>") {
         let after_key = key_start + "<key>EnvironmentVariables</key>".len();
@@ -533,11 +551,6 @@ fn ensure_launchd_cli_environment(definition: &str) -> Result<String> {
             .context("launchd EnvironmentVariables has an unclosed dict")?;
         let has_path = definition[dict_start..dict_end].contains("<key>PATH</key>");
         let has_term = definition[dict_start..dict_end].contains("<key>TERM</key>");
-        let tailscale_override = std::env::var_os("TAILSCALE").filter(|value| !value.is_empty());
-        let has_tailscale = definition[dict_start..dict_end].contains("<key>TAILSCALE</key>");
-        if has_path && has_term && (tailscale_override.is_none() || has_tailscale) {
-            return Ok(definition.to_owned());
-        }
         let insert_at = definition[..dict_end]
             .rfind('\n')
             .map_or(dict_end, |newline| newline + 1);
@@ -550,11 +563,29 @@ fn ensure_launchd_cli_environment(definition: &str) -> Result<String> {
         if !has_term {
             additions.push_str("    <key>TERM</key>\n    <string>dumb</string>\n");
         }
-        if !has_tailscale && let Some(executable) = tailscale_override {
-            additions.push_str(&format!(
-                "    <key>TAILSCALE</key>\n    <string>{}</string>\n",
-                xml_escape(&executable.to_string_lossy())
-            ));
+        for (key, value) in launchd_tailscale_environment() {
+            let Some(value) = value else { continue };
+            let escaped = xml_escape(&value.to_string_lossy());
+            let key_tag = format!("<key>{key}</key>");
+            if let Some(offset) = definition[dict_start..dict_end].find(&key_tag) {
+                let after_key = dict_start + offset + key_tag.len();
+                let string_start = definition.len() - definition[after_key..].trim_start().len();
+                let value_start = string_start + "<string>".len();
+                ensure!(definition[string_start..].starts_with("<string>"),
+                    "launchd {key} must be a string");
+                let value_end = definition[value_start..dict_end].find("</string>")
+                    .map(|offset| value_start + offset).context("unclosed launchd environment string")?;
+                if definition[value_start..value_end] != escaped {
+                    let mut updated = definition.to_owned();
+                    updated.replace_range(value_start..value_end, &escaped);
+                    return ensure_launchd_cli_environment(&updated);
+                }
+            } else {
+                additions.push_str(&format!("    <key>{key}</key>\n    <string>{escaped}</string>\n"));
+            }
+        }
+        if additions.is_empty() {
+            return Ok(definition.to_owned());
         }
         return Ok(format!(
             "{}{}{}",
@@ -807,23 +838,35 @@ fn refresh_systemd_unit(path: &Path) -> Result<bool> {
 /// Refresh publication policy even when the old process was loopback-only.
 /// Return true when a manager reload/restart is needed before early verification.
 pub(crate) fn refresh_installed_service(tailscale_serve: bool) -> Result<bool> {
-    match native_platform() {
+    let platform = native_platform();
+    let path = match platform {
+        ServicePlatform::Launchd => launchd_path()?,
+        ServicePlatform::Systemd => systemd_path()?,
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => return Ok(false),
+    };
+    refresh_installed_service_at(platform, &path, tailscale_serve, &std::env::current_exe()?)
+}
+
+fn refresh_installed_service_at(
+    platform: ServicePlatform,
+    path: &Path,
+    tailscale_serve: bool,
+    installed_binary: &Path,
+) -> Result<bool> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let definition = fs::read_to_string(path)?;
+    require_installed_service_binary(platform, &definition, installed_binary)?;
+    match platform {
         ServicePlatform::Systemd => {
-            let path = systemd_path()?;
-            if !path.is_file() {
-                return Ok(false);
-            }
-            let port = service_https_port(&fs::read_to_string(&path)?);
+            let port = service_https_port(&fs::read_to_string(path)?);
             let publication_changed =
-                repair_systemd_publication_flags(&path, tailscale_serve, port)?;
-            Ok(refresh_systemd_unit(&path)? || publication_changed)
+                repair_systemd_publication_flags(path, tailscale_serve, port)?;
+            Ok(refresh_systemd_unit(path)? || publication_changed)
         }
         ServicePlatform::Launchd => {
-            let path = launchd_path()?;
-            if !path.is_file() {
-                return Ok(false);
-            }
-            let definition = fs::read_to_string(&path)?;
+            let definition = fs::read_to_string(path)?;
             let rewritten = rewrite_launchd_publication_flags(
                 &definition,
                 tailscale_serve,
@@ -832,11 +875,56 @@ pub(crate) fn refresh_installed_service(tailscale_serve: bool) -> Result<bool> {
             if rewritten == definition {
                 return Ok(false);
             }
-            write_service_file(&path, &rewritten)?;
+            write_service_file(path, &rewritten)?;
             Ok(true)
         }
         ServicePlatform::ManualLinux | ServicePlatform::Unsupported => Ok(false),
     }
+}
+
+/// A service restart reuses the manager's executable, not the updating CLI.
+/// Refuse before rewriting or reloading anything when those executables differ.
+fn require_installed_service_binary(
+    platform: ServicePlatform,
+    definition: &str,
+    installed_binary: &Path,
+) -> Result<()> {
+    let configured = match platform {
+        ServicePlatform::Launchd => {
+            let argument = definition
+                .split_once("<key>ProgramArguments</key>")
+                .and_then(|(_, tail)| tail.split_once("<array>"))
+                .and_then(|(_, tail)| tail.trim_start().strip_prefix("<string>"))
+                .and_then(|tail| tail.split_once("</string>"))
+                .map(|(binary, _)| binary)
+                .context("launchd plist has no ProgramArguments[0]")?;
+            PathBuf::from(quick_xml::escape::unescape(argument)?.as_ref())
+        }
+        ServicePlatform::Systemd => {
+            let command = definition
+                .lines()
+                .find_map(|line| line.trim_start().strip_prefix("ExecStart="))
+                .context("systemd unit has no ExecStart")?;
+            let args = shell_words::split(command).context("cannot parse systemd ExecStart")?;
+            PathBuf::from(args.first().context("systemd ExecStart has no binary")?)
+        }
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => return Ok(()),
+    };
+    // Linux can run this comparison in the pre-swap image. /proc/self/exe
+    // then names the old inode as "<install path> (deleted)".
+    let stable_binary = (platform == ServicePlatform::Systemd)
+        .then(|| super::update::strip_deleted_suffix(installed_binary.to_owned()));
+    let installed_binary = stable_binary.as_deref().unwrap_or(installed_binary);
+    let resolved_configured = fs::canonicalize(&configured).unwrap_or_else(|_| configured.clone());
+    let resolved_installed =
+        fs::canonicalize(installed_binary).unwrap_or_else(|_| installed_binary.to_owned());
+    ensure!(
+        configured.is_absolute() && resolved_configured == resolved_installed,
+        "hub service binary drift; refusing to restart\n  configured: {}\n  installed: {}\n  Fix: cas hub service install",
+        configured.display(),
+        installed_binary.display()
+    );
+    Ok(())
 }
 
 pub(super) fn installed_https_port() -> Result<Option<u16>> {
@@ -856,6 +944,48 @@ pub(super) fn installed_service_exists() -> Result<bool> {
         ServicePlatform::Launchd => Ok(launchd_path()?.is_file()),
         ServicePlatform::Systemd | ServicePlatform::ManualLinux => Ok(systemd_path()?.is_file()),
         ServicePlatform::Unsupported => Ok(false),
+    }
+}
+
+/// One end-state budget shared by launchd unload, process exit and Serve teardown.
+pub(super) fn stop_deadline() -> crate::bounded_process::Deadline {
+    crate::bounded_process::Deadline::after(Duration::from_secs(15))
+}
+
+/// Unload before signaling a launchd-owned hub: KeepAlive must no longer
+/// own a restart while the ordinary stop path waits for process teardown.
+/// Keep the plist so an explicit restart can bootstrap it again.
+pub(super) fn stop_supervised(deadline: crate::bounded_process::Deadline) -> Result<()> {
+    if native_platform() != ServicePlatform::Launchd || !launchd_path()?.is_file() {
+        return Ok(());
+    }
+    let target = format!("{}/{}", launchd_domain()?, launchd_label());
+    if !probe_manager_with_timeout("launchctl", ["print", &target], deadline.remaining()).require_observed()? {
+        return Ok(());
+    }
+    let mut command = manager_command("launchctl");
+    command.args(["bootout", &target]);
+    let output = crate::bounded_process::run_command(
+        &mut command, deadline, deadline.remaining(),
+    ).map_err(|_| anyhow::anyhow!("launchctl bootout did not complete; refusing to race hub supervision"))?;
+    ensure!(output.status.success(), "launchctl refused to unload the Cassy hub service");
+    wait_for_manager_unload(deadline, |remaining| {
+        probe_manager_with_timeout("launchctl", ["print", &target], remaining)
+    })
+}
+
+fn wait_for_manager_unload(
+    deadline: crate::bounded_process::Deadline,
+    mut probe: impl FnMut(Duration) -> ManagerProbe,
+) -> Result<()> {
+    loop {
+        let remaining = deadline.remaining();
+        ensure!(!remaining.is_zero(), "Cassy hub service is still loaded after launchctl bootout");
+        if !probe(remaining).require_observed()? {
+            return Ok(());
+        }
+        // A successful bootout can precede removal from launchd's namespace.
+        std::thread::sleep(Duration::from_millis(25).min(deadline.remaining()));
     }
 }
 
@@ -882,7 +1012,15 @@ pub(super) fn inactive_detached_warning(
     paths: &HubRuntimePaths,
     record: Option<&HubProcessRecord>,
 ) -> Result<Option<&'static str>> {
-    let (installed, active) = match native_platform() {
+    inactive_detached_warning_on(native_platform(), paths, record)
+}
+
+fn inactive_detached_warning_on(
+    platform: ServicePlatform,
+    paths: &HubRuntimePaths,
+    record: Option<&HubProcessRecord>,
+) -> Result<Option<&'static str>> {
+    let (installed, active) = match platform {
         ServicePlatform::Launchd => {
             let path = launchd_path()?;
             let domain = launchd_domain()?;
@@ -915,6 +1053,10 @@ pub(super) fn inactive_detached_warning(
         }
         ServicePlatform::Unsupported => return Ok(None),
     };
+    // A detached hub needs no service manager when no service is installed.
+    if !installed {
+        return Ok(None);
+    }
     // A hung diagnostic cannot establish either service health or inactivity.
     if let Some(warning) = active.warning() {
         return Ok(Some(warning));
@@ -998,7 +1140,17 @@ fn wait_for_supervised_hub(previous_pid: Option<u32>, tailscale_serve: bool) -> 
     }
 }
 
-fn status(platform: ServicePlatform, cli: &Cli) -> Result<()> {
+fn status(platform: ServicePlatform, cli: &Cli, just_started: bool) -> Result<()> {
+    let finish = |report: ServiceReport| {
+        print_report(
+            cli,
+            if just_started {
+                report.after_start()
+            } else {
+                report
+            },
+        )
+    };
     match platform {
         ServicePlatform::Launchd => {
             let path = launchd_path()?;
@@ -1013,7 +1165,7 @@ fn status(platform: ServicePlatform, cli: &Cli) -> Result<()> {
                     })
                     .unwrap_or(ManagerProbe::Unavailable),
             );
-            print_report(cli, report(platform, installed, active, Some(path), None)?)
+            finish(report(platform, installed, active, Some(path), None)?)
         }
         ServicePlatform::Systemd => {
             let path = systemd_path()?;
@@ -1022,7 +1174,7 @@ fn status(platform: ServicePlatform, cli: &Cli) -> Result<()> {
                 "systemctl",
                 ["--user", "is-active", "--quiet", SYSTEMD_UNIT],
             ));
-            print_report(cli, report(platform, installed, active, Some(path), None)?)
+            finish(report(platform, installed, active, Some(path), None)?)
         }
         ServicePlatform::ManualLinux => print_report(
             cli,
@@ -1095,10 +1247,22 @@ fn report(
     instructions: Option<&'static str>,
 ) -> Result<ServiceReport> {
     let paths = HubRuntimePaths::default_for_user()?;
-    let hub_running = paths
+    use super::hub::HubDisplayState;
+    let display_state = paths
         .read_process_record()
         .ok()
-        .is_some_and(|record| super::hub::record_is_live(&record));
+        .map(|record| super::hub::hub_display_state(&paths, &record))
+        .filter(|state| *state != HubDisplayState::Exited)
+        .or_else(|| paths.lock_holders().first().map(super::hub::lock_holder_display_state))
+        .unwrap_or(HubDisplayState::Exited);
+    let hub_running = display_state == HubDisplayState::Running;
+    let hub_state = match display_state {
+        HubDisplayState::Running => "running",
+        HubDisplayState::Starting { .. } => "starting",
+        HubDisplayState::Stopping { .. } => "stopping",
+        HubDisplayState::Unresponsive { .. } => "unresponsive",
+        HubDisplayState::Exited => "not_running",
+    };
     let (platform_name, supervision) = match platform {
         ServicePlatform::Launchd => ("macos", "launchd"),
         ServicePlatform::Systemd => ("linux", "systemd-user"),
@@ -1131,6 +1295,7 @@ fn report(
         unit_path: path.map(|path| path.display().to_string()),
         log_path: Some(paths.log_path().display().to_string()),
         hub_running,
+        hub_state,
         launch_readiness: launch_readiness(),
         instructions,
     })
@@ -1165,11 +1330,7 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
                         Some(false) => " and inactive",
                         None => "",
                     },
-                    if report.hub_running {
-                        "running"
-                    } else {
-                        "not running"
-                    },
+                    report.hub_state.replace('_', " "),
                 );
                 if let Some(log_path) = report.log_path {
                     println!("  Logs: {log_path}");
@@ -1342,7 +1503,14 @@ fn run_manager_vec(command: &str, args: &[String]) -> Result<()> {
 /// runtime receipt collector. Mutating manager operations retain their own
 /// lifecycle semantics; an unknown diagnostic is never an inactive service.
 fn probe_manager<const N: usize>(command: &str, args: [&str; N]) -> ManagerProbe {
-    let deadline = Instant::now() + MANAGER_PROBE_TIMEOUT;
+    probe_manager_with_timeout(command, args, MANAGER_PROBE_TIMEOUT)
+}
+
+fn probe_manager_with_timeout<const N: usize>(command: &str, args: [&str; N], timeout: Duration) -> ManagerProbe {
+    if timeout.is_zero() {
+        return ManagerProbe::TimedOut;
+    }
+    let deadline = Instant::now() + MANAGER_PROBE_TIMEOUT.min(timeout);
     let Ok(mut child) = manager_command(command)
         .args(args)
         .stdin(Stdio::null())
@@ -1418,6 +1586,59 @@ fn systemd_preview_actions() -> Vec<String> {
     ]
 }
 
+fn human_dry_run(
+    platform: ServicePlatform,
+    path: &Path,
+    definition: &str,
+    actions: &[String],
+    full: bool,
+    utf8: bool,
+) -> String {
+    let (supervision, action_summary) = match platform {
+        ServicePlatform::Launchd => (
+            "launchd",
+            "bootout (if present), bootstrap, kickstart via launchctl",
+        ),
+        ServicePlatform::Systemd => (
+            "systemd-user",
+            "enable lingering, reload, enable service via systemctl",
+        ),
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => {
+            ("none", "no manager steps")
+        }
+    };
+    let dash = if utf8 { "—" } else { "-" };
+    let header = format!(
+        "Cassy hub service ({supervision}) dry run {dash} no files or manager state changed."
+    );
+    if !full {
+        return format!(
+            "{header}\nWould write: {}\nWould run: {action_summary}\nFull definition: cas hub service install --dry-run --full\n",
+            service_file_display_path(platform, path)
+        );
+    }
+    let actions = actions
+        .iter()
+        .map(|action| format!("  {action}\n"))
+        .collect::<String>();
+    format!(
+        "{header}\nWould write: {}\nWould run:\n{actions}\nService definition:\n{definition}\n",
+        path.display()
+    )
+}
+
+fn service_file_display_path(platform: ServicePlatform, path: &Path) -> String {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "service file".into());
+    match platform {
+        ServicePlatform::Launchd => format!("~/Library/LaunchAgents/{file_name}"),
+        ServicePlatform::Systemd => format!("~/.config/systemd/user/{file_name}"),
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => path.display().to_string(),
+    }
+}
+
 fn print_dry_run(
     cli: &Cli,
     platform: ServicePlatform,
@@ -1444,13 +1665,17 @@ fn print_dry_run(
             })
         );
     } else {
-        println!("Cassy hub service ({supervision}) dry run — no files or manager state changed.");
-        println!("Would write: {}", path.display());
-        println!("Would run:");
-        for action in actions {
-            println!("  {action}");
-        }
-        println!("\nService definition:\n{definition}");
+        print!(
+            "{}",
+            human_dry_run(
+                platform,
+                path,
+                definition,
+                actions,
+                cli.full,
+                crate::ui::components::locale_is_utf8(),
+            )
+        );
     }
     Ok(())
 }
@@ -1475,15 +1700,13 @@ fn launchd_plist(
         .map(|arg| format!("    <string>{}</string>", xml_escape(&arg)))
         .collect::<Vec<_>>()
         .join("\n");
-    let tailscale_override = std::env::var_os("TAILSCALE")
-        .filter(|value| !value.is_empty())
-        .map(|value| {
+    let tailscale_override = launchd_tailscale_environment()
+        .into_iter().filter_map(|(key, value)| value.map(|value| {
             format!(
-                "    <key>TAILSCALE</key>\n    <string>{}</string>\n",
+                "    <key>{key}</key>\n    <string>{}</string>\n",
                 xml_escape(&value.to_string_lossy())
             )
-        })
-        .unwrap_or_default();
+        })).collect::<String>();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1665,6 +1888,33 @@ fn manual_linux_instructions() -> &'static str {
 mod tests {
     use super::*;
 
+    #[test]
+    fn launchd_unload_after_five_seconds_uses_whole_stop_budget() {
+        let unloaded_at = Instant::now() + Duration::from_millis(5_050);
+        wait_for_manager_unload(stop_deadline(), |_| {
+            ManagerProbe::Observed(Instant::now() < unloaded_at)
+        }).expect("a launchd job disappearing after five seconds must fit the fifteen-second Stop budget");
+    }
+
+    #[test]
+    fn successful_bootout_waits_for_loaded_job_to_disappear() {
+        let mut calls = 0;
+        wait_for_manager_unload(crate::bounded_process::Deadline::after(Duration::from_secs(1)), |_| {
+            calls += 1;
+            ManagerProbe::Observed(calls == 1)
+        }).unwrap();
+        assert_eq!(calls, 2);
+
+        let error = wait_for_manager_unload(crate::bounded_process::Deadline::after(Duration::from_millis(10)), |_| {
+            ManagerProbe::Observed(true)
+        }).unwrap_err();
+        assert!(error.to_string().contains("still loaded after launchctl bootout"));
+        let error = wait_for_manager_unload(crate::bounded_process::Deadline::after(Duration::from_secs(1)), |_| {
+            ManagerProbe::TimedOut
+        }).unwrap_err();
+        assert!(error.to_string().contains("unknown (timed out)"));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn unknown_manager_refuses_restart_before_service_mutation_cas_8ee8() {
@@ -1743,11 +1993,20 @@ exit 0
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let fixture = tempfile::tempdir().unwrap();
         let manager = fixture.path().join("systemctl");
-        crate::test_paths::warm_stub(&manager, "#!/bin/sh\nexit 1\n");
         env.set(SYSTEMCTL_PATH_ENV, &manager);
         let paths = HubRuntimePaths::default_for_user().unwrap();
+        // Exercise an unavailable manager even when the platform was
+        // resolved before it disappeared, rather than only manual mode.
+        assert_eq!(
+            inactive_detached_warning_on(ServicePlatform::Systemd, &paths, None).unwrap(),
+            None,
+        );
         assert_eq!(inactive_detached_warning(&paths, None).unwrap(), None);
         write_service_file(&systemd_path().unwrap(), LEGACY_SYSTEMD_UNIT).unwrap();
+        assert_eq!(
+            inactive_detached_warning_on(ServicePlatform::Systemd, &paths, None).unwrap(),
+            Some(MANAGER_UNAVAILABLE_WARNING),
+        );
         assert_eq!(inactive_detached_warning(&paths, None).unwrap(), Some(MANAGER_UNAVAILABLE_WARNING));
         let cli = Cli { json: false, full: false, verbose: false, command: None };
         assert!(restart_supervised(&cli, false, 443).unwrap_err().to_string().contains("refusing to launch a detached hub"));
@@ -1762,6 +2021,178 @@ exit 0
             Some("Hub launch profile not recorded: malformed host config")
         );
         assert!(capture_launch_profiles_warning(Ok(())).is_none());
+    }
+
+    #[test]
+    fn service_install_dry_run_has_compact_summary_and_full_escape_cas_0051() {
+        let path = Path::new("/Users/test/Library/LaunchAgents/dev.cas.commander-hub.plist");
+        let definition = launchd_plist(
+            Path::new("/Users/test/.local/bin/cas"),
+            Path::new("/Users/test/.cas/hub/hub.log"),
+            true,
+            443,
+        );
+        let actions = launchd_preview_actions(path);
+
+        let summary = human_dry_run(
+            ServicePlatform::Launchd,
+            path,
+            &definition,
+            &actions,
+            false,
+            false,
+        );
+        assert!(
+            !summary.contains(&definition),
+            "the default human preview should not dump the plist"
+        );
+        assert!(
+            summary.contains("Would write: ~/Library/LaunchAgents/dev.cas.commander-hub.plist")
+        );
+        assert!(
+            summary.contains("Would run: bootout (if present), bootstrap, kickstart via launchctl")
+        );
+        assert!(summary.contains("Full definition: cas hub service install --dry-run --full"));
+        assert!(summary.starts_with(
+            "Cassy hub service (launchd) dry run - no files or manager state changed."
+        ));
+        assert!(summary.lines().all(|line| line.len() <= 80), "{summary}");
+
+        let full = human_dry_run(
+            ServicePlatform::Launchd,
+            path,
+            &definition,
+            &actions,
+            true,
+            false,
+        );
+        assert!(full.contains(&definition));
+        assert!(full.contains(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn update_refuses_stale_launchd_binary_cas_94fb() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("hub.plist");
+        let definition = include_str!("../../tests/fixtures/hub-service-launchd.plist");
+        fs::write(&path, definition).unwrap();
+        let error = refresh_installed_service_at(
+            ServicePlatform::Launchd,
+            &path,
+            true,
+            Path::new("/Users/test/.local/bin/cas"),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("/opt/cas/bin/cas"), "{message}");
+        assert!(message.contains("/Users/test/.local/bin/cas"), "{message}");
+        assert!(message.contains("cas hub service install"), "{message}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), definition);
+        assert!(
+            !refresh_installed_service_at(
+                ServicePlatform::Launchd,
+                &path,
+                true,
+                Path::new("/opt/cas/bin/cas"),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn update_refuses_stale_systemd_binary_cas_94fb() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("hub.service");
+        let definition = include_str!("../../tests/fixtures/hub-service-systemd.service");
+        fs::write(&path, definition).unwrap();
+        let error = refresh_installed_service_at(
+            ServicePlatform::Systemd,
+            &path,
+            true,
+            Path::new("/home/test/.local/bin/cas"),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("/opt/cas/bin/cas"), "{message}");
+        assert!(message.contains("/home/test/.local/bin/cas"), "{message}");
+        assert!(message.contains("cas hub service install"), "{message}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), definition);
+        assert!(
+            !refresh_installed_service_at(
+                ServicePlatform::Systemd,
+                &path,
+                true,
+                Path::new("/opt/cas/bin/cas"),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn systemd_update_accepts_deleted_process_path_cas_94fb() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("hub.service");
+        let definition = include_str!("../../tests/fixtures/hub-service-systemd.service");
+        fs::write(&path, definition).unwrap();
+        assert!(
+            !refresh_installed_service_at(
+                ServicePlatform::Systemd,
+                &path,
+                true,
+                Path::new("/opt/cas/bin/cas (deleted)"),
+            )
+            .expect("a renamed process image still identifies the installed cas")
+        );
+        let error = refresh_installed_service_at(
+            ServicePlatform::Systemd,
+            &path,
+            true,
+            Path::new("/different/cas (deleted)"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cas hub service install"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), definition);
+    }
+
+    #[test]
+    fn service_activation_reports_starting_until_ready_cas_94fb() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let activation = report(
+            ServicePlatform::Launchd,
+            true,
+            Some(ManagerProbe::Observed(true)),
+            None,
+            None,
+        )
+        .unwrap()
+        .after_start();
+        assert!(!activation.hub_running);
+        assert_eq!(activation.hub_state, "starting");
+        let json = serde_json::to_value(activation).unwrap();
+        assert_eq!(json["hub_state"], "starting");
+        assert_eq!(json["hub_running"], false);
+        let paths = HubRuntimePaths::default_for_user().unwrap();
+        let mut lock = paths.acquire_instance_lock().unwrap();
+        let starting = report(ServicePlatform::Launchd, true, Some(ManagerProbe::Observed(true)), None, None).unwrap();
+        assert_eq!(starting.hub_state, "starting", "plain status before a process record exists");
+        let process: HubProcessRecord = serde_json::from_value(serde_json::json!({
+            "pid": std::process::id(), "bind": "127.0.0.1", "port": 0,
+            "version": env!("CARGO_PKG_VERSION"), "started_at": chrono::Utc::now().to_rfc3339(),
+        })).unwrap();
+        paths.write_process_record(&process).unwrap();
+        let starting = report(ServicePlatform::Launchd, true, Some(ManagerProbe::Observed(true)), None, None).unwrap();
+        assert_eq!(starting.hub_state, "starting", "plain status with a startup record");
+        assert!(!starting.hub_running);
+        lock.set_phase("stopping").unwrap();
+        let stopping = report(ServicePlatform::Launchd, true, Some(ManagerProbe::Observed(true)), None, None).unwrap();
+        assert_eq!(stopping.hub_state, "stopping");
+        drop(lock);
+        // The fixture process stays alive; remove metadata as though that
+        // process had exited so the lock-owner fallback cannot still see it.
+        fs::remove_file(paths.lock_path()).unwrap();
+        paths.remove_process_record().unwrap();
+        let stopped = report(ServicePlatform::Launchd, true, Some(ManagerProbe::Observed(false)), None, None).unwrap();
+        assert_eq!(stopped.hub_state, "not_running");
     }
 
     #[test]
@@ -1856,7 +2287,7 @@ exit 0
         );
         let old = old.replace(
             &format!(
-                "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n    <key>TERM</key>\n    <string>dumb</string>\n  </dict>\n"
+                "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n    <key>TERM</key>\n    <string>dumb</string>\n    <key>TAILSCALE_BE_CLI</key>\n    <string>1</string>\n  </dict>\n"
             ),
             "",
         );
@@ -1992,7 +2423,7 @@ exit 0
         );
         let existing = original.replace(
             &format!(
-                "<dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n    <key>TERM</key>\n    <string>dumb</string>\n  </dict>"
+                "<dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n    <key>TERM</key>\n    <string>dumb</string>\n    <key>TAILSCALE_BE_CLI</key>\n    <string>1</string>\n  </dict>"
             ),
             "<dict/>",
         );
@@ -2011,10 +2442,11 @@ exit 0
             true,
             8443,
         );
-        let legacy = current.replace("    <key>TERM</key>\n    <string>dumb</string>\n", "");
+        let legacy = current.replace("    <key>TERM</key>\n    <string>dumb</string>\n", "")
+            .replace("    <key>TAILSCALE_BE_CLI</key>\n    <string>1</string>\n", "");
         assert_eq!(ensure_launchd_cli_environment(&legacy).unwrap(), current);
         let legacy = current.replace(
-            &format!("  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n    <key>TERM</key>\n    <string>dumb</string>\n  </dict>\n"),
+            &format!("  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n    <key>TERM</key>\n    <string>dumb</string>\n    <key>TAILSCALE_BE_CLI</key>\n    <string>1</string>\n  </dict>\n"),
             "",
         );
         assert_eq!(ensure_launchd_cli_environment(&legacy).unwrap(), current);

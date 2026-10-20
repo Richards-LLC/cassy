@@ -823,6 +823,150 @@ async fn team_push_serializes_task_dependency_collection() {
 }
 
 #[tokio::test]
+async fn cas_596d_successful_team_push_rearms_only_transient_exhausted_rows_once() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let team_id = "team-cas-596d";
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{team_id}/sync/push")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let config = CloudSyncerConfig::default();
+    let max_retries = config.max_retries;
+
+    for (id, error, outcome) in [
+        (
+            "entry-dns-exhausted",
+            "Network error: DNS resolution failed (temporary)",
+            None,
+        ),
+        (
+            "entry-auth-exhausted",
+            "Team push failed with status 401: unauthorized",
+            None,
+        ),
+        (
+            "entry-rejected-exhausted",
+            "permanent cloud rejection: reason=project_mismatch",
+            Some("rejected"),
+        ),
+        (
+            "entry-stale-rejection-dns",
+            "Network error: DNS resolution failed (temporary)",
+            Some("rejected"),
+        ),
+    ] {
+        queue
+            .enqueue_for_team(
+                EntityType::Skill,
+                id,
+                SyncOperation::Upsert,
+                Some(&format!(r#"{{"id":"{id}","origin_project":"p"}}"#)),
+                team_id,
+            )
+            .unwrap();
+        let row_id = queue
+            .list_all(20)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.entity_id == id)
+            .unwrap()
+            .id;
+        for _ in 0..max_retries {
+            queue.mark_failed(row_id, error).unwrap();
+        }
+        if let Some(outcome) = outcome {
+            queue
+                .record_row_outcome(row_id, outcome, Some("test"))
+                .unwrap();
+        }
+    }
+
+    let enqueue_successful_push = |id: &str| {
+        queue
+            .enqueue_for_team(
+                EntityType::Skill,
+                id,
+                SyncOperation::Upsert,
+                Some(&format!(r#"{{"id":"{id}","origin_project":"p"}}"#)),
+                team_id,
+            )
+            .unwrap();
+    };
+    enqueue_successful_push("entry-cloud-contact-one");
+
+    let syncer = Arc::new(CloudSyncer::new(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        config,
+    ));
+    let syncer_for_push = syncer.clone();
+    let first = tokio::task::spawn_blocking(move || syncer_for_push.push_team(team_id))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+    assert_eq!(first.pushed_skills, 1);
+    let row = |id: &str| {
+        queue
+            .list_all(20)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.entity_id == id)
+            .unwrap()
+    };
+    let dns = row("entry-dns-exhausted");
+    assert_eq!(
+        dns.retry_count, 0,
+        "a successful Cloud push re-arms DNS failures"
+    );
+    assert!(dns.last_error.is_none());
+    for id in [
+        "entry-auth-exhausted",
+        "entry-rejected-exhausted",
+        "entry-stale-rejection-dns",
+    ] {
+        assert_eq!(row(id).retry_count, max_retries, "{id} stays parked");
+    }
+
+    for _ in 0..max_retries {
+        queue
+            .mark_failed(dns.id, "Network error: DNS resolution failed (temporary)")
+            .unwrap();
+    }
+    enqueue_successful_push("entry-cloud-contact-two");
+    let syncer_for_push = syncer.clone();
+    let second = tokio::task::spawn_blocking(move || syncer_for_push.push_team(team_id))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(second.errors.is_empty(), "{:?}", second.errors);
+    assert_eq!(second.pushed_skills, 1);
+    assert_eq!(row("entry-dns-exhausted").retry_count, max_retries);
+}
+
+#[tokio::test]
 async fn team_push_failure_includes_body_and_trace_headers() {
     use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation};
     use tempfile::tempdir;
@@ -1926,6 +2070,120 @@ async fn team_pull_preserves_live_started_owner_cas_c4a52() {
 }
 
 #[tokio::test]
+async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
+    use crate::mcp::tools::core::task::audit;
+    let actor = cas_types::Agent::new("remote-supervisor-id".into(), "remote-supervisor".into());
+    let project = "park-owner";
+    let parked_at = chrono::DateTime::parse_from_rfc3339("2026-10-20T11:55:00Z")
+        .unwrap().with_timezone(&chrono::Utc);
+    let mut local = Task::new("cas-96ce4".into(), "delivered work".into());
+    local.status = TaskStatus::AwaitingMerge;
+    local.updated_at = parked_at;
+    local.pending_worktree_merge = true;
+    local.deliverables.parked_branch = Some("factory/replay-cas-96ce4".into());
+    local.deliverables.factory_branch_anchor = Some("a".repeat(40));
+    let old_reset = audit::reset_note(parked_at - chrono::Duration::minutes(25), TaskStatus::Open, None, false, "dead-session recovery");
+    local.notes = format!("{old_reset}\n\n{}", audit::parked_note(parked_at, "MERGE REQUIRED"));
+    let mut stale = team_task_fixture(
+        &local.id, TaskStatus::Open, project, project,
+        parked_at + chrono::Duration::minutes(3),
+    );
+    stale["notes"] = serde_json::json!(old_reset);
+    for status in [TaskStatus::InProgress, TaskStatus::Open] {
+        let mut projection = stale.clone();
+        projection["status"] = serde_json::json!(status);
+        let (_temp, result, store, queue) = pull_team_task_fixtures(
+            project, vec![projection], Some(local.clone()),
+        ).await;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let retained = store.get(&local.id).unwrap();
+        assert!(retained.lifecycle_matches(&local), "11:58 projection must not undo 11:55 park: {retained:?}");
+        assert_eq!(result.pulled_tasks, 0);
+        assert!(result.task_status_transitions.is_empty());
+        assert!(!retained.notes.contains("[CAS_SYNC_STATUS]"));
+        assert_eq!(queue.list_conflicts(10).unwrap().len(), 1);
+
+        // cas-f268: suppressing a merge as moot must not follow a stale pull.
+        use crate::prompt_revalidation::{
+            MergeRequestDecision, MergeRequestDelivery, MergeRequestEnvelope,
+            merge_request_delivery_decision,
+        };
+        let envelope = MergeRequestEnvelope {
+            task_id: local.id.clone(),
+            branch_tip: "a".repeat(40),
+            target_branch: "main".into(),
+            target_branch_tip: "b".repeat(40),
+            anchor_tip: None,
+            commits_not_on_target_base: 1,
+            pr_number: None,
+            source_freshness_unavailable: None,
+        };
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&retained), &envelope,
+                &MergeRequestDecision::Pending { target_tip: "b".repeat(40) },
+            ),
+            MergeRequestDelivery::Deliver,
+        );
+    }
+
+    // A previous cycle's closed_at must not replace the current park boundary.
+    let mut previous_cycle = local.clone();
+    previous_cycle.closed_at = Some(parked_at - chrono::Duration::hours(1));
+    let mut old_action = stale.clone();
+    old_action["notes"] = serde_json::json!(format!(
+        "{old_reset}\n\n{}", audit::reopen_note(parked_at - chrono::Duration::minutes(1), TaskStatus::Closed, false, &actor, "earlier cycle"),
+    ));
+    let (_temp, result, store, _queue) = pull_team_task_fixtures(
+        project, vec![old_action], Some(previous_cycle.clone()),
+    ).await;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert!(store.get(&local.id).unwrap().lifecycle_matches(&previous_cycle));
+
+    // Exercise the production audit writers, including parked review resets,
+    // proof-scope correction and merge-conflict resume (ver-f582f640f022).
+    let action_at = parked_at + chrono::Duration::minutes(4);
+    for (status, note) in [
+        (TaskStatus::Open, audit::reopen_note(action_at, TaskStatus::Closed, false, &actor, "regression found")),
+        (TaskStatus::Open, audit::reopen_note(action_at, TaskStatus::AwaitingMerge, true, &actor, "reset review scope")),
+        (TaskStatus::Open, audit::proof_scope_fix_note(action_at, &actor, "correct proof", "Proof targets widened.")),
+        (TaskStatus::InProgress, audit::merge_recovery_note(action_at, "factory/replay-cas-96ce4")),
+        (TaskStatus::Open, cas_store::request_changes_audit_note(parked_at, "Correct delivery", "prior commits remain")),
+        (TaskStatus::Open, audit::reset_note(action_at, TaskStatus::AwaitingMerge, Some("worker"), false, "dead-session recovery")),
+    ] {
+        let mut reopened = stale.clone();
+        let mut projected = local.clone();
+        projected.updated_at = parked_at + chrono::Duration::minutes(6);
+        projected.notes.push_str("\n\n[2026-10-20 12:01] [CAS_SYNC_STATUS] source=team_pull applied_status=awaiting_merge");
+        reopened["status"] = serde_json::json!(status);
+        reopened["updated_at"] = serde_json::json!(parked_at + chrono::Duration::minutes(7));
+        reopened["notes"] = serde_json::json!(format!("{}\n\n{note}", local.notes));
+        let (_temp, result, store, _queue) = pull_team_task_fixtures(
+            project, vec![reopened], Some(projected),
+        ).await;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.pulled_tasks, 1, "{note}");
+        let reopened = store.get(&local.id).unwrap();
+        assert_eq!(reopened.status, status, "{note}");
+        assert!(reopened.notes.contains("prior_status=awaiting_merge"));
+    }
+
+    // The real uppercase cancellation writer establishes the same-minute
+    // boundary needed to recognize a subsequent authorized reopen.
+    let mut cancelled = local.clone();
+    cancelled.status = TaskStatus::Cancelled;
+    cancelled.closed_at = Some(parked_at);
+    cancelled.notes = audit::cancel_note(parked_at, &actor, "scope ended", None);
+    let mut reopened = stale;
+    reopened["notes"] = serde_json::json!(format!("{}\n\n{}", cancelled.notes,
+        audit::reopen_note(parked_at + chrono::Duration::seconds(30), TaskStatus::Cancelled, false, &actor, "scope restored")));
+    let (_temp, result, store, _queue) = pull_team_task_fixtures(project, vec![reopened], Some(cancelled)).await;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.pulled_tasks, 1);
+    assert_eq!(store.get(&local.id).unwrap().status, TaskStatus::Open);
+}
+
+#[tokio::test]
 async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
     for (before, after) in [
         (TaskStatus::Open, TaskStatus::InProgress),
@@ -1947,6 +2205,12 @@ async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
             project,
             local.updated_at + chrono::Duration::minutes(1),
         );
+        if before == TaskStatus::AwaitingMerge {
+            raw["notes"] = serde_json::json!(format!(
+                "[{}] Decision: changes requested by supervisor. Correct delivery",
+                (local.updated_at + chrono::Duration::minutes(1)).format("%Y-%m-%d %H:%M"),
+            ));
+        }
         if !matches!(after, TaskStatus::Closed | TaskStatus::Cancelled) {
             raw["assignee"] = serde_json::json!(local.assignee);
         }
@@ -1976,13 +2240,18 @@ async fn team_pull_delivery_transaction_rejects_even_newer_lifecycle_row() {
     local.updated_at = chrono::Utc::now() - chrono::Duration::minutes(2);
     local.pending_worktree_merge = true;
     local.deliverables.parked_branch = Some("factory/replay".into());
-    let raw = team_task_fixture(
+    let mut raw = team_task_fixture(
         &local.id,
         TaskStatus::InProgress,
         project,
         project,
         local.updated_at + chrono::Duration::minutes(1),
     );
+    // A valid remote action reaches the independent live-delivery veto.
+    raw["notes"] = serde_json::json!(format!(
+        "[{}] Decision: changes requested by supervisor. Correct delivery",
+        (local.updated_at + chrono::Duration::minutes(1)).format("%Y-%m-%d %H:%M"),
+    ));
     let (_temp, result, store, queue) = pull_team_fixtures_with_delivery(
         project,
         vec![raw],
@@ -2162,6 +2431,58 @@ async fn team_pull_materializes_an_accepted_proposal_from_target_scope() {
     assert_eq!(task.status, TaskStatus::Open);
     assert_eq!(task.origin_project.as_deref(), Some("origin-project"));
     assert!(task.notes.contains("proposal_id: \"proposal-1\""));
+}
+
+/// cas-a8e2: Cloud echoes `received_at` in another format than the accept
+/// response did. A local row whose notes already hold the accept-time block,
+/// pulled with a remote row whose notes carry two copies, ends with exactly one
+/// provenance block, so the row executes in its target (cas-8a252).
+#[tokio::test]
+async fn team_pull_keeps_one_provenance_block_across_received_at_formats_cas_a8e2() {
+    let attested = |received_at: &str| {
+        serde_json::json!({
+            "server_attested": {
+                "proposal_id": "proposal-1",
+                "target_task_id": "cas-0123456789abcdef",
+                "creator_user_id": "user-1",
+                "team_id": "team-cas-2125",
+                "origin_project_canonical_id": "origin-project",
+                "target_project_canonical_id": "target-project",
+                "received_at": received_at,
+                "client_request_id": "request-1"
+            },
+            "client_asserted": {}
+        })
+    };
+    let rendered = |received_at: &str| {
+        let mut raw = serde_json::json!({"notes": "", "proposal_provenance": attested(received_at)});
+        render_task_proposal_provenance(&mut raw);
+        raw["notes"].as_str().unwrap().to_string()
+    };
+    let earlier = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let mut local = Task::new("cas-0123456789abcdef".into(), "task cas-0123456789abcdef".into());
+    local.origin_project = Some("origin-project".into());
+    local.updated_at = earlier;
+    local.notes = format!("[2026-10-17 21:30] accepted\n\n{}", rendered("2026-10-17T21:26:11.708274+00:00"));
+    let mut task = team_task_fixture(
+        "cas-0123456789abcdef",
+        TaskStatus::Open,
+        "target-project",
+        "origin-project",
+        chrono::Utc::now(),
+    );
+    let space = "2026-10-17 21:26:11.708274+00";
+    task["notes"] = serde_json::json!(format!("{}\n\n{}", rendered("2026-10-17T21:26:11.708274+00:00"), rendered(space)));
+    task["proposal_provenance"] = attested(space);
+
+    let (_temp, result, task_store, _queue) =
+        pull_team_task_fixtures("target-project", vec![task], Some(local)).await;
+
+    assert!(result.errors.is_empty(), "unexpected pull errors: {:?}", result.errors);
+    let task = task_store.get("cas-0123456789abcdef").unwrap();
+    assert_eq!(task.notes.matches("--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---").count(), 1, "{}", task.notes);
+    assert_eq!(task.notes.matches("--- BEGIN CLIENT-ASSERTED PROPOSAL PROVENANCE ---").count(), 1, "{}", task.notes);
+    assert!(task.notes.contains("[2026-10-17 21:30] accepted"), "ordinary notes survive: {}", task.notes);
 }
 
 #[tokio::test]
@@ -4788,4 +5109,75 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
             .all(|(key, _)| !key.starts_with("team_delivery_ack:")),
         "successful cleanup removes only its receipt"
     );
+}
+
+/// cas-abad: Cloud answers a personal pull for a team-owned project with an
+/// empty envelope flagged `team_owned_project`. That is not an inventory: a
+/// full `cas cloud pull` healed every local edge (and its endpoint tasks)
+/// against it and staged them all for personal push (rocketship-template,
+/// 2026-10-19: 412 task + 919 dependency rows from one pull).
+#[tokio::test]
+async fn personal_pull_of_a_team_owned_project_stages_nothing_cas_abad() {
+    use crate::store::{
+        open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
+        open_rule_store_local, open_skill_store_local, open_spec_store, open_store_local,
+        open_task_store_local,
+    };
+    use crate::types::{Dependency, DependencyType};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(super::pull::PULL_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [], "tasks": [], "rules": [], "skills": [], "task_dependencies": [],
+            "team_owned_project": {"team_id": "team-cas-abad"},
+            "pulled_at": "2026-10-19T14:40:52Z",
+        })))
+        .mount(&server)
+        .await;
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    let task_store = open_task_store_local(temp.path()).unwrap();
+    for id in ["cas-abad-from", "cas-abad-to"] {
+        let mut task = Task::new(id.to_string(), id.to_string());
+        task.origin_project = Some("p".into());
+        task_store.add(&task).unwrap();
+    }
+    task_store
+        .add_dependency(&Dependency::new("cas-abad-from".into(), "cas-abad-to".into(), DependencyType::Blocks))
+        .unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "p".into(),
+        temp.path(),
+    );
+    let result = syncer
+        .pull(
+            open_store_local(temp.path()).unwrap().as_ref(),
+            task_store.as_ref(),
+            open_rule_store_local(temp.path()).unwrap().as_ref(),
+            open_skill_store_local(temp.path()).unwrap().as_ref(),
+            open_spec_store(temp.path()).unwrap().as_ref(),
+            open_event_store(temp.path()).unwrap().as_ref(),
+            open_prompt_store(temp.path()).unwrap().as_ref(),
+            open_file_change_store(temp.path()).unwrap().as_ref(),
+            open_commit_link_store(temp.path()).unwrap().as_ref(),
+        )
+        .unwrap();
+    assert_eq!(result.healed_task_dependencies_to_cloud, 0);
+    assert!(
+        queue.list_all(10).unwrap().is_empty(),
+        "an empty team-owned envelope is not an inventory to heal against"
+    );
+    assert_eq!(task_store.list_dependencies(None).unwrap().len(), 1, "local edges are untouched");
 }

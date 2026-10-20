@@ -112,6 +112,12 @@ impl TaskStore for QuarantineFilteringTaskStore {
         self.inner.update(task)
     }
 
+    fn update_if_current_with_mutation_receipt(
+        &self, task: &Task, expected: &Task, receipt_id: &str,
+    ) -> Result<DateTime<Utc>> {
+        self.inner.update_if_current_with_mutation_receipt(task, expected, receipt_id)
+    }
+
     fn update_from_sync(&self, task: &Task, expected: &Task) -> Result<Option<DateTime<Utc>>> {
         self.inner.update_from_sync(task, expected)
     }
@@ -145,6 +151,20 @@ impl TaskStore for QuarantineFilteringTaskStore {
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>> {
         self.list_with_suppressed(status)
             .map(|(visible, _)| visible)
+    }
+
+    fn ids_by_assignees_and_statuses(
+        &self,
+        assignees: &[&str],
+        statuses: &[TaskStatus],
+    ) -> Result<Vec<String>> {
+        let hidden = self.quarantined();
+        Ok(self
+            .inner
+            .ids_by_assignees_and_statuses(assignees, statuses)?
+            .into_iter()
+            .filter(|id| !hidden.contains(id))
+            .collect())
     }
 
     fn epic_for_branch_excluding(&self, branch: &str, excluded: &[String]) -> Result<Option<Task>> {

@@ -399,6 +399,7 @@ fn peer(name: &str, machine: &str, live: bool) -> Peer {
         session: None,
         canonical_id: Some(REPO.to_string()),
         focus: None,
+        focus_title: None,
         last_heartbeat: chrono::Utc::now(),
         heartbeat_age_secs: if live { 5 } else { PEER_LIVE_SECS + 1 },
         live,

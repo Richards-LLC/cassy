@@ -275,6 +275,14 @@
         {
           "text": "../cas-tdd/SKILL.md#fewest-tests",
           "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
+        },
+        {
+          "text": "task action=update id=<task-id> status=blocked",
+          "reason": "Route mandatory supervisor review waits through the persisted Blocked task transition, not prose in the return contract."
+        },
+        {
+          "text": "target=supervisor task_id=<task-id> blocker=true",
+          "reason": "Correlate the required-review wait with the authenticated blocker dispatch; kind=status|ready cannot be combined with blocker=true."
         }
       ],
       "absent": [

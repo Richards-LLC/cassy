@@ -2,6 +2,14 @@ use crate::config::meta::registry::ConfigRegistry;
 use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 
 pub(super) fn register_slack(registry: &mut ConfigRegistry) {
+    registry.register(ConfigMeta {
+        key: "slack.stakeholder_contacts", section: "slack", name: "Stakeholder Contact Policies",
+        description: "JSON list of workspace_id, user_id, minimum_interval_secs and mode (refuse or warn). Cloud owns the shared policy and last-contact record. Until Cloud and Violet advertise stakeholder-contacts/v1, posts carry a local-only warning with the last locally confirmed contact; cross-machine exclusion is unavailable.",
+        value_type: ConfigType::String, default: "[]", constraint: Constraint::None,
+        advanced: false, requires_feature: None,
+        keywords: &["stakeholder", "contact", "rate", "mention", "interval"],
+        use_cases: &["Limit top-level stakeholder mentions across supervisors"],
+    });
     registry
         .section_descriptions
         .insert("slack", "Slack transport policy");

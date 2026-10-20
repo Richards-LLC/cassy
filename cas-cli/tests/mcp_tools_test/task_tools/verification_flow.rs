@@ -351,6 +351,92 @@ async fn registered_supervisor(cas_dir: &std::path::Path, name: &str) -> cas::mc
     core
 }
 
+#[tokio::test]
+async fn orphaned_parked_task_records_verdict_without_a_close_attempt_cas_9060() {
+    let mut env = TestEnvGuard::temp_home();
+    let (_temp, _worker, root, task_id, worker_dir) =
+        delivered_worktree_fixture(&mut env, "factory/orphaned-review").await;
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(worker_dir.path())
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(head.status.success());
+    let head = String::from_utf8(head.stdout).unwrap().trim().to_string();
+    let tasks = open_task_store(&root).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.parked_branch = Some("factory/orphaned-review".into());
+    task.deliverables.factory_branch_anchor = Some(head.clone());
+    tasks.update(&task).unwrap();
+    assert!(
+        cas_store::get_latest_verification_dispatch(&root, &task_id)
+            .unwrap()
+            .is_none()
+    );
+
+    let supervisor = registered_supervisor(&root, "restarted-review-owner").await;
+    let request = || VerificationAddRequest {
+        task_id: task_id.clone(),
+        status: "approved".into(),
+        summary: "Reviewed the immutable parked delivery after restart".into(),
+        confidence: Some(0.9),
+        issues: None,
+        files_reviewed: Some("delivered.txt".into()),
+        duration_ms: None,
+        verification_type: None,
+        verifier_capability: None,
+        dispatch_id: None,
+    };
+    let parent = Command::new("git")
+        .arg("-C")
+        .arg(worker_dir.path())
+        .args(["rev-parse", "HEAD^"])
+        .output()
+        .unwrap();
+    assert!(parent.status.success());
+    task.deliverables.factory_branch_anchor =
+        Some(String::from_utf8(parent.stdout).unwrap().trim().into());
+    tasks.update(&task).unwrap();
+    supervisor
+        .cas_verification_add(Parameters(request()))
+        .await
+        .expect_err("a parked branch that differs from its recorded tip cannot mint proof");
+    assert!(
+        cas_store::get_latest_verification_dispatch(&root, &task_id)
+            .unwrap()
+            .is_none()
+    );
+    task.deliverables.factory_branch_anchor = Some(head.clone());
+    tasks.update(&task).unwrap();
+    supervisor
+        .cas_verification_add(Parameters(request()))
+        .await
+        .expect("parked review must mint its exact boundary without task close");
+    let dispatch = cas_store::get_latest_verification_dispatch(&root, &task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        dispatch.state,
+        cas::types::VerificationDispatchState::Resolved
+    );
+    assert_eq!(dispatch.owner_agent_id, "restarted-review-owner");
+    let proof = dispatch.repository.unwrap();
+    assert_eq!(proof.head_commit, head);
+    assert_eq!(proof.anchor_commits, vec![head]);
+    let verdict = open_verification_store(&root)
+        .unwrap()
+        .get_latest_for_task(&task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(verdict.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+    assert_eq!(
+        verdict.provenance,
+        cas::types::VerificationProvenance::SupervisorDirect
+    );
+}
+
 /// cas-5c7a closed external ops while the supervisor checkout carried other
 /// Rust work beyond the task's main target. No delivery receipt or lane was
 /// recorded for the chore; its portable external proof is the delivery.
@@ -7623,106 +7709,72 @@ async fn test_supervisor_override_rejects_worker_with_supervisor_env_only() {
     assert!(extract_text(result).contains("SUPERVISOR OVERRIDE REJECTED"));
 }
 
-/// A supervisor-owned epic has no ordinary task assignee by design. Once the
-/// configured verification owner passes the close gate, the response and
-/// audit row must describe the epic verification semantics rather than the
-/// unrelated orphan-recovery path.
+/// Epic ownership authorizes the caller, not a verification skip. Only an
+/// explicit supervisor override bypasses a fresh epic review boundary.
 #[tokio::test]
-async fn test_close_supervisor_owned_epic_uses_owner_closed_wording() {
-    let mut test_env = TestEnvGuard::temp_home();
-    let (temp, service) = setup_cas(&mut test_env);
-    let cas_dir = temp.path().join(".cas");
-    let task_store = open_task_store(&cas_dir).unwrap();
-    let verification_store = open_verification_store(&cas_dir).unwrap();
-    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
-    let owner_id = agent_store
-        .list(None)
-        .expect("list agents")
-        .first()
-        .map(|agent| agent.id.clone())
-        .expect("setup_cas should register the closing agent");
+async fn test_close_supervisor_owned_epic_requires_dispatch_unless_overridden() {
+    for explicit_override in [false, true] {
+        let mut test_env = TestEnvGuard::temp_home();
+        let (temp, service) = setup_cas_as(&mut test_env, AgentRole::Supervisor);
+        let cas_dir = temp.path().join(".cas");
+        let task_store = open_task_store(&cas_dir).unwrap();
+        let verification_store = open_verification_store(&cas_dir).unwrap();
+        let agent_store = open_agent_store(&cas_dir).unwrap();
+        let owner_id = agent_store.list(None).unwrap()[0].id.clone();
 
-    let req = TaskCreateRequest {
-        depth: None,
-        title: "Supervisor-owned epic".to_string(),
-        description: None,
-        priority: 2,
-        task_type: "epic".to_string(),
-        risk: Some("none".to_string()),
-        door: None,
-        proof_targets: None,
-        supervisor_override: None,
-        reason: None,
-        labels: None,
-        notes: None,
-        blocked_by: None,
-        design: None,
-        acceptance_criteria: None,
-        external_ref: None,
-        assignee: None,
-        demo_statement: None,
-        execution_note: None,
-        epic: None,
-    };
-    let id = extract_task_id(&extract_text(
-        service
-            .cas_task_create(Parameters(req))
-            .await
-            .expect("task_create should succeed"),
-    ))
-    .expect("should have task ID")
-    .to_string();
+        let mut req = simple_task_req("Supervisor-owned epic");
+        req.task_type = "epic".into();
+        req.risk = Some("none".into());
+        let id = extract_task_id(&extract_text(
+            service.cas_task_create(Parameters(req)).await.unwrap(),
+        ))
+        .unwrap()
+        .to_string();
+        let mut epic = task_store.get(&id).unwrap();
+        epic.status = TaskStatus::InProgress;
+        epic.assignee = None;
+        epic.epic_verification_owner = Some(owner_id.clone());
+        task_store.update(&epic).unwrap();
 
-    let mut epic = task_store.get(&id).expect("epic should exist");
-    epic.status = cas::types::TaskStatus::InProgress;
-    epic.assignee = None;
-    epic.epic_verification_owner = Some(owner_id);
-    task_store.update(&epic).expect("should update epic");
-
-    let _guard = ScopedSupervisorEnv::new(&mut test_env);
-    let response_text = extract_text(
-        service
-            .cas_task_close(Parameters(TaskCloseRequest {
-                stranded_branch_override: None,
-                id: id.clone(),
-                reason: Some("all child tasks complete".to_string()),
-                supervisor_override: None,
-                legacy_bypass_code_review: None,
-                search_manifest: None,
-                commit_receipt: None,
-            }))
-            .await
-            .expect("owner should close epic"),
-    );
-
-    assert!(
-        response_text
-            .contains("epic verification: owner-closed; child tasks individually verified"),
-        "owner-close must explain epic verification semantics: {response_text}"
-    );
-    assert!(
-        !response_text.contains("orphaned task"),
-        "healthy supervisor-owned epic must not be labeled orphaned: {response_text}"
-    );
-
-    let persisted = task_store.get(&id).expect("closed epic should persist");
-    assert_eq!(persisted.status, cas::types::TaskStatus::Closed);
-    assert_eq!(
-        persisted.close_reason.as_deref(),
-        Some("all child tasks complete")
-    );
-
-    let row = verification_store
-        .get_latest_for_task(&id)
-        .expect("verification lookup")
-        .expect("owner-close should write an auditable Skipped row");
-    assert_eq!(row.status, cas::types::VerificationStatus::Skipped);
-    assert!(
-        row.summary.contains("closed by its verification owner")
-            && !row.summary.contains("orphaned"),
-        "audit row must describe owner-close semantics: {}",
-        row.summary
-    );
+        let _guard = ScopedSupervisorEnv::new(&mut test_env);
+        let response_text = extract_text(
+            service
+                .cas_task_close(Parameters(TaskCloseRequest {
+                    stranded_branch_override: None,
+                    id: id.clone(),
+                    reason: Some("all child tasks complete".into()),
+                    supervisor_override: explicit_override.then_some(true),
+                    legacy_bypass_code_review: None,
+                    search_manifest: None,
+                    commit_receipt: None,
+                }))
+                .await
+                .unwrap(),
+        );
+        let persisted = task_store.get(&id).unwrap();
+        let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &id).unwrap();
+        let row = verification_store.get_latest_for_task_by_type(&id, VerificationType::Epic).unwrap();
+        assert!(!response_text.contains("orphaned task"), "{response_text}");
+        if explicit_override {
+            assert_eq!(persisted.status, TaskStatus::Closed, "{response_text}");
+            assert!(!persisted.pending_verification);
+            assert!(dispatch.is_none(), "explicit override creates no review dispatch");
+            let row = row.expect("explicit override must be auditable");
+            assert_eq!(row.status, cas::types::VerificationStatus::Skipped);
+            assert!(row.summary.contains("supervisor_override=true"), "{}", row.summary);
+            assert_eq!(persisted.close_reason.as_deref(), Some("all child tasks complete"));
+        } else {
+            assert_eq!(persisted.status, TaskStatus::InProgress, "{response_text}");
+            assert!(persisted.pending_verification);
+            let dispatch = dispatch.expect("owner close must mint an exact pending dispatch");
+            assert_eq!(dispatch.state, cas_types::VerificationDispatchState::Pending);
+            assert_eq!(dispatch.requester_agent_id, owner_id);
+            assert_eq!(dispatch.owner_agent_id, owner_id);
+            assert!(response_text.contains(&dispatch.id), "{response_text}");
+            assert!(response_text.contains("verification_type=epic"), "{response_text}");
+            assert!(row.is_none_or(|row| row.status != cas::types::VerificationStatus::Skipped));
+        }
+    }
 }
 
 /// Positive: supervisor closes an orphaned task (no assignee) → bypass fires.

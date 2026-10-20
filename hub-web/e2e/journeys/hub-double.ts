@@ -123,6 +123,10 @@ export type Outage = {
    * a half-open TCP connection does after an interface change (default), or
    * close as a reset would. */
   sockets?: "stall" | "close";
+  /** HTTP fails at the network (default), or the hub answers every
+   * authenticated request with its retryable 503 auth_store_unavailable, as an
+   * EMFILE hub does (cas-cb94). */
+  http?: "abort" | "auth_store_unavailable";
 };
 
 /** The supervisor pane's rendered rows, as the daemon pages them to Raw output (cas-f285). */
@@ -172,7 +176,7 @@ export class HubDouble {
   readonly attaches: string[] = [];
   private readonly held = new Set<string>();
   private readonly attachDelays = new Map<string, number>();
-  /** Attaches held until the journey releases them (cas-54ed). */
+  /** Session welcomes held across concurrent/retry attaches until release (cas-54ed). */
   private readonly attachGates = new Map<string, Promise<void>>();
   private polls = 0;
   /** Relay polls answered so far: the pairing's own clock (cas-03b7). */
@@ -727,20 +731,23 @@ export class HubDouble {
   }
 
   /**
-   * Hold the session's next attach until the returned release is called
-   * (cas-54ed): a step that must act while the opening card is up waits on
-   * the page, not on a delay a loaded host can outrun.
+   * Hold every attach for this session until the returned release is called
+   * (cas-54ed): concurrent/retry sockets cannot bypass the opening state.
+   * A step waits on the page, not on a delay a loaded host can outrun.
    */
   holdAttach(session: string): () => void {
     let release!: () => void;
-    this.attachGates.set(session, new Promise<void>((ok) => { release = ok; }));
-    return () => release();
+    const gate = new Promise<void>((ok) => { release = ok; });
+    this.attachGates.set(session, gate);
+    return () => {
+      if (this.attachGates.get(session) === gate) this.attachGates.delete(session);
+      release();
+    };
   }
 
   /** Send the welcome now, after a held attach is released, or after a set delay. */
   private welcomeWhenReady(session: string, welcome: () => void): void {
     const gate = this.attachGates.get(session);
-    this.attachGates.delete(session);
     const delay = this.attachDelays.get(session);
     this.attachDelays.delete(session);
     if (gate) void gate.then(welcome);
@@ -770,7 +777,12 @@ export class HubDouble {
     const machineId = url.hostname.replace(/\.test$/, "");
     const path = url.pathname;
     const method = route.request().method();
-    if (!this.reachable(machineId)) return route.abort("internetdisconnected");
+    if (!this.reachable(machineId)) {
+      if (this.outages.get(machineId)?.http !== "auth_store_unavailable") return route.abort("internetdisconnected");
+      if (path === "/v1/health") return route.fulfill({ json: { ok: true, installation_protocol: 1 } });
+      const reason = "auth_store_unavailable";
+      return route.fulfill({ status: 503, headers: { "retry-after": "2", "x-cas-refusal": reason }, json: { error: reason, reason, retryable: true, server_time: Math.floor(this.now() / 1000) } });
+    }
     if (path === "/v1/auth/pairing/protocol") return route.fulfill({ json: { installation_protocol: 1 } });
     if (path === "/v1/health") return route.fulfill({ json: { ok: true, installation_protocol: 1 } });
     if (path === "/v1/auth/pairing/commit" || path === "/v1/auth/pairing/abort") return this.installationAction(route, machineId, path.endsWith("commit"));

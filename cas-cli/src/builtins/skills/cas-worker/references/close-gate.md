@@ -72,6 +72,23 @@ Never set `status=closed` or invent a verification record to bypass close.
   and hit counts for conclusions based on searches.
 - Epic: every child's delivered work must reach the parent before epic close.
 
+### Cross-machine proof logs
+
+Publish and attach a peer proof in one call:
+
+```text
+artifact action=publish task_id=<task-id> path=<log> note_type=platform_proof notes="<platform, command, revision, passing result>"
+```
+
+Use `note_type=loaded_proof` for a loaded receipt. The note is attached only
+when Cloud commits the log; it carries the artifact id, Cloud id and digest.
+On the owning machine, run `artifact action=fetch task_id=<task-id> id=<art-id>`
+(or `cas artifact fetch --task <task-id> <art-id>`) and read the returned path.
+Fetch checks size and SHA-256 before saving. Cite the artifact id in review;
+a machine-local path warning means the evidence still needs publishing.
+An existing committed id in `task action=notes notes="<receipt> <art-id>"`
+also carries its portable reference. Keep the receipt fields in the note.
+
 ### Loaded proof for non-Rust targets
 
 When the close gate requires a `loaded_proof` for `risk=concurrency`, add one

@@ -63,6 +63,9 @@ with `verification action=qa_record`, naming the round's `LEDGER.md`.
    `~/.cas/artifacts/<project-key>/<task-id>/qa/` with
    [references/evidence-bundle.md](references/evidence-bundle.md), including its
    trace, ARIA and polish requirements even when `visual_change: false`.
+   For a visual change, also write its before/after screenshots to `qa/pairs/`
+   ([pairs](references/evidence-bundle.md#beforeafter-pairs)); reports and
+   release notes read them from there.
    Cite `bundle.json` in a `platform_proof` note and the close reason.
    API-only changes use the transcript and diff, with credentials redacted;
    record sandbox reset and the check that no smoke rows remain inline.

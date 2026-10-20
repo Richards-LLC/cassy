@@ -16,6 +16,7 @@
 
 #[cfg(feature = "mcp-proxy")]
 pub(crate) mod credentials;
+pub mod draft_check;
 pub mod files;
 pub mod hub;
 
@@ -61,9 +62,8 @@ pub struct PostArgs {
     /// Local file to attach, read from disk (repeatable, up to 10)
     #[arg(long = "file", value_name = "PATH")]
     pub files: Vec<PathBuf>,
-    /// Retry a managed reply with the request_id of the attempt it repeats
-    /// (a new one is made otherwise)
-    #[arg(long = "request-id", value_name = "UUID", requires = "reply_to")]
+    /// Reuse a stable request ID for a stakeholder root or managed reply retry
+    #[arg(long = "request-id", value_name = "UUID")]
     pub request_id: Option<String>,
 }
 
@@ -259,6 +259,13 @@ fn run_post(
         ));
     }
     let files = inspect_all(&args.files)?;
+    if let Some(text) = &text {
+        draft_check::check(&[draft_check::DraftMessage {
+            label: None,
+            text,
+            attached: files.iter().map(|file| file.filename.clone()).collect(),
+        }])?;
+    }
     let route = choose_route(&files);
     if route != Route::Message {
         gate_check(
@@ -277,7 +284,7 @@ fn run_post(
             "expected_generation": block["expected_generation"],
             "request_id": request_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         })
-    });
+    }).or_else(|| request_id.as_ref().map(|id| json!({"request_id":id})));
     let mut hub = (context.connect)()?;
     let receipt = post_files_claimed(hub.as_mut(), &channel, text, reply_to, claim.as_ref(), &files)?;
     if context.json {
@@ -577,6 +584,21 @@ fn run_thread(
             files: inspect_all(&spec.files)?,
         });
     }
+    let mut drafts = vec![draft_check::DraftMessage {
+        label: Some("top-level".to_string()),
+        text: &text,
+        attached: Vec::new(),
+    }];
+    for (index, reply) in replies.iter().enumerate() {
+        if let Some(reply_text) = &reply.text {
+            drafts.push(draft_check::DraftMessage {
+                label: Some(format!("reply {}", index + 1)),
+                text: reply_text,
+                attached: reply.files.iter().map(|file| file.filename.clone()).collect(),
+            });
+        }
+    }
+    draft_check::check(&drafts)?;
     if replies.iter().any(|reply| !reply.files.is_empty()) {
         gate_check(
             context,
@@ -662,7 +684,75 @@ pub fn post_thread(
         "idempotency_key": idempotency_key,
         "replies": entries,
     });
-    call_ok(hub, "violet_post", args).map_err(|error| with_begun(error, &begun))
+    let receipt = call_ok(hub, "violet_post", args).map_err(|error| with_begun(error, &begun))?;
+    confirm_reply_files(receipt, channel, replies).map_err(|error| with_begun(error, &begun))
+}
+
+/// GH #1251: a reply sent with files is confirmed only when its receipt,
+/// `posted[i].files`, lists that many distinct `file_id`s in
+/// `state: attached`. Anything less fails the run with a named code. The
+/// error keeps the hub's receipt, so the posted message ids and any returned
+/// file ids are printed, and it never retries.
+fn confirm_reply_files(receipt: Value, channel: &str, replies: &[ReplyPlan]) -> Result<Value, VioletError> {
+    let posted = |position: usize| {
+        receipt["posted"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|item| item["index"].as_u64() == Some(position as u64))
+    };
+    for (index, reply) in replies.iter().enumerate().filter(|(_, reply)| !reply.files.is_empty()) {
+        let position = index + 1;
+        let item = posted(position);
+        let files: Vec<&Value> = item
+            .and_then(|item| item["files"].as_array())
+            .into_iter()
+            .flatten()
+            .filter(|file| file["file_id"].as_str().is_some_and(|id| !id.is_empty()))
+            .collect();
+        // Distinct ids: two entries for one attached file prove one file.
+        let in_state = |state: &str| {
+            files
+                .iter()
+                .filter(|file| file["state"] == state)
+                .filter_map(|file| file["file_id"].as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        };
+        let (sent, attached, uploaded) = (reply.files.len(), in_state("attached"), in_state("uploaded"));
+        if attached == sent {
+            continue;
+        }
+        let (code, what) = if uploaded > 0 && attached + uploaded >= sent {
+            ("uploaded_not_attached", format!("the hub uploaded {uploaded} of them without attaching them to the reply"))
+        } else {
+            ("thread_files_unconfirmed", format!("the hub's receipt confirms {attached} attached"))
+        };
+        let root = posted(0).and_then(|item| item["message_id"].as_str()).unwrap_or("unknown");
+        let reply_id = item.and_then(|item| item["message_id"].as_str()).unwrap_or("unknown");
+        let plural = if sent == 1 { "" } else { "s" };
+        // The receipt's error carries the whole cause and remedy for machines;
+        // the terminal line stays short because the hint lines name the read
+        // command and the same-key rule (cas-e592 terminal-qa).
+        let full = format!(
+            "reply {position} was sent {sent} file{plural}, but {what}. The thread is posted (root {root}, reply \
+             {reply_id}): read it with `cas violet read --channel {channel} --thread {root}` before posting \
+             anything. Rerunning with the same --idempotency-key replays this receipt and never reposts; do not \
+             repost under a new key."
+        );
+        let mut error = VioletError::local(
+            code,
+            format!("reply {position}: {attached}/{sent} files attached; thread posted"),
+        );
+        let mut envelope = receipt.clone();
+        envelope["ok"] = json!(false);
+        envelope["failed_index"] = json!(position);
+        envelope["resume_safe"] = json!(false);
+        envelope["error"] = json!({"code": code, "message": full, "retryable": false});
+        error.envelope = Some(envelope);
+        return Err(error);
+    }
+    Ok(receipt)
 }
 
 // ---------------------------------------------------------------------------
@@ -805,7 +895,18 @@ fn receipt_files(receipt: &Value) -> Vec<&Value> {
     }
 }
 
+fn part_ids(message: &Value) -> Option<String> {
+    let ids = message
+        .get("part_ids")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    (!ids.is_empty()).then(|| ids.join(", "))
+}
+
 fn render_post(out: &mut dyn Write, route: Route, receipt: &Value) {
+    render_contact_warning(out, receipt);
     let files = receipt_files(receipt);
     let detail = match route {
         Route::Message => "message".to_string(),
@@ -831,6 +932,9 @@ fn render_post(out: &mut dyn Write, route: Route, receipt: &Value) {
             let _ = writeln!(out, "     message id not resolved by the hub");
         }
     }
+    if let Some(ids) = receipt.get("message").and_then(part_ids) {
+        let _ = writeln!(out, "     part_ids: {ids}");
+    }
     for file in files {
         let _ = writeln!(out, "     {}", file_line(file));
     }
@@ -854,6 +958,9 @@ fn posted_lines(out: &mut dyn Write, receipt: &Value) {
         let id = str_at(item, "/message_id").unwrap_or("?");
         let link = str_at(item, "/permalink").unwrap_or("");
         let _ = writeln!(out, "     {index} {role} {id}  {link}");
+        if let Some(ids) = part_ids(item) {
+            let _ = writeln!(out, "         part_ids: {ids}");
+        }
         for file in item
             .get("files")
             .and_then(Value::as_array)
@@ -866,6 +973,7 @@ fn posted_lines(out: &mut dyn Write, receipt: &Value) {
 }
 
 fn render_thread(out: &mut dyn Write, receipt: &Value) {
+    render_contact_warning(out, receipt);
     let count = receipt
         .get("posted")
         .and_then(Value::as_array)
@@ -880,6 +988,7 @@ fn render_thread(out: &mut dyn Write, receipt: &Value) {
 }
 
 fn render_partial_thread(out: &mut dyn Write, envelope: &Value) {
+    render_contact_warning(out, envelope);
     if envelope.get("kind").and_then(Value::as_str) != Some("thread") {
         return;
     }
@@ -888,6 +997,24 @@ fn render_partial_thread(out: &mut dyn Write, envelope: &Value) {
         .and_then(Value::as_u64)
         .map_or_else(|| "?".to_string(), |index| index.to_string());
     let resume_safe = envelope.get("resume_safe").and_then(Value::as_bool) == Some(true);
+    let unconfirmed = matches!(
+        str_at(envelope, "/error/code"),
+        Some("thread_files_unconfirmed" | "uploaded_not_attached")
+    );
+    if unconfirmed {
+        let _ = writeln!(out, "[FAILED] reply {failed} files not confirmed attached; the thread was posted");
+        posted_lines(out, envelope);
+        // The channel id is bounded where a channel name is not, so the read
+        // command stays within 80 columns on its own line.
+        let channel = str_at(envelope, "/channel/id")
+            .or_else(|| str_at(envelope, "/channel/name"))
+            .unwrap_or("<channel>");
+        let root = str_at(envelope, "/posted/0/message_id").unwrap_or("<root>");
+        let _ = writeln!(out, "  -> read the thread before posting again:");
+        let _ = writeln!(out, "     cas violet read --channel {channel} --thread {root}");
+        let _ = writeln!(out, "  -> rerun only with the same --idempotency-key, never a new key");
+        return;
+    }
     let _ = writeln!(
         out,
         "[FAILED] thread to {} stopped at index {failed}; resume_safe {resume_safe}",
@@ -897,9 +1024,15 @@ fn render_partial_thread(out: &mut dyn Write, envelope: &Value) {
     let hint = if resume_safe {
         "retry the identical command with the same --idempotency-key"
     } else {
-        "read the thread with `cas violet read --thread <root>` before doing anything else"
+        "read the thread first: cas violet read --thread <root>"
     };
     let _ = writeln!(out, "  -> {hint}");
+}
+
+fn render_contact_warning(out: &mut dyn Write, receipt: &Value) {
+    if let Some(warning) = receipt["dispatch_warning"].as_str() {
+        let _ = writeln!(out, "[WARN] {warning}");
+    }
 }
 
 fn render_read(out: &mut dyn Write, receipt: &Value, args: &ReadArgs) {

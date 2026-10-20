@@ -79,5 +79,6 @@ Operational bugs use `cas config get issues.repo` and
 `issues.components.{cassy,violet,cloud}`. File in the matching tracker before
 moving on; CAS source bugs become in-repo fix tasks. With no tracker, record a
 task note. Use the supervisor's filing reference for public-safe reports.
-Put long evidence in the configured task artifacts directory and send its path;
+Put long evidence in the configured task artifacts directory; for peer proofs,
+follow [cross-machine proof logs](close-gate.md#cross-machine-proof-logs);
 message and note schemas enforce the traffic limits.

@@ -18,7 +18,7 @@ use url::{Host, Url};
 
 use crate::cli::Cli;
 use crate::cli::hub::{
-    HubAuthorizeArgs, HubDisplayState, hub_display_state, hub_state_label, hub_state_remedy,
+    HubAuthorizeArgs, HubDisplayState, hub_display_state, hub_record_remedy, hub_state_label,
 };
 use crate::cloud::CloudConfig;
 use crate::hub::{
@@ -521,7 +521,7 @@ fn resolve_hub_url(
         state == HubDisplayState::Running,
         "cas hub authorize: {}; {}",
         hub_state_label(state, record.pid),
-        hub_state_remedy(state, record.pid)
+        hub_record_remedy(&record, state)
     );
     let remembered_hub_url = read_last_hub_url(paths)?;
     let url = explicit

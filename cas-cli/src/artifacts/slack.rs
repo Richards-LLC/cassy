@@ -42,6 +42,8 @@ pub struct PostOptions {
 /// What a successful post returns, for the release-report flow to record.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PostReceipt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispatch_warning: Option<String>,
     pub artifact_id: String,
     pub channel_id: Option<String>,
     pub message_id: Option<String>,
@@ -164,7 +166,7 @@ pub(crate) fn safe_url(raw: &str) -> bool {
     })
 }
 
-fn download(view: &SignedView) -> Result<Vec<u8>, PostError> {
+pub(crate) fn download(view: &SignedView) -> Result<Vec<u8>, PostError> {
     let artifact = &view.artifact;
     if artifact.size_bytes == 0 || artifact.size_bytes > ARTIFACT_MAX_BYTES {
         return Err(PostError::new(
@@ -183,7 +185,7 @@ fn download(view: &SignedView) -> Result<Vec<u8>, PostError> {
         return Err(PostError::new(
             "artifact_size_mismatch",
             format!(
-                "Cloud reports {} bytes but the published record says {}; nothing was posted",
+                "Cloud reports {} bytes but the published record says {}; artifact bytes were rejected",
                 view.view.size_bytes.unwrap_or_default(),
                 artifact.size_bytes
             ),
@@ -218,7 +220,7 @@ fn download(view: &SignedView) -> Result<Vec<u8>, PostError> {
         return Err(PostError::new(
             "artifact_size_mismatch",
             format!(
-                "downloaded {} bytes but the published record says {}; nothing was posted",
+                "downloaded {} bytes but the published record says {}; artifact bytes were rejected",
                 bytes.len(),
                 artifact.size_bytes
             ),
@@ -229,7 +231,7 @@ fn download(view: &SignedView) -> Result<Vec<u8>, PostError> {
         return Err(PostError::new(
             "artifact_checksum_mismatch",
             format!(
-                "downloaded SHA-256 {actual} differs from the published {}; nothing was posted",
+                "downloaded SHA-256 {actual} differs from the published {}; artifact bytes were rejected",
                 artifact.sha256
             ),
         ));
@@ -357,6 +359,7 @@ fn receipt(
         .filter(|p| !p.trim().is_empty())
         .ok_or_else(|| missing("/message/permalink"))?;
     Ok(PostReceipt {
+        dispatch_warning: complete.get("dispatch_warning").and_then(Value::as_str).map(str::to_owned),
         artifact_id,
         channel_id: complete
             .pointer("/channel/id")
@@ -411,12 +414,21 @@ pub fn envelope(result: Value) -> Result<Value, PostError> {
         .and_then(Value::as_str)
         .filter(|code| !code.trim().is_empty())
         .unwrap_or("violet_post_failed");
-    let message = value
+    let message = contact_refusal_evidence(&value).unwrap_or_else(|| value
         .pointer("/error/message")
         .and_then(Value::as_str)
         .map(excerpt)
-        .unwrap_or_else(|| "Violet refused the post".to_string());
+        .unwrap_or_else(|| "Violet refused the post".to_string()));
     Err(PostError::new(code, message))
+}
+
+/// Required contact evidence must survive the generic 300-character error
+/// excerpt used by CLI and artifact posting. This is receipt metadata only.
+pub fn contact_refusal_evidence(receipt: &Value) -> Option<String> {
+    let detail = receipt.pointer("/error/detail")?;
+    let at = detail.get("last_contact_at")?.as_str()?;
+    let text = |key: &str| detail[key].as_str().unwrap_or("unknown");
+    Some(format!("Last contact {at} by {}; {}. Next allowed {}.", text("last_poster"), text("permalink"), text("next_allowed_at")))
 }
 
 fn field(value: &Value, path: &str) -> Result<String, PostError> {

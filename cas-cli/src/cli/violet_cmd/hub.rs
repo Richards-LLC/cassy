@@ -53,11 +53,11 @@ impl VioletError {
             .filter(|code| !code.trim().is_empty())
             .unwrap_or("violet_post_failed")
             .to_string();
-        let message = receipt
+        let message = crate::artifacts::slack::contact_refusal_evidence(&receipt).unwrap_or_else(|| receipt
             .pointer("/error/message")
             .and_then(Value::as_str)
             .map(excerpt)
-            .unwrap_or_else(|| "Violet refused the request without a message".to_string());
+            .unwrap_or_else(|| "Violet refused the request without a message".to_string()));
         let retryable = receipt
             .pointer("/error/retryable")
             .and_then(Value::as_bool)
@@ -93,6 +93,29 @@ impl VioletError {
 impl std::fmt::Display for VioletError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.code, self.message)?;
+        // cas-d47fd750acf1df00: a `format_unreadable` refusal (from the hub or
+        // the local draft check) lists each violation as given, so the agent
+        // can apply its fix without a second round trip.
+        let violations = self
+            .envelope
+            .as_ref()
+            .and_then(|envelope| envelope.pointer("/error/detail/violations"))
+            .and_then(Value::as_array);
+        for violation in violations.into_iter().flatten() {
+            let field = |key: &str| match violation.get(key) {
+                Some(Value::String(text)) => text.clone(),
+                Some(other) => other.to_string(),
+                None => String::new(),
+            };
+            write!(
+                f,
+                "\n  - {} (line {}): {}\n    fix: {}",
+                field("rule"),
+                field("line"),
+                field("excerpt"),
+                field("fix")
+            )?;
+        }
         if !self.file_ids.is_empty() {
             write!(
                 f,
@@ -305,10 +328,13 @@ impl ProxyHub {
             }
         }
         runtime.block_on(crate::mcp::install_proxy_policy(&engine, &config));
+        if let Some(root) = cas_root {
+            runtime.block_on(crate::coordination::stakeholder_contacts::install(&engine, root));
+        }
         Ok(Self {
             runtime,
             engine: Some(engine),
-            caller: cli_caller(),
+            caller: cli_caller(cas_root),
         })
     }
 }
@@ -316,7 +342,18 @@ impl ProxyHub {
 /// The identity this one-shot process presents to the proxy policy: the
 /// factory role it was spawned with, if any, otherwise a plain session.
 #[cfg(feature = "mcp-proxy")]
-fn cli_caller() -> cmcp_core::ProxyCaller {
+fn cli_caller(cas_root: Option<&std::path::Path>) -> cmcp_core::ProxyCaller {
+    use crate::store::AgentStore;
+    if let Some(agent) = cas_root.and_then(|root| {
+        let session = std::env::var("CAS_SESSION_ID").ok()
+            .or_else(|| crate::agent_id::read_session_for_mcp(root).ok())?;
+        crate::store::open_agent_store(root).ok()?.get(&session).ok()
+    }) {
+        return cmcp_core::ProxyCaller {
+            agent_id: agent.id.clone(), role: agent.role, session_id: agent.id,
+            factory_session: None, active_task_ids: Vec::new(),
+        };
+    }
     let role = std::env::var("CAS_AGENT_ROLE")
         .ok()
         .and_then(|role| role.parse::<crate::types::AgentRole>().ok())

@@ -492,8 +492,24 @@ pub struct ArtifactRequest {
     )]
     pub action: String,
 
-    /// Task the artifact belongs to (publish, list)
-    #[schemars(description = "Task ID owning the artifact, e.g. 'cas-b72a' (publish, list)")]
+    /// Receipt appended with a portable artifact reference after Cloud commits.
+    #[schemars(
+        description = "Optional task proof receipt to append after publish commits to Cloud; one call publishes and attaches the log"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+
+    /// Category of the attached receipt.
+    #[schemars(
+        description = "Note type for publish with notes (default platform_proof; also loaded_proof)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_type: Option<String>,
+
+    /// Task the artifact belongs to (publish, list, fetch)
+    #[schemars(
+        description = "Task ID owning the artifact, e.g. 'cas-b72a' (publish, list, fetch)"
+    )]
     #[serde(default)]
     pub task_id: Option<String>,
 
@@ -504,8 +520,8 @@ pub struct ArtifactRequest {
     #[serde(default)]
     pub path: Option<String>,
 
-    /// Artifact record ID (show, post)
-    #[schemars(description = "Artifact record ID, e.g. 'art-7f3a9c21' (show, post)")]
+    /// Artifact record ID (show, fetch, post)
+    #[schemars(description = "Artifact record ID, e.g. 'art-7f3a9c21' (show, fetch, post)")]
     #[serde(default)]
     pub id: Option<String>,
 
@@ -998,7 +1014,7 @@ pub struct CoordinationRequest {
     pub id: Option<String>,
 
     /// Slack permalink for coordination action=claim.
-    #[schemars(description = "claim only: Slack thread permalink; Violet resolves and verifies the canonical thread")]
+    #[schemars(description = "claim only: Slack thread permalink; Violet resolves and verifies the canonical thread. managed=false (next_action reply_via_violet_v1) means the channel has no managed binding for this project: no claim is needed; reply through Violet v1")]
     #[serde(default)]
     pub external_ref: Option<String>,
 

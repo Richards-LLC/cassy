@@ -17,12 +17,18 @@ Use the project's release rubric as the contract. The procedure is:
 2. **Gather the merge.** Read the merged change set, for example
    `gh pr view <n> --json title,body,commits,files`. Describe what changed for
    the person on the other side of the screen, not an inventory of touched
-   files.
+   files. For each user-facing delivery, read its
+   `~/.cas/artifacts/<project-key>/<task-id>/qa/pairs/pairs.json` when it
+   exists. The template's before/after screenshots rule decides which images
+   go out, including for a project rubric copied before that rule existed.
 3. **Draft the messages from the rubric.** Follow its deploy-target label,
    audience labels, Was → Now format, thread count, reply count and Slack
    mrkdwn shape. Put one punch in each top-level message and the supporting
    detail in its reply. Do not include internal ticket labels or
-   implementation process.
+   implementation process. Lay each message out with the
+   [slack-formatting](../slack-formatting/SKILL.md) skill and pass its
+   self-check: name no file unless it is attached to that message, and show
+   every time in CT (or labelled ET), never UTC.
 4. **Save the draft.** Write the exact postable text to
    `docs/release-notes/<date>-<topic>-slack.md` before posting.
 5. **Post in rubric order** through [violet](../violet/SKILL.md),

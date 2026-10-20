@@ -563,6 +563,7 @@ impl SqliteTaskStore {
             crate::task_note_markers::neutralize_new_markers(formatted_note, None)
         };
         crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            let mut replacement = None;
             if trusted {
                 let current: Option<(String, String)> = tx.query_row(
                     "SELECT notes, updated_at FROM tasks WHERE id = ?1",
@@ -572,9 +573,13 @@ impl SqliteTaskStore {
                 let Some((notes, updated_at)) = current else {
                     return Err(StoreError::TaskNotFound(task_id.to_string()));
                 };
-                if notes.starts_with(formatted_note)
-                    || notes.contains(&format!("\n{formatted_note}"))
-                {
+                if formatted_note.starts_with("--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---") {
+                    replacement = Some(crate::task_note_markers::replace_rendered_provenance(&notes, formatted_note));
+                }
+                if replacement.as_deref() == Some(notes.as_str())
+                    || (replacement.is_none()
+                        && (notes.starts_with(formatted_note)
+                            || notes.contains(&format!("\n{formatted_note}")))) {
                     if !receipt_id.is_empty() {
                         Self::record_mutation_receipt_with_conn(tx, receipt_id, task_id)?;
                     }
@@ -583,10 +588,15 @@ impl SqliteTaskStore {
                 }
             }
             let now = Utc::now();
-            let rows = tx.execute(
-                "UPDATE tasks SET notes = CASE WHEN notes = '' THEN ?1 ELSE notes || char(10) || char(10) || ?1 END, updated_at = ?2 WHERE id = ?3",
-                params![safe_note.as_ref(), now.to_rfc3339(), task_id],
-            )?;
+            let rows = if let Some(next) = replacement {
+                tx.execute("UPDATE tasks SET notes = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![next, now.to_rfc3339(), task_id])?
+            } else {
+                tx.execute(
+                    "UPDATE tasks SET notes = CASE WHEN notes = '' THEN ?1 ELSE notes || char(10) || char(10) || ?1 END, updated_at = ?2 WHERE id = ?3",
+                    params![safe_note.as_ref(), now.to_rfc3339(), task_id],
+                )?
+            };
             if rows == 0 {
                 return Err(StoreError::TaskNotFound(task_id.to_string()));
             }

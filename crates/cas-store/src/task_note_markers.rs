@@ -16,6 +16,25 @@ pub fn is_reserved_line(line: &str) -> bool {
     RESERVED.iter().any(|marker| line.starts_with(marker))
 }
 
+pub fn replace_rendered_provenance(notes: &str, rendered: &str) -> String {
+    let retained = notes
+        .split("\n\n")
+        .filter(|paragraph| {
+            let paragraph = paragraph.trim();
+            !((paragraph.starts_with("--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---")
+                && paragraph.ends_with("--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---"))
+                || (paragraph.starts_with("--- BEGIN CLIENT-ASSERTED PROPOSAL PROVENANCE ---")
+                    && paragraph.ends_with("--- END CLIENT-ASSERTED PROPOSAL PROVENANCE ---")))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if retained.trim().is_empty() {
+        rendered.to_string()
+    } else {
+        format!("{}\n\n{rendered}", retained.trim_end())
+    }
+}
+
 fn copy_untrusted(span: &str, out: &mut String) -> bool {
     let mut changed = false;
     for line in span.split_inclusive('\n') {

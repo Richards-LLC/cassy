@@ -2528,10 +2528,12 @@ fn cas_16c0_manifest_cannot_regrant_denied_connectors_or_environment() {
     std::fs::create_dir_all(&selected).unwrap();
     std::fs::write(root.join("config.toml"), "[factory]\nsupervisor_only_mcp=['calendar']\nsupervisor_only_env=['PRIVATE_TOKEN']\n").unwrap();
     env.set("PRIVATE_TOKEN", "never-forward-fixture");
-    let servers = ["Gmail", "Vercel", "Neon", "Calendar"].into_iter().map(|name| (
+    let mut servers = ["Gmail", "Vercel", "Neon", "Calendar"].into_iter().map(|name| (
         format!("claude.ai {name}"), serde_json::json!({"type":"claudeai-proxy",
             "url":format!("https://{}.example.test/mcp", name.to_lowercase()), "id":format!("mcpsrv_{name}")})
     )).collect::<serde_json::Map<_, _>>();
+    let ceilings = serde_json::json!({"send_email": "blocked", "create_draft": "ask"});
+    servers["claude.ai Gmail"]["toolPermissions"] = ceilings.clone();
     std::fs::write(selected.join("cassy-worker-connectors.json"),
         serde_json::json!({"mcpServers": servers}).to_string()).unwrap();
     let pane = Mux::new(24, 80).build_add_worker_config(
@@ -2540,6 +2542,8 @@ fn cas_16c0_manifest_cannot_regrant_denied_connectors_or_environment() {
     let document: serde_json::Value = serde_json::from_slice(
         &std::fs::read(root.join("worker-mcp/worker.json")).unwrap()).unwrap();
     assert_eq!(document["mcpServers"].as_object().unwrap().keys().collect::<Vec<_>>(), vec!["cas", "claude.ai Gmail"]);
+    assert_eq!(document["mcpServers"]["claude.ai Gmail"]["toolPermissions"], ceilings,
+        "operator-exported native tool ceilings must reach Claude unchanged");
     assert!(pane.args.contains(&"--strict-mcp-config".into()));
     assert!(pane.env_remove.contains(&"PRIVATE_TOKEN".into()));
     assert!(env_value(&pane, "PRIVATE_TOKEN").is_none());

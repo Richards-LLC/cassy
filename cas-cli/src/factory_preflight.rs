@@ -318,6 +318,8 @@ struct PreflightFacts {
 
 #[derive(Debug, Clone)]
 struct CloudQueueFacts {
+    held_personal: usize,
+    team_only: bool,
     health: Option<QueueHealth>,
     pending_warning: usize,
     oldest_warning_secs: u64,
@@ -449,7 +451,13 @@ fn collect_cloud_queue_facts(cas_root: &Path) -> CloudQueueFacts {
     } else {
         None
     };
+    let linked = crate::cloud::CloudConfig::load_from_cas_dir(cas_root).ok();
+    let held_personal = linked.as_ref().filter(|c| c.active_team_id().is_some())
+        .and_then(|_| SyncQueue::open_read_only(cas_root).ok())
+        .and_then(|queue| queue.personal_row_count().ok()).unwrap_or(0);
     CloudQueueFacts {
+        held_personal,
+        team_only: linked.is_some_and(|c| c.team_only),
         health,
         pending_warning: cloud.queue_pending_warning.max(1),
         oldest_warning_secs: cloud.queue_oldest_warning_secs.max(1),
@@ -457,6 +465,11 @@ fn collect_cloud_queue_facts(cas_root: &Path) -> CloudQueueFacts {
 }
 
 fn classify_cloud_queue(facts: CloudQueueFacts, findings: &mut Vec<PreflightFinding>) {
+    if facts.held_personal > 0 {
+        findings.push(warning("cloud.personal_queue_held", "cloud_queue",
+            &format!("{} personal row(s) held: team-linked sync drains only the team queue; cloud.team_only is {}.", facts.held_personal, if facts.team_only {"on"} else {"off"}),
+            SyncQueue::personal_backlog_remedy(facts.team_only), None));
+    }
     let Some(health) = facts.health else {
         return;
     };
@@ -474,7 +487,7 @@ fn classify_cloud_queue(facts: CloudQueueFacts, findings: &mut Vec<PreflightFind
         .unwrap_or_else(|| "none".to_string());
     let last_error = health.last_error.as_deref().unwrap_or("none recorded");
     let message = format!(
-        "Cloud sync queue warning: {} pending; oldest pending age {}; last push error: {}; unreviewed conflicts: {}.",
+        "Cloud sync queue warning: {} pending; oldest pending age {}; last push error: {}; retained conflict snapshots: {}.",
         health.pending, oldest, last_error, health.unreviewed_conflicts
     );
     findings.push(warning(
@@ -1863,6 +1876,8 @@ mod tests {
                 snapshot
             },
             cloud_queue: CloudQueueFacts {
+                held_personal: 0,
+                team_only: false,
                 health: None,
                 pending_warning: 200,
                 oldest_warning_secs: 6 * 60 * 60,
@@ -1923,7 +1938,7 @@ mod tests {
         assert!(finding.message.contains("201 pending"));
         assert!(finding.message.contains("7h 0m"));
         assert!(finding.message.contains("Network error: offline"));
-        assert!(finding.message.contains("unreviewed conflicts: 3"));
+        assert!(finding.message.contains("retained conflict snapshots: 3"));
         assert!(!report.factory_blocked);
     }
 

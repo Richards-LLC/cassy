@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::coordination::external_work::{
     ExternalWorkCommand, ExternalWorkService, HttpCloudCoordinationPort, OperationContext,
-    RemoteError, SqliteRequestJournal, VioletThreadResolver, decode_violet_result,
+    RemoteError, SqliteRequestJournal, VioletThreadResolver,
 };
 
 #[derive(Debug, Clone, Subcommand)]
@@ -248,13 +248,9 @@ impl VioletThreadResolver for CliViolet {
             )
             .await
         });
-        match result {
-            Ok(Ok(value)) => decode_violet_result(value),
-            Ok(Err(error)) => Err(RemoteError::unavailable(
-                cmcp_core::describe_upstream_call_error(&error),
-            )),
-            Err(_) => Err(RemoteError::timeout("Violet thread resolution timed out")),
-        }
+        // cas-85c1: the shared mapping, so a CLI claim or reconcile retries a
+        // reconnecting upstream exactly as the MCP and daemon paths do.
+        crate::coordination::external_work::violet_proxy_outcome(result)
     }
 }
 

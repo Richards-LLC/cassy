@@ -29,6 +29,10 @@ struct TaskDependencyPayload<'a> {
     origin_project: Option<&'a str>,
 }
 
+fn strip_task_note_nuls(task: &mut Task) {
+    task.notes.retain(|character| character != '\0');
+}
+
 /// After a clean scheduled reconcile, the next one waits this long. It is the
 /// safety net for intents a crashed process left behind; a mutator fulfills
 /// its own intent.
@@ -178,6 +182,7 @@ impl SyncingTaskStore {
         // inner.get plus in-memory policy/serialization. It cannot reopen a
         // syncing store, acquire the mutation flock, or call back into queue.
         let mut task = self.inner.get(&intent.entity_id)?;
+        strip_task_note_nuls(&mut task);
         task.scope = if intent.global_scope {
             Scope::Global
         } else {
@@ -490,14 +495,16 @@ impl TaskStore for SyncingTaskStore {
     }
 
     fn add(&self, task: &Task) -> Result<()> {
+        let mut task = task.clone();
+        strip_task_note_nuls(&mut task);
         let _sync_guard = self
             .queue
             .lock_task_sync_mutations(&[&task.id])
             .map_err(queue_error_before_local_commit)?;
-        let intent = self.stage_upsert(task, "add", None, None)?;
+        let intent = self.stage_upsert(&task, "add", None, None)?;
         if let Err(error) = self
             .inner
-            .add_with_mutation_receipt(task, &intent.mutation_id)
+            .add_with_mutation_receipt(&task, &intent.mutation_id)
         {
             self.cancel_staged_after_local_failure(&intent);
             return Err(error);
@@ -514,13 +521,15 @@ impl TaskStore for SyncingTaskStore {
         epic_id: Option<&str>,
         created_by: Option<&str>,
     ) -> Result<()> {
+        let mut task = task.clone();
+        strip_task_note_nuls(&mut task);
         let _sync_guard = self
             .queue
             .lock_task_sync_mutations(&[&task.id])
             .map_err(queue_error_before_local_commit)?;
-        let intent = self.stage_upsert(task, "create_atomic", None, None)?;
+        let intent = self.stage_upsert(&task, "create_atomic", None, None)?;
         if let Err(error) = self.inner.create_atomic_with_mutation_receipt(
-            task,
+            &task,
             blocked_by,
             epic_id,
             created_by,
@@ -532,7 +541,7 @@ impl TaskStore for SyncingTaskStore {
         crate::mcp::tools::service::mutation_receipt::task_committed(&task.id);
         let task_sync_result = self.fulfill_upsert(&intent);
         let persisted = self
-            .persisted_for_queue(task)
+            .persisted_for_queue(&task)
             .map_err(|error| degraded_sync_error(&intent, error.to_string()))?;
         for dep in self.inner.get_dependencies(&task.id)? {
             self.queue_dependency_upsert(&dep, &persisted);
@@ -554,6 +563,8 @@ impl TaskStore for SyncingTaskStore {
     }
 
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
+        let mut task = task.clone();
+        strip_task_note_nuls(&mut task);
         let _sync_guard = self
             .queue
             .lock_task_sync_mutations(&[&task.id])
@@ -561,10 +572,10 @@ impl TaskStore for SyncingTaskStore {
         let previous = self.inner.get(&task.id)?;
         let previous_updated_at = previous.updated_at.to_rfc3339();
         let intent =
-            self.stage_upsert(task, "update", Some(&previous_updated_at), Some(&previous))?;
+            self.stage_upsert(&task, "update", Some(&previous_updated_at), Some(&previous))?;
         let persisted_at = match self
             .inner
-            .update_with_mutation_receipt(task, &intent.mutation_id)
+            .update_with_mutation_receipt(&task, &intent.mutation_id)
         {
             Ok(persisted_at) => persisted_at,
             Err(error) => {
@@ -596,6 +607,7 @@ impl TaskStore for SyncingTaskStore {
     }
 
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
+        let formatted_note = formatted_note.replace('\0', "");
         let _sync_guard = self
             .queue
             .lock_task_sync_mutations(&[task_id])
@@ -610,7 +622,7 @@ impl TaskStore for SyncingTaskStore {
         )?;
         let persisted_at = match self.inner.append_note_with_mutation_receipt(
             task_id,
-            formatted_note,
+            &formatted_note,
             &intent.mutation_id,
         ) {
             Ok(persisted_at) => persisted_at,
@@ -1736,7 +1748,7 @@ mod tests {
         queue.clear().unwrap();
 
         store
-            .append_note(&task.id, "synced task note")
+            .append_note(&task.id, "sync\u{0}ed task note")
             .expect("append note should commit locally and stage sync");
 
         let pending = queue.pending(10, 5).unwrap();
@@ -1752,6 +1764,10 @@ mod tests {
                 .count(),
             1
         );
+        let pushed: crate::types::Task =
+            serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(pushed.notes, "synced task note");
+        assert!(!pushed.notes.contains('\0'));
         assert_eq!(
             store
                 .get(&task.id)
@@ -1761,6 +1777,7 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(store.get(&task.id).unwrap().notes, "synced task note");
     }
 
     #[test]

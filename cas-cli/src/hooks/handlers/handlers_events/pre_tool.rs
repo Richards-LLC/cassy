@@ -124,7 +124,7 @@ fn handle_pre_tool_use_inner(
         return Ok(HookOutput::with_pre_tool_permission("deny", reason));
     }
 
-    // cas-d757 (GH #1219): operator-authenticated CLIs (vercel) and their
+    // cas-d757 (GH #1219): operator-authenticated CLIs (vercel/neonctl) and their
     // MCP tools are the supervisor's. Workers only; before auto-approval and
     // the missing-root early return.
     if let Some(reason) = super::worker_denied_tools::denial(input, tool_name, cas_root) {

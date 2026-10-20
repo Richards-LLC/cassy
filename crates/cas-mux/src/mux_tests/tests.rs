@@ -1063,6 +1063,7 @@ allowlist = ["vercel.get_runtime_errors"]
 #[tokio::test]
 async fn default_workers_keep_task_database_access_without_the_neon_api_key() {
     let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
     let project = tempfile::tempdir().unwrap();
     let cas_root = project.path().join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
@@ -1081,7 +1082,8 @@ async fn default_workers_keep_task_database_access_without_the_neon_api_key() {
         let supervisor = &configs.iter().find(|(name, _)| name == &config.supervisor_name).unwrap().1;
         assert!(!supervisor.env_remove.iter().any(|name| name == "NEON_API_KEY"));
         let mut worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
-        assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none(),
+            "{cli:?}: {:?}", env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR"));
         assert!(env_value(&worker, "NEON_API_KEY").is_none());
         assert!(worker.env_remove.iter().any(|name| name == "NEON_API_KEY"));
         assert!(!worker.env_remove.iter().any(|name| name == "DATABASE_URL"));

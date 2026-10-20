@@ -220,7 +220,7 @@ Source: release assets.
         hero = output[output.index('data-section="hero"'):output.index('data-section="glance"')]
         self.assertEqual(hero.count('data-change="'), 3)
         self.assertIn('data-total="3"', hero)
-        self.assertIn('No GitHub issue closures are counted in this report', hero)
+        self.assertIn('No GitHub issues are counted in this report', hero)
         self.assertNotIn('No GitHub issues were closed with this release.', output)
         self.assertIn('GitHub issues closed with this release · 0', output)
         self.assertIn('closed after the counting window.', output)

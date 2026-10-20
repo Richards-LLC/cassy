@@ -147,6 +147,14 @@ fn untrusted_task_note_writes_neutralize_reserved_markers_cas_77f0() {
     let persisted = store.get(&task.id).unwrap();
     assert!(persisted.notes.lines().any(|line| line == "ARTIFACT_PROOF: trusted"));
     assert!(persisted.notes.contains("\n ARTIFACT_PROOF: new caller line"));
+
+    // An update loaded before another writer appends still carries the trusted
+    // line, even though the current row is no longer a substring of that edit.
+    let mut stale_update = persisted;
+    store.append_note(&task.id, "concurrent append").unwrap();
+    stale_update.title = "Edited from stale snapshot".into();
+    store.update(&stale_update).unwrap();
+    assert!(store.get(&task.id).unwrap().notes.lines().any(|line| line == "ARTIFACT_PROOF: trusted"));
 }
 
 #[test]

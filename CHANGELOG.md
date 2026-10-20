@@ -12,6 +12,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Neon workspace setup** — Was: initialization checked only root-level
   packages and needed an interactive choice. → Now: it finds supported nested
   workspace packages and accepts explicit organization and project IDs.
+- **Alternate Codex accounts** — Was: a home-relative account location could
+  reach setup literally and fail with an empty parse error. → Now: the home
+  shortcut expands before trust preparation, and missing hook setup is named.
+- **Codex model checks** — Was: a fresh list from an older Codex app could hide
+  models the current client supports. → Now: older or unversioned lists are
+  treated as unverified, so they cannot falsely mark a model unsupported.
 - **Safe retention preview** — Was: closed-task evidence and task-created iOS
   simulators could accumulate indefinitely. → Now: pruning previews age, size,
   keep reasons and owned simulators; applying requires confirmation and checks

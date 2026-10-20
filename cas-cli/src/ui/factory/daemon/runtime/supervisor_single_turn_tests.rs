@@ -432,7 +432,7 @@ async fn cas_3f90_inline_peer_retains_the_shared_inbox_label() {
 async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {
     if !fixture_child("cas_bc4d_directed_batches_preserve_budget_and_legacy_guards") { return; }
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    for guard in ["budget", "held-leader", "held-passenger", "memory-passenger"] {
+    for guard in ["budget", "held-leader", "held-passenger", "memory-leader", "memory-passenger"] {
         let (root, mut daemon) = fixture().await;
         let cas = daemon.app.cas_dir().to_path_buf();
         let peer = cas_types::Agent::new_with_role(
@@ -446,7 +446,7 @@ async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {
         let ids: Vec<_> = bodies.iter().map(|body| enqueue(&daemon, &peer.name, body,
             cas_store::QueueOrigin::RegisteredAgent { agent_id: peer.id.clone() })).collect();
         let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
-        let held = if guard == "held-leader" { 0 } else { 1 };
+        let held = if guard.ends_with("leader") { 0 } else { 1 };
         if guard != "budget" {
             let row = queue.queued_prompt(ids[held]).unwrap().unwrap();
             let legacy = super::delivery::claude_teams_inbox_text(
@@ -456,7 +456,7 @@ async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {
             daemon.teams.as_ref().unwrap().write_to_inbox("supervisor", "director", &legacy, None, None).unwrap();
             let pane = daemon.app.supervisor_name().to_string();
             let bytes = daemon.app.mux.pane_bytes_received(&pane).unwrap();
-            if guard == "memory-passenger" {
+            if guard.starts_with("memory") {
                 daemon.inbox_deferred_writes.insert(row.id, super::queue_and_events::InboxDeferredWrite {
                     pane, bytes_at_write: bytes, written_at: Instant::now(), delivered_at: chrono::Utc::now(),
                 });
@@ -477,6 +477,10 @@ async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {
             assert_eq!(inbox.len(), 1, "{guard}: the held legacy copy must not be duplicated");
             assert!(!std::fs::read_to_string(root.path().join("input")).unwrap().contains(&bodies[held]),
                 "{guard}: legacy content must not be typed again as a batch member");
+            if guard == "memory-leader" {
+                assert_ne!(queue.message_delivery_report(ids[1]).unwrap().unwrap().stage,
+                    cas_store::DeliveryStage::Delivered, "a held leader cannot consume its unsent passenger");
+            }
         }
     }
 }

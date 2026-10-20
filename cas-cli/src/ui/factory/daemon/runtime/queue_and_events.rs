@@ -8639,8 +8639,10 @@ impl FactoryDaemon {
             if queued.processed_at.is_some() { continue; }
             let mut facts = row_facts.get(&queued.id).cloned().unwrap_or_default();
             let batch_len = facts.message_batch.len();
+            let leader_held = facts.deferred_inbox.is_some()
+                || self.inbox_deferred_writes.contains_key(&queued.id);
             facts.message_batch.retain(|member| {
-                !self.inbox_deferred_writes.contains_key(&member.id)
+                !leader_held && !self.inbox_deferred_writes.contains_key(&member.id)
                     && row_facts.get(&member.id).is_none_or(|fact| fact.deferred_inbox.is_none())
             });
             if facts.message_batch.len() != batch_len {

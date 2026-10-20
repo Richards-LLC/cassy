@@ -1088,16 +1088,23 @@ pub(super) fn merge_tip_content_presence(
             }
         }
     }
-    for commit in &commits {
-        // cas-bdd2: the commit's rebuilt bundles are left to the regeneration
-        // rule below without first walking them through the epic history.
-        match super::delivery_content_presence_in_parent_leaving_artifacts(
-            repo,
-            commit,
-            target,
-            merge_tip,
-            &carries_source,
-        ) {
+    // cas-18aa: every commit is measured first, so an earlier draft can be
+    // judged against the later task commit that replaced it.
+    let measurements: Vec<_> = commits
+        .iter()
+        .map(|commit| {
+            super::delivery_content_presence_in_parent_leaving_artifacts(
+                repo,
+                commit,
+                target,
+                merge_tip,
+                &carries_source,
+            )
+        })
+        .collect();
+    for (index, commit) in commits.iter().enumerate() {
+        let measured = measurements[index].clone();
+        match measured {
             DeliveryContentPresence::Present { paths } => append_unique(&mut present_paths, paths),
             DeliveryContentPresence::Superseded { paths, commits } => {
                 append_unique(&mut superseded_paths, paths);
@@ -1113,6 +1120,36 @@ pub(super) fn merge_tip_content_presence(
                     ) {
                         append_unique(&mut dropped_paths, vec![path]);
                         continue;
+                    }
+                    // cas-18aa: an earlier draft this delivery itself later
+                    // replaced is judged by the delivery's own final tree,
+                    // not by following each draft line through the target.
+                    // Build bundles keep their exact-blob and regeneration
+                    // rules (cas-5f0b, cas-baf7): lines of minified output say
+                    // nothing about a replacement.
+                    let replaced_later = !super::regenerable_build_artifact(repo, &path)
+                        && commits[index + 1..]
+                        .iter()
+                        .zip(&measurements[index + 1..])
+                        .any(|(later, measured)| {
+                            !matches!(measured, DeliveryContentPresence::Unknown { .. })
+                                && !matches!(measured, DeliveryContentPresence::Dropped { paths } if paths.contains(&path))
+                                && adds_meaningful_lines(repo, later, &path)
+                        });
+                    match replaced_later
+                        .then(|| draft_retired_by_delivery(repo, commit, merge_tip, &target_ref, &path))
+                        .unwrap_or(Ok(false))
+                    {
+                        Ok(true) => {
+                            append_unique(&mut superseded_paths, vec![path]);
+                            append_unique(&mut superseding_commits, vec![merge_tip.to_string()]);
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(reason) => {
+                            unknown_reason.get_or_insert(reason);
+                            continue;
+                        }
                     }
                     // A resolution may replace only the owned lines in its
                     // novel hunks, on a path whose final effect was proven.
@@ -1216,6 +1253,106 @@ pub(super) fn merge_tip_content_presence(
             paths: present_paths,
         })
     }
+}
+
+/// cas-18aa: whether `commit` adds a line with a letter or digit to `path`:
+/// a replacement, not only a deletion. Unreadable history is no.
+fn adds_meaningful_lines(repo: &Path, commit: &str, path: &str) -> bool {
+    git_text(repo, &["diff", "--unified=0", "--no-renames", &format!("{commit}^1"), commit, "--", path])
+        .is_some_and(|patch| {
+            patch.lines().any(|line| {
+                !line.starts_with("+++")
+                    && line.strip_prefix('+').is_some_and(|line| line.chars().any(char::is_alphanumeric))
+            })
+        })
+}
+
+/// cas-18aa: whether `commit`'s effect on `path`, missing from `target`, was
+/// retired by the delivery itself. That holds when every line it added that
+/// the target lacks is also absent from the delivery's final tree
+/// (`merge_tip`), and every line it removed that the target has again is
+/// also back in that final tree. The delivery's final content is measured
+/// separately, so this never excuses a line the delivery still holds and the
+/// target lost, nor a removal the target reintroduced on its own.
+///
+/// This is the cas-da9a shape: round one of a task landed a draft, round two
+/// (started from the newer target) replaced it, and the target's own later
+/// edits to the file kept the line walk from crediting the replacement. The
+/// caller asks only when a later, non-revert task commit added replacement
+/// lines to the path and was itself not dropped there.
+fn draft_retired_by_delivery(
+    repo: &Path,
+    commit: &str,
+    merge_tip: &str,
+    target: &str,
+    path: &str,
+) -> Result<bool, String> {
+    if commit == merge_tip {
+        return Ok(false);
+    }
+    let patch = git_text(repo, &["diff", "--unified=0", "--no-renames", &format!("{commit}^1"), commit, "--", path])
+        .ok_or_else(|| format!("Git could not render `{commit}`'s effect on `{path}`"))?;
+    if patch.contains("Binary files ") || patch.contains("GIT binary patch") {
+        return Ok(false);
+    }
+    let meaningful = |line: &str| line.trim().chars().any(char::is_alphanumeric);
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    for line in patch.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if let Some(line) = line.strip_prefix('+') {
+            added.push(line);
+        } else if let Some(line) = line.strip_prefix('-') {
+            removed.push(line);
+        }
+    }
+    // A file absent at a revision is empty; any other read failure is not
+    // evidence, so the caller keeps the drop unproven.
+    let lines_at = |revision: &str| -> Result<std::collections::HashMap<String, usize>, String> {
+        let object = format!("{revision}:{path}");
+        let exists = Command::new("git")
+            .args(["cat-file", "-e", &object])
+            .current_dir(repo)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|error| format!("failed to inspect `{object}`: {error}"))?
+            .success();
+        let mut counts = std::collections::HashMap::new();
+        if !exists {
+            return Ok(counts);
+        }
+        let output = Command::new("git")
+            .args(["cat-file", "blob", &object])
+            .current_dir(repo)
+            .output()
+            .map_err(|error| format!("failed to read `{object}`: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("Git could not read `{object}`"));
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            *counts.entry(line.to_string()).or_insert(0) += 1;
+        }
+        Ok(counts)
+    };
+    let (delivered, landed) = (lines_at(merge_tip)?, lines_at(target)?);
+    let count = |counts: &std::collections::HashMap<String, usize>, line: &str| counts.get(line).copied().unwrap_or(0);
+    let mut retired_any = false;
+    for line in added.iter().copied().filter(|line| meaningful(line)) {
+        let wanted = added.iter().filter(|other| **other == line).count();
+        let kept = count(&delivered, line).min(wanted);
+        if count(&landed, line) < kept {
+            return Ok(false);
+        }
+        retired_any |= count(&delivered, line) < wanted;
+    }
+    for line in removed.iter().copied().filter(|line| meaningful(line)) {
+        if count(&landed, line) > count(&delivered, line) {
+            return Ok(false);
+        }
+    }
+    Ok(retired_any)
 }
 
 /// A non-merge receipt can be integrated with a later task-owned QA

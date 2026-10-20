@@ -24,8 +24,9 @@ pub enum ArtifactCommands {
     Show(ShowArgs),
     /// List the artifacts published for a task
     List(ListArgs),
-    /// Reclaim closed tasks' artifact directories (and, with --simulators,
-    /// their iOS simulators); no factory session needed
+    /// Plan (and with --yes, apply) reclaiming closed tasks' artifact
+    /// directories and, with --simulators, their iOS simulators; no factory
+    /// session needed
     Prune(PruneArgs),
 }
 
@@ -35,8 +36,11 @@ pub struct PruneArgs {
     /// at least 7 days)
     #[arg(long, value_name = "DAYS", default_value = "7d", value_parser = parse_days)]
     pub older_than: i64,
-    /// List what would be removed without removing anything
+    /// Remove what the plan lists. Without it, prune only prints the plan.
     #[arg(long)]
+    pub yes: bool,
+    /// Print the plan and remove nothing (the default; accepted for clarity)
+    #[arg(long, conflicts_with = "yes")]
     pub dry_run: bool,
     /// Also reclaim this project's task-named iOS simulators (macOS)
     #[arg(long)]
@@ -268,9 +272,12 @@ fn execute_prune(
     let simulators = args
         .simulators
         .then(|| crate::task_simulators::inventory(simctl, &tasks, now));
-    let (removed, freed, errors) = if args.dry_run { (0, 0, Vec::new()) } else { apply_prune(&plan) };
-    let (sims_deleted, sims_failed) = match (&simulators, args.dry_run) {
-        (Some(Ok(list)), false) => crate::task_simulators::reclaim(simctl, list),
+    // Plan-only unless --yes (cas-75a8 review): deleting evidence is never
+    // the default, and --dry-run is an accepted alias for that default.
+    let apply = args.yes && !args.dry_run;
+    let (removed, freed, errors) = if apply { apply_prune(&plan) } else { (0, 0, Vec::new()) };
+    let (sims_deleted, sims_failed) = match (&simulators, apply) {
+        (Some(Ok(list)), true) => crate::task_simulators::reclaim(simctl, list),
         _ => (Vec::new(), Vec::new()),
     };
     let age = |closed: Option<chrono::DateTime<chrono::Utc>>| {
@@ -294,7 +301,7 @@ fn execute_prune(
         let document = serde_json::json!({
             "root": plan.root,
             "retention_days": plan.retention_days,
-            "dry_run": args.dry_run,
+            "applied": apply,
             "reclaimable": dirs(plan.reclaimable.iter().map(|dir| (dir, None)).collect()),
             "reclaimable_bytes": plan.reclaimable_bytes(),
             "kept": dirs(plan.kept.iter().map(|(dir, why)| (dir, Some(match why {
@@ -323,9 +330,9 @@ fn execute_prune(
         return Ok(());
     }
 
-    let verb = if args.dry_run { "would reclaim" } else { "reclaimed" };
-    let count = if args.dry_run { plan.reclaimable.len() } else { removed };
-    let bytes = if args.dry_run { plan.reclaimable_bytes() } else { freed };
+    let verb = if apply { "reclaimed" } else { "would reclaim" };
+    let count = if apply { removed } else { plan.reclaimable.len() };
+    let bytes = if apply { freed } else { plan.reclaimable_bytes() };
     println!(
         "[OK] {verb} {count} closed-task artifact dir(s), {} (closed >= {}d, uncited)",
         human_size(bytes),
@@ -350,15 +357,15 @@ fn execute_prune(
     }
     if let Some(simulators) = &simulators {
         print!("{}", crate::task_simulators::render(simulators));
-        if !args.dry_run {
+        if apply {
             println!("     simulators deleted: {}", sims_deleted.len());
         }
         for failure in &sims_failed {
             println!("[WARN] simulator delete failed: {failure}");
         }
     }
-    if args.dry_run && !plan.reclaimable.is_empty() {
-        println!("  -> rerun without --dry-run to remove them");
+    if !apply && !plan.reclaimable.is_empty() {
+        println!("  -> rerun with --yes to remove them");
     }
     Ok(())
 }
@@ -407,8 +414,9 @@ pub fn render_artifact_line(artifact: &PublishedArtifact) -> String {
 mod tests {
     use super::*;
 
-    /// cas-75a8 (GH #1295): only this project's closed, uncited tasks past
-    /// retention are reclaimed; a dry run removes nothing.
+    /// cas-75a8 (GH #1295): prune only plans unless --yes (with or without
+    /// --dry-run), and --yes reclaims only this project's closed, uncited
+    /// tasks past retention.
     #[test]
     fn prune_reclaims_only_old_uncited_closed_task_dirs_cas_75a8() {
         let env = crate::test_env_guard::TestEnvGuard::temp_home();
@@ -441,9 +449,13 @@ mod tests {
             std::fs::write(root.join(id).join("evidence.log"), b"proof").unwrap();
         }
         let missing = crate::task_simulators::Simctl::with_binary(env.home().join("no-xcrun"));
-        let dry = PruneArgs { older_than: 7, dry_run: true, simulators: false };
-        execute_prune(&dry, &cas_root, true, &missing, now).unwrap();
-        assert!(root.join("cas-0old").exists(), "a dry run removes nothing");
+        for plan_only in [
+            PruneArgs { older_than: 7, yes: false, dry_run: false, simulators: false },
+            PruneArgs { older_than: 7, yes: false, dry_run: true, simulators: false },
+        ] {
+            execute_prune(&plan_only, &cas_root, true, &missing, now).unwrap();
+            assert!(root.join("cas-0old").exists(), "without --yes prune only plans");
+        }
 
         let tasks = store.list(None).unwrap();
         let plan = crate::artifacts::retention::plan_prune(&cas_root, &root, &tasks, now, 7).unwrap();
@@ -453,7 +465,7 @@ mod tests {
         assert_eq!(plan.kept.len(), 2, "recent and cited closed tasks are kept");
         assert_eq!(plan.untouched, 2, "the open task and the unknown id are untouched");
 
-        let wet = PruneArgs { older_than: 7, dry_run: false, simulators: false };
+        let wet = PruneArgs { older_than: 7, yes: true, dry_run: false, simulators: false };
         execute_prune(&wet, &cas_root, true, &missing, now).unwrap();
         assert!(!root.join("cas-0old").exists());
         for kept in ["cas-0new", "cas-0cit", "cas-0opn", "cas-0zzz"] {

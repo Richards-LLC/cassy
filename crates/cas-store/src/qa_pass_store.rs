@@ -695,7 +695,7 @@ pub fn latest_qa_pass(cas_dir: &Path, task_id: &str, now: DateTime<Utc>) -> Resu
     latest_with_conn(&conn, task_id)
 }
 
-/// Reviewer IDs and round numbers for tasks whose latest QA round failed.
+/// Reviewer identities and round numbers for tasks whose latest QA round failed.
 /// Callers apply task-lifecycle and configured round-limit policy.
 pub fn latest_failed_qa_reviewers(
     cas_dir: &Path,

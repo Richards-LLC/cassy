@@ -680,7 +680,8 @@ impl DirectorData {
                 let pending_supervisor_messages =
                     pending_supervisor_counts.get(&a.name).copied().unwrap_or(0);
                 let latest_supervisor_message_at = latest_supervisor_messages.get(&a.name).copied();
-                let qa_reviewer_between_rounds = qa_reviewer_ids.contains(&a.id);
+                let qa_reviewer_between_rounds =
+                    qa_reviewer_ids.contains(&a.id) || qa_reviewer_ids.contains(&a.name);
                 let effort = a
                     .metadata
                     .get("worker_effort")

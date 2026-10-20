@@ -1112,7 +1112,7 @@ def main():
     parser.add_argument("action", choices=("prove", "check", "input", "prove-rows", "check-row",
                                            "reuse-merge-queue", "check-merge-queue"))
     parser.add_argument("root", type=Path)
-    parser.add_argument("row", nargs="?")
+    parser.add_argument("row", nargs="?", choices=ROW_PROOF_ROWS)
     args = parser.parse_args()
     try:
         root = args.root.resolve()
@@ -1129,7 +1129,7 @@ def main():
             print(merge_queue_line(*found))
             return 0
         if args.action == "prove-rows":
-            results = prove_rows(root)
+            results = prove_rows(root, (args.row,) if args.row else ROW_PROOF_ROWS)
             print("row-proofs " + " ".join(f"{row}={status}" for row, status in results.items()))
             return 0 if all(status == "PASS" for status in results.values()) else 1
         if args.action == "check-row":

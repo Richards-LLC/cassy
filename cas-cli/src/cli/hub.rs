@@ -3941,6 +3941,8 @@ mod tests {
 
         assert!(rendered.contains("version 3.4.1"), "{rendered}");
         assert!(rendered.contains("binary: 3.7.7"), "{rendered}");
+        assert!(rendered.contains("version drift"), "{rendered}");
+        assert!(rendered.contains("cas hub service install"), "{rendered}");
     }
 
     #[test]

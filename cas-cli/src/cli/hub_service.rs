@@ -97,6 +97,7 @@ struct ServiceReport {
     unit_path: Option<String>,
     log_path: Option<String>,
     hub_running: bool,
+    hub_state: &'static str,
     launch_readiness: Vec<LaunchReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<&'static str>,
@@ -108,6 +109,12 @@ struct LaunchReadiness {
     profile: String,
     ready: bool,
     detail: String,
+}
+
+impl ServiceReport {
+    fn after_start(self) -> Self {
+        self
+    }
 }
 
 fn launch_readiness() -> Vec<LaunchReadiness> {
@@ -210,7 +217,7 @@ pub(super) fn manage_service(
         HubServiceCommands::Install(args) => {
             install(platform, cli, tailscale_serve, tailscale_port, args.dry_run)
         }
-        HubServiceCommands::Status => status(platform, cli),
+        HubServiceCommands::Status => status(platform, cli, false),
         HubServiceCommands::Uninstall => uninstall(platform, cli),
     }
 }
@@ -275,7 +282,7 @@ fn install(
                 .status();
             run_manager_vec("launchctl", &launchd_bootstrap_args(&domain, &path))?;
             run_manager_vec("launchctl", &launchd_kickstart_args(&domain))?;
-            status(platform, cli)
+            status(platform, cli, true)
         }
         ServicePlatform::Systemd => {
             let path = systemd_path()?;
@@ -303,7 +310,7 @@ fn install(
                 ["--user", "enable", "--now", SYSTEMD_UNIT],
                 None,
             )?;
-            status(platform, cli)
+            status(platform, cli, true)
         }
         ServicePlatform::ManualLinux => print_report(
             cli,
@@ -828,23 +835,33 @@ fn refresh_systemd_unit(path: &Path) -> Result<bool> {
 /// Refresh publication policy even when the old process was loopback-only.
 /// Return true when a manager reload/restart is needed before early verification.
 pub(crate) fn refresh_installed_service(tailscale_serve: bool) -> Result<bool> {
-    match native_platform() {
+    let platform = native_platform();
+    let path = match platform {
+        ServicePlatform::Launchd => launchd_path()?,
+        ServicePlatform::Systemd => systemd_path()?,
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => return Ok(false),
+    };
+    refresh_installed_service_at(platform, &path, tailscale_serve, &std::env::current_exe()?)
+}
+
+fn refresh_installed_service_at(
+    platform: ServicePlatform,
+    path: &Path,
+    tailscale_serve: bool,
+    _installed_binary: &Path,
+) -> Result<bool> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    match platform {
         ServicePlatform::Systemd => {
-            let path = systemd_path()?;
-            if !path.is_file() {
-                return Ok(false);
-            }
-            let port = service_https_port(&fs::read_to_string(&path)?);
+            let port = service_https_port(&fs::read_to_string(path)?);
             let publication_changed =
-                repair_systemd_publication_flags(&path, tailscale_serve, port)?;
-            Ok(refresh_systemd_unit(&path)? || publication_changed)
+                repair_systemd_publication_flags(path, tailscale_serve, port)?;
+            Ok(refresh_systemd_unit(path)? || publication_changed)
         }
         ServicePlatform::Launchd => {
-            let path = launchd_path()?;
-            if !path.is_file() {
-                return Ok(false);
-            }
-            let definition = fs::read_to_string(&path)?;
+            let definition = fs::read_to_string(path)?;
             let rewritten = rewrite_launchd_publication_flags(
                 &definition,
                 tailscale_serve,
@@ -853,7 +870,7 @@ pub(crate) fn refresh_installed_service(tailscale_serve: bool) -> Result<bool> {
             if rewritten == definition {
                 return Ok(false);
             }
-            write_service_file(&path, &rewritten)?;
+            write_service_file(path, &rewritten)?;
             Ok(true)
         }
         ServicePlatform::ManualLinux | ServicePlatform::Unsupported => Ok(false),
@@ -1073,7 +1090,17 @@ fn wait_for_supervised_hub(previous_pid: Option<u32>, tailscale_serve: bool) -> 
     }
 }
 
-fn status(platform: ServicePlatform, cli: &Cli) -> Result<()> {
+fn status(platform: ServicePlatform, cli: &Cli, just_started: bool) -> Result<()> {
+    let finish = |report: ServiceReport| {
+        print_report(
+            cli,
+            if just_started {
+                report.after_start()
+            } else {
+                report
+            },
+        )
+    };
     match platform {
         ServicePlatform::Launchd => {
             let path = launchd_path()?;
@@ -1088,7 +1115,7 @@ fn status(platform: ServicePlatform, cli: &Cli) -> Result<()> {
                     })
                     .unwrap_or(ManagerProbe::Unavailable),
             );
-            print_report(cli, report(platform, installed, active, Some(path), None)?)
+            finish(report(platform, installed, active, Some(path), None)?)
         }
         ServicePlatform::Systemd => {
             let path = systemd_path()?;
@@ -1097,7 +1124,7 @@ fn status(platform: ServicePlatform, cli: &Cli) -> Result<()> {
                 "systemctl",
                 ["--user", "is-active", "--quiet", SYSTEMD_UNIT],
             ));
-            print_report(cli, report(platform, installed, active, Some(path), None)?)
+            finish(report(platform, installed, active, Some(path), None)?)
         }
         ServicePlatform::ManualLinux => print_report(
             cli,
@@ -1206,6 +1233,7 @@ fn report(
         unit_path: path.map(|path| path.display().to_string()),
         log_path: Some(paths.log_path().display().to_string()),
         hub_running,
+        hub_state: if hub_running { "running" } else { "not_running" },
         launch_readiness: launch_readiness(),
         instructions,
     })
@@ -1240,11 +1268,7 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
                         Some(false) => " and inactive",
                         None => "",
                     },
-                    if report.hub_running {
-                        "running"
-                    } else {
-                        "not running"
-                    },
+                    report.hub_state.replace('_', " "),
                 );
                 if let Some(log_path) = report.log_path {
                     println!("  Logs: {log_path}");
@@ -1982,6 +2006,83 @@ exit 0
         );
         assert!(full.contains(&definition));
         assert!(full.contains(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn update_refuses_stale_launchd_binary_cas_94fb() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("hub.plist");
+        let definition = include_str!("../../tests/fixtures/hub-service-launchd.plist");
+        fs::write(&path, definition).unwrap();
+        let error = refresh_installed_service_at(
+            ServicePlatform::Launchd,
+            &path,
+            true,
+            Path::new("/Users/test/.local/bin/cas"),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("/opt/cas/bin/cas"), "{message}");
+        assert!(message.contains("/Users/test/.local/bin/cas"), "{message}");
+        assert!(message.contains("cas hub service install"), "{message}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), definition);
+        assert!(
+            !refresh_installed_service_at(
+                ServicePlatform::Launchd,
+                &path,
+                true,
+                Path::new("/opt/cas/bin/cas"),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn update_refuses_stale_systemd_binary_cas_94fb() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("hub.service");
+        let definition = include_str!("../../tests/fixtures/hub-service-systemd.service");
+        fs::write(&path, definition).unwrap();
+        let error = refresh_installed_service_at(
+            ServicePlatform::Systemd,
+            &path,
+            true,
+            Path::new("/home/test/.local/bin/cas"),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("/opt/cas/bin/cas"), "{message}");
+        assert!(message.contains("/home/test/.local/bin/cas"), "{message}");
+        assert!(message.contains("cas hub service install"), "{message}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), definition);
+        assert!(
+            !refresh_installed_service_at(
+                ServicePlatform::Systemd,
+                &path,
+                true,
+                Path::new("/opt/cas/bin/cas"),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn service_activation_reports_starting_until_ready_cas_94fb() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let report = report(
+            ServicePlatform::Launchd,
+            true,
+            Some(ManagerProbe::Observed(true)),
+            None,
+            None,
+        )
+        .unwrap()
+        .after_start();
+        assert!(!report.hub_running);
+        assert_eq!(report.hub_state, "starting");
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["hub_state"], "starting");
+        assert_eq!(json["hub_running"], false);
     }
 
     #[test]

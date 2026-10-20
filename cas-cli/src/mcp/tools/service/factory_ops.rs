@@ -10693,23 +10693,7 @@ pub(crate) fn worker_account_dir(agent: &cas_types::Agent) -> Option<String> {
 /// Bounded tail read shared by the transcript scanners. A transcript can grow
 /// without limit; the terminal records that matter are always at its end.
 fn read_transcript_tail(path: &std::path::Path) -> Option<String> {
-    const TAIL_BYTES: u64 = 256 * 1024;
-    let metadata = std::fs::metadata(path).ok()?;
-    let start = metadata.len().saturating_sub(TAIL_BYTES);
-    let mut file = std::fs::File::open(path).ok()?;
-    use std::io::{Read, Seek, SeekFrom};
-    file.seek(SeekFrom::Start(start)).ok()?;
-    // cas-ceeb: the seek point can land inside a UTF-8 character (and is
-    // always inside a line), so read bytes, decode lossily and drop the cut
-    // first line. A strict `read_to_string` failed on long transcripts, and
-    // the logged-out supervisor went undetected.
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    if start > 0 {
-        let after_first_line = bytes.iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |i| i + 1);
-        bytes.drain(..after_first_line);
-    }
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    super::worker_liveness::read_jsonl_tail(path, 256 * 1024).map(|(_, tail)| tail)
 }
 
 fn codex_rollout_reports_usage_limit(
@@ -10732,22 +10716,10 @@ fn codex_rollout_usage_limit_evidence(
     let Some(rollout) = rollout else {
         return UsageLimitEvidence::Unavailable;
     };
-    let Ok(metadata) = std::fs::metadata(rollout) else {
+    // cas-b76b: the shared bounded reader survives a mid-character seek.
+    let Some((start, tail)) = super::worker_liveness::read_jsonl_tail(rollout, 256 * 1024) else {
         return UsageLimitEvidence::Unavailable;
     };
-    const TAIL_BYTES: u64 = 256 * 1024;
-    let start = metadata.len().saturating_sub(TAIL_BYTES);
-    let Ok(mut file) = std::fs::File::open(rollout) else {
-        return UsageLimitEvidence::Unavailable;
-    };
-    use std::io::{Read, Seek, SeekFrom};
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return UsageLimitEvidence::Unavailable;
-    }
-    let mut tail = String::new();
-    if file.read_to_string(&mut tail).is_err() {
-        return UsageLimitEvidence::Unavailable;
-    }
     // Rollouts are append-only JSONL.  A limit line that is followed by a
     // successful terminal turn is historical rollout text, not a live outage.
     // Keep the record timestamp (or its byte offset as a legacy fallback) as
@@ -11667,17 +11639,8 @@ fn transcript_path_fast_in(
 /// Returns `None` when the file can't be opened, the tail has no parseable
 /// assistant entry with a `usage` field, or any I/O error occurs.
 pub(crate) fn read_context_usage_from_tail(path: &std::path::Path) -> Option<u64> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    let mut file = std::fs::File::open(path).ok()?;
-    let file_len = file.metadata().ok()?.len();
-
-    const TAIL_BYTES: u64 = 8192;
-    let start = file_len.saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(start)).ok()?;
-
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).ok()?;
+    // cas-b76b: the shared bounded reader survives a mid-character seek.
+    let (_, buf) = super::worker_liveness::read_jsonl_tail(path, 8192)?;
 
     // Scan in reverse: the last assistant entry with usage is the freshest.
     for line in buf.lines().rev() {
@@ -18082,27 +18045,44 @@ effort = "high"
         assert!(ambiguous_output.contains("Likely synthesized:"));
     }
 
-    /// cas-ceeb: a supervisor transcript over 256 KiB whose tail starts in the
-    /// middle of a UTF-8 character still reads, and its last record — the real
-    /// "Login expired" refusal — classifies as an account failure.
+    /// cas-ceeb, cas-b76b: a transcript over 256 KiB whose tail starts in the
+    /// middle of a UTF-8 character still reads. A Claude transcript ending in
+    /// the real "Login expired" refusal classifies as an account failure; a
+    /// Codex rollout ending in an out-of-credit turn classifies as limited.
     #[test]
     fn a_long_transcript_cut_mid_character_still_detects_the_logout() {
         const TAIL: usize = 256 * 1024;
-        let record = r#"{"type":"assistant","timestamp":"2026-10-20T16:42:04.720Z","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Login expired · Please run /login"}]},"error":"authentication_failed","isApiErrorMessage":true}"#;
-        let run = "界".repeat(100_000);
-        // Pad so the seek point lands one byte into a three-byte character.
-        let pad = (0..3)
-            .find(|pad| (run.len() + pad + 1 + record.len() + 1 - TAIL) % 3 == 1)
-            .unwrap();
-        let body = format!("{run}{}\n{record}\n", "x".repeat(pad));
-        let start = body.len() - TAIL;
-        assert!(!body.is_char_boundary(start), "the fixture must cut a character");
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.jsonl");
-        std::fs::write(&path, body).unwrap();
+        // A '界' run whose 256 KiB tail starts one byte into a character.
+        let long = |name: &str, record: &str| {
+            let run = "界".repeat(100_000);
+            let pad = (0..3)
+                .find(|pad| (run.len() + pad + 1 + record.len() + 1 - TAIL) % 3 == 1)
+                .unwrap();
+            let body = format!("{run}{}\n{record}\n", "x".repeat(pad));
+            assert!(!body.is_char_boundary(body.len() - TAIL), "the fixture must cut a character");
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            path
+        };
+        let claude = long(
+            "session.jsonl",
+            r#"{"type":"assistant","timestamp":"2026-10-20T16:42:04.720Z","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Login expired · Please run /login"}]},"error":"authentication_failed","isApiErrorMessage":true}"#,
+        );
         assert!(
-            auth_failure_evidence_at(Some(&path), cas_mux::SupervisorCli::Claude).failed(),
+            auth_failure_evidence_at(Some(&claude), cas_mux::SupervisorCli::Claude).failed(),
             "a logged-out supervisor with a long transcript must be detected"
+        );
+        let codex = long(
+            "rollout.jsonl",
+            r#"{"timestamp":"2026-10-20T19:00:00Z","type":"event_msg","payload":{"type":"task_complete","error":"You've hit your usage limit","rate_limits":{"credits":{"has_credits":false}}}}"#,
+        );
+        assert!(
+            matches!(
+                codex_rollout_usage_limit_evidence(Some(&codex), cas_mux::SupervisorCli::Codex),
+                UsageLimitEvidence::Limited { .. }
+            ),
+            "an out-of-credit worker with a long rollout must be detected"
         );
     }
 

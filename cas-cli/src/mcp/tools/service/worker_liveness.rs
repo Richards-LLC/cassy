@@ -61,8 +61,11 @@ struct TurnEvent {
     kind: String,
 }
 
-/// Reads a fixed-size snapshot; ignores a partial first/last record, invalid
-/// UTF-8 records and malformed JSON. A concurrent append is seen next poll.
+/// Visits each JSON record in the bounded tail ([`read_jsonl_tail`]). The line
+/// the window cut and an unterminated last line (still being written) are
+/// skipped; malformed JSON is ignored. Invalid UTF-8 is decoded lossily, so a
+/// record containing it is visited with U+FFFD in place of the bad bytes. A
+/// concurrent append is seen on the next poll.
 pub(crate) fn tail_records(path: &Path, mut visit: impl FnMut(&Value)) {
     let Some((_, tail)) = read_jsonl_tail(path, TAIL_BYTES) else {
         return;

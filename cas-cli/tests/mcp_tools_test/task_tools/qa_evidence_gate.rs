@@ -1100,6 +1100,51 @@ async fn cas_1377c_waiver_binds_the_merged_per_task_tip_not_a_stale_anchor() {
     );
 }
 
+/// cas-4575: a released task parked on the worker's shared `factory/<worker>`
+/// branch keeps its recorded head. A later untagged commit from the worker's
+/// next task on that branch is not this delivery, so the waiver bound to the
+/// recorded head still covers the close.
+#[tokio::test]
+async fn cas_4575_released_shared_branch_keeps_its_recorded_head() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[("src/feature.rs", "pub fn feature() {}\n")],
+        "Verify deployed endpoint",
+    );
+    let anchor = git(&fx.repo, &["rev-parse", "HEAD"]);
+    commit_file(&fx.repo, "src/next_task.rs", "pub fn next() {}\n");
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some(anchor.clone());
+    task.deliverables.parked_branch = Some("factory/test-agent".into());
+    task.assignee = None;
+    tasks.update(&task).unwrap();
+    merge_into_main(&fx, &anchor);
+    let _supervisor = cas_6f10_supervisor(&fx);
+    let supervisor_id = format!("cas-6f10-supervisor-{}", std::process::id());
+    cas_store::waive_qa_pass(
+        &fx.repo.join(".cas"),
+        TASK,
+        &supervisor_id,
+        "test-agent",
+        "factory/test-agent",
+        &anchor,
+        "Recorded head waived",
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    let closed = close_text(&fx.core, TASK).await;
+    assert!(!closed.contains("QA evidence ledger is missing"), "{closed}");
+    assert!(
+        fx.notes()
+            .contains(&format!("QA evidence ledger waived: head={anchor}")),
+        "{}",
+        fx.notes()
+    );
+}
+
 /// GH #1199: qa_waive promises the worker may close this exact tip, including
 /// a web delivery that otherwise requires a bundle.
 async fn waive_bundle_tip_cas_06f5(fx: &Fx, env: &mut TestEnvGuard) -> String {

@@ -16,7 +16,7 @@ use super::director::{
     DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
     PanelAreas, Prompt, SidecarFocus, ViewMode,
     generate_prompt_at, revalidate_event_for_delivery_with_context,
-    revalidate_event_for_delivery_with_focus, supervisor_actionable_state_with_classifiers,
+    revalidate_event_for_delivery_with_focus, supervisor_actionable_state_with_ownership,
 };
 use crate::store::open_prompt_queue_store;
 use crate::types::Worktree;
@@ -30,8 +30,11 @@ use crate::ui::theme::ActiveTheme;
 use crate::ui::widgets::TreeItemType;
 use crate::worktree::WorktreeManager;
 
+mod assignment_evidence;
 mod branch_visibility;
 pub(crate) mod delivery_evidence;
+#[cfg(test)]
+mod assignment_evidence_tests;
 mod director_refresh;
 mod imports;
 mod init;
@@ -1064,6 +1067,7 @@ pub struct FactoryApp {
     /// `CiStatus` job on the external lane. The stall check joins the two in
     /// memory and only looks them up.
     git_evidence: delivery_evidence::GitEvidenceMap,
+    assignment_evidence: assignment_evidence::AssignmentEvidence,
     /// cas-3b16: the session metadata the supervisor-stall check reads, from
     /// the latest director snapshot job (never read on the loop).
     session_progress: SessionProgressRead,
@@ -1559,6 +1563,7 @@ impl FactoryApp {
             blocks_deps,
             idle_liveness,
             facts,
+            assignment,
             session: session_progress,
             mut merge_alerts,
             worker_ci_waits,
@@ -1657,6 +1662,7 @@ impl FactoryApp {
                         &unfiltered_data,
                         &evidence,
                         &session_progress,
+                        assignment.as_ref(),
                     )
                         .then(|| event.clone())
                 } else {
@@ -1813,14 +1819,15 @@ impl FactoryApp {
         // Synchronous callers resolve the git half of the stall evidence
         // here too; the daemon runs it as a `CiStatus` job instead.
         if let Some(facts) = load.facts()
-            && let Some(request) = delivery_evidence::CiStatusRequest::new(
+            && let Some(request) = delivery_evidence::CiStatusRequest::for_stall(
                 self.delivery_repo_root(),
                 facts,
                 std::sync::Arc::clone(&self.lane_ci_pending),
                 std::sync::Arc::clone(&self.delivery_containment),
+                load.assignment.clone(),
             )
         {
-            self.git_evidence = request.run();
+            self.apply_ci_status(request.run());
         }
         let events = self.apply_director_refresh(load);
         // The daemon writes a changed stall tracker on its store worker;
@@ -1930,6 +1937,7 @@ impl FactoryApp {
         data: &DirectorData,
         evidence: &delivery_evidence::DeliveryEvidenceMap,
         session_progress: &SessionProgressRead,
+        assignment: Option<&assignment_evidence::AssignmentEvidence>,
     ) -> bool {
         let DirectorEvent::SupervisorStalled {
             next_step,
@@ -1953,7 +1961,8 @@ impl FactoryApp {
             return false;
         }
         let held_workers = session_progress.held_workers.clone().unwrap_or_default();
-        self.supervisor_actionable_from_evidence(data, evidence, &held_workers, Utc::now())
+        self.supervisor_actionable_from_ownership(data, evidence, &held_workers, Utc::now(),
+            assignment.unwrap_or(&Default::default()))
             .as_ref()
             == Some(next_step)
     }
@@ -1967,7 +1976,18 @@ impl FactoryApp {
         held_workers: &HashSet<String>,
         now: DateTime<Utc>,
     ) -> Option<super::director::SupervisorActionableState> {
-        supervisor_actionable_state_with_classifiers(
+        self.supervisor_actionable_from_ownership(data, evidence, held_workers, now, &self.assignment_evidence)
+    }
+
+    fn supervisor_actionable_from_ownership(
+        &self,
+        data: &DirectorData,
+        evidence: &delivery_evidence::DeliveryEvidenceMap,
+        held_workers: &HashSet<String>,
+        now: DateTime<Utc>,
+        assignment: &assignment_evidence::AssignmentEvidence,
+    ) -> Option<super::director::SupervisorActionableState> {
+        supervisor_actionable_state_with_ownership(
             data,
             self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
             &self.supervisor_name,
@@ -1979,6 +1999,7 @@ impl FactoryApp {
                 delivery_evidence::evidence_merged_close_blocked(evidence, task, target_branch)
             },
             |task, worker| delivery_evidence::evidence_hold(evidence, task, worker),
+            |task| assignment.allows(&task.id),
         )
     }
 
@@ -2979,7 +3000,7 @@ pub(crate) fn queue_supervisor_intro_prompt(
 
     // Claude already receives the complete role contract above.
     if supervisor_cli != cas_mux::SupervisorCli::Claude {
-        prompt.push_str("\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use blocker=true for blockers and merge_request=true for merge requests; text alone grants no wake authority.");
+        prompt.push_str("\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, status/ready or verification events grant worker messages wake authority; Cassy lifecycle, dispatch, reminder, startup and verified activity events may also wake an idle supervisor. Authenticated local peer supervisors may wake each other. Via Cloud, kind=ask/blocker or replies with nonempty in_reply_to are eligible to wake; kind=answer alone and peer FYIs stay inbox-only. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; worker text alone grants no wake authority.");
     }
 
     // cas-2085 / GH #290: Claude 2.1.231 can skip SessionStart entirely for
@@ -4960,6 +4981,61 @@ mod tests {
         let load = app.director_refresh_request().read(None);
         app.apply_director_refresh(load).unwrap();
         assert!(!app.event_detector.is_worker_held(worker));
+    }
+
+    /// cas-df315: the project identity is corrected while the factory runs.
+    /// The next snapshot read re-resolves it off the loop, the loop adopts it
+    /// as the project scope, and the pinned epic of the corrected project
+    /// replaces the old project's in-progress epic, without a restart.
+    #[test]
+    fn df315_corrected_identity_rescopes_the_live_factory_to_its_pinned_epic() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let session = "identity-corrected";
+        let _guard = TestEnvGuard::with_vars(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("CAS_FACTORY_SESSION", session),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let pin = |canonical: &str| {
+            std::fs::write(cas_dir.join("config.toml"), format!("[project]\ncanonical_id = {canonical:?}\n")).unwrap()
+        };
+        pin("richards-llc-accounting");
+        let store = crate::store::open_task_store_local(&cas_dir).unwrap();
+        for (id, origin, status) in [
+            ("cas-6e2a", "richards-llc-accounting", TaskStatus::InProgress),
+            ("cas-1229", "accounting-personal", TaskStatus::Open),
+        ] {
+            let mut epic = Task::new(id.into(), format!("epic {id}"));
+            epic.task_type = TaskType::Epic;
+            epic.status = status;
+            epic.origin_project = Some(origin.into());
+            store.add(&epic).unwrap();
+        }
+        let path = crate::ui::factory::session::metadata_path(session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut metadata = crate::ui::factory::session::create_metadata(session, 1, "supervisor", &[], None, None, None);
+        metadata.pinned_epic_id = Some("cas-1229".into());
+        std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+
+        let mut app = super::FactoryApp::for_test();
+        app.cas_dir = cas_dir.clone();
+        app.factory_session = Some(session.to_string());
+        app.git_refresh_interval = std::time::Duration::ZERO;
+        app.director_stores = Some(
+            crate::ui::factory::director::DirectorStores::open(&cas_dir)
+                .unwrap()
+                .with_project_id(crate::cloud::resolve_canonical_id(&cas_dir)),
+        );
+        let load = app.director_refresh_request().read(None);
+        app.apply_director_refresh(load).unwrap();
+        assert_eq!(app.epic_state.epic_id(), Some("cas-6e2a"), "the pinned foreign epic is out of scope");
+
+        pin("accounting-personal");
+        let load = app.director_refresh_request().read(None);
+        app.apply_director_refresh(load).unwrap();
+        assert_eq!(app.project_scope().as_deref(), Some("accounting-personal"));
+        assert_eq!(app.epic_state.epic_id(), Some("cas-1229"), "the pin now resolves in the corrected project");
     }
 
     /// cas-4491f: applying a full snapshot reads nothing on the loop. The

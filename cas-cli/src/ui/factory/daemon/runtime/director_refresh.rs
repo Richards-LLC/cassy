@@ -39,7 +39,7 @@ use std::sync::Arc;
 use super::factory_jobs::{self, DeliverabilityBatch, FactoryJobOutput};
 use super::jobs::{JobResult, Submitted};
 use super::prompt_queue_jobs::{ExternalOutcome, QueueJobs};
-use crate::ui::factory::app::delivery_evidence::GitEvidenceMap;
+use crate::ui::factory::app::delivery_evidence::StallExternalEvidence;
 use crate::ui::factory::app::{
     DeliverabilityRequest, DeliveryInputs, DeliveryRequest, DirectorRefreshLoad,
     DirectorRefreshRequest, FactoryApp, IdleLivenessMap,
@@ -236,7 +236,7 @@ pub(crate) struct DirectorRefresh {
     health_ready: Vec<WorkerHealthReport>,
     /// Probes that will not report (refused, dropped, panicked or timed out).
     health_failed: Vec<(String, String)>,
-    ci_status: Slot<GitEvidenceMap>,
+    ci_status: Slot<StallExternalEvidence>,
     /// Consecutive delivery reads that came back without fresh data.
     failed_delivery_reads: u32,
     /// A snapshot was asked for while one, or a delivery read and its
@@ -837,7 +837,7 @@ impl DirectorRefresh {
     }
 
     /// A finished `CiStatus` job's evidence.
-    pub(crate) fn take_ci_status(&mut self, jobs: &mut QueueJobs) -> Option<GitEvidenceMap> {
+    pub(crate) fn take_ci_status(&mut self, jobs: &mut QueueJobs) -> Option<StallExternalEvidence> {
         self.poll(jobs);
         self.ci_status.ready.take()
     }

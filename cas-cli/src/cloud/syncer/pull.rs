@@ -89,7 +89,7 @@ fn record_project_warning(entity_kind: &str, project: &str, message: &str) {
 /// error. Pull payloads are raw JSON specifically so one malformed row does
 /// not abort the rest of a sync; without this boundary the resulting warning
 /// was un-actionable because it named neither the row nor its entity type.
-fn deserialize_pulled_entity<T: DeserializeOwned>(
+pub(crate) fn deserialize_pulled_entity<T: DeserializeOwned>(
     mut raw: serde_json::Value,
     entity_type: &str,
 ) -> Result<T, String> {
@@ -814,14 +814,14 @@ impl CloudSyncer {
     /// `types=task_dependencies` (the plural wire key) with no `since` is the
     /// only supported full-snapshot request; the cloud has no `full=1` flag and
     /// no per-entity count/hash endpoint to diff against instead.
-    fn fetch_dependency_snapshot(
+    pub(crate) fn fetch_dependency_snapshot(
         &self,
         team_id: Option<&str>,
         project_id: &str,
     ) -> Result<Vec<serde_json::Value>, CasError> {
         self.fetch_collection_snapshot(team_id, project_id, "task_dependencies")
     }
-    fn fetch_task_snapshot(
+    pub(crate) fn fetch_task_snapshot(
         &self,
         team_id: Option<&str>,
         project_id: &str,
@@ -974,21 +974,48 @@ fn unique_complete_provenance_block(notes: &str) -> Option<(usize, usize)> {
     .then_some((start, end))
 }
 
+/// Server-attested target project, read from the provenance block written
+/// into the accepted task's notes. The block and each field must be unique.
+fn accepted_proposal_server_fields(notes: &str) -> Option<(String, String, String)> {
+    let (start, end) = unique_complete_provenance_block(notes)?;
+    let block = &notes[start..end];
+    let server = &block[..block.find("--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---")?];
+    let field = |name: &str| -> Option<String> {
+        let prefix = format!("{name}: ");
+        let mut values = server
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix(prefix.as_str()));
+        let value = values.next()?;
+        values.next().is_none().then_some(())?;
+        serde_json::from_str::<String>(value).ok()
+    };
+    Some((
+        field("target_task_id")?,
+        field("origin_project_canonical_id")?,
+        field("target_project_canonical_id")?,
+    ))
+}
+
 /// cas-3556: the target project an accepted proposal was materialized for,
 /// read back from the server-attested block `render_task_proposal_provenance`
 /// writes into the task's notes. `None` unless the block is unique, complete
 /// and attests this very task id.
 pub(crate) fn accepted_proposal_target_project(task_id: &str, notes: &str) -> Option<String> {
-    let (start, end) = unique_complete_provenance_block(notes)?;
-    let field = |name: &str| {
-        notes[start..end].lines().find_map(|line| {
-            line.trim()
-                .strip_prefix(name)
-                .and_then(|rest| rest.strip_prefix(": "))
-                .and_then(|value| serde_json::from_str::<String>(value).ok())
-        })
-    };
-    (field("target_task_id")? == task_id).then(|| field("target_project_canonical_id"))?
+    let (attested_task, _, target) = accepted_proposal_server_fields(notes)?;
+    (attested_task == task_id).then_some(target)
+}
+
+/// cas-8a252 (GH #1275): the project an accepted cross-project task executes
+/// in. `origin_project` keeps the proposing project, so the attested target is
+/// read back from the provenance block [`render_task_proposal_provenance`]
+/// writes. Answers only for exactly one complete block whose server-attested
+/// `target_task_id` is this task and whose attested origin is this row's
+/// `origin_project`; a missing, duplicated or contradicting block is `None`.
+pub(crate) fn accepted_proposal_execution_project(task: &cas_types::Task) -> Option<String> {
+    let origin = task.origin_project.as_deref()?;
+    let (attested_task, attested_origin, target) = accepted_proposal_server_fields(&task.notes)?;
+    (attested_task == task.id && canonical_project_ids_match(&attested_origin, origin))
+        .then_some(target)
 }
 
 /// Persist proposal provenance visibly in the ordinary local task record.
@@ -1052,12 +1079,34 @@ pub(crate) fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
         .unwrap_or_default();
     let updated = if let Some((start, end)) = unique_complete_provenance_block(notes) {
         format!("{}{}{}", &notes[..start], rendered, &notes[end..])
+    } else if notes.split("\n\n").any(is_provenance_paragraph) {
+        // cas-a8e2: a row that already holds several (or partial) copies is
+        // normalised to the one freshly rendered block, kept where the first was.
+        let mut kept = Vec::new();
+        for paragraph in notes.split("\n\n") {
+            if !is_provenance_paragraph(paragraph) {
+                kept.push(paragraph);
+            } else if !kept.contains(&rendered.as_str()) {
+                kept.push(rendered.as_str());
+            }
+        }
+        kept.join("\n\n")
     } else if notes.is_empty() {
         rendered
     } else {
         format!("{}\n\n{}", notes.trim_end(), rendered)
     };
     raw["notes"] = serde_json::Value::String(updated);
+}
+
+/// cas-a8e2: one section (server-attested or client-asserted) of a rendered
+/// provenance block, as one `\n\n`-separated notes paragraph.
+fn is_provenance_paragraph(paragraph: &str) -> bool {
+    let paragraph = paragraph.trim();
+    (paragraph.starts_with(PROPOSAL_PROVENANCE_BEGIN)
+        && paragraph.ends_with("--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---"))
+        || (paragraph.starts_with("--- BEGIN CLIENT-ASSERTED PROPOSAL PROVENANCE ---")
+            && paragraph.ends_with(PROPOSAL_PROVENANCE_END))
 }
 
 /// Build a project-scoped `/api/sync/pull` URL, **failing closed** when the
@@ -1409,11 +1458,19 @@ fn reconcile_web_close(
 /// Merge append-only task-note blocks without allowing a whole-row conflict
 /// resolution to discard one machine's timeline.
 fn merge_task_notes(local: &str, remote: &str) -> String {
+    // cas-a8e2: the remote row's provenance is rendered fresh from Cloud's
+    // attested record, so it replaces the local copy. A union would keep both
+    // whenever a field's formatting differs (received_at did) and leave two
+    // server-attested sections, which no reader can trust.
+    let remote_has_provenance = remote.split("\n\n").any(is_provenance_paragraph);
     let mut blocks = Vec::<(Option<chrono::NaiveDateTime>, usize, String)>::new();
-    for notes in [local, remote] {
+    for (is_local, notes) in [(true, local), (false, remote)] {
         for block in notes.split("\n\n") {
             let block = block.trim();
-            if block.is_empty() || blocks.iter().any(|(_, _, existing)| existing == block) {
+            if block.is_empty()
+                || (is_local && remote_has_provenance && is_provenance_paragraph(block))
+                || blocks.iter().any(|(_, _, existing)| existing == block)
+            {
                 continue;
             }
             let timestamp = block
@@ -2009,11 +2066,14 @@ impl CloudSyncer {
         let Ok(project_id) = self.personal_push_project_id() else {
             return;
         };
+        // cas-092e: resolve the record in the scope this checkout syncs in.
+        let team_id = self.cloud_config.active_team_id();
         match crate::cloud::refresh_project_alias_record(
             &cas_root,
             &self.cloud_config.endpoint,
             token,
             &project_id,
+            team_id.as_deref(),
             self.config.timeout,
         ) {
             Ok(aliases) if !aliases.is_empty() => {
@@ -2090,6 +2150,15 @@ impl CloudSyncer {
         let (raw_body, project_id) = self.fetch_pull_json(None, &params)?;
         let body: PullResponse = serde_json::from_value(raw_body)
             .map_err(|e| CasError::Other(format!("Failed to parse response: {e}")))?;
+        // cas-abad: a team-owned project's personal envelope is empty by
+        // design. Applying it is a no-op, and healing local edges against it
+        // staged every edge and endpoint task for a personal push the cloud
+        // refuses. Team scope (`pull_team`) owns this project's rows.
+        if body.team_owned_project.is_some() {
+            tracing::debug!(project = %project_id, "personal pull skipped: project is team-owned");
+            result.duration_ms = start.elapsed().as_millis() as u64;
+            return Ok(result);
+        }
 
         // Use the already-resolved project ID for client-side entity validation
         let current_project_id = &project_id;

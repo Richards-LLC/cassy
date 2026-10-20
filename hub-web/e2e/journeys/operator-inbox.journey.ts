@@ -37,7 +37,7 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       ],
     });
     let outageId = "";
-    await journey.stage("The account opts this phone into machine alerts; nothing enables itself", async () => {
+    await journey.stage("Enable alerts and confirm the first machine report", async () => {
       await journey.open();
       await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
       await inbox.getByLabel("Name this browser").fill("Presence phone");
@@ -85,8 +85,6 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await enable.press("Enter");
       await expect(row.getByText("Waiting for the first report", { exact: true })).toBeVisible();
       expect(cloud.presence.get(soundwave.id)?.monitoring_generation).toBe("1");
-    });
-    await journey.stage("Reporting and component degradation are separate facts", async () => {
       cloud.presence.set(soundwave.id, report());
       await refresh();
       await expect(row.getByText("Reporting to Cassy Cloud", { exact: true })).toBeVisible();
@@ -96,7 +94,7 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await expect(row.locator("p time")).toHaveText(/^(?:now|\d+[smhd] ago)$/);
       await expect(inbox.locator(".operator-inbox-bubble")).toHaveCount(0);
     });
-    await journey.stage("A separate read-only profile sees machine status without pairing", async () => {
+    await journey.stage("A separate profile sees the status and signed outage without pairing", async () => {
       await desk.goto(page.url());
       await desk.getByRole("button", { name: "Operator inbox", exact: true }).click();
       await deskInbox.getByLabel("Name this browser").fill("Presence desk");
@@ -105,8 +103,6 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await cloud.approve(code);
       await expect(deskInbox.getByText("Reporting to Cassy Cloud", { exact: true })).toBeVisible({ timeout: 15_000 });
       await expect(deskInbox.getByRole("button", { name: /Enable alerts|Disable alerts/ })).toHaveCount(0);
-    });
-    await journey.stage("A signed outage reaches both inboxes, without a conversation bubble", async () => {
       const outage = await cloud.appendObserverNotice(soundwave, "machine_unobserved");
       outageId = outage.eventId;
       cloud.presence.set(soundwave.id, { ...report(), presence: "unobserved", open_outage: { outage_epoch: "1", opened_at: new Date(journeyNow()).toISOString(), unobserved_event_id: outageId } });
@@ -121,14 +117,12 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await expect.poll(() => cloud.acks.get(desktop.id)?.size ?? 0).toBe(1);
       await expect(inbox.locator(".operator-inbox-bubble")).toHaveCount(0);
     });
-    await journey.stage("Reload retains one device-persisted outage and its account identity", async () => {
+    await journey.stage("Reload preserves the outage, recovery, and observer state", async () => {
       await page.reload();
       await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
       await expect(notices.locator(`[data-presence-event="${outageId}"]`)).toHaveCount(1);
       await expect(notices.getByText("soundwave unreachable", { exact: true })).toBeVisible();
       await expect(inbox.getByRole("button", { name: "Sign in", exact: true })).toHaveCount(0);
-    });
-    await journey.stage("A verified recovery references the same outage on both devices", async () => {
       const recovery = await cloud.appendObserverNotice(soundwave, "machine_recovered", { refEventId: outageId });
       cloud.presence.set(soundwave.id, report());
       await refresh();
@@ -139,8 +133,6 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       const phone = [...cloud.devices.values()].find((device) => device.label === "Presence phone")!;
       await expect.poll(() => cloud.acks.get(phone.id)?.size ?? 0).toBe(2);
       await expect(inbox.locator(".operator-inbox-bubble")).toHaveCount(0);
-    });
-    await journey.stage("An unavailable observer is visible beside a fresh machine report", async () => {
       cloud.observerStatus = "unavailable";
       await refresh();
       await expect(inbox.getByText(/Cassy Cloud's alert check is unavailable/)).toBeVisible();
@@ -155,7 +147,7 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       { name: "more-contrast", width: 390, height: 844, scheme: "light" as const, media: { contrast: "more" as const }, query: "(prefers-contrast: more)" },
       { name: "reduced-motion", width: 390, height: 844, scheme: "light" as const, media: { reducedMotion: "reduce" as const }, query: "(prefers-reduced-motion: reduce)" },
     ];
-    await journey.stage("Machine observations and notices on phone, desktop and accessibility modes", async () => {
+    await journey.stage("Check machine alerts across accessibility modes", async () => {
       for (const cell of cells) {
         await page.setViewportSize({ width: cell.width, height: cell.height });
         await page.emulateMedia({ colorScheme: cell.scheme, forcedColors: null, contrast: null, reducedMotion: null, ...("media" in cell ? cell.media : {}) });
@@ -177,13 +169,13 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
         }
         if (process.env.QA_ARTIFACTS) await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/presence-${cell.name}.png` });
       }
+      if (process.env.QA_ARTIFACTS) {
+        const { readFile, writeFile } = await import("node:fs/promises");
+        const css = await readFile(new URL("../../dist/app.css", import.meta.url), "utf8");
+        const dialog = await inbox.evaluate((node) => node.outerHTML);
+        await writeFile(`${process.env.QA_ARTIFACTS}/presence.html`, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Machine alerts</title><style>${css}</style></head><body>${dialog}</body></html>`);
+      }
     });
-    if (process.env.QA_ARTIFACTS) {
-      const { readFile, writeFile } = await import("node:fs/promises");
-      const css = await readFile(new URL("../../dist/app.css", import.meta.url), "utf8");
-      const dialog = await inbox.evaluate((node) => node.outerHTML);
-      await writeFile(`${process.env.QA_ARTIFACTS}/presence.html`, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Machine alerts</title><style>${css}</style></head><body>${dialog}</body></html>`);
-    }
     await journey.stage("The phone disables alerts while the hub is unreachable", async () => {
       await page.emulateMedia({ forcedColors: null, contrast: null, reducedMotion: null });
       const settings = row.locator("summary");
@@ -528,10 +520,43 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
     await journey.stage("The existing phone can reply without signing out or pairing again", async () => {
       const reply = inbox.getByRole("textbox", { name: /Reply — soundwave/ });
       await expect(reply).toBeVisible({ timeout: 15_000 });
+      await page.emulateMedia({ colorScheme: "dark" });
+      await page.evaluate(() => { document.documentElement.dataset.scheme = "dark"; });
+      const fieldTokens = await reply.evaluate((field) => {
+        const expected = document.createElement("textarea");
+        expected.style.background = "var(--panel)";
+        expected.style.border = "var(--line-width) solid var(--line-strong)";
+        expected.style.borderRadius = "23px";
+        expected.style.color = "var(--ink)";
+        expected.style.font = getComputedStyle(field).font;
+        expected.style.padding = "12px 22px";
+        expected.style.lineHeight = "1.55";
+        expected.style.resize = "none";
+        document.body.append(expected);
+        const actualStyle = getComputedStyle(field);
+        const expectedStyle = getComputedStyle(expected);
+        const matches = {
+          background: actualStyle.backgroundColor === expectedStyle.backgroundColor,
+          border: actualStyle.borderColor === expectedStyle.borderColor && actualStyle.borderStyle === expectedStyle.borderStyle && actualStyle.borderWidth === expectedStyle.borderWidth,
+          radius: actualStyle.borderRadius === expectedStyle.borderRadius,
+          color: actualStyle.color === expectedStyle.color,
+          padding: actualStyle.padding === expectedStyle.padding,
+          lineHeight: actualStyle.lineHeight === expectedStyle.lineHeight,
+          resize: actualStyle.resize === expectedStyle.resize,
+        };
+        expected.remove();
+        return matches;
+      });
+      expect(fieldTokens).toEqual({ background: true, border: true, radius: true, color: true, padding: true, lineHeight: true, resize: true });
+      const longReply = [...Array.from({ length: 11 }, (_, i) => `Reply line ${i + 1} stays inset from the rounded field edge.`), `Reply line 12: https://example.test/${"long-text-".repeat(8)}`].join("\n");
+      await reply.fill(longReply);
+      await expect(reply).toHaveValue(longReply);
+      expect(await reply.evaluate(field => field.scrollHeight > field.clientHeight)).toBe(true);
+      await captureReply(page, "F01-long-reply");
       await reply.fill("Thanks, I can reply now.");
       await inbox.getByRole("button", { name: "Queue reply", exact: true }).press("Enter");
       await expect(inbox.getByText("Thanks, I can reply now.", { exact: true })).toBeVisible();
-      await captureReply(page, "M04-replied");
+      await captureReply(page, "M04-replied", true);
       expect(cloud.commands.size).toBe(1);
       expect(cloud.devices.size).toBe(2);
     });

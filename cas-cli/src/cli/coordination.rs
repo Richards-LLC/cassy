@@ -13,68 +13,125 @@ use crate::coordination::external_work::{
     RemoteError, SqliteRequestJournal, VioletThreadResolver,
 };
 
+// Clap's generated {usage} keeps required options on one line. These help-only
+// templates retain their spelling without changing parsing or other commands.
+const RESOURCE_CLAIM_HELP: &str = "\
+{about}
+
+{usage-heading} {bin} [OPTIONS]
+    --resource-id <RESOURCE_ID>
+    --expected-generation <EXPECTED_GENERATION>
+
+{all-args}{after-help}";
+
+const TRANSFER_CLAIM_HELP: &str = "\
+{about}
+
+{usage-heading} {bin} [OPTIONS]
+    --resource-id <RESOURCE_ID>
+    --expected-generation <EXPECTED_GENERATION>
+    --to-slot-id <TO_SLOT_ID>
+
+{all-args}{after-help}";
+
+const ACCEPT_CLAIM_HELP: &str = "\
+{about}
+
+{usage-heading} {bin} [OPTIONS]
+    --handoff-id <HANDOFF_ID>
+    --expected-generation <EXPECTED_GENERATION>
+
+{all-args}{after-help}";
+
 #[derive(Debug, Clone, Subcommand)]
+#[command(next_line_help = true)]
 pub enum ExternalWorkCommands {
     /// Claim a Slack thread using its permalink.
     Claim {
+        /// Slack thread permalink to claim.
         #[arg(long)]
         external_ref: String,
+        /// Request UUID for safe retries (generated when omitted).
         #[arg(long)]
         request_id: Option<String>,
     },
     /// Reconcile a prior claim or mutation by its original request ID.
     ClaimStatus {
+        /// Original request UUID to reconcile.
         #[arg(long)]
         request_id: String,
     },
     /// Release an external thread claim.
+    #[command(help_template = RESOURCE_CLAIM_HELP)]
     ReleaseClaim {
+        /// Thread resource UUID from the claim receipt.
         #[arg(long)]
         resource_id: String,
+        /// Current positive generation from the claim receipt.
         #[arg(long)]
         expected_generation: u64,
+        /// Request UUID for safe retries (generated when omitted).
         #[arg(long)]
         request_id: Option<String>,
     },
     /// Offer a claim to another eligible supervisor slot.
+    #[command(help_template = TRANSFER_CLAIM_HELP)]
     TransferClaim {
+        /// Thread resource UUID from the claim receipt.
         #[arg(long)]
         resource_id: String,
+        /// Current positive generation from the claim receipt.
         #[arg(long)]
         expected_generation: u64,
+        /// Eligible supervisor slot UUID receiving the offer.
         #[arg(long)]
         to_slot_id: String,
+        /// Offer lifetime in seconds (default: 600).
         #[arg(long)]
         offer_ttl_secs: Option<u32>,
+        /// Request UUID for safe retries (generated when omitted).
         #[arg(long)]
         request_id: Option<String>,
     },
     /// Accept a claim handoff offer.
+    #[command(help_template = ACCEPT_CLAIM_HELP)]
     AcceptClaim {
+        /// Handoff UUID from the transfer offer.
         #[arg(long)]
         handoff_id: String,
+        /// Current positive generation from the handoff receipt.
         #[arg(long)]
         expected_generation: u64,
+        /// Request UUID for safe retries (generated when omitted).
         #[arg(long)]
         request_id: Option<String>,
     },
     /// Extend a live claim's idle lease before it lapses.
+    #[command(help_template = RESOURCE_CLAIM_HELP)]
     RenewClaim {
+        /// Thread resource UUID from the claim receipt.
         #[arg(long)]
         resource_id: String,
+        /// Current positive generation from the claim receipt.
         #[arg(long)]
         expected_generation: u64,
+        /// Request UUID for safe retries (generated when omitted).
         #[arg(long)]
         request_id: Option<String>,
     },
     /// Register a reply intent and print its violet_post fields.
+    #[command(help_template = RESOURCE_CLAIM_HELP)]
     ReplyIntent {
+        /// Thread resource UUID from the claim receipt.
         #[arg(long)]
         resource_id: String,
+        /// Current positive generation from the claim receipt.
         #[arg(long)]
         expected_generation: u64,
+        /// Optional triggering event UUID for this reply.
         #[arg(long)]
         occurrence_id: Option<String>,
+        /// Request UUID for safe retries (generated when omitted).
         #[arg(long)]
         request_id: Option<String>,
     },
@@ -284,4 +341,56 @@ fn build_violet(_cas_root: &Path, _caller: ()) -> anyhow::Result<Arc<dyn VioletT
         }
     }
     Ok(Arc::new(Unavailable))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use crate::cli::Cli;
+
+    #[test]
+    fn coordination_help_describes_flags_and_fits_eighty_columns() {
+        let mut command = Cli::command();
+        command.build();
+        let coordination = command.find_subcommand("coordination").unwrap();
+        let mut findings = Vec::new();
+        for subcommand in coordination.get_subcommands() {
+            if subcommand.get_name() == "help" {
+                continue;
+            }
+            let error = Cli::command()
+                .try_get_matches_from(["cas", "coordination", subcommand.get_name(), "--help"])
+                .expect_err("help should exit before dispatching a coordination operation");
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+            let help = error.to_string();
+            for line in help.lines().filter(|line| line.chars().count() > 80) {
+                findings.push(format!("{}: over 80 columns: {line}", subcommand.get_name()));
+            }
+            for argument in subcommand
+                .get_arguments()
+                .filter(|argument| !argument.is_global_set() && argument.get_id() != "help")
+            {
+                let description = argument
+                    .get_help()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                if description.trim().is_empty() || !help.contains(&description) {
+                    findings.push(format!(
+                        "{}: --{} has no rendered explanation",
+                        subcommand.get_name(),
+                        argument.get_long().unwrap()
+                    ));
+                }
+                if argument.is_required_set() {
+                    let usage = help.split("Options:").next().unwrap();
+                    assert!(
+                        usage.contains(&format!("--{}", argument.get_long().unwrap())),
+                        "required flag missing from usage: {help}"
+                    );
+                }
+            }
+        }
+        assert!(findings.is_empty(), "{}", findings.join("\n"));
+    }
 }

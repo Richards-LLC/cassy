@@ -55,6 +55,10 @@ Post order: user top-level → capture `message.message_id` → user reply → d
 - **One punch per top-level message.**
 - **Plain language** in the User thread — no internal jargon, no module names.
 - **Honest reverts:** if something shipped and came back out, say so plainly.
+- **Attached files only:** never name a file, path or artifact id unless that
+  file is attached to the same message. Attach it, or describe it in words.
+- **Times in CT:** every time in a post is US Central (`9:42 AM CT`); ET is fine
+  when labelled. Never UTC, GMT or a timestamp ending in `Z`.
 
 **Was → Now punch (observed 2026-08-11):** Bad: `Added hook support, tests, and CI updates.`
 Good: `Was → Codex ignored an allowed hook decision. Now → it receives the harness-specific empty allow response.`

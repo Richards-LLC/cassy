@@ -309,20 +309,20 @@ pub(crate) struct CurrentTurn<'a> {
 /// excluded (cas-9568). A row handed off after the turn began reached a busy
 /// recipient mid-turn and is surfaced now, within one tool call, unless its
 /// body is the turn's own prompt. Without a known turn only unmarked rows are
-/// eligible. Rendered bodies spend `budget` (cas-1f0c).
+/// eligible. Rendered bodies spend `budget` (cas-1f0c). Keep the completion
+/// result so an overflow or failed drain is retried at the next boundary.
 pub(crate) fn surface_factory_inbox_after_tool_result(
     cas_root: Option<&Path>,
     input: &HookInput,
     turn: Option<CurrentTurn<'_>>,
     budget: &mut usize,
-) -> Option<String> {
+) -> Option<SurfacingOutcome> {
     surface_factory_inbox_with_transport_delivery(
         cas_root,
         input,
         Surfacing::ToolBoundary(turn),
         budget,
     )
-    .and_then(|outcome| outcome.text)
 }
 
 /// cas-1f0c: what one hook's additional context may hold in total. Claude
@@ -1266,9 +1266,11 @@ mod tests {
         input.agent_role = Some("worker".into());
         let at_turn = surface_factory_inbox(Some(temp.path()), &input);
         let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
-        let at_tool = surface_factory_inbox_after_tool_result(Some(temp.path()), &input, None, &mut budget);
+        let at_tool = surface_factory_inbox_after_tool_result(Some(temp.path()), &input, None, &mut budget)
+            .and_then(|outcome| outcome.text);
         let in_turn = surface_factory_inbox_after_tool_result(Some(temp.path()), &input,
-            Some(CurrentTurn { started_at: Utc::now(), prompt: "continue" }), &mut budget);
+            Some(CurrentTurn { started_at: Utc::now(), prompt: "continue" }), &mut budget)
+            .and_then(|outcome| outcome.text);
         assert!(at_turn.is_none() && at_tool.is_none() && in_turn.is_none(),
             "automatic hook surfacing must leave premise-sensitive nudges to the daemon");
         let queued = store.queued_prompt(id).unwrap().unwrap();

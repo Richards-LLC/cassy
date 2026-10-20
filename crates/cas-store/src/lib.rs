@@ -708,6 +708,24 @@ pub trait TaskStore: Send + Sync {
     /// general write path.
     fn update(&self, task: &Task) -> Result<DateTime<Utc>>;
 
+    /// Apply a local read-modify-write only while the expected status and
+    /// store-owned clock still match. Refusal has no row, event or receipt
+    /// effects. Unlike replication, this may advance an active local delivery.
+    fn update_if_current(&self, task: &Task, expected: &Task) -> Result<DateTime<Utc>> {
+        self.update_if_current_with_mutation_receipt(task, expected, "")
+    }
+
+    /// The same guarded write, with its durable receipt in the transaction.
+    /// Implementations without atomic support must fail closed.
+    fn update_if_current_with_mutation_receipt(
+        &self,
+        _task: &Task,
+        _expected: &Task,
+        _receipt_id: &str,
+    ) -> Result<DateTime<Utc>> {
+        Err(StoreError::Other("atomic guarded task updates are unsupported by this store".into()))
+    }
+
     /// Apply a replicated row only if the expected local clock still matches.
     /// Lifecycle changes are also refused while a local delivery transaction
     /// owns the task. An active execution lease protects InProgress from

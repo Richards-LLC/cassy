@@ -18,7 +18,7 @@
 use std::time::Duration;
 
 use super::jobs::{Criticality, JobSpec, Lane};
-use crate::ui::factory::app::delivery_evidence::GitEvidenceMap;
+use crate::ui::factory::app::delivery_evidence::StallExternalEvidence;
 use crate::ui::factory::app::{DeliveryInputs, DirectorRefreshLoad, IdleLivenessMap};
 use crate::ui::factory::director::{DirectorEvent, Prompt, WorkerHealthReport};
 
@@ -173,7 +173,7 @@ pub(crate) enum FactoryJobOutput {
     Deliverability(DeliverabilityBatch),
     WorkerHealth(WorkerHealthReport),
     ReminderScan,
-    CiStatus(GitEvidenceMap),
+    CiStatus(StallExternalEvidence),
 }
 
 /// Only the director's own result kinds; other owners drain theirs separately.

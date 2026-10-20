@@ -74,7 +74,7 @@ pub use conformance::{
 };
 pub use error::{Error, Result};
 pub use input_queue::{PTY_INPUT_BUFFER_CAP, PtyInput};
-pub use pty::{claude_supports_chrome_flag, claude_supports_flag};
+pub use pty::{claude_supports_chrome_flag, claude_supports_flag, expand_codex_home};
 pub use pty::{
     ContractRole, PROTECTED_OPERATOR_ENV, claude_supervisor_contract, claude_worker_contract,
     missing_contract_elements, rendered_contract_surface,

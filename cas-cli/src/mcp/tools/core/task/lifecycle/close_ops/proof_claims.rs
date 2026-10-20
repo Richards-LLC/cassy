@@ -5,7 +5,7 @@
 //! proposed close reason is inspected; historical notes are not new assertions.
 
 use regex::Regex;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::sync::OnceLock;
 
 struct Grammar {
@@ -131,12 +131,17 @@ fn local_paths(clause: &str) -> Vec<&str> {
         };
         for token in tokens {
             let path = super::strip_path_punctuation(token);
+            let has_path_component = |candidate: &str| {
+                Path::new(candidate)
+                    .components()
+                    .any(|component| matches!(component, Component::Normal(_)))
+            };
             if !path.contains("://")
                 && !path.to_ascii_lowercase().starts_with("/actions/runs/")
-                && (path.starts_with('/')
-                    || path.starts_with("~/")
-                    || path.starts_with("./")
-                    || path.starts_with("../")
+                && ((path.starts_with('/') && has_path_component(path))
+                    || ["~/", "./", "../"]
+                        .iter()
+                        .any(|prefix| path.strip_prefix(*prefix).is_some_and(has_path_component))
                     || (path.contains('/') && Path::new(path).extension().is_some()))
             {
                 paths.push(path);
@@ -144,4 +149,35 @@ fn local_paths(clause: &str) -> Vec<&str> {
         }
     }
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_claims;
+
+    #[test]
+    fn close_reason_slash_prose_is_not_a_receipt_path() {
+        let cas_root = tempfile::tempdir().expect("temporary Cassy root");
+        let receipt_root = tempfile::tempdir().expect("temporary receipt root");
+        std::fs::write(receipt_root.path().join("receipt.log"), "proof").expect("receipt file");
+
+        let error = validate_claims(
+            "CI reported 10312 tests passed / 1 failed",
+            cas_root.path(),
+            receipt_root.path(),
+        )
+        .expect_err("an unsupported CI claim still requires a receipt");
+        assert!(
+            error.contains("Cite a run id, artifact id or local receipt path"),
+            "{error}"
+        );
+        assert!(!error.contains("Cannot resolve receipt `/`"), "{error}");
+
+        validate_claims(
+            "CI tests passed ./receipt.log",
+            cas_root.path(),
+            receipt_root.path(),
+        )
+        .expect("path-shaped local receipts remain valid");
+    }
 }

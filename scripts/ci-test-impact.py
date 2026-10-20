@@ -119,7 +119,16 @@ def plan(root, base, zero, history):
     try:
         if not base or set(base) == {"0"}:
             base = zero
-        result["base"] = git(root, "merge-base", base, "HEAD")
+        base = git(root, "rev-parse", "--verify", f"{base}^{{commit}}")
+        parents = git(root, "rev-list", "--parents", "-n", "1", "HEAD").split()[1:]
+        if len(parents) > 1 and base == parents[0]:
+            # On a merge push, GitHub's before SHA is the first parent. That
+            # parent can already contain the changed source, so diffing from it
+            # hides the change from this merge's selection. Compare from the
+            # parents' common base to keep affected tests such as cli::update.
+            result["base"] = git(root, "merge-base", "--octopus", *parents)
+        else:
+            result["base"] = git(root, "merge-base", base, "HEAD")
         output = subprocess.check_output(["git", "diff", "--name-only", "-z", result["base"], "HEAD"], cwd=root)
         result["paths"] = output.decode().split("\0")[:-1]
         crates, edges = workspace(root)

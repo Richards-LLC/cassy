@@ -2164,6 +2164,59 @@ async fn team_pull_materializes_an_accepted_proposal_from_target_scope() {
     assert!(task.notes.contains("proposal_id: \"proposal-1\""));
 }
 
+/// cas-a8e2: Cloud echoes `received_at` in another format than the accept
+/// response did. A local row whose notes already hold the accept-time block,
+/// pulled with a remote row whose notes carry two copies, ends with exactly one
+/// provenance block, so the row executes in its target (cas-8a252).
+#[tokio::test]
+async fn team_pull_keeps_one_provenance_block_across_received_at_formats_cas_a8e2() {
+    let attested = |received_at: &str| {
+        serde_json::json!({
+            "server_attested": {
+                "proposal_id": "proposal-1",
+                "target_task_id": "cas-0123456789abcdef",
+                "creator_user_id": "user-1",
+                "team_id": "team-cas-2125",
+                "origin_project_canonical_id": "origin-project",
+                "target_project_canonical_id": "target-project",
+                "received_at": received_at,
+                "client_request_id": "request-1"
+            },
+            "client_asserted": {}
+        })
+    };
+    let rendered = |received_at: &str| {
+        let mut raw = serde_json::json!({"notes": "", "proposal_provenance": attested(received_at)});
+        render_task_proposal_provenance(&mut raw);
+        raw["notes"].as_str().unwrap().to_string()
+    };
+    let earlier = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let mut local = Task::new("cas-0123456789abcdef".into(), "task cas-0123456789abcdef".into());
+    local.origin_project = Some("origin-project".into());
+    local.updated_at = earlier;
+    local.notes = format!("[2026-10-17 21:30] accepted\n\n{}", rendered("2026-10-17T21:26:11.708274+00:00"));
+    let mut task = team_task_fixture(
+        "cas-0123456789abcdef",
+        TaskStatus::Open,
+        "target-project",
+        "origin-project",
+        chrono::Utc::now(),
+    );
+    let space = "2026-10-17 21:26:11.708274+00";
+    task["notes"] = serde_json::json!(format!("{}\n\n{}", rendered("2026-10-17T21:26:11.708274+00:00"), rendered(space)));
+    task["proposal_provenance"] = attested(space);
+
+    let (_temp, result, task_store, _queue) =
+        pull_team_task_fixtures("target-project", vec![task], Some(local)).await;
+
+    assert!(result.errors.is_empty(), "unexpected pull errors: {:?}", result.errors);
+    let task = task_store.get("cas-0123456789abcdef").unwrap();
+    assert_eq!(task.notes.matches("--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---").count(), 1, "{}", task.notes);
+    assert_eq!(task.notes.matches("--- BEGIN CLIENT-ASSERTED PROPOSAL PROVENANCE ---").count(), 1, "{}", task.notes);
+    assert!(task.notes.contains("[2026-10-17 21:30] accepted"), "ordinary notes survive: {}", task.notes);
+    assert_eq!(accepted_proposal_execution_project(&task).as_deref(), Some("target-project"));
+}
+
 #[tokio::test]
 async fn team_pull_parks_malformed_task_and_continues_to_valid_neighbor() {
     let valid = team_task_fixture(
@@ -4788,4 +4841,75 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
             .all(|(key, _)| !key.starts_with("team_delivery_ack:")),
         "successful cleanup removes only its receipt"
     );
+}
+
+/// cas-abad: Cloud answers a personal pull for a team-owned project with an
+/// empty envelope flagged `team_owned_project`. That is not an inventory: a
+/// full `cas cloud pull` healed every local edge (and its endpoint tasks)
+/// against it and staged them all for personal push (rocketship-template,
+/// 2026-10-19: 412 task + 919 dependency rows from one pull).
+#[tokio::test]
+async fn personal_pull_of_a_team_owned_project_stages_nothing_cas_abad() {
+    use crate::store::{
+        open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
+        open_rule_store_local, open_skill_store_local, open_spec_store, open_store_local,
+        open_task_store_local,
+    };
+    use crate::types::{Dependency, DependencyType};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(super::pull::PULL_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [], "tasks": [], "rules": [], "skills": [], "task_dependencies": [],
+            "team_owned_project": {"team_id": "team-cas-abad"},
+            "pulled_at": "2026-10-19T14:40:52Z",
+        })))
+        .mount(&server)
+        .await;
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    let task_store = open_task_store_local(temp.path()).unwrap();
+    for id in ["cas-abad-from", "cas-abad-to"] {
+        let mut task = Task::new(id.to_string(), id.to_string());
+        task.origin_project = Some("p".into());
+        task_store.add(&task).unwrap();
+    }
+    task_store
+        .add_dependency(&Dependency::new("cas-abad-from".into(), "cas-abad-to".into(), DependencyType::Blocks))
+        .unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+        "p".into(),
+        temp.path(),
+    );
+    let result = syncer
+        .pull(
+            open_store_local(temp.path()).unwrap().as_ref(),
+            task_store.as_ref(),
+            open_rule_store_local(temp.path()).unwrap().as_ref(),
+            open_skill_store_local(temp.path()).unwrap().as_ref(),
+            open_spec_store(temp.path()).unwrap().as_ref(),
+            open_event_store(temp.path()).unwrap().as_ref(),
+            open_prompt_store(temp.path()).unwrap().as_ref(),
+            open_file_change_store(temp.path()).unwrap().as_ref(),
+            open_commit_link_store(temp.path()).unwrap().as_ref(),
+        )
+        .unwrap();
+    assert_eq!(result.healed_task_dependencies_to_cloud, 0);
+    assert!(
+        queue.list_all(10).unwrap().is_empty(),
+        "an empty team-owned envelope is not an inventory to heal against"
+    );
+    assert_eq!(task_store.list_dependencies(None).unwrap().len(), 1, "local edges are untouched");
 }

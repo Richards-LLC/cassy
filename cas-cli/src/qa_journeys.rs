@@ -81,6 +81,29 @@ fn run_committed_selector(repo: &Path, head: &str, paths: &[String]) -> Result<V
     Ok(ids.into_iter().collect())
 }
 
+fn is_hub_web_documentation_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let file = lower.rsplit('/').next().unwrap_or(&lower);
+    let test_input = lower.split('/').any(|segment| {
+        matches!(
+            segment,
+            "e2e"
+                | "test"
+                | "tests"
+                | "__tests__"
+                | "testdata"
+                | "fixture"
+                | "__fixtures__"
+                | "__mocks__"
+        ) || segment.ends_with("-fixtures")
+            || segment.ends_with("_fixtures")
+    });
+    !test_input
+        && [".md", ".mdx", ".rst", ".adoc"]
+            .iter()
+            .any(|ext| file.ends_with(ext))
+}
+
 pub fn doc_only_rebind(repo: &Path, executed: &str, head: &str) -> bool {
     if !is_full_sha(executed) || !is_full_sha(head) {
         return false;
@@ -94,7 +117,15 @@ pub fn doc_only_rebind(repo: &Path, executed: &str, head: &str) -> bool {
     let Some(changed) = git(repo, &["diff", "--name-only", executed, head]) else {
         return false;
     };
-    if changed.is_empty() || !changed.lines().all(crate::qa_pass::is_non_surface_path) {
+    let changed_paths: Vec<_> = changed.lines().collect();
+    if changed_paths.is_empty()
+        || !changed_paths
+            .iter()
+            .all(|path| crate::qa_pass::is_non_surface_path(path))
+        || changed_paths
+            .iter()
+            .any(|path| path.starts_with("hub-web/") && !is_hub_web_documentation_path(path))
+    {
         return false;
     }
     git(
@@ -105,7 +136,6 @@ pub fn doc_only_rebind(repo: &Path, executed: &str, head: &str) -> bool {
             executed,
             head,
             "--",
-            "hub-web",
             "scripts/journeys-for-diff.py",
             "scripts/journey-eval.sh",
             "scripts/journey-bundles.py",

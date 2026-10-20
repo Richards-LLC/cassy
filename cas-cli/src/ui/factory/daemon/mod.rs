@@ -204,6 +204,7 @@ pub struct FactoryDaemon {
     compact_rows: u16,
     /// Pending spawn/shutdown actions (processed one per tick to avoid blocking TUI)
     pending_spawns: VecDeque<PendingSpawn>,
+    binding_intake: runtime::violet_intake::IntakeController,
     /// In-flight background spawn task: (worker_name, queue request id, per-spawn
     /// spec override, task_id to pre-assign (cas-6913), join_handle).
     /// One at a time, runs git worktree ops off main thread.

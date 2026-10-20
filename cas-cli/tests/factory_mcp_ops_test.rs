@@ -5873,7 +5873,7 @@ async fn test_gc_report_shows_pending_prompts() {
 #[tokio::test]
 async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
     const AGENT_COUNT: usize = 240;
-    const NAME_PADDING: usize = 1_500;
+    const NAME_PADDING: usize = 400;
 
     let env = FactoryTestEnv::new();
     let old_heartbeat = chrono::Utc::now() - chrono::Duration::hours(1);
@@ -5901,7 +5901,7 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
     let summary = get_text(&default_report);
 
     let mut offset = 0;
-    let mut found_last_agent = false;
+    let mut found_agents = vec![false; AGENT_COUNT];
     loop {
         let page_req: FactoryRequest = serde_json::from_value(serde_json::json!({
             "action": "gc_report",
@@ -5920,9 +5920,12 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
             "detail page must satisfy the byte cap, got {} bytes",
             page_text.len()
         );
-        found_last_agent |= page_text.contains("stale-report-239-");
-        if found_last_agent {
-            break;
+        assert!(
+            !page_text.contains(" omitted:"),
+            "a detail page must not replace inventory rows with an omission marker: {page_text}"
+        );
+        for (index, found) in found_agents.iter_mut().enumerate() {
+            *found |= page_text.contains(&format!("stale-report-{index:03}-"));
         }
         let Some(next_offset) = page_text.lines().find_map(|line| {
             line.strip_prefix("Next offset: ")
@@ -5937,8 +5940,10 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
         offset = next_offset;
     }
     assert!(
-        found_last_agent,
-        "last inventory item was not reachable through pages"
+        found_agents.iter().all(|found| *found),
+        "every stale-agent item must be reachable through pages; found {}/{}",
+        found_agents.iter().filter(|found| **found).count(),
+        AGENT_COUNT
     );
     assert!(
         summary.len() < 24_000,
@@ -5960,7 +5965,7 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
         .unwrap()
         .parse()
         .unwrap();
-    assert!(stale_bytes > 350_000, "{stale_category}");
+    assert!(stale_bytes > 100_000, "{stale_category}");
     assert!(summary.contains("first up to 3 items per category"), "{summary}");
     assert!(
         summary.contains("stale-report-000-"),
@@ -6081,6 +6086,13 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         report_text.contains("closed-task candidates=1"),
         "{report_text}"
     );
+    let artifact_summary = report_text
+        .lines()
+        .find(|line| line.starts_with("- Durable task artifacts:"))
+        .expect("durable artifact heading and summary");
+    assert!(artifact_summary.contains(&format!("root={}", root.display())));
+    assert!(artifact_summary.contains("closed-task candidates=1"));
+    assert!(artifact_summary.contains("stray inventory=2 mode=review-only"));
     assert!(
         report_text.contains("review-only stray artifact"),
         "{report_text}"
@@ -6096,6 +6108,41 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
     assert!(get_text(&refused).contains("Refused"), "{}", get_text(&refused));
     for name in ["trace.zip", "video.webm", "proof.txt"] {
         assert!(root.join(&closed_id).join(name).is_file(), "named cache reclaim deleted durable {name}");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // cas-c334: prove successful native named reclaim also returns before
+        // ordinary GC. Its aged closed-task media would otherwise be pruned.
+        let target = orphan.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("output.rlib"), b"regenerable").unwrap();
+        std::fs::write(orphan.join("source.rs"), b"uncommitted source").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(4 * 3600);
+        for path in [target.join("output.rlib"), target.clone()] {
+            std::fs::File::open(path).unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
+        }
+        let mut named = factory_req("gc_cleanup");
+        named.force = Some(true);
+        named.dry_run = Some(false);
+        named.reclaim_unknown_target = Some(target.canonicalize().unwrap().display().to_string());
+        // Exact-path admission deliberately rejects aliases, including macOS
+        // /var -> /private/var. Canonicalize the fixture service's root too.
+        let core = CasCore::with_daemon(env.cas_root.canonicalize().unwrap(), None, None);
+        core.set_agent_id_for_testing("test-agent-id".to_string());
+        let service = CasService::new(core, None);
+        let result = service.factory_request(Parameters(named)).await.unwrap();
+        let text = get_text(&result);
+        assert!(!target.exists(), "native exact-path reclaim must succeed: {text}");
+        assert_eq!(std::fs::read(orphan.join("source.rs")).unwrap(), b"uncommitted source");
+        for (name, bytes) in [("trace.zip", b"trace".as_slice()), ("video.webm", b"video"), ("proof.txt", b"durable proof")] {
+            assert_eq!(std::fs::read(root.join(&closed_id).join(name)).unwrap(), bytes, "successful named reclaim changed {name}: {text}");
+        }
+        assert!(root.join(&open_id).join("trace.zip").is_file());
+        assert!(root.join(&open_id).join("video.webm").is_file());
+        assert!(root.join("operator-review-stray").is_dir());
+        assert_eq!(std::fs::read(legacy.join("historical-proof.txt")).unwrap(), b"possibly shared evidence");
     }
 
     let mut preview = factory_req("gc_cleanup");

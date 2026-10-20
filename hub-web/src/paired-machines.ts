@@ -69,7 +69,9 @@ export function fleetPermissionsMarkup(row: Pick<PairedMachineRow, 'id' | 'label
  * `lastKnown` (cas-9846): the count comes from the catalog this browser kept
  * from the last visit, because no machine has answered yet; it says so.
  */
-export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions: number | undefined, build: string, loading = false, lastKnown = false): string {
+/** `lastKnown`: true when the whole count is last known, or how many of
+ * `sessions` are; only that share is qualified (cas-c552). */
+export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions: number | undefined, build: string, loading = false, lastKnown: boolean | number = false): string {
   const connected = rows.filter(row => row.connected).length;
   const machine = loading ? 'Paired machines' : rows.length === 1 ? rows[0].label : `${rows.length} paired machines`;
   const labels = rows.map(row => row.connectionState
@@ -103,7 +105,12 @@ export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions:
   // The dot shows the worst machine: green only when every machine is
   // connected, the warning tone when some are down (cas-b789) or unsteady.
   const dot = connected && connected === rows.length ? ' connected' : connected || state === UNSTEADY ? ' partial' : '';
-  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span class="machine-badge-state${/\s/.test(state.trim()) ? '' : ' whole'}" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta"><span>${sessions === undefined ? 'Conversations not loaded yet' : `${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}${lastKnown ? ', last known' : ''}`}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
+  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span class="machine-badge-state${/\s/.test(state.trim()) ? '' : ' whole'}" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta"><span>${sessions === undefined ? 'Conversations not loaded yet' : `${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}${lastKnownSuffix(sessions, lastKnown)}`}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
+}
+
+function lastKnownSuffix(sessions: number, lastKnown: boolean | number): string {
+  if (lastKnown === true || (typeof lastKnown === 'number' && lastKnown >= sessions && lastKnown > 0)) return ', last known';
+  return typeof lastKnown === 'number' && lastKnown > 0 ? ` · ${lastKnown} last known` : '';
 }
 
 /** "Shed NAS · Linux" reads "Shed NAS" where room is short. */

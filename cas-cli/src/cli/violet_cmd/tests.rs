@@ -431,7 +431,8 @@ fn a_thread_is_one_ordered_call_with_inline_reply_files() {
         "posted": [
             {"index": 0, "message_id": "1.0", "thread_id": "1.0", "permalink": "https://slack.test/0"},
             {"index": 1, "message_id": "1.1", "thread_id": "1.0", "permalink": "https://slack.test/1",
-             "files": [{"file_id": "F7", "name": "notes.md", "size_bytes": 8, "sha256_verified": true}]},
+             "files": [{"file_id": "F7", "name": "notes.md", "size_bytes": 8, "sha256_verified": true,
+                        "state": "attached"}]},
             {"index": 2, "message_id": "1.2", "thread_id": "1.0", "permalink": "https://slack.test/2"}
         ],
         "failed_index": null, "resume_safe": true
@@ -472,6 +473,96 @@ fn a_thread_is_one_ordered_call_with_inline_reply_files() {
         "{out}"
     );
     assert!(out.contains("file F7 notes.md"), "{out}");
+}
+
+#[test]
+fn multipart_post_and_thread_receipts_show_part_ids_human_and_json() {
+    let part_ids = json!(["1710000000.000001", "1710000000.000002"]);
+    let post_receipt = json!({
+        "ok": true, "kind": "message", "channel": channel(),
+        "message": {
+            "message_id": "1710000000.000002",
+            "thread_id": "1710000000.000001",
+            "permalink": "https://slack.test/p/2",
+            "part_ids": part_ids
+        }
+    });
+    let post_args = ["post", "--channel", "cas-internal", "--text", "long post"];
+
+    let hub = ScriptedHub::with(vec![post_receipt.clone()]);
+    let (out, result) = run_cli(&post_args, &hub, false, &no_gate);
+    result.unwrap();
+    assert!(out.contains("message 1710000000.000002"), "{out}");
+    assert!(
+        out.contains("part_ids: 1710000000.000001, 1710000000.000002"),
+        "{out}"
+    );
+
+    let hub = ScriptedHub::with(vec![post_receipt]);
+    let (out, result) = run_cli(&post_args, &hub, true, &no_gate);
+    result.unwrap();
+    let report: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["message"]["message_id"], "1710000000.000002");
+    assert_eq!(report["message"]["thread_id"], "1710000000.000001");
+    assert_eq!(report["message"]["part_ids"], part_ids);
+
+    let thread_receipt = json!({
+        "ok": true, "kind": "thread", "channel": channel(),
+        "posted": [
+            {
+                "index": 0,
+                "message_id": "1710000000.000002",
+                "thread_id": "1710000000.000001",
+                "permalink": "https://slack.test/p/2",
+                "part_ids": part_ids
+            },
+            {
+                "index": 1,
+                "message_id": "1710000000.000003",
+                "thread_id": "1710000000.000001",
+                "permalink": "https://slack.test/p/3"
+            }
+        ],
+        "failed_index": null, "resume_safe": true
+    });
+    let thread_args = [
+        "thread",
+        "--channel",
+        "cas-internal",
+        "--text",
+        "root",
+        "--reply",
+        "reply",
+        "--idempotency-key",
+        "multipart-fixture",
+    ];
+
+    let hub = ScriptedHub::with(vec![thread_receipt.clone()]);
+    let (out, result) = run_cli(&thread_args, &hub, false, &no_gate);
+    result.unwrap();
+    assert!(
+        out.lines()
+            .any(|line| { line.contains("0 root") && line.contains("1710000000.000002") }),
+        "{out}"
+    );
+    assert!(
+        out.contains("part_ids: 1710000000.000001, 1710000000.000002"),
+        "{out}"
+    );
+    assert_eq!(out.matches("part_ids:").count(), 1, "{out}");
+    assert!(
+        out.lines()
+            .any(|line| { line.contains("1 reply") && line.contains("1710000000.000003") }),
+        "{out}"
+    );
+
+    let hub = ScriptedHub::with(vec![thread_receipt]);
+    let (out, result) = run_cli(&thread_args, &hub, true, &no_gate);
+    result.unwrap();
+    let report: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["posted"][0]["message_id"], "1710000000.000002");
+    assert_eq!(report["posted"][0]["thread_id"], "1710000000.000001");
+    assert_eq!(report["posted"][0]["part_ids"], part_ids);
 }
 
 #[test]
@@ -518,6 +609,66 @@ fn a_stopped_thread_reports_failed_index_and_exits_non_zero() {
     );
 }
 
+/// GH #1251: an `ok: true` thread receipt that does not show every reply
+/// file attached is not a success. The run fails with a named code, keeps the
+/// posted ids, and says to read the thread instead of reposting.
+#[test]
+fn reply_files_the_receipt_does_not_show_attached_fail_the_run() {
+    let dir = TempDir::new().unwrap();
+    let (a, b) = (write_file(&dir, "a.png", b"\x89PNG a"), write_file(&dir, "b.png", b"\x89PNG b"));
+    let argv = [
+        "thread", "--channel", "cas-internal", "--text", "root", "--reply", "shots",
+        "--reply-file", a.to_str().unwrap(), "--reply-file", b.to_str().unwrap(),
+        "--idempotency-key", "k1251",
+    ];
+    // Real-shape ids and a long channel name: the read hint must stay usable at 80 columns.
+    let long_channel = json!({"id": "C09FCTHCQ2U", "name": "release-notes-for-customer-facing-announcements-and-screenshots"});
+    let receipt = |files: Value| {
+        json!({
+            "ok": true, "schema_version": 1, "kind": "thread", "channel": long_channel,
+            "idempotency_key": "k1251", "failed_index": null, "resume_safe": false,
+            "posted": [
+                {"index": 0, "message_id": "1792208267.493989", "thread_id": "1792208267.493989", "permalink": "https://slack.test/0"},
+                {"index": 1, "message_id": "1792208270.846219", "thread_id": "1792208267.493989", "permalink": "https://slack.test/1",
+                 "files": files}
+            ]
+        })
+    };
+    let attached = |id: &str| json!({"file_id": id, "name": "a.png", "state": "attached"});
+    for (files, code) in [
+        (json!([]), "thread_files_unconfirmed"),
+        (json!([attached("F1")]), "thread_files_unconfirmed"),
+        (json!([attached("F1"), attached("F1")]), "thread_files_unconfirmed"),
+        (json!([attached("F1"), {"file_id": "F2", "name": "b.png", "state": "uploaded"}]), "uploaded_not_attached"),
+    ] {
+        let hub = ScriptedHub::with(vec![receipt(files.clone())]);
+        let (out, result) = run_cli(&argv, &hub, false, &no_gate);
+        let error = result.unwrap_err();
+        assert_eq!(error.code, code, "{files}");
+        assert!(!out.contains("[OK]"), "{out}");
+        assert!(out.contains("0 root  1792208267.493989") && out.contains("1 reply 1792208270.846219"), "{out}");
+        assert!(out.contains("cas violet read --channel C09FCTHCQ2U --thread 1792208267.493989"), "{out}");
+        assert!(out.contains("same --idempotency-key, never a new key"), "{out}");
+        let line = format!("✗ {error}");
+        assert!(line.contains("reply 1:"), "{line}");
+        for line in out.lines().chain(std::iter::once(line.as_str())) {
+            assert!(line.chars().count() <= 80, "wider than 80 columns: {line}");
+        }
+
+        let hub = ScriptedHub::with(vec![receipt(files.clone())]);
+        let (out, result) = run_cli(&argv, &hub, true, &no_gate);
+        assert!(result.is_err());
+        let printed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(printed["ok"], false);
+        assert_eq!(printed["error"]["code"], code);
+        let full = printed["error"]["message"].as_str().unwrap();
+        assert!(full.contains("same --idempotency-key") && full.contains("1792208270.846219"), "JSON keeps the whole remedy: {full}");
+        assert_eq!(printed["posted"][1]["message_id"], "1792208270.846219");
+        assert_eq!(printed["posted"][1]["files"], files, "returned file ids are kept");
+        assert_eq!(hub.calls().len(), 1, "no automatic retry");
+    }
+}
+
 #[test]
 fn an_external_thread_uploads_first_and_sends_only_metadata() {
     let dir = TempDir::new().unwrap();
@@ -530,7 +681,11 @@ fn an_external_thread_uploads_first_and_sends_only_metadata() {
     let hub = ScriptedHub::with(vec![
         json!({"ok": true, "kind": "file_external", "step": "begin",
                "upload_url": "https://files.slack.test/u/F8", "file_id": "F8"}),
-        json!({"ok": true, "kind": "thread", "channel": channel(), "posted": [], "failed_index": null}),
+        json!({"ok": true, "kind": "thread", "channel": channel(), "failed_index": null, "posted": [
+            {"index": 0, "message_id": "2.0", "thread_id": "2.0", "permalink": "https://slack.test/0"},
+            {"index": 1, "message_id": "2.1", "thread_id": "2.0", "permalink": "https://slack.test/1",
+             "files": [{"file_id": "F8", "name": "trace.bin", "state": "attached"}]}
+        ]}),
     ]);
     let mut live = hub.clone();
     post_thread(&mut live, "cas-internal", "root", "k2", &replies).unwrap();
@@ -541,6 +696,22 @@ fn an_external_thread_uploads_first_and_sends_only_metadata() {
     assert_eq!(reply_file["size_bytes"], big.len());
     assert!(reply_file.get("content").is_none());
     assert_eq!(hub.uploads()[0].1, sha(&big));
+
+    // A success-shaped receipt that omits the reply's files is refused, and
+    // the refusal still names the upload Slack began.
+    let hub = ScriptedHub::with(vec![
+        json!({"ok": true, "kind": "file_external", "step": "begin",
+               "upload_url": "https://files.slack.test/u/F8", "file_id": "F8"}),
+        json!({"ok": true, "kind": "thread", "channel": channel(), "failed_index": null, "posted": [
+            {"index": 0, "message_id": "2.0", "thread_id": "2.0", "permalink": "https://slack.test/0"},
+            {"index": 1, "message_id": "2.1", "thread_id": "2.0", "permalink": "https://slack.test/1"}
+        ]}),
+    ]);
+    let mut live = hub.clone();
+    let error = post_thread(&mut live, "cas-internal", "root", "k2", &replies).unwrap_err();
+    assert_eq!(error.code, "thread_files_unconfirmed");
+    assert_eq!(error.file_ids, ["F8"], "the begun upload is kept");
+    assert_eq!(error.to_json()["uploads_begun"], json!(["F8"]));
 }
 
 // ---------------------------------------------------------------------------
@@ -875,6 +1046,7 @@ fn every_local_code_is_documented_in_the_violet_skill() {
         include_str!("mod.rs"),
         include_str!("hub.rs"),
         include_str!("files.rs"),
+        include_str!("draft_check.rs"),
     ];
     let pattern = regex::Regex::new(r#"VioletError::local\(\s*"([a-z_]+)""#).unwrap();
     let mut codes: Vec<&str> = sources
@@ -897,4 +1069,141 @@ fn every_local_code_is_documented_in_the_violet_skill() {
             "violet references/contract.md does not document `cas violet` code {code:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// cas-d47fd750acf1df00: readable posts (format_unreadable)
+// ---------------------------------------------------------------------------
+
+/// The hub's final `format_unreadable` refusal (violet_ps cas-dbea,
+/// 4b6fd1143c70), verbatim in shape: the sample's first_line violation plus a
+/// file violation whose fix names the token.
+fn format_unreadable_receipt() -> Value {
+    json!({
+        "ok": false,
+        "error": {
+            "code": "format_unreadable",
+            "message": "Rewrite the post for readability, then submit it again.",
+            "retryable": false,
+            "detail": {"violations": [
+                {"rule": "first_line", "line": 1,
+                 "excerpt": "Missed snapshots: checked every post since 5 Oct and the scheduler is solid…",
+                 "fix": "Start with a short, plain verdict sentence."},
+                {"rule": "unattached_file", "line": 4,
+                 "excerpt": "Full breakdown in ~/reports/summary.md",
+                 "fix": "Attach \"~/reports/summary.md\" to this message, or describe it without naming a path."},
+                {"rule": "fake_table", "line": 6,
+                 "excerpt": "Reels      143     145",
+                 "fix": "Put the table in a code block or rewrite its rows as • bullets."}
+            ]}
+        }
+    })
+}
+
+#[test]
+fn a_format_unreadable_refusal_prints_every_violation_and_fails() {
+    for json_output in [false, true] {
+        let hub = ScriptedHub::with(vec![format_unreadable_receipt()]);
+        let (out, result) = run_cli(
+            &["post", "--channel", "cas-internal", "--text", "Snapshots are healthy."],
+            &hub,
+            json_output,
+            &no_gate,
+        );
+        let error = result.expect_err("an unreadable post exits non-zero");
+        assert_eq!(error.code, "format_unreadable");
+        assert!(!error.retryable);
+        let expected = format_unreadable_receipt();
+        if json_output {
+            let printed: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(printed, expected, "--json prints the hub's refusal verbatim");
+        } else {
+            let text = error.to_string();
+            for violation in expected["error"]["detail"]["violations"].as_array().unwrap() {
+                let line = format!(
+                    "  - {} (line {}): {}\n    fix: {}",
+                    violation["rule"].as_str().unwrap(),
+                    violation["line"],
+                    violation["excerpt"].as_str().unwrap(),
+                    violation["fix"].as_str().unwrap()
+                );
+                assert!(text.contains(&line), "missing {line:?} in {text}");
+            }
+        }
+    }
+}
+
+/// The operator's hard rules, matched as the hub matches them: a draft naming
+/// a file it does not attach, even in backticks, or showing a UTC time, is
+/// refused before anything reaches the hub. Code blocks, URLs, a stack pair
+/// such as React/Next.js and a case-insensitive attachment name all pass.
+#[test]
+fn a_draft_with_utc_times_or_unattached_files_is_refused_before_sending() {
+    let refused = ScriptedHub::default();
+    let (_, result) = run_cli(
+        &["post", "--channel", "cas-internal", "--text",
+          "Deploy finished at 14:42Z.\n\nSee `notes.md` and ~/reports/summary.md\nPatched src/App.ts."],
+        &refused,
+        false,
+        &no_gate,
+    );
+    let error = result.expect_err("hard rules refuse the draft");
+    assert_eq!(error.code, "format_unreadable");
+    let envelope = error.envelope.as_ref().unwrap();
+    // pin: the local refusal reuses the hub's format_unreadable message verbatim (violet_ps cas-dbea contract)
+    assert_eq!(envelope["error"]["message"], "Rewrite the post for readability, then submit it again.");
+    assert_eq!(envelope["error"]["retryable"], false);
+    let violations = envelope["error"]["detail"]["violations"].as_array().unwrap();
+    let found: Vec<(String, u64)> = violations
+        .iter()
+        .map(|v| (v["rule"].as_str().unwrap().to_string(), v["line"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("utc_time".to_string(), 1),
+            ("unattached_file".to_string(), 3),
+            ("unattached_file".to_string(), 3),
+            ("unattached_file".to_string(), 4),
+        ]
+    );
+    assert_eq!(
+        violations[3]["fix"],
+        "Attach \"src/App.ts\" to this message, or describe it without naming a path.",
+        "a one-slash code path with a lowercase folder names a file"
+    );
+    assert_eq!(violations[0]["fix"], "Show \"14:42Z\" in CT (or labelled ET), never UTC.");
+    assert_eq!(
+        violations[1]["fix"],
+        "Attach \"notes.md\" to this message, or describe it without naming a path."
+    );
+    assert_eq!(refused.connects(), 0, "nothing reaches the hub");
+
+    let dir = TempDir::new().unwrap();
+    let path = write_file(&dir, "Summary.md", b"# summary\n");
+    let allowed = ScriptedHub::with(vec![file_receipt("F1", "Summary.md", b"# summary\n")]);
+    let (_, result) = run_cli(
+        &["post", "--channel", "cas-internal", "--file", path.to_str().unwrap(), "--text",
+          "summary.md attached: deploy finished at 9:42 AM CT.\n\n```\n2026-10-20T14:42:00Z deploy ok\n```\nDashboard: <https://hub.example/runs/1.json|run 1>, also https://hub.example/docs/notes.md\nBuilt on React/Next.js, React/three.js, Svelte/d3.js and Node.js."],
+        &allowed,
+        false,
+        &no_gate,
+    );
+    result.expect("CT times, attached files, code blocks, URLs and stack names pass");
+    assert_eq!(allowed.calls().len(), 1);
+
+    let thread = ScriptedHub::default();
+    let (_, result) = run_cli(
+        &["thread", "--channel", "cas-internal", "--text", "Release is live.",
+          "--reply", "Report is art-1234abcd.", "--idempotency-key", "k1"],
+        &thread,
+        false,
+        &no_gate,
+    );
+    let error = result.expect_err("a reply naming an unattached artifact is refused");
+    let violation = &error.envelope.as_ref().unwrap()["error"]["detail"]["violations"][0];
+    assert_eq!(violation["rule"], "unattached_file");
+    // pin: the plain refusal names the thread message and prints the hub's violation fields so an agent can apply the fix without --json
+    assert!(error.to_string().contains("(reply 1)\n  - unattached_file (line 1): Report is art-1234abcd."), "{error}");
+    assert_eq!(thread.connects(), 0);
 }

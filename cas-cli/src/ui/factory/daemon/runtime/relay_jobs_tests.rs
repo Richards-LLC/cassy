@@ -84,12 +84,23 @@ impl LoopCount {
     }
 }
 
+/// cas-675a: the fixture worker's name, unique to this test process. Death
+/// recording asks the host's real process table whether a process still runs
+/// as `--agent-name <name>` or `CAS_AGENT_NAME=<name>`, and rightly records no
+/// death while one does. A shared literal let any such host process (a
+/// sibling test's real harness respawn, say) make this dead worker look alive.
+fn relay_worker() -> &'static str {
+    static NAME: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| format!("relay-worker-{}", std::process::id()));
+    &NAME
+}
+
 /// A project with this factory session's active worker registered, so the
 /// relays' reads have a candidate to look at.
 fn project_with_worker() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
-    let mut worker = cas_types::Agent::new("w-1".into(), "relay-worker".into());
+    let mut worker = cas_types::Agent::new("w-1".into(), relay_worker().into());
     worker.role = cas_types::AgentRole::Worker;
     worker.factory_session = Some("provision-test".into());
     crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
@@ -211,7 +222,7 @@ async fn external_work_reconcile_job_reschedules_cloud_outage() {
 async fn c4491f_usage_limit_relay_reads_nothing_on_the_loop() {
     let (_dir, cas_dir) = project_with_worker();
     let mut daemon = daemon_on_lanes(&cas_dir);
-    daemon.app.add_worker_name_for_test("relay-worker");
+    daemon.app.add_worker_name_for_test(relay_worker());
     {
         let pass = LoopPass::start();
         daemon.relay_usage_limited_workers();
@@ -224,7 +235,7 @@ async fn c4491f_usage_limit_relay_reads_nothing_on_the_loop() {
 async fn c4491f_auth_failure_relay_reads_nothing_on_the_loop() {
     let (_dir, cas_dir) = project_with_worker();
     let mut daemon = daemon_on_lanes(&cas_dir);
-    daemon.app.add_worker_name_for_test("relay-worker");
+    daemon.app.add_worker_name_for_test(relay_worker());
     {
         let pass = LoopPass::start();
         daemon.relay_auth_failed_workers();
@@ -237,7 +248,7 @@ async fn c4491f_auth_failure_relay_reads_nothing_on_the_loop() {
 async fn c4491f_permission_relay_reads_nothing_on_the_loop() {
     let (_dir, cas_dir) = project_with_worker();
     let mut daemon = daemon_on_lanes(&cas_dir);
-    daemon.app.add_worker_name_for_test("relay-worker");
+    daemon.app.add_worker_name_for_test(relay_worker());
     {
         let pass = LoopPass::start();
         daemon.relay_worker_permission_requests();
@@ -294,14 +305,14 @@ async fn c4491f_relay_escalation_reads_nothing_on_the_loop() {
 async fn c4491f_assignment_wake_reads_its_task_off_the_loop() {
     let (_dir, cas_dir) = project_with_worker();
     let mut task = cas_types::Task::new("cas-a551".into(), "assigned work".into());
-    task.assignee = Some("relay-worker".into());
+    task.assignee = Some(relay_worker().into());
     crate::store::open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
     let mut daemon = daemon_on_lanes(&cas_dir);
     let progress = super::loop_watchdog::LoopProgress::new();
     let store_worker = super::store_worker::global();
     let mut refresh = DirectorRefresh::new();
     let wake = crate::ui::factory::director::Prompt {
-        target: "relay-worker".into(),
+        target: relay_worker().into(),
         text: "You have been assigned a new task:\nTask ID: cas-a551\nTitle: assigned work".into(),
         stall_nudge_task: None,
         retract_worker: None,
@@ -586,7 +597,7 @@ fn unread_batch(text: &str) -> super::factory_jobs::DeliverabilityBatch {
     super::factory_jobs::DeliverabilityBatch {
         prompts: vec![(
             crate::ui::factory::director::Prompt {
-                target: "relay-worker".into(),
+                target: relay_worker().into(),
                 text: text.into(),
                 stall_nudge_task: None,
                 retract_worker: None,
@@ -611,7 +622,7 @@ async fn c4491f_unread_assignment_wake_is_never_injected_unchecked() {
     let (_dir, cas_dir) = project_with_worker();
     let mut task = cas_types::Task::new("cas-c105".into(), "done".into());
     task.status = cas_types::TaskStatus::Closed;
-    task.assignee = Some("relay-worker".into());
+    task.assignee = Some(relay_worker().into());
     crate::store::open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
     let mut daemon = daemon_on_lanes(&cas_dir);
     let store_worker = super::store_worker::global();
@@ -627,7 +638,7 @@ async fn c4491f_unread_assignment_wake_is_never_injected_unchecked() {
         .peek_all(50)
         .unwrap()
         .into_iter()
-        .filter(|row| row.target == "relay-worker")
+        .filter(|row| row.target == relay_worker())
         .collect();
     assert!(queued.is_empty(), "a stale assignment wake reached the queue: {queued:?}");
 }
@@ -639,7 +650,7 @@ fn c4491f_unread_live_assignment_writes_its_assignment_row() {
     use crate::ui::factory::app::{UnreadAssignmentOutcome, resolve_unread_assignment};
     let (_dir, cas_dir) = project_with_worker();
     let mut task = cas_types::Task::new("cas-1a55".into(), "live".into());
-    task.assignee = Some("relay-worker".into());
+    task.assignee = Some(relay_worker().into());
     crate::store::open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
     let wake = unread_batch("You have been assigned a new task:\nTask ID: cas-1a55").prompts.remove(0).0;
     assert_eq!(
@@ -652,7 +663,7 @@ fn c4491f_unread_live_assignment_writes_its_assignment_row() {
             .peek_all(50)
             .unwrap()
             .iter()
-            .any(|row| row.source == "task-assignment" && row.target == "relay-worker"),
+            .any(|row| row.source == "task-assignment" && row.target == relay_worker()),
         "the assignment row carries the wake"
     );
 }
@@ -966,13 +977,13 @@ async fn cas_ff42_crash_stale_mark_writes_nothing_inside_the_enforced_step() {
         let before = cas_store::lane_guard::thread_violations();
         daemon.recent_worker_exits.push(super::ObservedWorkerExit {
             at,
-            worker: "relay-worker".into(),
+            worker: relay_worker().into(),
             status: "exited with code 1".into(),
             death: None,
             recording: true,
         });
         daemon.mark_registered_worker_stale(
-            "relay-worker",
+            relay_worker(),
             "exited with code 1",
             None,
             crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred,
@@ -991,8 +1002,8 @@ async fn cas_ff42_crash_stale_mark_writes_nothing_inside_the_enforced_step() {
     settle_relays(&mut daemon).await;
     let exit = &daemon.recent_worker_exits[0];
     assert!(!exit.recording, "the record reported");
-    assert!(exit.death.is_some(), "the death was recorded on the store worker");
     let agent = crate::store::open_agent_store(&cas_dir).unwrap().get("w-1").unwrap();
+    assert!(exit.death.is_some(), "the death was recorded on the store worker: {exit:?}; w-1 {agent:?}");
     assert_eq!(agent.status, cas_types::AgentStatus::Stale, "the registration is stale");
 }
 
@@ -1012,7 +1023,7 @@ async fn cas_ff42_inline_death_record_trips_the_enforced_step() {
     super::queue_and_events::record_worker_death_io(
         &cas_dir,
         "provision-test",
-        "relay-worker",
+        relay_worker(),
         Some("w-1"),
         "exited with code 1",
         None,
@@ -1032,13 +1043,13 @@ async fn cas_ff42_a_panicked_death_record_does_not_hold_its_exit_forever() {
     let at = chrono::Utc::now() - chrono::Duration::seconds(60);
     daemon.recent_worker_exits.push(super::ObservedWorkerExit {
         at,
-        worker: "relay-worker".into(),
+        worker: relay_worker().into(),
         status: "exited with code 1".into(),
         death: None,
         recording: true,
     });
     daemon.mark_registered_worker_stale(
-        "relay-worker",
+        relay_worker(),
         "exited with code 1",
         None,
         crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred,
@@ -1063,9 +1074,9 @@ async fn cas_58a3_worker_exit_writes_nothing_inside_the_enforced_step() {
     let (_dir, cas_dir) = project_with_worker();
     let mut daemon = daemon_on_lanes(&cas_dir);
     daemon.queue_jobs.store(&cas_dir).unwrap();
-    daemon.app.add_worker_name_for_test("relay-worker");
+    daemon.app.add_worker_name_for_test(relay_worker());
     daemon.spawn_verifications.insert(
-        "relay-worker".to_string(),
+        relay_worker().to_string(),
         super::super::SpawnVerification {
             request_id: Some(7),
             launched_at: Instant::now(),
@@ -1077,8 +1088,8 @@ async fn cas_58a3_worker_exit_writes_nothing_inside_the_enforced_step() {
     // cas-031e integration: worker-exit cleanup also cancels evidence owned
     // by that pane, without restoring any inline crash I/O.
     let probe = super::queue_and_events::NormalDeliveryProbe {
-        pane: "relay-worker".into(),
-        target: "relay-worker".into(),
+        pane: relay_worker().into(),
+        target: relay_worker().into(),
         bytes_at_delivery: 0,
         delivered_at: Instant::now(),
         delivered_at_utc: chrono::Utc::now(),
@@ -1099,7 +1110,7 @@ async fn cas_58a3_worker_exit_writes_nothing_inside_the_enforced_step() {
         let before = cas_store::lane_guard::thread_violations();
         let store_before = cas_store::wait_budget::store_access_violations();
         daemon
-            .handle_worker_crash("relay-worker", Some(1), None)
+            .handle_worker_crash(relay_worker(), Some(1), None)
             .await
             .unwrap();
         assert_eq!(
@@ -1119,11 +1130,11 @@ async fn cas_58a3_worker_exit_writes_nothing_inside_the_enforced_step() {
     }
     assert!(!live.load(std::sync::atomic::Ordering::Acquire), "old evidence was cancelled");
     assert!(!daemon.normal_delivery_probes.contains_key(&42), "old pane probe was removed");
-    assert!(!daemon.app.worker_names().iter().any(|name| name == "relay-worker"));
+    assert!(!daemon.app.worker_names().iter().any(|name| name == relay_worker()));
     // The record reports on a drain; its cleanup is submitted by the next
     // relay pass, outside the drained batch, as the loop's tick does.
     let deadline = Instant::now() + Duration::from_secs(30);
-    while daemon.app.crash_cleanup_pending("relay-worker") {
+    while daemon.app.crash_cleanup_pending(relay_worker()) {
         daemon.relay_correlated_worker_deaths();
         assert!(Instant::now() < deadline, "the cleanup never applied");
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1131,15 +1142,15 @@ async fn cas_58a3_worker_exit_writes_nothing_inside_the_enforced_step() {
     settle_relays(&mut daemon).await;
     let exit = &daemon.recent_worker_exits[0];
     assert!(!exit.recording, "recorded and cleaned");
-    assert!(exit.death.is_some(), "the death was recorded off the loop");
     let agent = crate::store::open_agent_store(&cas_dir).unwrap().get("w-1").unwrap();
+    assert!(exit.death.is_some(), "the death was recorded off the loop: {exit:?}; w-1 {agent:?}");
     assert_eq!(agent.status, cas_types::AgentStatus::Stale);
     let row = crate::store::open_prompt_queue_store(&cas_dir)
         .unwrap()
         .peek_all(10)
         .unwrap()
         .into_iter()
-        .any(|row| row.prompt.contains("relay-worker"));
+        .any(|row| row.prompt.contains(relay_worker()));
     assert!(row, "the boot-time spawn notice was written off the loop");
 }
 
@@ -1153,26 +1164,26 @@ async fn cas_58a3_an_exit_waits_for_its_crash_cleanup_before_it_is_relayed() {
         std::thread::sleep(Duration::from_millis(400));
         crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanupOutcome { worktree: None }
     });
-    daemon.app.add_worker_name_for_test("relay-worker");
+    daemon.app.add_worker_name_for_test(relay_worker());
     // Dated at the crash, after the worker registered, as production does.
     let at = chrono::Utc::now();
     daemon.recent_worker_exits.push(super::ObservedWorkerExit {
         at,
-        worker: "relay-worker".into(),
+        worker: relay_worker().into(),
         status: "exited with code 1".into(),
         death: None,
         recording: true,
     });
-    let cleanup = daemon.app.mark_worker_crashed_in_memory("relay-worker");
+    let cleanup = daemon.app.mark_worker_crashed_in_memory(relay_worker());
     daemon.mark_registered_worker_stale(
-        "relay-worker",
+        relay_worker(),
         "exited with code 1",
         None,
         crate::mcp::tools::service::orphan_recovery::DeathRelay::Deferred,
         Some(at),
         Some(cleanup),
     );
-    let cleanup_key = super::queue_and_events::worker_crash_cleanup_key("relay-worker", at);
+    let cleanup_key = super::queue_and_events::worker_crash_cleanup_key(relay_worker(), at);
     let deadline = Instant::now() + Duration::from_secs(30);
     while !daemon.relay_jobs.writing(&cleanup_key) {
         daemon.relay_correlated_worker_deaths();
@@ -1208,7 +1219,7 @@ async fn cas_58a3_a_same_batch_record_is_not_mistaken_for_a_vanished_one() {
     let at = chrono::Utc::now() - chrono::Duration::seconds(60);
     daemon.recent_worker_exits.push(super::ObservedWorkerExit {
         at,
-        worker: "relay-worker".into(),
+        worker: relay_worker().into(),
         status: "exited with code 1".into(),
         death: None,
         recording: true,
@@ -1218,11 +1229,11 @@ async fn cas_58a3_a_same_batch_record_is_not_mistaken_for_a_vanished_one() {
         RelayOutput::DeathsRelayed { group: Vec::new(), done: true }
     }));
     // Second: this exit's death record.
-    let record_key = super::queue_and_events::worker_death_record_key("relay-worker", at);
+    let record_key = super::queue_and_events::worker_death_record_key(relay_worker(), at);
     let record_key_out = record_key.clone();
     assert!(daemon.relay_jobs.submit_write(&mut daemon.queue_jobs, &record_key, None, move || {
         RelayOutput::WorkerDeathRecorded {
-            worker: "relay-worker".into(),
+            worker: relay_worker().into(),
             at: Some(at),
             death: None,
             record_key: record_key_out,
@@ -1265,43 +1276,43 @@ async fn cas_58a3_a_respawn_waits_for_the_crashed_workers_cleanup() {
         }
         crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanupOutcome { worktree: None }
     });
-    daemon.app.add_worker_name_for_test("relay-worker");
-    daemon.handle_worker_crash("relay-worker", Some(1), None).await.unwrap();
+    daemon.app.add_worker_name_for_test(relay_worker());
+    daemon.handle_worker_crash(relay_worker(), Some(1), None).await.unwrap();
     let at = daemon.recent_worker_exits[0].at;
-    let cleanup_key = super::queue_and_events::worker_crash_cleanup_key("relay-worker", at);
+    let cleanup_key = super::queue_and_events::worker_crash_cleanup_key(relay_worker(), at);
     let deadline = Instant::now() + Duration::from_secs(30);
     while !daemon.relay_jobs.writing(&cleanup_key) {
         daemon.relay_correlated_worker_deaths();
         assert!(Instant::now() < deadline, "the cleanup never started");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    assert!(daemon.app.crash_cleanup_pending("relay-worker"), "reserved while it cleans");
+    assert!(daemon.app.crash_cleanup_pending(relay_worker()), "reserved while it cleans");
 
     daemon
         .pending_spawns
-        .push_back(super::super::PendingSpawn::Respawn("relay-worker".into()));
+        .push_back(super::super::PendingSpawn::Respawn(relay_worker().into()));
     daemon.process_pending_spawns().await;
     assert!(daemon.spawn_task.is_none(), "no respawn started while the cleanup runs");
     assert!(
         daemon
             .pending_spawns
             .iter()
-            .any(|spawn| matches!(spawn, super::super::PendingSpawn::Respawn(name) if name == "relay-worker")),
+            .any(|spawn| matches!(spawn, super::super::PendingSpawn::Respawn(name) if name == relay_worker())),
         "the respawn was requeued, not dropped"
     );
     assert!(
-        daemon.app.snapshot_worker_spawn(Some("relay-worker"), false, None).is_err(),
+        daemon.app.snapshot_worker_spawn(Some(relay_worker()), false, None).is_err(),
         "a named spawn treats the name as busy"
     );
 
     RELEASE.store(true, std::sync::atomic::Ordering::Release);
-    while daemon.app.crash_cleanup_pending("relay-worker") {
+    while daemon.app.crash_cleanup_pending(relay_worker()) {
         daemon.relay_correlated_worker_deaths();
         assert!(Instant::now() < deadline, "the cleanup never applied");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert!(daemon.relay_jobs.crash_cleanups.is_empty());
-    assert!(daemon.app.snapshot_worker_spawn(Some("relay-worker"), false, None).is_ok(), "released");
+    assert!(daemon.app.snapshot_worker_spawn(Some(relay_worker()), false, None).is_ok(), "released");
     // The requeued respawn now runs instead of waiting again. (This test
     // daemon has no harness, so the relaunch itself fails; what matters is
     // that it was attempted, not refused as still cleaning.)
@@ -1311,7 +1322,7 @@ async fn cas_58a3_a_respawn_waits_for_the_crashed_workers_cleanup() {
         !daemon
             .pending_spawns
             .iter()
-            .any(|spawn| matches!(spawn, super::super::PendingSpawn::Respawn(name) if name == "relay-worker")),
+            .any(|spawn| matches!(spawn, super::super::PendingSpawn::Respawn(name) if name == relay_worker())),
         "the respawn was taken once the cleanup applied"
     );
     assert!(
@@ -1334,13 +1345,13 @@ fn cas_58a3_a_name_stays_reserved_while_another_cleanup_of_it_is_pending() {
     use crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanupOutcome;
     let (_dir, cas_dir) = project_with_worker();
     let mut app = crate::ui::factory::app::FactoryApp::for_test_at(cas_dir);
-    app.add_worker_name_for_test("relay-worker");
-    let _first = app.mark_worker_crashed_in_memory("relay-worker");
-    let _second = app.mark_worker_crashed_in_memory("relay-worker");
-    app.apply_crash_cleanup("relay-worker", CrashCleanupOutcome { worktree: None });
-    assert!(app.crash_cleanup_pending("relay-worker"), "the second cleanup still holds it");
-    app.abandon_crash_cleanup("relay-worker");
-    assert!(!app.crash_cleanup_pending("relay-worker"), "released after the last one");
+    app.add_worker_name_for_test(relay_worker());
+    let _first = app.mark_worker_crashed_in_memory(relay_worker());
+    let _second = app.mark_worker_crashed_in_memory(relay_worker());
+    app.apply_crash_cleanup(relay_worker(), CrashCleanupOutcome { worktree: None });
+    assert!(app.crash_cleanup_pending(relay_worker()), "the second cleanup still holds it");
+    app.abandon_crash_cleanup(relay_worker());
+    assert!(!app.crash_cleanup_pending(relay_worker()), "released after the last one");
 }
 
 /// cas-58a3 review M1: a death record job that panics still lets the crashed
@@ -1355,10 +1366,10 @@ async fn cas_58a3_a_panicked_death_record_still_runs_the_crash_cleanup() {
         CLEANED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         crate::ui::factory::app::render_and_ops::epic_workers::CrashCleanupOutcome { worktree: None }
     });
-    daemon.app.add_worker_name_for_test("relay-worker");
-    daemon.handle_worker_crash("relay-worker", Some(1), None).await.unwrap();
+    daemon.app.add_worker_name_for_test(relay_worker());
+    daemon.handle_worker_crash(relay_worker(), Some(1), None).await.unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
-    while daemon.app.crash_cleanup_pending("relay-worker")
+    while daemon.app.crash_cleanup_pending(relay_worker())
         || daemon.recent_worker_exits.first().is_some_and(|exit| exit.recording)
     {
         daemon.relay_correlated_worker_deaths();
@@ -1381,10 +1392,10 @@ async fn cas_58a3_a_cleanup_that_keeps_failing_is_given_up_and_releases_the_name
         TRIES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         panic!("cleanup job panicked")
     });
-    daemon.app.add_worker_name_for_test("relay-worker");
-    daemon.handle_worker_crash("relay-worker", Some(1), None).await.unwrap();
+    daemon.app.add_worker_name_for_test(relay_worker());
+    daemon.handle_worker_crash(relay_worker(), Some(1), None).await.unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
-    while daemon.app.crash_cleanup_pending("relay-worker")
+    while daemon.app.crash_cleanup_pending(relay_worker())
         || daemon.recent_worker_exits.first().is_some_and(|exit| exit.recording)
     {
         daemon.relay_correlated_worker_deaths();
@@ -1439,16 +1450,16 @@ fn worktree_fixture(worker: &str) -> (tempfile::TempDir, crate::worktree::Worktr
 async fn cas_58a3_inline_crash_cleanup_trips_the_enforced_step() {
     let (_dir, cas_dir) = project_with_worker();
     let mut daemon = daemon_on_lanes(&cas_dir);
-    let (_repo, manager) = worktree_fixture("relay-worker");
+    let (_repo, manager) = worktree_fixture(relay_worker());
     daemon.app.set_worktree_manager_for_test(manager);
-    daemon.app.add_worker_name_for_test("relay-worker");
+    daemon.app.add_worker_name_for_test(relay_worker());
     let progress = super::loop_watchdog::LoopProgress::new();
     let _lane = super::loop_watchdog::enforced_daemon_step(
         &progress,
         super::loop_watchdog::LoopPhase::ClientInput,
     );
     let _store_free = cas_store::wait_budget::forbid_store_access();
-    daemon.app.mark_worker_crashed("relay-worker").await;
+    daemon.app.mark_worker_crashed(relay_worker()).await;
 }
 
 /// cas-58a3 review M2: with a live tracked process group and a tracked
@@ -1461,10 +1472,10 @@ async fn cas_58a3_exit_reaps_the_group_and_worktree_off_the_enforced_step() {
     let (_dir, cas_dir) = project_with_worker();
     let mut daemon = daemon_on_lanes(&cas_dir);
     daemon.queue_jobs.store(&cas_dir).unwrap();
-    let (_repo, manager) = worktree_fixture("relay-worker");
-    let worktree = manager.worker_removal_plan("relay-worker").unwrap().worktree.path;
+    let (_repo, manager) = worktree_fixture(relay_worker());
+    let worktree = manager.worker_removal_plan(relay_worker()).unwrap().worktree.path;
     daemon.app.set_worktree_manager_for_test(manager);
-    daemon.app.add_worker_name_for_test("relay-worker");
+    daemon.app.add_worker_name_for_test(relay_worker());
     let mut command = std::process::Command::new("sh");
     command.args(["-c", "sleep 300 & wait"]);
     // SAFETY: setsid is async-signal-safe and runs in the child between fork
@@ -1480,7 +1491,7 @@ async fn cas_58a3_exit_reaps_the_group_and_worktree_off_the_enforced_step() {
     let mut child = command.spawn().unwrap();
     let session = daemon.app.factory_session().unwrap_or("provision-test").to_string();
     let record =
-        crate::ui::factory::process_groups::track(&cas_dir, "relay-worker", &session, child.id()).unwrap();
+        crate::ui::factory::process_groups::track(&cas_dir, relay_worker(), &session, child.id()).unwrap();
     assert!(crate::ui::factory::process_groups::is_live(&record));
 
     let progress = super::loop_watchdog::LoopProgress::new();
@@ -1492,7 +1503,7 @@ async fn cas_58a3_exit_reaps_the_group_and_worktree_off_the_enforced_step() {
         let store_free = cas_store::wait_budget::forbid_store_access();
         let before = cas_store::lane_guard::thread_violations();
         let store_before = cas_store::wait_budget::store_access_violations();
-        daemon.handle_worker_crash("relay-worker", Some(1), None).await.unwrap();
+        daemon.handle_worker_crash(relay_worker(), Some(1), None).await.unwrap();
         assert_eq!(
             cas_store::lane_guard::thread_violations(),
             before,
@@ -1512,7 +1523,7 @@ async fn cas_58a3_exit_reaps_the_group_and_worktree_off_the_enforced_step() {
     assert!(worktree.exists(), "not removed on the loop");
 
     let deadline = Instant::now() + Duration::from_secs(30);
-    while daemon.app.crash_cleanup_pending("relay-worker") {
+    while daemon.app.crash_cleanup_pending(relay_worker()) {
         daemon.relay_correlated_worker_deaths();
         assert!(Instant::now() < deadline, "the cleanup never applied");
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1525,7 +1536,7 @@ async fn cas_58a3_exit_reaps_the_group_and_worktree_off_the_enforced_step() {
         daemon
             .app
             .worktree_manager()
-            .and_then(|manager| manager.worker_removal_plan("relay-worker"))
+            .and_then(|manager| manager.worker_removal_plan(relay_worker()))
             .is_none(),
         "and forgotten"
     );

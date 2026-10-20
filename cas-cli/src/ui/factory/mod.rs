@@ -65,7 +65,7 @@ mod client;
 pub(crate) mod daemon;
 mod director;
 pub(crate) use director::effective_stall_threshold_secs;
-pub(crate) use director::external_response_hint;
+pub(crate) use director::{enqueue_external_message, external_response_hint};
 pub(crate) mod cgroup;
 mod input;
 mod layout;

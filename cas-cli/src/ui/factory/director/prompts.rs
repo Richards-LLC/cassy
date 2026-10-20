@@ -779,6 +779,29 @@ pub(crate) fn external_response_hint(cas_root: &std::path::Path, from: &str) -> 
     format!("{route}\n\nDO NOT USE SENDMESSAGE.")
 }
 
+/// Queue an external notifier's message (the bridge's POST /message and
+/// `cas factory message`) for `target`. Sender text cannot carry a server
+/// assignment binding: leading `<cas-assignment>` lookalikes are stripped with
+/// the same function the MCP route uses before the reply line is added.
+pub(crate) fn enqueue_external_message(
+    cas_root: &std::path::Path,
+    from: &str,
+    target: &str,
+    message: &str,
+    no_wrap: bool,
+) -> anyhow::Result<i64> {
+    let payload = if no_wrap {
+        message.to_string()
+    } else {
+        format!("{}\n\n{}", message.trim_end(), external_response_hint(cas_root, from))
+    };
+    let queue = crate::store::open_prompt_queue_store(cas_root)?;
+    Ok(match std::env::var("CAS_FACTORY_SESSION").ok() {
+        Some(session) => queue.enqueue_with_session(from, target, &payload, &session)?,
+        None => queue.enqueue(from, target, &payload)?,
+    })
+}
+
 /// Resolve the harness of the worker a director event is about (cas-dc1b).
 ///
 /// Worker-facing lines (assignment, stall nudge, reply footer) and the

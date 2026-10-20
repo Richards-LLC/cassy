@@ -5899,6 +5899,47 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
         .await
         .expect("bounded gc report");
     let summary = get_text(&default_report);
+
+    let mut offset = 0;
+    let mut found_last_agent = false;
+    loop {
+        let page_req: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "gc_report",
+            "limit": 100,
+            "offset": offset,
+        }))
+        .unwrap();
+        let page = env
+            .service
+            .factory_request(Parameters(page_req))
+            .await
+            .expect("gc report detail page");
+        let page_text = get_text(&page);
+        assert!(
+            page_text.len() <= 32 * 1024,
+            "detail page must satisfy the byte cap, got {} bytes",
+            page_text.len()
+        );
+        found_last_agent |= page_text.contains("stale-report-239-");
+        if found_last_agent {
+            break;
+        }
+        let Some(next_offset) = page_text.lines().find_map(|line| {
+            line.strip_prefix("Next offset: ")
+                .and_then(|value| value.parse::<usize>().ok())
+        }) else {
+            break;
+        };
+        assert!(
+            next_offset > offset,
+            "pagination did not advance: {page_text}"
+        );
+        offset = next_offset;
+    }
+    assert!(
+        found_last_agent,
+        "last inventory item was not reachable through pages"
+    );
     assert!(
         summary.len() < 24_000,
         "default gc_report should stay compact, got {} bytes",
@@ -5924,42 +5965,6 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
     assert!(
         summary.contains("stale-report-000-"),
         "top stale-agent sample missing: {summary}"
-    );
-
-    let mut offset = 0;
-    let mut found_last_agent = false;
-    loop {
-        let page_req: FactoryRequest = serde_json::from_value(serde_json::json!({
-            "action": "gc_report",
-            "limit": 100,
-            "offset": offset,
-        }))
-        .unwrap();
-        let page = env
-            .service
-            .factory_request(Parameters(page_req))
-            .await
-            .expect("gc report detail page");
-        let page_text = get_text(&page);
-        found_last_agent |= page_text.contains("stale-report-239-");
-        if found_last_agent {
-            break;
-        }
-        let Some(next_offset) = page_text.lines().find_map(|line| {
-            line.strip_prefix("Next offset: ")
-                .and_then(|value| value.parse::<usize>().ok())
-        }) else {
-            break;
-        };
-        assert!(
-            next_offset > offset,
-            "pagination did not advance: {page_text}"
-        );
-        offset = next_offset;
-    }
-    assert!(
-        found_last_agent,
-        "last inventory item was not reachable through pages"
     );
 }
 
@@ -6302,6 +6307,14 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     );
     assert_eq!(machine["caches"][0]["bytes"], 64);
     assert_eq!(machine["caches"][0]["disposition"], disposition);
+    let cache_category = report_text
+        .lines()
+        .find(|line| line.starts_with("- Cargo target cache pressure: "))
+        .expect("target-cache category summary");
+    assert!(
+        cache_category.starts_with("- Cargo target cache pressure: 1 items, "),
+        "machine JSON must not count as a cache inventory item: {cache_category}"
+    );
     assert!(
         report_text.contains(&worker.join("target").display().to_string()),
         "dry-run must report the exact cache path: {report_text}"

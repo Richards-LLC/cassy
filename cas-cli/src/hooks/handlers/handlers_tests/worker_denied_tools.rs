@@ -36,6 +36,13 @@ fn denial(output: HookOutput) -> Option<String> {
     })
 }
 
+fn assert_operator_credential_refusal(output: HookOutput, attempt: &str) {
+    let reason = denial(output).unwrap_or_else(|| panic!("worker access was allowed: {attempt}"));
+    assert!(reason.contains("WORKER-DENIED OPERATOR CREDENTIALS"), "{reason}");
+    assert!(reason.contains("blocker=true"), "{reason}");
+    assert!(reason.contains("target=supervisor"), "{reason}");
+}
+
 fn role_env(role: &str) -> (TestEnvGuard, tempfile::TempDir) {
     let mut env = TestEnvGuard::temp_home();
     let config_home = tempfile::tempdir().unwrap();
@@ -186,5 +193,116 @@ fn the_denied_lists_follow_project_config() {
     ] {
         let output = handle_pre_tool_use(&input(tool, args, home.path()), Some(&cas_root)).unwrap();
         assert!(!denial(output).is_some_and(|reason| reason.contains("WORKER-DENIED")), "{tool}");
+    }
+}
+
+#[test]
+fn worker_read_of_operator_neonctl_credentials_is_refused_cas_da9a() {
+    let (_env, cwd) = role_env("worker");
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    for path in [
+        "~/.config/neonctl/credentials.json".to_string(),
+        home.join(".config/neonctl/credentials.json")
+            .display()
+            .to_string(),
+    ] {
+        let output =
+            handle_pre_tool_use(
+                &input("Read", json!({"file_path": path}), cwd.path()),
+                Some(&cas_root),
+            )
+            .unwrap();
+        assert_operator_credential_refusal(output, &path);
+    }
+}
+
+#[test]
+fn worker_read_of_operator_vercel_auth_is_refused_cas_da9a() {
+    let (_env, cwd) = role_env("worker");
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    for path in [
+        "~/.local/share/com.vercel.cli/auth.json".to_string(),
+        "~/Library/Application Support/com.vercel.cli/auth.json".to_string(),
+        home.join(".local/share/com.vercel.cli/auth.json")
+            .display()
+            .to_string(),
+    ] {
+        let output =
+            handle_pre_tool_use(
+                &input("Read", json!({"file_path": path}), cwd.path()),
+                Some(&cas_root),
+            )
+            .unwrap();
+        assert_operator_credential_refusal(output, &path);
+    }
+}
+
+#[test]
+fn worker_shell_cat_cp_and_head_of_operator_credentials_are_refused_cas_da9a() {
+    let (_env, cwd) = role_env("worker");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    for command in [
+        "cat \"$HOME/.config/neonctl/credentials.json\"",
+        "cp \"$HOME/.config/neonctl/credentials.json\" /tmp/copied-token",
+        "head -n 1 \"$HOME/.local/share/com.vercel.cli/auth.json\"",
+    ] {
+        let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
+        assert_operator_credential_refusal(output, command);
+    }
+}
+
+#[test]
+fn worker_inline_scripts_cannot_read_operator_auth_stores_cas_da9a() {
+    let (_env, cwd) = role_env("worker");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    for command in [
+        "python3 -c 'from pathlib import Path; print((Path.home() / \".config\" / \"neonctl\" / \"credentials.json\").read_text())'",
+        "node -e 'require(\"fs\").readFileSync(process.env.HOME + \"/.local/share/com.vercel.cli/auth.json\")'",
+    ] {
+        let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
+        assert_operator_credential_refusal(output, command);
+    }
+}
+
+#[test]
+fn supervisor_can_read_operator_neon_and_vercel_auth_stores_cas_da9a() {
+    let (_env, cwd) = role_env("supervisor");
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    for path in [
+        home.join(".config/neonctl/credentials.json"),
+        home.join(".local/share/com.vercel.cli/auth.json"),
+    ] {
+        let output = handle_pre_tool_use(
+            &input(
+                "Read",
+                json!({"file_path": path.display().to_string()}),
+                cwd.path(),
+            ),
+            Some(&cas_root),
+        )
+        .unwrap();
+        assert!(
+            denial(output).is_none(),
+            "supervisor Read was denied for {}",
+            path.display()
+        );
+    }
+    for command in [
+        "cat \"$HOME/.config/neonctl/credentials.json\"",
+        "head -n 1 \"$HOME/.local/share/com.vercel.cli/auth.json\"",
+    ] {
+        let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
+        assert!(
+            denial(output).is_none(),
+            "supervisor shell read was denied: {command}"
+        );
     }
 }

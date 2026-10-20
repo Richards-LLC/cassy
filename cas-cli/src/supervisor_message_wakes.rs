@@ -578,6 +578,67 @@ mod tests {
             .unwrap();
     }
     #[test]
+    fn cas_bc4d_batching_errors_leave_action_selection_intact() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        for failure in ["config", "ledger", "park"] {
+            let (_root, cas, peer) = setup();
+            let ordinary = enqueue(&cas, &peer, "A peer field report");
+            let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+            let lifecycle = queue.enqueue_urgent_with_outcome(
+                "lifecycle-wake:test", "supervisor", "<ci-red-run>Review CI</ci-red-run>",
+                Some("wake-session"), None, None, false, Some(&QueueOrigin::Daemon),
+            ).unwrap().id();
+            let blocker = enqueue(&cas, &peer, &crate::prompt_revalidation::attach_blocker_envelope(
+                "A decision is required", &peer.name, None,
+            ));
+            let merge = enqueue(&cas, &peer, &crate::prompt_revalidation::attach_merge_request_envelope(
+                "Please merge the delivery", &crate::prompt_revalidation::MergeRequestEnvelope {
+                    task_id: "cas-bc4d".into(), branch_tip: "delivery".into(),
+                    target_branch: "epic/test".into(), target_branch_tip: "base".into(),
+                    anchor_tip: None, commits_not_on_target_base: 1, pr_number: None,
+                    source_freshness_unavailable: None,
+                },
+            ));
+            match failure {
+                "config" => std::fs::write(cas.join("config.toml"), "[factory\n").unwrap(),
+                "ledger" => {
+                    db(&cas).unwrap().lock().unwrap().execute_batch(
+                        "DROP TABLE supervisor_message_wake_pairs"
+                    ).unwrap();
+                }
+                "park" => {
+                    rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute_batch(&format!(
+                        "CREATE TRIGGER fail_wake_park BEFORE UPDATE OF next_attempt_at ON prompt_queue
+                         WHEN NEW.id={ordinary} BEGIN SELECT RAISE(FAIL,'wake park unavailable'); END;"
+                    )).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let logs = Arc::new(Mutex::new(Vec::new()));
+            let sink = logs.clone();
+            let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || Capture(sink.clone())).finish();
+            let selected = tracing::subscriber::with_default(subscriber, || select(&cas));
+            for id in [ordinary, lifecycle, blocker, merge] {
+                assert!(selected.rows.iter().any(|row| row.id == id),
+                    "{failure}: batching failure must not lose selected row #{id}");
+                assert!(selected.facts[&id].message_batch.is_empty());
+            }
+            assert!(String::from_utf8(logs.lock().unwrap().clone()).unwrap().contains("WARN"),
+                "{failure}: unavailable batching must be visible");
+        }
+    }
+    #[test]
     fn cas_1e7e2_acknowledgements_wait_readable_for_the_next_turn() {
         let (_root, cas, peer) = setup();
         let ack = enqueue(&cas, &peer, "thanks, received");

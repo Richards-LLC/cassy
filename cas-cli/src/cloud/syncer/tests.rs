@@ -830,9 +830,15 @@ async fn cas_596d_successful_team_push_rearms_only_transient_exhausted_rows_once
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
-    let team_id = "team-cas-596d";
+    let team_id = "team-401-403-auth-cas-596d";
     Mock::given(method("POST"))
         .and(path(format!("/api/teams/{team_id}/sync/push")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
         .respond_with(ResponseTemplate::new(200))
         .expect(2)
         .mount(&server)
@@ -848,13 +854,13 @@ async fn cas_596d_successful_team_push_rearms_only_transient_exhausted_rows_once
     queue.init().unwrap();
     let config = CloudSyncerConfig::default();
     let max_retries = config.max_retries;
+    let dns_error = format!(
+        "Network error: {}/api/teams/{team_id}/sync/push: dns resolution failed (temporary)",
+        server.uri()
+    );
 
     for (id, error, outcome) in [
-        (
-            "entry-dns-exhausted",
-            "Network error: DNS resolution failed (temporary)",
-            None,
-        ),
+        ("entry-dns-exhausted", dns_error.as_str(), None),
         (
             "entry-auth-exhausted",
             "Team push failed with status 401: unauthorized",
@@ -867,7 +873,7 @@ async fn cas_596d_successful_team_push_rearms_only_transient_exhausted_rows_once
         ),
         (
             "entry-stale-rejection-dns",
-            "Network error: DNS resolution failed (temporary)",
+            dns_error.as_str(),
             Some("rejected"),
         ),
     ] {
@@ -895,6 +901,24 @@ async fn cas_596d_successful_team_push_rearms_only_transient_exhausted_rows_once
                 .record_row_outcome(row_id, outcome, Some("test"))
                 .unwrap();
         }
+    }
+
+    queue
+        .enqueue(
+            EntityType::Skill,
+            "entry-personal-dns-exhausted",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"entry-personal-dns-exhausted","origin_project":"p"}"#),
+        )
+        .unwrap();
+    let personal_row = queue
+        .list_all(20)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.entity_id == "entry-personal-dns-exhausted")
+        .unwrap();
+    for _ in 0..max_retries {
+        queue.mark_failed(personal_row.id, &dns_error).unwrap();
     }
 
     let enqueue_successful_push = |id: &str| {
@@ -951,7 +975,7 @@ async fn cas_596d_successful_team_push_rearms_only_transient_exhausted_rows_once
 
     for _ in 0..max_retries {
         queue
-            .mark_failed(dns.id, "Network error: DNS resolution failed (temporary)")
+            .mark_failed(dns.id, &dns_error)
             .unwrap();
     }
     enqueue_successful_push("entry-cloud-contact-two");
@@ -964,6 +988,32 @@ async fn cas_596d_successful_team_push_rearms_only_transient_exhausted_rows_once
     assert!(second.errors.is_empty(), "{:?}", second.errors);
     assert_eq!(second.pushed_skills, 1);
     assert_eq!(row("entry-dns-exhausted").retry_count, max_retries);
+
+    let syncer_for_personal_push = syncer.clone();
+    tokio::task::spawn_blocking(move || {
+        syncer_for_personal_push.push_personal_payload(serde_json::Map::new(), "test-token")
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let personal_dns = row("entry-personal-dns-exhausted");
+    assert_eq!(
+        personal_dns.retry_count, 0,
+        "a successful personal push re-arms DNS failures"
+    );
+    assert!(personal_dns.last_error.is_none());
+
+    for _ in 0..max_retries {
+        queue.mark_failed(personal_dns.id, &dns_error).unwrap();
+    }
+    let syncer_for_personal_push = syncer.clone();
+    tokio::task::spawn_blocking(move || {
+        syncer_for_personal_push.push_personal_payload(serde_json::Map::new(), "test-token")
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(row("entry-personal-dns-exhausted").retry_count, max_retries);
 }
 
 #[tokio::test]

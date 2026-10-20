@@ -1216,6 +1216,22 @@ impl CloudSyncer {
                             serde_json::from_str(&body).unwrap_or_default()
                         };
                         parsed.raw_body = body;
+                        match self
+                            .queue
+                            .rearm_personal_transient_network_failures_after_success(
+                                self.config.max_retries,
+                            )
+                        {
+                            Ok(0) => {}
+                            Ok(rearmed) => tracing::debug!(
+                                rearmed,
+                                "re-armed exhausted transient personal network sync rows after successful personal push"
+                            ),
+                            Err(error) => tracing::warn!(
+                                error = %error,
+                                "could not re-arm transient personal network sync rows after successful personal push"
+                            ),
+                        }
                         return Ok(parsed);
                     } else {
                         let status = resp.status();

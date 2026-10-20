@@ -60,29 +60,6 @@ fn validate(artifact: &PublishedArtifact, task_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A pulled owner row can carry proof lines that were written by the source
-/// machine's trusted publisher. Move valid committed records out of ordinary
-/// task text so replication appends them through the trusted sink as well.
-pub(crate) fn take_published_proof_lines(notes: &mut String, task_id: &str) -> Vec<String> {
-    let mut trusted = Vec::new();
-    let mut ordinary = Vec::new();
-    for line in notes.lines() {
-        let published = line
-            .strip_prefix(MARKER)
-            .and_then(|json| serde_json::from_str::<PublishedArtifact>(json).ok())
-            .is_some_and(|record| validate(&record, task_id).is_ok());
-        if published {
-            trusted.push(line.to_string());
-        } else {
-            ordinary.push(line);
-        }
-    }
-    if !trusted.is_empty() {
-        *notes = ordinary.join("\n");
-    }
-    trusted
-}
-
 /// Add the committed ledger record beside a cited id. This also upgrades a
 /// local path citation if its bytes already have a committed artifact record.
 /// Missing peer paths still warn: existence on this host is not required.

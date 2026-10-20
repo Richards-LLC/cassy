@@ -36,7 +36,6 @@ use std::time::Duration;
 pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub mod lane_guard;
-pub mod task_note_markers;
 pub mod shared_db;
 pub mod wait_budget;
 
@@ -765,21 +764,6 @@ pub trait TaskStore: Send + Sync {
     /// Append one already-formatted note without exposing a stale
     /// read-modify-write window to concurrent callers.
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>>;
-
-    /// Append marker-bearing text prepared by artifact publication or the
-    /// server-attested proposal renderer. Never pass caller text here.
-    fn append_trusted_note(&self, _task_id: &str, _formatted_note: &str) -> Result<DateTime<Utc>> {
-        Err(StoreError::Other("trusted task-note append is unsupported by this store".into()))
-    }
-
-    fn append_trusted_note_with_mutation_receipt(
-        &self,
-        _task_id: &str,
-        _formatted_note: &str,
-        _receipt_id: &str,
-    ) -> Result<DateTime<Utc>> {
-        Err(StoreError::Other("atomic trusted task-note append is unsupported by this store".into()))
-    }
 
     /// Append one note and bind a generic durable mutation receipt in the same
     /// store transaction. Syncing wrappers use this to keep the local note and

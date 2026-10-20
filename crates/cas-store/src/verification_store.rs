@@ -1736,14 +1736,12 @@ pub fn invalidate_verification_dispatch_and_reopen_task_exact(
             "exact reviewed scope was not invalidated".to_string(),
         ));
     }
-    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![task.id], |row| row.get(0))?;
-    let safe_notes = crate::task_note_markers::neutralize_new_markers(&task.notes, Some(&prior_notes));
     let rows = tx.execute(
         "UPDATE tasks SET status = ?1, notes = ?2, updated_at = ?3
          WHERE id = ?4 AND status = ?5",
         params![
             TaskStatus::Open.to_string(),
-            safe_notes.as_ref(),
+            task.notes,
             task.updated_at.to_rfc3339(),
             task.id,
             expected_status.to_string(),
@@ -2021,8 +2019,6 @@ fn correct_parked_delivery_proof_scope_inner(
         }
     }
 
-    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![corrected_task.id], |row| row.get(0))?;
-    let safe_notes = crate::task_note_markers::neutralize_new_markers(&corrected_task.notes, Some(&prior_notes));
     let changed = tx.execute(
         "UPDATE tasks SET status = 'open', notes = ?2, deliverables = ?3,
          proof_targets = ?4, risk = ?5, pending_verification = 0, pending_worktree_merge = 0, updated_at = ?6
@@ -2030,7 +2026,7 @@ fn correct_parked_delivery_proof_scope_inner(
          WHERE id = ?1 AND status IN ('awaiting_merge', 'in_progress', 'blocked') AND updated_at = ?7",
         params![
             corrected_task.id,
-            safe_notes.as_ref(),
+            corrected_task.notes,
             serde_json::to_string(&corrected_task.deliverables).map_err(|error| {
                 StoreError::Parse(format!(
                     "failed to serialize corrected deliverables: {error}"
@@ -2280,8 +2276,6 @@ pub fn request_changes_for_parked_delivery(
             ],
         )?;
     }
-    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![task_id], |row| row.get(0))?;
-    let safe_notes = crate::task_note_markers::neutralize_new_markers(&notes, Some(&prior_notes));
     let task_changed = tx.execute(
         "UPDATE tasks
          SET status = 'open', notes = ?2, deliverables = ?3,
@@ -2289,7 +2283,7 @@ pub fn request_changes_for_parked_delivery(
          WHERE id = ?1 AND status = 'awaiting_merge'",
         params![
             task_id,
-            safe_notes.as_ref(),
+            notes,
             serde_json::to_string(&deliverables).map_err(|error| {
                 StoreError::Parse(format!("failed to serialize task deliverables: {error}"))
             })?,

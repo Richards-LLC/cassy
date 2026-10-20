@@ -170,24 +170,6 @@ impl TaskStore for NotifyingTaskStore {
         Ok(persisted_at)
     }
 
-    fn append_trusted_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
-        let task = self.inner.get(task_id)?;
-        let persisted_at = self.inner.append_trusted_note(task_id, formatted_note)?;
-        crate::mcp::tools::service::mutation_receipt::task_committed(task_id);
-        self.notify_updated(&task, Some(task.status));
-        Ok(persisted_at)
-    }
-
-    fn append_trusted_note_with_mutation_receipt(
-        &self, task_id: &str, formatted_note: &str, receipt_id: &str,
-    ) -> Result<DateTime<Utc>> {
-        let task = self.inner.get(task_id)?;
-        let persisted_at = self.inner.append_trusted_note_with_mutation_receipt(task_id, formatted_note, receipt_id)?;
-        crate::mcp::tools::service::mutation_receipt::task_committed(task_id);
-        self.notify_updated(&task, Some(task.status));
-        Ok(persisted_at)
-    }
-
     fn append_note_with_mutation_receipt(
         &self,
         task_id: &str,

@@ -21,7 +21,7 @@ pub(crate) mod pull;
 pub(crate) use pull::{
     SyncWarningSummary, collect_sync_warnings, entity_matches_project,
     contains_proposal_provenance_marker, record_pulled_accepted_proposal,
-    render_task_proposal_provenance, take_rendered_provenance,
+    render_task_proposal_provenance,
 };
 mod push;
 mod team_push;

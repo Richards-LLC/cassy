@@ -975,18 +975,6 @@ fn unique_complete_provenance_block(notes: &str) -> Option<(usize, usize)> {
     .then_some((start, end))
 }
 
-/// Remove the renderer's marker block from ordinary task text. The caller
-/// persists the body through the untrusted sink, then appends this block with
-/// `TaskStore::append_trusted_note`.
-pub(crate) fn take_rendered_provenance(notes: &mut String) -> Option<String> {
-    let (start, end) = unique_complete_provenance_block(notes)?;
-    let rendered = notes[start..end].to_string();
-    *notes = format!("{}{}", &notes[..start], &notes[end..])
-        .trim()
-        .to_string();
-    Some(rendered)
-}
-
 /// cas-3556: whether text carries a proposal provenance marker. Only
 /// `render_task_proposal_provenance` writes the block; agent note writes that
 /// contain a marker are refused so a forged block never reaches the notes.
@@ -2298,7 +2286,7 @@ impl CloudSyncer {
             }
             render_task_proposal_provenance(&mut raw_task);
             let raw_task_for_parking = raw_task.clone();
-            let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
+            let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
                     self.park_pulled_task_row(
@@ -2312,10 +2300,6 @@ impl CloudSyncer {
                     continue;
                 }
             };
-            let trusted_provenance = take_rendered_provenance(&mut remote_task.notes);
-            let trusted_proofs = crate::artifacts::proof::take_published_proof_lines(
-                &mut remote_task.notes, &remote_task.id,
-            );
             // cas-7a63: a row without its own origin cannot be attributed.
             // Its project scope field echoes the request, so stamping it (as
             // this code once did) gave a foreign legacy row the puller's
@@ -2353,12 +2337,6 @@ impl CloudSyncer {
             };
             match task_outcome {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
-                    if let Some(block) = trusted_provenance.as_deref() {
-                        task_store.append_trusted_note(&remote_task.id, block)?;
-                    }
-                    for proof in &trusted_proofs {
-                        task_store.append_trusted_note(&remote_task.id, proof)?;
-                    }
                     result.pulled_tasks += 1;
                     if let Some(revision) = task_revision {
                         let _ =
@@ -3492,7 +3470,7 @@ impl CloudSyncer {
                 self.note_incoming_revision(EntityType::Task, id, &raw_task);
             }
             let raw_task_for_parking = raw_task.clone();
-            let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
+            let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
                     self.park_pulled_task_row(
@@ -3506,10 +3484,6 @@ impl CloudSyncer {
                     continue;
                 }
             };
-            let trusted_provenance = take_rendered_provenance(&mut remote_task.notes);
-            let trusted_proofs = crate::artifacts::proof::take_published_proof_lines(
-                &mut remote_task.notes, &remote_task.id,
-            );
             // cas-7a63: a row without its own origin cannot be attributed.
             // Its project scope field echoes the request, so stamping it (as
             // this code once did) gave a foreign legacy row the puller's
@@ -3538,12 +3512,6 @@ impl CloudSyncer {
                 "team_pull",
             ) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
-                    if let Some(block) = trusted_provenance.as_deref() {
-                        task_store.append_trusted_note(&remote_task.id, block)?;
-                    }
-                    for proof in &trusted_proofs {
-                        task_store.append_trusted_note(&remote_task.id, proof)?;
-                    }
                     result.pulled_tasks += 1;
                     if let Some(revision) = team_task_revision {
                         let _ =

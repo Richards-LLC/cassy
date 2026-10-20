@@ -643,35 +643,6 @@ impl TaskStore for SyncingTaskStore {
         Ok(persisted_at)
     }
 
-    fn append_trusted_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
-        let _sync_guard = self
-            .queue
-            .lock_task_sync_mutations(&[task_id])
-            .map_err(queue_error_before_local_commit)?;
-        let previous = self.inner.get(task_id)?;
-        let previous_updated_at = previous.updated_at.to_rfc3339();
-        let intent = self.stage_upsert(
-            &previous,
-            "append_trusted_note",
-            Some(&previous_updated_at),
-            Some(&previous),
-        )?;
-        let persisted_at = match self.inner.append_trusted_note_with_mutation_receipt(
-            task_id,
-            formatted_note,
-            &intent.mutation_id,
-        ) {
-            Ok(persisted_at) => persisted_at,
-            Err(error) => {
-                self.cancel_staged_after_local_failure(&intent);
-                return Err(error);
-            }
-        };
-        crate::mcp::tools::service::mutation_receipt::task_committed(task_id);
-        self.fulfill_upsert(&intent)?;
-        Ok(persisted_at)
-    }
-
     fn delete(&self, id: &str) -> Result<()> {
         let task = self.inner.get(id)?;
         let mut dependencies = self.inner.get_dependencies(id)?;

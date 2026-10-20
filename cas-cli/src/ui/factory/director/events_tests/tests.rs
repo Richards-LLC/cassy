@@ -3537,6 +3537,53 @@ fn test_60dd_held_worker_never_flags_stalled() {
     );
 }
 
+/// cas-73b89: a released worker with an in-progress task that does nothing
+/// after release and has no pending reminder or message pages the
+/// supervisor once. A pending reminder is a wake, so it raises nothing.
+#[test]
+fn released_worker_with_no_pending_wake_raises_supervisor_attention() {
+    let base_utc = chrono::Utc::now();
+    let mut detector =
+        DirectorEventDetector::new(vec!["kind-hound".to_string()], "supervisor".to_string());
+    detector.set_stall_threshold_secs(300);
+    detector.mark_worker_hold("kind-hound");
+    let mut data = stalled_data_for(make_agent_working_stalled(
+        "agent-1", "kind-hound", "cas-927a", 5, None, base_utc,
+    ));
+    detector.initialize(&data);
+    detector.clear_worker_hold("kind-hound");
+    let mut stalls_at = |data: &DirectorData, secs: i64| -> Vec<DirectorEvent> {
+        let at = base_utc + chrono::Duration::seconds(secs);
+        detector
+            .detect_changes_at(data, None, std::time::Instant::now(), at)
+            .into_iter()
+            .filter(|event| matches!(event, DirectorEvent::WorkerStalled { .. }))
+            .collect()
+    };
+
+    assert!(stalls_at(&data, 0).is_empty(), "just released");
+    data.reminders.push(
+        serde_json::from_value(serde_json::json!({
+            "id": 1, "owner_id": "agent-1", "target_id": "agent-1", "message": "red run done",
+            "trigger_type": "event", "trigger_event": "task_completed", "status": "pending",
+            "ttl_secs": 3600, "created_at": base_utc,
+        }))
+        .unwrap(),
+    );
+    assert!(stalls_at(&data, 301).is_empty(), "a pending reminder will wake it");
+    data.reminders.clear();
+    let events = stalls_at(&data, 302);
+    assert!(
+        matches!(
+            events.as_slice(),
+            [DirectorEvent::WorkerStalled { worker, task_id, escalate: true, .. }]
+                if worker == "kind-hound" && task_id == "cas-927a"
+        ),
+        "{events:?}"
+    );
+    assert!(stalls_at(&data, 900).is_empty(), "once per release");
+}
+
 /// Clearing a hold resumes normal idle detection on subsequent ticks.
 #[test]
 fn test_09d0_clearing_hold_resumes_idle_detection() {

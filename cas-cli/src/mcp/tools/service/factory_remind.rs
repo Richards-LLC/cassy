@@ -851,7 +851,9 @@ fn ended_reminder_desc(reminder: &cas_store::Reminder) -> String {
                 reminder.created_at.to_rfc3339()
             ),
         },
-        ReminderStatus::Pending | ReminderStatus::Fired => reminder.status.to_string(),
+        ReminderStatus::Pending | ReminderStatus::Fired | ReminderStatus::Suspended => {
+            reminder.status.to_string()
+        }
     }
 }
 

@@ -823,6 +823,150 @@ async fn team_push_serializes_task_dependency_collection() {
 }
 
 #[tokio::test]
+async fn cas_596d_successful_team_push_rearms_only_transient_exhausted_rows_once() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let team_id = "team-cas-596d";
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{team_id}/sync/push")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let config = CloudSyncerConfig::default();
+    let max_retries = config.max_retries;
+
+    for (id, error, outcome) in [
+        (
+            "entry-dns-exhausted",
+            "Network error: DNS resolution failed (temporary)",
+            None,
+        ),
+        (
+            "entry-auth-exhausted",
+            "Team push failed with status 401: unauthorized",
+            None,
+        ),
+        (
+            "entry-rejected-exhausted",
+            "permanent cloud rejection: reason=project_mismatch",
+            Some("rejected"),
+        ),
+        (
+            "entry-stale-rejection-dns",
+            "Network error: DNS resolution failed (temporary)",
+            Some("rejected"),
+        ),
+    ] {
+        queue
+            .enqueue_for_team(
+                EntityType::Skill,
+                id,
+                SyncOperation::Upsert,
+                Some(&format!(r#"{{"id":"{id}","origin_project":"p"}}"#)),
+                team_id,
+            )
+            .unwrap();
+        let row_id = queue
+            .list_all(20)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.entity_id == id)
+            .unwrap()
+            .id;
+        for _ in 0..max_retries {
+            queue.mark_failed(row_id, error).unwrap();
+        }
+        if let Some(outcome) = outcome {
+            queue
+                .record_row_outcome(row_id, outcome, Some("test"))
+                .unwrap();
+        }
+    }
+
+    let enqueue_successful_push = |id: &str| {
+        queue
+            .enqueue_for_team(
+                EntityType::Skill,
+                id,
+                SyncOperation::Upsert,
+                Some(&format!(r#"{{"id":"{id}","origin_project":"p"}}"#)),
+                team_id,
+            )
+            .unwrap();
+    };
+    enqueue_successful_push("entry-cloud-contact-one");
+
+    let syncer = Arc::new(CloudSyncer::new(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        config,
+    ));
+    let syncer_for_push = syncer.clone();
+    let first = tokio::task::spawn_blocking(move || syncer_for_push.push_team(team_id))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+    assert_eq!(first.pushed_skills, 1);
+    let row = |id: &str| {
+        queue
+            .list_all(20)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.entity_id == id)
+            .unwrap()
+    };
+    let dns = row("entry-dns-exhausted");
+    assert_eq!(
+        dns.retry_count, 0,
+        "a successful Cloud push re-arms DNS failures"
+    );
+    assert!(dns.last_error.is_none());
+    for id in [
+        "entry-auth-exhausted",
+        "entry-rejected-exhausted",
+        "entry-stale-rejection-dns",
+    ] {
+        assert_eq!(row(id).retry_count, max_retries, "{id} stays parked");
+    }
+
+    for _ in 0..max_retries {
+        queue
+            .mark_failed(dns.id, "Network error: DNS resolution failed (temporary)")
+            .unwrap();
+    }
+    enqueue_successful_push("entry-cloud-contact-two");
+    let syncer_for_push = syncer.clone();
+    let second = tokio::task::spawn_blocking(move || syncer_for_push.push_team(team_id))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(second.errors.is_empty(), "{:?}", second.errors);
+    assert_eq!(second.pushed_skills, 1);
+    assert_eq!(row("entry-dns-exhausted").retry_count, max_retries);
+}
+
+#[tokio::test]
 async fn team_push_failure_includes_body_and_trace_headers() {
     use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation};
     use tempfile::tempdir;

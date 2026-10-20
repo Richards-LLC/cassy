@@ -154,6 +154,7 @@ impl SyncQueue {
         // team_id migration because that path can rebuild sync_queue from an
         // explicit legacy column list.
         self.migrate_row_outcomes(&conn)?;
+        self.migrate_auto_rearm_count(&conn)?;
 
         Ok(())
     }

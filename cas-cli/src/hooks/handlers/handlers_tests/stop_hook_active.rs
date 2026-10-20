@@ -107,3 +107,42 @@ fn an_absent_stop_hook_active_key_leaves_blocking_behaviour_unchanged() {
         "maintenance must not block when the key is absent"
     );
 }
+
+/// cas-7456 (GH #1302 F): a supervisor ended its turn with no reminder set and
+/// slept for 11 h. A factory supervisor's Stop with no pending reminder warns
+/// that it has no wake source (and never blocks); a pending reminder quiets it.
+#[test]
+fn a_supervisor_stop_with_no_pending_reminder_warns_of_no_wake_source_gh1302() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    env.set("CAS_AGENT_NAME", "brave-crow-50");
+    env.set("CAS_FACTORY_SESSION", "gh1302-session");
+    let dir = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(dir.path()).unwrap();
+    let stop = || handle_stop(&stop_payload(None), Some(&cas_root)).expect("handler ok");
+
+    let warned = stop();
+    assert_eq!(decision_of(&warned), None, "the warning never blocks the stop");
+    let text = serde_json::to_string(&warned).unwrap();
+    assert!(text.contains("No wake source"), "{text}");
+
+    crate::store::open_reminder_store(&cas_root)
+        .unwrap()
+        .create_with_scope(
+            "brave-crow-50",
+            None,
+            "watchdog: check the merge queue",
+            cas_store::ReminderTriggerType::Time,
+            Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
+            None,
+            None,
+            0,
+            Some("gh1302-session"),
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+    let quiet = serde_json::to_string(&stop()).unwrap();
+    assert!(!quiet.contains("No wake source"), "a pending reminder is a wake source: {quiet}");
+}

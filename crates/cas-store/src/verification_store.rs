@@ -1246,6 +1246,37 @@ pub fn resolve_verification_dispatch_with_conn(
     get_verification_dispatch_with_conn(conn, dispatch_id).map(Some)
 }
 
+/// cas-7456 (GH #1302 B): open dispatches (pending or claimed) whose deadline
+/// passed in `since..=now`, oldest deadline first, at most `limit`. Read-only:
+/// timing a dispatch out stays with the close and verification paths.
+pub fn expired_verification_dispatches(
+    cas_dir: &Path,
+    since: DateTime<Utc>,
+    now: DateTime<Utc>,
+    limit: usize,
+) -> Result<Vec<VerificationDispatch>> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
+    let ids = {
+        let mut statement = conn.prepare(
+            "SELECT id FROM verification_dispatches
+             WHERE state IN ('pending', 'claimed')
+                   AND deadline_at > ?1 AND deadline_at <= ?2
+             ORDER BY deadline_at ASC, id ASC
+             LIMIT ?3",
+        )?;
+        statement
+            .query_map(
+                params![since.to_rfc3339(), now.to_rfc3339(), limit as i64],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    ids.iter()
+        .map(|id| get_verification_dispatch_with_conn(&conn, id))
+        .collect()
+}
+
 /// Mark one exact due dispatch timed out. Other tasks are never touched.
 pub fn timeout_verification_dispatch(
     cas_dir: &Path,

@@ -1942,10 +1942,21 @@ pub fn generate_prompt_at(
                 // means un-persisted work + full in-flight context loss, not
                 // "safe". Point at the actual triage triad instead —
                 // `is-wedged` classifies before anyone kills anything.
+                // cas-73b89: a worker with nothing pending to wake it will
+                // not resume on its own; say so, so a message is the obvious fix.
+                let pending_wake = data.agents.iter().any(|agent| {
+                    agent.name == *worker
+                        && super::events::worker_has_pending_wake(data, agent)
+                });
+                let cause = if pending_wake {
+                    "an auto-nudge did not unstick it"
+                } else {
+                    "no reminder or message is pending to wake it, so it will not resume on \
+                     its own. If it is waiting, message it to continue"
+                };
                 let text = format!(
                     "Worker {worker} has been stalled on task {task_id} for about \
-                     {elapsed_mins}m — alive heartbeat, no activity, and an auto-nudge \
-                     did not unstick it.\n\n\
+                     {elapsed_mins}m — alive heartbeat, no activity, and {cause}.\n\n\
                      Triage before acting:\n\
                      1. `cas factory is-wedged {worker}` — classifies Alive / Wedged / \
                      Starved / Dead from PID + transcript evidence.\n\

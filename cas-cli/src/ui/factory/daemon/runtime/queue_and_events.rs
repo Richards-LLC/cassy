@@ -12071,6 +12071,27 @@ impl ReminderTriggerContext {
         }
     }
 
+    /// The persisted shape `fire_reminder` writes to `fired_event`.
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "event_type": self.event_type,
+            "data": self.data,
+            "description": self.description,
+        })
+    }
+
+    /// The event a suspended reminder caught during its worker's hold.
+    fn caught_during_hold(event: &serde_json::Value) -> Option<Self> {
+        Some(Self {
+            event_type: event.get("event_type")?.as_str()?.to_string(),
+            data: event.get("data").cloned().unwrap_or(serde_json::Value::Null),
+            description: format!(
+                "{} (while you were held)",
+                event.get("description")?.as_str()?
+            ),
+        })
+    }
+
     fn ci(wake: &super::ci_watch::CiWake) -> Self {
         Self {
             event_type: super::ci_watch::EXTERNAL_CI_COMPLETED_EVENT.to_string(),
@@ -12194,6 +12215,9 @@ fn run_reminder_scan(scan: ReminderScanInput) {
         ) {
             continue;
         }
+        // cas-73b89: a reminder whose event arrived during a worker hold is
+        // re-armed as due now and still carries that event.
+        let caught = reminder.fired_event.as_ref().and_then(ReminderTriggerContext::caught_during_hold);
         fire_reminder(
             reminder,
             &reminder_store,
@@ -12202,7 +12226,7 @@ fn run_reminder_scan(scan: ReminderScanInput) {
             &session_name,
             &supervisor_name,
             &agent_id_to_name,
-            None,
+            caught.as_ref(),
             &cas_dir,
         );
     }
@@ -12238,6 +12262,22 @@ fn run_reminder_scan(scan: ReminderScanInput) {
     // Check event-based reminders against detected events
     for event in &events {
         let event_type = event.event_type();
+        // cas-73b89: a held worker's reminder does not fire, but keeps the
+        // first matching event so release can deliver it at once.
+        for reminder in reminder_store
+            .get_suspended_event_reminders(event_type)
+            .unwrap_or_default()
+        {
+            if reminder_matches_factory_session(
+                reminder.session_id.as_deref(),
+                reminder.cross_session,
+                &session_name,
+            ) && matches_event_filter(&reminder, event)
+            {
+                let _ = reminder_store
+                    .catch_suspended_event(reminder.id, &ReminderTriggerContext::director(event).to_json());
+            }
+        }
         let candidates = match reminder_store.get_event_reminders(event_type) {
             Ok(r) => r,
             Err(_) => continue,
@@ -12295,13 +12335,7 @@ pub(super) fn fire_reminder(
     };
 
     // Build event JSON for persistence
-    let event_json = triggering_event.map(|event| {
-        serde_json::json!({
-            "event_type": event.event_type,
-            "data": event.data,
-            "description": event.description,
-        })
-    });
+    let event_json = triggering_event.map(ReminderTriggerContext::to_json);
 
     // Mark as fired first to prevent double-fire on next tick
     if let Err(e) = reminder_store.mark_fired(reminder.id, event_json.as_ref()) {
@@ -13152,6 +13186,55 @@ mod tests {
         let expected = "CI completed for fba7a3365eb0: CI failure https://github.test/runs/1";
         assert_eq!(event["description"], expected);
         assert!(super::ci_completed_candidates(temp.path(), "factory-a").is_empty());
+    }
+
+    /// cas-73b89: hold, the awaited event during the hold, release, and the
+    /// worker is woken with that event. Cancelling on hold left kind-hound-79
+    /// with no wake for about an hour.
+    #[test]
+    fn held_worker_reminder_wakes_worker_with_event_caught_during_hold() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let reminders: Arc<dyn cas_store::ReminderStore> =
+            Arc::new(cas_store::SqliteReminderStore::open(temp.path()).unwrap());
+        reminders.init().unwrap();
+        let prompts: Arc<dyn cas_store::PromptQueueStore> =
+            Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
+        prompts.init().unwrap();
+        let filter = serde_json::json!({"task_id": "cas-927a"});
+        let id = reminders
+            .create(
+                "worker-id", None, "red run finished", cas_store::ReminderTriggerType::Event,
+                None, Some("task_completed"), Some(&filter), 3600, Some("factory-a"),
+            )
+            .unwrap();
+        let scan = |events| {
+            super::run_reminder_scan(super::ReminderScanInput {
+                cas_dir: temp.path().to_path_buf(),
+                session_name: "factory-a".to_string(),
+                supervisor_name: "supervisor".to_string(),
+                agent_id_to_name: HashMap::from([("worker-id".to_string(), "kind-hound".to_string())]),
+                events,
+                external_ready: Vec::new(),
+                ci_wakes: Vec::new(),
+            })
+        };
+
+        assert_eq!(reminders.suspend_pending_for_target("worker-id").unwrap(), 1);
+        scan(vec![crate::ui::factory::director::DirectorEvent::TaskCompleted {
+            task_id: "cas-927a".to_string(),
+            task_title: "red run".to_string(),
+            worker: "kind-hound".to_string(),
+        }]);
+        assert_eq!(prompts.peek_all(10).unwrap().len(), 0);
+
+        assert_eq!(reminders.resume_suspended_for_target("worker-id").unwrap(), 1);
+        scan(Vec::new());
+        let woken = prompts.peek_all(10).unwrap();
+        assert_eq!(woken.len(), 1);
+        assert_eq!(woken[0].target, "kind-hound");
+        assert_eq!(cas_store::parse_reminder_delivery_id(&woken[0].prompt), Some(id));
+        let fired = reminders.list_recently_fired(60).unwrap();
+        assert_eq!(fired[0].fired_event.as_ref().unwrap()["data"]["task_id"], "cas-927a");
     }
 
     /// GH #1015: a foreign factory must not consume a time reminder while

@@ -112,7 +112,10 @@ struct LaunchReadiness {
 }
 
 impl ServiceReport {
-    fn after_start(self) -> Self {
+    fn after_start(mut self) -> Self {
+        if !self.hub_running {
+            self.hub_state = "starting";
+        }
         self
     }
 }
@@ -848,11 +851,13 @@ fn refresh_installed_service_at(
     platform: ServicePlatform,
     path: &Path,
     tailscale_serve: bool,
-    _installed_binary: &Path,
+    installed_binary: &Path,
 ) -> Result<bool> {
     if !path.is_file() {
         return Ok(false);
     }
+    let definition = fs::read_to_string(path)?;
+    require_installed_service_binary(platform, &definition, installed_binary)?;
     match platform {
         ServicePlatform::Systemd => {
             let port = service_https_port(&fs::read_to_string(path)?);
@@ -875,6 +880,46 @@ fn refresh_installed_service_at(
         }
         ServicePlatform::ManualLinux | ServicePlatform::Unsupported => Ok(false),
     }
+}
+
+/// A service restart reuses the manager's executable, not the updating CLI.
+/// Refuse before rewriting or reloading anything when those executables differ.
+fn require_installed_service_binary(
+    platform: ServicePlatform,
+    definition: &str,
+    installed_binary: &Path,
+) -> Result<()> {
+    let configured = match platform {
+        ServicePlatform::Launchd => {
+            let argument = definition
+                .split_once("<key>ProgramArguments</key>")
+                .and_then(|(_, tail)| tail.split_once("<array>"))
+                .and_then(|(_, tail)| tail.trim_start().strip_prefix("<string>"))
+                .and_then(|tail| tail.split_once("</string>"))
+                .map(|(binary, _)| binary)
+                .context("launchd plist has no ProgramArguments[0]")?;
+            PathBuf::from(quick_xml::escape::unescape(argument)?.as_ref())
+        }
+        ServicePlatform::Systemd => {
+            let command = definition
+                .lines()
+                .find_map(|line| line.trim_start().strip_prefix("ExecStart="))
+                .context("systemd unit has no ExecStart")?;
+            let args = shell_words::split(command).context("cannot parse systemd ExecStart")?;
+            PathBuf::from(args.first().context("systemd ExecStart has no binary")?)
+        }
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => return Ok(()),
+    };
+    let resolved_configured = fs::canonicalize(&configured).unwrap_or_else(|_| configured.clone());
+    let resolved_installed =
+        fs::canonicalize(installed_binary).unwrap_or_else(|_| installed_binary.to_owned());
+    ensure!(
+        configured.is_absolute() && resolved_configured == resolved_installed,
+        "hub service binary drift; refusing to restart\n  configured: {}\n  installed: {}\n  Fix: cas hub service install",
+        configured.display(),
+        installed_binary.display()
+    );
+    Ok(())
 }
 
 pub(super) fn installed_https_port() -> Result<Option<u16>> {
@@ -1200,7 +1245,9 @@ fn report(
     let hub_running = paths
         .read_process_record()
         .ok()
-        .is_some_and(|record| super::hub::record_is_live(&record));
+        .is_some_and(|record| {
+            super::hub::hub_display_state(&paths, &record) == super::hub::HubDisplayState::Running
+        });
     let (platform_name, supervision) = match platform {
         ServicePlatform::Launchd => ("macos", "launchd"),
         ServicePlatform::Systemd => ("linux", "systemd-user"),

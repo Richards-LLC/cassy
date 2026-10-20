@@ -10,6 +10,7 @@ scripts/regenerate-generated-artifacts.sh reruns the real generator on the
 merged history. The fixture repository carries this checkout's scripts and
 .gitattributes, so the test exercises exactly what ships.
 """
+import json
 import os
 from pathlib import Path
 import shutil
@@ -81,11 +82,11 @@ class ReferenceHistoryMergeTests(unittest.TestCase):
         after = self.git("rev-parse", "HEAD").stdout.strip()
         self.run_script("regenerate-generated-artifacts.sh", before, after)
         self.assertEqual(self.git("status", "--porcelain").stdout, "", "the regenerated ledger is committed")
-        committed = (self.repo / LEDGER).read_text()
         self.run_script("gen-builtin-reference-history.sh")
-        self.assertEqual((self.repo / LEDGER).read_text(), committed, "the ledger equals a fresh generator run")
-        for reference in ("first", "second"):
-            self.assertIn(f"skills/demo/references/{reference}.md", committed)
+        fresh = self.git("diff", "--exit-code", "--", LEDGER, check=False)
+        self.assertEqual(fresh.returncode, 0, "the ledger equals a fresh generator run:\n" + fresh.stdout)
+        ledger = json.loads((self.repo / LEDGER).read_text())["files"]
+        self.assertTrue({"skills/demo/references/first.md", "skills/demo/references/second.md"} <= set(ledger))
 
 
 if __name__ == "__main__":

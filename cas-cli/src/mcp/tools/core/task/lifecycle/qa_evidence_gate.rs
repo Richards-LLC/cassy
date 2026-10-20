@@ -638,6 +638,7 @@ mod tests {
         commit_file(&repo, "README.md", "base\n");
         git(&repo, &["switch", "-q", "-c", "factory/worker"]);
         commit_file(&repo, "src/service.ts", "backend delivery\n");
+        let own_commit = git(&repo, &["rev-parse", "HEAD"]);
         git(&repo, &["switch", "-q", "main"]);
         commit_file(&repo, "hub-web/dist/epic.vue", "incoming epic UI\n");
         git(&repo, &["switch", "-q", "factory/worker"]);
@@ -649,11 +650,17 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(".cas")).unwrap();
         let mut task = Task::new("cas-8105".into(), "Backend delivery after sync".into());
         task.assignee = Some("worker".into());
-        qa_evidence_close_gate(&temp.path().join(".cas"), &task, &repo, "main", Some(&worker_tip))
-            .expect("a worker sync merge must not adopt the epic's UI as its own delivery");
-        let (from, to) = delivery_range(&repo, &worker_tip, "main").unwrap();
-        assert_eq!(to, integration);
-        assert_eq!(range_paths(&repo, &from, &to), Some(vec!["src/service.ts".into()]));
+        // cas-cca7: measured from the pre-sync anchor (the task's last own
+        // commit), the first ancestry-path merge is the lane's own target
+        // sync, whose first-parent diff is the incoming epic UI. Both heads
+        // must resolve to the integration merge and the task-only paths.
+        for head in [&worker_tip, &own_commit] {
+            qa_evidence_close_gate(&temp.path().join(".cas"), &task, &repo, "main", Some(head))
+                .expect("a worker sync merge must not adopt the epic's UI as its own delivery");
+            let (from, to) = delivery_range(&repo, head, "main").unwrap();
+            assert_eq!(to, integration, "head {head}");
+            assert_eq!(range_paths(&repo, &from, &to), Some(vec!["src/service.ts".into()]));
+        }
     }
 
     /// cas-bde8 (GH #978): task A's UI commits on a reused factory branch were

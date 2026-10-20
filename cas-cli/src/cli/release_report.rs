@@ -3465,7 +3465,8 @@ mod tests {
         let page_one = &report[..report.find("## What you can do now").unwrap()];
         assert!(!page_one.contains("| 0 |"), "{page_one}");
         assert!(!page_one.contains("unavailable |"), "{page_one}");
-        assert!(report.contains("No GitHub issues were closed with this release."));
+        assert!(report.contains("No GitHub issue closures are counted in this report"));
+        assert!(!report.contains("No GitHub issues were closed with this release."));
         assert!(report.contains("Not measured for this release: green to published"));
     }
 

@@ -2501,12 +2501,15 @@ fn factory_shell_tokens_with_literals(command: &str) -> (Vec<ShellToken>, Vec<bo
             escaped = false;
             continue;
         }
-        // Preserve the nested heredoc's quotes before the outer double-quote
-        // tokenizer can consume them. Only the bounded literal cat form is
-        // recognized; the effect collector still judges how its output is used.
+        // A substitution has its own quoting context: its double quotes must
+        // not close the outer word or turn quoted parentheses into scopes.
+        // Preserve its source for the recursive effect collector, which still
+        // judges both the commands it runs and how its output is used.
         if quote == Some('"') && ch == '$' && chars.peek() == Some(&'(') {
             let tail = format!("${}", chars.clone().collect::<String>());
-            if let Some(end) = shell_effects::literal_cat_heredoc_end(&tail) {
+            if let Some(end) = shell_effects::literal_cat_heredoc_end(&tail)
+                .or_else(|| shell_effects::substitution_end(tail.as_bytes(), 2, 0))
+            {
                 let substitution = &tail[..=end];
                 word.push_str(substitution);
                 for _ in 1..substitution.chars().count() {
@@ -8155,6 +8158,12 @@ mod workspace_contract_tests {
             let decision = value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("");
             if (decision == "deny") != denied {
                 mismatches.push(format!("{command}: expected denied={denied}, got {value}"));
+            }
+            if command == r#"printf '%s\n' "$(cat"#
+                && !value["hookSpecificOutput"]["permissionDecisionReason"].as_str()
+                    .is_some_and(|reason| reason.contains("cannot resolve shell filesystem effects"))
+            {
+                mismatches.push(format!("malformed substitution needs a resolution reason: {value}"));
             }
             if command.starts_with("gh issue comment") && denied
                 && value["hookSpecificOutput"]["permissionDecisionReason"].as_str()

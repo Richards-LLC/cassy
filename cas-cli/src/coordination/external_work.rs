@@ -1437,8 +1437,14 @@ fn valid_uuid(value: &str) -> Result<String, ExternalWorkError> {
 }
 
 fn validate_uuid_field(value: &str, field: &str) -> Result<(), ExternalWorkError> {
-    let parsed = Uuid::parse_str(value)
-        .map_err(|_| error("invalid_request", format!("{field} must be a UUID")))?;
+    let parsed = Uuid::parse_str(value).map_err(|_| {
+        let message = if field == "occurrence_id" {
+            "occurrence_id is optional; use a caller-generated UUID, not a Slack message ts; omit it or pass a UUID".to_string()
+        } else {
+            format!("{field} must be a UUID")
+        };
+        error("invalid_request", message)
+    })?;
     if value != parsed.to_string() {
         return Err(error(
             "invalid_request",
@@ -2193,6 +2199,25 @@ mod tests {
             occurrence_id: occurrence_id.map(str::to_string),
             request_id: Some(request_id.into()),
         }
+    }
+
+    #[test]
+    fn reply_intent_explains_occurrence_id_slack_timestamp_cas_be34() {
+        let journal = journal();
+        let service = service(
+            Arc::new(FakeCloud::new(journal.clone())),
+            Arc::new(FakeViolet::ok()),
+            journal,
+        );
+
+        let error = service
+            .execute(reply_intent(REQUEST_ID, Some("1760616000.123456")))
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid_request: occurrence_id is optional; use a caller-generated UUID, not a Slack message ts; omit it or pass a UUID"
+        );
     }
 
     /// cas-f869 (GH #1272): reply_intent sends Cloud's exact wire request and

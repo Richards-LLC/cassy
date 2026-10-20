@@ -1032,8 +1032,10 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_u32")]
     pub offer_ttl_secs: Option<u32>,
 
-    /// cas-f869: reply_intent's optional Cloud occurrence id.
-    #[schemars(description = "reply_intent: optional occurrence id")]
+    /// cas-f869: reply_intent's optional caller-generated Cloud occurrence id.
+    #[schemars(
+        description = "reply_intent only: optional; when supplied, use a caller-generated UUID, not a Slack message ts; omit it or pass a UUID"
+    )]
     #[serde(default)]
     pub occurrence_id: Option<String>,
 

@@ -936,15 +936,22 @@ fn push_codex_home_env(env: &mut Vec<(String, String)>, role: &str, config_dir: 
         return;
     };
 
-    let expanded = config_dir.strip_prefix('~').map_or_else(
+    env.push(("CODEX_HOME".to_string(), expand_codex_home(config_dir)));
+}
+
+/// Resolve a spawn's Codex account selector (`~/...` or absolute) to the
+/// directory the worker's `CODEX_HOME` names. Launch preparation must use this
+/// same spelling: an unexpanded `~/...` is relative to the daemon's cwd
+/// (cas-10af).
+pub fn expand_codex_home(config_dir: &str) -> String {
+    config_dir.strip_prefix('~').map_or_else(
         || config_dir.to_string(),
         |suffix| {
             dirs::home_dir()
                 .map(|home| format!("{}{}", home.display(), suffix))
                 .unwrap_or_else(|| config_dir.to_string())
         },
-    );
-    env.push(("CODEX_HOME".to_string(), expanded));
+    )
 }
 
 /// Pin the worker process and its Codex MCP children to the host home.

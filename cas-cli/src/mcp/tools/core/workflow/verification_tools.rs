@@ -443,6 +443,17 @@ impl CasCore {
             dispatch_id
         } else if let Some(dispatch_id) = req.dispatch_id.clone() {
             dispatch_id
+        } else if supervisor_direct {
+            // The active-task unique index guarantees one live boundary. Infer
+            // only for this authenticated supervisor; child handoffs above stay
+            // sealed, and expired/terminal cycles require explicit recovery.
+            cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .filter(|dispatch| matches!(dispatch.state,
+                    cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed)
+                    && dispatch.deadline_at > chrono::Utc::now())
+                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS,
+                    "No active verification dispatch can be inferred. Retry task close to prepare the delivery; expired dispatch recovery requires its explicit dispatch_id."))?.id
         } else {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,

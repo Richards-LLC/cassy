@@ -26,6 +26,8 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
     for scenario in ["merged", "positive", "missing", "shutdown", "merged_fallback"] {
         let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
         let cas_dir = fixture.app.cas_dir().to_path_buf();
+        // A dropped incident must count as zero rows, not an uninitialized schema.
+        let _queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         fixture
             .app
             .set_supervisor_cli_for_test(cas_mux::SupervisorCli::Claude);
@@ -189,7 +191,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             }
         }
     }
-    assert!(shutdown_delivered, "shutdown must consume the completed native failure and deliver its PTY fallback plus incident");
+    assert!(shutdown_delivered, "shutdown must consume the completed native failure and deliver its PTY fallback plus incident (stale fallback suppressed: {stale_fallback_suppressed})");
     assert!(stale_fallback_suppressed, "a merge after the native error must suppress the PTY fallback");
 }
 

@@ -12269,19 +12269,24 @@ fn run_reminder_scan(scan: ReminderScanInput) {
     for event in &events {
         let event_type = event.event_type();
         // cas-73b89: a held worker's reminder does not fire, but keeps the
-        // first matching event so release can deliver it at once.
-        for reminder in reminder_store
+        // first matching event so release can deliver it at once. A store
+        // error here would lose that wake, so it is logged (cas-c5ab).
+        let suspended = reminder_store
             .get_suspended_event_reminders(event_type)
-            .unwrap_or_default()
-        {
+            .unwrap_or_else(|error| {
+                tracing::warn!(event_type, %error, "failed to read held workers' reminders; this event will not reach them");
+                Vec::new()
+            });
+        for reminder in suspended {
             if reminder_matches_factory_session(
                 reminder.session_id.as_deref(),
                 reminder.cross_session,
                 &session_name,
             ) && matches_event_filter(&reminder, event)
+                && let Err(error) = reminder_store
+                    .catch_suspended_event(reminder.id, &ReminderTriggerContext::director(event).to_json())
             {
-                let _ = reminder_store
-                    .catch_suspended_event(reminder.id, &ReminderTriggerContext::director(event).to_json());
+                tracing::warn!(reminder_id = reminder.id, event_type, %error, "failed to record an event for a held worker's reminder; release will not deliver it");
             }
         }
         let candidates = match reminder_store.get_event_reminders(event_type) {

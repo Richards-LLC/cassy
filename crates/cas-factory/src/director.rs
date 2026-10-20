@@ -1003,6 +1003,8 @@ fn load_reminders(store: &SqliteReminderStore) -> Vec<Reminder> {
         return Vec::new();
     }
     let mut all = store.list_all_pending().unwrap_or_default();
+    // cas-c5ab: a held worker's suspended reminders stay visible as held.
+    all.extend(store.list_suspended(None).unwrap_or_default());
     all.extend(store.list_recently_fired(60).unwrap_or_default());
     all
 }

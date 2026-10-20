@@ -158,8 +158,15 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
         .expect("public hold action");
     let hold_result = result_text(&result);
     assert!(hold_result.contains(worker));
-    assert!(hold_result.contains("Cancelled 1 pending reminder"), "{hold_result}");
     assert!(reminders.list_pending_for_target(&worker_id).unwrap().is_empty());
+    // cas-c5ab: the suspended reminder is still listed, labelled held.
+    let listed = env
+        .service
+        .coordination(Parameters(serde_json::from_value(serde_json::json!({"action": "remind_list"})).unwrap()))
+        .await
+        .expect("remind_list");
+    let listed = result_text(&listed);
+    assert!(listed.contains("watch worker after hold") && listed.contains("[held"), "{listed}");
     let held: cas::ui::factory::SessionMetadata =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(held.held_workers, vec![worker.to_string()]);
@@ -179,10 +186,35 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
     let released: cas::ui::factory::SessionMetadata =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert!(released.held_workers.is_empty());
-    assert!(
-        reminders.list_pending_for_target(&worker_id).unwrap().is_empty(),
-        "release must not revive cancelled one-shot watchdog reminders"
-    );
+    // cas-73b89: release re-arms the suspended reminder.
+    assert_eq!(reminders.list_pending_for_target(&worker_id).unwrap().len(), 1);
+}
+
+/// cas-c5ab: a hold whose state cannot be persisted changes no reminder.
+#[tokio::test]
+async fn failed_hold_persist_leaves_reminders_pending_cas_c5ab() {
+    let home = TempDir::new().unwrap();
+    let session = "session-worker-hold-unpersisted";
+    let worker = "lively-crow";
+    let _guard = EnvGuard::set(&[
+        ("HOME", home.path().to_str().unwrap()),
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_FACTORY_SESSION", session),
+    ]);
+    let env = TestEnv::new();
+    let worker_id = env.register_worker(worker, session);
+    let reminders = open_reminder_store(&env.cas_root).unwrap();
+    let after = chrono::Utc::now() + chrono::Duration::hours(1);
+    reminders
+        .create("hold-test-supervisor", Some(&worker_id), "watch", ReminderTriggerType::Time, Some(after), None, None, 3600, Some(session))
+        .unwrap();
+
+    // No session metadata file exists, so the hold cannot be persisted.
+    env.service
+        .coordination(Parameters(request("hold_worker", worker)))
+        .await
+        .expect_err("an unpersisted hold fails");
+    assert_eq!(reminders.list_pending_for_target(&worker_id).unwrap().len(), 1);
 }
 
 #[tokio::test]

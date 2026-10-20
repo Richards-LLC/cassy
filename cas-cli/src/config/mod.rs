@@ -173,6 +173,17 @@ pub struct Config {
     /// via `cas cloud project set <canonical-id>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<ProjectConfig>,
+
+    /// Machine-wide control for the managed Viktor upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viktor: Option<ViktorConfig>,
+}
+
+/// Host `.cas` directory used for settings that apply across projects.
+pub fn host_config_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".cas")
 }
 
 impl Config {
@@ -265,12 +276,18 @@ impl Config {
         merge_option!(project);
         merge_option!(release);
         merge_option!(slack);
+        merge_option!(viktor);
         changed
     }
 
     /// Get daemon maintenance config with defaults.
     pub fn daemon(&self) -> DaemonSettings {
         self.daemon.clone().unwrap_or_default()
+    }
+
+    /// Managed Viktor is enabled by default for existing installations.
+    pub fn viktor_enabled(&self) -> bool {
+        self.viktor.as_ref().is_none_or(ViktorConfig::enabled)
     }
 
     /// Whether a probed Claude account e-mail may run the one-shot

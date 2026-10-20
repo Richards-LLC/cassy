@@ -140,6 +140,11 @@ pub(crate) fn surface_inbound_at_session_start(
 }
 
 pub(crate) fn session_start_warning(cas_root: &Path) -> Option<String> {
+    if crate::config::Config::load(&crate::config::host_config_dir())
+        .is_ok_and(|config| !config.viktor_enabled())
+    {
+        return None;
+    }
     let health = crate::mcp::read_proxy_health_cache(cas_root).ok()?;
     let snapshot: cmcp_core::ProxyHealthSnapshot = serde_json::from_slice(&health).ok()?;
     let absent = snapshot

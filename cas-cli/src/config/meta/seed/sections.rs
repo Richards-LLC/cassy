@@ -97,4 +97,7 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
         "skills",
         "Optional stack-specific builtin skills for this project",
     );
+    registry
+        .section_descriptions
+        .insert("viktor", "Machine-wide managed Viktor upstream");
 }

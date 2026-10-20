@@ -7078,10 +7078,10 @@ impl CasCore {
         inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         let caller_task = format!("{}task", self.guidance_prefix());
-        if let Some(message) = req
-            .reason
-            .as_deref()
-            .and_then(crate::mcp::tools::core::task::caller_note_marker_rejection)
+        if let Some(message) = [req.reason.as_deref(), req.stranded_branch_override.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(crate::mcp::tools::core::task::caller_note_marker_rejection)
         {
             return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
         }

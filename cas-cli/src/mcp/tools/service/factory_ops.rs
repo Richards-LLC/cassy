@@ -2342,6 +2342,11 @@ impl CasService {
             .filter(|brief| !brief.is_empty())
             .map(str::to_string);
         if let Some(brief) = spawn_brief.as_deref() {
+            if let Some(message) =
+                crate::mcp::tools::core::task::caller_note_marker_rejection(brief)
+            {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+            }
             if req.task_id.is_none() {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,

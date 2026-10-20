@@ -475,7 +475,7 @@ pub(crate) fn violet_proxy_outcome(
     }
 }
 
-/// Decode the MCP envelope around Violet's deployed `violet_read` response and/// Decode the MCP envelope around Violet's deployed `violet_read` response and
+/// Decode the MCP envelope around Violet's deployed `violet_read` response and
 /// normalize the identity-only v1 contract for the external-work service.
 /// Violet intentionally returns no message body or identity-proof field.
 pub(crate) fn decode_violet_result(value: Value) -> Result<Value, RemoteError> {
@@ -1886,10 +1886,11 @@ mod tests {
         }
     }
 
-    /// cas-85c1 (GH #1292): a daemon reconcile of a journaled claim, whose
-    /// Violet call goes through the shared proxy mapping, retries a dropped
-    /// upstream within the window and succeeds; a drop that persists fails
-    /// clearly and posts nothing to Cloud.
+    /// cas-85c1 (GH #1292): a daemon reconcile of a journaled claim retries a
+    /// dropped upstream within the window and succeeds; a drop that persists
+    /// fails clearly and posts nothing to Cloud. The resolver is a test double
+    /// that feeds proxied rmcp errors through `violet_proxy_outcome`, the
+    /// mapping every production resolver uses (see the guard test below).
     #[cfg(feature = "mcp-proxy")]
     #[test]
     fn daemon_reconcile_retries_a_proxied_violet_drop_cas_85c1() {
@@ -1916,6 +1917,28 @@ mod tests {
                 assert!(violet.calls.load(Ordering::SeqCst) > 1);
                 assert_eq!(cloud.posts.load(Ordering::SeqCst), 0);
             }
+        }
+    }
+
+    /// cas-85c1: every production Violet resolver maps proxied outcomes
+    /// through `violet_proxy_outcome`, so the CLI, MCP and daemon paths all
+    /// retry a reconnecting upstream. A new copy of the old mapping fails this.
+    #[test]
+    fn every_violet_resolver_uses_the_shared_proxy_mapping_cas_85c1() {
+        // pin: the resolvers wrap a live ProxyEngine that a unit test cannot
+        // drive into a reconnecting drop, so the shared-mapping contract is
+        // checked on their source; the behaviour is proven by the daemon test.
+        for (path, source) in [
+            ("cli/coordination.rs", include_str!("../cli/coordination.rs")), // pin: CLI resolver
+            ("mcp/tools/service/coordination_external_work.rs", include_str!("../mcp/tools/service/coordination_external_work.rs")), // pin: MCP resolver
+            ("ui/factory/daemon/runtime/external_work_reconcile_jobs.rs", include_str!("../ui/factory/daemon/runtime/external_work_reconcile_jobs.rs")), // pin: daemon resolver
+        ] {
+            let production = source.split("#[cfg(test)]").next().unwrap();
+            assert!(production.contains("violet_proxy_outcome(result)"), "{path} must use the shared mapping");
+            assert!(
+                !production.contains("Ok(Ok(value)) => decode_violet_result(value)"),
+                "{path} keeps its own copy of the proxied-outcome mapping"
+            );
         }
     }
 

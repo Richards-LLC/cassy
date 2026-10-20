@@ -4161,22 +4161,9 @@ impl FactoryDaemon {
         // dropped at shutdown. Finished re-checks are delivered as decided;
         // ones that never reported are re-checked here, as the inject loop
         // did before cas-223f.
-        let (rechecked, unchecked) = director_refresh
-            .drain_deliverability(&mut self.queue_jobs, Duration::from_secs(2))
-            .await;
-        for batch in rechecked {
-            self.inject_rechecked_batch(batch, store_worker).await;
-        }
-        for pending in unchecked {
-            for prompt in pending.prompts {
-                if !self.app.prompt_is_still_deliverable(&prompt) {
-                    log_dropped_stale_prompt(&prompt);
-                    continue;
-                }
-                self.inject_director_prompt(prompt, &pending.events, pending.refresh_started, store_worker, None)
-                    .await;
-            }
-        }
+        self.drain_director_deliveries_for_shutdown(
+            &mut director_refresh, store_worker, Duration::from_secs(10),
+        ).await;
         drop(director_refresh);
         self.finish_shutdown_writes(store_worker, Duration::from_secs(5));
 
@@ -4698,6 +4685,46 @@ impl FactoryDaemon {
             }
             self.inject_director_prompt(prompt, &events, refresh_started, store_worker, Some(assignment))
                 .await;
+        }
+    }
+
+    /// Keep the result owner alive through native completions and fallback
+    /// rechecks before closing the external lane and draining store writes.
+    pub(super) async fn drain_director_deliveries_for_shutdown(
+        &mut self,
+        refresh: &mut super::director_refresh::DirectorRefresh,
+        store_worker: &super::store_worker::StoreWorker,
+        timeout: Duration,
+    ) {
+        let (rechecked, unchecked) = refresh
+            .drain_deliverability(&mut self.queue_jobs, timeout.min(Duration::from_secs(2)))
+            .await;
+        for batch in rechecked {
+            self.inject_rechecked_batch(batch, store_worker).await;
+        }
+        for pending in unchecked {
+            for prompt in pending.prompts {
+                if !self.app.prompt_is_still_deliverable(&prompt) {
+                    log_dropped_stale_prompt(&prompt);
+                    continue;
+                }
+                self.inject_director_prompt(prompt, &pending.events, pending.refresh_started, store_worker, None)
+                    .await;
+            }
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            for completed in refresh.take_merge_alert_inbox(&mut self.queue_jobs) {
+                self.finish_merge_alert_inbox(completed).await;
+            }
+            if !self.queue_jobs.external_kind_pending(super::factory_jobs::MERGE_ALERT_INBOX) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!("merge alert jobs still pending at shutdown deadline");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 

@@ -116,12 +116,20 @@ struct NativeInboxWrite {
     missing: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MergeAlertPhase {
+    Native,
+    PtyFallback,
+}
+
 /// Finish delivery (including PTY fallback) through the ordinary dispatcher.
 pub(crate) struct CompletedMergeAlert {
     prompt: crate::ui::factory::director::Prompt,
     native: NativeInboxWrite,
-    inject_started: Instant,
+    inject_ms: f64,
+    refresh_to_deliver_ms: f64,
     refresh_started: Instant,
+    phase: MergeAlertPhase,
 }
 
 fn teams_path_missing(error: &anyhow::Error) -> bool {
@@ -1118,14 +1126,14 @@ impl FactoryDaemon {
             key: format!("MergeAlertInbox:{task_id}"),
             lane: super::jobs::Lane::External,
             criticality: super::jobs::Criticality::Critical,
-            generation: 0,
+            generation: self.queue_jobs.generation(),
             budget: Duration::from_secs(10),
         };
         let prompt = prompt.clone();
         let submitted = self.queue_jobs.submit_external(spec, move || {
             let completed = if request.read(None, std::slice::from_ref(&prompt)) == [true] {
-                let inject_started = Instant::now();
                 let missing = teams.team_tree_missing();
+                let inject_started = Instant::now();
                 let result = teams.write_to_inbox_for_merge_alert(
                     "supervisor",
                     super::teams::DIRECTOR_AGENT_NAME,
@@ -1136,7 +1144,9 @@ impl FactoryDaemon {
                 );
                 Some(CompletedMergeAlert {
                     prompt, native: NativeInboxWrite { result, missing },
-                    inject_started, refresh_started,
+                    inject_ms: inject_started.elapsed().as_secs_f64() * 1000.0,
+                    refresh_to_deliver_ms: refresh_started.elapsed().as_secs_f64() * 1000.0,
+                    refresh_started, phase: MergeAlertPhase::Native,
                 })
             } else {
                 tracing::info!(target: "cas::coordination", stage = "suppress_stale_merge_alert",
@@ -1154,15 +1164,59 @@ impl FactoryDaemon {
         true
     }
 
-    pub(crate) async fn finish_merge_alert_inbox(&self, completed: CompletedMergeAlert) {
-        let CompletedMergeAlert { prompt, native, inject_started, refresh_started } = completed;
+    pub(crate) async fn finish_merge_alert_inbox(&mut self, mut completed: CompletedMergeAlert) {
+        if completed.phase == MergeAlertPhase::Native
+            && completed.native.result.as_ref().is_err_and(teams_path_missing)
+        {
+            // Report the outage even if the merge lands before fallback is needed.
+            if let Some(teams) = self.teams.as_ref() {
+                self.alert_missing_team_tree(teams);
+            }
+            let request = self.app.deliverability_request();
+            let task = completed.prompt.retract_task.as_deref().expect("merge alert task");
+            let spec = super::jobs::JobSpec {
+                kind: super::factory_jobs::MERGE_ALERT_INBOX,
+                key: format!("MergeAlertInbox:{task}:fallback"),
+                lane: super::jobs::Lane::External,
+                criticality: super::jobs::Criticality::Critical,
+                generation: self.queue_jobs.generation(),
+                budget: Duration::from_secs(10),
+            };
+            let submitted = self.queue_jobs.submit_external(spec, move || {
+                let ready = if request.read(None, std::slice::from_ref(&completed.prompt)) == [true] {
+                    completed.phase = MergeAlertPhase::PtyFallback;
+                    Some(completed)
+                } else {
+                    tracing::info!(target: "cas::coordination",
+                        stage = "suppress_stale_merge_alert_fallback", target_agent = %completed.prompt.target,
+                        "merge landed before the PTY fallback containment check");
+                    None
+                };
+                Box::new(super::factory_jobs::FactoryJobOutput::MergeAlertInbox(ready))
+            });
+            if matches!(submitted, super::jobs::Submitted::Closed
+                | super::jobs::Submitted::LaneMismatch { .. }
+                | super::jobs::Submitted::DroppedRefresh)
+            {
+                tracing::warn!(?submitted, "merge alert fallback check refused; withholding cached alert");
+            }
+            return;
+        }
+        let CompletedMergeAlert {
+            prompt, native, inject_ms, refresh_to_deliver_ms, refresh_started, phase,
+        } = completed;
+        let fallback_started = Instant::now();
         let result = self.deliver_to_worker_via_channel(
             &prompt.target, super::teams::DIRECTOR_AGENT_NAME, &prompt.text,
             None, Some(super::teams::DIRECTOR_AGENT_COLOR),
             prompt.retract_worker.as_deref(), prompt.retract_task.as_deref(),
             prompt.retract_epic.as_deref(), None, Some(native),
         ).await.map(|(outcome, _)| outcome);
-        log_director_delivery(&prompt, &result, inject_started, refresh_started);
+        if phase == MergeAlertPhase::PtyFallback {
+            log_director_delivery(&prompt, &result, fallback_started, refresh_started);
+        } else {
+            log_director_delivery_metrics(&prompt, &result, inject_ms, refresh_to_deliver_ms);
+        }
     }
 
     /// cas-ae6d: hand a director prompt to the durable queue, on the store
@@ -1775,8 +1829,18 @@ pub(super) fn log_director_delivery(
     inject_started: Instant,
     refresh_started: Instant,
 ) {
-    let inject_ms = inject_started.elapsed().as_secs_f64() * 1000.0;
-    let total_ms = refresh_started.elapsed().as_secs_f64() * 1000.0;
+    log_director_delivery_metrics(
+        prompt, inject_result, inject_started.elapsed().as_secs_f64() * 1000.0,
+        refresh_started.elapsed().as_secs_f64() * 1000.0,
+    );
+}
+
+fn log_director_delivery_metrics(
+    prompt: &crate::ui::factory::director::Prompt,
+    inject_result: &anyhow::Result<InjectOutcome>,
+    inject_ms: f64,
+    total_ms: f64,
+) {
     match inject_result {
         Ok(cas_mux::InjectOutcome::Delivered) => tracing::info!(
             target: "cas::coordination",

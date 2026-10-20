@@ -1019,7 +1019,7 @@ impl QueueJobs {
         }
     }
 
-    fn generation(&mut self) -> u64 {
+    pub(crate) fn generation(&mut self) -> u64 {
         self.next_generation += 1;
         self.next_generation
     }
@@ -1648,7 +1648,11 @@ impl QueueJobs {
     }
 
     fn owner_of(&self, spec: &JobSpec, external: bool) -> Option<SubmittedRefresh> {
-        (spec.criticality == Criticality::Refresh).then(|| SubmittedRefresh {
+        // Merge-alert jobs are critical, but their completion owner must also
+        // survive shutdown until native delivery and fallback checks settle.
+        (spec.criticality == Criticality::Refresh
+            || (external && spec.kind == super::factory_jobs::MERGE_ALERT_INBOX))
+        .then(|| SubmittedRefresh {
             key: spec.key.clone(),
             kind: spec.kind,
             generation: spec.generation,
@@ -1665,7 +1669,7 @@ impl QueueJobs {
             return;
         };
         match submitted {
-            Submitted::Queued | Submitted::QueuedDroppedOldest { .. } => {
+            Submitted::Queued | Submitted::QueuedBehindKey | Submitted::QueuedDroppedOldest { .. } => {
                 self.owner_entry(&refresh).outstanding.push_back(refresh.generation);
             }
             Submitted::Coalesced { replaced_generation } => {
@@ -1681,8 +1685,7 @@ impl QueueJobs {
             Submitted::DroppedRefresh => {
                 self.report_dropped(refresh.key, refresh.kind, refresh.generation, refresh.external);
             }
-            Submitted::QueuedBehindKey
-            | Submitted::Closed
+            Submitted::Closed
             | Submitted::LaneMismatch { .. } => {}
         }
         if let Submitted::QueuedDroppedOldest {
@@ -1761,6 +1764,13 @@ impl QueueJobs {
         work: impl FnOnce(Option<&DirectorStores>) -> Box<dyn std::any::Any + Send> + Send + 'static,
     ) -> Submitted {
         self.submit_job_read(spec, true, move |stores| QueueJobOutcome::External(work(stores)))
+    }
+
+    /// Completion owners must remain alive until their critical jobs settle.
+    pub(crate) fn external_kind_pending(&self, kind: &str) -> bool {
+        self.job_owners.values().any(|owner| {
+            owner.external && owner.kind == kind && !owner.outstanding.is_empty()
+        })
     }
 
     /// Finished external jobs, including ones that panicked (`outcome` Err).

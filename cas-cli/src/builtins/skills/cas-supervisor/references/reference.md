@@ -78,7 +78,7 @@ Your `cas serve` creates `cas-<task-id>-<n>` with `neonctl`; use `neonctl` for a
 
 Stock workers cannot run `neonctl` (including `env`, `npx` and `pnpm dlx`
 wrappers) or call tools matching `*neon*`, alongside the Vercel denials.
-Refusals route them to `coordination action=message target=supervisor blocker=true`.
+Refusals route them to `coordination action=message target=supervisor blocker=true summary="need Neon" message="<operation and reason>"`.
 Inherited `NEON_API_KEY` and `VERCEL_TOKEN` are stripped by the existing
 protected-token policy; your credentials and `db_branch_create` stay available.
 The worker keeps its own `.env.cas-db` and `DATABASE_URL`. Operator-configured

@@ -7755,7 +7755,11 @@ mod team_cmd_tests {
 
         execute_queue(&apply, &cli, &root).unwrap();
         let repeated = queue.list_all(10).unwrap().remove(0);
-        assert_eq!(repeated, repaired, "a second apply must be a no-op");
+        assert_eq!(
+            serde_json::to_value(&repeated).unwrap(),
+            serde_json::to_value(&repaired).unwrap(),
+            "a second apply must be a no-op"
+        );
     }
 
     #[test]

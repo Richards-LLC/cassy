@@ -793,6 +793,33 @@ pub trait TaskStore: Send + Sync {
     /// List tasks with optional status filter
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>>;
 
+    /// IDs owned by any named assignee in any supplied status. Empty filters
+    /// match nothing. Assignee names are ASCII case-insensitive, like routing.
+    /// SQLite overrides this to avoid decoding the project's task backlog.
+    fn ids_by_assignees_and_statuses(
+        &self,
+        assignees: &[&str],
+        statuses: &[TaskStatus],
+    ) -> Result<Vec<String>> {
+        let mut ids = Vec::new();
+        if assignees.is_empty() {
+            return Ok(ids);
+        }
+        for status in statuses {
+            for task in self.list(Some(*status))? {
+                if task.assignee.as_deref().is_some_and(|owner| {
+                    assignees
+                        .iter()
+                        .any(|name| owner.eq_ignore_ascii_case(name))
+                }) && !ids.contains(&task.id)
+                {
+                    ids.push(task.id);
+                }
+            }
+        }
+        Ok(ids)
+    }
+
     /// Find a lane owner through the store's visibility policy, preferring a
     /// live epic over historical terminal records.
     fn epic_for_branch(&self, branch: &str) -> Result<Option<Task>> {

@@ -51,6 +51,23 @@ pub(crate) fn attach_assignment_envelope(message: &str, task_id: Option<&str>) -
     format!("<cas-assignment{task_attribute}/>\n{message}")
 }
 
+/// Caller text cannot supply a durable server assignment binding. Remove
+/// leading lookalikes at ingress before any server-authored framing is added.
+pub(crate) fn strip_assignment_envelopes(mut message: &str) -> &str {
+    loop {
+        let candidate = message.trim_start();
+        if !(candidate.starts_with(ASSIGNMENT_ENVELOPE_OPEN)
+            || candidate.starts_with("<cas-assignment/>"))
+        {
+            return message;
+        }
+        let Some(end) = candidate.find('>') else {
+            return message;
+        };
+        message = candidate[end + 1..].trim_start();
+    }
+}
+
 pub(crate) fn is_assignment_prompt(prompt: &str) -> bool {
     assignment_phrase_end(prompt).is_some()
 }

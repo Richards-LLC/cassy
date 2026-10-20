@@ -14,18 +14,27 @@ pub(crate) fn current_project_id(cas_root: &std::path::Path) -> Option<String> {
     crate::cloud::resolve_canonical_id(cas_root)
 }
 
-/// An accepted cross-project proposal belongs to the project it was accepted
-/// into, while `origin_project` keeps naming the proposer (cas-3556); the
-/// server-attested provenance in its notes names that target.
 pub(crate) fn task_belongs_to_project(task: &cas_types::Task, project_id: Option<&str>) -> bool {
-    project_id.is_some_and(|project_id| {
-        task.origin_project.as_deref() == Some(project_id)
-            || crate::cloud::syncer::accepted_proposal_target_project(&task.id, &task.notes)
-                .is_some_and(|target| {
-                    crate::cloud::canonical_project_id(&target)
-                        == crate::cloud::canonical_project_id(project_id)
-                })
-    })
+    project_id.is_some_and(|project_id| task.origin_project.as_deref() == Some(project_id))
+}
+
+/// cas-3556: an accepted cross-project proposal belongs to the project that
+/// accepted it, while `origin_project` keeps naming the proposer. Only the
+/// local acceptance record, written by the accept path and the sync pull of a
+/// server-attested proposal, says so; free-text notes never do.
+pub(crate) fn task_accepted_into_project(
+    task: &cas_types::Task,
+    cas_root: &std::path::Path,
+    project_id: Option<&str>,
+) -> bool {
+    let Some(project) = project_id.and_then(crate::cloud::canonical_project_id) else {
+        return false;
+    };
+    cas_store::accepted_proposal_target(cas_root, &task.id)
+        .ok()
+        .flatten()
+        .and_then(|target| crate::cloud::canonical_project_id(&target))
+        .is_some_and(|target| target == project)
 }
 
 /// Task board reads retain legacy rows that have no origin attribution. Rows
@@ -208,7 +217,9 @@ pub(crate) fn ensure_task_origin(
     action: &str,
 ) -> Result<Option<String>, rmcp::ErrorData> {
     let project_id = current_project_id(cas_root);
-    if task_belongs_to_project(task, project_id.as_deref()) {
+    if task_belongs_to_project(task, project_id.as_deref())
+        || task_accepted_into_project(task, cas_root, project_id.as_deref())
+    {
         return Ok(None);
     }
 

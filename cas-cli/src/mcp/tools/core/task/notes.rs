@@ -52,6 +52,14 @@ impl CasCore {
             data: None,
         })?;
 
+        if crate::cloud::syncer::contains_proposal_provenance_marker(&req.note) {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("Task notes cannot contain the proposal provenance markers; Cassy renders that block itself from the server-attested proposal (cas-3556)."),
+                data: None,
+            });
+        }
+
         let supervisor_override = req.supervisor_override.unwrap_or(false);
         let registered_supervisor = if supervisor_override {
             self.resolve_live_supervisor_authority().map_err(|error| McpError {

@@ -974,21 +974,42 @@ fn unique_complete_provenance_block(notes: &str) -> Option<(usize, usize)> {
     .then_some((start, end))
 }
 
-/// cas-3556: the target project an accepted proposal was materialized for,
-/// read back from the server-attested block `render_task_proposal_provenance`
-/// writes into the task's notes. `None` unless the block is unique, complete
-/// and attests this very task id.
-pub(crate) fn accepted_proposal_target_project(task_id: &str, notes: &str) -> Option<String> {
-    let (start, end) = unique_complete_provenance_block(notes)?;
-    let field = |name: &str| {
-        notes[start..end].lines().find_map(|line| {
-            line.trim()
-                .strip_prefix(name)
-                .and_then(|rest| rest.strip_prefix(": "))
-                .and_then(|value| serde_json::from_str::<String>(value).ok())
-        })
+/// cas-3556: whether text carries a proposal provenance marker. Only
+/// `render_task_proposal_provenance` writes the block; agent note writes that
+/// contain a marker are refused so a forged block never reaches the notes.
+pub(crate) fn contains_proposal_provenance_marker(text: &str) -> bool {
+    text.contains(PROPOSAL_PROVENANCE_BEGIN)
+        || text.contains(PROPOSAL_PROVENANCE_END)
+        || text.contains("--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---")
+        || text.contains("--- BEGIN CLIENT-ASSERTED PROPOSAL PROVENANCE ---")
+}
+
+/// cas-3556: remember a pulled, server-attested accepted proposal as this
+/// project's task. Ownership checks read only this record, never notes; the
+/// row is written only when the provenance attests this very task id and
+/// this project as its target.
+pub(crate) fn record_pulled_accepted_proposal(
+    cas_root: &std::path::Path,
+    raw: &serde_json::Value,
+    current_project_id: &str,
+) {
+    if !accepted_proposal_targets_project(raw, current_project_id) {
+        return;
+    }
+    let Some(provenance) = raw.get("proposal_provenance").and_then(|value| {
+        serde_json::from_value::<crate::cloud::task_proposals::ProposalProvenance>(value.clone()).ok()
+    }) else {
+        return;
     };
-    (field("target_task_id")? == task_id).then(|| field("target_project_canonical_id"))?
+    let server = &provenance.server_attested;
+    if let Err(error) = cas_store::record_accepted_proposal_target(
+        cas_root,
+        &server.target_task_id,
+        &server.proposal_id,
+        &server.target_project_canonical_id,
+    ) {
+        tracing::warn!(task_id = %server.target_task_id, %error, "could not record accepted proposal");
+    }
 }
 
 /// Persist proposal provenance visibly in the ordinary local task record.
@@ -2182,6 +2203,9 @@ impl CloudSyncer {
             if let Some(id) = raw_task.get("id").and_then(serde_json::Value::as_str) {
                 self.note_incoming_revision(EntityType::Task, id, &raw_task);
             }
+            if let Some(cas_root) = self.push_cas_root.as_deref() {
+                record_pulled_accepted_proposal(cas_root, &raw_task, &current_project_id);
+            }
             render_task_proposal_provenance(&mut raw_task);
             let raw_task_for_parking = raw_task.clone();
             let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
@@ -3358,6 +3382,9 @@ impl CloudSyncer {
                 continue;
             }
             let mut raw_task = raw_task;
+            if let Some(cas_root) = self.push_cas_root.as_deref() {
+                record_pulled_accepted_proposal(cas_root, &raw_task, current_project_id);
+            }
             render_task_proposal_provenance(&mut raw_task);
             let wire_is_owner = task_wire_is_owner(&raw_task);
             let team_task_revision = crate::cloud::wire_revision(&raw_task);

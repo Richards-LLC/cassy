@@ -6318,6 +6318,45 @@ mod cas_89e1_post_merge_message_type_tests {
                 Some("cas-fba9")
             );
         }
+        // A busy worker can receive its next assignment before the supervisor
+        // updates that task's assignee. The started task is context, not binding.
+        let tasks = crate::store::open_task_store_local(root).unwrap();
+        for status in [TaskStatus::InProgress, TaskStatus::Blocked] {
+            let mut previous = tasks.get("cas-3e24").unwrap();
+            previous.status = status;
+            tasks.update(&previous).unwrap();
+            let mut next = tasks.get("cas-fba9").unwrap();
+            next.assignee = None;
+            tasks.update(&next).unwrap();
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "message", "target": "eager-cobra-57",
+                "summary": "next assignment while busy",
+                "message": "You're assigned cas-fba9; read its task and start.",
+            }))
+            .unwrap();
+            service
+                .message_send(request)
+                .await
+                .expect("next task must queue while busy");
+            let row = queue
+                .peek_all(10)
+                .unwrap()
+                .into_iter()
+                .max_by_key(|row| row.id)
+                .unwrap();
+            assert_eq!(
+                assignment_solicited_task_id(&row.prompt).as_deref(),
+                Some("cas-fba9")
+            );
+            assert_eq!(
+                crate::ui::factory::daemon::runtime::delivery::assignment_stale_status(
+                    root,
+                    &row.prompt,
+                    &row.target,
+                ),
+                None,
+            );
+        }
         // The binding also keeps genuine staleness: once the NEW task closes,
         // every queued variant must be withdrawn for that task, not the old one.
         let tasks = crate::store::open_task_store_local(root).unwrap();

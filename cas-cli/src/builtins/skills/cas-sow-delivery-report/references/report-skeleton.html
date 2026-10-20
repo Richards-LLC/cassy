@@ -110,7 +110,7 @@ footer { padding: 32px 0 48px; border-top: 1px solid var(--line); font-size: 14p
   /* A whole full-width pair may exceed a sheet; keep each image/caption,
      rather than the pair, together. */
   .pair { break-inside: auto; }
-  .pair > figcaption { break-after: avoid; }
+  .pair > figcaption { break-inside: avoid; break-after: avoid; }
   .side + .side { margin-top: 16pt; }
   h2 { break-after: avoid; }
   /* Rounds + provenance print as one block: a footer-only last page is a defect (pdf.md). */
@@ -175,7 +175,9 @@ footer { padding: 32px 0 48px; border-top: 1px solid var(--line); font-size: 14p
       </figure>
       <figure class="side after">
         <div class="shot"><img src="shots/R3-store-ranking.jpg" alt="Store ranking now: this week, last week and the change, per store.">
-          <svg class="mark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><rect x="55" y="18" width="40" height="70" fill="none" stroke="var(--verdict)" stroke-width="0.8" rx="1.5"/></svg></div>
+          <!-- Optional svg.mark overlay: position it for the actual screenshot,
+               verify that no stroke crosses text, or leave the image unmarked. -->
+        </div>
         <figcaption><b>After</b> · round 2 · staging · 2026-10-20</figcaption>
       </figure>
     </div>

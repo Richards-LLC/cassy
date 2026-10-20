@@ -65,8 +65,9 @@ this variant instead of the completion report:
   the reason. Never leave a blank image or substitute a mock.
 - Use at most one highlight per *after* image: an outline or numbered marker
   on the changed region, drawn in the brand's verdict colour as an SVG overlay
-  on the image. Never paint the highlight into the pixels, so the screenshot
-  stays the unedited evidence.
+  on the image. Position it for that screenshot and check that no stroke crosses
+  text; omit it when there is no clear margin. Never paint the highlight into
+  the pixels, so the screenshot stays the unedited evidence.
 - The caption states the change in the client's words. The image proves it.
   The caption never makes a claim the image cannot show.
 

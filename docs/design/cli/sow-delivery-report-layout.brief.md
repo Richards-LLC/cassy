@@ -25,7 +25,8 @@ tokens and captions; give each screenshot enough space to read its contents.
 
 Before and after each use the complete evidence column, with their source and
 round attached. A pair may continue onto another printed page, but an individual
-image and its caption stay together.
+image and its caption stay together. The after image carries the comparison
+without an unverified decorative outline obscuring its column headings.
 
 ## Deliberately omitted
 

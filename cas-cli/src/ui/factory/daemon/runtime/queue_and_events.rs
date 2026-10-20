@@ -10050,8 +10050,8 @@ impl FactoryDaemon {
                 for (member, token) in batch_claims {
                     match self.queue_jobs.admit_claimed(self.app.cas_dir(),member.id,&member.target,token,Instant::now()) {
                         super::prompt_queue_jobs::Admission::Inject { generation } => {
-                            prompt_with_instructions.push_str(&format!("\n\n{}\n{}",
-                                crate::mcp::tools::service::agent_search_system::message::first_message_provenance(&member),member.prompt));
+                            prompt_with_instructions.push_str(&format!("\n\n{}\nFrom: {}\n{}",
+                                crate::mcp::tools::service::agent_search_system::message::first_message_provenance(&member),member.source,member.prompt));
                             message_batch.push((member,generation));
                         },
                         super::prompt_queue_jobs::Admission::InFlight | super::prompt_queue_jobs::Admission::NotClaimed => {},

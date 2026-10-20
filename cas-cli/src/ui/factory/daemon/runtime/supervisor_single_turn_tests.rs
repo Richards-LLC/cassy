@@ -504,6 +504,7 @@ async fn cas_1e7e2_directed_burst_debounces_into_one_body_turn() {
         .await
         .expect("one submitted burst body");
         assert_eq!(typed.matches('\r').count(), 1, "one turn: {typed:?}");
+        assert!(typed.contains("From: peer"),"coalesced bodies retain sender attribution: {typed:?}");
         for body in bodies {
             assert_eq!(typed.matches(body).count(), 1, "{typed:?}");
         }

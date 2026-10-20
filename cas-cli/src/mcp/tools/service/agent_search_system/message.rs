@@ -1941,7 +1941,7 @@ impl CasService {
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
                         format!(
-                            "worker messages support kind=status or kind=ready to the same-session supervisor, not '{other}'"
+                            "worker messages support status, ready, receipt, answer or ask; status/ready require the same-session supervisor, not '{other}'"
                         ),
                     ));
                 }
@@ -4003,6 +4003,10 @@ fn pending_deadline_narrative(
     if stage == DeliveryStage::Gated
         && pending_reason == Some(cas_store::PendingReason::AwaitingBusyRecipient)
     {
+        if let Some(detail)=pending_detail.filter(|detail|detail.starts_with("directed supervisor message ")
+            || detail.starts_with("quiet acknowledgement or wake=false")) {
+            return format!("supervisor wake policy: still pending — {detail}; readable at the next turn start or tool call\n");
+        }
         return format!(
             "busy recipient: still pending — wake retries stopped while the recipient works; \
              the message surfaces at its next turn start or tool call — {}\n",
@@ -4330,6 +4334,12 @@ mod pending_deadline_tests {
         assert!(line.contains("next turn start or tool call"), "{line}");
         assert!(!line.contains("never be delivered"), "{line}");
         assert!(!line.contains("PAST"), "{line}");
+        for detail in ["directed supervisor message burst debounce", "directed supervisor message held by sender-pair wake cap"] {
+            let policy=pending_deadline_narrative(DeliveryStage::Gated,Some(cas_store::PendingReason::AwaitingBusyRecipient),Some(detail),Some(1200),InboxHandoffState::NotHeld);
+            assert!(policy.contains("supervisor wake policy"),"{policy}");
+            assert!(!policy.contains("busy recipient"),"a policy hold is not evidence the recipient works: {policy}");
+        }
+
     }
 
     #[test]

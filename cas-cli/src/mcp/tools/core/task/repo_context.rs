@@ -1365,6 +1365,101 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unreachable_known_roots_are_bounded_and_negatively_cached() {
+        const CHILD_MODE: &str = "CAS_REPO_CONTEXT_HANG_FIXTURE";
+        if let Ok(mode) = std::env::var(CHILD_MODE) {
+            let mut env = TestEnvGuard::temp_home();
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let fixtures = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+            let healthy = fixtures.path().join("healthy");
+            let blocked = fixtures.path().join("blocked");
+            for repo in [&healthy, &blocked] {
+                std::fs::create_dir(repo).unwrap();
+                git(repo, &["init", "-q", "-b", "main"]);
+                std::fs::create_dir(repo.join(".cas")).unwrap();
+                crate::store::known_repos::register_repo_strict(repo).unwrap();
+            }
+            std::fs::write(
+                healthy.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"healthy\"\n",
+            )
+            .unwrap();
+            let fifo = if mode == "config" {
+                blocked.join(".cas/config.toml")
+            } else {
+                fixtures.path().join("blocked-git")
+            };
+            assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+            let actual_git = which::which("git").unwrap();
+            let bin = fixtures.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            let calls = fixtures.path().join("blocked-probes");
+            crate::test_paths::warm_stub(
+                &bin.join("git"),
+                r#"#!/bin/sh
+if [ "$2" = "$CAS_TEST_BLOCKED_ROOT" ]; then
+    printf 'probe\n' >> "$CAS_TEST_BLOCKED_CALLS"
+    if [ "$CAS_TEST_BLOCKED_MODE" = git ]; then
+        read -r blocked < "$CAS_TEST_BLOCKED_FIFO"
+        exit 1
+    fi
+fi
+exec "$CAS_TEST_REAL_GIT" "$@"
+"#,
+            );
+            let mut paths = vec![bin];
+            paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+            env.set("PATH", std::env::join_paths(paths).unwrap());
+            env.set("CAS_TEST_REAL_GIT", actual_git);
+            env.set("CAS_TEST_BLOCKED_ROOT", &blocked);
+            env.set("CAS_TEST_BLOCKED_CALLS", &calls);
+            env.set("CAS_TEST_BLOCKED_MODE", &mode);
+            env.set("CAS_TEST_BLOCKED_FIFO", &fifo);
+            let target = WorkTarget {
+                repo_selector: "project:healthy".to_string(),
+                target_branch: "main".to_string(),
+            };
+            let first = resolve_repo_context(&healthy.join(".cas"), &target)
+                .expect("an unrelated blocked root must not prevent healthy resolution");
+            assert_eq!(first.repo_root, healthy.canonicalize().unwrap());
+            let first_calls = std::fs::read_to_string(&calls).expect("blocked root was probed");
+            assert!(!first_calls.is_empty());
+            let second = resolve_repo_context(&healthy.join(".cas"), &target).unwrap();
+            assert_eq!(second, first);
+            assert_eq!(
+                std::fs::read_to_string(&calls).unwrap(),
+                first_calls,
+                "a timed-out root must not start another probe while negatively cached"
+            );
+            return;
+        }
+
+        // Re-exec isolates the deliberately blocked filesystem call. The outer
+        // deadline makes the unfixed regression fail and reaps its Git child.
+        for mode in ["git", "config"] {
+            let output = run_command(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "mcp::tools::core::task::repo_context::tests::unreachable_known_roots_are_bounded_and_negatively_cached",
+                        "--nocapture",
+                    ])
+                    .env(CHILD_MODE, mode),
+                Deadline::after(Duration::from_secs(20)),
+                Duration::from_secs(20),
+            )
+            .unwrap_or_else(|error| panic!("{mode} known-root fixture did not return: {error:?}"));
+            assert!(
+                output.status.success(),
+                "{mode} fixture failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     #[test]
     fn explicit_target_is_normalized_registered_and_path_free_when_serialized() {
         TestEnvGuard::run_with_temp_home(|home| {

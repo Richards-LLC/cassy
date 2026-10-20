@@ -236,5 +236,32 @@ Source: release assets.
                 renderer.render(bad)
 
 
+
+@unittest.skipUnless(importlib.util.find_spec('pymupdf'), 'check-pdf needs PyMuPDF')
+class PdfCheckTests(unittest.TestCase):
+    def test_footer_only_last_page_is_refused(self):
+        """GH #1305: a last page holding only the closing folio stays inside the
+        bounds yet prints an empty sheet; check-pdf must refuse it."""
+        import pymupdf, subprocess, sys
+        check = ROOT / 'cas-cli/src/builtins/skills/cas-release-report/scripts/check-pdf.py'
+
+        def run(last_page_body):
+            with tempfile.TemporaryDirectory() as tmp:
+                pdf = pymupdf.open()
+                pdf.new_page().insert_text((60, 80), 'Evidence and scope')
+                last = pdf.new_page()
+                if last_page_body:
+                    last.insert_text((60, 80), last_page_body)
+                last.insert_text((60, 120), 'Cassy v9.99.1 / Release report   Markdown source · Print edition')
+                last.insert_text((290, 820), '2 / 2')
+                pdf.save(Path(tmp) / 'report.pdf')
+                return subprocess.run([sys.executable, str(check), str(Path(tmp) / 'report.pdf'), tmp],
+                                      capture_output=True, text=True)
+
+        refused = run('')
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('closing folio', refused.stderr)
+        self.assertEqual(run('Source: release assets.').returncode, 0)
+
 if __name__ == '__main__':
     unittest.main()

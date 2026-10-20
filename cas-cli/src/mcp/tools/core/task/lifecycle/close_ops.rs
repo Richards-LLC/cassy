@@ -13026,16 +13026,19 @@ fn regenerable_build_artifact(repo_path: &std::path::Path, path: &str) -> bool {
 /// cas-2ea6: the builtin reference-history ledger and its generator.
 const REFERENCE_HISTORY_LEDGER: &str = "cas-cli/src/builtins/reference-history.json";
 const REFERENCE_HISTORY_GENERATOR: &str = "scripts/gen-builtin-reference-history.sh";
-/// cas-2ea6: a full-history generator run took about 30 s on cas-src; a hung
-/// one must not hold a close.
-const REFERENCE_HISTORY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+/// cas-2ea6: the most a keyed regeneration may take inside a close gate. A
+/// few keys took about 1 s on cas-src (40 keys: 6 s); a whole-history run
+/// takes about 30 s, which no close gate can spend.
+const REFERENCE_HISTORY_CAP: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// cas-2ea6: the ledger is derived from git history, so a lane's copy can
 /// carry hashes of versions that never reached the target (the cas-9dee
-/// shape). It is delivered when the target's committed copy equals a fresh run
-/// of the target's own generator at the target (`--rev`), not when every lane
-/// line survives. A target copy that differs from that run stays dropped.
-/// Returns the acceptance note and the paths that remain dropped.
+/// shape). It is delivered when, for every key whose delivered hashes the
+/// target lacks, the target's entry equals a fresh run of the target's own
+/// generator for that key at the target (`--rev --only`). A target entry that
+/// differs from that run stays dropped, and so does an undecidable run (an
+/// older generator, the gate's deadline). Returns the acceptance note and the
+/// paths that remain dropped.
 fn without_regenerated_ledger(
     repo_path: &std::path::Path,
     anchor: &str,
@@ -13054,60 +13057,97 @@ fn without_regenerated_ledger(
     let Some(target) = resolve_branch_sha(repo_path, &format!("{target_ref}^{{commit}}")) else {
         return (None, paths);
     };
-    if reference_history_equals_fresh_run(repo_path, &target) != Some(true) {
+    let Some(keys) = dropped_ledger_keys_regenerate(repo_path, anchor, &target) else {
         return (None, paths);
-    }
+    };
     let note = format!(
-        "{REFERENCE_HISTORY_LEDGER} on `{target_ref}` equals a fresh {REFERENCE_HISTORY_GENERATOR} run at {}, so lane-only hash lines are not a drop (cas-2ea6)",
+        "{REFERENCE_HISTORY_LEDGER} entries {} on `{target_ref}` equal a fresh {REFERENCE_HISTORY_GENERATOR} run at {}, so the lane-only hashes are versions that never shipped, not a drop (cas-2ea6)",
+        keys.join(", "),
         &target[..target.len().min(12)],
     );
     (Some(note), paths.into_iter().filter(|path| path != REFERENCE_HISTORY_LEDGER).collect())
 }
 
-/// cas-2ea6: whether `target`'s committed ledger equals its own generator's
-/// `--rev target` output. `None` when Git or the generator cannot say (an
-/// older target generator without `--rev`, a timeout): the drop then stands.
-fn reference_history_equals_fresh_run(repo_path: &std::path::Path, target: &str) -> Option<bool> {
-    let show = |path: &str| {
+/// cas-2ea6: the ledger keys whose `anchor` hashes `target` lacks, when each
+/// of their `target` entries equals the target generator's `--rev --only`
+/// run. `None` when the drop must stand or cannot be decided.
+fn dropped_ledger_keys_regenerate(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    target: &str,
+) -> Option<Vec<String>> {
+    type Entries = std::collections::BTreeMap<String, std::collections::BTreeSet<String>>;
+    let show = |revision: &str, path: &str| {
         std::process::Command::new("git")
-            .args(["show", &format!("{target}:{path}")])
+            .args(["show", &format!("{revision}:{path}")])
             .current_dir(repo_path)
-            .output()
+            .measurement_output()
             .ok()
             .filter(|output| output.status.success())
             .map(|output| output.stdout)
     };
-    let (generator, committed) = (show(REFERENCE_HISTORY_GENERATOR)?, show(REFERENCE_HISTORY_LEDGER)?);
+    let entries = |bytes: &[u8]| -> Option<Entries> {
+        let doc: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        doc.get("files")?
+            .as_object()?
+            .iter()
+            .map(|(key, hashes)| {
+                let hashes = hashes.as_array()?.iter().map(|hash| hash.as_str().map(str::to_owned)).collect::<Option<_>>()?;
+                Some((key.clone(), hashes))
+            })
+            .collect()
+    };
+    let delivered = entries(&show(anchor, REFERENCE_HISTORY_LEDGER)?)?;
+    let landed = entries(&show(target, REFERENCE_HISTORY_LEDGER)?)?;
+    let dropped: Vec<String> = delivered
+        .iter()
+        .filter(|(key, hashes)| landed.get(*key).is_none_or(|kept| !hashes.is_subset(kept)))
+        .map(|(key, _)| key.clone())
+        .collect();
+    if dropped.is_empty() {
+        return None;
+    }
+    // An older generator ignores `--rev`/`--only` and would rewrite the
+    // caller's checkout instead: run only one that declares `--only`.
+    let generator = show(target, REFERENCE_HISTORY_GENERATOR)?;
+    if !String::from_utf8_lossy(&generator).contains("--only)") {
+        return None;
+    }
     let scratch = tempfile::tempdir().ok()?;
     let script = scratch.path().join("gen-builtin-reference-history.sh");
     let fresh = scratch.path().join("reference-history.json");
     std::fs::write(&script, generator).ok()?;
-    let mut child = std::process::Command::new("bash")
-        .arg(&script)
-        .args(["--rev", target, "--output"])
-        .arg(&fresh)
-        .current_dir(repo_path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
+    let mut command = std::process::Command::new("bash");
+    command.arg(&script).args(["--rev", target, "--output"]).arg(&fresh).current_dir(repo_path);
+    for key in &dropped {
+        command.args(["--only", key]);
+    }
+    let budget = epic_measurement::deadline()
+        .map(|deadline| deadline.remaining())
+        .unwrap_or(std::time::Duration::MAX)
+        .min(REFERENCE_HISTORY_CAP);
     let started = std::time::Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().ok()? {
-            break status;
-        }
-        if started.elapsed() > REFERENCE_HISTORY_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    };
-    if !status.success() {
+    let output = crate::bounded_process::run_command(
+        &mut command,
+        crate::bounded_process::Deadline::after(budget),
+        std::time::Duration::MAX,
+    );
+    tracing::info!(
+        target: "cas::close",
+        stage = "reference_history_regeneration",
+        keys = dropped.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        ok = output.as_ref().is_ok_and(|output| output.status.success()),
+        "cas-2ea6: keyed reference-history regeneration finished"
+    );
+    if !output.ok()?.status.success() {
         return None;
     }
-    Some(std::fs::read(&fresh).ok()? == committed)
+    let regenerated = entries(&std::fs::read(&fresh).ok()?)?;
+    dropped
+        .iter()
+        .all(|key| regenerated.get(key) == landed.get(key))
+        .then_some(dropped)
 }
 
 /// cas-baf7: the delivery's own non-artifact paths (its source), measured
@@ -13305,12 +13345,16 @@ fn epic_anchor_content_presence(
     let DeliveryContentPresence::Dropped { paths } = &presence else {
         return (presence, None);
     };
+    let joined = |note: Option<String>| match (note, ledger_note.clone()) {
+        (Some(note), Some(ledger)) => Some(format!("{note}; {ledger}")),
+        (note, ledger) => note.or(ledger),
+    };
     match target_identical_delivered_paths(task, repo, anchor, target, None, &identity, paths, false) {
         Some((note, remaining)) if remaining.is_empty() => {
-            (DeliveryContentPresence::Present { paths: paths.clone() }, note)
+            (DeliveryContentPresence::Present { paths: paths.clone() }, joined(note))
         }
-        Some((note, remaining)) => (DeliveryContentPresence::Dropped { paths: remaining }, note),
-        None => (presence, None),
+        Some((note, remaining)) => (DeliveryContentPresence::Dropped { paths: remaining }, joined(note)),
+        None => (presence, joined(None)),
     }
 }
 
@@ -13734,19 +13778,26 @@ fn anchored_delivery_content_gate_unbounded(
             None
         }
         DeliveryContentPresence::Dropped { paths } => {
-            // cas-2ea6: the history-derived ledger is judged by regeneration.
+            // cas-2ea6: the history-derived ledger is judged by regeneration,
+            // and its note rides on whichever check accepts the rest.
             let (ledger_note, paths) = without_regenerated_ledger(repo_path, anchor, parent_branch, paths);
+            let with_ledger = |note: String| match &ledger_note {
+                Some(ledger) if note.is_empty() => ledger.clone(),
+                Some(ledger) => format!("{note}; {ledger}"),
+                None => note,
+            };
             if paths.is_empty() {
                 return Some(MergeStateGateOutcome::ProceedWithNote(format!(
                     "DECISION: delivery content accepted for task {task_id}: {}.",
-                    ledger_note.unwrap_or_default()
+                    with_ledger(String::new())
                 )));
             }
             // cas-24d8: decide an artifacts-only drop by the cas-baf7 rule
             // before the byte-identity proof walks those bundles again.
             if let Some(note) = regenerated_artifact_drop_note(repo_path, anchor, &paths) {
                 return Some(MergeStateGateOutcome::ProceedWithNote(format!(
-                    "DECISION: delivery content accepted for task {task_id}: {note}."
+                    "DECISION: delivery content accepted for task {task_id}: {}.",
+                    with_ledger(note)
                 )));
             }
             let (identical, paths) = match target_identical_delivered_paths(
@@ -13765,12 +13816,13 @@ fn anchored_delivery_content_gate_unbounded(
             if paths.is_empty() {
                 return Some(MergeStateGateOutcome::ProceedWithNote(format!(
                     "DECISION: delivery content accepted for task {task_id}: {}.",
-                    identical.unwrap_or_default()
+                    with_ledger(identical.unwrap_or_default())
                 )));
             }
             if let Some(note) = regenerated_artifact_drop_note(repo_path, anchor, &paths) {
                 return Some(MergeStateGateOutcome::ProceedWithNote(format!(
-                    "DECISION: delivery content accepted for task {task_id}: {note}."
+                    "DECISION: delivery content accepted for task {task_id}: {}.",
+                    with_ledger(note)
                 )));
             }
             match validated_delivery_drop_review(
@@ -13782,7 +13834,8 @@ fn anchored_delivery_content_gate_unbounded(
             ) {
                 Ok(Some(review)) => {
                     return Some(MergeStateGateOutcome::ProceedWithNote(format!(
-                        "DECISION: reviewed delivery content supersession accepted for task {task_id}; {review}"
+                        "DECISION: reviewed delivery content supersession accepted for task {task_id}; {}",
+                        with_ledger(review)
                     )));
                 }
                 Err(reason) => {
@@ -31907,8 +31960,9 @@ esac
     /// the hash of a draft it later rewrote away, so that version never ships.
     /// The integration regenerates the ledger from the merged history inside
     /// the merge, and the lane-only line is gone. The target's ledger equals a
-    /// fresh generator run, so the delivery is not dropped. A target ledger
-    /// that differs from a fresh run still refuses.
+    /// fresh generator run for the dropped key, so the delivery is not
+    /// dropped. A target ledger that differs from a fresh run still refuses,
+    /// and a target generator without `--only` is never run.
     #[test]
     fn regenerated_reference_history_is_not_a_dropped_delivery_cas_2ea6() {
         const GENERATOR: &str = include_str!("../../../../../../../scripts/gen-builtin-reference-history.sh");
@@ -31987,6 +32041,20 @@ esac
             }
             other => panic!("a ledger that differs from a fresh run still refuses: {other:?}"),
         }
+
+        // A target generator without `--only` ignores the arguments and
+        // rewrites the caller's checkout: it is never run, and the drop stands.
+        write(
+            "scripts/gen-builtin-reference-history.sh",
+            &format!("#!/usr/bin/env bash\necho rewritten > {LEDGER}\n"),
+        );
+        git(p, &["commit", "-q", "-am", "an older generator"]);
+        assert!(matches!(
+            run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p),
+            MergeStateGateOutcome::Reject(_)
+        ));
+        let status = git_command(p, &["status", "--porcelain"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&status.stdout), "", "the gate must not rewrite the checkout");
     }
 
     /// cas-18aa: the cas-da9a shape, minimized. Round one of the task lands a

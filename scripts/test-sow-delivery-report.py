@@ -48,6 +48,7 @@ class SowGateTests(unittest.TestCase):
 
     def test_login_requires_a_success_url_before_reading_credentials_or_launching_a_browser(self):
         with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'shots.json').write_text('[]')
             result = subprocess.run(['node', str(CAPTURE), '--shots', str(Path(tmp) / 'shots.json'),
                                      '--base', 'https://example.invalid', '--out', tmp,
                                      '--login', '--credentials', str(Path(tmp) / 'not-a-credential-file')],

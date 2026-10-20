@@ -854,9 +854,9 @@ async fn cas_596d_successful_team_push_rearms_only_transient_exhausted_rows_once
     queue.init().unwrap();
     let config = CloudSyncerConfig::default();
     let max_retries = config.max_retries;
+    let dns_host = "cloud-auth-401-403.example.invalid";
     let dns_error = format!(
-        "Network error: {}/api/teams/{team_id}/sync/push: dns resolution failed (temporary)",
-        server.uri()
+        "Network error: https://{dns_host}/api/teams/{team_id}/sync/push: resolve dns name '{dns_host}:443': No ip address for {dns_host}"
     );
 
     for (id, error, outcome) in [
@@ -919,6 +919,33 @@ async fn cas_596d_successful_team_push_rearms_only_transient_exhausted_rows_once
         .unwrap();
     for _ in 0..max_retries {
         queue.mark_failed(personal_row.id, &dns_error).unwrap();
+    }
+
+    queue
+        .enqueue(
+            EntityType::Skill,
+            "entry-personal-null-team-dns-exhausted",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"entry-personal-null-team-dns-exhausted","origin_project":"p"}"#),
+        )
+        .unwrap();
+    let legacy_personal_row = queue
+        .list_all(20)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.entity_id == "entry-personal-null-team-dns-exhausted")
+        .unwrap();
+    let db = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    db.execute(
+        "UPDATE sync_queue SET team_id = NULL WHERE id = ?1",
+        [legacy_personal_row.id],
+    )
+    .unwrap();
+    drop(db);
+    for _ in 0..max_retries {
+        queue
+            .mark_failed(legacy_personal_row.id, &dns_error)
+            .unwrap();
     }
 
     let enqueue_successful_push = |id: &str| {
@@ -1002,6 +1029,11 @@ async fn cas_596d_successful_team_push_rearms_only_transient_exhausted_rows_once
         "a successful personal push re-arms DNS failures"
     );
     assert!(personal_dns.last_error.is_none());
+    assert_eq!(
+        row("entry-personal-null-team-dns-exhausted").retry_count,
+        0,
+        "a successful personal push re-arms legacy NULL team rows"
+    );
 
     for _ in 0..max_retries {
         queue.mark_failed(personal_dns.id, &dns_error).unwrap();

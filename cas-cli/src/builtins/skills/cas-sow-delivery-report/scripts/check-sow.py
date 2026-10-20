@@ -28,12 +28,18 @@ import sys
 from pathlib import Path
 
 STATUSES = ("Met (live)", "Met (measured)", "Partial", "Gap", "Gap → PM")
+# Common client identifiers are not tracker keys. Exempt only these named
+# standard/model families and four-digit fiscal periods, not every prefix.
+CLIENT_IDENTIFIERS = re.compile(
+    r"\b(?:COVID-19|SHA-(?:1|224|256|384|512)|UTF-(?:8|16|32)|"
+    r"ISO-[0-9]+|GPT-[0-9]+(?:\.[0-9]+)?|(?:Q[1-4]|H[12]|FY)-[0-9]{4})\b", re.I)
 HYGIENE = [
-    # CAS ids include all-digit and longer collision suffixes. Numeric tracker
-    # keys use uppercase prefixes; lowercase years such as mid-2026 are prose.
+    # CAS ids include all-digit and longer collision suffixes. Known PROJ/ENG
+    # keys also ignore case; other numeric trackers use uppercase prefixes.
+    # Lowercase years such as mid-2026 remain prose.
     # Other legacy hex keys need a digit and a hex letter, unlike self-feed.
     ("ticket label", re.compile(
-        r"\b(?:(?i:cas-[0-9a-f]{4,})|[A-Z][A-Z0-9]+-[0-9]+|"
+        r"\b(?:(?i:cas-[0-9a-f]{4,}|(?:proj|eng)-[0-9]+)|[A-Z][A-Z0-9]+-[0-9]+|"
         r"[A-Za-z]{2,6}-(?=[0-9a-fA-F]*[0-9])(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{4,})\b")),
     ("issue or PR number", r"#[0-9]{2,5}\b"),
     ("process word", r"\bPR\b|pull request|\bbranch\b|\bcommit\b|\bagent\b|\bworker\b"
@@ -83,7 +89,7 @@ def hygiene(path, allow):
     allowed = [re.compile(rf"\b{re.escape(word)}\b", re.I) for word in allow]
     hits = 0
     for number, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
-        scrubbed = line
+        scrubbed = CLIENT_IDENTIFIERS.sub("", line)
         for pattern in allowed:
             scrubbed = pattern.sub("", scrubbed)
         for label, pattern in HYGIENE:

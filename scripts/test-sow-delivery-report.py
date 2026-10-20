@@ -37,7 +37,7 @@ class SowGateTests(unittest.TestCase):
             self.assertEqual(run(tmp, 'clean.md', clean, 'hygiene').returncode, 0)
             for label in ('cas-ddb0', 'cas-9060', 'cas-1a2b3', 'PROJ-123', 'ENG-1234', 'proj-123', 'eng-1234', 'abc-12f4'):
                 with self.subTest(label=label):
-                    result = run(tmp, 'planted.md', clean + f'The export shipped in {label}.\n', 'hygiene')
+                    result = run(tmp, 'planted.md', clean + f'The SHA-256 export shipped in {label}.\n', 'hygiene')
                     self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                     self.assertIn(f"planted.md:4: ticket label '{label}'", result.stdout)
 

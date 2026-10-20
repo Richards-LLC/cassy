@@ -60,12 +60,15 @@ impl Retries {
     }
 
     pub fn remember(&mut self, event: &DirectorEvent, now: DateTime<Utc>) {
-        let Some(task) = task_id(event) else {
+        let DirectorEvent::WorkerIdle { active_task: Some(task), .. } = event else {
             return;
         };
+        if !matches!(task.task_status, cas_types::TaskStatus::InProgress | cas_types::TaskStatus::AwaitingMerge) {
+            return;
+        }
         let entry = self
             .entries
-            .entry(task.to_string())
+            .entry(task.task_id.clone())
             .or_insert_with(|| Retry {
                 event: event.clone(),
                 next_probe: now + RETRY_INTERVAL,
@@ -102,7 +105,7 @@ impl Retries {
             };
             data.in_progress_tasks.iter().any(|task| {
                 task.id == *task_id
-                    && task.status == cas_types::TaskStatus::AwaitingMerge
+                    && matches!(task.status, cas_types::TaskStatus::InProgress | cas_types::TaskStatus::AwaitingMerge)
                     && task.assignee.as_deref().is_some_and(|assignee| {
                         assignee == worker || data.agent_id_to_name.get(assignee) == Some(worker)
                     })

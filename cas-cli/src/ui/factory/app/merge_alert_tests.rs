@@ -239,6 +239,8 @@ fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
 fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci() {
     let mut f = Fixture::new();
     f.in_progress();
+    let now = Utc::now();
+    f.app.merge_alert_retries.now = Some(now);
     use cas_store::ReminderStore;
     let reminders = cas_store::SqliteReminderStore::open(&f.app.cas_dir).unwrap();
     reminders.init().unwrap();
@@ -260,10 +262,15 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci() {
         None, None, 3600, None, Some("merge-w"), false, Some("cas-old")).unwrap();
     let _other_lane = crate::factory_worker_check::try_lock_lane(&f.app.cas_dir, f.remote.path()).unwrap().unwrap();
     std::fs::write(f.app.cas_dir.join("gh-requests"), "").unwrap();
-    assert_eq!(f.relay().len(), 1, "fixture must expose an idle in-progress delivery before CI is pending");
+    let minute = now + chrono::Duration::minutes(1);
+    f.app.merge_alert_retries.now = Some(minute);
+    let retries = f.app.merge_alert_retry_events_at(minute);
+    assert_eq!(retries.len(), 1, "suppressed in-progress wait retains its delivery retry");
+    assert_eq!(f.app.revalidate_and_prompt_for_delivery(&retries).1.len(), 1,
+        "after the wake ends, an idle worker must still alert without a new detector event");
     f.ci(None);
     let relays: usize = (0..3).map(|_| f.relay().len()).sum();
-    assert!(relays <= 1, "relay at most once while the pushed tip's CI is pending; got {relays}");
+    assert_eq!(relays, 0, "pending pushed-tip CI must suppress every idle relay");
     let tip = git(f.repo.path(), &["rev-parse", "HEAD"]);
     let requests = std::fs::read_to_string(f.app.cas_dir.join("gh-requests")).unwrap();
     assert!(requests.contains(&format!("commits/{tip}/check-runs")), "query the pushed tip: {requests}");

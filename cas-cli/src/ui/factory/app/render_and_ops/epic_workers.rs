@@ -983,6 +983,119 @@ fn checkout_ref_for_spawn_base_observed(
     (base_ref, freshness_notice, checkout_ref)
 }
 
+#[derive(Clone, Copy)]
+enum EpicBasePublication {
+    Published,
+    Unpublished { no_task_deliveries: bool },
+    Unverified,
+}
+
+/// Include nested children and legacy explicit-target children. Any durable
+/// delivery evidence prevents the planning-only reset shortcut.
+fn epic_has_no_task_deliveries(
+    cas_dir: &std::path::Path,
+    epic: &cas_types::Task,
+) -> anyhow::Result<bool> {
+    let store = open_task_store_cached(cas_dir)?;
+    let mut ids = std::collections::HashSet::new();
+    let mut pending = vec![epic.id.clone()];
+    while let Some(id) = pending.pop() {
+        if !ids.insert(id.clone()) {
+            continue;
+        }
+        pending.extend(
+            store
+                .get_dependents(&id)?
+                .into_iter()
+                .filter(|edge| edge.dep_type == cas_types::DependencyType::ParentChild)
+                .map(|edge| edge.from_id),
+        );
+    }
+    Ok(!store.list(None)?.iter().any(|task| {
+        let belongs = ids.contains(&task.id)
+            || task
+                .deliverables
+                .work_target
+                .as_ref()
+                .is_some_and(|target| {
+                    Some(target.target_branch.as_str()) == epic.branch.as_deref()
+                });
+        let d = &task.deliverables;
+        belongs
+            && (!d.files_changed.is_empty()
+                || d.commit_hash.is_some()
+                || d.merge_commit.is_some()
+                || d.factory_branch_anchor.is_some()
+                || !d.historical_factory_branch_anchors.is_empty()
+                || d.delivery_pr_number.is_some()
+                || d.delivery_pr_merge_commit.is_some()
+                || d.parked_branch.is_some()
+                || d.integration_batch.is_some()
+                || !d.handoff_branches.is_empty()
+                || d.green_merge_commit.is_some())
+    }))
+}
+
+/// A positive ancestry proof may use cached shared trunk refs: staleness can
+/// miss a safe reset, but cannot invent reachability. Never use a local-only
+/// operator commit as shared trunk while origin is configured.
+fn epic_unique_work_is_in_trunk(
+    git: &crate::worktree::GitOperations,
+    repo: &std::path::Path,
+    epic: &str,
+    parent: &str,
+) -> Result<bool, String> {
+    let mut command = std::process::Command::new("git");
+    command
+        .args(["rev-list", "--max-count=1", epic, "--not", parent])
+        .current_dir(repo);
+    for branch in [
+        git.detect_default_branch(),
+        "main".into(),
+        "master".into(),
+        "trunk".into(),
+    ] {
+        if branch.starts_with("epic/") || branch.starts_with("factory/") {
+            continue;
+        }
+        let shared = if git.has_origin_remote() {
+            format!("origin/{branch}")
+        } else {
+            branch
+        };
+        if let Some(sha) = full_sha(repo, &shared) {
+            command.arg(sha);
+        }
+    }
+    let output = command.output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "could not inspect epic-only history: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output.stdout.is_empty())
+}
+
+fn epic_reconcile_command(repo: &std::path::Path, epic: &str, parent: &str) -> String {
+    let shared = format!(
+        "origin/{}",
+        parent.strip_prefix("refs/heads/").unwrap_or(parent)
+    );
+    let parent = if !parent.starts_with("origin/") && full_sha(repo, &shared).is_some() {
+        shared.as_str()
+    } else {
+        parent
+    };
+    format!(
+        "git -C {} switch {} && git -C {} merge {}",
+        shell_words::quote(&repo.to_string_lossy()),
+        shell_words::quote(epic),
+        shell_words::quote(&repo.to_string_lossy()),
+        shell_words::quote(parent)
+    )
+}
+
 /// Fast-forward an epic's local base ref from the parent branch it recorded
 /// when the two histories are cleanly aligned. A spawned worker merges back
 /// into the epic ref, so updating *and publishing* that ref (rather than
@@ -993,14 +1106,15 @@ fn checkout_ref_for_spawn_base_observed(
 /// available before the relationship is tested. A local parent that is ahead
 /// of origin is refused rather than treated as authoritative: a worker must
 /// not be cut from an unpublished operator commit. A genuinely split
-/// epic/parent history is also refused because the worker must not inherit a
-/// base known to omit target history.
+/// epic/parent history is refused unless the lane is verified unpublished and
+/// its unique commits are already in trunk or it has no task deliveries. That
+/// stale planning lane resets to the parent, retaining its old graph for recovery.
 fn refresh_epic_base_from_parent(
     repo_root: &std::path::Path,
     epic_branch: &str,
     parent_branch: &str,
     parent_ref: &str,
-    publish_existing: bool,
+    publication: EpicBasePublication,
 ) -> Result<Option<String>, String> {
     if epic_branch == parent_branch
         || !ref_exists(repo_root, epic_branch)
@@ -1017,8 +1131,10 @@ fn refresh_epic_base_from_parent(
         return Ok(None);
     }
 
+    let git = crate::worktree::GitOperations::new(repo_root.to_path_buf());
+    let mut reset_reason = None;
     let is_ancestor = std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", epic_branch, &parent_ref])
+        .args(["merge-base", "--is-ancestor", &epic_sha, &parent_sha])
         .current_dir(repo_root)
         .status()
         .map_err(|error| {
@@ -1026,9 +1142,12 @@ fn refresh_epic_base_from_parent(
                 "could not check whether epic base '{epic_branch}' can fast-forward from '{parent_ref}': {error}"
             )
         })?;
+    if !matches!(is_ancestor.code(), Some(0 | 1)) {
+        return Err("could not compare epic and parent ancestry; no refs changed".into());
+    }
     if !is_ancestor.success() {
         let parent_is_ancestor = std::process::Command::new("git")
-            .args(["merge-base", "--is-ancestor", &parent_ref, epic_branch])
+            .args(["merge-base", "--is-ancestor", &parent_sha, &epic_sha])
             .current_dir(repo_root)
             .status()
             .map_err(|error| {
@@ -1036,20 +1155,32 @@ fn refresh_epic_base_from_parent(
                     "could not check whether recorded parent '{parent_ref}' is contained in epic base '{epic_branch}': {error}"
                 )
             })?;
+        if !matches!(parent_is_ancestor.code(), Some(0 | 1)) {
+            return Err("could not compare parent and epic ancestry; no refs changed".into());
+        }
         if parent_is_ancestor.success() {
             return Ok(None);
         }
-        return Err(format!(
-            "epic base '{epic_branch}' ({}) and recorded parent '{parent_ref}' ({}) have diverged; refusing to cut a worker from an unreconciled base",
-            &epic_sha[..epic_sha.len().min(8)],
-            &parent_sha[..parent_sha.len().min(8)],
-        ));
+        if let EpicBasePublication::Unpublished { no_task_deliveries } = publication {
+            if no_task_deliveries {
+                reset_reason = Some("no task deliveries are recorded");
+            } else if epic_unique_work_is_in_trunk(&git, repo_root, &epic_sha, &parent_sha)? {
+                reset_reason = Some("all epic-only commits are already reachable from trunk");
+            }
+        }
+        if reset_reason.is_none() {
+            return Err(format!(
+                "epic base '{epic_branch}' ({}) and recorded parent '{parent_ref}' ({}) have diverged; refusing to cut a worker from an unreconciled base. Reconcile: `{}`",
+                &epic_sha[..epic_sha.len().min(8)],
+                &parent_sha[..parent_sha.len().min(8)],
+                epic_reconcile_command(repo_root, epic_branch, parent_ref),
+            ));
+        }
     }
 
     // A ref update is invisible to any checkout that has this branch out:
     // inventory and guard those checkouts before moving the ref, then refresh
     // them after the compare-and-swap so spawn cannot strand a stale index.
-    let git = crate::worktree::GitOperations::new(repo_root.to_path_buf());
     let branch = epic_branch
         .strip_prefix("refs/heads/")
         .unwrap_or(epic_branch);
@@ -1085,6 +1216,19 @@ fn refresh_epic_base_from_parent(
     } else {
         format!("refs/heads/{epic_branch}")
     };
+    // A planning-only lane can still contain an unrecorded manual commit.
+    // Preserve the old graph under a durable ref before the guarded reset.
+    let recovery = format!("refs/cas/epic-base-resets/{epic_sha}");
+    if reset_reason.is_some() {
+        let saved = std::process::Command::new("git")
+            .args(["update-ref", &recovery, &epic_sha])
+            .current_dir(repo_root)
+            .output()
+            .map_err(|error| format!("could not preserve epic tip before reset: {error}"))?;
+        if !saved.status.success() {
+            return Err("could not preserve epic tip before reset; no branch changed".into());
+        }
+    }
     let update = std::process::Command::new("git")
         .args(["update-ref", &refname, &parent_sha, &epic_sha])
         .current_dir(repo_root)
@@ -1108,7 +1252,12 @@ fn refresh_epic_base_from_parent(
         }
     }
 
-    if !publish_existing {
+    if let Some(reason) = reset_reason {
+        return Ok(Some(format!(
+            "EPIC BASE RESET (UNPUBLISHED, NO UNIQUE WORK): '{epic_branch}' ({epic_sha}) reset to recorded parent '{parent_ref}' ({parent_sha}); {reason}. Previous tip retained at '{recovery}'. Publication is handled separately before worker checkout."
+        )));
+    }
+    if !matches!(publication, EpicBasePublication::Published) {
         return Ok(Some(format!(
             "EPIC BASE FAST-FORWARDED (LOCAL): epic base '{epic_branch}' ({epic_sha}) advanced to its recorded parent '{parent_branch}' via '{parent_ref}' ({parent_sha}); publication is handled separately; the refreshed local tip will be used."
         )));
@@ -2012,20 +2161,32 @@ impl WorkerSpawnContext {
                                     anyhow::bail!(
                                         "{}",
                                         epic_base_refresh_refusal(&format!(
-                                            "epic base '{parent_branch}' and recorded parent '{parent_ref}' have diverged; no refs changed"
+                                            "epic base '{parent_branch}' and recorded parent '{parent_ref}' have diverged; no refs changed. Reconcile: `{}`",
+                                            epic_reconcile_command(&repo_root, &parent_branch, &parent_ref),
                                         ))
                                     );
                                 }
-                            } else if let Some(notice) = refresh_epic_base_from_parent(
-                                &repo_root,
-                                &parent_branch,
-                                &parent,
-                                &parent_ref,
-                                existing_remote,
-                            )
-                            .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?
-                            {
-                                notices.push(notice);
+                            } else {
+                                let publication = if existing_remote {
+                                    EpicBasePublication::Published
+                                } else if matches!(observation.remote, Ok(None) | Ok(Some(false))) && !observation.previous_remote {
+                                    EpicBasePublication::Unpublished {
+                                        no_task_deliveries: epic_has_no_task_deliveries(&self.cas_dir, recorded_epic.as_ref().expect("managed epic"))?,
+                                    }
+                                } else {
+                                    EpicBasePublication::Unverified
+                                };
+                                if let Some(notice) = refresh_epic_base_from_parent(
+                                    &repo_root,
+                                    &parent_branch,
+                                    &parent,
+                                    &parent_ref,
+                                    publication,
+                                )
+                                .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?
+                                {
+                                    notices.push(notice);
+                                }
                             }
                         } else {
                             notices.push(format!("EPIC BASE REFRESH SKIPPED: '{parent_branch}' recorded parent '{parent}' has no resolvable local or cached origin ref; using the existing epic tip unchanged."));
@@ -5444,6 +5605,9 @@ mod spawn_base_tests {
                     &fixture.repo,
                     &["rev-parse", "epic/diverged-support"],
                 );
+                // A published lane remains protected even with no recorded
+                // delivery: another clone can already depend on its graph.
+                super::spawn_readiness_tests::git(&fixture.repo, &["push", "origin", "epic/diverged-support"]);
                 super::spawn_readiness_tests::git(&fixture.repo, &["checkout", "main"]);
                 fixture.advance_parent();
                 if offline {

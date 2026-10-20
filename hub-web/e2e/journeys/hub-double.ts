@@ -176,7 +176,7 @@ export class HubDouble {
   readonly attaches: string[] = [];
   private readonly held = new Set<string>();
   private readonly attachDelays = new Map<string, number>();
-  /** Attaches held until the journey releases them (cas-54ed). */
+  /** Session welcomes held across concurrent/retry attaches until release (cas-54ed). */
   private readonly attachGates = new Map<string, Promise<void>>();
   private polls = 0;
   /** Relay polls answered so far: the pairing's own clock (cas-03b7). */
@@ -731,20 +731,23 @@ export class HubDouble {
   }
 
   /**
-   * Hold the session's next attach until the returned release is called
-   * (cas-54ed): a step that must act while the opening card is up waits on
-   * the page, not on a delay a loaded host can outrun.
+   * Hold every attach for this session until the returned release is called
+   * (cas-54ed): concurrent/retry sockets cannot bypass the opening state.
+   * A step waits on the page, not on a delay a loaded host can outrun.
    */
   holdAttach(session: string): () => void {
     let release!: () => void;
-    this.attachGates.set(session, new Promise<void>((ok) => { release = ok; }));
-    return () => release();
+    const gate = new Promise<void>((ok) => { release = ok; });
+    this.attachGates.set(session, gate);
+    return () => {
+      if (this.attachGates.get(session) === gate) this.attachGates.delete(session);
+      release();
+    };
   }
 
   /** Send the welcome now, after a held attach is released, or after a set delay. */
   private welcomeWhenReady(session: string, welcome: () => void): void {
     const gate = this.attachGates.get(session);
-    this.attachGates.delete(session);
     const delay = this.attachDelays.get(session);
     this.attachDelays.delete(session);
     if (gate) void gate.then(welcome);

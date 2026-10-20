@@ -2117,6 +2117,8 @@ Every file in a managed builtin skill directory other than its `SKILL.md` (refer
 
 and commit the regenerated JSON. Skipping it means the version you just replaced is not recognized as Cassy content downstream, so installs that still hold it will keep it forever instead of upgrading (cas-0c0a).
 
+Lanes never hand-merge the ledger (cas-fb11). `.gitattributes` marks it `merge=cas-generated`, so a merge keeps the target's copy without a conflict, and `scripts/regenerate-generated-artifacts.sh <pre-merge-head> <merged-head>` reruns the generator on the merged history and commits the result. Cassy's merge runs that script. After a manual `git merge`, run it yourself; run `python3 scripts/cas-merge-drivers.py install` once per clone first. The committed ledger then equals a fresh generator run, which the release gate's `builtin-projections` row checks. `scripts/test-regenerate-generated-artifacts.py` merges two lanes that both add builtin history.
+
 ### Viktor distribution
 
 The managed Viktor surface has three coupled user-facing pieces: its Claude/Codex/Grok builtin

@@ -9,6 +9,12 @@ vendor/blake3-1.8.6/** whitespace=-trailing-space,-blank-at-eof
 # merge run `python3 scripts/cas-merge-drivers.py install` once per clone.
 hub-web/dist/** merge=cas-generated
 
+# cas-fb11: the builtin reference-history ledger is derived from git history, so
+# two lanes that touch builtins always conflicted on it. The same driver keeps
+# the target's copy and scripts/regenerate-generated-artifacts.sh reruns
+# scripts/gen-builtin-reference-history.sh on the merged history.
+cas-cli/src/builtins/reference-history.json merge=cas-generated
+
 # cas-7aa5: parallel epics each add a section under ## [Unreleased]. The
 # `cas-changelog` driver (scripts/cas-merge-drivers.py) keeps both, in merge
 # order; a conflicting edit to a released section still conflicts.

@@ -213,6 +213,7 @@ test-scoped-selftest:
 # exhaustive — if you add a scripts/test-*.sh, wire it into a lane here.
 test-ci-tiers:
 	cd .. && python3 scripts/test-sow-delivery-report.py
+	cd .. && python3 scripts/test-regenerate-generated-artifacts.py
 	cd .. && python3 scripts/test-check-communication-slos.py
 	cd .. && python3 scripts/test-violet-reference-guard.py
 	cd .. && python3 scripts/test-assembly-proof.py

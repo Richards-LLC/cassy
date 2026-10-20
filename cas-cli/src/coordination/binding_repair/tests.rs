@@ -27,7 +27,7 @@ fn scope() -> IntakeScope {
 fn runtime(root: &Path, capability: bool) -> std::thread::JoinHandle<()> {
     use crate::ui::factory::daemon::runtime::violet_intake::*;
     use crate::ui::factory::*;
-    let name = "binding-fixture";
+    let name = "bind-fx";
     let mut metadata = create_metadata(
         name,
         std::process::id(),
@@ -187,8 +187,9 @@ fn cas_9021_old_or_unknown_actual_runtime_preflight_sends_zero_post() {
     let old = client.repair(&root, &scope).unwrap();
     gui.join().unwrap();
     assert!(matches!(old.outcome, RepairOutcome::Blocked));
-    assert!(old.error.unwrap().contains("lacks"));
-    let metadata_path = crate::ui::factory::metadata_path("binding-fixture");
+    let old_error = old.error.unwrap();
+    assert!(old_error.contains("lacks"), "{old_error}");
+    let metadata_path = crate::ui::factory::metadata_path("bind-fx");
     let mut metadata: crate::ui::factory::SessionMetadata =
         serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
     metadata.daemon_build_hash = None;

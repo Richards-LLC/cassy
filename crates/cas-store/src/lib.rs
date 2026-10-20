@@ -65,6 +65,7 @@ mod prompt_queue_store;
 mod prompt_store;
 mod qa_pass_store;
 mod qa_batch_store;
+mod rule_candidate_store;
 mod epic_split_store;
 mod recording_store;
 mod recording_text_store;
@@ -144,6 +145,10 @@ pub use qa_pass_store::{
 };
 pub use qa_batch_store::{QA_BATCH_SCHEMA_STATEMENTS, QaBatchReceipt, record_qa_batch_receipt,
     list_qa_batch_receipts, qa_batch_receipts_for_task, qa_task_implementation_actors, defer_qa_batch_evidence, has_qa_batch_deferral};
+pub use rule_candidate_store::{
+    RULE_CANDIDATE_MATCH, RULE_CANDIDATE_SCHEMA_STATEMENTS, RuleCandidate, RuleCandidateOccurrence,
+    list_rule_candidates, observe_rule_candidate, rule_candidate_similarity, similar_rule_candidates,
+};
 pub use artifact_store::{
     ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,
     SqliteArtifactStore, looks_like_signed_upload_url,

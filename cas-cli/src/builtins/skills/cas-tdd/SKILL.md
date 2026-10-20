@@ -12,7 +12,8 @@ metadata:
 
 Elegant tests, not copious: a test exists to catch a real regression, and each extra one costs CI time and another chance to flake.
 
-- Write the fewest that fail without the change: one per changed behaviour, through the real path its caller uses.
+- Write the fewest that fail without the change: a few tests that each prove one behaviour, through the real path its caller uses. Never set a test count or a fixture per case.
+- `test-first` is met by an added or changed case in any test file plus a recorded failing-first run; it never needs a new file.
 - Extend an existing test or table before adding a file; delete tests the change makes redundant or that cover dead code.
 - Assert observable behaviour. A test restating the implementation (mirroring its branches or constants) is bloat; mark a durable exact-text contract `// pin: <reason>`.
 - No exhaustive matrices, near-duplicates, copied fixtures, sleeps, timing assumptions or host state.

@@ -75,6 +75,8 @@ pub const RULE_ACTIONS: &[&str] = &[
     "harmful",
     "sync",
     "check_similar",
+    "observe",
+    "candidates",
 ];
 
 pub const SKILL_ACTIONS: &[&str] = &[

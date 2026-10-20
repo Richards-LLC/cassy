@@ -28,7 +28,7 @@ Every task spec must include:
 - **Interface definition** — Inputs, outputs, and error states defined explicitly
 - **Layer boundary** — Which files/modules the worker owns and must not touch outside of; boundary violation is a rejection condition
 - **Explicit non-goals** — What the task deliberately does NOT do, stated to prevent scope creep
-- **Test guidance** — Name the behaviour each test must catch; the error path only when the change touches it. Ask for the [fewest tests](../../cas-tdd/SKILL.md#fewest-tests), not a scenario list.
+- **Test guidance** — Name the behaviour each test must catch; the error path only when the change touches it. Ask for the [fewest tests](../../cas-tdd/SKILL.md#fewest-tests), a few that each prove one behaviour: never a scenario list, a test count or a fixture per case.
 - **Evidence-source plan** — For report/investigation/evidence tasks, explicitly name the MCP/log/recording/task-record sources the worker should use. Treat live `.cas/cas.db` access as an exception: only require it when safer surfaces are insufficient, and then specify read-only URI or copied-snapshot access.
 
 **Task-description specificity (observed 2026-08-11):** Bad: `Improve issue intake (GH #221).`

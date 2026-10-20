@@ -641,7 +641,7 @@ pub struct RuleRequest {
     /// Action to perform
     #[schemars(
         schema_with = "crate::actions::rule_action_schema",
-        description = "Operation. `list` returns proven rules only; `helpful` votes; `promote` (needs change_note) makes a rule proven; `delete` tombstones; `sync` writes .claude/rules/; `check_similar` finds similar existing rules."
+        description = "Operation. `list` returns proven rules only; `helpful` votes; `promote` (needs change_note) makes a rule proven; `delete` tombstones; `sync` writes .claude/rules/; `check_similar` finds similar rules; `observe` keeps verifier lessons as candidates."
     )]
     pub action: String,
 

@@ -38,6 +38,7 @@ use crate::ui::components::table::Column as TableColumn;
 use crate::ui::components::{Border, Formatter, OutputMode, Renderable, Table, Verdict, Width};
 use crate::ui::theme::{ActiveTheme, Icons};
 
+mod discovery_probe;
 mod findings;
 mod fixture;
 mod live;
@@ -1517,7 +1518,7 @@ fn refresh_all_projects_with_user_refresh(
     let started_at = Instant::now();
     let mut discovery = discover_local_projects(current_cas_root);
     for project in std::mem::take(&mut discovery.projects) {
-        if crate::cli::project_files::git_root(&project) {
+        if discovery.git_projects.contains(&project) {
             discovery.projects.push(project);
         } else {
             discovery.skipped_unregistered.push(SkippedProject {
@@ -2607,6 +2608,8 @@ struct ProjectDiscovery {
     /// Every project the refresh will process: the host registry plus every
     /// scan-discovered directory that actually holds a store.
     projects: Vec<PathBuf>,
+    /// Git ownership observed under the same per-root deadline.
+    git_projects: BTreeSet<PathBuf>,
     /// The subset of `projects` that the filesystem scan found but the host
     /// registry does not know about. These are refreshed and then registered,
     /// so discovery converges without the operator doing anything.
@@ -2637,26 +2640,48 @@ fn user_level_store_root() -> Option<PathBuf> {
 /// early return also hid every project nested under a parent that is itself a
 /// project, which is the normal monorepo-of-repos layout.
 fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery {
-    let known = crate::worktree::discovery::list_tracked_repos().unwrap_or_default();
-    let known_roots = known
-        .iter()
-        .filter(|repo| repo.healthy)
-        .map(|repo| canonical_path(&repo.path))
-        .collect::<Vec<_>>();
-    let mut registered = BTreeSet::new();
+    use crate::store::KnownRepoStore;
+    use crate::store::known_repos::{open_host_known_repo_store, registry_skip_for_observed_roots};
+
+    // Do not call list_tracked_repos here: its synchronous health checks touch
+    // each root before the bounded observer can protect the refresh.
+    let known = open_host_known_repo_store()
+        .and_then(|store| store.list().map_err(Into::into))
+        .unwrap_or_default();
+    let mut inspector = discovery_probe::Inspector::default();
+    let mut observations = Vec::new();
+    let mut known_artifacts = Vec::new();
     let mut skipped_by_path = BTreeMap::new();
-    for repo in known.into_iter().filter(|repo| repo.healthy) {
-        let path = canonical_path(&repo.path);
-        if let Some(skip) = crate::store::known_repos::registry_skip_for_known_roots(
-            &path,
-            &known_roots,
-        ) {
-            skipped_by_path.insert(path, skip.reason());
-        } else {
-            registered.insert(path);
+    for repo in known {
+        match inspector.observe(&repo.path) {
+            Some(root) if root.ready => {
+                known_artifacts.push((root.root.clone(), root.artifacts.clone()));
+                observations.push(root);
+            }
+            Some(_) => {}
+            None => {
+                // Even an unreadable registered parent still owns its literal
+                // artifact subtree; do not turn its copies into live projects.
+                known_artifacts.push((repo.path.clone(), vec![repo.path.join(".cas/artifacts")]));
+                skipped_by_path.insert(repo.path, discovery_probe::TIMEOUT.to_string());
+            }
         }
     }
-
+    let classify = |root: &discovery_probe::Observation| {
+        registry_skip_for_observed_roots(
+            root.skip.clone(),
+            std::slice::from_ref(&root.root),
+            &known_artifacts,
+        )
+    };
+    let mut registered = BTreeSet::new();
+    for root in observations {
+        if let Some(skip) = classify(&root) {
+            skipped_by_path.insert(root.root, skip.reason());
+        } else {
+            registered.insert(root.root);
+        }
+    }
     let roots = std::env::var_os("CAS_PROJECT_ROOTS")
         .map(|raw| {
             raw.to_string_lossy()
@@ -2668,25 +2693,26 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery 
         .unwrap_or_else(|| dirs::home_dir().into_iter().collect());
     let mut scanned = BTreeSet::new();
     for root in roots {
-        scan_for_projects(&root, MAX_SCAN_DEPTH, &mut scanned);
+        scan_observed_projects(
+            &root,
+            MAX_SCAN_DEPTH,
+            &mut scanned,
+            &mut inspector,
+            &mut skipped_by_path,
+        );
     }
-
-    let user_level_root = user_level_store_root();
-    let home = dirs::home_dir().map(|home| canonical_path(&home));
-
+    let home = dirs::home_dir();
     let mut projects = registered.clone();
     let mut unregistered = BTreeSet::new();
     for candidate in scanned {
-        if Some(&candidate) == home.as_ref() {
+        if home.as_ref() == Some(&candidate) || registered.contains(&candidate) {
             continue;
         }
-        if registered.contains(&candidate) {
+        let Some(root) = inspector.observe(&candidate) else {
             continue;
-        }
-        if candidate.join(".cas").join("cas.db").is_file() {
-            if let Some(skip) =
-                crate::store::known_repos::registry_skip_for_known_roots(&candidate, &known_roots)
-            {
+        };
+        if root.has_store {
+            if let Some(skip) = classify(&root) {
                 skipped_by_path.insert(candidate, skip.reason());
             } else {
                 projects.insert(candidate.clone());
@@ -2696,55 +2722,54 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery 
             skipped_by_path.insert(candidate, "no .cas/cas.db store".to_string());
         }
     }
-
-    // A current root outside the scan is still considered, but the same
-    // exclusion rules apply. This prevents an explicit current path from
-    // bypassing the cloud-identity safety boundary.
-    if let Some(cas_root) = current_cas_root
-        && let Some(project) = cas_root.parent()
-        && user_level_root.as_deref() != Some(canonical_path(cas_root).as_path())
-    {
-        let project = canonical_path(project);
-        if project.join(".cas/cas.db").is_file() {
-            if let Some(skip) = crate::store::known_repos::registry_skip_for_known_roots(
-                &project,
-                &known_roots,
-            ) {
-                skipped_by_path.insert(project, skip.reason());
-            } else {
-                projects.insert(project);
+    // Explicit current roots have exactly the same ownership checks as the
+    // registry and scan, and share an already timed-out observation.
+    if let Some(project) = current_cas_root.and_then(Path::parent) {
+        match inspector.observe(project) {
+            Some(root) if home.as_ref() != Some(&root.root) => {
+                if !root.has_store {
+                    skipped_by_path.insert(root.root, "no .cas/cas.db store".into());
+                } else if let Some(skip) = classify(&root) {
+                    skipped_by_path.insert(root.root, skip.reason());
+                } else {
+                    projects.insert(root.root);
+                }
             }
-        } else {
-            skipped_by_path.insert(project, "no .cas/cas.db store".to_string());
+            Some(_) => {}
+            None => {
+                skipped_by_path.insert(project.to_path_buf(), discovery_probe::TIMEOUT.into());
+            }
         }
     }
-
-    // `~/.cas` is host state, not a project: it is migrated by its own
-    // user-level phase so it can never be counted in the project totals.
-    if let Some(home) = home {
+    if let Some(home) = home
+        .and_then(|home| inspector.observe(&home))
+        .map(|root| root.root)
+    {
         projects.remove(&home);
         unregistered.remove(&home);
     }
-
-    // A bind mount can expose the same project at two real paths. Refresh
-    // once per filesystem directory, preferring an already registered path.
     let mut seen_inodes = std::collections::HashSet::new();
-    let mut preferred = projects.iter().cloned().collect::<Vec<_>>();
+    let mut preferred = projects.into_iter().collect::<Vec<_>>();
     preferred.sort_by_key(|path| (!registered.contains(path), path.clone()));
-    let mut keep = BTreeSet::new();
+    let mut projects = BTreeSet::new();
+    let mut git_projects = BTreeSet::new();
     for project in preferred {
-        if crate::store::known_repos::project_inode_key(&project)
-            .is_some_and(|inode| !seen_inodes.insert(inode)) {
+        let Some(root) = inspector.observe(&project) else {
+            continue;
+        };
+        if root.inode.is_some_and(|inode| !seen_inodes.insert(inode)) {
             unregistered.remove(&project);
             skipped_by_path.insert(project, "duplicate project directory".to_string());
         } else {
-            keep.insert(project);
+            if root.git_root {
+                git_projects.insert(project.clone());
+            }
+            projects.insert(project);
         }
     }
-    projects = keep;
-
     ProjectDiscovery {
         projects: projects.into_iter().collect(),
+        git_projects,
         unregistered,
         skipped_unregistered: skipped_by_path
             .into_iter()
@@ -2765,49 +2790,36 @@ fn canonical_path(path: &Path) -> PathBuf {
 /// directories are skipped for the same reason plus cost — `~/.cargo`,
 /// `~/.rustup`, and `~/.claude` are large and hold no projects, and anything
 /// genuinely living under one is reachable through the host registry.
+#[cfg(test)]
 fn scan_for_projects(root: &Path, depth: usize, projects: &mut BTreeSet<PathBuf>) {
-    if root.join(".cas").is_dir() && crate::store::known_repos::is_project_root(root) {
-        projects.insert(canonical_path(root));
+    scan_observed_projects(
+        root,
+        depth,
+        projects,
+        &mut discovery_probe::Inspector::default(),
+        &mut BTreeMap::new(),
+    );
+}
+
+fn scan_observed_projects(
+    root: &Path,
+    depth: usize,
+    projects: &mut BTreeSet<PathBuf>,
+    inspector: &mut discovery_probe::Inspector,
+    skipped: &mut BTreeMap<PathBuf, String>,
+) {
+    let Some(observation) = inspector.observe(root) else {
+        skipped.insert(root.to_path_buf(), discovery_probe::TIMEOUT.into());
+        return;
+    };
+    if observation.project_root {
+        projects.insert(observation.root);
     }
     if depth == 0 {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(metadata) = entry.file_type() else {
-            continue;
-        };
-        if !metadata.is_dir() || metadata.is_symlink() {
-            continue;
-        }
-        let name = path.file_name().and_then(|name| name.to_str());
-        if name.is_none_or(|name| name.starts_with('.')) {
-            continue;
-        }
-        if matches!(
-            name,
-            Some(
-                "node_modules"
-                    | "target"
-                    | "venv"
-                    | "dist"
-                    | "build"
-                    | "vendor"
-                    | "Library"
-                    | "snap"
-            )
-        ) {
-            continue;
-        }
-        if dirs::home_dir()
-            .is_some_and(|home| canonical_path(&path) == canonical_path(&home.join("Archive")))
-        {
-            continue;
-        }
-        scan_for_projects(&path, depth - 1, projects);
+    for child in observation.children {
+        scan_observed_projects(&child, depth - 1, projects, inspector, skipped);
     }
 }
 

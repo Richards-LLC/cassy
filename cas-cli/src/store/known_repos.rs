@@ -297,12 +297,22 @@ pub fn is_project_root(dir: &Path) -> bool {
     if crate::cloud::canonical_id_from_config_toml(&dir.join(".cas")).is_some() {
         return true;
     }
-    let Ok(output) = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-    else {
+    git_project_root(dir)
+}
+
+/// Discovery must not leave an unbounded Git child behind a timed-out read.
+pub(crate) fn git_project_root(dir: &Path) -> bool {
+    use crate::bounded_process::{Deadline, run_command};
+    use std::time::Duration;
+    let budget = Duration::from_secs(1);
+    let Ok(output) = run_command(
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", "--show-toplevel"]),
+        Deadline::after(budget),
+        budget,
+    ) else {
         return false;
     };
     output.status.success()
@@ -328,22 +338,40 @@ pub fn registry_skip_for_known_roots(
     known_roots: &[PathBuf],
 ) -> Option<RegistrySkip> {
     let skip = registry_skip(repo_path);
-    // A copy beneath a registered project's artifacts is more specific than
-    // the generic missing-project-root reason, and names the source project.
     if skip.is_some() && !matches!(&skip, Some(RegistrySkip::NotProjectRoot(_))) {
         return skip;
     }
+    let roots = known_roots
+        .iter()
+        .map(|project| {
+            let project = canonical_path(project);
+            let artifacts = path_spellings(&project.join(".cas/artifacts"));
+            (project, artifacts)
+        })
+        .collect::<Vec<_>>();
+    registry_skip_for_observed_roots(skip, &path_spellings(repo_path), &roots)
+}
 
-    let candidate = path_spellings(repo_path);
-    for project in known_roots {
-        let project = canonical_path(project);
-        let artifacts = project.join(".cas/artifacts");
+/// The same ownership rule, using already-observed path spellings. Host-wide
+/// discovery must not reopen every other known root while inspecting one.
+pub(crate) fn registry_skip_for_observed_roots(
+    skip: Option<RegistrySkip>,
+    candidate: &[PathBuf],
+    roots: &[(PathBuf, Vec<PathBuf>)],
+) -> Option<RegistrySkip> {
+    if skip.is_some() && !matches!(&skip, Some(RegistrySkip::NotProjectRoot(_))) {
+        return skip;
+    }
+    for (project, artifacts) in roots {
         if candidate.iter().any(|path| {
-            path_spellings(&artifacts)
+            artifacts
                 .iter()
                 .any(|base| path.starts_with(base) && path != base)
         }) {
-            return Some(RegistrySkip::NestedArtifacts { project, artifacts });
+            return Some(RegistrySkip::NestedArtifacts {
+                project: project.clone(),
+                artifacts: project.join(".cas/artifacts"),
+            });
         }
     }
     skip

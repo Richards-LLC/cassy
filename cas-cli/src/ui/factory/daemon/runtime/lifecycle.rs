@@ -1217,12 +1217,6 @@ pub(super) struct FoldedRelayAttempt {
     pub recipient: Option<String>,
 }
 
-/// The relay, whether its supervisor prompt is enqueued, and whether its
-/// durable row is recorded. A `Pending` outcome whose prompt is enqueued
-/// failed only to stamp the durable row: the supervisor will still hear it
-/// (cas-26c8 L2). A recorded row the prompt never reached is re-driven by the
-/// death sweep (cas-ff42 L1).
-#[allow(clippy::too_many_arguments)]
 /// The durable dedupe key of one worker-attention episode (its
 /// `supervisor_queue.transition_key`), shared by the relay writer and the
 /// sweeps that ask whether an episode was already relayed (cas-b080).
@@ -1238,6 +1232,12 @@ fn worker_attention_relay_key(
     )
 }
 
+/// The relay, whether its supervisor prompt is enqueued, and whether its
+/// durable row is recorded. A `Pending` outcome whose prompt is enqueued
+/// failed only to stamp the durable row: the supervisor will still hear it
+/// (cas-26c8 L2). A recorded row the prompt never reached is re-driven by the
+/// death sweep (cas-ff42 L1).
+#[allow(clippy::too_many_arguments)]
 fn enqueue_worker_attention_relay_inner(
     cas_dir: &std::path::Path,
     kind: &str,

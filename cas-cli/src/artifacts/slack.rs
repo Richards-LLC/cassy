@@ -42,6 +42,8 @@ pub struct PostOptions {
 /// What a successful post returns, for the release-report flow to record.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PostReceipt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispatch_warning: Option<String>,
     pub artifact_id: String,
     pub channel_id: Option<String>,
     pub message_id: Option<String>,
@@ -357,6 +359,7 @@ fn receipt(
         .filter(|p| !p.trim().is_empty())
         .ok_or_else(|| missing("/message/permalink"))?;
     Ok(PostReceipt {
+        dispatch_warning: complete.get("dispatch_warning").and_then(Value::as_str).map(str::to_owned),
         artifact_id,
         channel_id: complete
             .pointer("/channel/id")

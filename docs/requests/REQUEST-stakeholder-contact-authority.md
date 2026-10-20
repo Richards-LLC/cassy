@@ -47,7 +47,7 @@ downgrades that attempt to a warning.
   "schema":"cassy.stakeholder-contacts/v1",
   "project_id":"canonical-project",
   "registration_id":"authenticated-registration",
-  "request_id":"stable-logical-post-id",
+  "request_id":"10000000-0000-4000-8000-000000000001",
   "channel":"configured-channel-name-or-id",
   "payload_sha256":"sha256-of-canonical-violet-arguments-without-contact_authorization",
   "policies":[{"workspace_id":"T123","user_id":"U123","minimum_interval_secs":3600,"mode":"refuse"}]
@@ -100,10 +100,19 @@ Refusal (also required in warn-mode grant's `warnings`):
 Other stable codes: `contact_in_flight`, `outcome_unknown`, `policy_conflict`,
 `idempotency_conflict`, `coordination_scope_required`, `authority_unavailable`.
 Same ID and same inputs replay the same operation; changed inputs conflict.
+Request IDs are UUIDs. A thread without explicit `request_id` derives a UUIDv8:
+take the first 16 bytes of SHA-256 of compact JSON
+`[schema,canonical_project_id,registration_id,idempotency_key]`, set the RFC variant
+and version 8 bits. Other posts generate a UUIDv4. Cassy journals immutable
+request inputs and returns the ID with unconfirmed-dispatch errors. Thread
+ownership reconciliation never consumes these contact journal rows.
+
 Unknown outcomes reconcile through existing `GET /api/coordination/operations/{request_id}`
 with registration ID. A caller must reuse its ID and must not mint a new one
 to bypass a pending operation. Cassy generates an ID when absent; explicit
 `request_id` or thread `idempotency_key` is needed for deliberate replay.
+An already settled reserve replay returns `code: "completed"` and its original
+Violet `post_receipt` (`ok: true`); Cassy returns it without a second dispatch.
 
 ### Trusted Violet dispatch and settlement
 
@@ -146,3 +155,19 @@ capability evidence; Cassy's local doubles do not establish production safety.
 Cassy's peers detail renders shared time/poster/permalink/next-allowed/owner;
 failed reads remain `unavailable`, never "never contacted". Before capability,
 it renders `local_warning` with machine-local evidence and explicit unknowns.
+
+## Cassy configuration
+
+```sh
+cas config set slack.stakeholder_contacts '[{"workspace_id":"T123","user_id":"U123","minimum_interval_secs":3600,"mode":"refuse"}]'
+cas violet post --channel dev --text '<@U123> review ready' --request-id 10000000-0000-4000-8000-000000000001
+cas factory peers --detail
+```
+
+`mode` is `refuse` (default) or `warn`. An empty list disables this local
+adapter; it must not disable Cloud's authoritative policy or Violet's direct
+dispatch enforcement. Desired configuration is project-local; shared policy
+administration remains operator-authorized in Cloud. Cassy includes degraded
+or granted warn-mode evidence as `dispatch_warning` in JSON receipts and human
+output. Local fallback evidence is derived from provider timestamps, never the
+machine clock; other machines and uncertain sends remain unknown.

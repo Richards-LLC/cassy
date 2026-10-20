@@ -62,9 +62,8 @@ pub struct PostArgs {
     /// Local file to attach, read from disk (repeatable, up to 10)
     #[arg(long = "file", value_name = "PATH")]
     pub files: Vec<PathBuf>,
-    /// Retry a managed reply with the request_id of the attempt it repeats
-    /// (a new one is made otherwise)
-    #[arg(long = "request-id", value_name = "UUID", requires = "reply_to")]
+    /// Reuse a stable request ID for a stakeholder root or managed reply retry
+    #[arg(long = "request-id", value_name = "UUID")]
     pub request_id: Option<String>,
 }
 
@@ -285,7 +284,7 @@ fn run_post(
             "expected_generation": block["expected_generation"],
             "request_id": request_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         })
-    });
+    }).or_else(|| request_id.as_ref().map(|id| json!({"request_id":id})));
     let mut hub = (context.connect)()?;
     let receipt = post_files_claimed(hub.as_mut(), &channel, text, reply_to, claim.as_ref(), &files)?;
     if context.json {
@@ -907,6 +906,7 @@ fn part_ids(message: &Value) -> Option<String> {
 }
 
 fn render_post(out: &mut dyn Write, route: Route, receipt: &Value) {
+    render_contact_warning(out, receipt);
     let files = receipt_files(receipt);
     let detail = match route {
         Route::Message => "message".to_string(),
@@ -973,6 +973,7 @@ fn posted_lines(out: &mut dyn Write, receipt: &Value) {
 }
 
 fn render_thread(out: &mut dyn Write, receipt: &Value) {
+    render_contact_warning(out, receipt);
     let count = receipt
         .get("posted")
         .and_then(Value::as_array)
@@ -987,6 +988,7 @@ fn render_thread(out: &mut dyn Write, receipt: &Value) {
 }
 
 fn render_partial_thread(out: &mut dyn Write, envelope: &Value) {
+    render_contact_warning(out, envelope);
     if envelope.get("kind").and_then(Value::as_str) != Some("thread") {
         return;
     }
@@ -1025,6 +1027,12 @@ fn render_partial_thread(out: &mut dyn Write, envelope: &Value) {
         "read the thread first: cas violet read --thread <root>"
     };
     let _ = writeln!(out, "  -> {hint}");
+}
+
+fn render_contact_warning(out: &mut dyn Write, receipt: &Value) {
+    if let Some(warning) = receipt["dispatch_warning"].as_str() {
+        let _ = writeln!(out, "[WARN] {warning}");
+    }
 }
 
 fn render_read(out: &mut dyn Write, receipt: &Value, args: &ReadArgs) {

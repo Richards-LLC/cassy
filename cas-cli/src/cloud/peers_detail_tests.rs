@@ -165,7 +165,7 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
         .insert("focus".into(), format!("\u{1b}[31m\n{}", "界".repeat(100)));
     let report = PeerReport {
         #[cfg(feature = "mcp-proxy")]
-        stakeholder_contacts: serde_json::json!({"state":"unconfigured"}),
+        stakeholder_contacts: serde_json::json!({"state":"shared","contacts":[{"workspace_id":"T123","user_id":"U123","last_contact_at":"2026-10-20T16:23:00Z","last_poster":"peer-on-prowl","permalink":"https://example.slack.com/root","next_allowed_at":"2026-10-20T17:23:00Z","owner":{"registration_id":"new-owner"}}]}),
         hidden_peers: 0,
         overlaps: Vec::new(),
         limitations: Vec::new(),
@@ -205,9 +205,13 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
             assert!(!ascii || text.is_ascii());
             assert!(text.contains("--json for untruncated values"));
             assert!(text.contains("Claims  0") && text.contains("Workers 0 live (read-only)"));
+            #[cfg(feature = "mcp-proxy")]
+            assert!(text.contains("Stakeholder contacts [shared]") && text.contains("Next allowed 2026-10-20T17:23:00Z") && text.contains("Owner new-owner"));
         }
     }
     let encoded = serde_json::to_value(&report).unwrap();
+    #[cfg(feature = "mcp-proxy")]
+    assert_eq!(encoded["stakeholder_contacts"]["contacts"][0]["last_poster"], "peer-on-prowl");
     assert_eq!(
         encoded["peers"][0]["supervisor"]["focus"],
         agents[0].metadata["focus"]

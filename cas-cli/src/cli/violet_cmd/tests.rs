@@ -158,27 +158,33 @@ fn exactly_one_mebibyte_goes_inline_in_one_call() {
     let dir = TempDir::new().unwrap();
     let bytes = vec![b'a'; INLINE_LIMIT as usize];
     let path = write_file(&dir, "edge.txt", &bytes);
-    let hub = ScriptedHub::with(vec![file_receipt("F1", "edge.txt", &bytes)]);
+    let mut receipt = file_receipt("F1", "edge.txt", &bytes);
+    receipt["dispatch_warning"] = json!("shared exclusion is unavailable; last 16:23 by peer; https://slack.test/root");
+    let hub = ScriptedHub::with(vec![receipt]);
 
-    let (_, result) = run_cli(
+    let (out, result) = run_cli(
         &[
             "post",
             "--channel",
             "cas-internal",
             "--file",
             path.to_str().unwrap(),
+            "--request-id",
+            "10000000-0000-4000-8000-000000000001",
         ],
         &hub,
         false,
         &no_gate,
     );
     result.unwrap();
+    assert!(out.contains("[WARN] shared exclusion is unavailable; last 16:23 by peer; https://slack.test/root"));
 
     let calls = hub.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
     let (tool, args) = &calls[0];
     assert_eq!(tool, "violet_post");
     assert_eq!(args["kind"], "file");
+    assert_eq!(args["request_id"], "10000000-0000-4000-8000-000000000001");
     assert_eq!(args["file"]["content_encoding"], "text");
     assert_eq!(args["file"]["size_bytes"], INLINE_LIMIT);
     assert_eq!(args["file"]["sha256"], sha(&bytes));

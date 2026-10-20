@@ -100,13 +100,14 @@ pub trait ProxyCallInterceptor: Send + Sync {
 
 pub struct PreparedProxyCall {
     pub arguments: Option<serde_json::Map<String, Value>>,
-    pub refusal: Option<rmcp::model::CallToolResult>,
+    pub response: Option<rmcp::model::CallToolResult>,
     pub warning: Option<String>,
+    pub failure_context: Option<String>,
 }
 
 impl PreparedProxyCall {
     pub fn forward(arguments: Option<serde_json::Map<String, Value>>) -> Self {
-        Self { arguments, refusal: None, warning: None }
+        Self { arguments, response: None, warning: None, failure_context: None }
     }
 }
 
@@ -1433,12 +1434,12 @@ impl ProxyEngine {
         } else {
             PreparedProxyCall::forward(arguments)
         };
-        if let Some(refusal) = prepared.refusal {
-            return Ok(refusal);
+        if let Some(response) = prepared.response {
+            return Ok(response);
         }
         let arguments = prepared.arguments;
 
-        let mut result = self
+        let result = self
             .call_upstream(
                 server_name,
                 CallToolRequestParams {
@@ -1448,7 +1449,11 @@ impl ProxyEngine {
                     task: None,
                 },
             )
-            .await?;
+            .await;
+        let mut result = match prepared.failure_context {
+            Some(context) => result.with_context(|| context)?,
+            None => result?,
+        };
 
         if let Some(interceptor) = interceptor {
             let serialized = serde_json::to_value(&result).unwrap_or(Value::Null);
@@ -1458,6 +1463,20 @@ impl ProxyEngine {
             });
         }
         if let Some(warning) = prepared.warning {
+            // Keep warnings in JSON receipts too: CLI and artifact callers
+            // decode the first receipt, while direct MCP sees all content.
+            if let Some(value) = result.structured_content.as_mut().filter(|value| value.is_object()) {
+                value["dispatch_warning"] = Value::String(warning.clone());
+            }
+            for content in &mut result.content {
+                if let rmcp::model::RawContent::Text(text) = &mut content.raw
+                    && let Ok(mut value) = serde_json::from_str::<Value>(&text.text)
+                    && value.is_object()
+                {
+                    value["dispatch_warning"] = Value::String(warning.clone());
+                    text.text = value.to_string();
+                }
+            }
             result.content.push(rmcp::model::Content::text(warning));
         }
 
@@ -2834,6 +2853,31 @@ mod tests {
             factory_session: Some("factory-1".to_string()),
             active_task_ids: vec!["cas-8750".to_string()],
         }
+    }
+
+    #[tokio::test]
+    async fn interceptor_refusal_covers_direct_and_execute_dispatch() {
+        struct Refuse;
+        impl ProxyCallInterceptor for Refuse {
+            fn prepare<'a>(&'a self, caller: &'a ProxyCaller, server: &'a str, tool: &'a str,
+                arguments: Option<serde_json::Map<String, Value>>,
+            ) -> futures::future::BoxFuture<'a, Result<PreparedProxyCall>> {
+                Box::pin(async move {
+                    assert_eq!(caller.agent_id, "registered-worker");
+                    assert_eq!((server, tool), ("violet", "violet_post"));
+                    Ok(PreparedProxyCall { arguments, warning:None, failure_context:None,
+                        response:Some(rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text("contact_too_recent")])) })
+                })
+            }
+        }
+        let engine = ProxyEngine::from_configs(HashMap::new()).await.unwrap();
+        engine.set_call_interceptor(Arc::new(Refuse)).await;
+        let caller = registered_worker_caller();
+        let direct = engine.call_tool(&caller, "violet", "violet_post", None).await.unwrap();
+        assert_eq!(direct["isError"], true);
+        let execute = engine.execute(&caller, r#"{"server":"violet","tool":"violet_post","args":{}}"#, None).await.unwrap();
+        assert!(execute.is_error && execute.text.contains("contact_too_recent"));
+        // No upstream exists, so either missed dispatch path fails above.
     }
 
     /// GH #988: `supervisor:` routes admit supervisors and plain sessions,

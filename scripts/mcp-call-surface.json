@@ -2,6 +2,7 @@
   "tools": {
     "artifact": {
       "actions": [
+        "fetch",
         "list",
         "post",
         "publish",
@@ -12,6 +13,8 @@
         "channel",
         "id",
         "initial_comment",
+        "note_type",
+        "notes",
         "path",
         "reply_to",
         "task_id",

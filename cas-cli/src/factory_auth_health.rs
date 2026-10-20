@@ -200,13 +200,46 @@ pub enum CodexModelSupport {
 /// A catalogue older than this may predate the model, so it cannot refuse it.
 const CODEX_CATALOG_MAX_AGE_DAYS: i64 = 7;
 
+/// The numeric components of a codex version (`codex-cli 0.163.0` → [0,163,0]),
+/// from the first token that starts with a digit, so a trailing token such
+/// as `(abc1234)` cannot hide it (cas-c8de).
+fn codex_version_parts(version: &str) -> Option<Vec<u64>> {
+    let token = version
+        .split_whitespace()
+        .map(|token| token.trim_start_matches('v'))
+        .find(|token| token.starts_with(|c: char| c.is_ascii_digit()))?;
+    let parts: Vec<u64> = token
+        .split(['.', '-', '+'])
+        .map_while(|part| part.parse().ok())
+        .collect();
+    (!parts.is_empty()).then_some(parts)
+}
+
+/// `older < newer` with missing trailing components read as zero, so 0.163
+/// and 0.163.0 are the same version (cas-c8de).
+fn codex_version_older(older: &[u64], newer: &[u64]) -> bool {
+    let len = older.len().max(newer.len());
+    let padded = |parts: &[u64]| parts.iter().copied().chain(std::iter::repeat(0)).take(len).collect::<Vec<_>>();
+    padded(older) < padded(newer)
+}
+
 /// Codex records the ChatGPT account's model list in `models_cache.json`
 /// beside `auth.json`; a model absent from a fresh list is one the account
 /// cannot run (cas-5e3c).
+///
+/// cas-49d3: the server filters that list by the client that fetched it. An
+/// older codex (ChatGPT.app bundles 0.146) rewrites the cache with a catalogue
+/// lacking newer models such as gpt-6.1-sol, which the installed codex can
+/// run. So a cache whose `client_version` is missing, or older than
+/// `installed_codex` (the `codex --version` that will run the worker), is not
+/// evidence of absence. With the installed version unknown, a recorded
+/// `client_version` keeps the catalogue's verdict. `installed_codex` is asked
+/// only when the catalogue would otherwise refuse (cas-c8de).
 pub fn codex_account_model_support(
     codex_home: &std::path::Path,
     model: &str,
     now: chrono::DateTime<chrono::Utc>,
+    installed_codex: &dyn Fn() -> Option<String>,
 ) -> CodexModelSupport {
     let read_json = |name: &str| -> Result<serde_json::Value, String> {
         let path = codex_home.join(name);
@@ -245,12 +278,29 @@ pub fn codex_account_model_support(
         return CodexModelSupport::Unverified("models_cache.json lists no models".to_string());
     }
     if listed.iter().any(|slug| slug.eq_ignore_ascii_case(model.trim())) {
-        CodexModelSupport::Supported
-    } else {
-        CodexModelSupport::Unsupported {
-            catalog: codex_home.join("models_cache.json"),
-            listed,
-        }
+        return CodexModelSupport::Supported;
+    }
+    let cache_client = catalog
+        .get("client_version")
+        .and_then(serde_json::Value::as_str)
+        .and_then(codex_version_parts);
+    let Some(cache_client) = cache_client else {
+        return CodexModelSupport::Unverified(
+            "models_cache.json does not record the codex client that fetched it".to_string(),
+        );
+    };
+    if let Some(installed) = installed_codex().as_deref().and_then(codex_version_parts)
+        && codex_version_older(&cache_client, &installed)
+    {
+        return CodexModelSupport::Unverified(format!(
+            "models_cache.json was fetched by codex {} and lists only that client's models; the installed codex is {}",
+            cache_client.iter().map(u64::to_string).collect::<Vec<_>>().join("."),
+            installed.iter().map(u64::to_string).collect::<Vec<_>>().join("."),
+        ));
+    }
+    CodexModelSupport::Unsupported {
+        catalog: codex_home.join("models_cache.json"),
+        listed,
     }
 }
 
@@ -443,27 +493,79 @@ mod tests {
             std::fs::write(home.path().join("auth.json"), format!(r#"{{"auth_mode":"{mode}"}}"#)).unwrap();
             std::fs::write(
                 home.path().join("models_cache.json"),
-                serde_json::json!({"fetched_at": fetched, "models": [{"slug": "gpt-6-sol"}]}).to_string(),
+                serde_json::json!({"fetched_at": fetched, "client_version": "0.163.0", "models": [{"slug": "gpt-6-sol"}]})
+                    .to_string(),
             )
             .unwrap();
         };
+        let installed = || Some("codex-cli 0.163.0".to_string());
         assert!(matches!(
-            codex_account_model_support(home.path(), "gpt-6.1-sol", now),
+            codex_account_model_support(home.path(), "gpt-6.1-sol", now, &installed),
             CodexModelSupport::Unverified(_)
         ));
         write("chatgpt", now);
-        assert_eq!(codex_account_model_support(home.path(), "gpt-6-sol", now), CodexModelSupport::Supported);
+        assert_eq!(
+            codex_account_model_support(home.path(), "gpt-6-sol", now, &installed),
+            CodexModelSupport::Supported
+        );
         assert!(matches!(
-            codex_account_model_support(home.path(), "gpt-6.1-sol", now),
+            codex_account_model_support(home.path(), "gpt-6.1-sol", now, &installed),
             CodexModelSupport::Unsupported { ref listed, .. } if listed == &["gpt-6-sol"]
         ));
         write("chatgpt", now - chrono::Duration::days(30));
         assert!(matches!(
-            codex_account_model_support(home.path(), "gpt-6.1-sol", now),
+            codex_account_model_support(home.path(), "gpt-6.1-sol", now, &installed),
             CodexModelSupport::Unverified(_)
         ));
         write("apikey", now);
-        assert_eq!(codex_account_model_support(home.path(), "gpt-6.1-sol", now), CodexModelSupport::Supported);
+        assert_eq!(
+            codex_account_model_support(home.path(), "gpt-6.1-sol", now, &installed),
+            CodexModelSupport::Supported
+        );
+    }
+
+    /// cas-49d3: on prowl, ChatGPT.app's bundled codex 0.146 rewrote
+    /// models_cache.json with a catalogue filtered for that client, without
+    /// gpt-6.x, while the installed codex 0.163 runs gpt-6.1-sol. An older or
+    /// unrecorded client's catalogue cannot refuse; the same client's can.
+    #[test]
+    fn an_older_client_catalogue_cannot_refuse_a_model_the_installed_codex_runs_cas_49d3() {
+        let home = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        std::fs::write(home.path().join("auth.json"), r#"{"auth_mode":"chatgpt"}"#).unwrap();
+        let catalogue = |client: Option<&str>| {
+            let mut cache = serde_json::json!({"fetched_at": now, "models": [{"slug": "gpt-5.6-sol"}]});
+            if let Some(client) = client {
+                cache["client_version"] = serde_json::json!(client);
+            }
+            std::fs::write(home.path().join("models_cache.json"), cache.to_string()).unwrap();
+        };
+        let installed = std::cell::Cell::new("codex-cli 0.163.0");
+        let probes = std::cell::Cell::new(0);
+        let probe = || {
+            probes.set(probes.get() + 1);
+            Some(installed.get().to_string())
+        };
+        let support = || codex_account_model_support(home.path(), "gpt-6.1-sol", now, &probe);
+
+        catalogue(Some("0.146.0"));
+        assert!(matches!(support(), CodexModelSupport::Unverified(_)), "{:?}", support());
+        catalogue(None);
+        assert!(matches!(support(), CodexModelSupport::Unverified(_)), "{:?}", support());
+        catalogue(Some("0.163.0"));
+        assert!(matches!(support(), CodexModelSupport::Unsupported { .. }), "{:?}", support());
+
+        // cas-c8de: a trailing build token and an uneven-length version are
+        // still read, and a listed model never runs the probe.
+        installed.set("codex-cli 0.163.0 (abc1234)");
+        catalogue(Some("0.146.0"));
+        assert!(matches!(support(), CodexModelSupport::Unverified(_)), "{:?}", support());
+        catalogue(Some("0.163"));
+        assert!(matches!(support(), CodexModelSupport::Unsupported { .. }), "0.163 is 0.163.0: {:?}", support());
+        probes.set(0);
+        let listed = || codex_account_model_support(home.path(), "gpt-5.6-sol", now, &probe);
+        assert_eq!(listed(), CodexModelSupport::Supported);
+        assert_eq!(probes.get(), 0, "a listed model needs no codex --version");
     }
 
     #[test]

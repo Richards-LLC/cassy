@@ -324,27 +324,6 @@ impl SyncQueue {
         Ok(reset)
     }
 
-    /// Replace a planned task upsert only if no concurrent writer changed its
-    /// payload. Repaired NUL rows become retryable while preserving the queue
-    /// identity and creation order.
-    pub fn repair_task_note_nul_payload(
-        &self,
-        id: i64,
-        previous_payload: &str,
-        repaired_payload: &str,
-    ) -> Result<bool, CasError> {
-        let conn = self.conn.lock().unwrap();
-        let updated = conn.execute(
-            "UPDATE sync_queue
-             SET payload = ?1, retry_count = 0, last_error = NULL,
-                 last_outcome = NULL, last_reason = NULL, failed_client_version = NULL
-             WHERE id = ?2 AND entity_type = 'task' AND operation = 'upsert'
-               AND payload = ?3",
-            params![repaired_payload, id, previous_payload],
-        )?;
-        Ok(updated == 1)
-    }
-
     /// Requeue terminal failures caused by a client version gate once this
     /// build meets the server's recorded minimum version. `last_error` is the
     /// latest failure even when an earlier cloud verdict remains in

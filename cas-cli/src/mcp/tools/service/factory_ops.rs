@@ -7522,6 +7522,8 @@ const GC_REPORT_PAGE_MAX: usize = 100;
 const GC_REPORT_PAGE_MAX_BYTES: usize = 32 * 1024;
 const GC_REPORT_SAMPLE_ITEMS: usize = 3;
 const GC_REPORT_SAMPLE_CHARS: usize = 180;
+const GC_REPORT_CATEGORY_HEADING_MAX_CHARS: usize = 512;
+const GC_REPORT_MACHINE_STATUS_MAX_BYTES: usize = 8 * 1024;
 
 /// Keep the default tool result compact while preserving every original line
 /// behind explicit, zero-based `limit`/`offset` pages.
@@ -7597,9 +7599,13 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             .filter(|line| gc_report_is_inventory_item(line))
             .collect::<Vec<_>>();
         let item_count = item_lines.len();
+        let section_bytes = lines
+            .iter()
+            .filter(|line| !gc_report_is_machine_status_line(line))
+            .map(|line| line.len().saturating_add(1))
+            .sum::<usize>();
         summary.push_str(&format!(
-            "- {label}: {item_count} items, {} bytes\n",
-            section.len()
+            "- {label}: {item_count} items, {section_bytes} bytes\n"
         ));
 
         if let Some(context) = detail_lines
@@ -7619,7 +7625,7 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
     if !machine_status_lines.is_empty() {
         summary.push_str("\nMachine-readable status:\n");
         for line in machine_status_lines {
-            summary.push_str(line);
+            summary.push_str(&gc_report_bounded_machine_status_line(line));
             summary.push('\n');
         }
     }
@@ -7688,17 +7694,15 @@ fn gc_report_page_text(
 }
 
 fn gc_report_category_label(heading: &str) -> String {
-    let heading = heading.trim();
-    let label = if heading.starts_with("TARGET_CACHE_STATUS_JSON=") {
-        "Cargo target cache machine detail"
-    } else {
-        heading
-            .split_once(": ")
-            .map_or(heading, |(label, _)| label)
-            .trim_end_matches(':')
-            .trim()
-    };
-    gc_report_short_line(label)
+    let heading = heading.trim().trim_end_matches(':').trim();
+    let chars = heading.chars().collect::<Vec<_>>();
+    if chars.len() <= GC_REPORT_CATEGORY_HEADING_MAX_CHARS {
+        return heading.to_string();
+    }
+    let half = GC_REPORT_CATEGORY_HEADING_MAX_CHARS / 2;
+    let start = chars[..half].iter().collect::<String>();
+    let end = chars[chars.len() - half..].iter().collect::<String>();
+    format!("{start}…{end}")
 }
 
 fn gc_report_is_inventory_item(line: &str) -> bool {
@@ -7725,6 +7729,166 @@ fn gc_report_short_line(line: &str) -> String {
         format!("{short}…")
     } else {
         short
+    }
+}
+
+fn gc_report_bounded_machine_status_line(line: &str) -> String {
+    if line.len() <= GC_REPORT_MACHINE_STATUS_MAX_BYTES {
+        return line.to_string();
+    }
+
+    let Some((key, raw_json)) = line.split_once('=') else {
+        return line.chars().take(GC_REPORT_MACHINE_STATUS_MAX_BYTES).collect();
+    };
+    let original_bytes = line.len();
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw_json) else {
+        return format!(
+            "{key}={{\"summary_truncated\":true,\"summary_original_bytes\":{original_bytes}}}"
+        );
+    };
+    let original_counts = ["caches", "lane_previews"]
+        .into_iter()
+        .map(|field| {
+            (
+                field,
+                value
+                    .get(field)
+                    .and_then(serde_json::Value::as_array)
+                    .map_or(0, Vec::len),
+            )
+        })
+        .collect::<Vec<_>>();
+    for (field, count) in &original_counts {
+        if let Some(items) = value.get_mut(field).and_then(serde_json::Value::as_array_mut) {
+            items.truncate(GC_REPORT_SAMPLE_ITEMS);
+        }
+        let omitted = count.saturating_sub(GC_REPORT_SAMPLE_ITEMS);
+        if omitted > 0
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert(format!("{field}_omitted"), serde_json::json!(omitted));
+        }
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.insert("summary_truncated".into(), serde_json::Value::Bool(true));
+        object.insert(
+            "summary_original_bytes".into(),
+            serde_json::json!(original_bytes),
+        );
+    }
+
+    loop {
+        let encoded = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
+        let candidate = format!("{key}={encoded}");
+        if candidate.len() <= GC_REPORT_MACHINE_STATUS_MAX_BYTES {
+            return candidate;
+        }
+
+        let mut removed = false;
+        for field in ["caches", "lane_previews"] {
+            let Some(items) = value.get_mut(field).and_then(serde_json::Value::as_array_mut)
+            else {
+                continue;
+            };
+            if items.pop().is_none() {
+                continue;
+            }
+            let omitted_key = format!("{field}_omitted");
+            let omitted = value
+                .get(&omitted_key)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                .saturating_add(1);
+            if let Some(object) = value.as_object_mut() {
+                object.insert(omitted_key, serde_json::json!(omitted));
+            }
+            removed = true;
+            break;
+        }
+        if !removed {
+            let count_for = |field: &str| {
+                original_counts
+                    .iter()
+                    .find(|(name, _)| *name == field)
+                    .map_or(0, |(_, count)| *count)
+            };
+            let compact = serde_json::json!({
+                "schema_version": value.get("schema_version"),
+                "filesystem": value.get("filesystem"),
+                "candidate_bytes": value.get("candidate_bytes"),
+                "selected_bytes": value.get("selected_bytes"),
+                "reclaimed_bytes": value.get("reclaimed_bytes"),
+                "dry_run": value.get("dry_run"),
+                "cache_count": count_for("caches"),
+                "lane_preview_count": count_for("lane_previews"),
+                "summary_truncated": true,
+                "summary_original_bytes": original_bytes,
+            });
+            return format!("{key}={compact}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod gc_report_render_tests {
+    use super::*;
+
+    #[test]
+    fn large_machine_status_is_bounded_and_records_omitted_cache_details() {
+        let caches = (0..1_000)
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("/tmp/factory/cache-{index}"),
+                    "bytes": index,
+                    "disposition": "selected",
+                    "reason": "stale regenerable cache; review before cleanup",
+                })
+            })
+            .collect::<Vec<_>>();
+        let status = serde_json::json!({
+            "schema_version": 1,
+            "filesystem": {"total_bytes": 10_000, "available_bytes": 5_000},
+            "candidate_bytes": 499_500,
+            "selected_bytes": 499_500,
+            "reclaimed_bytes": 0,
+            "dry_run": true,
+            "remediation": "Review gc_report before cleanup.",
+            "caches": caches,
+            "lane_previews": [],
+        });
+        let report = format!(
+            "Factory GC Report\n=================\n\nStale agents: 0\n\nCargo target cache pressure:\n  - /tmp/factory/cache-0 bytes=0\nTARGET_CACHE_STATUS_JSON={status}\n"
+        );
+
+        let summary = render_gc_report_response(&report, None, None);
+        let line = summary
+            .lines()
+            .find(|line| line.starts_with("TARGET_CACHE_STATUS_JSON="))
+            .expect("bounded machine-readable status line");
+        assert!(line.len() <= 8 * 1024, "{} bytes", line.len());
+        let value: serde_json::Value = serde_json::from_str(
+            line.strip_prefix("TARGET_CACHE_STATUS_JSON=").unwrap(),
+        )
+        .expect("status remains valid JSON");
+        assert_eq!(value["summary_truncated"], true);
+        assert_eq!(value["caches"].as_array().unwrap().len(), 3);
+        assert_eq!(value["caches_omitted"], 997);
+        let category = summary
+            .lines()
+            .find(|line| line.starts_with("- Cargo target cache pressure:"))
+            .unwrap();
+        assert!(category.starts_with("- Cargo target cache pressure: 1 items, "));
+        let category_bytes = category
+            .split(" items, ")
+            .nth(1)
+            .unwrap()
+            .split(" bytes")
+            .next()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        assert!(category_bytes < 1_000, "{category}");
+        assert!(!summary.contains("Sample: TARGET_CACHE_STATUS_JSON="));
     }
 }
 

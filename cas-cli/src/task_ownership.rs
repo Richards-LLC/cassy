@@ -106,7 +106,11 @@ fn read_stores(cas_root: &Path, specs: Vec<StoreSpec>, between: &dyn Fn()) -> St
             continue;
         }
         let db = spec.cas_dir.join("cas.db");
-        if !spec.required && !db.exists() {
+        // cas-69b5: only a store that is not there is absent; one that
+        // cannot be looked at (permission denied) is unreadable, not empty.
+        if !spec.required
+            && std::fs::metadata(&db).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
             continue;
         }
         match store_task_ids_retrying(&db, between) {
@@ -183,6 +187,11 @@ struct Fingerprint {
     /// checkpoint progress (backfilled frames). Every commit and every
     /// checkpoint moves one of them; reader marks are left out.
     wal_index: Vec<u8>,
+    /// cas-69b5: a checkpoint is copying frames into the database right now
+    /// (SQLite raises `nBackfillAttempted` when it starts and `nBackfill` to
+    /// match when it finishes). One that spans the whole read leaves the
+    /// wal-index unchanged, so it is detected here instead.
+    checkpointing: bool,
 }
 
 /// Up to `len` bytes of `path` from `start`; a missing file reads empty.
@@ -209,6 +218,8 @@ fn fingerprint(db: &Path, wal: &Path) -> Result<Fingerprint, String> {
     let (_, header) = file_bytes(&shm, 0, 48)?;
     let (_, backfill) = file_bytes(&shm, 96, 4)?;
     let (_, attempted) = file_bytes(&shm, 128, 4)?;
+    let word = |bytes: &[u8]| <[u8; 4]>::try_from(bytes).ok().map(u32::from_ne_bytes);
+    let checkpointing = matches!((word(&backfill), word(&attempted)), (Some(done), Some(started)) if started > done);
     let wal_index = [header, backfill, attempted].concat();
     Ok(Fingerprint {
         db_len: meta.len(),
@@ -217,6 +228,7 @@ fn fingerprint(db: &Path, wal: &Path) -> Result<Fingerprint, String> {
         wal_len,
         wal_header,
         wal_index,
+        checkpointing,
     })
 }
 
@@ -228,6 +240,9 @@ fn store_task_ids(db: &Path, between: &dyn Fn()) -> Result<HashSet<String>, Read
     }
     let wal = PathBuf::from(format!("{}-wal", db.display()));
     let before = fingerprint(db, &wal)?;
+    if before.checkpointing {
+        return Err(ReadError::Changed);
+    }
     let wal_bytes = match std::fs::read(&wal) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -428,6 +443,43 @@ mod tests {
         assert!(matches!(store_task_ids(&db, &checkpoint), Err(ReadError::Changed)));
         assert_eq!(std::fs::metadata(&db).unwrap().len(), before, "the checkpoint kept the size");
         assert_eq!(std::fs::metadata(&db).unwrap().modified().unwrap(), mtime, "and the mtime");
+    }
+
+    /// cas-69b5: a checkpoint already copying frames when the read starts
+    /// (and still copying when it ends) leaves every fingerprint field as it
+    /// was, so the store is unproven rather than trusted.
+    #[test]
+    fn an_in_flight_checkpoint_makes_the_store_unproven_cas_69b5() {
+        let dir = tempfile::tempdir().unwrap();
+        let this = tempfile::tempdir().unwrap();
+        let root = store_with_wal(dir.path(), &["cas-aaaa"], &["cas-bbbb"]);
+        let mut shm = vec![0u8; 136];
+        shm[96..100].copy_from_slice(&1u32.to_ne_bytes());
+        shm[128..132].copy_from_slice(&2u32.to_ne_bytes());
+        std::fs::write(root.join(".cas/cas.db-shm"), shm).unwrap();
+        let projects = KnownProjects::from_specs_with(&this.path().join(".cas"), vec![repo_spec(root)], &|| {});
+        assert!(projects.holders("cas-aaaa").unwrap_err().contains("changed while it was read"));
+    }
+
+    /// cas-69b5: a global store that cannot be looked at (permission
+    /// denied) is unreadable, never absent, so no id counts as not held.
+    #[test]
+    fn an_unreadable_global_store_is_unproven_not_absent_cas_69b5() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let this = tempfile::tempdir().unwrap();
+        let global = home.path().join(".cas");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(global.join("cas.db"), b"").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let spec = StoreSpec { label: "global store".into(), cas_dir: global.clone(), required: false };
+        let projects = KnownProjects::from_specs_with(&this.path().join(".cas"), vec![spec], &|| {});
+        let result = projects.holders("cas-abcd");
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.unwrap_err().contains("global store"));
+        let missing = StoreSpec { label: "global store".into(), cas_dir: home.path().join("none"), required: false };
+        let projects = KnownProjects::from_specs_with(&this.path().join(".cas"), vec![missing], &|| {});
+        assert!(projects.holders("cas-abcd").unwrap().is_empty(), "a missing global store holds nothing");
     }
 
     /// cas-2191: a store written once during the read is read again and

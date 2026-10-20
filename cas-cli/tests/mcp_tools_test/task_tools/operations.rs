@@ -4912,7 +4912,7 @@ fn branch_adoption_fixture(env: &mut TestEnvGuard) -> BranchAdoptionFixture {
 
 #[tokio::test]
 async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_38a7() {
-    for mode in ["dirty", "dirty-force", "diverged", "foreign"] {
+    for mode in ["dirty", "dirty-force", "diverged", "foreign", "unrelated-branch"] {
         let mut env = TestEnvGuard::temp_home();
         let fixture = branch_adoption_fixture(&mut env);
         let foreign = tempfile::TempDir::new().unwrap();
@@ -4938,6 +4938,8 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
             let mut receiver = fixture.receiver.clone();
             receiver.metadata.insert("clone_path".into(), foreign.path().display().to_string());
             agents.update(&receiver).unwrap();
+        } else if mode == "unrelated-branch" {
+            branch_transfer_git(fixture.destination.path(), &["switch", "-c", "factory/unrelated-worker"]);
         } else {
             std::fs::write(fixture.destination.path().join("own-work.txt"), "keep me").unwrap();
             if mode == "diverged" {
@@ -4955,7 +4957,8 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
         assert_eq!(after.assignee, fixture.task.assignee, "{mode}");
         assert_eq!(after.deliverables.parked_branch, fixture.task.deliverables.parked_branch, "{mode}");
         assert_eq!(agents.get_lease(&fixture.task.id).unwrap().unwrap().agent_id, original_holder, "{mode}");
-        assert_eq!(branch_transfer_git(fixture.destination.path(), &["branch", "--show-current"]), "factory/new-worker");
+        let expected_branch = if mode == "unrelated-branch" { "factory/unrelated-worker" } else { "factory/new-worker" };
+        assert_eq!(branch_transfer_git(fixture.destination.path(), &["branch", "--show-current"]), expected_branch);
     }
 }
 
@@ -5041,6 +5044,12 @@ async fn transfer_adopt_branch_uses_isolated_receivers_managed_worktree_cas_2d20
     let parked = cas::factory_isolation::worker_task_branch(&departed.name, &task.id);
     branch_transfer_git(root, &["branch", &parked, &tip]);
     branch_transfer_git(&managed, &["switch", &parked]);
+    // The live receiver had already fast-forwarded this source branch beyond
+    // the task's anchor. Recovery must preserve it and copy only the anchor.
+    std::fs::write(managed.join("later-task.txt"), "separate work").unwrap();
+    branch_transfer_git(&managed, &["add", "later-task.txt"]);
+    branch_transfer_git(&managed, &["commit", "-m", "later task"]);
+    let source_head = branch_transfer_git(&managed, &["rev-parse", "HEAD"]);
     agents.release_lease(&task.id, &source.id).unwrap();
     agents.unregister(&departed.id).unwrap();
     task.status = cas::types::TaskStatus::AwaitingMerge;
@@ -5083,6 +5092,8 @@ async fn transfer_adopt_branch_uses_isolated_receivers_managed_worktree_cas_2d20
     let expected = "factory/new-worker-cas-branch1100";
     assert_eq!(branch_transfer_git(&managed, &["branch", "--show-current"]), expected);
     assert_eq!(branch_transfer_git(&managed, &["rev-parse", "HEAD"]), tip);
+    assert!(!managed.join("later-task.txt").exists());
+    assert_eq!(branch_transfer_git(&managed, &["rev-parse", &parked]), source_head);
     let after = open_task_store(&cas_dir).unwrap().get(&task.id).unwrap();
     assert_eq!(after.assignee.as_deref(), Some("new-worker"));
     assert_eq!(after.deliverables.parked_branch.as_deref(), Some(expected));

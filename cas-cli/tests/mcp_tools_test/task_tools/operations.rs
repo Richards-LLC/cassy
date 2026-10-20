@@ -5018,9 +5018,9 @@ async fn transfer_adopt_branch_rebinds_delivery_and_real_commit_guard_cas_38a7()
 /// binds the per-task branch there, and the commit guard admits it; an
 /// unadopted foreign branch in that worktree is still refused.
 #[tokio::test]
-async fn transfer_adopt_branch_uses_isolated_receivers_managed_worktree_cas_2d20() {
+async fn transfer_adopt_branch_uses_isolated_receivers_managed_worktree_cas_2d20_cas_a9fe() {
     let mut env = TestEnvGuard::temp_home();
-    let BranchAdoptionFixture { temp, destination, service, task, receiver, tip, .. } =
+    let BranchAdoptionFixture { temp, destination, service, mut task, source, receiver, tip } =
         branch_adoption_fixture(&mut env);
     let root = temp.path();
     let cas_dir = root.join(".cas");
@@ -5034,16 +5034,59 @@ async fn transfer_adopt_branch_uses_isolated_receivers_managed_worktree_cas_2d20
     registered.metadata.remove("clone_path");
     agents.update(&registered).unwrap();
 
+    // cas-da9a: the old worker is gone, and the receiver's own clean tree
+    // already has that worker's parked task branch checked out.
+    let departed = Agent::new_with_role("departed-id".into(), "departed-worker".into(), AgentRole::Worker);
+    agents.register(&departed).unwrap();
+    let parked = cas::factory_isolation::worker_task_branch(&departed.name, &task.id);
+    branch_transfer_git(root, &["branch", &parked, &tip]);
+    branch_transfer_git(&managed, &["switch", &parked]);
+    agents.release_lease(&task.id, &source.id).unwrap();
+    agents.unregister(&departed.id).unwrap();
+    task.status = cas::types::TaskStatus::AwaitingMerge;
+    task.assignee = Some(departed.name);
+    task.deliverables.parked_branch = Some(parked.clone());
+    open_task_store(&cas_dir).unwrap().update(&task).unwrap();
+    promote_default_test_agent(&cas_dir);
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    // Replay the ordinary transfer from the incident: assignment succeeds,
+    // but it cannot repair the worktree binding by itself.
+    service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "transfer", "id": task.id, "to_agent": receiver.name,
+        "supervisor_override": true,
+    })).unwrap())).await.unwrap();
+    let guard = |command: &str| -> serde_json::Value {
+        let input: cas::hooks::HookInput = serde_json::from_value(serde_json::json!({
+            "session_id": receiver.id, "cwd": managed, "tool_name": "Bash",
+            "tool_input": {"command": command},
+        })).unwrap();
+        serde_json::to_value(cas::hooks::handle_pre_tool_use(&input, Some(&cas_dir)).unwrap()).unwrap()
+    };
+    env.set("CAS_FACTORY_MODE", "1");
+    env.set("CAS_AGENT_ROLE", "worker");
+    env.set("CAS_CLONE_PATH", &managed);
+    env.set("CAS_AGENT_NAME", &receiver.name);
+    env.set("CAS_AGENT_ID", &receiver.id);
+    let denied = guard("git fetch origin && git merge --ff-only origin/main");
+    assert_eq!(denied.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("deny"), "{denied}");
+    assert!(denied.to_string().contains("adopt_branch=true"), "{denied}");
+    // The named recovery must work in one supervisor call without asking
+    // the worker to run a checkout that the guard itself refuses.
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    env.set("CAS_AGENT_NAME", &source.name);
+    env.set("CAS_AGENT_ID", &source.id);
     let request = serde_json::from_value(serde_json::json!({
-        "action": "transfer", "id": task.id, "to_agent": receiver.name, "adopt_branch": true,
+        "action": "transfer", "id": task.id, "to_agent": receiver.name,
+        "adopt_branch": true, "supervisor_override": true,
     })).unwrap();
-    service.task(Parameters(request)).await.expect("adoption into the managed worktree");
+    service.task(Parameters(request)).await.expect("cas-da9a recovery adopts the parked tip into the receiver's own branch");
     let expected = "factory/new-worker-cas-branch1100";
     assert_eq!(branch_transfer_git(&managed, &["branch", "--show-current"]), expected);
     assert_eq!(branch_transfer_git(&managed, &["rev-parse", "HEAD"]), tip);
     let after = open_task_store(&cas_dir).unwrap().get(&task.id).unwrap();
     assert_eq!(after.assignee.as_deref(), Some("new-worker"));
     assert_eq!(after.deliverables.parked_branch.as_deref(), Some(expected));
+    assert!(after.deliverables.handoff_branches.contains(&parked));
 
     env.set("CAS_FACTORY_MODE", "1");
     env.set("CAS_AGENT_ROLE", "worker");
@@ -5060,6 +5103,11 @@ async fn transfer_adopt_branch_uses_isolated_receivers_managed_worktree_cas_2d20
             .pointer("/hookSpecificOutput/permissionDecision")
             .and_then(|v| v.as_str()).unwrap_or("").to_string()
     };
+    for command in ["git fetch origin", "git merge --ff-only origin/main", "git push origin HEAD"] {
+        let allowed = guard(command);
+        assert_eq!(allowed.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()),
+            Some("allow"), "{command}: {allowed}");
+    }
     assert_eq!(commit(), "allow", "the adopted branch is the receiver's own");
     // An unadopted foreign branch in the same worktree stays refused.
     branch_transfer_git(&managed, &["switch", "-c", "factory/crisp-spider-42-cas-e3dd"]);

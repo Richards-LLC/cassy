@@ -737,6 +737,143 @@ fn make_project(root: &Path) {
     .expect("pin fixture identity");
 }
 
+/// Reproduce a config whose metadata is readable but whose open stalls.
+/// The parent owns the FIFO and kills the unfixed discovery subprocess.
+#[cfg(unix)]
+#[test]
+fn discovery_skips_a_stalled_known_config_and_keeps_healthy_roots_cas_1514() {
+    use crate::bounded_process::{Deadline, run_command};
+    use crate::store::KnownRepoStore;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    const CHILD: &str = "CAS_UPDATE_STALLED_CONFIG_FIXTURE";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = PathBuf::from(root);
+        let healthy = root.join("healthy").canonicalize().unwrap();
+        let blocked = root.join("blocked").canonicalize().unwrap();
+        let copy = healthy.join(".cas/artifacts/cas-1514/copy");
+        let started = Instant::now();
+        let discovery = discover_local_projects(None);
+        eprintln!("cas-1514 first discovery: {:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(8));
+        assert_eq!(discovery.projects, vec![healthy.clone()]);
+        assert!(
+            discovery
+                .skipped_unregistered
+                .iter()
+                .any(|skip| skip.project == blocked && skip.reason.contains("timed out")),
+            "blocked config must be named: {:?}",
+            discovery.skipped_unregistered
+        );
+        assert!(
+            discovery
+                .skipped_unregistered
+                .iter()
+                .any(|skip| skip.project == copy && skip.reason.contains("artifacts"))
+        );
+
+        // Successful observations cannot cache ownership settings across passes.
+        std::fs::write(
+            healthy.join(".cas/config.toml"),
+            format!(
+                "[project]\ncanonical_id = \"healthy\"\n[factory]\nartifacts_root = {:?}\n",
+                root.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let second = discover_local_projects(None);
+        eprintln!("cas-1514 repeat discovery: {:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(8));
+        assert!(
+            second.projects.is_empty(),
+            "fresh exclusion: {:?}",
+            second.projects
+        );
+        // Complete the native refresh path too: after excluding these roots
+        // it must reach the host phase and write its normal JSON receipt.
+        let mut args = update_test_args();
+        args.all_projects = true;
+        args.dry_run = true;
+        args.refresh_receipt = Some(root.join("refresh.json"));
+        let mut host_phase_ran = false;
+        let started = Instant::now();
+        refresh_all_projects_with_user_refresh(
+            &args,
+            &update_test_cli(true),
+            None,
+            None,
+            None,
+            None,
+            || {
+                host_phase_ran = true;
+                ProjectPhase::Skipped("fixture host phase".into())
+            },
+        )
+        .unwrap();
+        eprintln!("cas-1514 native refresh: {:?}", started.elapsed());
+        assert!(host_phase_ran);
+        let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["refresh_status"], "complete");
+        assert!(receipt["projects"].as_array().unwrap().is_empty());
+        assert!(
+            receipt["skipped_unregistered"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|skip| skip["project"] == blocked.to_string_lossy().as_ref()
+                    && skip["reason"].as_str().unwrap().contains("timed out"))
+        );
+        return;
+    }
+
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    crate::store::known_repos::ensure_host_schema().unwrap();
+    // A durable-looking fixture avoids the disposable-root ownership rule.
+    let fixture = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    env.set_current_dir(env.home().to_path_buf());
+    let healthy = fixture.path().join("healthy");
+    let blocked = fixture.path().join("blocked");
+    let copy = healthy.join(".cas/artifacts/cas-1514/copy");
+    let store = crate::store::known_repos::open_host_known_repo_store().unwrap();
+    for repo in [&healthy, &blocked, &copy] {
+        make_project(repo);
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .arg(repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        store.upsert(repo).unwrap();
+    }
+    let fifo = blocked.join(".cas/config.toml");
+    std::fs::remove_file(&fifo).unwrap();
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = run_command(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "cli::update::tests::discovery_skips_a_stalled_known_config_and_keeps_healthy_roots_cas_1514", "--nocapture"])
+            .env(CHILD, fixture.path())
+            .env("CAS_PROJECT_ROOTS", fixture.path()),
+        Deadline::after(Duration::from_secs(20)), Duration::from_secs(20),
+    ).expect("discovery must return despite a stalled known config");
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
 #[test]
 fn discovery_finds_sibling_projects_below_a_parent_that_is_itself_a_project() {
     // The regression: `~/.cas` exists on every real host, and the scan used to

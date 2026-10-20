@@ -831,14 +831,14 @@ impl CasCore {
 
         // Filter to unclaimed tasks. Legacy rows with no origin remain visible;
         // explicitly foreign rows require the opt-in flag.
-        let project_id = super::super::task::current_project_id(&self.cas_root);
+        let project_scope = super::super::task::ProjectScope::current(&self.cas_root);
         let hidden_foreign = if req.include_foreign {
             0
         } else {
             ready_tasks
                 .iter()
                 .filter(|task| {
-                    !super::super::task::task_visible_in_project(task, project_id.as_deref())
+                    !project_scope.shows(task)
                 })
                 .count()
         };
@@ -846,7 +846,7 @@ impl CasCore {
             .iter()
             .filter(|t| {
                 req.include_foreign
-                    || super::super::task::task_visible_in_project(t, project_id.as_deref())
+                    || project_scope.shows(t)
             })
             .filter(|t| !claimed_ids.contains(t.id.as_str()))
             .collect();
@@ -1283,7 +1283,7 @@ impl CasCore {
         }
 
         let leases = agent_store.list_agent_leases(&agent_id).unwrap_or_default();
-        let project_id = super::super::task::current_project_id(&self.cas_root);
+        let project_scope = super::super::task::ProjectScope::current(&self.cas_root);
         let mut assigned: Vec<Task> = task_store
             .list(None)
             .unwrap_or_default()
@@ -1292,7 +1292,7 @@ impl CasCore {
             // unattributed row is this project's work until some other project
             // claims it, and hiding it from `mine` left an assigned worker
             // with nothing to act on.
-            .filter(|t| super::super::task::task_visible_in_project(t, project_id.as_deref()))
+            .filter(|t| project_scope.shows(t))
             .filter(|t| {
                 if t.is_terminal() {
                     return false;

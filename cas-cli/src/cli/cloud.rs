@@ -6105,55 +6105,36 @@ fn attributed_rows(
         .collect())
 }
 
-const PROPOSAL_PROVENANCE_BEGIN: &str = "--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---";
-const PROPOSAL_PROVENANCE_END: &str = "--- END CLIENT-ASSERTED PROPOSAL PROVENANCE ---";
-const PROPOSAL_PROVENANCE_SERVER_END: &str = "--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---";
-
 /// A task materialized by an accepted cross-project proposal is intentionally
 /// retained in the target project even though its origin belongs to a peer.
-/// Pull persists the server-attested target project in the task notes; only a
-/// complete marker block targeting this project qualifies.
+/// Only the local acceptance record says so (cas-11ba): the accept path and
+/// the sync pull of a server-attested proposal write `accepted_proposal_targets`,
+/// while task notes are free text a close or cancel reason can fill.
 fn is_accepted_proposal_task(
     conn: &rusqlite::Connection,
     task_id: &str,
     current_project: &str,
 ) -> anyhow::Result<bool> {
-    let has_notes = conn
-        .prepare("PRAGMA table_info(tasks)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?
-        .iter()
-        .any(|column| column == "notes");
-    if !has_notes {
+    let has_table = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'accepted_proposal_targets'
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !has_table {
         return Ok(false);
     }
-
-    let notes: Option<String> =
-        conn.query_row("SELECT notes FROM tasks WHERE id = ?1", [task_id], |row| {
-            row.get(0)
-        })?;
-    let Some(notes) = notes else {
-        return Ok(false);
-    };
-    let Some(start) = notes.find(PROPOSAL_PROVENANCE_BEGIN) else {
-        return Ok(false);
-    };
-    let Some((end_offset, end_marker)) = [PROPOSAL_PROVENANCE_END, PROPOSAL_PROVENANCE_SERVER_END]
-        .iter()
-        .filter_map(|marker| notes[start..].find(marker).map(|offset| (offset, *marker)))
-        .min_by_key(|(offset, _)| *offset)
-    else {
-        return Ok(false);
-    };
-    let end = start + end_offset + end_marker.len();
-    let block = &notes[start..end];
-    let target = block.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("target_project_canonical_id:")
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-    });
-    Ok(target.is_some_and(|target| project_ids_match(target, current_project)))
+    use rusqlite::OptionalExtension;
+    let target: Option<String> = conn
+        .query_row(
+            "SELECT target_project_canonical_id FROM accepted_proposal_targets WHERE task_id = ?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(target.is_some_and(|target| project_ids_match(&target, current_project)))
 }
 
 /// A task with a local external-blocker projection is deliberately retained:

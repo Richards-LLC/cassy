@@ -1683,17 +1683,17 @@ impl CasCore {
             })?
         };
 
-        let project_id = super::current_project_id(&self.cas_root);
+        let project_scope = super::ProjectScope::current(&self.cas_root);
         let hidden_foreign = if req.include_foreign {
             0
         } else {
             tasks
                 .iter()
-                .filter(|task| !super::task_visible_in_project(task, project_id.as_deref()))
+                .filter(|task| !project_scope.shows(task))
                 .count()
         };
         if !req.include_foreign {
-            tasks.retain(|task| super::task_visible_in_project(task, project_id.as_deref()));
+            tasks.retain(|task| project_scope.shows(task));
         }
 
         // Apply sorting. cas-06f9 (GH #104): unspecified means priority order

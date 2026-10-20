@@ -150,6 +150,7 @@ impl Fixture {
         let agents = crate::store::open_agent_store(&self.app.cas_dir).unwrap();
         let mut worker = agents.get("merge-w").unwrap();
         worker.cc_session_id = Some(session.into());
+        worker.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
         worker.metadata.insert("worker_cli".into(), "codex".into());
         worker.metadata.insert("clone_path".into(), clone.to_str().unwrap().into());
         worker.metadata.insert("worker_account_dir".into(), account.to_str().unwrap().into());

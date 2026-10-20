@@ -203,7 +203,7 @@ pub(super) fn read_worker_wait(
             })
     })?;
     let stored_agent = crate::store::open_agent_store(cas_dir).ok()?.get(&agent.id).ok()?;
-    let build_pending = stored_agent.machine_id == cas_types::Agent::get_or_generate_machine_id()
+    let build_pending = stored_agent.machine_id == Some(cas_types::Agent::get_or_generate_machine_id())
         && stored_agent.metadata.get("clone_path").is_some_and(|clone| {
             crate::factory_worker_check::lane_is_busy(cas_dir, Path::new(clone)).unwrap_or(false)
         });

@@ -1615,7 +1615,7 @@ impl FactoryApp {
 
         // cas-9fff: pass session-focused epic so EpicAllSubtasksClosed can
         // use session-affinity routing (not just epic_verification_owner).
-        let focused_epic_id = self.current_epic_id.as_deref();
+        let focused_epic_id = self.current_epic_id.clone();
         let delivery_events: Vec<DirectorEvent> = events
             .iter()
             .filter_map(|event| {
@@ -1642,7 +1642,7 @@ impl FactoryApp {
                         event,
                         &unfiltered_data,
                         &self.supervisor_name,
-                        focused_epic_id,
+                        focused_epic_id.as_deref(),
                         self.event_detector.worker_idle_since(worker),
                     )?;
                     let active = match &current {
@@ -1673,7 +1673,7 @@ impl FactoryApp {
                         event,
                         &unfiltered_data,
                         &self.supervisor_name,
-                        focused_epic_id,
+                        focused_epic_id.as_deref(),
                     )
                 }
             })

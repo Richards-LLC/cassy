@@ -261,10 +261,13 @@ fn idle_workers_beside_any_ready_work_are_paged_gh1302() {
 }
 
 /// cas-7456 (GH #1302 D): two supervisors left their idle page unanswered for
-/// 11–12 h overnight. Two hours of silence with work waiting pages the
-/// operator once; fresh supervisor activity starts a new episode.
+/// 11–12 h overnight. From two hours of silence with work waiting, every
+/// wake asks to page the operator for that silence episode. cas-b080: the
+/// tracker keeps asking, so a page whose event was dropped before delivery
+/// is asked again on the next wake; the durable operator turn is deduped on
+/// the episode. Fresh supervisor activity names a new episode.
 #[test]
-fn an_unanswered_idle_page_reaches_the_operator_once_per_silence_gh1302() {
+fn an_unanswered_idle_page_keeps_asking_for_the_operator_until_delivered_gh1302() {
     let start = Utc.with_ymd_and_hms(2026, 10, 20, 1, 5, 0).unwrap();
     let actionable = Some(SupervisorActionableState::AssignReadyWork {
         task_ids: vec!["cas-ready".into()],
@@ -274,21 +277,28 @@ fn an_unanswered_idle_page_reaches_the_operator_once_per_silence_gh1302() {
     let pages = |tracker: &mut SupervisorStallTracker, last_call: i64, minutes: std::ops::RangeInclusive<i64>| {
         minutes
             .step_by(5)
-            .filter(|minute| {
+            .filter_map(|minute| {
                 tracker
                     .observe(
                         actionable.clone(),
                         Some(start + Duration::minutes(last_call)),
                         false,
-                        start + Duration::minutes(*minute),
+                        start + Duration::minutes(minute),
                         600,
                     )
-                    .page_operator
+                    .operator_page_episode
+                    .map(|episode| (minute, episode))
             })
             .collect::<Vec<_>>()
     };
-    assert_eq!(pages(&mut tracker, 0, 10..=300), vec![120], "one page at two hours, not every refire");
-    assert_eq!(pages(&mut tracker, 400, 410..=700), vec![520], "a new silence pages again");
+    let first = pages(&mut tracker, 0, 10..=140);
+    assert_eq!(
+        first,
+        vec![(120, start), (130, start), (140, start)],
+        "every wake of the silence asks, so a dropped first page is asked again"
+    );
+    let second = pages(&mut tracker, 400, 410..=520);
+    assert_eq!(second, vec![(520, start + Duration::minutes(400))], "a new silence is a new episode");
 }
 
 #[test]

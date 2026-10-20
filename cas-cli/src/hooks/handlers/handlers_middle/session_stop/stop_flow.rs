@@ -798,19 +798,26 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
 /// open may legitimately stop) so it sets one before going quiet.
 fn supervisor_turn_ends_without_wake_source(cas_root: &Path, input: &HookInput) -> Option<String> {
     let is_supervisor = std::env::var("CAS_AGENT_ROLE").ok().as_deref() == Some("supervisor");
-    let in_factory = std::env::var("CAS_FACTORY_SESSION").is_ok_and(|session| !session.is_empty());
-    if !is_supervisor || !in_factory {
+    let session = std::env::var("CAS_FACTORY_SESSION").unwrap_or_default();
+    if !is_supervisor || session.is_empty() {
         return None;
     }
     let reminders = crate::store::open_reminder_store(cas_root).ok()?;
     let id = current_agent_id(input);
     let name = std::env::var("CAS_AGENT_NAME").unwrap_or_default();
+    // cas-b080: only this factory session's reminders can wake this turn's
+    // supervisor. A stale reminder left by an earlier session hid the warning.
+    let this_session = |pending: Vec<cas_store::Reminder>| {
+        pending
+            .iter()
+            .any(|reminder| reminder.session_id.as_deref() == Some(session.as_str()))
+    };
     let has_wake_source = [id.as_str(), name.as_str()]
         .into_iter()
         .filter(|key| !key.is_empty())
         .any(|key| {
-            reminders.list_pending(key).is_ok_and(|pending| !pending.is_empty())
-                || reminders.list_pending_for_target(key).is_ok_and(|pending| !pending.is_empty())
+            reminders.list_pending(key).is_ok_and(this_session)
+                || reminders.list_pending_for_target(key).is_ok_and(this_session)
         });
     (!has_wake_source).then(|| {
         "No wake source: this supervisor turn ended with no pending reminder, so only a relay Cassy delivers can start your next turn. If work is open (idle workers, parked deliveries, a running CI or merge queue), set one now with coordination action=remind (an event such as ci_completed or task_completed, or a time watchdog with cross_session=true)."

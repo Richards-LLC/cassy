@@ -220,18 +220,15 @@ pub struct SupervisorStallTracker {
     /// delivery must not refire the same close demand every ten minutes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_merged_close_blocked_key: Option<String>,
-    /// cas-7456: the supervisor activity whose silence already paged the
-    /// operator, so one silence episode pages at most once.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operator_paged_for: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SupervisorStallObservation {
     pub wake: Option<SupervisorActionableState>,
     pub actionable_idle_secs: u64,
-    /// This wake must also reach the operator (GH #1302 D).
-    pub page_operator: bool,
+    /// This wake must also reach the operator (GH #1302 D): the silence
+    /// episode it belongs to, named by the supervisor's last activity.
+    pub operator_page_episode: Option<DateTime<Utc>>,
 }
 
 impl SupervisorStallTracker {
@@ -295,20 +292,18 @@ impl SupervisorStallTracker {
             None
         };
         // cas-7456 (GH #1302 D): a page the supervisor has left unanswered
-        // for hours goes to the operator too, once per silence episode.
-        let silent_for_operator = last_supervisor_mcp_call_at
-            .is_some_and(|last| (now - last).num_seconds() >= SUPERVISOR_IDLE_OPERATOR_PAGE_SECS);
-        let page_operator = wake.is_some()
-            && silent_for_operator
-            && self.operator_paged_for != last_supervisor_mcp_call_at;
-        if page_operator {
-            self.operator_paged_for = last_supervisor_mcp_call_at;
-        }
+        // for hours goes to the operator too. Every such wake asks; the
+        // durable operator turn is keyed on the silence episode, so it lands
+        // once (cas-b080: a mark set here was lost when the event was
+        // dropped before delivery, and that silence never paged).
+        let operator_page_episode = last_supervisor_mcp_call_at.filter(|last| {
+            wake.is_some() && (now - *last).num_seconds() >= SUPERVISOR_IDLE_OPERATOR_PAGE_SECS
+        });
 
         SupervisorStallObservation {
             wake,
             actionable_idle_secs: current_secs,
-            page_operator,
+            operator_page_episode,
         }
     }
 
@@ -917,8 +912,10 @@ pub enum DirectorEvent {
         occurrence: String,
         actionable_idle_secs: u64,
         /// The supervisor has stayed silent past the operator threshold, so
-        /// this page also reaches the operator (cas-7456, GH #1302 D).
-        page_operator: bool,
+        /// this page also reaches the operator (cas-7456, GH #1302 D). Names
+        /// the silence episode by the supervisor's last activity; the operator
+        /// turn is deduped on it (cas-b080).
+        operator_page_episode: Option<DateTime<Utc>>,
     },
     /// A task was assigned to a worker
     TaskAssigned {

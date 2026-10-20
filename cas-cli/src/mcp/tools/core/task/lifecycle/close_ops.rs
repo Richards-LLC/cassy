@@ -31623,6 +31623,88 @@ esac
         );
     }
 
+    /// cas-18aa: the cas-da9a shape, minimized. Round one of the task lands a
+    /// draft block in guarded.txt. Changes are requested, so round two starts
+    /// from the newer target and moves that block (the task's own later
+    /// commit); the target meanwhile evolves the same file elsewhere, before
+    /// and after the worker's last sync, and then lands round two. Every line
+    /// the task finally delivered is present and its round-one draft is gone
+    /// from the task's own final tree as well, so this is no drop. Losing the
+    /// moved block on the target still is.
+    #[test]
+    fn a_task_draft_it_later_replaced_is_not_dropped_by_target_evolution_cas_18aa() {
+        let build = |drop_moved_block: bool| {
+            let dir = init_factory_repo("worker");
+            let p = dir.path().to_path_buf();
+            let lines = |edit: &dyn Fn(&mut Vec<String>)| {
+                let mut file: Vec<String> = std::fs::read_to_string(p.join("guarded.txt"))
+                    .map(|text| text.lines().map(str::to_owned).collect())
+                    .unwrap_or_else(|_| (1..=40).map(|n| format!("line {n}")).collect());
+                edit(&mut file);
+                std::fs::write(p.join("guarded.txt"), file.join("\n") + "\n").unwrap();
+            };
+            let commit = |message: &str| {
+                git(&p, &["add", "."]);
+                git(&p, &["commit", "-qm", message]);
+            };
+            let on = |branch: &str| git(&p, &["checkout", "-q", branch]);
+            on("main");
+            lines(&|_| {});
+            commit("baseline");
+            // Round one: the draft lands.
+            git(&p, &["checkout", "-q", "-B", "factory/worker", "main"]);
+            lines(&|file| file.splice(10..10, ["draft guard".to_string(), "draft check one".to_string(), "draft check two".to_string()]).for_each(drop));
+            commit("cas-test1: draft the guard");
+            on("main");
+            git(&p, &["merge", "--no-ff", "-q", "factory/worker", "-m", "Merge branch 'factory/worker' cas-test1 round one"]);
+            lines(&|file| file[30] = "line 31 evolved by another lane".to_string());
+            commit("cas-test2: another lane edits guarded.txt");
+            // Round two: from the newer target, the task moves its draft.
+            git(&p, &["checkout", "-q", "-B", "factory/worker", "main"]);
+            lines(&|file| {
+                file.drain(10..13);
+                file.splice(20..20, ["moved guard".to_string(), "guard resolves its operands".to_string()]).for_each(drop);
+            });
+            commit("cas-test1: move the guard to its resolver");
+            on("main");
+            lines(&|file| file[33] = "line 34 evolved before the sync".to_string());
+            commit("cas-test3: edit guarded.txt before the sync");
+            on("factory/worker");
+            git(&p, &["merge", "--no-ff", "-q", "main", "-m", "Merge main into factory/worker cas-test1"]);
+            let anchor = head_sha(&p);
+            on("main");
+            lines(&|file| {
+                file[36] = "line 37 evolved after the sync".to_string();
+                file[3] = "line 4 evolved after the sync".to_string();
+            });
+            commit("merge(sync): target syncs guarded.txt after the worker's last sync");
+            git(&p, &["merge", "--no-ff", "-q", "factory/worker", "-m", "Merge branch 'factory/worker' cas-test1 round two"]);
+            if drop_moved_block {
+                lines(&|file| file.retain(|line| !line.contains("guard")));
+                commit("cas-test4: rewrite loses the delivered guard");
+            }
+            (dir, anchor)
+        };
+        let window = window_at(0, "cas-18aa repro");
+        let identity = TaskCommitIdentity { task_id: Some("cas-test1".into()), known_commits: Vec::new() };
+
+        let (dir, anchor) = build(false);
+        let presence =
+            super::task_attribution::merge_tip_content_presence(dir.path(), "main", &anchor, Some(&window), &identity, None);
+        assert!(
+            matches!(presence, Some(DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. })),
+            "the task's own replaced draft is not a drop: {presence:?}"
+        );
+
+        let (dir, anchor) = build(true);
+        let presence =
+            super::task_attribution::merge_tip_content_presence(dir.path(), "main", &anchor, Some(&window), &identity, None);
+        assert!(
+            matches!(&presence, Some(DeliveryContentPresence::Dropped { paths }) if paths == &vec!["guarded.txt".to_string()]),
+            "losing the delivered block still refuses: {presence:?}"
+        );
+    }
+
     /// Replays immutable production delivery anchors. Run explicitly in a
     /// checkout retaining the v34 history; normal shallow CI uses the fixtures.
     #[test]

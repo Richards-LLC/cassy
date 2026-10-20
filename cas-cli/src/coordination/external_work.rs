@@ -1437,8 +1437,14 @@ fn valid_uuid(value: &str) -> Result<String, ExternalWorkError> {
 }
 
 fn validate_uuid_field(value: &str, field: &str) -> Result<(), ExternalWorkError> {
-    let parsed = Uuid::parse_str(value)
-        .map_err(|_| error("invalid_request", format!("{field} must be a UUID")))?;
+    let parsed = Uuid::parse_str(value).map_err(|_| {
+        let message = if field == "occurrence_id" {
+            "occurrence_id is optional; use a caller-generated UUID, not a Slack message ts; omit it or pass a UUID".to_string()
+        } else {
+            format!("{field} must be a UUID")
+        };
+        error("invalid_request", message)
+    })?;
     if value != parsed.to_string() {
         return Err(error(
             "invalid_request",

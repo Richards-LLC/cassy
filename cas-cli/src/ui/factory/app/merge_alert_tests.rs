@@ -237,7 +237,7 @@ fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
 /// A worker waiting on its own pushed CI is not stalled, even if repeated
 /// idle episodes arrive while the task is still in progress.
 #[test]
-fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci() {
+fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     let mut f = Fixture::new();
     f.in_progress();
     let now = Utc::now();
@@ -245,12 +245,23 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci() {
     use cas_store::ReminderStore;
     let reminders = cas_store::SqliteReminderStore::open(&f.app.cas_dir).unwrap();
     reminders.init().unwrap();
+    let long = reminders.create_with_scope("merge-w", Some("merge-w"), "check next week",
+        cas_store::ReminderTriggerType::Time, Some(now + chrono::Duration::days(7)),
+        None, None, 604800, None, Some("merge-w"), true, None).unwrap();
+    assert_eq!(f.relay().len(), 1, "an untasked week-long reminder cannot hide a stuck worker");
+    reminders.cancel(long, "merge-w").unwrap();
     // The real reminder store is reloaded by the delivery read, not the cached panel.
     let reminder = reminders.create_with_scope("merge-w", Some("merge-w"), "check build",
         cas_store::ReminderTriggerType::Time, Some(Utc::now() + chrono::Duration::minutes(3)),
         None, None, 3600, None, Some("merge-w"), false, Some("cas-9efb-test")).unwrap();
     assert!(f.relay().is_empty(), "a pending self-reminder owes the worker its next wake");
     reminders.cancel(reminder, "merge-w").unwrap();
+
+    let short = reminders.create_with_scope("merge-w", Some("merge-w"), "check soon",
+        cas_store::ReminderTriggerType::Time, Some(now + chrono::Duration::minutes(3)),
+        None, None, 3600, None, Some("merge-w"), false, None).unwrap();
+    assert!(f.relay().is_empty(), "an untasked short-horizon wake still suppresses idle");
+    reminders.cancel(short, "merge-w").unwrap();
 
     // Use the same OS lane lock the real runner holds during admission and
     // execution. Its release leaves a file behind, which must not hide idle.
@@ -292,7 +303,7 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci() {
 
 /// Same task/tip liveness relays may arrive from retry jobs rather than the detector.
 #[test]
-fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff() {
+fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff_cas_e390() {
     let mut f = Fixture::new();
     f.in_progress();
     let now = Utc::now();
@@ -308,6 +319,22 @@ fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff(
     git(f.repo.path(), &["commit", "-qam", "new tip"]);
     assert_eq!(f.relay().len(), 1, "new tip is a changed idle signal");
     assert!(f.relay().is_empty());
+    // Missing worker refs are a stable state, not permission to wake each minute.
+    git(f.repo.path(), &["switch", "-q", "--detach", "epic/test"]);
+    git(f.repo.path(), &["branch", "-D", "factory/merge-w"]);
+    git(f.repo.path(), &["update-ref", "-d", "refs/remotes/origin/factory/merge-w"]);
+    assert_eq!(f.relay().len(), 1, "unknown commit still owes one alert");
+    for minutes in [1, 2] {
+        f.app.merge_alert_retries.now = Some(now + chrono::Duration::hours(1) + chrono::Duration::minutes(minutes));
+        assert!(f.relay().is_empty(), "unknown commit must coalesce at minute {minutes}");
+    }
+    // A failed fresh read has no worker_waits row; it needs the same unknown key.
+    let events = vec![f.event.clone()];
+    f.app.merge_alert_retries.now = Some(now + chrono::Duration::hours(2));
+    assert_eq!(f.app.revalidate_and_prompt_for_delivery_from(&events, DeliveryInputs::failed_for_test()).1.len(), 1);
+    assert!(f.app.revalidate_and_prompt_for_delivery_from(&events, DeliveryInputs::failed_for_test()).1.is_empty(),
+        "failed reads retain first-alert liveness without manufacturing repeated wakes");
+
 }
 
 #[test]

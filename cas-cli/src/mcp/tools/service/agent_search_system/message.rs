@@ -2641,6 +2641,11 @@ impl CasService {
                 .map(|agent| cas_store::QueueOrigin::RegisteredAgent {
                     agent_id: agent.id.clone(),
                 });
+        // Local cap/spill and reply framing must not discard the sender's opt-out.
+        if (req.wake == Some(false) || req.kind.as_deref()==Some("receipt"))
+            && !crate::supervisor_message_wakes::quiet(&message) {
+            message=format!("{}\n{message}",crate::supervisor_message_wakes::QUIET);
+        }
         let enqueue_started = std::time::Instant::now();
         let peer_copy_message = peer_supervisor_copy
             .as_ref()
@@ -5926,6 +5931,19 @@ mod cas_89e1_post_merge_message_type_tests {
                     .map(|envelope| envelope.kind),
                 Some(expected)
             );
+        }
+
+        for (kind,wake,body) in [
+            ("receipt",None,"The delivery was received."),
+            ("answer",Some(false),"A field report that can wait."),
+        ] {
+            let mut request=message_request_to("supervisor");
+            request.kind=Some(kind.into());request.wake=wake;request.message=Some(body.into());
+            service.message_send(request).await.expect("quiet message remains deliverable");
+            let rows=crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
+            let row=rows.iter().find(|row|row.prompt.contains(body))
+                .expect("quiet body retained");
+            assert!(crate::supervisor_message_wakes::quiet(&row.prompt),"{kind}: {}",row.prompt);
         }
 
         let mut cross_session = message_request_to("supervisor-b");

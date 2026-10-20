@@ -16624,8 +16624,8 @@ mod tests {
             &source,
             &awaiting_merge_payload("cas-f02b")
         ));
-        // Ordinary traffic is consumed normally — no retry semantics.
-        assert!(!FactoryDaemon::row_is_supervisor_wake(
+        // Authenticated directed traffic remains pending until it can wake.
+        assert!(FactoryDaemon::row_is_supervisor_wake(
             &worker_sender("swift-fox"),
             "cosmic-bear-43",
             "swift-fox",

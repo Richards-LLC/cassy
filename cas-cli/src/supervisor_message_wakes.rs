@@ -287,6 +287,23 @@ struct Usage {
     complete: bool,
 }
 
+fn machine_turn_names(text: &str, id: i64) -> bool {
+    let mut text = text.trim_start().trim_start_matches("\x1b[200~");
+    if text.starts_with("<pasted_content ") {
+        let Some((_, body)) = text.split_once('>') else {
+            return false;
+        };
+        text = body;
+    }
+    if text.starts_with("Message from ") {
+        let Some((_, body)) = text.split_once(": ") else {
+            return false;
+        };
+        text = body;
+    }
+    text.starts_with(&format!("[cas #{id} "))
+}
+
 /// Bounded tail, read once per status call; unknown/truncated records stay
 /// unmeasured. Claude streaming copies share message.id and count once.
 fn transcript_usage(path: &Path, ids: &HashSet<i64>) -> anyhow::Result<HashMap<i64, Usage>> {
@@ -353,11 +370,7 @@ fn transcript_usage(path: &Path, ids: &HashSet<i64>) -> anyhow::Result<HashMap<i
                 current = ids
                     .iter()
                     .filter(|id| !result.contains_key(id))
-                    .find(|id| {
-                        texts
-                            .iter()
-                            .any(|text| text.contains(&format!("[cas #{id} ")))
-                    })
+                    .find(|id| texts.iter().any(|text| machine_turn_names(text, **id)))
                     .copied();
                 baseline = cumulative;
                 claude_messages.clear();
@@ -456,7 +469,7 @@ pub(crate) fn report(cas: &Path, recipient: &str) -> anyhow::Result<String> {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("wake ledger lock poisoned"))?;
             for (id, usage) in measurements {
-                if usage.complete {
+                if usage.complete && usage.started.is_some() {
                     conn.execute("UPDATE supervisor_message_wakes SET started_at=?1,input_tokens=?2,output_tokens=?3,usage_evidence=?4 WHERE lead_id=?5 AND input_tokens IS NULL",
                         params![usage.started.map(|at|at.to_rfc3339()), i64::try_from(usage.input)?,i64::try_from(usage.output)?,path.display().to_string(),id])?;
                 }
@@ -488,7 +501,7 @@ pub(crate) fn report(cas: &Path, recipient: &str) -> anyhow::Result<String> {
     };
     let latency: Option<f64>=conn.query_row("SELECT MAX((julianday(started_at)-julianday(created_at))*86400000) FROM supervisor_message_wakes WHERE recipient=?1 AND injected_at>?2",params![recipient,since],|row|row.get(0))?;
     Ok(format!(
-        "directed_message_wakes_last_hour: {wakes}; median_tokens_per_woken_turn: {median}; measured_turns: {}; max_observed_start_latency_ms: {}\n",
+        "directed_message_wakes_last_hour: {wakes}\nmedian_tokens_per_woken_turn: {median}; measured_turns: {}\nmax_observed_start_latency_ms: {}\n",
         totals.len(),
         latency
             .map(|n| format!("{n:.0}"))
@@ -568,7 +581,11 @@ mod tests {
     fn cas_1e7e2_acknowledgements_wait_readable_for_the_next_turn() {
         let (_root, cas, peer) = setup();
         let ack = enqueue(&cas, &peer, "thanks, received");
-        let receipt = enqueue(&cas, &peer, "<cas-message-quiet/>\nAcknowledged.");
+        let receipt = enqueue(
+            &cas,
+            &peer,
+            "[CAS reply: explicitly acknowledges notification_id=1]\n<cas-message-quiet/>\nAcknowledged.",
+        );
         age(&cas);
         assert!(
             select(&cas).rows.is_empty(),
@@ -634,7 +651,7 @@ mod tests {
                     {"type":"assistant","message":{"id":"a","usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":5}}},
                     {"type":"user","message":{"content":[{"type":"tool_result","content":"tool response"}]}},
                     {"type":"assistant","message":{"id":"a","stop_reason":"end_turn","usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":9}}},
-                    {"type":"user","message":{"content":"Operator unrelated next turn"}},
+                    {"type":"user","message":{"content":"Operator quoting [cas #99 peer] unrelated next turn"}},
                     {"type":"assistant","message":{"id":"b","stop_reason":"end_turn","usage":{"input_tokens":999,"output_tokens":999}}}
                 ]),
                 (100, 9),
@@ -663,7 +680,11 @@ mod tests {
                     .collect::<String>(),
             )
             .unwrap();
-            let usage = transcript_usage(&path, &HashSet::from([42])).unwrap();
+            let usage = transcript_usage(&path, &HashSet::from([42, 99])).unwrap();
+            assert!(
+                !usage.contains_key(&99),
+                "quoted ids never attribute wake cost"
+            );
             assert!(usage[&42].complete, "{name}");
             assert_eq!((usage[&42].input, usage[&42].output), expected, "{name}");
             assert_eq!(

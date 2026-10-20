@@ -280,9 +280,11 @@ pub fn sibling_misbinding_message(worker_name: &str, owner: &str, cwd: &str) -> 
          git rev-parse --abbrev-ref HEAD   # must print {expected_branch}\n\n\
          If your assigned worktree is not on {expected_branch}, stop and report the misbinding to \
          your supervisor — do not commit from another worker's tree.\n\n\
-         For an authorized takeover, use `task action=transfer id=<task-id> \
-         to_agent={worker_name} adopt_branch=true` (supervisors add supervisor_override=true), \
-         then commit in the receiving worker's registered worktree on its adopted branch.\n\n\
+         For an authorized takeover, ask your supervisor to run `task action=transfer id=<task-id> \
+         to_agent={worker_name} adopt_branch=true supervisor_override=true` from its own context. \
+         This copies the task's recorded tip to your own per-task branch in your registered \
+         worktree, including when it is on that task's source branch; no worker checkout is \
+         needed first. Then commit on the adopted branch.\n\n\
          Note: --no-verify does NOT bypass this guard (it only skips git hooks, not the Claude \
          Code PreToolUse harness)."
     )

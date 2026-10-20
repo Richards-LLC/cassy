@@ -7,7 +7,9 @@ use std::time::Duration;
 use cas_types::{Agent, AgentRole, Task};
 
 use crate::bounded_process::{Deadline, run_command};
-use crate::factory_isolation::{verify_worker_worktree_binding, worker_task_branch};
+use crate::factory_isolation::{
+    WorkerBinding, classify_worker_binding, verify_worker_worktree_binding, worker_task_branch,
+};
 
 pub(super) struct AdoptedBranch {
     pub source_branch: String,
@@ -92,7 +94,6 @@ pub(super) fn adopt_task_branch(
              worker first",
         )?;
     let destination = destination.as_path();
-    verify_worker_worktree_binding(&receiver.name, destination, None).map_err(|e| e.to_string())?;
     let deadline = Deadline::after(Duration::from_secs(20));
     let git = Git {
         root: destination,
@@ -153,7 +154,22 @@ pub(super) fn adopt_task_branch(
     } else {
         source_head
     };
-    if !git.ancestor("HEAD", &tip)? {
+    let current_branch = git.run(&["symbolic-ref", "--short", "HEAD"])?;
+    // cas-a9fe: a supervisor may repair a receiver already checked out on
+    // this task's source branch. Prove the registered path is a real root
+    // and accept only that exact source, never an unrelated foreign branch.
+    let foreign_source = current_branch == source_branch
+        && classify_worker_binding(&receiver.name, Some(&current_branch)) != WorkerBinding::Own;
+    verify_worker_worktree_binding(
+        &receiver.name,
+        destination,
+        foreign_source.then_some(source_branch.as_str()),
+    )
+    .map_err(|e| e.to_string())?;
+    // Copy the recorded anchor without moving an advanced foreign source.
+    // The receiver's own work must still fast-forward; its existing task
+    // branch is checked separately below even during source recovery.
+    if !foreign_source && !git.ancestor("HEAD", &tip)? {
         return Err("receiver HEAD cannot fast-forward to the task delivery tip; reconcile the branches first".into());
     }
     let branch = worker_task_branch(&receiver.name, &task.id);
@@ -171,6 +187,8 @@ pub(super) fn adopt_task_branch(
     } else {
         git.run(&["switch", "-c", &branch, &tip])?;
     }
+    verify_worker_worktree_binding(&receiver.name, destination, Some(&branch))
+        .map_err(|e| e.to_string())?;
     Ok(AdoptedBranch {
         source_branch,
         branch,

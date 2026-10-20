@@ -52,13 +52,12 @@ run_case() {
     export CAS_UPDATE_WAIT_STEPS=1
     export CAS_UPDATE_WAIT_SLEEP=0
     export CAS_UPDATE_SOURCE_ONLY=1
-    case "$mode" in darwin*) is_darwin=1 ;; *) is_darwin=0 ;; esac
-    if [ "$is_darwin" = 1 ]; then
-      mkdir -p "$tmp/tools"
-      printf '#!/usr/bin/env bash\nprintf "Darwin\\n"\n' >"$tmp/tools/uname"
-      chmod +x "$tmp/tools/uname"
-      export PATH="$tmp/tools:$PATH"
-    fi
+    # Platform belongs to the fixture, including simulated Linux procfs on a Mac.
+    case "$mode" in darwin*) fixture_os=Darwin ;; *) fixture_os=Linux ;; esac
+    mkdir -p "$tmp/tools"
+    printf '#!/usr/bin/env bash\nprintf "%s\\n"\n' "$fixture_os" >"$tmp/tools/uname"
+    chmod +x "$tmp/tools/uname"
+    export PATH="$tmp/tools:$PATH"
     # shellcheck source=../cas-update
     source "$helper"
     SCAN_ROOTS="$tmp/home"
@@ -103,6 +102,7 @@ run_case() {
 new_fixture() {
   local tmp
   tmp="$(mktemp -d -t cas-update-test.XXXXXX)"
+  tmp="$(cd "$tmp" && pwd -P)" # macOS /var aliases /private/var; compare physical paths.
   mkdir -p "$tmp/home" "$tmp/bin" "$tmp/source" "$tmp/proc" "$tmp/registry"
   : >"$tmp/signals"
   make_binary "$tmp/bin/cas" 'cas 2.51.0 (old0001)' old

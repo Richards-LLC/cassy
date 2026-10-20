@@ -26,9 +26,8 @@ fn local_policy(
     use rusqlite::OptionalExtension;
     let (table, scope, preference) = match kind {
         EntityType::Task => ("tasks", "'project'", "0"),
-        EntityType::Entry => ("entries", "scope", "entry_type = 'preference'"),
+        EntityType::Entry => ("entries", "scope", "type = 'preference'"),
         EntityType::Rule => ("rules", "scope", "0"),
-        EntityType::Skill => ("skills", "scope", "0"),
         _ => return false,
     };
     conn.query_row(
@@ -57,8 +56,18 @@ fn eligibility(
     if row.operation != SyncOperation::Upsert {
         return "delete_preserved";
     }
-    if row.project_id.is_some() {
-        return "explicit_route_preserved";
+    if row
+        .project_id
+        .as_deref()
+        .is_some_and(|route| route != project)
+    {
+        return "foreign_route_preserved";
+    }
+    if !matches!(
+        row.entity_type,
+        EntityType::Task | EntityType::Entry | EntityType::Rule | EntityType::TaskDependency
+    ) {
+        return "unsupported_entity_preserved";
     }
     let Some(value) = row
         .payload
@@ -150,7 +159,7 @@ impl SyncQueue {
             let reason = eligibility(&tx, &row, team, project);
             let eligible = reason == "enqueue_team_snapshot";
             if apply && eligible {
-                tx.execute("INSERT INTO sync_queue(entity_type,entity_id,operation,payload,team_id,project_id,created_at,retry_count) VALUES(?1,?2,'upsert',?3,?4,NULL,?5,0)",rusqlite::params![row.entity_type.as_str(),row.entity_id,row.payload,team,chrono::Utc::now().to_rfc3339()])?;
+                tx.execute("INSERT INTO sync_queue(entity_type,entity_id,operation,payload,team_id,project_id,created_at,retry_count) VALUES(?1,?2,'upsert',?3,?4,?5,?6,0)",rusqlite::params![row.entity_type.as_str(),row.entity_id,row.payload,team,row.project_id,chrono::Utc::now().to_rfc3339()])?;
             }
             decisions.push(TeamBackfillRow {
                 id: row.id,

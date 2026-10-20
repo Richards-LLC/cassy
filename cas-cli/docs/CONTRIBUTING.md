@@ -274,9 +274,10 @@ cas cloud sync
 prints every queue identifier and decision. Apply requires `team_only=true`.
 It copies owned, project-scoped, shared upsert snapshots into the active team
 queue without replacing existing team intents. Deletes, private/global rows,
-foreign or unknown origins, explicit project routes and unsupported types stay
+foreign or unknown origins, foreign project routes and unsupported types stay
 untouched. Dependencies require both locally owned, shared endpoints and a
-current local edge. Snapshot JSON is preserved so the existing exact itemized
+current local edge. Canonical local routes are supported; receipts bind the personal route.
+Snapshot JSON is preserved so the existing exact itemized
 ACK can retire the personal copy after delivery; enqueue alone retires nothing.
 Missing/changed provenance or sharing policy fails closed. Reopen long-running
 writers after changing team_only so their cached policy uses the new setting.

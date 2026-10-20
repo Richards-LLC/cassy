@@ -1634,7 +1634,7 @@ fn print_team_scope_adoption(cli: &Cli, adoption: &crate::cloud::TeamScopeAdopti
     match adoption {
         TeamScopeAdoption::Adopted(team) => {
             if cli.json {
-                println!(
+                eprintln!(
                     "{}",
                     serde_json::json!({
                         "team_scope_adoption": {
@@ -1659,7 +1659,7 @@ fn print_team_scope_adoption(cli: &Cli, adoption: &crate::cloud::TeamScopeAdopti
             // project belongs to, and silence here would reproduce exactly the
             // "why is nothing shared?" confusion this task exists to remove.
             if cli.json {
-                println!(
+                eprintln!(
                     "{}",
                     serde_json::json!({
                         "team_scope_adoption": {
@@ -4232,7 +4232,7 @@ fn execute_sync_with_output(
                         FetchTeamsOutcome::Empty => {
                             tracing::debug!("lazy /api/me refresh: zero team memberships");
                         }
-                        FetchTeamsOutcome::AuthFailed if emit_output && !cli.json => {
+                        FetchTeamsOutcome::AuthFailed if emit_output => {
                             eprintln!(
                                 "warning: could not refresh team membership (/api/me 401). \
                                  Token may be expired — run `cas cloud login` to re-authenticate."
@@ -4258,7 +4258,7 @@ fn execute_sync_with_output(
     // execute_push via open_store → active_team_id().
     if !args.dry_run {
         let outcome = maybe_apply_team_backfill();
-        if emit_output && !cli.json {
+        if emit_output {
             print_backfill_notice(cli, &outcome);
         }
 
@@ -4270,7 +4270,7 @@ fn execute_sync_with_output(
         // notice (which then correctly says nothing) and before execute_push
         // opens the syncing stores that read `active_team_id()`.
         match crate::cloud::maybe_adopt_team_scope(cas_root) {
-            Ok(adoption) if emit_output && !cli.json => print_team_scope_adoption(cli, &adoption),
+            Ok(adoption) if emit_output => print_team_scope_adoption(cli, &adoption),
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!(error = %e, "could not adopt the resolvable team scope");
@@ -4278,7 +4278,7 @@ fn execute_sync_with_output(
         }
 
         match maybe_mark_personal_scope_notice(cas_root) {
-            Ok(Some(notice)) if emit_output && !cli.json => print_personal_scope_notice(cli, &notice),
+            Ok(Some(notice)) if emit_output => print_personal_scope_notice(cli, &notice),
             Ok(Some(_)) => {}
             Ok(None) => {}
             Err(e) => {
@@ -4417,6 +4417,7 @@ fn write_sync_summaries(out: &mut dyn io::Write, summaries: &[SyncSummary], json
             "operation":"sync_summary",
             "push":summaries.iter().find(|s|s.kind == SyncSummaryKind::Push),
             "pull":summaries.iter().find(|s|s.kind == SyncSummaryKind::Pull),
+            "held_personal_reason":summaries.iter().any(|s|s.team_configured && s.held_personal_pending+s.held_personal_failed>0).then_some("team_linked_sync_drains_team_queue_only"),
             "recovery_command":"cas cloud queue migrate-to-team",
         }))?;
         writeln!(out)?;

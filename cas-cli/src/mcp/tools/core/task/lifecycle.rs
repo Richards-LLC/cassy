@@ -1892,6 +1892,35 @@ impl CasCore {
 
         let agent_store = self.open_agent_store()?;
 
+        // A supervisor may grant exactly this registration one start. Check
+        // before worker-assignee checks or worktree mutation; force is not
+        // authority to take a child promised to a peer.
+        let split_note = match crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.id) {
+            Some(hold) => {
+                let agent = agent_store.get(&agent_id).ok();
+                let authorization = task.deliverables.split_takeover.as_ref().filter(|authorization| {
+                    authorization.split_id == hold.split_id
+                        && authorization.worker_id == agent_id
+                        && !authorization.supervisor_id.is_empty()
+                        && !authorization.reason.trim().is_empty()
+                        && agent.as_ref().is_some_and(|agent| {
+                            agent.role == cas_types::AgentRole::Worker
+                                && super::task_assignee_matches_agent(
+                                    agent_store.as_ref(), task.assignee.as_deref(), agent,
+                                )
+                        })
+                });
+                match authorization {
+                    Some(authorization) => hold.override_note(&req.id, authorization),
+                    None => return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        hold.refusal(&req.id, &crate::mcp::tools::core::guidance::caller_prefix()),
+                    )),
+                }
+            }
+            None => String::new(),
+        };
+
         // cas-7844 / GH #259: Gate tasks are supervisor-owned decisions,
         // not worker execution. Reuse the same live registered-supervisor
         // resolver as the other non-delivery terminal outcomes so env-role
@@ -2219,21 +2248,6 @@ impl CasCore {
         // Cassy Cloud claim first, so a peer's live claim refuses this start
         // before anything changes. Not logged in, or no repository id: no
         // peers to see, nothing said.
-        // cas-4736: a child the peer took under a binding epic split is
-        // refused unless forced. Local, so it holds with the cloud down.
-        let split_note = match crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.id) {
-            Some(hold) => {
-                let prefix = crate::mcp::tools::core::guidance::caller_prefix();
-                if !req.force.unwrap_or(false) {
-                    return Err(Self::error(
-                        ErrorCode::INVALID_PARAMS,
-                        hold.refusal(&req.id, &prefix),
-                    ));
-                }
-                hold.override_note(&req.id, &prefix)
-            }
-            None => String::new(),
-        };
         let peer_claims = crate::cloud::peer_claims::PeerClaims::for_project(&self.cas_root);
         let agent_name = agent_store
             .get(&agent_id)
@@ -2285,6 +2299,9 @@ impl CasCore {
                 Acquire::PeerHolds(hold) if kind == ClaimKind::Epic => {
                     peer_notes.push_str(&shared_epic_note(&req.id, &hold));
                 }
+                // The consumed supervisor decision also authorizes proceeding
+                // past this split peer's claim; leave their Cloud lease intact.
+                Acquire::PeerHolds(_) if !split_note.is_empty() => {}
                 Acquire::PeerHolds(hold) if !req.force.unwrap_or(false) => {
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
@@ -2567,6 +2584,10 @@ impl CasCore {
         task.labels
             .retain(|label| label != VERIFICATION_REJECTED_REOPEN_LABEL);
         task.status = TaskStatus::InProgress;
+        if !split_note.is_empty() {
+            task.notes.push_str(&split_note);
+            task.deliverables.split_takeover = None;
+        }
         task.updated_at = chrono::Utc::now();
 
         // cas-ec74: `updated_at` is store-owned. Adopt the stamp the store

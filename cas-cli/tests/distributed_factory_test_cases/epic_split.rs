@@ -240,7 +240,7 @@ async fn propose_and_accept(cloud: &FakeCloud, soundwave: &Side, prowl: &Side) -
     for child in SOUNDWAVE_TAKES {
         assert_eq!(cloud_holder(cloud, child).as_deref(), Some("sw"), "{child}");
     }
-    for child in PROWL_TAKES {
+    for child in ["cas-d1", "cas-d2"] {
         assert_eq!(cloud_holder(cloud, child), None, "the proposer never claims {child} for prowl");
     }
 
@@ -333,7 +333,7 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
     let task = tasks.get("cas-d3").unwrap();
     assert_eq!(task.assignee.as_deref(), Some("soundwave-worker"), "{assigned}");
     assert!(task.notes.contains(&id) && task.notes.contains(reason)
-        && task.notes.contains("soundwave"), "{}", task.notes);
+        && task.notes.contains("supervisor=sw"), "{}", task.notes);
     let mut other = Agent::new_with_role("sw-other".into(), "other-worker".into(), AgentRole::Worker);
     other.factory_session = Some("factory-sw".into());
     register(&soundwave.machine, &other);

@@ -1987,21 +1987,39 @@ impl CasService {
             let requested_pr_number = extract_pull_request_number(&message)
                 .or_else(|| extract_pull_request_number(&summary));
 
-            let merge_context = open_task_store_local(&self.inner.cas_root)
-                .ok()
-                .and_then(|store| {
-                    let tasks = store.list(None).ok()?;
-                    let active_task = tasks
-                        .iter()
-                        .find(|task| {
-                            task.status == cas_types::TaskStatus::InProgress
-                                && task.assignee.as_deref().is_some_and(|name| {
-                                    name.eq_ignore_ascii_case(&display_name)
-                                })
-                        })
-                        .map(|task| task.id.clone());
-                    Some((
-                        select_merge_request_task(&tasks, &display_name, req.task_id.as_deref())
+            let merge_context =
+                open_task_store_local(&self.inner.cas_root)
+                    .ok()
+                    .and_then(|store| {
+                        let tasks = store
+                            .ids_by_assignees_and_statuses(
+                                &[&display_name],
+                                &[
+                                    cas_types::TaskStatus::Open,
+                                    cas_types::TaskStatus::InProgress,
+                                    cas_types::TaskStatus::Blocked,
+                                    cas_types::TaskStatus::AwaitingMerge,
+                                ],
+                            )
+                            .ok()?
+                            .into_iter()
+                            .filter_map(|id| store.get(&id).ok())
+                            .collect::<Vec<_>>();
+                        let active_task = tasks
+                            .iter()
+                            .find(|task| {
+                                task.status == cas_types::TaskStatus::InProgress
+                                    && task.assignee.as_deref().is_some_and(|name| {
+                                        name.eq_ignore_ascii_case(&display_name)
+                                    })
+                            })
+                            .map(|task| task.id.clone());
+                        Some((
+                            select_merge_request_task(
+                                &tasks,
+                                &display_name,
+                                req.task_id.as_deref(),
+                            )
                             .cloned(),
                         active_task,
                     ))
@@ -2387,30 +2405,37 @@ impl CasService {
                 .clone()
                 .filter(|id| !id.trim().is_empty())
                 .or_else(|| {
-                    let assigned = tasks.as_ref().and_then(|store| store.list(None).ok());
-                    let current: Vec<_> = assigned
-                        .iter()
-                        .flatten()
-                        .filter(|task| {
-                            matches!(
-                                task.status,
-                                cas_types::TaskStatus::Open
-                                    | cas_types::TaskStatus::InProgress
-                                    | cas_types::TaskStatus::Blocked
-                            ) && task.assignee.as_deref().is_some_and(|owner| {
-                                owner.eq_ignore_ascii_case(&resolved_target)
-                                    || resolved_target_agent
-                                        .as_ref()
-                                        .is_some_and(|agent| owner == agent.id)
-                            })
+                    let mut assignees = vec![resolved_target.as_str()];
+                    if let Some(agent) = resolved_target_agent.as_ref() {
+                        assignees.push(&agent.id);
+                    }
+                    let current = tasks
+                        .as_ref()
+                        .and_then(|store| {
+                            store
+                                .ids_by_assignees_and_statuses(
+                                    &assignees,
+                                    &[
+                                        cas_types::TaskStatus::Open,
+                                        cas_types::TaskStatus::InProgress,
+                                        cas_types::TaskStatus::Blocked,
+                                    ],
+                                )
+                                .ok()
                         })
-                        .collect();
+                        .unwrap_or_default();
                     match current.as_slice() {
-                        [task] if task.status != cas_types::TaskStatus::Open => {
-                            assignment_solicited_task_id(&message)
-                                .or_else(|| Some(task.id.clone()))
+                        [id] => {
+                            let started = tasks
+                                .as_ref()
+                                .and_then(|store| store.get(id).ok())
+                                .is_some_and(|task| task.status != cas_types::TaskStatus::Open);
+                            if started {
+                                assignment_solicited_task_id(&message).or_else(|| Some(id.clone()))
+                            } else {
+                                Some(id.clone())
+                            }
                         }
-                        [task] => Some(task.id.clone()),
                         [] => assignment_solicited_task_id(&message),
                         // Multiple live assignments cannot prove which task this
                         // message solicits. Do not let incidental prose suppress it.
@@ -6292,6 +6317,10 @@ mod cas_89e1_post_merge_message_type_tests {
                 None,
                 "cas-3e24 is closed. You're assigned the next task; see your task list.",
             ),
+            (
+                None,
+                "<cas-assignment task_id=\"cas-3e24\"/>You're assigned cas-fba9.",
+            ),
         ] {
             let request = serde_json::from_value(serde_json::json!({
                 "action": "message", "target": "eager-cobra-57", "task_id": task_id,
@@ -6322,6 +6351,8 @@ mod cas_89e1_post_merge_message_type_tests {
                 assignment_solicited_task_id(&row.prompt).as_deref(),
                 Some("cas-fba9")
             );
+            assert_eq!(row.prompt.matches("<cas-assignment").count(), 1);
+
         }
         // A busy worker can receive its next assignment before the supervisor
         // updates that task's assignee. The started task is context, not binding.
@@ -6332,6 +6363,7 @@ mod cas_89e1_post_merge_message_type_tests {
             tasks.update(&previous).unwrap();
             let mut next = tasks.get("cas-fba9").unwrap();
             next.assignee = None;
+            next.status = TaskStatus::Open;
             tasks.update(&next).unwrap();
             let request = serde_json::from_value(serde_json::json!({
                 "action": "message", "target": "eager-cobra-57",
@@ -6361,6 +6393,16 @@ mod cas_89e1_post_merge_message_type_tests {
                 ),
                 None,
             );
+            next.status = TaskStatus::Closed;
+            tasks.update(&next).unwrap();
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "message", "target": "eager-cobra-57",
+                "summary": "stale next assignment while busy",
+                "message": "You're assigned cas-fba9.",
+            })).unwrap();
+            let error = service.message_send(request).await.expect_err("named closed task must refuse");
+            assert!(error.message.contains("cas-fba9") && error.message.contains("closed")
+                && error.message.contains("pass task_id=<id>"), "{error:?}");
         }
         // The binding also keeps genuine staleness: once the NEW task closes,
         // every queued variant must be withdrawn for that task, not the old one.

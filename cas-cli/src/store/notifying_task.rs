@@ -211,6 +211,15 @@ impl TaskStore for NotifyingTaskStore {
         self.inner.list(status)
     }
 
+    fn ids_by_assignees_and_statuses(
+        &self,
+        assignees: &[&str],
+        statuses: &[TaskStatus],
+    ) -> Result<Vec<String>> {
+        self.inner
+            .ids_by_assignees_and_statuses(assignees, statuses)
+    }
+
     fn epic_for_branch_excluding(&self, branch: &str, excluded: &[String]) -> Result<Option<Task>> {
         self.inner.epic_for_branch_excluding(branch, excluded)
     }

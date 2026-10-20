@@ -153,6 +153,20 @@ impl TaskStore for QuarantineFilteringTaskStore {
             .map(|(visible, _)| visible)
     }
 
+    fn ids_by_assignees_and_statuses(
+        &self,
+        assignees: &[&str],
+        statuses: &[TaskStatus],
+    ) -> Result<Vec<String>> {
+        let hidden = self.quarantined();
+        Ok(self
+            .inner
+            .ids_by_assignees_and_statuses(assignees, statuses)?
+            .into_iter()
+            .filter(|id| !hidden.contains(id))
+            .collect())
+    }
+
     fn epic_for_branch_excluding(&self, branch: &str, excluded: &[String]) -> Result<Option<Task>> {
         let mut hidden = self.quarantined();
         hidden.extend(excluded.iter().cloned());

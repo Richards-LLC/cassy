@@ -46,6 +46,43 @@ fn test_task_crud() {
     let open = store.list(Some(TaskStatus::Open)).unwrap();
     assert_eq!(open.len(), 0);
 
+    // Binding queries return only the requested owners and live statuses.
+    task.assignee = Some("worker-a".into());
+    store.update(&task).unwrap();
+    for (other_id, assignee, status) in [
+        ("cas-id00", Some("worker-id"), TaskStatus::Blocked),
+        ("cas-done", Some("worker-a"), TaskStatus::Closed),
+        ("cas-peer", Some("worker-b"), TaskStatus::InProgress),
+        ("cas-none", None, TaskStatus::InProgress),
+    ] {
+        let mut other = Task::new(other_id.into(), "query exclusion".into());
+        other.assignee = assignee.map(str::to_owned);
+        other.status = status;
+        store.add(&other).unwrap();
+    }
+    let mut ids = store
+        .ids_by_assignees_and_statuses(
+            &["WORKER-A", "worker-id"],
+            &[TaskStatus::InProgress, TaskStatus::Blocked],
+        )
+        .unwrap();
+    ids.sort();
+    let mut expected = vec![id.clone(), "cas-id00".into()];
+    expected.sort();
+    assert_eq!(ids, expected);
+    assert!(
+        store
+            .ids_by_assignees_and_statuses(&[], &[TaskStatus::InProgress])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .ids_by_assignees_and_statuses(&["worker-a"], &[])
+            .unwrap()
+            .is_empty()
+    );
+
     // Delete task
     store.delete(&id).unwrap();
     assert!(store.get(&id).is_err());

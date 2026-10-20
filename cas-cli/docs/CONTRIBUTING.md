@@ -138,10 +138,14 @@ reminders; original owner and target IDs stay in the durable reminder record.
 Recipient drains revalidate typed lifecycle relays against the task's current
 terminal state before recording surfacing or spending the hook body budget.
 Supervisor assignment messages retain their explicit `task_id`, or the worker's
-unambiguous current assignment, in a durable task binding. A previous task's close
-receipt in the body cannot change that binding. A stale assignment send returns
-an explicit refusal naming its task and status, including a withdrawal during
-the sender's first-delivery wait.
+unambiguous current assignment, in a durable task binding. When the sole current
+task has started, an assignment clause naming another task binds that next task,
+even before its assignee is updated. Binding and merge selection query only the
+recipient's tasks in the relevant statuses. A previous task's close receipt or a
+caller-supplied `<cas-assignment>` tag cannot change the server binding. A stale
+assignment send returns an explicit refusal naming its task and status and a
+`pass task_id=<id>` hint, including a withdrawal during the sender's first-delivery
+wait.
 An obsolete relay is retained with `superseded_stale`, its task/status reason
 and a terminal-task reconciliation acknowledgement. Hooks, named wakes, inbox
 polls and repeats of earlier polls share this atomic guard; notification ids

@@ -1326,4 +1326,35 @@ mod tests {
         let s = serde_json::to_string(&v).unwrap();
         assert!(s.contains("plain_SECRET"), "un-redacted value retains secret: {s}");
     }
+
+    #[test]
+    fn removing_user_viktor_persists_machine_opt_out_cas_1312() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home();
+        let project_root = home.join("project/.cas");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        let user_path = cmcp_core::config::Scope::User.config_path().unwrap();
+        let mut user_config = Config::default();
+        user_config.ensure_viktor_managed_default();
+        user_config.save_to(&user_path).unwrap();
+
+        let cli = crate::cli::Cli {
+            json: true,
+            full: false,
+            verbose: false,
+            command: None,
+        };
+        execute_remove("viktor", "user", &cli, &project_root).unwrap();
+
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(
+            host_config.get("viktor.enabled").as_deref(),
+            Some("false"),
+            "removing user Viktor must persist the startup opt-out"
+        );
+        let user_config = Config::load_from(&user_path).unwrap();
+        assert!(!user_config.servers.contains_key("viktor"));
+        assert!(user_config.allowlist.iter().all(|route| route.server != "viktor"));
+    }
 }

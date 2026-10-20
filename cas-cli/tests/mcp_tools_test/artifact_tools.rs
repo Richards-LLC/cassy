@@ -271,7 +271,7 @@ async fn post_is_dispatched_and_its_failures_are_named() {
 /// artifact row nor its filesystem, only the synced task and Cloud credentials.
 #[tokio::test]
 async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
-    use cas::store::{TaskStore, open_task_store};
+    use cas::store::open_task_store;
     use cas::types::Task;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -315,7 +315,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     let (owner, owner_service) = setup_cas_service(&mut env);
     open_task_store(&owner.path().join(".cas")).unwrap().add(&synced).unwrap();
     std::fs::write(owner.path().join(".cas/cloud.json"), cloud.to_string()).unwrap();
-    assert!(cas::store::SqliteArtifactStore::open(&owner.path().join(".cas")).unwrap().get(id).unwrap().is_none());
+    assert!(cas_store::SqliteArtifactStore::open(&owner.path().join(".cas")).unwrap().get(id).unwrap().is_none());
     // Delete the source: resolving must use Cloud, not a shared-host shortcut.
     std::fs::remove_file(source).unwrap();
     let fetch = serde_json::json!({"action": "fetch", "task_id": task.id, "id": id});
@@ -337,7 +337,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
 
 #[tokio::test]
 async fn proof_note_warns_for_unpublished_machine_local_path_cas_4bb2() {
-    use cas::store::{TaskStore, open_task_store};
+    use cas::store::open_task_store;
     use cas::types::Task;
     let mut env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas_service(&mut env);

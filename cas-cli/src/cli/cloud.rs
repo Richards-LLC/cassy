@@ -438,7 +438,6 @@ pub struct CloudQueueArgs {
     #[arg(
         long,
         conflicts_with_all = [
-            "command",
             "purge_team_owned",
             "dry_run",
             "ids",
@@ -451,7 +450,7 @@ pub struct CloudQueueArgs {
     pub repair_task_note_nuls: bool,
 
     /// Apply the planned task-note NUL repair.
-    #[arg(long, requires = "repair_task_note_nuls", conflicts_with = "command")]
+    #[arg(long, requires = "repair_task_note_nuls")]
     pub apply: bool,
 }
 
@@ -2764,6 +2763,11 @@ fn execute_queue_task_note_nul_repair(
 
 fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     use crate::cloud::SyncQueue;
+
+    anyhow::ensure!(
+        !args.repair_task_note_nuls || args.command.is_none(),
+        "--repair-task-note-nuls cannot be combined with a queue subcommand"
+    );
 
     if let Some(CloudQueueCommand::MigrateToTeam { apply }) = args.command {
         anyhow::ensure!(!args.purge_team_owned && !args.clear && !args.retry && args.prune.is_none(),

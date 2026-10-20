@@ -18768,7 +18768,9 @@ fn reanchored_delivery_content_in_parent(
 /// A parked `factory_branch_anchor` is the authoritative commit-ish. It is
 /// task-specific and remains stable when a worker later reuses the same
 /// factory branch for another epic. When that anchor is absent or no longer
-/// resolves, both the historical `parked_branch` and a distinct current
+/// resolves, an existing per-task branch (local or origin) is measured alone;
+/// the shared worker branch can carry other tasks' history. Without a per-task
+/// branch, both the historical `parked_branch` and a distinct current
 /// assignee-derived live branch are checked. Taking the maximum unmerged count
 /// avoids double-counting shared history while ensuring reassignment cannot
 /// hide either worker's stranded commits.
@@ -18911,14 +18913,29 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         let mut resolved_anchor =
             recorded_anchor.filter(|anchor| git_snapshot.commit_exists(anchor));
 
+        // cas-6d70: per-task lanes isolate this delivery from the worker's
+        // reused bare branch. Resolve against the same local/origin snapshot
+        // as measurement, including a parked task lane after reassignment.
+        let task_branch_suffix = format!("-{}", t.id);
+        let per_task_branch = has_delivery.then(|| {
+            task_delivery_branch_candidates(t).into_iter().find(|branch| {
+                branch.starts_with("factory/")
+                    && branch.ends_with(&task_branch_suffix)
+                    && git_snapshot.read_ref(branch).read_ref().is_some()
+            })
+        }).flatten();
         let mut fallback_branches = Vec::new();
-        if let Some(branch) = parked_branch.as_ref() {
-            fallback_branches.push(branch.clone());
-        }
-        if let Some(branch) = live_factory_branch.as_ref()
-            && !fallback_branches.contains(branch)
-        {
-            fallback_branches.push(branch.clone());
+        if let Some(branch) = per_task_branch {
+            fallback_branches.push(branch);
+        } else {
+            if let Some(branch) = parked_branch.as_ref() {
+                fallback_branches.push(branch.clone());
+            }
+            if let Some(branch) = live_factory_branch.as_ref()
+                && !fallback_branches.contains(branch)
+            {
+                fallback_branches.push(branch.clone());
+            }
         }
         let factory_branch = fallback_branches.first().cloned().or(parked_branch);
         let additional_factory_branches: Vec<String> =

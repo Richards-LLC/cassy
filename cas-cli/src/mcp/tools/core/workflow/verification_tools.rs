@@ -1274,6 +1274,10 @@ impl CasCore {
         )
         .map_err(|error| refuse(error.to_string()))
     }
+
+    // ========================================================================
+    // Worktree Operations
+    // ========================================================================
 }
 
 fn verification_status_emoji(status: VerificationStatus) -> &'static str {

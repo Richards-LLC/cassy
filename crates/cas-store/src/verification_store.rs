@@ -1280,7 +1280,7 @@ pub fn expired_verification_dispatches(
 /// Adopt only the latest unresolved proof for an orphaned owner. The caller
 /// supplies positively dead process snapshots; status/PID/fingerprint are
 /// compared again under the write lock so a revived owner is never displaced.
-/// Missing registry rows require a single live supervisor in this project.
+/// Missing registry rows require matching machine/session retirement evidence.
 pub fn adopt_orphaned_verification_dispatches(
     cas_dir: &Path,
     supervisor_id: &str,
@@ -1298,15 +1298,20 @@ pub fn adopt_orphaned_verification_dispatches(
         tx.commit()?;
         return Ok(0);
     }
-    let session: Option<String> = tx.query_row(
-        "SELECT factory_session FROM agents WHERE id = ?1 AND role = 'supervisor' AND status IN ('active', 'idle')",
-        [supervisor_id], |row| row.get(0),
-    )?;
-    let live_supervisors: i64 = tx.query_row(
-        "SELECT count(*) FROM agents WHERE role = 'supervisor' AND status IN ('active', 'idle')",
-        [],
-        |row| row.get(0),
-    )?;
+    let local_machine = Agent::get_or_generate_machine_id();
+    let adopter: Option<(String, String)> = tx
+        .query_row(
+            "SELECT machine_id, factory_session FROM agents
+         WHERE id = ?1 AND role = 'supervisor' AND status IN ('active', 'idle')
+           AND machine_id = ?2 AND factory_session IS NOT NULL AND trim(factory_session) != ''",
+            params![supervisor_id, local_machine],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((machine, session)) = adopter else {
+        tx.commit()?;
+        return Ok(0);
+    };
     let ids = {
         let mut stmt = tx.prepare(
             "SELECT d.id FROM verification_dispatches d JOIN tasks t ON t.id = d.task_id
@@ -1324,25 +1329,43 @@ pub fn adopt_orphaned_verification_dispatches(
     let mut adopted = 0;
     for id in ids {
         let dispatch = get_verification_dispatch_with_conn(&tx, &id)?;
-        let prior: Option<(String, Option<u32>, Option<i64>, Option<String>)> = tx
+        let prior: Option<(String, String, Option<u32>, Option<i64>, Option<String>, Option<String>)> = tx
             .query_row(
-                "SELECT status, pid, pid_starttime, factory_session FROM agents WHERE id = ?1",
+                "SELECT role, status, pid, pid_starttime, machine_id, factory_session FROM agents WHERE id = ?1",
                 [&dispatch.owner_agent_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             )
             .optional()?;
         let may_adopt = match prior {
-            Some((status, pid, fingerprint, prior_session)) => {
-                prior_session == session
-                    && session.is_some()
+            Some((role, status, pid, fingerprint, prior_machine, prior_session)) => {
+                role == "supervisor"
+                    && prior_machine.as_deref() == Some(machine.as_str())
+                    && prior_session.as_deref() == Some(session.as_str())
                     && dead_owners.iter().any(|agent| {
                         agent.id == dispatch.owner_agent_id
+                            && agent.machine_id.as_deref() == Some(machine.as_str())
+                            && agent.factory_session.as_deref() == Some(session.as_str())
                             && agent.status.to_string() == status
                             && agent.pid == pid
                             && agent.pid_starttime.map(|value| value as i64) == fingerprint
                     })
             }
-            None => live_supervisors == 1,
+            None => {
+                let metadata: Option<String> = tx.query_row(
+                    "SELECT metadata FROM events
+                     WHERE event_type = 'agent_shutdown' AND entity_type = 'agent' AND entity_id = ?1
+                     ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    [&dispatch.owner_agent_id], |row| row.get::<_, Option<String>>(0),
+                ).optional()?.flatten();
+                metadata
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                    .is_some_and(|metadata| {
+                        let retired = &metadata["retired_agent"];
+                        retired["role"].as_str() == Some("supervisor")
+                            && retired["machine_id"].as_str() == Some(machine.as_str())
+                            && retired["factory_session"].as_str() == Some(session.as_str())
+                    })
+            }
         };
         if !may_adopt {
             continue;

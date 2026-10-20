@@ -225,6 +225,9 @@ fn execute_add(raw: &[String], cli: &super::Cli, cas_root: &Path) -> Result<()> 
     guard_supervisor_only(&raw_name, Some(&server_config), &config, cas_root)?;
     config.add_server(raw_name.clone(), server_config);
     config.save_to(&path)?;
+    if scope.eq_ignore_ascii_case("user") && raw_name.eq_ignore_ascii_case("viktor") {
+        crate::cli::viktor::set_enabled(true)?;
+    }
     let public_name = public_name_after_mutation(&raw_name, cas_root)?;
 
     if cli.json {

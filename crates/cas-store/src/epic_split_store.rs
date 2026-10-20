@@ -433,6 +433,8 @@ mod tests {
         assert_eq!(legacy.mine, vec!["cas-1"]);
         assert!(legacy.decided_by.is_none() && !legacy.cleanup_pending);
         let now = Utc::now();
+        assert!(!decide_epic_split_by(dir.path(), &legacy.id, &[SplitState::Pending],
+            SplitState::Accepted, None, now, Some("peer")).unwrap());
         assert!(decide_epic_split_by(dir.path(), &legacy.id, &[SplitState::Pending],
             SplitState::Expired, None, now, Some("local")).unwrap());
         assert!(!decide_epic_split_by(dir.path(), &legacy.id, &[SplitState::Pending],

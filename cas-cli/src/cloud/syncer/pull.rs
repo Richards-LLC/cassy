@@ -1,3 +1,4 @@
+use crate::mcp::tools::core::task::audit;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -1508,9 +1509,9 @@ fn has_explicit_remote_reopen(local: &Task, remote: &Task) -> bool {
     let local_boundary = local.notes.split("\n\n").filter_map(|block| {
         let (at, event) = lifecycle_audit_note(block)?;
         let is_boundary = if local.is_terminal() {
-            event.starts_with("Closed:") || event.starts_with("Cancelled:")
+            event.starts_with(audit::CLOSED) || event.starts_with(audit::CANCELLED)
         } else {
-            event.starts_with("Close rejected:") && event.contains("Task parked as awaiting_merge;")
+            event.starts_with(audit::PARKED) && event.contains(audit::PARKED_STATE)
         };
         is_boundary.then_some((at, block.trim()))
     }).max_by_key(|(at, _)| *at);
@@ -1525,17 +1526,23 @@ fn has_explicit_remote_reopen(local: &Task, remote: &Task) -> bool {
         if local.notes.split("\n\n").any(|known| known.trim() == block.trim()) {
             return false;
         }
-        let reopen = event.strip_prefix("Reopened:")
+        let reopen = [audit::REOPENED, audit::REVIEW_SCOPE_RESET, audit::UNBLOCKED]
+            .into_iter().find_map(|prefix| event.strip_prefix(prefix))
             .and_then(|audit| audit.trim().strip_prefix("actor="))
             .and_then(|audit| audit.split_once(" reason="))
             .is_some_and(|(actor, reason)| !actor.trim().is_empty() && !reason.trim().is_empty());
-        let request_changes = event.strip_prefix("Decision: changes requested by supervisor. ")
+        let request_changes = event.strip_prefix(cas_store::REQUEST_CHANGES_AUDIT_PREFIX)
             .is_some_and(|reason| !reason.trim().is_empty());
-        let reset = event.strip_prefix("reset: force-transitioned ")
+        let reset = event.strip_prefix(audit::RESET)
             .and_then(|audit| audit.split_once("→Open (prior assignee: "))
             .and_then(|(_, audit)| audit.split_once(") — "))
             .is_some_and(|(_, reason)| !reason.trim().is_empty());
-        if !(reopen || request_changes || reset) {
+        let scope_fix = event.strip_prefix(audit::PROOF_SCOPE_FIX)
+            .is_some_and(|decision| !decision.trim().is_empty());
+        let merge_recovery = remote.status == crate::types::TaskStatus::InProgress
+            && event.strip_prefix(audit::MERGE_RECOVERY)
+                .is_some_and(|decision| !decision.trim().is_empty());
+        if !(reopen || request_changes || reset || scope_fix || merge_recovery) {
             return false;
         }
         // Notes have minute precision. At an equal minute require causal

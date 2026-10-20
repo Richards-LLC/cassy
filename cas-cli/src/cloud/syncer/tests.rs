@@ -2071,6 +2071,8 @@ async fn team_pull_preserves_live_started_owner_cas_c4a52() {
 
 #[tokio::test]
 async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
+    use crate::mcp::tools::core::task::audit;
+    let actor = cas_types::Agent::new("remote-supervisor-id".into(), "remote-supervisor".into());
     let project = "park-owner";
     let parked_at = chrono::DateTime::parse_from_rfc3339("2026-10-20T11:55:00Z")
         .unwrap().with_timezone(&chrono::Utc);
@@ -2080,8 +2082,8 @@ async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
     local.pending_worktree_merge = true;
     local.deliverables.parked_branch = Some("factory/replay-cas-96ce4".into());
     local.deliverables.factory_branch_anchor = Some("a".repeat(40));
-    let old_reset = "[2026-10-20 11:30] reset: force-transitioned Open→Open (prior assignee: <none>, lease released: false) — dead-session recovery";
-    local.notes = format!("{old_reset}\n\n[2026-10-20 11:55] Close rejected: MERGE REQUIRED. Task parked as awaiting_merge; worker lease released until supervisor merge completes.");
+    let old_reset = audit::reset_note(parked_at - chrono::Duration::minutes(25), TaskStatus::Open, None, false, "dead-session recovery");
+    local.notes = format!("{old_reset}\n\n{}", audit::parked_note(parked_at, "MERGE REQUIRED"));
     let mut stale = team_task_fixture(
         &local.id, TaskStatus::Open, project, project,
         parked_at + chrono::Duration::minutes(3),
@@ -2130,7 +2132,7 @@ async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
     previous_cycle.closed_at = Some(parked_at - chrono::Duration::hours(1));
     let mut old_action = stale.clone();
     old_action["notes"] = serde_json::json!(format!(
-        "{old_reset}\n\n[2026-10-20 11:54] Reopened: actor=peer reason=earlier cycle",
+        "{old_reset}\n\n{}", audit::reopen_note(parked_at - chrono::Duration::minutes(1), TaskStatus::Closed, false, &actor, "earlier cycle"),
     ));
     let (_temp, result, store, _queue) = pull_team_task_fixtures(
         project, vec![old_action], Some(previous_cycle.clone()),
@@ -2138,29 +2140,47 @@ async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     assert!(store.get(&local.id).unwrap().lifecycle_matches(&previous_cycle));
 
-    // New, explicit lifecycle actions still authorize rework on the replica.
-    for event in [
-        "Reopened: actor=remote-supervisor reason=regression found",
-        "Decision: changes requested by supervisor. Correct the delivery",
-        "reset: force-transitioned AwaitingMerge→Open (prior assignee: worker, lease released: false) — dead-session recovery",
+    // Exercise the production audit writers, including parked review resets,
+    // proof-scope correction and merge-conflict resume (ver-f582f640f022).
+    let action_at = parked_at + chrono::Duration::minutes(4);
+    for (status, note) in [
+        (TaskStatus::Open, audit::reopen_note(action_at, TaskStatus::Closed, false, &actor, "regression found")),
+        (TaskStatus::Open, audit::reopen_note(action_at, TaskStatus::AwaitingMerge, true, &actor, "reset review scope")),
+        (TaskStatus::Open, audit::proof_scope_fix_note(action_at, &actor, "correct proof", "Proof targets widened.")),
+        (TaskStatus::InProgress, audit::merge_recovery_note(action_at, "factory/replay-cas-96ce4")),
+        (TaskStatus::Open, cas_store::request_changes_audit_note(parked_at, "Correct delivery", "prior commits remain")),
+        (TaskStatus::Open, audit::reset_note(action_at, TaskStatus::AwaitingMerge, Some("worker"), false, "dead-session recovery")),
     ] {
         let mut reopened = stale.clone();
-        // A later sync-apply annotation is a projection, not a new park.
         let mut projected = local.clone();
         projected.updated_at = parked_at + chrono::Duration::minutes(6);
         projected.notes.push_str("\n\n[2026-10-20 12:01] [CAS_SYNC_STATUS] source=team_pull applied_status=awaiting_merge");
+        reopened["status"] = serde_json::json!(status);
         reopened["updated_at"] = serde_json::json!(parked_at + chrono::Duration::minutes(7));
-        let minute = if event.starts_with("Decision:") { "11:55" } else { "11:59" };
-        reopened["notes"] = serde_json::json!(format!("{}\n\n[2026-10-20 {minute}] {event}", local.notes));
+        reopened["notes"] = serde_json::json!(format!("{}\n\n{note}", local.notes));
         let (_temp, result, store, _queue) = pull_team_task_fixtures(
             project, vec![reopened], Some(projected),
         ).await;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
-        assert_eq!(result.pulled_tasks, 1, "{event}");
+        assert_eq!(result.pulled_tasks, 1, "{note}");
         let reopened = store.get(&local.id).unwrap();
-        assert_eq!(reopened.status, TaskStatus::Open, "{event}");
+        assert_eq!(reopened.status, status, "{note}");
         assert!(reopened.notes.contains("prior_status=awaiting_merge"));
     }
+
+    // The real uppercase cancellation writer establishes the same-minute
+    // boundary needed to recognize a subsequent authorized reopen.
+    let mut cancelled = local.clone();
+    cancelled.status = TaskStatus::Cancelled;
+    cancelled.closed_at = Some(parked_at);
+    cancelled.notes = audit::cancel_note(parked_at, &actor, "scope ended", None);
+    let mut reopened = stale;
+    reopened["notes"] = serde_json::json!(format!("{}\n\n{}", cancelled.notes,
+        audit::reopen_note(parked_at + chrono::Duration::seconds(30), TaskStatus::Cancelled, false, &actor, "scope restored")));
+    let (_temp, result, store, _queue) = pull_team_task_fixtures(project, vec![reopened], Some(cancelled)).await;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.pulled_tasks, 1);
+    assert_eq!(store.get(&local.id).unwrap().status, TaskStatus::Open);
 }
 
 #[tokio::test]

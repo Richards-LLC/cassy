@@ -217,6 +217,7 @@ pub use loop_store::{LOOP_SCHEMA, LoopStore, SqliteLoopStore};
 
 // Verification store for task quality gates
 pub use verification_store::{
+    REQUEST_CHANGES_AUDIT_PREFIX, request_changes_audit_note,
     IssuedVerifierCapability, ParentDependencyUpdate, ProofScopeCorrectionOutcome,
     RequestChangesBoundary, RequestChangesOutcome, SqliteVerificationStore,
     TaskReopenLifecycleOutbox, VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT,

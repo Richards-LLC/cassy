@@ -1,3 +1,4 @@
+pub(crate) mod audit;
 pub(crate) mod integration_batch;
 pub(crate) mod block_hold;
 mod dependencies;

@@ -1,3 +1,4 @@
+use crate::mcp::tools::core::task::audit;
 pub(crate) mod gate_text;
 mod loaded_proof;
 mod proof_claims;
@@ -6217,10 +6218,7 @@ impl CasCore {
         parked.pending_worktree_merge = false;
         parked.updated_at = now;
 
-        let timestamp = now.format("%Y-%m-%d %H:%M");
-        let audit = format!(
-            "[{timestamp}] Close rejected: {reason}. Task parked as awaiting_merge; worker lease released until supervisor merge completes."
-        );
+        let audit = audit::parked_note(now, reason);
         parked.notes = if parked.notes.is_empty() {
             audit
         } else {
@@ -10538,8 +10536,7 @@ impl CasCore {
 
         if let Some(reason) = &req.reason {
             task.close_reason = Some(reason.clone());
-            let timestamp = now.format("%Y-%m-%d %H:%M");
-            let close_note = format!("[{timestamp}] Closed: {reason}");
+            let close_note = audit::closed_note(now, reason);
             if task.notes.is_empty() {
                 task.notes = close_note;
             } else {
@@ -11374,18 +11371,7 @@ impl CasCore {
         }
 
         let now = chrono::Utc::now();
-        let pointer_note = superseded_by
-            .as_deref()
-            .map(|pointer| format!(" Superseded by: {pointer}."))
-            .unwrap_or_default();
-        let cancel_note = format!(
-            "[{}] CANCELLED: supervisor {} ({}) ended this task without delivery. Reason: {}{}",
-            now.format("%Y-%m-%d %H:%M"),
-            supervisor.name,
-            supervisor.id,
-            reason,
-            pointer_note,
-        );
+        let cancel_note = audit::cancel_note(now, &supervisor, reason, superseded_by.as_deref());
         if task.notes.is_empty() {
             task.notes = cancel_note;
         } else {
@@ -11585,17 +11571,11 @@ impl CasCore {
         // Terminal exits must be independently intelligible after replication:
         // the actor and the reason are both embedded in the note, rather than
         // relying on ephemeral caller context or a generic updated_at stamp.
-        let timestamp = task.updated_at.format("%Y-%m-%d %H:%M");
-        let verb = if fresh_scope_dispatch.is_some() && old_status != TaskStatus::Closed {
-            "Review scope reset"
-        } else if old_status == TaskStatus::Blocked {
-            "Unblocked"
-        } else {
-            "Reopened"
-        };
+        let reopen_note = audit::reopen_note(
+            task.updated_at, old_status, fresh_scope_dispatch.is_some(), &actor, reason,
+        );
         let actor = format!("{} ({})", actor.name, actor.id).replace(['\n', '\r'], " ");
         let reason = reason.replace(['\n', '\r'], " ");
-        let reopen_note = format!("[{timestamp}] {verb}: actor={actor} reason={reason}");
         if task.notes.is_empty() {
             task.notes = reopen_note;
         } else {

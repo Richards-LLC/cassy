@@ -6623,6 +6623,7 @@ impl CasService {
             out.push_str(&crate::task_simulators::render(&crate::task_simulators::inventory(
                 &crate::task_simulators::Simctl::default(),
                 &tasks,
+                &crate::task_ownership::KnownProjects::load(&self.inner.cas_root),
                 chrono::Utc::now(),
             )));
         }
@@ -7366,7 +7367,10 @@ impl CasService {
             let simulators = crate::store::open_task_store(&self.inner.cas_root)
                 .map_err(anyhow::Error::from)
                 .and_then(|store| store.list(None).map_err(anyhow::Error::from))
-                .and_then(|tasks| crate::task_simulators::inventory(&simctl, &tasks, chrono::Utc::now()));
+                .and_then(|tasks| {
+                    let others = crate::task_ownership::KnownProjects::load(&self.inner.cas_root);
+                    crate::task_simulators::inventory(&simctl, &tasks, &others, chrono::Utc::now())
+                });
             output.push_str(&crate::task_simulators::render(&simulators));
             if artifact_authorized && let Ok(simulators) = &simulators {
                 let (deleted, failed) = crate::task_simulators::reclaim(&simctl, simulators);
@@ -7515,6 +7519,7 @@ fn serve_memory_report(agents: &[cas_types::Agent]) -> String {
 
 const GC_REPORT_PAGE_SIZE: usize = 100;
 const GC_REPORT_PAGE_MAX: usize = 100;
+const GC_REPORT_PAGE_MAX_BYTES: usize = 32 * 1024;
 const GC_REPORT_SAMPLE_ITEMS: usize = 3;
 const GC_REPORT_SAMPLE_CHARS: usize = 180;
 
@@ -7536,25 +7541,7 @@ fn render_gc_report_response(
         let requested_limit = limit.unwrap_or(GC_REPORT_PAGE_SIZE);
         let page_size = requested_limit.min(GC_REPORT_PAGE_MAX);
         let start = offset.unwrap_or(0).min(lines.len());
-        let end = start.saturating_add(page_size).min(lines.len());
-        let mut page = format!(
-            "Factory GC Report\n=================\nDetail page: zero-based lines {start}..{end} of {}.\n",
-            lines.len()
-        );
-        if requested_limit > GC_REPORT_PAGE_MAX {
-            page.push_str(&format!(
-                "Requested limit {requested_limit} was capped at {GC_REPORT_PAGE_MAX}.\n"
-            ));
-        }
-        if end < lines.len() {
-            page.push_str(&format!("Next offset: {end}\n"));
-        }
-        page.push('\n');
-        for line in &lines[start..end] {
-            page.push_str(line);
-            page.push('\n');
-        }
-        return page;
+        return render_gc_report_page(&lines, start, page_size, requested_limit);
     }
 
     summarize_gc_report(full_report, detail)
@@ -7567,14 +7554,23 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
         .filter(|section| !section.trim().is_empty());
     let metrics = sections.next().unwrap_or_default();
     let mut summary = format!(
-        "Factory GC Report\n=================\nFull report: {} bytes; detail pages contain {} zero-based lines (limit capped at {}). Use `factory action=gc_report limit={} offset=0` for full detail.\n\n",
+        "Factory GC Report\n=================\nFull report: {} bytes; detail pages contain at most {} zero-based lines and {} bytes. Use `factory action=gc_report limit={} offset=0` for full detail.\n\n",
         full_report.len(),
-        detail.lines().count(),
         GC_REPORT_PAGE_MAX,
+        GC_REPORT_PAGE_MAX_BYTES,
         GC_REPORT_PAGE_SIZE,
     );
+    let machine_status_lines = detail
+        .lines()
+        .filter(|line| gc_report_is_machine_status_line(line))
+        .collect::<Vec<_>>();
     if !metrics.is_empty() {
-        summary.push_str(metrics);
+        for line in metrics.lines() {
+            if !gc_report_is_machine_status_line(line) {
+                summary.push_str(line);
+                summary.push('\n');
+            }
+        }
         summary.push_str(
             "\n\nInventory summary (category counts/bytes; first up to 3 items per category):\n",
         );
@@ -7585,12 +7581,15 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
         let Some(heading) = lines.first() else {
             continue;
         };
+        if gc_report_is_machine_status_line(heading) {
+            continue;
+        }
         let label = gc_report_category_label(heading);
         let detail_lines = lines
             .iter()
             .skip(1)
             .copied()
-            .filter(|line| !line.is_empty())
+            .filter(|line| !line.is_empty() && !gc_report_is_machine_status_line(line))
             .collect::<Vec<_>>();
         let item_lines = detail_lines
             .iter()
@@ -7617,7 +7616,75 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             summary.push_str(&format!("  Sample: {}\n", gc_report_short_line(item)));
         }
     }
+    if !machine_status_lines.is_empty() {
+        summary.push_str("\nMachine-readable status:\n");
+        for line in machine_status_lines {
+            summary.push_str(line);
+            summary.push('\n');
+        }
+    }
     summary
+}
+
+fn render_gc_report_page(
+    lines: &[&str],
+    start: usize,
+    page_size: usize,
+    requested_limit: usize,
+) -> String {
+    let max_end = start.saturating_add(page_size).min(lines.len());
+    let mut end = start;
+    for candidate_end in start.saturating_add(1)..=max_end {
+        if gc_report_page_text(lines, start, candidate_end, requested_limit).len()
+            > GC_REPORT_PAGE_MAX_BYTES
+        {
+            break;
+        }
+        end = candidate_end;
+    }
+    if end == start && start < lines.len() {
+        // Keep a single unusually long row from exceeding the tool-result cap.
+        let mut page = gc_report_page_text(lines, start, start + 1, requested_limit);
+        let row_text = format!("{}\n", lines[start]);
+        if let Some(position) = page.rfind(&row_text) {
+            page.replace_range(
+                position..,
+                &format!(
+                    "[line {start} omitted: {} bytes exceeds the {} byte page cap]\n",
+                    lines[start].len(),
+                    GC_REPORT_PAGE_MAX_BYTES
+                ),
+            );
+        }
+        return page;
+    }
+    gc_report_page_text(lines, start, end, requested_limit)
+}
+
+fn gc_report_page_text(
+    lines: &[&str],
+    start: usize,
+    end: usize,
+    requested_limit: usize,
+) -> String {
+    let mut page = format!(
+        "Factory GC Report\n=================\nDetail page: zero-based lines {start}..{end} of {} (max {GC_REPORT_PAGE_MAX} lines, {GC_REPORT_PAGE_MAX_BYTES} bytes).\n",
+        lines.len()
+    );
+    if requested_limit > GC_REPORT_PAGE_MAX {
+        page.push_str(&format!(
+            "Requested limit {requested_limit} was capped at {GC_REPORT_PAGE_MAX}.\n"
+        ));
+    }
+    if end < lines.len() {
+        page.push_str(&format!("Next offset: {end}\n"));
+    }
+    page.push('\n');
+    for line in &lines[start..end] {
+        page.push_str(line);
+        page.push('\n');
+    }
+    page
 }
 
 fn gc_report_category_label(heading: &str) -> String {
@@ -7639,7 +7706,16 @@ fn gc_report_is_inventory_item(line: &str) -> bool {
     line.starts_with("- ")
         || line.starts_with("session=")
         || line.starts_with("[")
-        || line.starts_with("TARGET_CACHE_STATUS_JSON=")
+}
+
+fn gc_report_is_machine_status_line(line: &str) -> bool {
+    let Some((key, _)) = line.split_once("_STATUS_JSON=") else {
+        return false;
+    };
+    !key.is_empty()
+        && key.chars().all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        })
 }
 
 fn gc_report_short_line(line: &str) -> String {

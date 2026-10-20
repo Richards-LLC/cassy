@@ -259,19 +259,20 @@ fn execute_prune(
 ) -> anyhow::Result<()> {
     use crate::artifacts::retention::{Kept, apply_prune, plan_prune};
     let config = Config::load(cas_root).unwrap_or_default();
-    let root = crate::config::project_factory_artifacts_root(
-        cas_root,
-        &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()),
-    );
+    let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let root = crate::config::project_factory_artifacts_root(cas_root, &base);
+    // cas-6162: legacy `<base>/cas-<id>/` dirs and task-named simulators
+    // carry no project; prove the id is not another known project's.
+    let others = crate::task_ownership::KnownProjects::load(cas_root);
     let tasks = crate::store::open_task_store(cas_root)
         .context("opening the task store")?
         .list(None)
         .context("listing tasks")?;
-    let plan = plan_prune(cas_root, &root, &tasks, now, args.older_than)
+    let plan = plan_prune(cas_root, &root, Some(&base), &others, &tasks, now, args.older_than)
         .map_err(|error| anyhow::anyhow!("artifact retention evidence unavailable; nothing removed: {error}"))?;
     let simulators = args
         .simulators
-        .then(|| crate::task_simulators::inventory(simctl, &tasks, now));
+        .then(|| crate::task_simulators::inventory(simctl, &tasks, &others, now));
     // Plan-only unless --yes (cas-75a8 review): deleting evidence is never
     // the default, and --dry-run is an accepted alias for that default.
     let apply = args.yes && !args.dry_run;
@@ -285,7 +286,7 @@ fn execute_prune(
     };
 
     if json {
-        let dirs = |list: Vec<(&crate::artifacts::retention::TaskArtifactDir, Option<&str>)>| {
+        let dirs = |list: Vec<(&crate::artifacts::retention::TaskArtifactDir, Option<String>)>| {
             list.into_iter()
                 .map(|(dir, kept)| {
                     serde_json::json!({
@@ -293,6 +294,7 @@ fn execute_prune(
                         "path": dir.path,
                         "bytes": dir.bytes,
                         "closed_at": dir.closed_at,
+                        "legacy": dir.legacy,
                         "kept": kept,
                     })
                 })
@@ -305,8 +307,9 @@ fn execute_prune(
             "reclaimable": dirs(plan.reclaimable.iter().map(|dir| (dir, None)).collect()),
             "reclaimable_bytes": plan.reclaimable_bytes(),
             "kept": dirs(plan.kept.iter().map(|(dir, why)| (dir, Some(match why {
-                Kept::Recent => "recent",
-                Kept::Referenced => "referenced",
+                Kept::Recent => "recent".to_string(),
+                Kept::Referenced => "referenced".to_string(),
+                Kept::Unproven(reason) => format!("unproven: {reason}"),
             }))).collect()),
             "untouched_dirs": plan.untouched,
             "removed": removed,
@@ -339,15 +342,26 @@ fn execute_prune(
         plan.retention_days
     );
     println!("     root {}", plan.root.display());
+    let place = |dir: &crate::artifacts::retention::TaskArtifactDir| if dir.legacy { " (legacy)" } else { "" };
     for dir in &plan.reclaimable {
-        println!("     {:<22} {:>9}  {}", dir.task_id, human_size(dir.bytes), age(dir.closed_at));
+        println!("     {:<22} {:>9}  {}{}", dir.task_id, human_size(dir.bytes), age(dir.closed_at), place(dir));
     }
+    let mut unproven = 0;
     for (dir, why) in &plan.kept {
         let why = match why {
-            Kept::Recent => "kept: closed recently",
-            Kept::Referenced => "kept: still cited",
+            Kept::Recent => "kept: closed recently".to_string(),
+            Kept::Referenced => "kept: still cited".to_string(),
+            Kept::Unproven(reason) => {
+                unproven += 1;
+                if unproven > 1 && reason.starts_with("task stores of other known projects") {
+                    // One shared reason; print it once.
+                    "kept: ownership unproven (see above)".to_string()
+                } else {
+                    format!("kept: ownership unproven: {reason}")
+                }
+            }
         };
-        println!("     {:<22} {:>9}  {why}", dir.task_id, human_size(dir.bytes));
+        println!("     {:<22} {:>9}  {why}{}", dir.task_id, human_size(dir.bytes), place(dir));
     }
     if plan.untouched > 0 {
         println!("     {} other dir(s) untouched (open tasks, other projects, strays)", plan.untouched);
@@ -414,6 +428,66 @@ pub fn render_artifact_line(artifact: &PublishedArtifact) -> String {
 mod tests {
     use super::*;
 
+    /// cas-6162: legacy `<artifacts_root>/cas-<id>/` dirs are reachable. One
+    /// whose id is closed here and held by no other known project is
+    /// reclaimed with --yes; one whose id another project also holds is kept
+    /// as unproven, plan-only by default.
+    #[test]
+    fn legacy_top_level_dirs_are_reclaimed_only_when_provably_this_projects_cas_6162() {
+        let env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let other_root = crate::store::init_cas_dir(other.path()).unwrap();
+        let now = chrono::Utc::now();
+        let closed = |id: &str| {
+            let mut task = cas_types::Task::new(id.into(), id.into());
+            task.status = cas_types::TaskStatus::Closed;
+            task.closed_at = Some(now - chrono::Duration::days(30));
+            task.updated_at = now - chrono::Duration::days(30);
+            task
+        };
+        let store = crate::store::open_task_store_local(&cas_root).unwrap();
+        store.add(&closed("cas-a0a0")).unwrap();
+        store.add(&closed("cas-b1b1")).unwrap();
+        crate::store::open_task_store_local(&other_root).unwrap().add(&closed("cas-b1b1")).unwrap();
+        for (root, id) in [(&cas_root, "fixture-this"), (&other_root, "fixture-other")] {
+            std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id = {id:?}\n")).unwrap();
+        }
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        crate::store::known_repos::register_repo_strict(project.path()).unwrap();
+        crate::store::known_repos::register_repo_strict(other.path()).unwrap();
+        let base = crate::config::resolved_factory_artifacts_root(None);
+        assert!(base.starts_with(env.home()), "{}", base.display());
+        for id in ["cas-a0a0", "cas-b1b1", "cas-c2c2"] {
+            std::fs::create_dir_all(base.join(id)).unwrap();
+            std::fs::write(base.join(id).join("proof.zip"), b"zip").unwrap();
+        }
+        let missing = crate::task_simulators::Simctl::with_binary(env.home().join("no-xcrun"));
+        let plan_only = PruneArgs { older_than: 7, yes: false, dry_run: false, simulators: false };
+        execute_prune(&plan_only, &cas_root, false, &missing, now).unwrap();
+        assert!(base.join("cas-a0a0").exists(), "plan-only by default");
+
+        let tasks = store.list(None).unwrap();
+        let others = crate::task_ownership::KnownProjects::load(&cas_root);
+        let root = crate::config::project_factory_artifacts_root(&cas_root, &base);
+        let plan = crate::artifacts::retention::plan_prune(&cas_root, &root, Some(&base), &others, &tasks, now, 7).unwrap();
+        assert_eq!(
+            plan.reclaimable.iter().map(|dir| (dir.task_id.as_str(), dir.legacy)).collect::<Vec<_>>(),
+            vec![("cas-a0a0", true)],
+            "kept: {:?}",
+            plan.kept
+        );
+        assert!(matches!(&plan.kept[..], [(dir, crate::artifacts::retention::Kept::Unproven(why))]
+            if dir.task_id == "cas-b1b1" && why.contains(&other.path().display().to_string())), "{:?}", plan.kept);
+        assert_eq!(plan.untouched, 1, "cas-c2c2 is no task of this project");
+
+        let yes = PruneArgs { older_than: 7, yes: true, dry_run: false, simulators: false };
+        execute_prune(&yes, &cas_root, false, &missing, now).unwrap();
+        assert!(!base.join("cas-a0a0").exists());
+        assert!(base.join("cas-b1b1").exists() && base.join("cas-c2c2").exists());
+    }
+
     /// cas-75a8 (GH #1295): prune only plans unless --yes (with or without
     /// --dry-run), and --yes reclaims only this project's closed, uncited
     /// tasks past retention.
@@ -458,7 +532,8 @@ mod tests {
         }
 
         let tasks = store.list(None).unwrap();
-        let plan = crate::artifacts::retention::plan_prune(&cas_root, &root, &tasks, now, 7).unwrap();
+        let none = crate::task_ownership::KnownProjects::from_roots(&cas_root, Vec::new());
+        let plan = crate::artifacts::retention::plan_prune(&cas_root, &root, None, &none, &tasks, now, 7).unwrap();
         let ids = |dirs: Vec<&str>| dirs.into_iter().map(str::to_string).collect::<Vec<_>>();
         assert_eq!(plan.reclaimable.iter().map(|dir| dir.task_id.clone()).collect::<Vec<_>>(), ids(vec!["cas-0old"]));
         assert_eq!(plan.reclaimable_bytes(), 5);

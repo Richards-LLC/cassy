@@ -44,6 +44,9 @@ pub enum SimVerdict {
     NotShutdown,
     /// The task id is not a task of this project.
     UnknownTask,
+    /// cas-6162: another known project also has this task id, or ownership
+    /// cannot be checked; the device is never deleted.
+    Unproven,
 }
 
 impl SimVerdict {
@@ -54,6 +57,7 @@ impl SimVerdict {
             Self::Recent => "kept: task ended under 24h ago",
             Self::NotShutdown => "kept: not shut down",
             Self::UnknownTask => "review only: not a task of this project",
+            Self::Unproven => "kept: task id not provably this project's",
         }
     }
 }
@@ -102,8 +106,15 @@ pub fn parse_devices(json: &str) -> Result<Vec<SimDevice>> {
     Ok(devices)
 }
 
-/// Classify every task-named device against this project's tasks.
-pub fn classify(devices: &[SimDevice], tasks: &[cas_types::Task], now: DateTime<Utc>) -> Vec<TaskSimulator> {
+/// Classify every task-named device against this project's tasks. A device
+/// is reclaimable only when no other known project holds the same task id
+/// (cas-6162): the name carries an id, not a project.
+pub fn classify(
+    devices: &[SimDevice],
+    tasks: &[cas_types::Task],
+    others: &dyn crate::task_ownership::OtherProjects,
+    now: DateTime<Utc>,
+) -> Vec<TaskSimulator> {
     let cutoff = now - Duration::hours(SIMULATOR_TTL_HOURS);
     devices
         .iter()
@@ -114,35 +125,88 @@ pub fn classify(devices: &[SimDevice], tasks: &[cas_types::Task], now: DateTime<
                 Some(task) if !task.is_terminal() => SimVerdict::OpenTask,
                 Some(task) if task.closed_at.unwrap_or(task.updated_at) > cutoff => SimVerdict::Recent,
                 Some(_) if device.state != "Shutdown" => SimVerdict::NotShutdown,
-                Some(_) => SimVerdict::Reclaimable,
+                Some(_) => match others.holders(&task_id) {
+                    Ok(holders) if holders.is_empty() => SimVerdict::Reclaimable,
+                    _ => SimVerdict::Unproven,
+                },
             };
             Some(TaskSimulator { device: device.clone(), task_id, verdict })
         })
         .collect()
 }
 
+/// The longest one `xcrun simctl` call may take before gc reports the
+/// simulators as unavailable (cas-6162).
+pub const SIMCTL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Runs `xcrun simctl`; tests substitute a fake executable.
 pub struct Simctl {
     xcrun: PathBuf,
+    timeout: std::time::Duration,
 }
 
 impl Default for Simctl {
     fn default() -> Self {
-        Self { xcrun: PathBuf::from("xcrun") }
+        Self { xcrun: PathBuf::from("xcrun"), timeout: SIMCTL_TIMEOUT }
     }
 }
 
 impl Simctl {
     pub fn with_binary(xcrun: impl Into<PathBuf>) -> Self {
-        Self { xcrun: xcrun.into() }
+        Self { xcrun: xcrun.into(), timeout: SIMCTL_TIMEOUT }
+    }
+
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     fn run(&self, args: &[&str]) -> Result<String> {
-        let output = std::process::Command::new(&self.xcrun)
+        use std::io::Read;
+        use std::process::Stdio;
+        let mut child = std::process::Command::new(&self.xcrun)
             .arg("simctl")
             .args(args)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .with_context(|| format!("running {} simctl {}", self.xcrun.display(), args.join(" ")))?;
+        // Drain both pipes on threads so a large device list cannot block the
+        // child while the deadline is watched here.
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let mut stderr = child.stderr.take().expect("piped stderr");
+        let out = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stdout.read_to_end(&mut buf);
+            buf
+        });
+        let err = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stderr.read_to_end(&mut buf);
+            buf
+        });
+        let deadline = std::time::Instant::now() + self.timeout;
+        let status = loop {
+            if let Some(status) = child.try_wait().context("waiting for xcrun simctl")? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow!(
+                    "xcrun simctl {} timed out after {}s",
+                    args.join(" "),
+                    self.timeout.as_secs_f64()
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        };
+        let output = std::process::Output {
+            status,
+            stdout: out.join().unwrap_or_default(),
+            stderr: err.join().unwrap_or_default(),
+        };
         if !output.status.success() {
             return Err(anyhow!(
                 "xcrun simctl {} failed: {}",
@@ -163,8 +227,13 @@ impl Simctl {
 }
 
 /// The task simulators on this host, or why they could not be listed.
-pub fn inventory(simctl: &Simctl, tasks: &[cas_types::Task], now: DateTime<Utc>) -> Result<Vec<TaskSimulator>> {
-    Ok(classify(&simctl.devices()?, tasks, now))
+pub fn inventory(
+    simctl: &Simctl,
+    tasks: &[cas_types::Task],
+    others: &dyn crate::task_ownership::OtherProjects,
+    now: DateTime<Utc>,
+) -> Result<Vec<TaskSimulator>> {
+    Ok(classify(&simctl.devices()?, tasks, others, now))
 }
 
 /// Delete every reclaimable device. Returns (deleted, failures).
@@ -253,7 +322,8 @@ mod tests {
             task("cas-976c", Some(48)),
         ];
         let simctl = Simctl::with_binary(&xcrun);
-        let simulators = inventory(&simctl, &tasks, now).unwrap();
+        let none = crate::task_ownership::KnownProjects::from_roots(dir.path(), Vec::new());
+        let simulators = inventory(&simctl, &tasks, &none, now).unwrap();
         let verdicts: Vec<_> = simulators.iter().map(|sim| (sim.device.name.as_str(), sim.verdict.clone())).collect();
         assert_eq!(
             verdicts,
@@ -269,5 +339,64 @@ mod tests {
         assert_eq!((deleted, failed), (vec!["cas-10e9-proof".to_string()], Vec::<String>::new()));
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "U-OLD\n");
         assert!(render(&Ok(simulators)).contains("cas-10e9-proof (U-OLD) Shutdown 4100000000 bytes: reclaimable"));
+    }
+
+    /// Another project holding the same task ids.
+    struct OtherHolds(&'static [&'static str]);
+    impl crate::task_ownership::OtherProjects for OtherHolds {
+        fn holders(&self, task_id: &str) -> Result<Vec<String>, String> {
+            Ok(if self.0.contains(&task_id) { vec!["/projects/other".into()] } else { Vec::new() })
+        }
+    }
+
+    /// cas-6162: a simulator whose task id another known project also has is
+    /// never selected, even when this project's task with that id is long
+    /// closed; an unreadable registry keeps it too.
+    #[test]
+    fn a_same_id_simulator_of_another_project_is_never_reclaimable_cas_6162() {
+        let now = Utc::now();
+        let mut closed = cas_types::Task::new("cas-10e9".into(), "closed here".into());
+        closed.status = cas_types::TaskStatus::Closed;
+        closed.closed_at = Some(now - Duration::hours(48));
+        let device = SimDevice {
+            udid: "U-1".into(),
+            name: "cas-10e9-proof".into(),
+            state: "Shutdown".into(),
+            runtime: "iOS".into(),
+            bytes: None,
+        };
+        let verdict = |others: &dyn crate::task_ownership::OtherProjects| {
+            classify(std::slice::from_ref(&device), std::slice::from_ref(&closed), others, now)[0].verdict.clone()
+        };
+        assert_eq!(verdict(&OtherHolds(&[])), SimVerdict::Reclaimable);
+        assert_eq!(verdict(&OtherHolds(&["cas-10e9"])), SimVerdict::Unproven);
+        struct Unreadable;
+        impl crate::task_ownership::OtherProjects for Unreadable {
+            fn holders(&self, _: &str) -> Result<Vec<String>, String> {
+                Err("registry unreadable".into())
+            }
+        }
+        assert_eq!(verdict(&Unreadable), SimVerdict::Unproven);
+    }
+
+    /// cas-6162: a hung `xcrun simctl` returns within the bound, and the
+    /// report says the simulators are unavailable.
+    #[test]
+    #[cfg(unix)]
+    fn a_hung_simctl_returns_within_its_bound_cas_6162() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let xcrun = dir.path().join("xcrun");
+        std::fs::write(&xcrun, "#!/bin/sh
+exec sleep 30
+").unwrap();
+        std::fs::set_permissions(&xcrun, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let simctl = Simctl::with_binary(&xcrun).with_timeout(std::time::Duration::from_millis(300));
+        let none = crate::task_ownership::KnownProjects::from_roots(dir.path(), Vec::new());
+        let started = std::time::Instant::now();
+        let result = inventory(&simctl, &[], &none, Utc::now());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+        let report = render(&result);
+        assert!(report.contains("Task simulators: unavailable") && report.contains("timed out"), "{report}");
     }
 }

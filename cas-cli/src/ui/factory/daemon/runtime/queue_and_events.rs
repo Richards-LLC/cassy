@@ -2993,6 +2993,13 @@ pub(crate) fn run_queue_select(
     Ok(selection)
 }
 
+/// Shared by the inline budget preview and the admitted transport payload.
+fn batch_member_body(member: &cas_store::QueuedPrompt) -> String {
+    format!("\n\n{}\nFrom: {}\n{}",
+        crate::mcp::tools::service::agent_search_system::message::first_message_provenance(member),
+        member.source, member.prompt)
+}
+
 /// Whether a completed harness turn is newer than the wake attempt that
 /// declined to interrupt it. Kept pure so timestamp ordering stays explicit
 /// and testable at the queue boundary.
@@ -8630,7 +8637,18 @@ impl FactoryDaemon {
             // once that claim came back.
             let queued = selected;
             if queued.processed_at.is_some() { continue; }
-            let facts = row_facts.get(&queued.id).cloned().unwrap_or_default();
+            let mut facts = row_facts.get(&queued.id).cloned().unwrap_or_default();
+            let batch_len = facts.message_batch.len();
+            facts.message_batch.retain(|member| {
+                !self.inbox_deferred_writes.contains_key(&member.id)
+                    && row_facts.get(&member.id).is_none_or(|fact| fact.deferred_inbox.is_none())
+            });
+            if facts.message_batch.len() != batch_len {
+                crate::supervisor_message_wakes::retain_batch_senders(
+                    &mut facts.message_senders, &queued, &facts.message_batch,
+                    self.app.supervisor_name(), &registered_agents,
+                );
+            }
             if !self.queue_jobs.prompt_preparation.allows_delivery(Instant::now()) {
                 // Earlier injects/probes can outlive this batch's evidence.
                 // Claimed rows stay owned; unclaimed rows remain selectable.
@@ -9146,9 +9164,13 @@ impl FactoryDaemon {
                 ) == super::delivery::DeliveryChannel::TeamsInbox;
             // GH #1231: bounded supervisor events have one delivery path.
             // Preserve already-held legacy copies until their recovery settles.
-            let inline_supervisor_body = !facts.message_senders.is_empty() || claude_inbox_target
+            let batch_body = facts.message_batch.iter().fold(prompt_with_instructions.clone(), |mut body, member| {
+                body.push_str(&batch_member_body(member));
+                body
+            });
+            let inline_supervisor_body = (!facts.message_senders.is_empty() || claude_inbox_target)
                 && (target == "supervisor" || target == self.app.supervisor_name())
-                && cas_store::fits_hook_surface(&prompt_with_instructions)
+                && cas_store::fits_hook_surface(&batch_body)
                 && facts.deferred_inbox.is_none()
                 && !self.inbox_deferred_writes.contains_key(&queued.id);
             // cas-786a6 (H3): the durable marker, read by QueueSelect.
@@ -10076,8 +10098,7 @@ impl FactoryDaemon {
                 for (member, token) in batch_claims {
                     match self.queue_jobs.admit_claimed(self.app.cas_dir(),member.id,&member.target,token,Instant::now()) {
                         super::prompt_queue_jobs::Admission::Inject { generation } => {
-                            prompt_with_instructions.push_str(&format!("\n\n{}\nFrom: {}\n{}",
-                                crate::mcp::tools::service::agent_search_system::message::first_message_provenance(&member),member.source,member.prompt));
+                            prompt_with_instructions.push_str(&batch_member_body(&member));
                             message_batch.push((member,generation));
                         },
                         super::prompt_queue_jobs::Admission::InFlight | super::prompt_queue_jobs::Admission::NotClaimed => {},

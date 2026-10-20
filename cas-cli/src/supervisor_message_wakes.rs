@@ -95,6 +95,17 @@ fn wants_wake(row: &QueuedPrompt) -> bool {
     }
 }
 
+/// A daemon-local legacy hold can remove a passenger after QueueSelect.
+/// Charge only the eligible sender pairs still represented in this handoff.
+pub(crate) fn retain_batch_senders(
+    senders: &mut Vec<String>, lead: &QueuedPrompt, passengers: &[QueuedPrompt],
+    supervisor: &str, agents: &[cas_types::Agent],
+) {
+    senders.retain(|id| std::iter::once(lead).chain(passengers).any(|row| {
+        wants_wake(row) && sender(row, supervisor, agents).as_ref() == Some(id)
+    }));
+}
+
 fn db(cas: &Path) -> anyhow::Result<Arc<Mutex<Connection>>> {
     job_thread_store("supervisor_message_wakes", cas, |cas| {
         let connection = Connection::open(cas.join("cas.db"))?;
@@ -233,6 +244,7 @@ pub(crate) fn schedule(
     let can_batch = |row: &QueuedPrompt| {
         facts.get(&row.id).is_some_and(|fact| {
             fact.assignment_stale.is_none()
+                && fact.deferred_inbox.is_none()
                 && fact.lifecycle_task.is_none()
                 && fact.merge_request.is_none()
         }) && !row.prompt.contains("<cas-blocker ")

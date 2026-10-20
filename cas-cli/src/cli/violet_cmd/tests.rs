@@ -1262,8 +1262,17 @@ fn a_managed_reply_carries_the_callers_reply_intent_cas_8239() {
     let retry = "00000091-2222-4222-8222-000000000091";
     let hub = ScriptedHub::with(vec![file_receipt("F1", "after.png", bytes)]);
     let with_id: Vec<&str> = argv.iter().copied().chain(["--request-id", retry]).collect();
-    run_cli_claimed(&with_id, &hub, false, &no_gate, Some(intent)).1.unwrap();
+    run_cli_claimed(&with_id, &hub, false, &no_gate, Some(intent.clone())).1.unwrap();
     assert_eq!(hub.calls()[0].1["request_id"], retry);
+
+    // cas-d626: past the inline limit a managed reply fails before any call.
+    let big = write_file(&dir, "big.bin", &vec![b'a'; INLINE_LIMIT as usize + 1]);
+    let too_big = ["post", "--channel", "gabber-internal", "--reply-to", root, "--file", big.to_str().unwrap()];
+    let hub = ScriptedHub::with(Vec::new());
+    let error = run_cli_claimed(&too_big, &hub, false, &no_gate, Some(intent.clone())).1.unwrap_err();
+    assert_eq!(error.code, "invalid_input");
+    assert!(error.message.contains(&INLINE_LIMIT.to_string()), "{error}");
+    assert_eq!(hub.connects(), 0);
 
     let refusal = json!({"ok": false, "error": {"code": "managed_reply_required", "retryable": false,
         "message": "a reply needs coordination_operation_id, expected_generation and request_id from the current claim"}});

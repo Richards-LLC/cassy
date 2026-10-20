@@ -2509,9 +2509,6 @@ mod tests {
         }
     }
 
-    /// cas-f869: Cloud's refusals pass through with their next step and no
-    /// post fields; renew follows the fixture wire, and a lapsed claim is a
-    /// named refusal with no automatic reclaim.
     /// cas-8239 (GH #1300): `cas violet post` takes a managed reply's claim
     /// fields from the caller's own live reply intent in the journal. Another
     /// session's intent, another thread, a lapsed claim or a released claim
@@ -2547,6 +2544,9 @@ mod tests {
         assert!(journal.current_reply_post(me, root, before_expiry()).unwrap().is_none(), "released claim");
     }
 
+    /// cas-f869: Cloud's refusals pass through with their next step and no
+    /// post fields; renew follows the fixture wire, and a lapsed claim is a
+    /// named refusal with no automatic reclaim.
     #[test]
     fn reply_intent_refusals_and_renew_never_reclaim_cas_f869() {
         for (n, case) in ["stale pre-claim wake cannot reply", "unresolved reply pins the thread"].into_iter().enumerate() {

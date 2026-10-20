@@ -455,6 +455,25 @@ mod tests {
         assert_eq!(std::fs::metadata(&db).unwrap().modified().unwrap(), mtime, "and the mtime");
     }
 
+    /// Recovery raises nBackfillAttempted without a checkpoint running. Keep
+    /// the recovered connection open, as the daemon keeps its global store.
+    #[test]
+    fn a_recovered_idle_store_is_proven_cas_593e() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = store_with_wal(dir.path(), &["cas-aaaa"], &["cas-bbbb"]);
+        let db = root.join(".cas/cas.db");
+        let recovered = rusqlite::Connection::open(&db).unwrap();
+        recovered.execute_batch("PRAGMA wal_autocheckpoint=0;").unwrap();
+        assert_eq!(recovered.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+        let shm = std::fs::read(root.join(".cas/cas.db-shm")).unwrap();
+        let word = |offset| u32::from_ne_bytes(shm[offset..offset+4].try_into().unwrap());
+        assert_eq!(word(96), 0, "recovery has not backfilled");
+        assert!(word(128) > word(96), "recovery leaves attempted ahead of backfill");
+        let ids = store_task_ids(&db, &|| {}).unwrap_or_else(|_| panic!("recovered idle store must be proven"));
+        assert!(ids.contains("cas-aaaa") && ids.contains("cas-bbbb"));
+        drop(recovered);
+    }
+
     /// cas-69b5: a checkpoint already copying frames when the read starts
     /// (and still copying when it ends) leaves every fingerprint field as it
     /// was, so the store is unproven rather than trusted.
@@ -465,10 +484,31 @@ mod tests {
         let root = store_with_wal(dir.path(), &["cas-aaaa"], &["cas-bbbb"]);
         let mut shm = vec![0u8; 136];
         shm[96..100].copy_from_slice(&1u32.to_ne_bytes());
-        shm[128..132].copy_from_slice(&2u32.to_ne_bytes());
-        std::fs::write(root.join(".cas/cas.db-shm"), shm).unwrap();
+        shm[128..132].copy_from_slice(&1u32.to_ne_bytes());
+        let path = root.join(".cas/cas.db-shm");
+        std::fs::write(&path, shm).unwrap();
+        // Hold SQLite's actual checkpointer byte in another process. Counters
+        // alone must not decide whether a checkpoint is running.
+        let mut child = std::process::Command::new("python3")
+            .args(["-I", "-S", "-c", r#"
+import fcntl, sys
+with open(sys.argv[1], 'r+b') as shm:
+    fcntl.lockf(shm, fcntl.LOCK_EX, 1, 121)
+    print('locked', flush=True)
+    sys.stdin.buffer.read(1)
+"#])
+            .arg(&path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn().unwrap();
+        let mut ready = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut ready).unwrap();
+        assert_eq!(ready.trim(), "locked");
         let projects = KnownProjects::from_specs_with(&this.path().join(".cas"), vec![repo_spec(root)], &|| {});
-        assert!(projects.holders("cas-aaaa").unwrap_err().contains("changed while it was read"));
+        let result = projects.holders("cas-aaaa");
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        assert!(result.unwrap_err().contains("changed while it was read"));
     }
 
     /// cas-69b5: a global store that cannot be looked at (permission
@@ -476,6 +516,10 @@ mod tests {
     #[test]
     fn an_unreadable_global_store_is_unproven_not_absent_cas_69b5() {
         use std::os::unix::fs::PermissionsExt;
+        // Root bypasses mode bits, so mode 000 cannot prove unreadability.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         let this = tempfile::tempdir().unwrap();
         let global = home.path().join(".cas");

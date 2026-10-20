@@ -6,42 +6,33 @@
 //! as this project's only when no other known project's task store holds it;
 //! a store that cannot be read makes every bare id unproven.
 //!
-//! Other projects' stores are never written. Their main database file is read
-//! with SQLite's `immutable=1`, which takes no locks and creates, checkpoints
-//! or deletes no `-wal`/`-shm` file. An immutable read does not see rows still
-//! in the write-ahead log, so a non-empty `-wal` is also scanned, read-only,
-//! for the candidate ids; any hit counts as holding the id (conservative). An
-//! id that was never scanned against a store with a WAL is unproven.
+//! Other projects' stores are never written. Each store is read in one
+//! consistent pass (cas-6162): its `-wal` bytes first, then its main database
+//! with SQLite's `immutable=1` (no locks; nothing created, checkpointed or
+//! deleted), then both are re-checked. If the WAL header or size, or the
+//! database size or mtime, changed during the pass (a checkpoint and WAL
+//! restart in between would otherwise hide a row), the store is unproven.
+//! Ids still only in the WAL are found by scanning its bytes: at every `cas-`
+//! the run of hex digits after it yields every id length (4 to 16), so a
+//! longer id is never shadowed by a shorter one and adjacent bytes can only
+//! add holders, never remove one.
 
-use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Other projects' task stores, consulted read-only.
 pub trait OtherProjects {
     /// The other projects whose store holds `task_id`. `Err` means ownership
-    /// cannot be proven (a store is missing or unreadable).
+    /// cannot be proven (a store is missing, unreadable or changed while read).
     fn holders(&self, task_id: &str) -> Result<Vec<String>, String>;
 
-    /// Look up many ids at once before calling [`Self::holders`]; a store's
-    /// write-ahead log is then read once for all of them.
+    /// Kept for callers that batch lookups; reads happen at load.
     fn prefetch(&self, _task_ids: &[String]) {}
 }
 
-/// One other project's store.
-struct Store {
-    label: String,
-    ids: HashSet<String>,
-    /// A non-empty `-wal` beside the database, scanned on demand.
-    wal: Option<PathBuf>,
-}
-
-/// Task ids of every other known project.
+/// Task ids of every other known project, read once at load.
 pub struct KnownProjects {
-    stores: Result<Vec<Store>, String>,
-    /// Ids already scanned against every WAL, with the stores that hold them.
-    wal_hits: RefCell<HashMap<String, Vec<String>>>,
-    wal_error: RefCell<Option<String>>,
+    stores: Result<Vec<(String, HashSet<String>)>, String>,
 }
 
 impl KnownProjects {
@@ -51,16 +42,18 @@ impl KnownProjects {
             .and_then(|store| cas_store::KnownRepoStore::list(&store).map_err(Into::into));
         match repos {
             Ok(repos) => Self::from_roots(cas_root, repos.into_iter().map(|repo| repo.path)),
-            Err(error) => Self::failed(format!("known-repo registry unreadable: {error}")),
+            Err(error) => Self { stores: Err(format!("known-repo registry unreadable: {error}")) },
         }
-    }
-
-    fn failed(error: String) -> Self {
-        Self { stores: Err(error), wal_hits: RefCell::default(), wal_error: RefCell::default() }
     }
 
     /// Other projects from explicit repo roots (each with a `.cas/` store).
     pub fn from_roots(cas_root: &Path, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self::from_roots_with(cas_root, roots, &|| {})
+    }
+
+    /// [`Self::from_roots`] with a hook run between a store's WAL read and
+    /// its main-database read (tests use it to race a checkpoint).
+    fn from_roots_with(cas_root: &Path, roots: impl IntoIterator<Item = PathBuf>, between: &dyn Fn()) -> Self {
         let this = std::fs::canonicalize(cas_root).unwrap_or_else(|_| cas_root.to_path_buf());
         let mut stores = Vec::new();
         let mut unreadable = Vec::new();
@@ -69,96 +62,105 @@ impl KnownProjects {
             if std::fs::canonicalize(&other).is_ok_and(|other| other == this) {
                 continue;
             }
-            let db = other.join("cas.db");
-            match main_task_ids(&db) {
-                Ok(ids) => {
-                    let wal = PathBuf::from(format!("{}-wal", db.display()));
-                    let wal = std::fs::metadata(&wal).is_ok_and(|meta| meta.len() > 0).then_some(wal);
-                    stores.push(Store { label: root.display().to_string(), ids, wal });
-                }
+            match store_task_ids(&other.join("cas.db"), between) {
+                Ok(ids) => stores.push((root.display().to_string(), ids)),
                 Err(error) => unreadable.push(format!("{} ({error})", root.display())),
             }
         }
         if unreadable.is_empty() {
-            Self { stores: Ok(stores), wal_hits: RefCell::default(), wal_error: RefCell::default() }
+            Self { stores: Ok(stores) }
         } else {
-            Self::failed(format!(
-                "task stores of other known projects cannot be read: {}; forget missing repos with `cas known-repos` or restore them",
-                unreadable.join(", ")
-            ))
+            Self {
+                stores: Err(format!(
+                    "task stores of other known projects cannot be read: {}; forget missing repos with `cas known-repos` or restore them",
+                    unreadable.join(", ")
+                )),
+            }
         }
     }
 }
 
 impl OtherProjects for KnownProjects {
-    fn prefetch(&self, task_ids: &[String]) {
-        let Ok(stores) = &self.stores else { return };
-        let pending: Vec<&String> = {
-            let hits = self.wal_hits.borrow();
-            task_ids.iter().filter(|id| !hits.contains_key(*id)).collect()
-        };
-        if pending.is_empty() {
-            return;
-        }
-        let mut found: HashMap<String, Vec<String>> =
-            pending.iter().map(|id| ((*id).clone(), Vec::new())).collect();
-        let pattern = pending.iter().map(|id| regex::escape(id)).collect::<Vec<_>>().join("|");
-        let matcher = match regex::bytes::Regex::new(&pattern) {
-            Ok(matcher) => matcher,
-            Err(error) => {
-                *self.wal_error.borrow_mut() = Some(format!("cannot scan write-ahead logs: {error}"));
-                return;
-            }
-        };
-        for store in stores {
-            let Some(wal) = &store.wal else { continue };
-            match std::fs::read(wal) {
-                Ok(bytes) => {
-                    for hit in matcher.find_iter(&bytes) {
-                        let id = String::from_utf8_lossy(hit.as_bytes()).into_owned();
-                        if let Some(holders) = found.get_mut(&id)
-                            && !holders.contains(&store.label)
-                        {
-                            holders.push(store.label.clone());
-                        }
-                    }
-                }
-                Err(error) => {
-                    *self.wal_error.borrow_mut() =
-                        Some(format!("write-ahead log of {} unreadable: {error}", store.label));
-                    return;
-                }
-            }
-        }
-        self.wal_hits.borrow_mut().extend(found);
-    }
-
     fn holders(&self, task_id: &str) -> Result<Vec<String>, String> {
         let stores = self.stores.as_ref().map_err(Clone::clone)?;
-        if stores.iter().any(|store| store.wal.is_some()) {
-            self.prefetch(&[task_id.to_string()]);
-        }
-        if let Some(error) = self.wal_error.borrow().clone() {
-            return Err(error);
-        }
-        let mut holders: BTreeMap<String, ()> = stores
+        let holders: BTreeMap<&str, ()> = stores
             .iter()
-            .filter(|store| store.ids.contains(task_id))
-            .map(|store| (store.label.clone(), ()))
+            .filter(|(_, ids)| ids.contains(task_id))
+            .map(|(label, _)| (label.as_str(), ()))
             .collect();
-        if let Some(from_wal) = self.wal_hits.borrow().get(task_id) {
-            holders.extend(from_wal.iter().map(|label| (label.clone(), ())));
-        }
-        Ok(holders.into_keys().collect())
+        Ok(holders.into_keys().map(str::to_string).collect())
     }
+}
+
+/// What must not change while one store is read.
+#[derive(Debug, PartialEq, Eq)]
+struct Fingerprint {
+    db_len: u64,
+    db_mtime: Option<std::time::SystemTime>,
+    wal_len: u64,
+    /// The WAL header (magic, version, page size, checkpoint sequence,
+    /// salts, checksums): a checkpoint restart rewrites it.
+    wal_header: Vec<u8>,
+}
+
+fn fingerprint(db: &Path, wal: &Path) -> Result<Fingerprint, String> {
+    let meta = std::fs::metadata(db).map_err(|error| error.to_string())?;
+    let (wal_len, wal_header) = match std::fs::File::open(wal) {
+        Ok(mut file) => {
+            use std::io::Read;
+            let len = file.metadata().map_err(|error| error.to_string())?.len();
+            let mut header = vec![0; 32.min(len as usize)];
+            file.read_exact(&mut header).map_err(|error| error.to_string())?;
+            (len, header)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (0, Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(Fingerprint { db_len: meta.len(), db_mtime: meta.modified().ok(), wal_len, wal_header })
+}
+
+/// Every task id a store holds: WAL bytes first, then the immutable main
+/// database, then a re-check that neither changed in between.
+fn store_task_ids(db: &Path, between: &dyn Fn()) -> Result<HashSet<String>, String> {
+    if !db.is_file() {
+        return Err("no cas.db".into());
+    }
+    let wal = PathBuf::from(format!("{}-wal", db.display()));
+    let before = fingerprint(db, &wal)?;
+    let wal_bytes = match std::fs::read(&wal) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(format!("write-ahead log unreadable: {error}")),
+    };
+    between();
+    let mut ids = main_task_ids(db)?;
+    if fingerprint(db, &wal)? != before || wal_bytes.len() as u64 != before.wal_len {
+        return Err("store changed while it was read".into());
+    }
+    ids.extend(wal_task_ids(&wal_bytes));
+    Ok(ids)
+}
+
+/// Every possible task id in raw WAL bytes: at each `cas-`, the hex run
+/// after it contributes each prefix of 4 to 16 digits.
+fn wal_task_ids(bytes: &[u8]) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    let mut at = 0;
+    while let Some(offset) = bytes[at..].windows(4).position(|window| window == b"cas-") {
+        let start = at + offset + 4;
+        let run = bytes[start..].iter().take(16).take_while(|byte| byte.is_ascii_hexdigit()).count();
+        for len in 4..=run {
+            ids.insert(format!("cas-{}", String::from_utf8_lossy(&bytes[start..start + len])));
+        }
+        at = start;
+    }
+    ids
 }
 
 /// Every task id in a store's main database file, read with `immutable=1`
 /// so the other project's files are never written, locked or checkpointed.
+/// Any read anomaly is an error, which makes the store unproven.
 fn main_task_ids(db: &Path) -> Result<HashSet<String>, String> {
-    if !db.is_file() {
-        return Err("no cas.db".into());
-    }
     let uri = format!("file:{}?immutable=1", uri_path(db));
     let conn = rusqlite::Connection::open_with_flags(
         uri,
@@ -166,7 +168,7 @@ fn main_task_ids(db: &Path) -> Result<HashSet<String>, String> {
     )
     .map_err(|error| error.to_string())?;
     // A store whose schema still lives only in the WAL has no tasks table in
-    // the main file yet; its ids are found by the WAL scan.
+    // the main file yet; its ids come from the WAL scan.
     let has_tasks: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks')",
@@ -239,5 +241,64 @@ mod tests {
         let after = (std::fs::read(store.join("cas.db")).unwrap(), std::fs::read(store.join("cas.db-wal")).unwrap());
         assert!(before == after, "the other store's database and WAL are unchanged");
         assert!(!store.join("cas.db-shm").exists(), "no -shm is created");
+    }
+
+    /// A store with a WAL-only row, as an idle copy of a live store.
+    fn store_with_wal(dir: &Path, checkpointed: &[&str], wal_only: &[&str]) -> PathBuf {
+        let live = dir.join("live");
+        std::fs::create_dir_all(&live).unwrap();
+        let db = live.join("cas.db");
+        let writer = rusqlite::Connection::open(&db).unwrap();
+        writer
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT);")
+            .unwrap();
+        for id in checkpointed {
+            writer.execute("INSERT INTO tasks VALUES (?1, 'deadbeef')", [id]).unwrap();
+        }
+        writer.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        for id in wal_only {
+            // A hex-looking neighbour column, so ids run into adjacent bytes.
+            writer.execute("INSERT INTO tasks VALUES (?1, 'abcdef0123')", [id]).unwrap();
+        }
+        let root = dir.join("other");
+        let store = root.join(".cas");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::copy(&db, store.join("cas.db")).unwrap();
+        std::fs::copy(live.join("cas.db-wal"), store.join("cas.db-wal")).unwrap();
+        root
+    }
+
+    /// cas-6162 (a): a shorter id never shadows a longer one in the WAL scan;
+    /// both cas-02a7 and cas-02a7d rows are held.
+    #[test]
+    fn a_shorter_wal_id_never_shadows_a_longer_one_cas_6162() {
+        let dir = tempfile::tempdir().unwrap();
+        let this = tempfile::tempdir().unwrap();
+        let root = store_with_wal(dir.path(), &[], &["cas-02a7", "cas-02a7d"]);
+        let projects = KnownProjects::from_roots(&this.path().join(".cas"), vec![root.clone()]);
+        let label = root.display().to_string();
+        assert_eq!(projects.holders("cas-02a7d").unwrap(), vec![label.clone()]);
+        assert_eq!(projects.holders("cas-02a7").unwrap(), vec![label]);
+    }
+
+    /// cas-6162 (b): a checkpoint and WAL restart between the WAL read and
+    /// the main-database read makes the store unproven, never "not held".
+    #[test]
+    fn a_checkpoint_between_reads_makes_the_store_unproven_cas_6162() {
+        let dir = tempfile::tempdir().unwrap();
+        let this = tempfile::tempdir().unwrap();
+        let root = store_with_wal(dir.path(), &["cas-aaaa"], &["cas-bbbb"]);
+        let wal = root.join(".cas/cas.db-wal");
+        // The race: the WAL is restarted (new header salts) after it was read.
+        let restart = || {
+            let mut bytes = std::fs::read(&wal).unwrap();
+            for byte in &mut bytes[16..24] {
+                *byte ^= 0xff;
+            }
+            std::fs::write(&wal, bytes).unwrap();
+        };
+        let projects = KnownProjects::from_roots_with(&this.path().join(".cas"), vec![root], &restart);
+        let error = projects.holders("cas-bbbb").unwrap_err();
+        assert!(error.contains("changed while it was read"), "{error}");
     }
 }

@@ -13012,6 +13012,93 @@ fn regenerable_build_artifact(repo_path: &std::path::Path, path: &str) -> bool {
         })
 }
 
+/// cas-2ea6: the builtin reference-history ledger and its generator.
+const REFERENCE_HISTORY_LEDGER: &str = "cas-cli/src/builtins/reference-history.json";
+const REFERENCE_HISTORY_GENERATOR: &str = "scripts/gen-builtin-reference-history.sh";
+/// cas-2ea6: a full-history generator run took about 30 s on cas-src; a hung
+/// one must not hold a close.
+const REFERENCE_HISTORY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// cas-2ea6: the ledger is derived from git history, so a lane's copy can
+/// carry hashes of versions that never reached the target (the cas-9dee
+/// shape). It is delivered when the target's committed copy equals a fresh run
+/// of the target's own generator at the target (`--rev`), not when every lane
+/// line survives. A target copy that differs from that run stays dropped.
+/// Returns the acceptance note and the paths that remain dropped.
+fn without_regenerated_ledger(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    parent_branch: &str,
+    paths: Vec<String>,
+) -> (Option<String>, Vec<String>) {
+    if !paths.iter().any(|path| path == REFERENCE_HISTORY_LEDGER) {
+        return (None, paths);
+    }
+    let origin = format!("origin/{parent_branch}");
+    let target_ref = if git_ref_exists(repo_path, &origin) && git_commit_is_ancestor(repo_path, anchor, &origin) {
+        origin
+    } else {
+        parent_branch.to_string()
+    };
+    let Some(target) = resolve_branch_sha(repo_path, &format!("{target_ref}^{{commit}}")) else {
+        return (None, paths);
+    };
+    if reference_history_equals_fresh_run(repo_path, &target) != Some(true) {
+        return (None, paths);
+    }
+    let note = format!(
+        "{REFERENCE_HISTORY_LEDGER} on `{target_ref}` equals a fresh {REFERENCE_HISTORY_GENERATOR} run at {}, so lane-only hash lines are not a drop (cas-2ea6)",
+        &target[..target.len().min(12)],
+    );
+    (Some(note), paths.into_iter().filter(|path| path != REFERENCE_HISTORY_LEDGER).collect())
+}
+
+/// cas-2ea6: whether `target`'s committed ledger equals its own generator's
+/// `--rev target` output. `None` when Git or the generator cannot say (an
+/// older target generator without `--rev`, a timeout): the drop then stands.
+fn reference_history_equals_fresh_run(repo_path: &std::path::Path, target: &str) -> Option<bool> {
+    let show = |path: &str| {
+        std::process::Command::new("git")
+            .args(["show", &format!("{target}:{path}")])
+            .current_dir(repo_path)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| output.stdout)
+    };
+    let (generator, committed) = (show(REFERENCE_HISTORY_GENERATOR)?, show(REFERENCE_HISTORY_LEDGER)?);
+    let scratch = tempfile::tempdir().ok()?;
+    let script = scratch.path().join("gen-builtin-reference-history.sh");
+    let fresh = scratch.path().join("reference-history.json");
+    std::fs::write(&script, generator).ok()?;
+    let mut child = std::process::Command::new("bash")
+        .arg(&script)
+        .args(["--rev", target, "--output"])
+        .arg(&fresh)
+        .current_dir(repo_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().ok()? {
+            break status;
+        }
+        if started.elapsed() > REFERENCE_HISTORY_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    if !status.success() {
+        return None;
+    }
+    Some(std::fs::read(&fresh).ok()? == committed)
+}
+
 /// cas-baf7: the delivery's own non-artifact paths (its source), measured
 /// against the anchor's first parent, or its second for a merge anchor.
 /// `None` when Git cannot say.
@@ -13190,6 +13277,19 @@ fn epic_anchor_content_presence(
             .unwrap_or_else(|| delivery_content_presence_in_parent(repo, anchor, target))
     } else {
         delivery_content_presence_in_parent(repo, anchor, target)
+    };
+    let DeliveryContentPresence::Dropped { paths } = &presence else {
+        return (presence, None);
+    };
+    // cas-2ea6: the history-derived ledger is judged by regeneration.
+    let (ledger_note, remaining) = without_regenerated_ledger(repo, anchor, target, paths.clone());
+    if remaining.is_empty() {
+        return (DeliveryContentPresence::Present { paths: paths.clone() }, ledger_note);
+    }
+    let presence = if ledger_note.is_some() {
+        DeliveryContentPresence::Dropped { paths: remaining }
+    } else {
+        presence
     };
     let DeliveryContentPresence::Dropped { paths } = &presence else {
         return (presence, None);
@@ -13623,6 +13723,14 @@ fn anchored_delivery_content_gate_unbounded(
             None
         }
         DeliveryContentPresence::Dropped { paths } => {
+            // cas-2ea6: the history-derived ledger is judged by regeneration.
+            let (ledger_note, paths) = without_regenerated_ledger(repo_path, anchor, parent_branch, paths);
+            if paths.is_empty() {
+                return Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                    "DECISION: delivery content accepted for task {task_id}: {}.",
+                    ledger_note.unwrap_or_default()
+                )));
+            }
             // cas-24d8: decide an artifacts-only drop by the cas-baf7 rule
             // before the byte-identity proof walks those bundles again.
             if let Some(note) = regenerated_artifact_drop_note(repo_path, anchor, &paths) {
@@ -31782,6 +31890,92 @@ esac
             regenerated_artifact_drop_note(p, &tip, &paths).is_some(),
             "cas-baf7 accepts a bundle-only drop when the delivery carries source"
         );
+    }
+
+    /// cas-2ea6: the cas-9dee shape. A lane's reference-history ledger records
+    /// the hash of a draft it later rewrote away, so that version never ships.
+    /// The integration regenerates the ledger from the merged history inside
+    /// the merge, and the lane-only line is gone. The target's ledger equals a
+    /// fresh generator run, so the delivery is not dropped. A target ledger
+    /// that differs from a fresh run still refuses.
+    #[test]
+    fn regenerated_reference_history_is_not_a_dropped_delivery_cas_2ea6() {
+        const GENERATOR: &str = include_str!("../../../../../../../scripts/gen-builtin-reference-history.sh");
+        const LEDGER: &str = "cas-cli/src/builtins/reference-history.json";
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let write = |relative: &str, body: &str| {
+            let path = p.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        let generate = || {
+            let run = std::process::Command::new("bash")
+                .arg("scripts/gen-builtin-reference-history.sh")
+                .current_dir(p)
+                .output()
+                .unwrap();
+            assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(p.join(LEDGER)).unwrap()).unwrap()
+        };
+        git(p, &["checkout", "-q", "main"]);
+        write("scripts/gen-builtin-reference-history.sh", GENERATOR);
+        write("cas-cli/src/builtins/agents/task-verifier.body.md", "Verify the task.\n");
+        write("cas-cli/src/builtins/skills/demo/SKILL.md", "# Demo\n");
+        git(p, &["add", "-A"]);
+        git(p, &["commit", "-q", "-m", "builtins"]);
+        generate();
+        git(p, &["add", "-A"]);
+        git(p, &["commit", "-q", "-m", "ledger"]);
+
+        // The lane drafts a reference and records it, then rewrites the draft;
+        // its ledger keeps the draft's hash beside the shipped version's.
+        git(p, &["checkout", "-q", "-B", "factory/worker", "main"]);
+        write("cas-cli/src/builtins/skills/demo/references/guide.md", "# Guide draft\n");
+        git(p, &["add", "-A"]);
+        git(p, &["commit", "-q", "-m", "cas-test1: draft the guide"]);
+        let draft = generate();
+        git(p, &["checkout", "-q", "--", LEDGER]);
+        git(p, &["reset", "-q", "--hard", "HEAD~1"]);
+        write("cas-cli/src/builtins/skills/demo/references/guide.md", "# Guide\n");
+        git(p, &["add", "-A"]);
+        git(p, &["commit", "-q", "-m", "cas-test1: add the guide"]);
+        let mut lane = generate();
+        let key = "skills/demo/references/guide.md";
+        let mut hashes: Vec<serde_json::Value> = lane["files"][key].as_array().unwrap().clone();
+        hashes.extend(draft["files"][key].as_array().unwrap().iter().cloned());
+        hashes.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        hashes.dedup();
+        lane["files"][key] = serde_json::Value::Array(hashes);
+        write(LEDGER, &(serde_json::to_string_pretty(&lane).unwrap() + "\n"));
+        git(p, &["commit", "-q", "-am", "cas-test1: record the guide in the ledger"]);
+        let anchor = head_sha(p);
+
+        // The integration regenerates the ledger from the merged history.
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "--no-ff", "-q", "factory/worker", "-m", "merge factory/worker cas-test1"]);
+        generate();
+        git(p, &["commit", "-q", "-a", "--amend", "--no-edit"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::ProceedWithNote(note) => assert!(note.contains("cas-2ea6"), "{note}"),
+            other => panic!("a ledger equal to a fresh run is delivered: {other:?}"),
+        }
+
+        // A target ledger that is not a fresh run (a hand edit drops the
+        // shipped version's hash) still refuses.
+        let mut stale = generate();
+        stale["files"][key] = serde_json::json!([]);
+        write(LEDGER, &(serde_json::to_string_pretty(&stale).unwrap() + "\n"));
+        git(p, &["commit", "-q", "-am", "hand-edit the ledger"]);
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("DELIVERY CONTENT DROPPED") && message.contains(LEDGER), "{message}")
+            }
+            other => panic!("a ledger that differs from a fresh run still refuses: {other:?}"),
+        }
     }
 
     /// cas-18aa: the cas-da9a shape, minimized. Round one of the task lands a

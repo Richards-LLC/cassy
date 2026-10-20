@@ -3012,7 +3012,14 @@ const URGENT_WAKE_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::fro
 /// How long a normal, transport-delivered message may remain unsurfaced before
 /// the daemon retries a *normal* nudge.  This deliberately does not borrow the
 /// urgent interrupt path: ordinary traffic must never escalate itself.
-const NORMAL_DELIVERY_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+/// cas-badb (GH #1302): a recipient should start its turn within 30 seconds.
+const NORMAL_DELIVERY_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// cas-badb (GH #1302): a recipient that still has not started a turn is
+/// nudged again every [`LIFECYCLE_RENUDGE_INTERVAL`] (60s), this many times in
+/// all, and then flagged. Five nudges from the 30s first check reach about
+/// five minutes, when its sender and the operator are also told.
+pub(super) const NORMAL_DELIVERY_MAX_NUDGES: u32 = 5;
 
 /// cas-ac97 (GH #1153): how often a due probe re-reads the recipient's
 /// transcript while that recipient is still inside a turn that began before
@@ -3035,6 +3042,8 @@ pub(crate) struct NormalDeliveryProbe {
     /// cas-ac97: the queued body, for the per-message transcript match.
     pub(crate) prompt: String,
     pub(crate) nudge_sent_at: Option<std::time::Instant>,
+    /// cas-badb (GH #1302): watchdog nudges typed so far for this row.
+    pub(crate) nudges: u32,
     /// cas-ac97: when the probe is next due for an evidence read. `None`
     /// means one observe window after delivery.
     pub(crate) next_check_at: Option<std::time::Instant>,
@@ -3089,7 +3098,7 @@ pub(super) fn normal_delivery_probe_due(
 /// Called only for a due probe.
 pub(super) fn normal_delivery_probe_action(
     evidence: NormalDeliveryTurnEvidence,
-    nudge_sent_at: Option<std::time::Instant>,
+    nudges: u32,
 ) -> NormalDeliveryProbeAction {
     match evidence {
         NormalDeliveryTurnEvidence::TurnStarted
@@ -3100,10 +3109,13 @@ pub(super) fn normal_delivery_probe_action(
         NormalDeliveryTurnEvidence::NoTurn
         | NormalDeliveryTurnEvidence::Unavailable {
             pane_output_grew: false,
-        } => match nudge_sent_at {
-            None => NormalDeliveryProbeAction::RetryNormalNudge,
-            Some(_) => NormalDeliveryProbeAction::FlagSupervisor,
-        },
+        } => {
+            if nudges < NORMAL_DELIVERY_MAX_NUDGES {
+                NormalDeliveryProbeAction::RetryNormalNudge
+            } else {
+                NormalDeliveryProbeAction::FlagSupervisor
+            }
+        }
     }
 }
 
@@ -4885,7 +4897,7 @@ impl FactoryDaemon {
                 }
                 evidence => evidence,
             };
-            let action = normal_delivery_probe_action(evidence, probe.nudge_sent_at);
+            let action = normal_delivery_probe_action(evidence, probe.nudges);
             tracing::debug!(target: "cas::coordination", stage = "normal_delivery_watchdog_evidence",
                 message_id = row_id, target_agent = %probe.pane, ?evidence, ?action,
                 "cas-ac97: normal delivery watchdog read harness turn evidence");
@@ -4926,7 +4938,8 @@ impl FactoryDaemon {
                     });
                     if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
                         probe.nudge_sent_at = Some(now);
-                        probe.next_check_at = Some(now + NORMAL_DELIVERY_OBSERVE_WINDOW);
+                        probe.nudges += 1;
+                        probe.next_check_at = Some(now + LIFECYCLE_RENUDGE_INTERVAL);
                     }
                     tracing::warn!(
                         target: "cas::coordination",
@@ -8019,6 +8032,7 @@ impl FactoryDaemon {
                         delivered_at_utc: delivery_started_at_utc,
                         prompt: queued.prompt.clone(),
                         nudge_sent_at: None,
+                        nudges: 0,
                         next_check_at: None,
                     },
                 );
@@ -18629,42 +18643,42 @@ mod urgent_wake_probe_tests {
     #[test]
     fn normal_watchdog_retries_idle_codex_then_flags_cas_6e76() {
         use super::{
-            NORMAL_DELIVERY_OBSERVE_WINDOW, NormalDeliveryProbeAction, NormalDeliveryTurnEvidence,
+            NORMAL_DELIVERY_MAX_NUDGES, NormalDeliveryProbeAction, NormalDeliveryTurnEvidence,
             normal_delivery_probe_action, normal_delivery_probe_due,
         };
 
         let start = Instant::now();
         assert!(
-            !normal_delivery_probe_due(start, None, start + Duration::from_secs(30)),
+            !normal_delivery_probe_due(start, None, start + Duration::from_secs(20)),
             "inside the first window the probe reads no evidence at all"
         );
-        assert!(normal_delivery_probe_due(
-            start,
-            None,
-            start + NORMAL_DELIVERY_OBSERVE_WINDOW
-        ));
+        // cas-badb (GH #1302): the first check is 30s after delivery.
+        assert!(normal_delivery_probe_due(start, None, start + Duration::from_secs(30)));
+        // cas-badb (GH #1302): a turnless recipient is re-woken at every
+        // check until the nudges run out, never just once.
+        for nudges in 0..NORMAL_DELIVERY_MAX_NUDGES {
+            assert_eq!(
+                normal_delivery_probe_action(NormalDeliveryTurnEvidence::NoTurn, nudges),
+                NormalDeliveryProbeAction::RetryNormalNudge,
+                "nudge {nudges} of {NORMAL_DELIVERY_MAX_NUDGES}"
+            );
+        }
         assert_eq!(
-            normal_delivery_probe_action(NormalDeliveryTurnEvidence::NoTurn, None),
-            NormalDeliveryProbeAction::RetryNormalNudge,
-            "an idle normal recipient gets exactly one normal retry at the cadence"
-        );
-        let nudged_at = start + NORMAL_DELIVERY_OBSERVE_WINDOW;
-        assert_eq!(
-            normal_delivery_probe_action(NormalDeliveryTurnEvidence::TurnStarted, Some(nudged_at)),
+            normal_delivery_probe_action(NormalDeliveryTurnEvidence::TurnStarted, 1),
             NormalDeliveryProbeAction::Observed,
-            "a recipient that takes a turn after the normal nudge retires the probe"
+            "a recipient that takes a turn after a normal nudge retires the probe"
         );
         assert_eq!(
-            normal_delivery_probe_action(NormalDeliveryTurnEvidence::NoTurn, Some(nudged_at)),
+            normal_delivery_probe_action(NormalDeliveryTurnEvidence::NoTurn, NORMAL_DELIVERY_MAX_NUDGES),
             NormalDeliveryProbeAction::FlagSupervisor,
-            "the second turnless window is a supervisor-visible flag, never an auto-urgent"
+            "after the last nudge the stall is a supervisor-visible flag, never an auto-urgent"
         );
         assert_eq!(
             normal_delivery_probe_action(
                 NormalDeliveryTurnEvidence::Unavailable {
                     pane_output_grew: true
                 },
-                None,
+                0,
             ),
             NormalDeliveryProbeAction::Observed,
             "without a readable transcript, post-delivery pane output stays the fallback"
@@ -18674,7 +18688,7 @@ mod urgent_wake_probe_tests {
                 NormalDeliveryTurnEvidence::Unavailable {
                     pane_output_grew: false
                 },
-                None,
+                0,
             ),
             NormalDeliveryProbeAction::RetryNormalNudge
         );
@@ -18694,15 +18708,15 @@ mod urgent_wake_probe_tests {
 
         let echo_only = NormalDeliveryTurnEvidence::NoTurn;
         assert_eq!(
-            normal_delivery_probe_action(echo_only, None),
+            normal_delivery_probe_action(echo_only, 0),
             NormalDeliveryProbeAction::RetryNormalNudge
         );
         assert_eq!(
-            normal_delivery_probe_action(echo_only, Some(Instant::now())),
+            normal_delivery_probe_action(echo_only, super::NORMAL_DELIVERY_MAX_NUDGES),
             NormalDeliveryProbeAction::FlagSupervisor
         );
         assert_eq!(
-            normal_delivery_probe_action(NormalDeliveryTurnEvidence::RecipientBusy, None),
+            normal_delivery_probe_action(NormalDeliveryTurnEvidence::RecipientBusy, 0),
             NormalDeliveryProbeAction::WaitForTurnBoundary,
             "a recipient still inside an earlier turn has the message queued; typing a \
              nudge into a working pane is not the fix"
@@ -19930,6 +19944,7 @@ mod gh_1153_idle_pty_delivery_tests {
                 delivered_at_utc,
                 prompt: prompt.to_string(),
                 nudge_sent_at: None,
+                nudges: 0,
                 next_check_at: None,
             },
         );
@@ -20001,6 +20016,7 @@ mod gh_1153_idle_pty_delivery_tests {
             .get_mut(&row)
             .unwrap()
             .nudge_sent_at = Some(Instant::now());
+        daemon.normal_delivery_probes.get_mut(&row).unwrap().nudges = super::NORMAL_DELIVERY_MAX_NUDGES;
         daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
         let report = queue.message_delivery_report(row).unwrap().unwrap();
         assert_ne!(
@@ -20195,13 +20211,13 @@ mod gh_1153_idle_pty_delivery_tests {
             .expect("the probe stays open after the nudge");
         assert!(probe.nudge_sent_at.is_some());
 
-        // The nudge also lands only as echo; the second window elapses.
+        assert_eq!(probe.nudges, 1);
+
+        // cas-badb: every nudge lands only as echo until they run out.
         drain_for(&mut daemon, Duration::from_millis(800)).await;
-        daemon
-            .normal_delivery_probes
-            .get_mut(&row)
-            .unwrap()
-            .next_check_at = Instant::now().checked_sub(Duration::from_secs(1));
+        let probe = daemon.normal_delivery_probes.get_mut(&row).unwrap();
+        probe.nudges = super::NORMAL_DELIVERY_MAX_NUDGES;
+        probe.next_check_at = Instant::now().checked_sub(Duration::from_secs(1));
         daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
 
         let report = queue.message_delivery_report(row).unwrap().unwrap();

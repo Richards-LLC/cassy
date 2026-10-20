@@ -646,6 +646,59 @@ pub(crate) fn wake_attempt_narrative(
     format!("{line}\n")
 }
 
+/// cas-badb (GH #1302): the sender's one-line answer to "did it arrive?".
+/// Received means the recipient's own session saw this message: a turn
+/// observed carrying it, its own hook rendering it into its turn, its own
+/// inbox_poll, or its explicit acknowledgement. A pane handoff or transport
+/// claim alone is still pending.
+pub(crate) fn recipient_verdict(
+    report: &cas_store::MessageDeliveryReport,
+    now: chrono::DateTime<chrono::Utc>,
+    escalate_after_secs: u64,
+) -> String {
+    use cas_store::{DeliveryStage, SurfacingSource};
+    let how = if report.wake == cas_store::ObservationStatus::Observed {
+        Some("its turn started with this message")
+    } else {
+        match report.recipient_receipt {
+            Some(SurfacingSource::ObservedWake) => Some("its turn started with this message"),
+            Some(SurfacingSource::HookSurfaced) => Some("this message was shown in its own turn"),
+            Some(SurfacingSource::InboxPoll) if report.recipient_poll_settled.is_none() => {
+                Some("it read this message with inbox_poll")
+            }
+            _ => (report.confirmation_source == cas_store::ConfirmationSource::ExplicitAck)
+                .then_some("it acknowledged this message"),
+        }
+    };
+    if let Some(how) = how {
+        let at = report
+            .wake_observed_at
+            .or(report.confirmed_at)
+            .map(|at| format!(" at {}", at.to_rfc3339()))
+            .unwrap_or_default();
+        return format!("recipient: RECEIVED by {}: {how}{at}.\n", report.target);
+    }
+    let waited = (now - report.enqueued_at).num_seconds().max(0);
+    if matches!(
+        report.stage,
+        DeliveryStage::Dropped | DeliveryStage::Suppressed | DeliveryStage::Abandoned
+    ) {
+        return format!(
+            "recipient: NOT RECEIVED by {}: delivery ended ({}) after {waited}s; resend or reach it another way.\n",
+            report.target, report.stage
+        );
+    }
+    let escalation = if (waited as u64) < escalate_after_secs {
+        format!("you and the operator are told at {escalate_after_secs}s")
+    } else {
+        "you and the operator have been told".to_string()
+    };
+    format!(
+        "recipient: PENDING for {}: no turn has started with this message after {waited}s          (stage {}, last wake {}, declined wakes {}). Cassy keeps re-waking it every 60s; {escalation}.\n",
+        report.target, report.stage, report.wake_attempt, report.wake_gate_declines
+    )
+}
+
 /// cas-ad92: say whether the body reached the recipient's turn or was only
 /// claimed by the daemon's transport. A Claude teams handoff is claimed when
 /// the inbox file is written, but Claude Code renders it only at a turn
@@ -3768,8 +3821,18 @@ impl CasService {
                     undelivered_after_secs,
                     handoff,
                 );
+                let factory = crate::config::Config::load(&self.inner.cas_root)
+                    .unwrap_or_default()
+                    .factory();
+                let escalate_after_secs = if r.urgent || r.priority <= 1 {
+                    factory.delivery_stalled_priority_secs
+                } else {
+                    factory.delivery_stalled_normal_secs
+                };
+                let verdict_line = recipient_verdict(&r, now, escalate_after_secs);
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
+                     {verdict_line}\
                      stage: {}  pending_reason: {}  wake: {}  wake_attempt: {}  wake_gate_declines: {}  \
                      reaction: {}  confirmation_source: {}\n\
                      {wake_attempt_line}\
@@ -4420,6 +4483,35 @@ mod inbox_poll_identity_tests {
         );
         assert!(line.contains("DID nudge"), "{line}");
         assert!(line.contains("#155"), "{line}");
+    }
+
+    /// cas-badb (GH #1302): the sender sees received or pending. A pane
+    /// handoff is still pending; the recipient's own session seeing the
+    /// message is received.
+    #[test]
+    fn message_status_tells_the_sender_received_or_pending_cas_badb() {
+        use cas_store::{PromptQueueStore, SurfacingSource};
+        let temp = tempfile::tempdir().unwrap();
+        let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let id = queue.enqueue_with_session("worker-a", "zen-hound", "please review", "session").unwrap();
+        let verdict = |now| {
+            let report = queue.message_delivery_report(id).unwrap().unwrap();
+            super::recipient_verdict(&report, now, 300)
+        };
+        let now = chrono::Utc::now();
+        let pending = verdict(now);
+        assert!(pending.starts_with("recipient: PENDING for zen-hound"), "{pending}");
+        assert!(pending.contains("told at 300s"), "{pending}");
+        assert!(
+            verdict(now + chrono::Duration::seconds(600)).contains("have been told"),
+            "after the escalation threshold the sender knows the alert went out"
+        );
+        queue.record_recipient_surfaced(id, "zen-hound", SurfacingSource::TransportDelivered).unwrap();
+        assert!(verdict(now).starts_with("recipient: PENDING"), "a pane handoff is not a read");
+        queue.record_recipient_surfaced(id, "zen-hound", SurfacingSource::HookSurfaced).unwrap();
+        let received = verdict(now);
+        assert!(received.starts_with("recipient: RECEIVED by zen-hound"), "{received}");
     }
 
     /// cas-ad92: status must tell a body rendered into a turn from one the

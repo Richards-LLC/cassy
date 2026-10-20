@@ -1126,3 +1126,35 @@ fn cas_6d5c_task_lifecycle_retires_only_the_related_workers_alarms() {
         );
     }
 }
+
+/// cas-badb (GH #1302): an unread message, even one typed into the pane with no
+/// turn observed afterwards, reaches its sender and the operator, and the
+/// operator is paged once per episode.
+#[test]
+fn cas_badb_unread_message_escalates_to_sender_and_operator_once() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let id = handed_off_row(&f, "supervisor", "worker");
+    f.queue
+        .record_recipient_surfaced(id, "worker", cas_store::SurfacingSource::TransportDelivered)
+        .unwrap();
+    let pages = |f: &Fixture| -> i64 {
+        rusqlite::Connection::open(f.cas_dir.join("cas.db"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM prompt_queue WHERE source = 'unread-message-watchdog' AND target = 'operator'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let first = f.scan();
+    assert!(
+        first.iter().any(|row| row.source == "delivery-watchdog" && row.target == "supervisor"),
+        "the sender hears that its message is unread: {first:?}"
+    );
+    assert_eq!(pages(&f), 1, "the operator is paged with the sender");
+    f.scan();
+    assert_eq!(pages(&f), 1, "one operator page per unread episode");
+}
+

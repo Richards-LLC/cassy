@@ -5819,17 +5819,20 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         }
     };
 
-    if let Ok(config) = crate::cloud::CloudConfig::load_from_cas_dir(cas_root)
-        && config.active_team_id().is_some()
-        && let Ok(queue) = crate::cloud::SyncQueue::open_read_only(cas_root)
-        && let Ok(held) = queue.personal_row_count()
-        && held > 0
-    {
-        return Check {
-            name: "cloud sync queue".into(), status: CheckStatus::Warning,
-            message: format!("{held} personal row(s) held: team-linked sync drains only the team queue; cloud.team_only is {}. {}", if config.team_only {"on"} else {"off"}, crate::cloud::SyncQueue::personal_backlog_remedy(config.team_only)),
-        };
-    }
+    let held_notice = crate::cloud::CloudConfig::load_from_cas_dir(cas_root)
+        .ok()
+        .filter(|config| config.active_team_id().is_some())
+        .and_then(|config| {
+            crate::cli::cloud::team_only_held_personal_rows(cas_root)
+                .filter(|count| *count > 0)
+                .map(|count| {
+                    format!(
+                        "{count} migratable personal row(s) held: team-linked sync drains only the team queue; cloud.team_only is {}. {}",
+                        if config.team_only { "on" } else { "off" },
+                        crate::cloud::SyncQueue::personal_backlog_remedy(config.team_only)
+                    )
+                })
+        });
 
     let pending = match crate::cli::cloud::pending_content_pushes(&conn) {
         Ok(pending) => pending,
@@ -5837,7 +5840,10 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
             return Check {
                 name: "cloud sync queue".to_string(),
                 status: CheckStatus::Warning,
-                message: format!("cannot count queued content changes: {error}"),
+                message: append_held_notice(
+                    format!("cannot count queued content changes: {error}"),
+                    held_notice.as_deref(),
+                ),
             };
         }
     };
@@ -5885,6 +5891,7 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
                 describe_queue_rejections(&rejections)
             ));
         }
+        message = append_held_notice(message, held_notice.as_deref());
         return Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Warning,
@@ -5892,10 +5899,10 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         };
     }
 
-    if pending.is_empty() && rejections.is_empty() {
+    let mut check = if pending.is_empty() && rejections.is_empty() {
         Check {
             name: "cloud sync queue".to_string(),
-            status: CheckStatus::Ok,
+            status: if held_notice.is_some() { CheckStatus::Warning } else { CheckStatus::Ok },
             message: format!("0 queued content change(s) await push; {remediation}"),
         }
     } else if pending.is_empty() {
@@ -5926,7 +5933,17 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
                 }
             ),
         }
+    };
+    check.message = append_held_notice(check.message, held_notice.as_deref());
+    check
+}
+
+fn append_held_notice(mut message: String, held_notice: Option<&str>) -> String {
+    if let Some(notice) = held_notice {
+        message.push(' ');
+        message.push_str(notice);
     }
+    message
 }
 
 /// Pending rows annotated before a sync could attempt them because the cloud
@@ -6277,17 +6294,47 @@ mod tests {
     fn cas_db92_doctor_explains_held_personal_rows_without_retrying_the_wrong_endpoint() {
         let temp = TempDir::new().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "p").unwrap();
         let mut cloud = crate::cloud::CloudConfig::default();
         cloud.set_team("550e8400-e29b-41d4-a716-446655440000", "fixture");
         cloud.save_to_cas_dir(&root).unwrap();
-        let queue = crate::cloud::SyncQueue::open(&root).unwrap(); queue.init().unwrap();
-        queue.enqueue(crate::cloud::EntityType::Task, "held", crate::cloud::SyncOperation::Upsert, Some("{}")).unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let enqueue_task = |id: &str, private: bool| {
+            let mut task = crate::types::Task::new(id.into(), id.into());
+            task.origin_project = Some("p".into());
+            if private {
+                task.share = Some(crate::types::ShareScope::Private);
+            }
+            tasks.add(&task).unwrap();
+            queue.enqueue(
+                crate::cloud::EntityType::Task,
+                id,
+                crate::cloud::SyncOperation::Upsert,
+                Some(&serde_json::to_string(&task).unwrap()),
+            ).unwrap();
+        };
+        enqueue_task("held", false);
+        enqueue_task("registration-conflict", true);
+        enqueue_task("rejected", true);
+        let conflict = queue.list_all(10).unwrap().into_iter().find(|row| row.entity_id == "registration-conflict").unwrap();
+        queue.record_row_outcome(conflict.id, "parked", Some("project_registration_conflict")).unwrap();
+        let rejected = queue.list_all(10).unwrap().into_iter().find(|row| row.entity_id == "rejected").unwrap();
+        queue.record_row_outcome(rejected.id, "rejected", Some("team_owned_project")).unwrap();
+        queue.enqueue(crate::cloud::EntityType::Task, "delete", crate::cloud::SyncOperation::Delete, None).unwrap();
         let check = cloud_queue_check(&root);
         assert!(matches!(check.status, CheckStatus::Warning));
-        assert!(check.message.contains("1 personal row(s) held"));
+        assert!(check.message.contains("1 migratable personal row(s) held"));
         assert!(check.message.contains("cas config set cloud.team_only true"));
         assert!(check.message.contains("cas cloud queue migrate-to-team"));
         assert!(!check.message.contains("cas cloud queue --retry"));
+        assert!(check.message.contains("project_registration_conflict"), "{}", check.message);
+        assert!(check.message.contains("team_owned_project"), "{}", check.message);
+
+        queue.migrate_personal_to_team("550e8400-e29b-41d4-a716-446655440000", "p", true).unwrap();
+        let after_migration = cloud_queue_check(&root);
+        assert!(!after_migration.message.contains("personal row(s) held"), "{}", after_migration.message);
     }
 
     #[test]

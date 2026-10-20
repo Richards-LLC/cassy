@@ -116,8 +116,6 @@ pub fn classify(
     now: DateTime<Utc>,
 ) -> Vec<TaskSimulator> {
     let cutoff = now - Duration::hours(SIMULATOR_TTL_HOURS);
-    let ids: Vec<String> = devices.iter().filter_map(|device| owner_task(&device.name)).map(str::to_string).collect();
-    others.prefetch(&ids);
     devices
         .iter()
         .filter_map(|device| {
@@ -365,7 +363,8 @@ mod tests {
         let xcrun = dir.path().join("xcrun");
         // A non-exec wrapper: the sleep is a grandchild that must die with the
         // process group, or the bounded call would leak it.
-        std::fs::write(&xcrun, "#!/bin/sh\nsleep 30\necho done\n").unwrap();
+        let pidfile = dir.path().join("grandchild.pid");
+        std::fs::write(&xcrun, format!("#!/bin/sh\nsleep 30 &\necho $! > '{}'\nwait\n", pidfile.display())).unwrap();
         std::fs::set_permissions(&xcrun, std::fs::Permissions::from_mode(0o700)).unwrap();
         let simctl = Simctl::with_binary(&xcrun).with_timeout(std::time::Duration::from_millis(300));
         let none = crate::task_ownership::KnownProjects::from_roots(dir.path(), Vec::new());
@@ -374,5 +373,17 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
         let report = render(&result);
         assert!(report.contains("Task simulators: unavailable") && report.contains("timed out"), "{report}");
+        let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        let alive = |pid: i32| match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // Linux: a reaped or zombie process is dead.
+            Ok(stat) => !stat.rsplit(')').next().unwrap_or("").trim_start().starts_with('Z'),
+            Err(_) if std::path::Path::new("/proc/self/stat").exists() => false,
+            Err(_) => unsafe { libc::kill(pid, 0) == 0 },
+        };
+        let gone_by = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while alive(pid) && std::time::Instant::now() < gone_by {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!alive(pid), "the grandchild sleep {pid} must die with the process group");
     }
 }

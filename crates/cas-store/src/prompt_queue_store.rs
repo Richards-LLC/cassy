@@ -5872,10 +5872,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                -- cas-b5ad: the daemon's transport claim is a reservation,
                -- not a read; a claimed row whose wake keeps being declined is
                -- still unread, and its sender must hear that it stalled.
+               -- cas-badb (GH #1302): text typed into a pane is not a read
+               -- either until a turn is observed (observed_wake) or the
+               -- recipient's own session surfaces or polls it.
                AND NOT EXISTS (
                     SELECT 1 FROM prompt_queue_recipient_seen seen
                      WHERE seen.prompt_id = q.id AND seen.recipient = q.target
-                       AND seen.source <> 'transport_claimed'
+                       AND seen.source NOT IN ('transport_claimed', 'transport_delivered')
                )
                {recipient_acted}
                AND (((q.urgent = 1 OR q.priority <= 1) AND q.created_at <= ?)
@@ -5940,7 +5943,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                        AND NOT EXISTS (
                            SELECT 1 FROM prompt_queue_recipient_seen seen
                             WHERE seen.prompt_id = q.id AND seen.recipient = q.target
-                              AND seen.source <> 'transport_claimed'
+                              AND seen.source NOT IN ('transport_claimed', 'transport_delivered')
                        )",
                     params![prompt_id, factory_session, stale_cutoff],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?)),

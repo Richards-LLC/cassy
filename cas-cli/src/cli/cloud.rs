@@ -2305,8 +2305,11 @@ pub(crate) fn team_only_mismatch_line(queue: &SyncQueue, team_only: bool) -> Opt
 }
 
 pub(crate) fn team_only_held_personal_rows(cas_root: &Path) -> Option<usize> {
+    let config = CloudConfig::load_from_cas_dir(cas_root).ok()?;
+    let team = config.active_team_id()?;
+    let project = crate::cloud::resolve_canonical_id_for_sync(cas_root).ok()?;
     let queue = SyncQueue::open_read_only(cas_root).ok()?;
-    queue.personal_row_count().ok()
+    queue.migratable_personal_row_count(&team, &project).ok()
 }
 
 fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
@@ -4413,13 +4416,20 @@ fn execute_sync_with_output(
 
 fn write_sync_summaries(out: &mut dyn io::Write, summaries: &[SyncSummary], json: bool, verbose: bool) -> anyhow::Result<()> {
     if json {
-        serde_json::to_writer(&mut *out, &serde_json::json!({
+        let has_held_personal = summaries.iter().any(|summary| {
+            summary.team_configured
+                && summary.held_personal_pending + summary.held_personal_failed > 0
+        });
+        let mut value = serde_json::json!({
             "operation":"sync_summary",
             "push":summaries.iter().find(|s|s.kind == SyncSummaryKind::Push),
             "pull":summaries.iter().find(|s|s.kind == SyncSummaryKind::Pull),
-            "held_personal_reason":summaries.iter().any(|s|s.team_configured && s.held_personal_pending+s.held_personal_failed>0).then_some("team_linked_sync_drains_team_queue_only"),
-            "recovery_command":"cas cloud queue migrate-to-team",
-        }))?;
+            "held_personal_reason":has_held_personal.then_some("team_linked_sync_drains_team_queue_only"),
+        });
+        if has_held_personal {
+            value["recovery_command"] = serde_json::json!("cas cloud queue migrate-to-team");
+        }
+        serde_json::to_writer(&mut *out, &value)?;
         writeln!(out)?;
     } else {
         let mut fmt = Formatter::stdout(out, ActiveTheme::default());
@@ -8214,6 +8224,14 @@ mod team_cmd_tests {
         assert_eq!(value["push"]["held_personal_rejected"]["team_owned_project"], 2);
         assert_eq!(value["push"]["team_backlog_pending"], 0);
         assert_eq!(value["recovery_command"], "cas cloud queue migrate-to-team");
+
+        let mut empty_summary = team_only_push_summary();
+        empty_summary.held_personal_pending = 0;
+        empty_summary.held_personal_failed = 0;
+        let mut empty_output = Vec::new();
+        write_sync_summaries(&mut empty_output, &[empty_summary], true, false).unwrap();
+        let empty: serde_json::Value = serde_json::from_slice(&empty_output).unwrap();
+        assert!(empty.get("recovery_command").is_none(), "{empty}");
     }
 
     /// cas-25c1 fixture: a team-linked checkout whose personal queue holds

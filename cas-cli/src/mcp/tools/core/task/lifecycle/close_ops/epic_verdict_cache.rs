@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Bump when the verdict semantics or the key inputs change.
-const CACHE_VERSION: u32 = 6; // cas-b28c: measure every existing per-task lane
+const CACHE_VERSION: u32 = 7; // cas-2b10: retired shared lanes measured
 /// Bound on stored verdicts; the oldest are evicted first.
 const MAX_ENTRIES: usize = 8192;
 const CACHE_DIR: &str = "cas";

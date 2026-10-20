@@ -486,6 +486,9 @@ fn cas_cd42_two_machine_inventory_preserves_private_stale_and_claim_authority() 
             expires_at: now + Duration::hours(1),
             created_at: now,
             decided_at: Some(now),
+            decided_by: None,
+            cleanup_pending: false,
+            expiry_notice_pending: false,
         },
     )
     .unwrap();

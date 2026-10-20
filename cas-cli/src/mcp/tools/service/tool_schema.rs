@@ -104,7 +104,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("session_id", "register/session_start/session_end: harness id."),
     ("remind_message", "Required reminder text; message kind=ask: default taken at deadline."),
     ("remind_delay_secs", "Delay seconds; message kind=ask: deadline."),
-    ("remind_event", "task_completed, task_blocked, worker_idle, epic_completed; branch_contained_in, tag_exists, ci_completed require cross_session=true."),
+    ("remind_event", "task_completed, task_blocked, worker_idle, epic_completed, epic_split_decided (filter split_id); branch_contained_in, tag_exists, ci_completed require cross_session=true."),
     ("remind_filter", "JSON: branch_contained_in {\"commit\":\"<ref>\",\"target_branch\":\"main\"}; tag_exists {\"tag\":\"v1.0.0\"}; ci_completed {\"sha\":\"<40-hex>\",\"workflow\":\"CI\"} (workflow optional); local events e.g. {\"task_id\":\"cas-1234\"}."),
     ("remind_id", "remind_cancel: reminder id."),
     ("remind_ttl_secs", "TTL seconds: default 3600; external default 604800 (7 days); 0=never."),

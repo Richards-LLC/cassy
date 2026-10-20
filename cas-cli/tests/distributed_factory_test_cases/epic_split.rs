@@ -513,9 +513,9 @@ async fn epic_split_expires_unaccepted_and_claims_all_or_nothing() {
     assert!(cloud.messages_to("pr").is_empty(), "nothing was proposed");
     assert!(soundwave.factory(json!({})).await.unwrap().contains("No epic splits"));
 
-    // Expiry: a one-second proposal nobody accepts.
+    // Expiry: move both stored deadlines into the past, without a timed sleep.
     let proposed = soundwave
-        .factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1", "theirs": "cas-a3", "ttl_secs": 1}))
+        .factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1", "theirs": "cas-a3"}))
         .await
         .unwrap();
     let id = split_id(&proposed);
@@ -523,7 +523,12 @@ async fn epic_split_expires_unaccepted_and_claims_all_or_nothing() {
     // While open, the proposer's own gate holds.
     let refused = soundwave.start("cas-a3", false).await.unwrap_err();
     assert!(refused.contains("SPLIT TO A PEER") && refused.contains("pending"), "{refused}");
-    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    for supervisor in [&soundwave, &prowl] {
+        rusqlite::Connection::open(supervisor.machine.cas_dir.join("cas.db")).unwrap()
+            .execute("UPDATE epic_splits SET expires_at=?1 WHERE id=?2",
+                rusqlite::params![(chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339(), id])
+            .unwrap();
+    }
 
     let expiry = soundwave.tick().await;
     assert!(expiry.errors.is_empty(), "{expiry:?}");
@@ -531,6 +536,14 @@ async fn epic_split_expires_unaccepted_and_claims_all_or_nothing() {
     assert_split_decision(&soundwave, &id, "expired");
     assert_eq!(prowl.tick().await.delivered, 1);
     assert_split_decision(&prowl, &id, "expired");
+
+    // Simulate restart after the outbox send but before settling its work flag.
+    let sent = cloud.messages_to("pr").len();
+    rusqlite::Connection::open(soundwave.machine.cas_dir.join("cas.db")).unwrap()
+        .execute("UPDATE epic_splits SET expiry_notice_pending=1 WHERE id=?1", [&id]).unwrap();
+    let retry = soundwave.tick().await;
+    assert!(retry.errors.is_empty(), "{retry:?}");
+    assert_eq!(cloud.messages_to("pr").len(), sent, "expiry reuses its original logical send");
 
     let late = prowl
         .factory(json!({"id": id, "decision": "accept"}))

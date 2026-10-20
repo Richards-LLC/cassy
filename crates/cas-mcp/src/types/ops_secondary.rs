@@ -936,21 +936,21 @@ pub struct FactoryRequest {
     // ========== Epic split between peer supervisors (cas-4736) ==========
     /// Children of the epic the caller takes.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids you take; claimed in Cassy Cloud now, all or nothing"
+        description = "epic_split propose: comma-separated child task ids you take; claimed in Cloud now, all or nothing. Omit or leave empty for a grant; at least one of mine/theirs is required"
     )]
     #[serde(default)]
     pub mine: Option<String>,
 
     /// Children of the epic offered to the peer.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids offered to the peer (target); they claim them only if they accept"
+        description = "epic_split propose: comma-separated child task ids offered to the peer (target); claimed only on accept. Omit or leave empty for a request; at least one of mine/theirs is required"
     )]
     #[serde(default)]
     pub theirs: Option<String>,
 
     /// Answer to, or end of, an epic split.
     #[schemars(
-        description = "epic_split with id=<split id>: 'accept' (claims only your share), 'reject' (with reason), or 'cancel' (either side; releases only your own claims and tells the peer)"
+        description = "epic_split with id=<split id>: 'accept' (claims only your share), 'reject' (with reason), 'cancel' (releases only your own claims and tells the peer), or 'status' (read the decision, decider and observed claims)"
     )]
     #[serde(default)]
     pub decision: Option<String>,
@@ -1520,21 +1520,21 @@ pub struct CoordinationRequest {
     // ========== Epic split between peer supervisors (cas-4736) ==========
     /// Children of the epic the caller takes.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids you take; claimed in Cassy Cloud now, all or nothing"
+        description = "epic_split propose: comma-separated child task ids you take; claimed in Cloud now, all or nothing. Omit or leave empty for a grant; at least one of mine/theirs is required"
     )]
     #[serde(default)]
     pub mine: Option<String>,
 
     /// Children of the epic offered to the peer.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids offered to the peer (target); they claim them only if they accept"
+        description = "epic_split propose: comma-separated child task ids offered to the peer (target); claimed only on accept. Omit or leave empty for a request; at least one of mine/theirs is required"
     )]
     #[serde(default)]
     pub theirs: Option<String>,
 
     /// Answer to, or end of, an epic split.
     #[schemars(
-        description = "epic_split with id=<split id>: 'accept' (claims only your share), 'reject' (with reason), or 'cancel' (either side; releases only your own claims and tells the peer)"
+        description = "epic_split with id=<split id>: 'accept' (claims only your share), 'reject' (with reason), 'cancel' (releases only your own claims and tells the peer), or 'status' (read the decision, decider and observed claims)"
     )]
     #[serde(default)]
     pub decision: Option<String>,

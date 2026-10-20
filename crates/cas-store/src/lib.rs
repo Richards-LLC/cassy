@@ -133,8 +133,9 @@ pub use delegation_receipt_store::{
     SqliteDelegationReceiptStore,
 };
 pub use epic_split_store::{
-    EPIC_SPLIT_SCHEMA_STATEMENTS, EpicSplit, SplitDirection, SplitState, decide_epic_split,
-    get_epic_split, insert_epic_split, list_epic_splits, open_epic_splits,
+    EPIC_SPLIT_DECISION_SCHEMA_STATEMENTS, EPIC_SPLIT_SCHEMA_STATEMENTS, EpicSplit, SplitDirection,
+    SplitState, decide_epic_split, decide_epic_split_by, finish_epic_split_work, get_epic_split,
+    insert_epic_split, list_epic_splits, open_epic_splits, pending_epic_split_work,
 };
 pub use qa_pass_store::{
     NewQaPass, QA_PASS_SCHEMA_STATEMENTS, QaPassOpen, assert_may_review_qa_task, carry_qa_pass,

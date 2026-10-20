@@ -266,7 +266,7 @@ fn existing_split_proposal_remains_an_actionable_peer_ask_cas_1f25() {
     let mut fyi = split;
     fyi.kind = SplitKind::Cancel;
     assert!(
-        !parse_envelope(&render_prompt(&message(
+        parse_envelope(&render_prompt(&message(
             "pm-cancel",
             "supervisor",
             REPO,

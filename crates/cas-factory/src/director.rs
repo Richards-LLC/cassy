@@ -633,18 +633,22 @@ impl DirectorData {
                     .unwrap_or_default()
             };
 
-        // Only the latest failed round matters, and only deliveries still
-        // parked for QA leave the reviewer between rounds. Read all relevant
-        // task IDs in one bounded store query; store errors fail open.
-        let awaiting_qa_task_ids = tasks
+        // Rejection reopens a delivery to Open while its implementer fixes it.
+        // Only non-terminal deliveries below the QA limit leave reviewers
+        // between rounds. Read the task IDs in one bounded store query;
+        // store errors fail open.
+        let active_qa_task_ids = tasks
             .iter()
-            .filter(|task| task.status == TaskStatus::AwaitingMerge)
+            .filter(|task| !task.is_terminal())
             .map(|task| task.id.clone())
             .collect::<Vec<_>>();
+        let qa_max_rounds = qa_reviewer_round_limit(cas_dir);
         let qa_reviewer_ids =
-            cas_store::latest_failed_qa_reviewers(cas_dir, &awaiting_qa_task_ids)
+            cas_store::latest_failed_qa_reviewers(cas_dir, &active_qa_task_ids)
                 .unwrap_or_default()
                 .into_values()
+                .filter(|(_, round)| *round < qa_max_rounds)
+                .map(|(reviewer, _)| reviewer)
                 .collect::<HashSet<_>>();
 
         let mut agent_id_to_name = HashMap::new();
@@ -676,7 +680,8 @@ impl DirectorData {
                 let pending_supervisor_messages =
                     pending_supervisor_counts.get(&a.name).copied().unwrap_or(0);
                 let latest_supervisor_message_at = latest_supervisor_messages.get(&a.name).copied();
-                let qa_reviewer_between_rounds = qa_reviewer_ids.contains(&a.id);
+                let qa_reviewer_between_rounds =
+                    qa_reviewer_ids.contains(&a.id) || qa_reviewer_ids.contains(&a.name);
                 let effort = a
                     .metadata
                     .get("worker_effort")
@@ -977,6 +982,19 @@ pub fn task_in_project(task: &Task, project_id: &str) -> bool {
     task.origin_project
         .as_deref()
         .is_none_or(|origin| origin == project_id)
+}
+
+// QA dispatch migrates legacy project settings to TOML before opening a round.
+// Keep this aggregation read-only and use the dispatch default when settings
+// are unavailable, without depending on the CLI's Config type.
+fn qa_reviewer_round_limit(cas_dir: &Path) -> u32 {
+    std::fs::read_to_string(cas_dir.join("config.toml"))
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+        .and_then(|config| config.get("qa")?.get("max_rounds")?.as_integer())
+        .and_then(|rounds| u32::try_from(rounds).ok())
+        .unwrap_or(3)
+        .max(1)
 }
 
 fn load_reminders(store: &SqliteReminderStore) -> Vec<Reminder> {

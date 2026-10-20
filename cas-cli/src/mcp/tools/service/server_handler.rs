@@ -612,7 +612,7 @@ impl CasService {
         mut budget: std::time::Duration,
         caller_tool_use: Option<String>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
-        if let (Ok(_), Some(tool_use)) = (&result, caller_tool_use) {
+        if result.is_ok() {
             if budget.is_zero() || crate::internal_llm::is_internal_invocation() {
                 return result;
             }
@@ -620,8 +620,16 @@ impl CasService {
             let wait = (budget / 2).min(std::time::Duration::from_millis(300));
             let this = self.clone();
             let proven = tokio::task::spawn_blocking(move || {
-                this.registered_factory_agent()
-                    .and_then(|agent| caller_transcript_path(&agent))
+                let Some(agent) = this.registered_factory_agent() else {
+                    return false;
+                };
+                let Some(tool_use) = caller_tool_use else {
+                    // A shared Claude server cannot attribute an untagged call
+                    // to the parent. Leave its mail for a proven call or hook.
+                    return super::factory_ops::worker_cli_from_agent(&agent)
+                        != cas_mux::SupervisorCli::Claude;
+                };
+                caller_transcript_path(&agent)
                     .is_some_and(|path| top_level_tool_use(&path, &tool_use, wait))
             })
             .await
@@ -631,7 +639,8 @@ impl CasService {
             }
             budget = budget.saturating_sub(started.elapsed());
         }
-        self.append_factory_context_with_budget(result, budget).await
+        self.append_factory_context_with_budget(result, budget)
+            .await
     }
 
     async fn append_factory_context_with_budget(
@@ -1530,7 +1539,7 @@ mod tests {
         use crate::mcp::server::CasCore;
         use crate::mcp::tools::service::CasService;
         use crate::test_support::TestEnvGuard;
-        use cas_store::{PromptQueueStore, SqlitePromptQueueStore};
+        use cas_store::{DeliveryStage, PromptQueueStore, SqlitePromptQueueStore, SurfacingSource};
         let temp = tempfile::tempdir().unwrap();
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_NAME", Some("parent-supervisor")),
@@ -1567,7 +1576,10 @@ mod tests {
         // The parent's transcript names the verifier's call only inside a
         // sidechain record and a tool result, never as its own tool_use.
         let parent = [
-            r#"{"type":"user","promptId":"parent-turn","message":{"content":"continue"}}"#.to_string(),
+            serde_json::json!({"type":"user", "promptId":"parent-turn",
+                "timestamp": (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
+                "message":{"content":"continue"}})
+            .to_string(),
             tool_use("toolu_parent", false),
             tool_use("toolu_sidechain", true),
             serde_json::json!({"type": "user", "message": {"content": [
@@ -1575,37 +1587,149 @@ mod tests {
             .to_string(),
         ]
         .join("\n");
-        std::fs::write(transcripts.join("parent-session.jsonl"), parent).unwrap();
-        std::fs::write(subagents.join("agent-verifier.jsonl"), tool_use("toolu_verifier", false)).unwrap();
+        std::fs::write(transcripts.join("parent-session.jsonl"), &parent).unwrap();
+        std::fs::write(
+            subagents.join("agent-verifier.jsonl"),
+            tool_use("toolu_verifier", false),
+        )
+        .unwrap();
         let store = service.inner.open_agent_store().unwrap();
         let mut agent = store.get("parent-session").unwrap();
-        agent.metadata.insert("worker_account_dir".into(), account.to_string_lossy().into_owned());
+        agent.metadata.insert(
+            "worker_account_dir".into(),
+            account.to_string_lossy().into_owned(),
+        );
         agent.metadata.insert("worker_cli".into(), "claude".into());
         store.update(&agent).unwrap();
         let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
-        queue
-            .enqueue_with_session("worker-a", "parent-supervisor", "peer ask for the parent", "badb-factory")
+        let first_body = "peer ask for the parent ".to_owned() + &"a".repeat(2_600);
+        let first = queue
+            .enqueue_with_summary(
+                "worker-a",
+                "parent-supervisor",
+                &first_body,
+                Some("badb-factory"),
+                Some("review the pending branch"),
+            )
             .unwrap();
+        // The harness accepted the transport, but no recipient turn carried the body.
+        queue.mark_transport_delivered(first).unwrap();
+        queue
+            .record_recipient_surfaced(
+                first,
+                "parent-supervisor",
+                SurfacingSource::TransportDelivered,
+            )
+            .unwrap();
+        let second_body = "next pending request ".to_owned() + &"b".repeat(2_600);
+        let second = queue
+            .enqueue_with_summary(
+                "worker-b",
+                "parent-supervisor",
+                &second_body,
+                Some("badb-factory"),
+                Some("second pending decision"),
+            )
+            .unwrap();
+        let before = queue.message_delivery_report(first).unwrap().unwrap();
+        assert_eq!(before.stage, DeliveryStage::Delivered);
+        assert!(before.confirmed_at.is_none());
+        // pin: the existing message_status JSON field must distinguish handoff from rendering.
+        assert_eq!(
+            serde_json::to_value(&before).unwrap()["recipient_receipt"],
+            "transport_delivered"
+        );
         let budget = std::time::Duration::from_millis(500);
 
-        for caller in ["toolu_verifier", "toolu_sidechain", "toolu_unknown"] {
+        for caller in [
+            Some("toolu_verifier"),
+            Some("toolu_sidechain"),
+            Some("toolu_unknown"),
+            None,
+        ] {
             let output = service
                 .append_factory_context_for_caller(
                     Ok(CasCore::success("verifier result")),
                     budget,
-                    Some(caller.into()),
+                    caller.map(str::to_owned),
                 )
                 .await
                 .unwrap();
-            assert_eq!(output.content.len(), 1, "{caller} must not see the parent's mail");
+            assert_eq!(
+                output.content.len(),
+                1,
+                "{caller:?} must not see the parent's mail"
+            );
+            assert_eq!(
+                queue.recipient_receipt(first, "parent-supervisor").unwrap(),
+                Some(SurfacingSource::TransportDelivered)
+            );
+            assert!(
+                queue
+                    .message_delivery_report(first)
+                    .unwrap()
+                    .unwrap()
+                    .confirmed_at
+                    .is_none()
+            );
         }
+        // The next real parent turn automatically takes the provisional handoff.
+        let next = serde_json::json!({"type":"user", "promptId":"parent-next-turn",
+            "timestamp": chrono::Utc::now().to_rfc3339(), "message":{"content":"continue again"}});
+        let transcript = transcripts.join("parent-session.jsonl");
+        std::fs::write(
+            &transcript,
+            format!("{parent}\n{next}\n{}", tool_use("toolu_parent_next", false)),
+        )
+        .unwrap();
+        let hook = crate::hooks::HookInput {
+            session_id: "parent-session".into(),
+            agent_role: Some("supervisor".into()),
+            transcript_path: Some(transcript.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let block = crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(
+            Some(temp.path()),
+            &hook,
+        )
+        .unwrap();
+        assert!(block.contains(&first_body));
+        assert!(!block.contains(&second_body), "overflow must remain unread");
+        assert!(block.contains(&format!("Message #{second} did not fit")));
+        // pin: overflow is actionable by id and original summary, not an anonymous count.
+        assert!(block.contains("second pending decision"), "{block}");
+        let rendered = queue.message_delivery_report(first).unwrap().unwrap();
+        assert_eq!(
+            rendered.recipient_receipt,
+            Some(SurfacingSource::HookSurfaced)
+        );
+        assert!(rendered.confirmed_at.is_some());
+        assert!(
+            queue
+                .message_delivery_report(second)
+                .unwrap()
+                .unwrap()
+                .confirmed_at
+                .is_none()
+        );
+        // The parent's next tool boundary recovers overflow without an explicit inbox poll.
         let output = service
-            .append_factory_context_for_caller(Ok(CasCore::success("parent result")), budget, Some("toolu_parent".into()))
+            .append_factory_context_for_caller(
+                Ok(CasCore::success("parent result")),
+                budget,
+                Some("toolu_parent_next".into()),
+            )
             .await
             .unwrap();
-        assert_eq!(output.content.len(), 2, "the parent's own call still receives its mail");
-        assert!(serde_json::to_string(&output).unwrap().contains("peer ask for the parent"));
+        assert_eq!(output.content.len(), 2);
+        assert!(result_text(&output).contains(&second_body));
+        assert_eq!(
+            queue
+                .recipient_receipt(second, "parent-supervisor")
+                .unwrap(),
+            Some(SurfacingSource::HookSurfaced)
+        );
     }
 
     #[test]

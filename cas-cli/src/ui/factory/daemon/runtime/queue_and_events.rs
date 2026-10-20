@@ -18643,8 +18643,8 @@ mod urgent_wake_probe_tests {
     #[test]
     fn normal_watchdog_retries_idle_codex_then_flags_cas_6e76() {
         use super::{
-            NORMAL_DELIVERY_MAX_NUDGES, NORMAL_DELIVERY_OBSERVE_WINDOW, NormalDeliveryProbeAction,
-            NormalDeliveryTurnEvidence, normal_delivery_probe_action, normal_delivery_probe_due,
+            NORMAL_DELIVERY_MAX_NUDGES, NormalDeliveryProbeAction, NormalDeliveryTurnEvidence,
+            normal_delivery_probe_action, normal_delivery_probe_due,
         };
 
         let start = Instant::now();
@@ -18652,13 +18652,8 @@ mod urgent_wake_probe_tests {
             !normal_delivery_probe_due(start, None, start + Duration::from_secs(20)),
             "inside the first window the probe reads no evidence at all"
         );
-        assert!(normal_delivery_probe_due(
-            start,
-            None,
-            start + NORMAL_DELIVERY_OBSERVE_WINDOW
-        ));
         // cas-badb (GH #1302): the first check is 30s after delivery.
-        assert_eq!(NORMAL_DELIVERY_OBSERVE_WINDOW, Duration::from_secs(30));
+        assert!(normal_delivery_probe_due(start, None, start + Duration::from_secs(30)));
         // cas-badb (GH #1302): a turnless recipient is re-woken at every
         // check until the nudges run out, never just once.
         for nudges in 0..NORMAL_DELIVERY_MAX_NUDGES {

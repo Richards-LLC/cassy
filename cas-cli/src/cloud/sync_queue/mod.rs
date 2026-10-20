@@ -23,6 +23,7 @@ mod schema;
 mod stats;
 mod task_intents;
 mod team_delivery;
+mod team_backfill;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -44,6 +45,7 @@ pub use quarantine::{
 };
 pub use revisions::{SYNC_REVISION_STATEMENTS, parse_wire_revision, wire_revision};
 pub use team_delivery::TeamOwnedCleanupRow;
+pub use team_backfill::TeamBackfillRow;
 pub use types::{
     EntityType, PendingByType, QueueHealth, QueueStats, QueuedSync, SyncConflictRecord,
     SyncOperation,

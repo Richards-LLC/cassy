@@ -1885,6 +1885,24 @@ mod tests {
     }
 
     #[test]
+    fn cas_db92_team_linked_personal_backlog_names_team_only_and_backfill() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut cloud = crate::cloud::CloudConfig::default();
+        cloud.set_team("550e8400-e29b-41d4-a716-446655440000", "test");
+        cloud.save_to_cas_dir(&root).unwrap();
+        let queue = SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        queue.enqueue(crate::cloud::EntityType::Task, "held", crate::cloud::SyncOperation::Upsert, Some("{}")).unwrap();
+        let mut findings = Vec::new();
+        classify_cloud_queue(collect_cloud_queue_facts(&root), &mut findings);
+        let finding = findings.iter().find(|f| f.code == "cloud.personal_queue_held").expect("small held backlog must warn before age/size thresholds");
+        assert!(finding.message.contains("1 personal"));
+        assert!(finding.remediation.contains("cas config set cloud.team_only true"));
+        assert!(finding.remediation.contains("cas cloud queue migrate-to-team"));
+    }
+
+    #[test]
     fn unhealthy_cloud_queue_warns_but_never_blocks_factory() {
         let mut facts = healthy_facts();
         facts.cloud_queue.health = Some(QueueHealth {

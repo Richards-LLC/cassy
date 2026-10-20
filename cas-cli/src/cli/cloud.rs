@@ -4349,15 +4349,19 @@ fn execute_sync_with_output(
         summaries.push(pull_summary);
     }
 
-    if emit_output && !cli.json && !args.dry_run {
-        let mut out = io::stdout();
-        let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-        for summary in &summaries {
-            render_sync_summary(&mut fmt, summary, cli.verbose)?;
-        }
+    if emit_output && !args.dry_run {
+        write_sync_summaries(&mut io::stdout(), &summaries, cli.json, cli.verbose)?;
     }
 
     Ok(summaries)
+}
+
+fn write_sync_summaries(out: &mut dyn io::Write, summaries: &[SyncSummary], json: bool, verbose: bool) -> anyhow::Result<()> {
+    if !json {
+        let mut fmt = Formatter::stdout(out, ActiveTheme::default());
+        for summary in summaries { render_sync_summary(&mut fmt, summary, verbose)?; }
+    }
+    Ok(())
 }
 
 /// The push receipt of a team-linked sync before the team drain is merged in
@@ -8082,6 +8086,22 @@ mod team_cmd_tests {
 
         assert!(tf.output().contains("1 conflict(s) resolved"));
         assert!(tf.output().contains("entry cas-conflict"));
+    }
+
+    #[test]
+    fn cas_db92_sync_json_reports_held_personal_queue_and_recovery_command() {
+        let (temp, _queue) = cas_25c1_queue_with_held_rejections(false);
+        let mut summary = team_only_push_summary();
+        refresh_team_linked_backlog(&mut summary, temp.path(), "team-1", false).unwrap();
+        let mut output = Vec::new();
+        write_sync_summaries(&mut output, &[summary], true, false).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["operation"], "sync_summary");
+        assert_eq!(value["held_personal_pending"], 1);
+        assert_eq!(value["held_personal_failed"], 3);
+        assert_eq!(value["held_personal_rejected"]["team_owned_project"], 2);
+        assert_eq!(value["team_backlog_pending"], 0);
+        assert_eq!(value["recovery_command"], "cas cloud queue migrate-to-team");
     }
 
     /// cas-25c1 fixture: a team-linked checkout whose personal queue holds

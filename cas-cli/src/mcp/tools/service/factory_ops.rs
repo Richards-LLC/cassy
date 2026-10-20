@@ -10722,8 +10722,10 @@ fn codex_rollout_usage_limit_evidence(
     };
     // Rollouts are append-only JSONL.  A limit line that is followed by a
     // successful terminal turn is historical rollout text, not a live outage.
-    // Keep the record timestamp (or its byte offset as a legacy fallback) as
-    // the durable episode identity used by daemon restarts and retry keys.
+    // Keep the record timestamp as the durable episode identity used by daemon
+    // restarts and retry keys. A legacy record without one falls back to
+    // `tail-<window start + line index>`: a position within the read window,
+    // not a byte offset, counting from the first whole line after the cut.
     let mut latest_terminal = None;
     for (line_index, line) in tail.lines().enumerate() {
         let limited = line.contains("You've hit your usage limit")
@@ -11688,23 +11690,9 @@ fn read_context_usage_from_tail_for_cli(
         });
     }
 
-    use std::io::{Read, Seek, SeekFrom};
-
-    let mut file = std::fs::File::open(path).ok()?;
-    let file_len = file.metadata().ok()?.len();
-    const TAIL_BYTES: u64 = 8192;
-    file.seek(SeekFrom::Start(file_len.saturating_sub(TAIL_BYTES)))
-        .ok()?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    // A bounded seek can land on one of the at most three continuation
-    // bytes of a UTF-8 code point. Drop only that incomplete leading scalar;
-    // invalid UTF-8 anywhere else still fails closed as a malformed rollout.
-    let buf = (0..=3).find_map(|offset| {
-        bytes
-            .get(offset..)
-            .and_then(|tail| std::str::from_utf8(tail).ok())
-    })?;
+    // cas-189b: the shared bounded reader drops the line the seek cut, so a
+    // split code point there cannot hide usage.
+    let (_, buf) = super::worker_liveness::read_jsonl_tail(path, 8192)?;
 
     for line in buf.lines().rev() {
         if !line.contains("\"type\":\"token_count\"") {

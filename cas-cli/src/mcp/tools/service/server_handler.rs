@@ -297,21 +297,11 @@ fn top_level_tool_use(transcript: &std::path::Path, tool_use_id: &str, wait: std
 }
 
 fn transcript_tail_has_top_level_tool_use(transcript: &std::path::Path, tool_use_id: &str) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
     const TAIL: u64 = 512 * 1024;
-    let Ok(mut file) = std::fs::File::open(transcript) else {
+    let Some((_, tail)) = super::worker_liveness::read_jsonl_tail(transcript, TAIL) else {
         return false;
     };
-    let size = file.metadata().map(|meta| meta.len()).unwrap_or(0);
-    if file.seek(SeekFrom::Start(size.saturating_sub(TAIL))).is_err() {
-        return false;
-    }
-    let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).is_err() {
-        return false;
-    }
-    String::from_utf8_lossy(&bytes)
-        .lines()
+    tail.lines()
         .filter(|line| line.contains(tool_use_id))
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .any(|record| {

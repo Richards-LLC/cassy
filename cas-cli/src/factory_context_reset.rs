@@ -197,23 +197,13 @@ pub fn transcript_records_clear(path: &Path) -> bool {
 /// an ordinary user sentence containing "prompt is too long" as a harness
 /// failure.
 pub fn transcript_has_prompt_overflow_failure(path: &Path) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
-
-    let Ok(mut file) = std::fs::File::open(path) else {
+    let Some((_, tail)) = crate::mcp::tools::service::worker_liveness::read_jsonl_tail(
+        path,
+        TRANSCRIPT_FAILURE_TAIL_BYTES,
+    ) else {
         return false;
     };
-    let Ok(size) = file.metadata().map(|metadata| metadata.len()) else {
-        return false;
-    };
-    let start = size.saturating_sub(TRANSCRIPT_FAILURE_TAIL_BYTES);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return false;
-    }
-    let mut buf = Vec::new();
-    if file.read_to_end(&mut buf).is_err() {
-        return false;
-    }
-    let lower = String::from_utf8_lossy(&buf).to_ascii_lowercase();
+    let lower = tail.to_ascii_lowercase();
     lower.contains("prompt is too long")
         && (lower.contains("failurereason") || lower.contains("idlereason"))
 }

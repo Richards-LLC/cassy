@@ -10,6 +10,18 @@ fn is_transient_network_error(error: &str) -> bool {
     let Some(message) = error.strip_prefix("Network error:") else {
         return false;
     };
+    let message = message.trim_start();
+    let message = if let Some(url_and_cause) = message
+        .strip_prefix("http://")
+        .or_else(|| message.strip_prefix("https://"))
+    {
+        let Some((_, cause)) = url_and_cause.split_once(": ") else {
+            return false;
+        };
+        cause
+    } else {
+        message
+    };
     let message = message.to_ascii_lowercase();
     if ["auth", "401", "403", "unauthorized", "forbidden", "reject"]
         .iter()
@@ -360,7 +372,28 @@ impl SyncQueue {
         team_id: &str,
         max_retries: i32,
     ) -> Result<usize, CasError> {
-        if team_id.trim().is_empty() || max_retries <= 0 {
+        if team_id.trim().is_empty() {
+            return Ok(0);
+        }
+        self.rearm_transient_network_failures_for_scope(team_id, max_retries)
+    }
+
+    /// Re-arm personal exhausted transient network failures after a successful
+    /// personal Cloud push. Each row shares the same one-time automatic retry
+    /// budget and terminal-outcome exclusions as team rows.
+    pub fn rearm_personal_transient_network_failures_after_success(
+        &self,
+        max_retries: i32,
+    ) -> Result<usize, CasError> {
+        self.rearm_transient_network_failures_for_scope("", max_retries)
+    }
+
+    fn rearm_transient_network_failures_for_scope(
+        &self,
+        team_id: &str,
+        max_retries: i32,
+    ) -> Result<usize, CasError> {
+        if max_retries <= 0 {
             return Ok(0);
         }
 

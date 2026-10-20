@@ -30,6 +30,8 @@ If the task has a ParentChild dependency, run `task action=dep_list id=<task-id>
 
 ### Step 3: Find the delivery
 
+For every cited `art-` id used as proof, run `artifact action=fetch task_id=<task-id> id=<art-id>`, then read the downloaded copy at the returned path. A citation alone does not prove its contents.
+
 The task record names the delivery: `deliverables.files_changed`, `deliverables.commit_hash`, and the target branch (`Target: … @ <branch>`). In factory mode, work in the worker's clone (`factory action=worker_status` gives its path). Diff against the task's own delivery base, never a fixed commit count:
 
 ```bash

@@ -51,6 +51,10 @@ pub(crate) fn pure_ack(text: &str) -> bool {
 }
 
 pub(crate) fn quiet(text: &str) -> bool {
+    let text = text
+        .strip_prefix("[CAS reply:")
+        .and_then(|s| s.split_once('\n').map(|(_, text)| text))
+        .unwrap_or(text);
     text.starts_with(QUIET) || pure_ack(text)
 }
 
@@ -173,6 +177,27 @@ pub(crate) fn schedule(
     drop(conn);
     let queue =
         crate::ui::factory::daemon::runtime::prompt_queue_jobs::job_thread_prompt_queue(cas)?;
+    for (row, sender) in &candidates {
+        if capped[sender] && wants_wake(row) {
+            let notice = format!(
+                "Wake cap: messages from {} to {supervisor} reached {cap} wakes/hour. Batched into this turn; read the pending messages before replying.",
+                row.source
+            );
+            queue.enqueue_idempotent(
+                "supervisor-wake-cap",
+                &row.target,
+                &notice,
+                Some(session),
+                Some("Supervisor message wake cap"),
+                None,
+                &format!(
+                    "supervisor-wake-cap:{sender}:{supervisor}:{}",
+                    now.timestamp() / 3600
+                ),
+                Some(&QueueOrigin::Daemon),
+            )?;
+        }
+    }
     let wakers: Vec<_> = candidates
         .iter()
         .filter(|(row, sender)| wants_wake(row) && !capped[sender])
@@ -184,23 +209,6 @@ pub(crate) fn schedule(
     if !due {
         for (row, sender) in &candidates {
             let (detail, recheck) = if capped[sender] && wants_wake(row) {
-                let notice = format!(
-                    "Wake cap: messages from {} to {supervisor} exceeded {cap} wakes/hour. Batched into this turn; read the pending messages before replying.",
-                    row.source
-                );
-                queue.enqueue_idempotent(
-                    "supervisor-wake-cap",
-                    &row.target,
-                    &notice,
-                    Some(session),
-                    Some("Supervisor message wake cap"),
-                    None,
-                    &format!(
-                        "supervisor-wake-cap:{sender}:{supervisor}:{}",
-                        now.timestamp() / 3600
-                    ),
-                    Some(&QueueOrigin::Daemon),
-                )?;
                 (
                     "directed supervisor message held by sender-pair wake cap",
                     now + chrono::Duration::minutes(1),
@@ -434,8 +442,10 @@ pub(crate) fn report(cas: &Path, recipient: &str) -> anyhow::Result<String> {
     };
     if !pending.is_empty() {
         let agents = crate::store::open_agent_store(cas)?.list(None)?;
-        if let Some(agent) =
-            crate::cli::factory::wedged::preferred_worker_registration(&agents, recipient)
+        if let Some(agent) = agents
+            .iter()
+            .filter(|agent| agent.name == recipient)
+            .max_by_key(|agent| agent.registered_at)
             && let Some(path) =
                 crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
                     cas, agent,

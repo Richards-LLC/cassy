@@ -9889,6 +9889,20 @@ impl FactoryDaemon {
                 // `ClaimForInject` job on the writer (QA retarget, re-read,
                 // compare-and-set claim); this pass submits it and moves on,
                 // and the row's next pass injects once the claim came back.
+                // Resolve every claim before taking any token. Taking the leader
+                // first would drop its carry while member jobs are still pending.
+                if !facts.message_batch.is_empty() {
+                    let mut ready=self.queue_jobs.claim_resolved(self.app.cas_dir(),&self.session_name,
+                        queued.id,&queued.target,&queued.target);
+                    for member in &facts.message_batch {
+                        ready &= self.queue_jobs.claim_resolved(self.app.cas_dir(),&self.session_name,
+                            member.id,&member.target,&member.target);
+                    }
+                    if !ready {
+                        self.queue_jobs.carry_claimed_row(queued.clone(),facts.clone());
+                        continue;
+                    }
+                }
                 let claim_token = match self.queue_jobs.claim_for_inject(
                     self.app.cas_dir(),
                     &self.session_name,
@@ -9906,7 +9920,7 @@ impl FactoryDaemon {
                     super::prompt_queue_jobs::ClaimStep::HandedOff
                     | super::prompt_queue_jobs::ClaimStep::NotClaimed => {
                         for member in &facts.message_batch {
-                            self.queue_jobs.release_inject_claim(self.app.cas_dir(),member.id,&member.target);
+                            self.queue_jobs.cancel_unadmitted_claim(self.app.cas_dir(),member.id,&member.target);
                         }
                         continue;
                     },
@@ -9924,10 +9938,6 @@ impl FactoryDaemon {
                 if waiting_for_batch {
                     self.queue_jobs.carry_claimed_row(queued.clone(), facts.clone());
                     continue;
-                }
-                for (member, _) in &batch_claims {
-                    prompt_with_instructions.push_str(&format!("\n\n{}\n{}",
-                        crate::mcp::tools::service::agent_search_system::message::first_message_provenance(member), member.prompt));
                 }
                 let normal_wake = if !queued.urgent {
                     let is_supervisor_target = pane_target == self.app.supervisor_name();
@@ -10039,7 +10049,11 @@ impl FactoryDaemon {
                 let mut message_batch = Vec::new();
                 for (member, token) in batch_claims {
                     match self.queue_jobs.admit_claimed(self.app.cas_dir(),member.id,&member.target,token,Instant::now()) {
-                        super::prompt_queue_jobs::Admission::Inject { generation } => message_batch.push((member,generation)),
+                        super::prompt_queue_jobs::Admission::Inject { generation } => {
+                            prompt_with_instructions.push_str(&format!("\n\n{}\n{}",
+                                crate::mcp::tools::service::agent_search_system::message::first_message_provenance(&member),member.prompt));
+                            message_batch.push((member,generation));
+                        },
                         super::prompt_queue_jobs::Admission::InFlight | super::prompt_queue_jobs::Admission::NotClaimed => {},
                     }
                 }

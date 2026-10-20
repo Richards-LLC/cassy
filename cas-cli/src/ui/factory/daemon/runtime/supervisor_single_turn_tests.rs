@@ -420,6 +420,8 @@ async fn cas_3f90_inline_peer_retains_the_shared_inbox_label() {
     crate::store::open_agent_store(daemon.app.cas_dir()).unwrap().register(&peer).unwrap();
     let body = "Please coordinate this delivery with me.";
     enqueue(&daemon, &peer.name, body, cas_store::QueueOrigin::RegisteredAgent { agent_id: peer.id.clone() });
+    rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db")).unwrap().execute(
+        "UPDATE prompt_queue SET created_at=?1",[(chrono::Utc::now()-chrono::Duration::seconds(21)).to_rfc3339()]).unwrap();
     daemon.process_prompt_queue().await.unwrap();
     let typed = typed_once(&root, &mut daemon, body).await;
     assert!(typed.contains("[peer supervisor]"), "{typed:?}");

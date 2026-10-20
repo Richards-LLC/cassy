@@ -1229,6 +1229,14 @@ impl QueueJobs {
         }
     }
 
+    /// Cancel a prepared batch member if its leader was consumed meanwhile.
+    /// Late pending completions follow the existing stale-generation release path.
+    pub(crate) fn cancel_unadmitted_claim(&mut self, cas_dir: &Path, row: i64, recipient: &str) {
+        if let Some(ClaimState::Ready(ClaimOutcome::Claimed(claim_token),_)) = self.claims.remove(&(row,recipient.to_string())) {
+            self.submit_stamp(cas_dir,row,recipient,0,QueueStamp::ReleaseClaim { claim_token });
+        }
+    }
+
     /// Queue the settling stamp for every inject whose outcome is in. It runs
     /// after that row's earlier stamps (same key), and its completion clears
     /// the in-flight entry.

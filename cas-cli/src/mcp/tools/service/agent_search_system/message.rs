@@ -2369,6 +2369,74 @@ impl CasService {
             );
         }
 
+        // Bind supervisor assignments before any halt or enqueue mutation.
+        // Prose may open with the receipt for the worker's previous task.
+        // Preserve explicit task_id first, otherwise the live assignment;
+        // every delivery path reads the same immutable binding.
+        if matches!(role.as_str(), "supervisor" | "director")
+            && !resolved_target.eq_ignore_ascii_case("all_workers")
+            && resolved_target_agent
+                .as_ref()
+                .is_none_or(|agent| agent.role == cas_types::AgentRole::Worker)
+            && crate::prompt_revalidation::is_assignment_prompt(&message)
+        {
+            let tasks = crate::store::open_task_store_local(&self.inner.cas_root).ok();
+            let binding = req
+                .task_id
+                .clone()
+                .filter(|id| !id.trim().is_empty())
+                .or_else(|| {
+                    let assigned = tasks.as_ref().and_then(|store| store.list(None).ok());
+                    let current: Vec<_> = assigned
+                        .iter()
+                        .flatten()
+                        .filter(|task| {
+                            matches!(
+                                task.status,
+                                cas_types::TaskStatus::Open
+                                    | cas_types::TaskStatus::InProgress
+                                    | cas_types::TaskStatus::Blocked
+                            ) && task.assignee.as_deref().is_some_and(|owner| {
+                                owner.eq_ignore_ascii_case(&resolved_target)
+                                    || resolved_target_agent
+                                        .as_ref()
+                                        .is_some_and(|agent| owner == agent.id)
+                            })
+                        })
+                        .collect();
+                    match current.as_slice() {
+                        [task] => Some(task.id.clone()),
+                        [] => assignment_solicited_task_id(&message),
+                        // Multiple live assignments cannot prove which task this
+                        // message solicits. Do not let incidental prose suppress it.
+                        _ => None,
+                    }
+                });
+            message = crate::prompt_revalidation::attach_assignment_envelope(
+                &message,
+                binding.as_deref(),
+            );
+            if let Some((task_id, status)) = binding
+                .as_deref()
+                .and_then(|id| tasks.as_ref()?.get(id).ok())
+                .and_then(|task| {
+                    assignment_stale_task(
+                        &message,
+                        task.status,
+                        task.assignee.as_deref(),
+                        &resolved_target,
+                    )
+                })
+            {
+                return Err(Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    format!(
+                        "Assignment refused for {task_id}: task is {status}. No message was queued."
+                    ),
+                ));
+            }
+        }
+
         // cas-6913: a message addressed to a not-yet-registered worker name
         // (the common spawn-then-immediately-assign sequence) sits in the
         // queue until that name shows up in the agent store. Check
@@ -2998,6 +3066,21 @@ impl CasService {
                 })
             })
             .unwrap_or("inspect message_status for the current delivery detail");
+        // The task can move on between preflight and the daemon's first pass.
+        // A withdrawal is a refused send, never a successful queue receipt.
+        if delivery_stage == cas_store::DeliveryStage::Suppressed
+            && send_report.as_ref().is_some_and(|report| {
+                report.pending_reason == Some(cas_store::PendingReason::SupersededStale)
+            })
+            && let Some(task_id) = assignment_solicited_task_id(&message)
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                format!(
+                    "Assignment refused for {task_id}: {report_detail}. Message #{message_id} was withdrawn before delivery."
+                ),
+            ));
+        }
         let supervisor_copy_suffix = supervisor_copy_id
             .map(|id| format!("; supervisor copy #{id}"))
             .unwrap_or_default();
@@ -6150,6 +6233,180 @@ mod cas_89e1_post_merge_message_type_tests {
             .await
             .expect_err("blank summary must be rejected");
         assert!(error.message.contains("summary required"), "{error:?}");
+    }
+
+    fn assignment_message_fixture() -> (tempfile::TempDir, CasService) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        for (id, name, role) in [
+            ("supervisor-id", "supervisor", AgentRole::Supervisor),
+            ("worker-id", "eager-cobra-57", AgentRole::Worker),
+        ] {
+            let mut agent = Agent::new(id.into(), name.into());
+            agent.role = role;
+            agent.factory_session = Some("assignment-test".into());
+            agents.register(&agent).unwrap();
+        }
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        for (id, status) in [
+            ("cas-3e24", TaskStatus::Closed),
+            ("cas-fba9", TaskStatus::Open),
+        ] {
+            let mut task = Task::new(id.into(), "assignment regression".into());
+            task.status = status;
+            task.assignee = Some("eager-cobra-57".into());
+            tasks.add(&task).unwrap();
+        }
+        let core = crate::mcp::server::CasCore::with_daemon(root, None, None);
+        core.set_agent_id_for_testing("supervisor-id".into());
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        (temp, service)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn next_assignment_survives_closed_task_preamble_cas_baf6b() {
+        let _env = TestEnvGuard::temp_home();
+        let (_temp, service) = assignment_message_fixture();
+        let root = &service.inner.cas_root;
+        let queue = crate::store::open_prompt_queue_store(root).unwrap();
+        // Notification 4202032: a closed-task receipt precedes the next assignment.
+        for (task_id, message) in [
+            (
+                None,
+                "cas-3e24 is closed (ver-019d84ba844b). You're assigned cas-fba9; read its task and start.",
+            ),
+            (
+                Some("cas-fba9"),
+                "cas-3e24 is closed (old brief: action=start id=cas-3e24). You're assigned cas-fba9.",
+            ),
+            (
+                None,
+                "cas-3e24 is closed. You're assigned the next task; see your task list.",
+            ),
+        ] {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "message", "target": "eager-cobra-57", "task_id": task_id,
+                "summary": "next assignment", "message": message,
+            }))
+            .unwrap();
+            service
+                .message_send(request)
+                .await
+                .expect("new assignment must be queued");
+            let row = queue
+                .peek_all(10)
+                .unwrap()
+                .into_iter()
+                .max_by_key(|row| row.id)
+                .expect("row");
+            assert_eq!(
+                crate::ui::factory::daemon::runtime::delivery::assignment_stale_status(
+                    root,
+                    &row.prompt,
+                    &row.target,
+                ),
+                None,
+                "a closed-task preamble must not withdraw the next assignment: {}",
+                row.prompt,
+            );
+            assert_eq!(
+                assignment_solicited_task_id(&row.prompt).as_deref(),
+                Some("cas-fba9")
+            );
+        }
+        // The binding also keeps genuine staleness: once the NEW task closes,
+        // every queued variant must be withdrawn for that task, not the old one.
+        let tasks = crate::store::open_task_store_local(root).unwrap();
+        let mut task = tasks.get("cas-fba9").unwrap();
+        task.status = TaskStatus::Closed;
+        tasks.update(&task).unwrap();
+        for row in queue.peek_all(10).unwrap() {
+            assert_eq!(
+                crate::ui::factory::daemon::runtime::delivery::assignment_stale_status(
+                    root,
+                    &row.prompt,
+                    &row.target,
+                ),
+                Some(("cas-fba9".into(), TaskStatus::Closed)),
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_assignment_send_is_an_explicit_refusal_cas_baf6b() {
+        let _env = TestEnvGuard::temp_home();
+        let (_temp, service) = assignment_message_fixture();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "message", "target": "eager-cobra-57", "task_id": "cas-3e24",
+            "summary": "stale assignment", "message": "You're assigned cas-fba9.",
+        }))
+        .unwrap();
+        let error = service
+            .message_send(request)
+            .await
+            .expect_err("explicit closed task must refuse the send");
+        assert!(
+            error.message.contains("cas-3e24") && error.message.contains("closed"),
+            "{error:?}"
+        );
+        assert!(
+            crate::store::open_prompt_queue_store(&service.inner.cas_root)
+                .unwrap()
+                .poll_all(10)
+                .unwrap()
+                .is_empty(),
+            "a refused send must not enqueue"
+        );
+
+        // Cover the enqueue-to-delivery race through the real notify boundary.
+        let root = &service.inner.cas_root;
+        let socket = tokio::net::UnixDatagram::bind(cas_factory::notify_socket_path(root)).unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "message", "target": "eager-cobra-57", "task_id": "cas-fba9",
+            "summary": "assignment closes before transport", "message": "You're assigned cas-fba9.",
+        }))
+        .unwrap();
+        let withdraw = async {
+            socket.recv(&mut [0u8]).await.unwrap();
+            let tasks = crate::store::open_task_store_local(root).unwrap();
+            let mut task = tasks.get("cas-fba9").unwrap();
+            task.status = TaskStatus::Closed;
+            tasks.update(&task).unwrap();
+            let queue = crate::store::open_prompt_queue_store(root).unwrap();
+            let row = queue.peek_all(10).unwrap().pop().unwrap();
+            let (id, status) =
+                crate::ui::factory::daemon::runtime::delivery::assignment_stale_status(
+                    root,
+                    &row.prompt,
+                    &row.target,
+                )
+                .expect("closed assignment is stale");
+            queue
+                .mark_superseded(
+                    row.id,
+                    &format!("assignment for {id} is stale because task is {status}"),
+                )
+                .unwrap();
+            row.id
+        };
+        let (sent, id) = tokio::join!(service.message_send(request), withdraw);
+        let error = sent.expect_err("a transport withdrawal must refuse the send");
+        assert!(
+            error.message.contains("cas-fba9") && error.message.contains("closed"),
+            "{error:?}"
+        );
+        let queue = crate::store::open_prompt_queue_store(root).unwrap();
+        let report = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.stage, cas_store::DeliveryStage::Suppressed);
+        assert_eq!(
+            report.pending_reason,
+            Some(cas_store::PendingReason::SupersededStale)
+        );
+        assert!(report.delivered_at.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -480,8 +480,8 @@ fn validate_create_response(
     validate_task_proposal(
         &proposal,
         team_id,
-        Some(&request.origin_project_canonical_id),
-        Some(expected_target),
+        None,
+        None,
         Some("proposed"),
     )?;
     if server.client_request_id != request.client_request_id {
@@ -491,10 +491,11 @@ fn validate_create_response(
     }
     // cas-a968 (GH #1281): this response is Cloud's receipt for this attempt,
     // so the proposal is persisted. When Cloud attests a different project
-    // identity (for example a registry alias), still refuse to confirm it, but
-    // return the receipt so the caller never resends it as a new attempt.
+    // identity not confirmed by the registry, refuse to confirm it but return
+    // the receipt so the caller never resends it as a new attempt. Structural,
+    // team and attempt checks above still reject malformed or unrelated receipts.
     if server.origin_project_canonical_id != request.origin_project_canonical_id
-        || server.target_project_canonical_id != request.target_project_canonical_id
+        || server.target_project_canonical_id != expected_target
     {
         return Err(TaskProposalError::Contract(format!(
             "Refusing untrusted cloud proposal response: proposal response project identity did not match the request. \

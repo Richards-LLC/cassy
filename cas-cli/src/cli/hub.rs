@@ -4128,14 +4128,20 @@ mod tests {
     }
 
     #[test]
-    fn host_hub_opt_out_survives_config_round_trip() {
+    fn host_hub_transport_mode_survives_config_round_trip_cas_3f03e() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = Config::default();
-        assert_eq!(config.get("hub.tailscale_serve").as_deref(), Some("true"));
-        config.set("hub.tailscale_serve", "false").unwrap();
-        config.save(temp.path()).unwrap();
-        let loaded = Config::load(temp.path()).unwrap();
-        assert_eq!(loaded.hub.unwrap().tailscale_serve, Some(false));
+        assert_eq!(config.get("hub.transport_mode").as_deref(), Some("auto"));
+        for mode in ["required", "loopback", "auto"] {
+            config.set("hub.transport_mode", mode).unwrap();
+            config.save(temp.path()).unwrap();
+            let loaded = Config::load(temp.path()).unwrap();
+            assert_eq!(loaded.get("hub.transport_mode").as_deref(), Some(mode));
+        }
+        assert!(config.set("hub.transport_mode", "invalid").is_err());
+        // Existing host opt-outs remain effective until a mode is explicitly set.
+        let legacy: Config = toml::from_str("[hub]\ntailscale_serve = false\n").unwrap();
+        assert_eq!(legacy.get("hub.transport_mode").as_deref(), Some("loopback"));
     }
 
     #[test]

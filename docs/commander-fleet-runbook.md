@@ -246,8 +246,11 @@ cas hub restart
 ```
 
 The modes are `auto` (default: try Tailscale Serve, retain loopback with a warning
-if publication fails), `required` (refuse startup without Serve), and `loopback`
-(never publish). For example:
+if interactive publication fails), `required` (refuse startup without Serve), and `loopback`
+(never publish). On macOS, Auto service startup still exits after bounded
+publication retries so launchd KeepAlive retries at boot. Interactive Auto fallback
+prints the transport warning and `cas hub start --loopback` remedy on stderr,
+including with JSON output. For example:
 
 ```toml
 [hub]

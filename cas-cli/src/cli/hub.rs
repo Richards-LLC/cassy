@@ -435,8 +435,8 @@ fn host_tailscale_default() -> Result<bool> {
 }
 
 // A service must exit on failed publication so launchd KeepAlive retries boot startup.
-fn publication_failure_is_fatal(mode: HubTransportMode, _service_startup: bool) -> bool {
-    mode == HubTransportMode::Required
+fn publication_failure_is_fatal(mode: HubTransportMode, service_startup: bool) -> bool {
+    mode.publishes() && (service_startup || mode == HubTransportMode::Required)
 }
 
 fn tailscale_policy(explicit_on: bool, explicit_off: bool, configured: bool) -> bool {
@@ -1061,6 +1061,22 @@ fn version_warning(
 }
 
 pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
+    let result = execute_command(args, cli);
+    // Warn on every interactive path, including an already-running hub and JSON
+    // output. Keep diagnostics on stderr so stdout remains one JSON document.
+    if matches!(args.command, Some(HubCommands::Start(_) | HubCommands::Restart(_)))
+        && let Ok(paths) = HubRuntimePaths::default_for_user()
+        && let Ok(record) = paths.read_process_record()
+        && let Some(warning) = &record.transport_warning
+        && record_is_ready(&paths, &record)
+    {
+        eprintln!("Tailscale Serve inactive: {warning}; hub remains loopback-only");
+        eprintln!("For local access, run `cas hub start --loopback`.");
+    }
+    result
+}
+
+fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
     let requested = match &args.command {
         Some(HubCommands::Start(_) | HubCommands::Restart(_) | HubCommands::Serve(_))
         | Some(HubCommands::Service(HubServiceArgs {
@@ -1539,12 +1555,6 @@ fn start_with_output_resolved(
                         .map(str::to_owned)
                         .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
                     println!("Cassy hub started at {endpoint} (pid {})", record.pid);
-                    if launch_origin != HubLaunchOrigin::Update
-                        && let Some(warning) = &record.transport_warning
-                    {
-                        eprintln!("Tailscale Serve inactive: {warning}; hub remains loopback-only");
-                        eprintln!("Check `tailscale status`, then run `cas hub restart`.");
-                    }
                 }
                 return Ok(());
             }
@@ -1717,7 +1727,11 @@ fn serve_foreground_logged(
         &paths,
     )?;
     let transport_mode = if tailscale_serve {
-        host_transport_mode()?
+        match host_transport_mode()? {
+            // An explicit --tailscale-serve overrides the saved loopback choice.
+            HubTransportMode::Loopback => HubTransportMode::Auto,
+            configured => configured,
+        }
     } else {
         HubTransportMode::Loopback
     };
@@ -1798,7 +1812,12 @@ fn serve_foreground_logged(
             match ensure_result {
                 Ok(receipt) => (Some(proxy_listener), Some(receipt), None),
                 Err(error) if publication_failure_is_fatal(transport_mode, service_startup) => {
-                    return Err(error).context("Hub transport required: Tailscale Serve startup failed");
+                    let context = if service_startup {
+                        "Tailscale Serve service startup exhausted its bounded retries"
+                    } else {
+                        "Hub transport required: Tailscale Serve startup failed"
+                    };
+                    return Err(error).context(context);
                 }
                 Err(error) => {
                     let warning = error.to_string();

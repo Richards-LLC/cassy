@@ -116,7 +116,7 @@ impl SlackConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HubTransportMode {
-    /// Try Tailscale Serve, retaining loopback with a warning on failure.
+    /// Try Tailscale Serve; interactive failure warns, macOS service failure retries.
     #[default]
     Auto,
     /// Refuse startup unless Tailscale Serve publishes successfully.

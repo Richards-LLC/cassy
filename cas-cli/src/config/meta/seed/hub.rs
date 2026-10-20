@@ -9,7 +9,7 @@ pub(super) fn register_hub(registry: &mut ConfigRegistry) {
         key: "hub.transport_mode",
         section: "hub",
         name: "Transport mode",
-        description: "Persistent machine hub policy from ~/.cas/config.toml. auto tries Tailscale Serve and falls back to loopback with a warning; required refuses loopback fallback; loopback never publishes. Restart and update honor this setting. CLI publication flags override a single launch.",
+        description: "Persistent machine hub policy from ~/.cas/config.toml. auto tries Tailscale Serve with an interactive loopback warning (macOS service failures exit so launchd retries); required refuses loopback fallback; loopback never publishes. Restart and update honor this setting. CLI publication flags override a single launch.",
         value_type: ConfigType::String,
         default: "auto",
         constraint: Constraint::OneOf(vec!["auto".into(), "required".into(), "loopback".into()]),

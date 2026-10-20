@@ -41,6 +41,20 @@ pub fn worker_task_branch(worker_name: &str, task_id: &str) -> String {
     format!("factory/{}-{}", worker_name.trim(), task_id.trim())
 }
 
+/// cas-47a2: a reset ends the previous holder's delivery cycle. Its branch
+/// moves to handoff history and its anchor to historical anchors, so the live
+/// binding read by peers, epic views and merge alerts stops naming a dead
+/// worker's branch; the next holder's commit or park binds its own. Returns
+/// the retired branch.
+pub fn retire_branch_binding(deliverables: &mut cas_types::TaskDeliverables) -> Option<String> {
+    let branch = deliverables.parked_branch.take();
+    if let Some(branch) = branch.as_deref() {
+        deliverables.record_handoff_branch(branch);
+    }
+    deliverables.retain_factory_branch_anchor_as_history();
+    branch
+}
+
 /// Whether `value` reads as a task id: a letter first, a `-`, then more
 /// letters, digits, `.`, `_` or `-` (for example `cas-73b8` or `cas-73b8.1`).
 /// Mirrors the pattern the worker git hooks accept.

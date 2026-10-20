@@ -2283,6 +2283,7 @@ fn reset_worker_tasks(cas_root: &Path, worker_name: &str) -> Result<usize> {
         let _ = agent_store.release_lease_for_task(&t.id, "Wedged worker recovery");
         t.status = TaskStatus::Open;
         t.assignee = None;
+        crate::factory_isolation::retire_branch_binding(&mut t.deliverables);
         t.updated_at = chrono::Utc::now();
         if task_store.update(&t).is_ok() {
             cas_store::release_qa_claim_for_task(cas_root, &t.id)

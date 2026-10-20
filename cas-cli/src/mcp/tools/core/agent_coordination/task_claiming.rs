@@ -752,6 +752,8 @@ impl CasCore {
         let prior_assignee = task.assignee.clone();
         task.status = TaskStatus::Open;
         task.assignee = None;
+        // cas-47a2: history only; the next holder binds its own branch.
+        crate::factory_isolation::retire_branch_binding(&mut task.deliverables);
         // cas-86c5: note whether the reset was forced (live worker override).
         let recovery_kind = if req.force.unwrap_or(false) {
             "forced reset (alive-worker guard bypassed)"

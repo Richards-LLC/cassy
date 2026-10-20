@@ -238,6 +238,13 @@ fn plan_legacy(
         .filter(|entry| crate::task_ownership::is_task_id(&entry.file_name().to_string_lossy()))
         .collect();
     dirs.sort_by_key(|entry| entry.file_name());
+    // One read of each other store's write-ahead log for every candidate.
+    let candidates: Vec<String> = dirs
+        .iter()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| tasks.iter().any(|task| &task.id == name && task.status == cas_types::TaskStatus::Closed))
+        .collect();
+    others.prefetch(&candidates);
     for entry in dirs {
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some(task) = tasks

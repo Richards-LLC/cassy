@@ -1767,11 +1767,18 @@ impl FactoryApp {
                     }
                 }
                 if let DirectorEvent::WorkerIdle { worker, active_task: Some(task) } = event
-                    && let Some(read) = worker_waits.get(worker)
-                    && task.task_id == read.task
-                    && !self.merge_alert_retries.admit_idle(worker, read, merge_now)
+                    && task.task_status == cas_types::TaskStatus::InProgress
                 {
-                    continue;
+                    // Missing refs or an unavailable fresh read still owe one
+                    // liveness relay, not an unbounded relay every retry minute.
+                    let unknown = merge_alert::WorkerWait {
+                        task: task.task_id.clone(), tip: None, ci: "unknown", waiting: false,
+                    };
+                    let read = worker_waits.get(worker)
+                        .filter(|read| read.task == task.task_id).unwrap_or(&unknown);
+                    if !self.merge_alert_retries.admit_idle(worker, read, merge_now) {
+                        continue;
+                    }
                 }
                 prompts.push(prompt);
             }

@@ -1,6 +1,6 @@
 ---
 name: cas-html-reports
-description: Use when producing a human-readable analysis that must outlive the conversation: investigations, audits, decision briefs, benchmarks, post-mortems or executive updates; not releases, feature reports or client deliverables.
+description: "Use when producing durable HTML analysis: investigations, audits, decision briefs, benchmarks, post-mortems or executive updates; use cas-release-report for published releases; not feature reports or client deliverables."
 metadata:
   managed_by: cas
 ---

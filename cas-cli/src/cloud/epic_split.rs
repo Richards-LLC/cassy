@@ -558,12 +558,25 @@ pub fn propose(
     }
 
     let peer = match discover_peers(cas_root, Some(&caller.id)) {
-        Ok(PeerDiscovery::Found { peers, .. }) => {
-            peer_mailbox::resolve_peer_target(&peers, peer_target)?
-                .cloned()
-                .ok_or_else(|| {
-                    format!("no peer supervisor of this repository is named '{peer_target}'")
-                })?
+        Ok(PeerDiscovery::Found { peers, ended, .. }) => {
+            // GH #1319: an offer to a supervisor that ended, or whose harness
+            // is logged out, goes to its successor or is refused by name.
+            let (addressed, was_ended) = match peer_mailbox::resolve_peer_target(&peers, peer_target)? {
+                Some(peer) => (peer.clone(), false),
+                None => (
+                    crate::cloud::peers::ended_target(&ended, peer_target)
+                        .cloned()
+                        .ok_or_else(|| {
+                            format!("no peer supervisor of this repository is named '{peer_target}'")
+                        })?,
+                    true,
+                ),
+            };
+            match crate::cloud::peers::slot_holder(&peers, &addressed, was_ended) {
+                crate::cloud::peers::SlotHolder::Addressed => addressed,
+                crate::cloud::peers::SlotHolder::Successor { peer, .. } => peer.clone(),
+                crate::cloud::peers::SlotHolder::Refused(reason) => return Err(reason),
+            }
         }
         Ok(PeerDiscovery::NotLoggedIn) => {
             return Err("this project is not logged in to Cassy Cloud (`cas login`)".to_string());

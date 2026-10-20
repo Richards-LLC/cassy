@@ -10583,12 +10583,45 @@ pub(crate) fn worker_auth_failure_evidence(
     cas_root: &std::path::Path,
     agent: &cas_types::Agent,
 ) -> crate::factory_auth_health::AuthFailureEvidence {
+    auth_failure_evidence_at(
+        worker_transcript_path_for_agent(cas_root, agent).as_deref(),
+        worker_cli_from_agent(agent),
+    )
+}
+
+/// GH #1319: account health of a supervisor's own harness, read from its
+/// transcript. A logged-out supervisor heartbeats like a healthy one while
+/// every turn it is given ends in "Login expired · Please run /login".
+pub(crate) fn supervisor_auth_failure_evidence(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+) -> crate::factory_auth_health::AuthFailureEvidence {
+    let cli = agent
+        .metadata
+        .get("supervisor_cli")
+        .and_then(|value| value.parse::<cas_mux::SupervisorCli>().ok())
+        .unwrap_or(cas_mux::SupervisorCli::Claude);
+    let project = agent
+        .metadata
+        .get("clone_path")
+        .filter(|path| !path.trim().is_empty())
+        .cloned()
+        .or_else(|| cas_root.parent().map(|path| path.to_string_lossy().into_owned()));
+    let transcript = resolve_worker_transcript_path_for_account(
+        project.as_deref(),
+        agent.cc_session_id.as_deref().unwrap_or(&agent.id),
+        cli,
+        agent.metadata.get("supervisor_account_dir").map(String::as_str),
+    );
+    auth_failure_evidence_at(transcript.as_deref(), cli)
+}
+
+fn auth_failure_evidence_at(
+    transcript: Option<&std::path::Path>,
+    cli: cas_mux::SupervisorCli,
+) -> crate::factory_auth_health::AuthFailureEvidence {
     use crate::factory_auth_health::AuthFailureEvidence;
-    let cli = worker_cli_from_agent(agent);
-    let Some(transcript) = worker_transcript_path_for_agent(cas_root, agent) else {
-        return AuthFailureEvidence::Unavailable;
-    };
-    let Some(tail) = read_transcript_tail(&transcript) else {
+    let Some(tail) = transcript.and_then(read_transcript_tail) else {
         return AuthFailureEvidence::Unavailable;
     };
     match cli {

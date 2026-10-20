@@ -225,6 +225,7 @@ pub fn heartbeat_metadata(
         "peer_prs_v1",
         "peer_splits_v1",
         crate::cloud::peers::META_FOCUS_TITLE,
+        crate::cloud::peers::META_HARNESS_AUTH_FAILED,
     ] {
         metadata.insert(key.into(), agent.metadata.get(key).cloned().unwrap_or_default().into());
     }

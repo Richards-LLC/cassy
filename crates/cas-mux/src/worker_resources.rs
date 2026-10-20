@@ -22,13 +22,18 @@ pub(crate) fn claude_account_connectors(
     account_dir: &Path,
     policy: &FactoryWorkerPolicy,
 ) -> ClaudeAccountConnectors {
-    #[derive(serde::Deserialize)]
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(rename_all = "lowercase")]
+    enum ToolPermission { Allow, Ask, Blocked }
+    #[derive(serde::Deserialize, serde::Serialize)]
     #[serde(deny_unknown_fields)]
     struct Descriptor {
         #[serde(rename = "type")]
         transport: String,
         url: String,
         id: String,
+        #[serde(rename = "toolPermissions", skip_serializing_if = "Option::is_none")]
+        tool_permissions: Option<BTreeMap<String, ToolPermission>>,
     }
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -85,9 +90,7 @@ pub(crate) fn claude_account_connectors(
                 denied = true;
                 continue;
             }
-            servers.insert(name, serde_json::json!({
-                "type": descriptor.transport, "url": descriptor.url, "id": descriptor.id
-            }));
+            servers.insert(name, serde_json::to_value(descriptor).map_err(|_| "invalid descriptor format")?);
         }
         Ok((servers, denied))
     };

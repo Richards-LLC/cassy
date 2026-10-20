@@ -828,13 +828,18 @@ keeping `--strict-mcp-config`. The account owner provisions a regular file at
 Copy the exact connector name, URL and ID from this account's authorized MCP
 status metadata; the example values are placeholders. The manifest is an
 operator grant of the listed connectors, so keep it owner-only. It accepts
-only those three descriptor fields, HTTPS URLs without embedded credentials or
+those three descriptor fields plus optional native `toolPermissions` (a map of
+tool names to `allow`, `ask` or `blocked`), HTTPS URLs without embedded credentials or
 query strings, and `claude.ai ` names. Other transports, fields, symlinks and
 files over 64 KiB are invalid. A missing or invalid manifest leaves strict
 CAS-only launch working and emits a one-line notice, also available in
 `CAS_FACTORY_CLAUDE_CONNECTOR_NOTICE`. Configured supervisor-only connectors
 and deployment connectors Vercel/Neon are omitted. Claude's managed restrictions
 and connector-disable settings still apply; the manifest cannot override them.
+When the account has organization tool controls, provision their exact native
+`toolPermissions` map too and refresh it when those controls change. Cassy
+preserves supplied ceilings; a status export without that metadata does not
+prove the account's tool restrictions are preserved.
 
 Only an explicit account parameter reads this file. Host/requester account
 inheritance, default workers, supervisors and Codex do not import it. Cassy

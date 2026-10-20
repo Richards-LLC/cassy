@@ -830,7 +830,8 @@ status metadata; the example values are placeholders. The manifest is an
 operator grant of the listed connectors, so keep it owner-only. It accepts
 those three descriptor fields plus optional native `toolPermissions` (a map of
 tool names to `allow`, `ask` or `blocked`), HTTPS URLs without embedded credentials or
-query strings, and `claude.ai ` names. Other transports, fields, symlinks and
+query strings, and names beginning with `claude.ai` followed by a space.
+Other transports, fields, symlinks and
 files over 64 KiB are invalid. A missing or invalid manifest leaves strict
 CAS-only launch working and emits a one-line notice, also available in
 `CAS_FACTORY_CLAUDE_CONNECTOR_NOTICE`. Configured supervisor-only connectors

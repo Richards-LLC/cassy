@@ -9,6 +9,14 @@ use std::path::Path;
 
 const RETRY_INTERVAL: chrono::Duration = chrono::Duration::minutes(1);
 const UNKNOWN_AFTER: chrono::Duration = chrono::Duration::minutes(10);
+const IDLE_RELAY_BACKOFF: chrono::Duration = chrono::Duration::minutes(30);
+
+#[derive(PartialEq, Eq)]
+struct IdleSignal {
+    task: String,
+    tip: String,
+    ci: &'static str,
+}
 
 struct Retry {
     event: DirectorEvent,
@@ -19,11 +27,30 @@ struct Retry {
 #[derive(Default)]
 pub(super) struct Retries {
     entries: HashMap<String, Retry>,
+    idle_signals: HashMap<String, (IdleSignal, DateTime<Utc>)>,
     #[cfg(test)]
     pub now: Option<DateTime<Utc>>,
 }
 
 impl Retries {
+    pub fn waiting(&mut self, worker: &str) {
+        // A later completed wait is a changed state, even at the same tip.
+        self.idle_signals.remove(worker);
+    }
+
+    /// Consume only a rendered, live relay. Suppressed waits never consume it.
+    pub fn admit_idle(&mut self, worker: &str, read: &WorkerWait, now: DateTime<Utc>) -> bool {
+        let Some(tip) = &read.tip else { return true; };
+        let signal = IdleSignal { task: read.task.clone(), tip: tip.clone(), ci: read.ci };
+        if let Some((previous, sent_at)) = self.idle_signals.get(worker)
+            && previous == &signal && now.signed_duration_since(*sent_at) < IDLE_RELAY_BACKOFF
+        {
+            return false;
+        }
+        self.idle_signals.insert(worker.to_string(), (signal, now));
+        true
+    }
+
     pub fn clock(&self) -> DateTime<Utc> {
         #[cfg(test)]
         if let Some(now) = self.now {
@@ -68,6 +95,7 @@ impl Retries {
     }
 
     pub fn due(&mut self, now: DateTime<Utc>, data: &DirectorData) -> Vec<DirectorEvent> {
+        self.idle_signals.retain(|worker, _| data.agents.iter().any(|agent| agent.name == *worker));
         self.entries.retain(|task_id, retry| {
             let DirectorEvent::WorkerIdle { worker, .. } = &retry.event else {
                 return false;
@@ -122,44 +150,84 @@ pub(super) fn needs_ci_read(event: &DirectorEvent) -> bool {
     matches!(event, DirectorEvent::WorkerIdle { active_task: Some(_), .. })
 }
 
-/// Positive evidence only: the live worker/task and its exact pushed tip have
-/// unfinished CI. Unknown, unpushed and settled states keep the lifecycle relay.
-/// Runs with the existing delivery Git/CI job, never on the control/read lane.
-pub(super) fn read_worker_ci_wait(
+pub(super) struct WorkerWait {
+    pub task: String,
+    pub tip: Option<String>,
+    pub ci: &'static str,
+    pub waiting: bool,
+}
+
+/// A self-reminder is a promised wake, not a stalled worker. Old-task,
+/// cancelled, fired and expired reminders cannot hide the current idle signal.
+pub(super) fn worker_has_pending_reminder(
+    data: &DirectorData,
+    worker: &str,
+    task: Option<&str>,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(agent) = data.agents.iter().find(|agent| agent.name == worker) else { return false; };
+    let owns = |id: &str| id == agent.id || id == agent.name;
+    data.reminders.iter().any(|reminder| {
+        let ttl_start = reminder.trigger_at.unwrap_or(reminder.created_at);
+        reminder.status == cas_store::ReminderStatus::Pending
+            && owns(&reminder.owner_id) && owns(&reminder.target_id)
+            && reminder.origin_session_id.as_deref().is_none_or(owns)
+            && reminder.task_id.as_deref().is_none_or(|id| Some(id) == task)
+            && (reminder.ttl_secs == 0 || now.signed_duration_since(ttl_start).num_seconds() <= reminder.ttl_secs)
+    })
+}
+
+/// Read the current delivery, not the remembered event's task. Local build
+/// evidence comes from the registered clone's OS lane lock; CI is exact-tip.
+/// Runs with the existing external delivery job, never on the control lane.
+pub(super) fn read_worker_wait(
     event: &DirectorEvent,
     data: &DirectorData,
+    cas_dir: &Path,
     repo: &Path,
-) -> Option<(String, (String, String))> {
+) -> Option<(String, WorkerWait)> {
     let DirectorEvent::WorkerIdle { worker, active_task: Some(_), .. } = event else {
         return None;
     };
     // Match delivery-time rebinding: an old parked idle event can now refer
     // to the worker's next task, whose own tip is the only relevant CI.
-    let active = data.agents.iter().find(|agent| agent.name == *worker)?
-        .active_lease.as_ref()?;
+    let agent = data.agents.iter().find(|agent| agent.name == *worker)?;
+    let active = agent.active_lease.as_ref()?;
     let task = data.in_progress_tasks.iter().find(|task| {
         task.id == active.task_id && task.status == cas_types::TaskStatus::InProgress
             && task.assignee.as_deref().is_some_and(|assignee| {
                 assignee == worker || data.agent_id_to_name.get(assignee) == Some(worker)
             })
     })?;
+    let stored_agent = crate::store::open_agent_store(cas_dir).ok()?.get(&agent.id).ok()?;
+    let build_pending = stored_agent.machine_id == cas_types::Agent::get_or_generate_machine_id()
+        && stored_agent.metadata.get("clone_path").is_some_and(|clone| {
+            crate::factory_worker_check::lane_is_busy(cas_dir, Path::new(clone)).unwrap_or(false)
+        });
+    let mut read = WorkerWait { task: task.id.clone(), tip: None, ci: "unknown", waiting: build_pending };
+    if build_pending { return Some((worker.clone(), read)); }
     let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo, branch)
         .or_else(|| crate::git_evidence::resolve_ref_commit_sha(repo, &format!("origin/{branch}")));
+    let parked = crate::store::open_task_store_cached(cas_dir).ok()
+        .and_then(|store| store.get(&task.id).ok()).and_then(|task| task.deliverables.parked_branch);
     let (branch, tip) = crate::ui::factory::director::task_delivery_ref(
-        &task.id, worker, None, None, resolve, |_, _| false,
+        &task.id, worker, parked.as_deref(), None, resolve, |_, _| false,
     );
-    let tip = tip?;
+    read.tip = tip;
+    let Some(tip) = read.tip.as_deref() else { return Some((worker.clone(), read)); };
     if crate::git_evidence::fetch_parent_branch_result(repo, &branch)
         != crate::git_evidence::BoundedFetch::Succeeded
         || crate::git_evidence::resolve_ref_commit_sha(repo, &format!("origin/{branch}"))
-            .as_deref() != Some(tip.as_str())
+            .as_deref() != Some(tip)
     {
-        return None;
+        read.ci = "unpushed";
+        return Some((worker.clone(), read));
     }
-    let pending = crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(&tip, repo) == "pending";
+    read.ci = crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(tip, repo);
     // Do not borrow a running old tip if the worker committed during the probe.
-    (pending && resolve(&branch).as_deref() == Some(tip.as_str()))
-        .then(|| (worker.clone(), (task.id.clone(), tip)))
+    if resolve(&branch).as_deref() != Some(tip) { return None; }
+    read.waiting = read.ci == "pending";
+    Some((worker.clone(), read))
 }
 
 /// Runs off the loop. No result means defer; it never consumes the dedupe key.

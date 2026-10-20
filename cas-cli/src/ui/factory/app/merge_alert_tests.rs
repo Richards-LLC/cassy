@@ -153,7 +153,7 @@ impl Fixture {
         worker.metadata.insert("worker_cli".into(), "codex".into());
         worker.metadata.insert("clone_path".into(), clone.to_str().unwrap().into());
         worker.metadata.insert("worker_account_dir".into(), account.to_str().unwrap().into());
-    agents.update(&worker).unwrap();
+        agents.update(&worker).unwrap();
     }
 
     fn ci(&self, conclusion: Option<&str>) {
@@ -249,23 +249,16 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci() {
     assert!(f.relay().is_empty(), "a pending self-reminder owes the worker its next wake");
     reminders.cancel(reminder, "merge-w").unwrap();
 
-    // A live detached capped runner is evidence during admission and execution.
-    // It remains outside the harness's process tree, as in the incident.
-    #[cfg(target_os = "linux")]
-    {
-        struct Runner(std::process::Child);
-        impl Drop for Runner {
-            fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
-        }
-        let runner = Runner(std::process::Command::new("sh")
-            .args(["-c", "read -r done", "cas", "factory", "worker-check", "--cas-root"])
-            .arg(&f.app.cas_dir).arg("--").args(["-p", "cas", "--tests"])
-            .current_dir(f.repo.path()).env("CAS_SESSION_ID", "merge-w")
-            .env("CAS_AGENT_NAME", "merge-w")
-            .stdin(std::process::Stdio::piped()).spawn().unwrap());
-        assert!(f.relay().is_empty(), "a live capped runner owns the queued/admitted build wait");
-        drop(runner);
-    }
+    // Use the same OS lane lock the real runner holds during admission and
+    // execution. Its release leaves a file behind, which must not hide idle.
+    let lane = crate::factory_worker_check::try_lock_lane(&f.app.cas_dir, f.repo.path()).unwrap().unwrap();
+    assert!(f.relay().is_empty(), "queued/admitted build owns the worker lane");
+    drop(lane);
+    // A reminder for an old task and another worker's build are not this wait.
+    reminders.create_with_scope("merge-w", Some("merge-w"), "old task",
+        cas_store::ReminderTriggerType::Time, Some(Utc::now() + chrono::Duration::minutes(3)),
+        None, None, 3600, None, Some("merge-w"), false, Some("cas-old")).unwrap();
+    let _other_lane = crate::factory_worker_check::try_lock_lane(&f.app.cas_dir, f.remote.path()).unwrap().unwrap();
     std::fs::write(f.app.cas_dir.join("gh-requests"), "").unwrap();
     assert_eq!(f.relay().len(), 1, "fixture must expose an idle in-progress delivery before CI is pending");
     f.ci(None);

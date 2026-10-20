@@ -29,7 +29,7 @@
  *
  * A shot whose final path differs from the requested path fails as "redirected to …"
  * unless it sets allowRedirect: that is how an expired or failed login shows.
- * --success-url must match only the signed-in URL: anchor it (^https://[^/]+/admin/),
+ * --success-url is required with --login and must match only the signed-in URL: anchor it (^https://[^/]+/admin/),
  * because a sign-in URL often carries the target in a returnUrl parameter.
  *
  * Writes <out>/<id>.png (full resolution), <out>/<id>.jpg (quality 80,
@@ -90,7 +90,7 @@ async function login(page, base, o) {
     await page.locator(o['email-sel'] ?? 'input[type=email]').first().fill(creds.email);
     await page.locator(o['password-sel'] ?? 'input[type=password]').first().fill(creds.password);
     await page.locator(o['submit-sel'] ?? 'button[type=submit]').first().click();
-    await page.waitForURL(new RegExp(o['success-url'] ?? '.'), { timeout: 60_000 });
+    await page.waitForURL(new RegExp(o['success-url']), { timeout: 60_000 });
   } catch (err) {
     await page.screenshot({ path: join(resolve(o.out), 'login-failure.png') }).catch(() => {});
     throw new Error(`login failed at ${page.url()}: ${String(err?.message ?? err).split('\n')[0]} (login-failure.png saved)`);
@@ -103,6 +103,10 @@ async function main() {
   const o = args(process.argv.slice(2));
   if (!o.shots || !o.base || !o.out) {
     console.error('usage: capture.mjs --shots shots.json --base <url> --out <dir> [--env name] [--login --credentials <file> ...]');
+    process.exit(2);
+  }
+  if (o.login && (typeof o['success-url'] !== 'string' || !o['success-url'].trim())) {
+    console.error("login failed: --login requires --success-url <regex>.\nExample: --success-url '^https://[^/]+/admin/' (use your signed-in route).");
     process.exit(2);
   }
   const shots = JSON.parse(readFileSync(o.shots, 'utf8'));

@@ -57,15 +57,17 @@ this variant instead of the completion report:
 ## Before/after pairs
 
 - Each pair has the same shot id, the same viewport and the same framing.
-  Place them side by side at ≥ 1024px wide and stacked below that. Each side
-  carries a caption with its label (`Before`, `After`), round, environment and
-  capture date.
+  Stack before then after, each at full content width, on screen and in the
+  PDF. Keep each image with its caption; a pair may span pages rather than
+  shrink into two print columns. Each side carries a caption with its label
+  (`Before`, `After`), round, environment and capture date.
 - When no *before* exists, the left slot reads "Before not captured" and names
   the reason. Never leave a blank image or substitute a mock.
 - Use at most one highlight per *after* image: an outline or numbered marker
   on the changed region, drawn in the brand's verdict colour as an SVG overlay
-  on the image. Never paint the highlight into the pixels, so the screenshot
-  stays the unedited evidence.
+  on the image. Position it for that screenshot and check that no stroke crosses
+  text; omit it when there is no clear margin. Never paint the highlight into
+  the pixels, so the screenshot stays the unedited evidence.
 - The caption states the change in the client's words. The image proves it.
   The caption never makes a claim the image cannot show.
 
@@ -79,6 +81,9 @@ omitted* field.
   this copy and a full-resolution PNG.
 - Aim for under 250 KB per image and under 8 MB per file. Above that, crop
   to the region that proves the row rather than lowering the quality further.
+- Inspect the screenshot text in A4 at 100%, not only its caption. Crop the
+  proving region, with identical framing for before and after, when a full
+  application screen makes that text too small to read.
 - A table, a number or a text claim stays HTML text, never a screenshot of
   it.
 

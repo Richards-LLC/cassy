@@ -66,30 +66,12 @@ pub(crate) fn delivered_head(
         if !merged {
             return Some(tip);
         }
-        let anchor = task.deliverables.factory_branch_anchor.as_deref().and_then(rev);
-        // cas-1377c: a per-task branch holds only this task's commits, so its
-        // merged tip is the delivery. An anchor recorded at an earlier park
-        // and left behind by later commits on the branch is not the head
-        // the supervisor reviewed or waived.
-        let per_task = branch.as_deref().is_some_and(|branch| {
-            branch
-                .trim_start_matches("origin/")
-                .strip_prefix("factory/")
-                .is_some_and(|name| name.ends_with(&format!("-{}", task.id)))
-        });
-        if per_task
-            && anchor.as_deref().is_some_and(|anchor| {
-                anchor != tip
-                    && Command::new("git")
-                        .args(["merge-base", "--is-ancestor", anchor, &tip])
-                        .current_dir(repo)
-                        .status()
-                        .is_ok_and(|status| status.success())
-            })
-        {
-            return Some(tip);
-        }
-        return anchor.or(Some(tip));
+        return task
+            .deliverables
+            .factory_branch_anchor
+            .as_deref()
+            .and_then(rev)
+            .or(Some(tip));
     }
     rev("HEAD")
 }

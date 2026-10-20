@@ -31818,15 +31818,17 @@ esac
             "the task's own replaced draft is not a drop: {presence:?}"
         );
 
-        for variant in ["drop", "kept-plus", "reintroduced-dash"] {
-            let (dir, anchor) = build(variant);
-            let presence =
-                super::task_attribution::merge_tip_content_presence(dir.path(), "main", &anchor, Some(&window), &identity, None);
-            assert!(
-                matches!(&presence, Some(DeliveryContentPresence::Dropped { paths }) if paths == &vec!["guarded.txt".to_string()]),
-                "{variant}: changing what the task delivered still refuses: {presence:?}"
-            );
-        }
+        let not_refused: Vec<_> = ["drop", "kept-plus", "reintroduced-dash"]
+            .into_iter()
+            .filter_map(|variant| {
+                let (dir, anchor) = build(variant);
+                let presence =
+                    super::task_attribution::merge_tip_content_presence(dir.path(), "main", &anchor, Some(&window), &identity, None);
+                (!matches!(&presence, Some(DeliveryContentPresence::Dropped { paths }) if paths == &vec!["guarded.txt".to_string()]))
+                    .then(|| format!("{variant}: {presence:?}"))
+            })
+            .collect();
+        assert!(not_refused.is_empty(), "changing what the task delivered must still refuse: {not_refused:#?}");
     }
 
     /// Replays immutable production delivery anchors. Run explicitly in a

@@ -431,8 +431,8 @@ async fn cas_3f90_inline_peer_retains_the_shared_inbox_label() {
 #[tokio::test(flavor = "current_thread")]
 async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {
     if !fixture_child("cas_bc4d_directed_batches_preserve_budget_and_legacy_guards") { return; }
-    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     for guard in ["budget", "held-leader", "held-passenger", "memory-leader", "memory-passenger"] {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         let (root, mut daemon) = fixture().await;
         let cas = daemon.app.cas_dir().to_path_buf();
         let peer = cas_types::Agent::new_with_role(

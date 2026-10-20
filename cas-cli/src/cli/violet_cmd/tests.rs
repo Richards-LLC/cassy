@@ -1239,6 +1239,13 @@ fn a_draft_with_utc_times_or_unattached_files_is_refused_before_sending() {
 /// managed_reply_required refusal comes back as a failure.
 #[test]
 fn a_managed_reply_carries_the_callers_reply_intent_cas_8239() {
+    #[derive(clap::Parser)]
+    struct Harness { #[command(subcommand)] command: VioletCommand }
+    let rejected = <Harness as clap::Parser>::try_parse_from([
+        "violet", "post", "--channel", "dev", "--text", "update",
+        "--request-id", "00000091-2222-4222-8222-000000000091",
+    ]).err().expect("request-id is managed-reply-only in Violet's contract");
+    assert_eq!(rejected.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     let dir = TempDir::new().unwrap();
     let bytes = b"\x89PNG before and after";
     let path = write_file(&dir, "after.png", bytes);
@@ -1268,7 +1275,7 @@ fn a_managed_reply_carries_the_callers_reply_intent_cas_8239() {
     let refusal = json!({"ok": false, "error": {"code": "managed_reply_required", "retryable": false,
         "message": "a reply needs coordination_operation_id, expected_generation and request_id from the current claim"}});
     let hub = ScriptedHub::with(vec![refusal]);
-    let (_, result) = run_cli_claimed(&argv, &hub, false, &no_gate, None);
+    let (_, result) = run_cli_claimed(&with_id, &hub, false, &no_gate, None);
     assert_eq!(result.unwrap_err().code, "managed_reply_required");
     let args = &hub.calls()[0].1;
     assert!(args.get("coordination_operation_id").is_none() && args.get("request_id").is_none(), "{args}");

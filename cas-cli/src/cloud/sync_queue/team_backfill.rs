@@ -182,6 +182,7 @@ mod tests {
     fn cas_db92_backfill_preserves_scope_and_retires_only_itemized_acknowledged_snapshots() {
         let temp = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "p").unwrap();
         let queue = SyncQueue::open(&root).unwrap();
         queue.init().unwrap();
         let tasks = crate::store::open_task_store_local(&root).unwrap();
@@ -192,21 +193,59 @@ mod tests {
             ("private", "p", None),
             ("unknown", "unknown", None),
             ("global", "p", None),
+            ("routed", "p", None),
+            ("foreign-route", "p", None),
         ] {
             let mut task = crate::types::Task::new(id.into(), id.into());
             task.origin_project = Some(origin.into());
             tasks.add(&task).unwrap();
             let payload = serde_json::json!({"id":id, "origin_project":origin,
                 "scope":if id == "global" {"global"} else {"project"}, "share":share});
-            queue
-                .enqueue(
-                    EntityType::Task,
-                    id,
-                    SyncOperation::Upsert,
-                    Some(&payload.to_string()),
-                )
-                .unwrap();
+            // Legacy fixture predates today's provenance enqueue guard.
+            super::super::queue_ops::upsert_queue_row(
+                &queue.conn.lock().unwrap(),
+                EntityType::Task,
+                id,
+                SyncOperation::Upsert,
+                Some(&payload.to_string()),
+                "",
+                match id {
+                    "routed" => Some("p"),
+                    "foreign-route" => Some("other"),
+                    _ => None,
+                },
+            )
+            .unwrap();
         }
+        let mut entry = crate::types::Entry::new("entry".into(), "fixture".into());
+        entry.origin_project = Some("p".into());
+        crate::store::open_store_local(&root)
+            .unwrap()
+            .add(&entry)
+            .unwrap();
+        queue
+            .enqueue(
+                EntityType::Entry,
+                "entry",
+                SyncOperation::Upsert,
+                Some(&serde_json::to_string(&entry).unwrap()),
+            )
+            .unwrap();
+        let mut rule = crate::types::Rule::default();
+        rule.id = "rule".into();
+        rule.origin_project = Some("p".into());
+        crate::store::open_rule_store_local(&root)
+            .unwrap()
+            .add(&rule)
+            .unwrap();
+        queue
+            .enqueue(
+                EntityType::Rule,
+                "rule",
+                SyncOperation::Upsert,
+                Some(&serde_json::to_string(&rule).unwrap()),
+            )
+            .unwrap();
         // A stale public payload cannot override a newer private local policy.
         queue
             .conn
@@ -244,21 +283,21 @@ mod tests {
                 .filter(|r| r.eligible)
                 .map(|r| r.entity_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["owned", "edge"]
+            vec!["owned", "routed", "entry", "rule", "edge"]
         );
         assert_eq!(
             serde_json::to_value(queue.list_all(100).unwrap()).unwrap(),
             serde_json::to_value(&before).unwrap()
         );
         let applied = queue.migrate_personal_to_team("t", "p", true).unwrap();
-        assert_eq!(applied.iter().filter(|r| r.eligible).count(), 2);
+        assert_eq!(applied.iter().filter(|r| r.eligible).count(), 5);
         assert_eq!(
             queue.personal_row_count().unwrap(),
-            9,
+            13,
             "enqueue is not delivery"
         );
         let team = queue.pending_for_team("t", 100, 5).unwrap();
-        assert_eq!(team.len(), 3);
+        assert_eq!(team.len(), 6);
         assert!(
             team.iter()
                 .any(|r| r.entity_id == "newer" && r.operation == SyncOperation::Delete)
@@ -272,20 +311,45 @@ mod tests {
             "idempotent and no overwrites"
         );
         assert_eq!(queue.neutralize_team_only_personal("t", "p").unwrap(), 0);
-        let sent = team.iter().find(|r| r.entity_id == "owned").unwrap();
-        let personal = queue.personal_delivery_snapshots().unwrap();
+        for id in ["owned", "routed"] {
+            let sent = team.iter().find(|r| r.entity_id == id).unwrap();
+            let personal = queue.personal_delivery_snapshots().unwrap();
+            queue
+                .acknowledge_team_write(
+                    sent,
+                    &serde_json::from_str(sent.payload.as_deref().unwrap()).unwrap(),
+                    "t",
+                    "p",
+                    &personal,
+                )
+                .unwrap();
+        }
         queue
-            .acknowledge_team_write(
-                sent,
-                &serde_json::from_str(sent.payload.as_deref().unwrap()).unwrap(),
-                "t",
-                "p",
-                &personal,
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE sync_queue SET project_id='other' WHERE entity_id='routed' AND team_id=''",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            queue.neutralize_team_only_personal("t", "p").unwrap(),
+            1,
+            "changed routing is not delivery proof"
+        );
+        queue
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE sync_queue SET project_id='p' WHERE entity_id='routed' AND team_id=''",
+                [],
             )
             .unwrap();
         drop(queue);
         let reopened = SyncQueue::open(&root).unwrap();
         assert_eq!(reopened.neutralize_team_only_personal("t", "p").unwrap(), 1);
-        assert_eq!(reopened.personal_row_count().unwrap(), 8);
+        assert_eq!(reopened.personal_row_count().unwrap(), 11);
     }
 }

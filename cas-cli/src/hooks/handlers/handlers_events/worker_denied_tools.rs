@@ -5,9 +5,9 @@
 //! With no CLI credentials it started a Vercel device login, which put an auth
 //! prompt on the operator's screen, every time. The operator does not grant
 //! it; the supervisor owns such access. This guard refuses a worker's shell
-//! command that runs a CLI on `factory.worker_denied_clis` (default `vercel`),
+//! command that runs a CLI on `factory.worker_denied_clis` (defaults `vercel`, `neonctl`),
 //! however wrapped, and an MCP or connector tool matching
-//! `factory.worker_denied_mcp_tools` (default `*vercel*`), including calls
+//! `factory.worker_denied_mcp_tools` (defaults `*vercel*`, `*neon*`), including calls
 //! dispatched through `mcp_execute`. The refusal sends the worker to the
 //! supervisor with a blocker. Supervisors are never refused.
 use std::path::Path;

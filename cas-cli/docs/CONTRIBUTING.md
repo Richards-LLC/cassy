@@ -655,16 +655,26 @@ Both lists default to empty and appear in `cas config list`. Server names are
 exact.
 
 Operator-authenticated CLIs and connector tools are refused to workers at the
-pre-tool hook (GH #1219). `factory.worker_denied_clis` (default `vercel`) names
+pre-tool hook (GH #1219). `factory.worker_denied_clis` (defaults `vercel`, `neonctl`) names
 executables a worker's shell may not run, matched on basename through wrappers
 (`env`, `sudo`, `timeout`, `sh -c`, `eval`, `npx`, `pnpm dlx`, paths).
-`factory.worker_denied_mcp_tools` (default `*vercel*`) holds case-insensitive
+`factory.worker_denied_mcp_tools` (defaults `*vercel*`, `*neon*`) holds case-insensitive
 tool-name patterns, also applied to each `server.tool` an `mcp_execute`
 dispatches. The refusal sends the worker to the supervisor with
 `blocker=true`; supervisors are unaffected. Both keys are operator-only, and
 an empty list disables its check. These denials override project proxy credential grants and read-only
 server declarations for every worker harness. The supervisor's configuration
 and environment are preserved. Spawn diagnostics record denied names only.
+
+The existing protected-operator-token policy removes inherited `NEON_API_KEY`
+and `VERCEL_TOKEN` from workers by default, even though `supervisor_only_env`
+is empty. Explicit project credential grants can authorize these names;
+`supervisor_only_env` still wins over grants. Changing a CLI/tool denial list
+does not grant a credential. Workers retain their own `.env.cas-db` and its
+`DATABASE_URL`; the supervisor provisions that disposable task branch with
+`factory action=db_branch_create`. Supervisors retain Neon CLI/MCP access and
+their credentials. An explicit CLI/tool list replaces its stock defaults,
+including an empty list to disable that check.
 
 Configured workers get a private, materialized MCP configuration under
 `<cas_root>/worker-mcp/<name>.json`. Tracked and existing worktree `.mcp.json`

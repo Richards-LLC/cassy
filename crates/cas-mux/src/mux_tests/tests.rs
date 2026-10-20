@@ -1058,6 +1058,58 @@ allowlist = ["vercel.get_runtime_errors"]
     assert!(stripped(&ungranted, "NEON_API_KEY"));
 }
 
+/// Stock worker launches strip the operator's Neon API key while keeping
+/// the task database file readable; no Neon service is contacted.
+#[tokio::test]
+async fn default_workers_keep_task_database_access_without_the_neon_api_key() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    env.set("XDG_CONFIG_HOME", project.path());
+    env.remove("CAS_CREDENTIALS_FILE");
+    env.remove("DATABASE_URL");
+    env.set("NEON_API_KEY", "operator-neon-fixture");
+    std::fs::write(project.path().join(".env.cas-db"),
+        "DATABASE_URL=postgresql://task-db.invalid/task\n").unwrap();
+    for cli in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok, SupervisorCli::OpenCode] {
+        let config = MuxConfig {
+            cwd: project.path().into(), cas_root: Some(cas_root.clone()), workers: 1,
+            worker_cli: cli, include_director: false, ..Default::default()
+        };
+        let configs = Mux::factory_pane_configs(&config);
+        let supervisor = &configs.iter().find(|(name, _)| name == &config.supervisor_name).unwrap().1;
+        assert!(!supervisor.env_remove.iter().any(|name| name == "NEON_API_KEY"));
+        let mut worker = configs.into_iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        assert!(env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none(),
+            "{cli:?}: {:?}", env_value(&worker, "CAS_FACTORY_WORKER_LAUNCH_ERROR"));
+        assert!(env_value(&worker, "NEON_API_KEY").is_none());
+        assert!(worker.env_remove.iter().any(|name| name == "NEON_API_KEY"));
+        assert!(!worker.env_remove.iter().any(|name| name == "DATABASE_URL"));
+        // Keep the actual environment/spawn path, replacing only the harness
+        // executable with a bounded local probe that sources its own DB file.
+        worker.command = "/bin/sh".into();
+        worker.args = vec!["-c".into(),
+            "test -z \"${NEON_API_KEY+x}\" && . ./.env.cas-db && test \"$DATABASE_URL\" = postgresql://task-db.invalid/task && printf 'task-db-only\\n'".into()];
+        let mut pty = crate::pty::Pty::spawn("default-neon-policy-probe", worker).unwrap();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut output = Vec::new();
+            loop {
+                match pty.recv().await {
+                    Some(crate::pty::PtyEvent::Output(bytes)) => output.extend(bytes),
+                    Some(crate::pty::PtyEvent::Exited(code)) => { assert_eq!(code, Some(0)); break; }
+                    Some(crate::pty::PtyEvent::Error(error)) => panic!("{error}"),
+                    None => panic!("PTY ended without process status"),
+                }
+            }
+            output
+        }).await.expect("bounded task database probe");
+        assert!(String::from_utf8_lossy(&output).contains("task-db-only"));
+    }
+    assert_eq!(std::env::var("NEON_API_KEY").unwrap(), "operator-neon-fixture");
+}
+
 #[test]
 fn factory_worker_configs_isolate_operator_credentials_for_every_harness() {
     let mut env = TestEnvGuard::temp_home();

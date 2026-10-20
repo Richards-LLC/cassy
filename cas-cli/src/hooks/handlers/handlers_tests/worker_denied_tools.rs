@@ -1,5 +1,5 @@
 //! cas-d757 (GH #1219): factory workers may not run operator-authenticated
-//! CLIs (vercel) or call their MCP tools; supervisors may.
+//! CLIs (vercel and neonctl) or call their MCP tools; supervisors may.
 use crate::config::Config;
 use crate::hooks::handlers::handle_pre_tool_use;
 use crate::test_support::TestEnvGuard;
@@ -46,33 +46,39 @@ fn role_env(role: &str) -> (TestEnvGuard, tempfile::TempDir) {
     (env, config_home)
 }
 
-const WRAPPED_VERCEL: &[&str] = &[
-    "vercel env ls production",
-    "env VERCEL_ORG_ID=team_1 vercel env pull .env.local",
-    "sudo -u deploy vercel ls",
-    "sh -c 'vercel env ls production'",
-    "cd web && npx vercel logs",
-    "/usr/local/bin/vercel whoami",
+const WRAPPED_CLIS: &[(&str, &str)] = &[
+    ("vercel", "vercel env ls production"),
+    ("vercel", "env VERCEL_ORG_ID=team_1 vercel env pull .env.local"),
+    ("vercel", "sudo -u deploy vercel ls"),
+    ("vercel", "sh -c 'vercel env ls production'"),
+    ("vercel", "cd web && npx vercel logs"),
+    ("vercel", "/usr/local/bin/vercel whoami"),
+    ("neonctl", "neonctl projects list"),
+    ("neonctl", "env NEON_PROJECT_ID=fixture neonctl branches list"),
+    ("neonctl", "sh -c 'neonctl projects list'"),
+    ("neonctl", "npx -y neonctl@latest projects list"),
+    ("neonctl", "pnpm dlx neonctl projects list"),
+    ("neonctl", "/usr/local/bin/neonctl projects list"),
 ];
 
-/// A worker running vercel, plain or through env, sudo, sh -c, npx or a path,
+/// A worker running a stock denied CLI through wrappers or a path
 /// is refused with the CLI named and the blocker route, with and without a
 /// CAS root.
 #[test]
-fn a_worker_is_refused_vercel_however_it_is_wrapped() {
+fn a_worker_is_refused_default_clis_however_wrapped() {
     let (_env, home) = role_env("worker");
     let project = tempfile::tempdir().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
-    for command in WRAPPED_VERCEL {
+    for (cli, command) in WRAPPED_CLIS {
         for root in [Some(cas_root.as_path()), None] {
             let reason = denial(handle_pre_tool_use(&bash(command, home.path()), root).unwrap())
                 .unwrap_or_else(|| panic!("{command} was allowed (root {root:?})"));
-            assert!(reason.contains("`vercel`"), "{reason}");
+            assert!(reason.contains(&format!("`{cli}`")), "{reason}");
             assert!(reason.contains("blocker=true"), "{reason}");
             assert!(reason.contains("target=supervisor"), "{reason}");
         }
     }
-    for command in ["git log --grep vercel", "cat vercel.json", "npm run build"] {
+    for command in ["git log --grep vercel", "cat vercel.json", "git log --grep neonctl", "cat .env.cas-db", "npm run build"] {
         let output = handle_pre_tool_use(&bash(command, home.path()), Some(&cas_root)).unwrap();
         assert!(
             !denial(output).is_some_and(|reason| reason.contains("WORKER-DENIED")),
@@ -83,14 +89,14 @@ fn a_worker_is_refused_vercel_however_it_is_wrapped() {
 
 /// Supervisors and non-factory sessions are unaffected.
 #[test]
-fn a_supervisor_and_a_plain_session_may_run_vercel() {
+fn a_supervisor_and_a_plain_session_may_run_default_denied_clis() {
     for role in ["supervisor", ""] {
         let (mut env, home) = role_env(role);
         if role.is_empty() {
             env.remove("CAS_AGENT_ROLE");
             env.remove("CAS_FACTORY_SESSION");
         }
-        for command in WRAPPED_VERCEL {
+        for (_, command) in WRAPPED_CLIS {
             let output = handle_pre_tool_use(&bash(command, home.path()), None).unwrap();
             assert!(
                 !denial(output).is_some_and(|reason| reason.contains("WORKER-DENIED")),
@@ -103,6 +109,13 @@ fn a_supervisor_and_a_plain_session_may_run_vercel() {
         )
         .unwrap();
         assert!(!denial(output).is_some_and(|reason| reason.contains("WORKER-DENIED")), "{role:?}");
+        for (tool, args) in [
+            ("mcp__Neon__list_projects", json!({})),
+            ("mcp__cs__factory", json!({"action": "db_branch_create", "task_id": "cas-fixture"})),
+        ] {
+            let output = handle_pre_tool_use(&input(tool, args, home.path()), None).unwrap();
+            assert!(!denial(output).is_some_and(|reason| reason.contains("WORKER-DENIED")), "{role:?}: {tool}");
+        }
     }
 }
 
@@ -114,6 +127,9 @@ fn a_worker_is_refused_a_matching_mcp_tool() {
     for (tool, args) in [
         ("mcp__claude_ai_Vercel__list_deployments", json!({})),
         ("mcp__vercel__get_project", json!({"id": "web"})),
+        ("mcp__Neon__list_projects", json!({})),
+        ("mcp__claude_ai_Neon__list_branches", json!({})),
+        ("mcp__cs__mcp_execute", json!({"code": "neon.list_projects({})"})),
         ("mcp__cs__mcp_execute", json!({"code": "vercel.list_projects({})"})),
     ] {
         let reason = denial(handle_pre_tool_use(&input(tool, args, home.path()), None).unwrap())
@@ -149,6 +165,8 @@ fn the_denied_lists_follow_project_config() {
     let vercel =
         handle_pre_tool_use(&bash("vercel ls", home.path()), Some(&cas_root)).unwrap();
     assert!(!denial(vercel).is_some_and(|reason| reason.contains("WORKER-DENIED")));
+    let neon = handle_pre_tool_use(&bash("neonctl projects list", home.path()), Some(&cas_root)).unwrap();
+    assert!(!denial(neon).is_some_and(|reason| reason.contains("WORKER-DENIED")));
     assert!(
         denial(
             handle_pre_tool_use(
@@ -159,4 +177,14 @@ fn the_denied_lists_follow_project_config() {
         )
         .is_some_and(|reason| reason.contains("mcp__neon__*"))
     );
+    config.set("factory.worker_denied_clis", "").unwrap();
+    config.set("factory.worker_denied_mcp_tools", "").unwrap();
+    config.save(&cas_root).unwrap();
+    for (tool, args) in [
+        ("Bash", json!({"command": "neonctl projects list"})),
+        ("mcp__neon__list_projects", json!({})),
+    ] {
+        let output = handle_pre_tool_use(&input(tool, args, home.path()), Some(&cas_root)).unwrap();
+        assert!(!denial(output).is_some_and(|reason| reason.contains("WORKER-DENIED")), "{tool}");
+    }
 }

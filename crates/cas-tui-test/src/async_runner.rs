@@ -556,7 +556,9 @@ mod tests {
     async fn test_async_wait_stable() {
         let mut runner = AsyncPtyRunner::new();
         runner
-            .spawn("echo", &["quick output"])
+            // Hold startup output until explicitly released, so a quiet
+            // initial PTY cannot accidentally stand in for output readiness.
+            .spawn("sh", &["-c", "read -r signal; echo 'quick output'; read -r signal"])
             .await
             .expect("spawn failed");
 

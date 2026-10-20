@@ -31734,10 +31734,15 @@ esac
     /// and after the worker's last sync, and then lands round two. Every line
     /// the task finally delivered is present and its round-one draft is gone
     /// from the task's own final tree as well, so this is no drop. Losing the
-    /// moved block on the target still is.
+    /// moved block on the target still is. cas-e594: so is losing a draft
+    /// line the delivery kept that diffs as `+++i;`, and reintroducing a
+    /// draft-removed `-- note`, which diffs as `--- note`. Neither is a header.
     #[test]
     fn a_task_draft_it_later_replaced_is_not_dropped_by_target_evolution_cas_18aa() {
-        let build = |drop_moved_block: bool| {
+        // "": the clean replacement; "drop": the target loses the moved block;
+        // "kept-plus": the target loses `++i;`, a draft line the delivery kept;
+        // "reintroduced-dash": the target restores `-- note`, which the draft removed.
+        let build = |variant: &str| {
             let dir = init_factory_repo("worker");
             let p = dir.path().to_path_buf();
             let lines = |edit: &dyn Fn(&mut Vec<String>)| {
@@ -31753,11 +31758,19 @@ esac
             };
             let on = |branch: &str| git(&p, &["checkout", "-q", branch]);
             on("main");
-            lines(&|_| {});
+            lines(&|file| file[5] = "-- note".to_string());
             commit("baseline");
             // Round one: the draft lands.
             git(&p, &["checkout", "-q", "-B", "factory/worker", "main"]);
-            lines(&|file| file.splice(10..10, ["draft guard".to_string(), "draft check one".to_string(), "draft check two".to_string()]).for_each(drop));
+            lines(&|file| {
+                file.splice(10..10, ["draft guard".to_string(), "draft check one".to_string(), "draft check two".to_string()]).for_each(drop);
+                if variant == "kept-plus" {
+                    file.insert(13, "++i;".to_string());
+                }
+                if variant == "reintroduced-dash" {
+                    file.remove(5);
+                }
+            });
             commit("cas-test1: draft the guard");
             on("main");
             git(&p, &["merge", "--no-ff", "-q", "factory/worker", "-m", "Merge branch 'factory/worker' cas-test1 round one"]);
@@ -31766,7 +31779,7 @@ esac
             // Round two: from the newer target, the task moves its draft.
             git(&p, &["checkout", "-q", "-B", "factory/worker", "main"]);
             lines(&|file| {
-                file.drain(10..13);
+                file.retain(|line| !line.starts_with("draft "));
                 file.splice(20..20, ["moved guard".to_string(), "guard resolves its operands".to_string()]).for_each(drop);
             });
             commit("cas-test1: move the guard to its resolver");
@@ -31783,16 +31796,21 @@ esac
             });
             commit("merge(sync): target syncs guarded.txt after the worker's last sync");
             git(&p, &["merge", "--no-ff", "-q", "factory/worker", "-m", "Merge branch 'factory/worker' cas-test1 round two"]);
-            if drop_moved_block {
-                lines(&|file| file.retain(|line| !line.contains("guard")));
-                commit("cas-test4: rewrite loses the delivered guard");
+            match variant {
+                "drop" => lines(&|file| file.retain(|line| !line.contains("guard"))),
+                "kept-plus" => lines(&|file| file.retain(|line| line != "++i;")),
+                "reintroduced-dash" => lines(&|file| file.insert(5, "-- note".to_string())),
+                _ => {}
+            }
+            if !variant.is_empty() {
+                commit("cas-test4: the target changes what the task delivered");
             }
             (dir, anchor)
         };
         let window = window_at(0, "cas-18aa repro");
         let identity = TaskCommitIdentity { task_id: Some("cas-test1".into()), known_commits: Vec::new() };
 
-        let (dir, anchor) = build(false);
+        let (dir, anchor) = build("");
         let presence =
             super::task_attribution::merge_tip_content_presence(dir.path(), "main", &anchor, Some(&window), &identity, None);
         assert!(
@@ -31800,13 +31818,17 @@ esac
             "the task's own replaced draft is not a drop: {presence:?}"
         );
 
-        let (dir, anchor) = build(true);
-        let presence =
-            super::task_attribution::merge_tip_content_presence(dir.path(), "main", &anchor, Some(&window), &identity, None);
-        assert!(
-            matches!(&presence, Some(DeliveryContentPresence::Dropped { paths }) if paths == &vec!["guarded.txt".to_string()]),
-            "losing the delivered block still refuses: {presence:?}"
-        );
+        let not_refused: Vec<_> = ["drop", "kept-plus", "reintroduced-dash"]
+            .into_iter()
+            .filter_map(|variant| {
+                let (dir, anchor) = build(variant);
+                let presence =
+                    super::task_attribution::merge_tip_content_presence(dir.path(), "main", &anchor, Some(&window), &identity, None);
+                (!matches!(&presence, Some(DeliveryContentPresence::Dropped { paths }) if paths == &vec!["guarded.txt".to_string()]))
+                    .then(|| format!("{variant}: {presence:?}"))
+            })
+            .collect();
+        assert!(not_refused.is_empty(), "changing what the task delivered must still refuse: {not_refused:#?}");
     }
 
     /// Replays immutable production delivery anchors. Run explicitly in a

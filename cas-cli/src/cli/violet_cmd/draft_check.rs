@@ -6,10 +6,10 @@
 //! there, and a refusal prints the same `detail.violations[]` shape:
 //!
 //! - `unattached_file`: a post never names a file the reader cannot open from
-//!   Slack. It catches absolute or `~/` paths, relative paths with an
-//!   extension, bare filenames with common extensions, and `art-xxxxxxxx`
-//!   artifact ids, and passes only when the same message attaches a file of
-//!   that name.
+//!   Slack. It catches absolute or `~/` paths, relative paths (a slash plus a
+//!   known extension), bare filenames with a document or data extension (so
+//!   `Node.js` passes), and `art-xxxxxxxx` artifact ids, and passes only when
+//!   the same message attaches a file of that name.
 //! - `utc_time`: times are shown in CT (ET when labelled). It catches `UTC`,
 //!   `GMT`, `HH:MMZ`, and ISO timestamps ending in `Z` or `+00:00`.
 //!
@@ -46,18 +46,28 @@ static FILE_REFERENCE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         // absolute (two or more segments) or home-relative paths
         r"(?:^|[^\w/~.])(?P<abs>(?:~|/[\w.\-]+)/[\w.\-]+(?:/[\w.\-]+)*)",
-        // relative paths with an extension
-        r"|\b(?P<rel>[\w.\-]+(?:/[\w.\-]+)+\.[A-Za-z0-9]{1,6})\b",
-        // bare filenames with a common extension
-        r"|\b(?P<bare>[\w\-]+(?:\.[\w\-]+)*\.(?:md|pdf|png|jpe?g|gif|svg|webp|txt|log|json|csv|tsv|html?|zip|tar|gz|tgz|ya?ml|toml|rs|py|sh|ts|tsx|js|jsx|mp4|mov|docx?|xlsx?|pptx?))\b",
+        // relative paths: a slash plus a known extension
+        r"|\b(?P<rel>[\w.\-]+(?:/[\w.\-]+)+\.(?:md|html|pdf|png|jpg|jpeg|gif|svg|csv|json|txt|log|zip|yaml|toml|ts|js|py|rs))\b",
+        // bare filenames with a document or data extension only, so that
+        // `Node.js` and `Next.js` are not file references
+        r"|\b(?P<bare>[\w\-]+(?:\.[\w\-]+)*\.(?:md|html|pdf|png|jpg|jpeg|gif|svg|csv|json|txt|log|zip|yaml|toml))\b",
         // Cassy artifact ids
         r"|\b(?P<art>art-[0-9a-f]{8})\b",
     ))
     .expect("file pattern")
 });
 
-const FIX_FILE: &str = "attach the file to this message (--file or --reply-file), or describe what it shows without naming it";
-const FIX_TIME: &str = "show the time in US Central, for example 2:08 PM CT (ET is fine when labelled); never UTC, GMT or Z";
+fn fix_file(token: &str) -> String {
+    format!(
+        "attach `{token}` to this message (--file or --reply-file), or describe what it shows without naming it"
+    )
+}
+
+fn fix_time(token: &str) -> String {
+    format!(
+        "replace `{token}` with US Central time, for example 2:08 PM CT (ET is fine when labelled); never UTC, GMT or Z"
+    )
+}
 
 /// Every hard-rule violation in `message`, in line order, as hub-shaped
 /// violation objects.
@@ -73,7 +83,7 @@ pub fn violations(message: &DraftMessage<'_>) -> Vec<Value> {
             continue;
         }
         let prose = URL.replace_all(&LINK.replace_all(line, " "), " ").into_owned();
-        let mut push = |rule: &str, fix: &str| {
+        let mut push = |rule: &str, fix: String| {
             let mut violation = json!({
                 "rule": rule,
                 "line": index + 1,
@@ -85,20 +95,20 @@ pub fn violations(message: &DraftMessage<'_>) -> Vec<Value> {
             }
             found.push(violation);
         };
-        if UTC_TIME.is_match(&prose) {
-            push("utc_time", FIX_TIME);
+        if let Some(token) = UTC_TIME.find(&prose) {
+            push("utc_time", fix_time(token.as_str()));
         }
-        let unattached = FILE_REFERENCE.captures_iter(&prose).any(|captures| {
+        let unattached = FILE_REFERENCE.captures_iter(&prose).find_map(|captures| {
             let reference = ["abs", "rel", "bare", "art"]
                 .iter()
                 .find_map(|name| captures.name(name))
                 .map(|matched| matched.as_str())
                 .unwrap_or_default();
             let name = reference.rsplit('/').next().unwrap_or(reference);
-            !message.attached.iter().any(|attached| attached == name)
+            (!message.attached.iter().any(|attached| attached == name)).then_some(reference)
         });
-        if unattached {
-            push("unattached_file", FIX_FILE);
+        if let Some(token) = unattached {
+            push("unattached_file", fix_file(token));
         }
     }
     found

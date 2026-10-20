@@ -24,7 +24,7 @@ People scan; they do not read. In NN/g eyetracking studies 79% of users scanned 
 
 The operator set these two, and they are never traded for brevity or tone. They apply to prose: text inside a fenced code block and inside a Slack `<url|label>` link is exempt. `cas violet post|thread` refuses a draft that breaks them before sending, and the hub refuses it with `format_unreadable` (`unattached_file`, `utc_time`).
 
-**Rule 9 catches** absolute or `~/` paths, relative paths with an extension, bare filenames with common extensions, and `art-xxxxxxxx` artifact ids. It passes only when the same message attaches a file of that name.
+**Rule 9 catches** absolute or `~/` paths, relative paths (a slash plus a known extension), bare filenames with a document or data extension (`notes.md`, `report.pdf`, `data.csv`; `Node.js` and `Next.js` pass), and `art-xxxxxxxx` artifact ids. Every URL is exempt. It passes only when the same message attaches a file of that name.
 
 - Don't: `Full breakdown in ~/reports/stall-summary.md`
 - Don't: `See docs/postmortem.md and art-1234abcd for details`

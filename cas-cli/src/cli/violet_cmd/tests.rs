@@ -986,7 +986,7 @@ fn a_draft_with_utc_times_or_unattached_files_is_refused_before_sending() {
     let allowed = ScriptedHub::with(vec![file_receipt("F1", "summary.md", b"# summary\n")]);
     let (_, result) = run_cli(
         &["post", "--channel", "cas-internal", "--file", path.to_str().unwrap(), "--text",
-          "summary.md attached: deploy finished at 9:42 AM CT.\n\n```\n2026-10-20T14:42:00Z deploy ok\n```\nDashboard: <https://hub.example/runs/1.json|run 1>"],
+          "summary.md attached: deploy finished at 9:42 AM CT.\n\n```\n2026-10-20T14:42:00Z deploy ok\n```\nDashboard: <https://hub.example/runs/1.json|run 1>, also https://hub.example/docs/notes.md\nBuilt on Node.js and Next.js."],
         &allowed,
         false,
         &no_gate,
@@ -1006,6 +1006,7 @@ fn a_draft_with_utc_times_or_unattached_files_is_refused_before_sending() {
     let violation = &error.envelope.as_ref().unwrap()["error"]["detail"]["violations"][0];
     assert_eq!(violation["rule"], "unattached_file");
     assert_eq!(violation["message"], "reply 1");
+    assert!(violation["fix"].as_str().unwrap().contains("`art-1234abcd`"), "the fix names the token: {violation}");
     // pin: the plain refusal names the rule, message and line so an agent can apply the fix without --json
     assert!(error.to_string().contains("unattached_file (reply 1, line 1): Report is art-1234abcd."));
     assert_eq!(thread.connects(), 0);

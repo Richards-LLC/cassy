@@ -206,7 +206,10 @@ fn cas_hook_trust_entries(hooks_path: &Path) -> io::Result<Vec<HookTrustEntry>> 
         .get("hooks")
         .and_then(serde_json::Value::as_object)
         .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "hooks.json has no hooks object")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} has no hooks object", hooks_path.display()),
+            )
         })?;
 
     let mut entries = Vec::with_capacity(CAS_CODEX_HOOKS.len());
@@ -223,7 +226,7 @@ fn cas_hook_trust_entries(hooks_path: &Path) -> io::Result<Vec<HookTrustEntry>> 
             }
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("hooks.json is missing CAS {event} hook groups"),
+                format!("{} is missing CAS {event} hook groups", hooks_path.display()),
             ));
         };
         let mut found = None;
@@ -273,7 +276,10 @@ fn cas_hook_trust_entries(hooks_path: &Path) -> io::Result<Vec<HookTrustEntry>> 
             None => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("hooks.json does not contain canonical CAS {event} command"),
+                    format!(
+                        "{} does not contain canonical CAS {event} command",
+                        hooks_path.display()
+                    ),
                 ));
             }
         }

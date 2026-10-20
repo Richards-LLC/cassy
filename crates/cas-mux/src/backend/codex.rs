@@ -509,7 +509,7 @@ mod tests {
         for dir in [&account, &worktree.join(".codex"), &daemon_cwd] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        let hooks = r#"{"hooks":{"PreToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"CAS_HOOK_HARNESS=codex cas hook PreToolUse","timeout":3}]}]}}"#;
+        let hooks = r#"{"hooks":{"PreToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"CAS_HOOK_HARNESS=codex cas hook PreToolUse","timeout":3}]}],"PostToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"cas hook PostToolUse"}]}]}}"#;
         std::fs::write(account.join("hooks.json"), hooks).unwrap();
         std::fs::write(worktree.join(".codex/hooks.json"), hooks).unwrap();
         env.set_current_dir(&daemon_cwd);

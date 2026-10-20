@@ -17,8 +17,9 @@
         section, or a hunk that carries a `## ` heading, such as a release
         cut) stays a conflict.
 
-`merge=cas-generated` (hub-web/dist) keeps ours with no conflict; the merge
-then rebuilds it with scripts/regenerate-generated-artifacts.sh.
+`merge=cas-generated` (hub-web/dist and the builtin reference-history ledger)
+keeps ours with no conflict; the merge then rebuilds both with
+scripts/regenerate-generated-artifacts.sh.
 """
 
 import os
@@ -30,6 +31,7 @@ from pathlib import Path
 ATTRIBUTES = (
     "CHANGELOG.md merge=cas-changelog",
     "hub-web/dist/** merge=cas-generated",
+    "cas-cli/src/builtins/reference-history.json merge=cas-generated",
 )
 
 

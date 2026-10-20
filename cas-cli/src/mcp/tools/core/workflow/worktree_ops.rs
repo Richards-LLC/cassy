@@ -6109,7 +6109,10 @@ mod cas_7ce6_parked_merge_source_tests {
             .parked_merge_source_for_task(&store, repo.path(), "factory/w", "main", &task)
             .expect_err("new content is not the parked delivery");
         assert!(refusal.contains("PARKED DELIVERY NOT ON SOURCE"));
-        assert_eq!(store.get(&task.id).unwrap(), task);
+        assert_eq!(
+            serde_json::to_value(store.get(&task.id).unwrap()).unwrap(),
+            serde_json::to_value(&task).unwrap(),
+        );
         assert_eq!(git(repo.path(), &["rev-parse", "main"]), before);
     }
 

@@ -182,6 +182,16 @@ fn idle_transcript_replaying_a_finished_call(root: &tempfile::TempDir, daemon: &
         .unwrap()
         .set_modified(std::time::SystemTime::now() - Duration::from_secs(600))
         .unwrap();
+    // The wake gate reads this file, not an unknown transcript.
+    let registered = agents.get("single-sup").unwrap();
+    assert_eq!(
+        crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
+            daemon.app.cas_dir(),
+            &registered,
+        ),
+        Some(path),
+        "{registered:?}"
+    );
 }
 
 /// cas-3866: an idle Claude supervisor is woken by a fired `ci_completed`

@@ -209,23 +209,52 @@ fn cas_bfa1_spawn_dirty_epic_refuses_without_cutting_worktree() {
 }
 
 #[test]
-fn cas_bfa1_spawn_remote_parent_divergence_refuses_even_offline() {
+fn spawn_unpublished_diverged_epic_resets_only_without_unique_delivery_cas_dab9() {
+    for (in_trunk, delivered, online) in [(true, true, true), (false, false, true), (false, true, true), (false, false, false)] {
     with_fixture(|f| {
+        git(&f.repo, &["branch", "staging", "main"]);
+        let tasks = open_task_store_cached(&f.root).unwrap();
+        let mut epic = tasks.get("cas-round2-epic").unwrap();
+        epic.deliverables.work_target.as_mut().unwrap().target_branch = "staging".into();
+        tasks.update(&epic).unwrap();
         git(&f.repo, &["checkout", "epic/round2"]);
         commit(&f.repo, "epic-work");
-        let epic = git(&f.repo, &["rev-parse", "HEAD"]);
+        let tip = git(&f.repo, &["rev-parse", "HEAD"]);
+        if delivered {
+            let mut child = tasks.get("cas-round2-child").unwrap();
+            child.deliverables.commit_hash = Some(tip.clone());
+            tasks.update(&child).unwrap();
+        }
         git(&f.repo, &["checkout", "main"]);
-        f.advance_parent();
-        git(&f.repo, &["update-ref", "refs/heads/main", &f.old]);
-        f.offline();
-        let error = f
-            .prepare()
-            .err()
-            .expect("cached remote-parent divergence must refuse")
-            .to_string();
-        assert!(error.contains("have diverged"), "{error}");
-        assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), epic);
+        if in_trunk {
+            git(&f.repo, &["merge", "--ff-only", "epic/round2"]);
+            git(&f.repo, &["push", "origin", "main"]);
+        }
+        git(&f.repo, &["checkout", "staging"]);
+        commit(&f.repo, "parent-current");
+        git(&f.repo, &["push", "origin", "staging"]);
+        let parent = git(&f.repo, &["rev-parse", "HEAD"]);
+        if !online {
+            f.offline();
+        }
+        let result = f.prepare();
+        if online && (in_trunk || !delivered) {
+            let prep = result.expect("an unpublished stale plan must reset, not refuse");
+            let notice = prep.warnings.join("\n");
+            assert!(notice.contains("EPIC BASE RESET (UNPUBLISHED, NO UNIQUE WORK)"), "{notice}");
+            assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), parent);
+            assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), parent);
+            let work = prep.worktree_info.unwrap();
+            assert_eq!(git(&f.repo, &["rev-parse", work.base_ref.as_deref().unwrap_or(&work.parent_branch)]), parent);
+        } else {
+            let error = result.err().expect("unique deliveries or unverified publication must refuse").to_string();
+            assert!(error.contains("EPIC BASE REFRESH REFUSED") && error.contains("have diverged"), "{error}");
+            assert!(error.contains("git -C") && error.contains("merge origin/staging"), "{error}");
+            assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), tip);
+            assert!(!f.repo.join(".cas/worktrees/round2-worker").exists());
+        }
     });
+    }
 }
 
 #[test]

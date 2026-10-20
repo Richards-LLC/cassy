@@ -1417,6 +1417,27 @@ fn parked_merge_source(
     ))
 }
 
+impl CasCore {
+    fn parked_merge_source_for_task(
+        &self,
+        _task_store: &dyn cas_store::TaskStore,
+        repo: &Path,
+        source: &str,
+        _parent_branch: &str,
+        task: &cas_types::Task,
+    ) -> Result<Option<String>, String> {
+        let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else {
+            return Ok(None);
+        };
+        parked_merge_source(
+            &crate::worktree::GitOperations::new(repo.to_path_buf()),
+            source,
+            &task.id,
+            anchor,
+        )
+    }
+}
+
 /// A branch-only merge request can name its task through the canonical
 /// `factory/<worker>-<task-id>` suffix. The task row still authorizes it.
 fn per_task_merge_identity(id: &str) -> Option<(&str, &str)> {
@@ -3407,13 +3428,12 @@ impl CasCore {
         // than merge another task's work under this task's name.
         if transactional_delivery.is_none()
             && let Some(task_id) = task_id
-            && let Some(anchor) = self
-                .open_task_store()
-                .ok()
-                .and_then(|store| store.get(task_id).ok())
-                .and_then(|task| task.deliverables.factory_branch_anchor)
+            && let Ok(store) = self.open_task_store()
+            && let Ok(task) = store.get(task_id)
         {
-            match parked_merge_source(manager.git(), &worktree.branch, task_id, &anchor) {
+            match self.parked_merge_source_for_task(
+                store.as_ref(), &cwd, &worktree.branch, &worktree.parent_branch, &task,
+            ) {
                 Ok(Some(delivery_branch)) => worktree.branch = delivery_branch,
                 Ok(None) => {}
                 Err(refusal) => {
@@ -6034,6 +6054,63 @@ mod cas_7ce6_parked_merge_source_tests {
         git(path, &["checkout", "-qb", "factory/w"]);
         let anchor = commit(path, "parked");
         (repo, anchor)
+    }
+
+    fn rebased_lane() -> (tempfile::TempDir, cas_types::Task, String) {
+        let (repo, _) = stacked_lane();
+        let path = repo.path();
+        let anchor = commit(path, "parked-second");
+        git(path, &["checkout", "-q", "main"]);
+        commit(path, "target-update");
+        git(path, &["checkout", "-q", "factory/w"]);
+        git(path, &["rebase", "main"]);
+        let tip = git(path, &["rev-parse", "HEAD"]);
+        let mut task = cas_types::Task::new("cas-park".into(), "parked rebase".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some("w".into());
+        task.deliverables.parked_branch = Some("factory/w".into());
+        task.deliverables.factory_branch_anchor = Some(anchor);
+        (repo, task, tip)
+    }
+
+    #[test]
+    fn rebased_same_patch_delivery_rebinds_and_merges_without_reclose_cas_e833() {
+        use cas_store::TaskStore;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let (repo, task, tip) = rebased_lane();
+        let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
+        let core = crate::mcp::CasCore::with_daemon(repo.path().join(".cas"), None, None);
+        assert_eq!(
+            core.parked_merge_source_for_task(&store, repo.path(), "factory/w", "main", &task),
+            Ok(None),
+        );
+        let rebound = store.get(&task.id).unwrap();
+        assert_eq!(rebound.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
+        assert_eq!(rebound.deliverables.parked_branch, task.deliverables.parked_branch);
+        assert!(rebound.notes.contains(task.deliverables.factory_branch_anchor.as_deref().unwrap()));
+        git(repo.path(), &["checkout", "-q", "main"]);
+        git(repo.path(), &["merge", "--no-ff", "-m", "integrate", "factory/w"]);
+        assert!(repo.path().join("parked").is_file());
+        assert!(repo.path().join("parked-second").is_file());
+        assert!(repo.path().join("target-update").is_file());
+    }
+
+    #[test]
+    fn rebased_content_change_keeps_anchor_and_refuses_merge_cas_e833() {
+        use cas_store::TaskStore;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let (repo, task, _) = rebased_lane();
+        std::fs::write(repo.path().join("parked"), "changed after review").unwrap();
+        git(repo.path(), &["commit", "-qam", "changed delivery"]);
+        let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
+        let core = crate::mcp::CasCore::with_daemon(repo.path().join(".cas"), None, None);
+        let before = git(repo.path(), &["rev-parse", "main"]);
+        let refusal = core
+            .parked_merge_source_for_task(&store, repo.path(), "factory/w", "main", &task)
+            .expect_err("new content is not the parked delivery");
+        assert!(refusal.contains("PARKED DELIVERY NOT ON SOURCE"));
+        assert_eq!(store.get(&task.id).unwrap(), task);
+        assert_eq!(git(repo.path(), &["rev-parse", "main"]), before);
     }
 
     /// cas-7ce6 AC: after the worker moves its branch on to the next task, a

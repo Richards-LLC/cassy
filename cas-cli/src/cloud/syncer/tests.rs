@@ -1954,6 +1954,19 @@ async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
     assert!(!retained.notes.contains("[CAS_SYNC_STATUS]"));
     assert_eq!(queue.list_conflicts(10).unwrap().len(), 1);
 
+    // A previous cycle's closed_at must not replace the current park boundary.
+    let mut previous_cycle = local.clone();
+    previous_cycle.closed_at = Some(parked_at - chrono::Duration::hours(1));
+    let mut old_action = stale.clone();
+    old_action["notes"] = serde_json::json!(format!(
+        "{old_reset}\n\n[2026-10-20 11:54] Reopened: actor=peer reason=earlier cycle",
+    ));
+    let (_temp, result, store, _queue) = pull_team_task_fixtures(
+        project, vec![old_action], Some(previous_cycle.clone()),
+    ).await;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert!(store.get(&local.id).unwrap().lifecycle_matches(&previous_cycle));
+
     // New, explicit lifecycle actions still authorize rework on the replica.
     for event in [
         "Reopened: actor=remote-supervisor reason=regression found",
@@ -1961,11 +1974,15 @@ async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
         "reset: force-transitioned AwaitingMerge→Open (prior assignee: worker, lease released: false) — dead-session recovery",
     ] {
         let mut reopened = stale.clone();
-        reopened["updated_at"] = serde_json::json!(parked_at + chrono::Duration::minutes(5));
+        // A later sync-apply annotation is a projection, not a new park.
+        let mut projected = local.clone();
+        projected.updated_at = parked_at + chrono::Duration::minutes(6);
+        projected.notes.push_str("\n\n[2026-10-20 12:01] [CAS_SYNC_STATUS] source=team_pull applied_status=awaiting_merge");
+        reopened["updated_at"] = serde_json::json!(parked_at + chrono::Duration::minutes(7));
         let minute = if event.starts_with("Decision:") { "11:55" } else { "11:59" };
         reopened["notes"] = serde_json::json!(format!("{}\n\n[2026-10-20 {minute}] {event}", local.notes));
         let (_temp, result, store, _queue) = pull_team_task_fixtures(
-            project, vec![reopened], Some(local.clone()),
+            project, vec![reopened], Some(projected),
         ).await;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.pulled_tasks, 1, "{event}");

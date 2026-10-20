@@ -17,9 +17,10 @@ figure in the hero note and the glance strip; no zero row appears on page one.
 
 ## Emotional register
 
-Assured, humane, collected: sandstone paper, regular serif verdict, system sans
-reading text, mono folio, quiet rules. <Name the project design source and mapped
-tokens, or record the bundled Petrastella fallback.>
+Assured, humane, collected: the project's own surfaces, a regular serif verdict,
+sans reading text, mono folio, quiet rules. <Name the project design source
+(DESIGN.md sources and maps, or a token JSON) or record the bundled Petrastella
+fallback, and the surfaces it gives the hero.>
 
 ## Distinctive move
 
@@ -39,7 +40,7 @@ and the inference it cannot support.>
 | Order | Section | Form / source to fill |
 | --- | --- | --- |
 | Hero | Verdict + change map | Unit-dot figure of changes by area; <CHANGELOG section> |
-| 1 | Release at a glance | Changes-by-area table, then ruled stat strip; <issue counting window> |
+| 1 | Release at a glance | Changes-by-area table, stat tiles with the first as lead, counting note; <issue counting window> |
 | 2 | What you can do now | Grouped Was → Now; <user release draft> |
 | 3 | Under the hood | Compact Was → Now ledger; <developer draft and commits> |
 | 4 | Fixes ledger | Linked issue table; <closure timestamps> |

@@ -85,6 +85,12 @@ class ReleaseRendererTests(unittest.TestCase):
         self.assertIn('break-before:auto', output)
         self.assertNotIn('break-before:page', output)
         self.assertNotIn('{{', output)
+        # This repo's root DESIGN.md supplies the tokens: hub variables behind the
+        # report roles, Commander's faces inlined, the brand mark, no self-alias.
+        self.assertIn('--verdict:var(--color-verdict)', output)
+        self.assertEqual(output.count('url("data:font/woff2;base64,'), 2)
+        self.assertIn('<img class="mark" src="data:image/svg+xml;base64,', output)
+        self.assertNotIn('--ink:var(--ink)', output)
 
     def test_publication_over_budget_row_survives_html_rendering(self):
         source = EXEMPLAR.replace("| Green to published |",
@@ -110,6 +116,11 @@ class ReleaseRendererTests(unittest.TestCase):
             self.assertNotIn('Cassy', output)
             self.assertIn('--verdict:#123456', output)
             self.assertIn('--bg:#F7F4EE', output)
+            # A DESIGN.md token source may not reach the network.
+            (root / 'tokens.css').write_text(':root{--paper:#fff;--art:url(https://example.org/a.png)}')
+            (root / 'DESIGN.md').write_text('---\nsource: [tokens.css]\nmaps:\n  bg: "--paper"\n---\n')
+            with self.assertRaisesRegex(ValueError, 'only tokens and local font faces'):
+                renderer.render(EXEMPLAR, project_root=root)
 
     def test_bad_totals_and_duplicate_issues_fail(self):
         for source in (EXEMPLAR.replace('| Total | 21 |', '| Total | 22 |'),
@@ -262,6 +273,8 @@ class PdfCheckTests(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn('closing folio', refused.stderr)
         self.assertEqual(run('Source: release assets.').returncode, 0)
+        # The closing folio, not an evidence line that also names the source, is the anchor.
+        self.assertEqual(run('Markdown source: the v9.99.1 CHANGELOG section.').returncode, 0)
 
 if __name__ == '__main__':
     unittest.main()

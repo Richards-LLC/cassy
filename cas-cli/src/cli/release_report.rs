@@ -2520,13 +2520,21 @@ const { pathToFileURL } = require('node:url');
       await document.fonts.ready;
       document.querySelectorAll('details').forEach(panel => { panel.open = true; });
     });
+    // The running folio wears the report's own tokens: its title and page
+    // count in the mono stack and muted ink the page declares.
+    const folio = await page.evaluate(() => {
+      const style = getComputedStyle(document.documentElement);
+      const token = name => style.getPropertyValue(name).trim();
+      return { color: token('--ink-muted') || 'GrayText', font: token('--font-mono') || 'monospace' };
+    });
+    const attr = text => text.replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
     for (const format of ['A4', 'Letter']) {
       await page.pdf({
         path: path.join(output, path.basename(input, '.html') + '-' + format + '.pdf'),
         format, printBackground: true, preferCSSPageSize: false,
         margin: { top: '15mm', right: '15mm', bottom: '15mm', left: '15mm' },
         displayHeaderFooter: true, headerTemplate: '<span></span>',
-        footerTemplate: '<div style="font:8px sans-serif;width:100%;text-align:center;color:#555"><span class="pageNumber"></span> / <span class="totalPages"></span></div>'
+        footerTemplate: `<div style="width:100%;margin:0 15mm;display:flex;justify-content:space-between;gap:12px;font:7px ${attr(folio.font)};color:${attr(folio.color)}"><span class="title"></span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>`
       });
     }
   } finally { await browser.close(); }

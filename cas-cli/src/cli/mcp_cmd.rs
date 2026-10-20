@@ -1193,6 +1193,7 @@ fn extract_auth_header(
 mod tests {
     use super::*;
     use cmcp_core::config::ServerConfig;
+    use cas_store::PromptQueueStore;
     use std::collections::HashMap;
 
     fn agent_context() -> crate::config::operator_policy::InvocationContext {

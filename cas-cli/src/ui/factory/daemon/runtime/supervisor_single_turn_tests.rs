@@ -494,7 +494,8 @@ async fn cas_1e7e2_directed_burst_debounces_into_one_body_turn() {
                 daemon.process_prompt_queue().await.unwrap();
                 settle_injected_writes(&mut daemon).await;
                 let text = std::fs::read_to_string(root.path().join("input")).unwrap();
-                if text.ends_with('\r') {
+                if text.ends_with('\r') && ids.iter().all(|id|
+                    queue.message_delivery_report(*id).unwrap().unwrap().stage == cas_store::DeliveryStage::Delivered) {
                     break text;
                 }
                 tokio::task::yield_now().await;

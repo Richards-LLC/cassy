@@ -25,6 +25,9 @@ struct TeamDeliveryAck {
     team_id: String,
     project_id: String,
     payload_sha256: String,
+    /// Version 2 binds the personal route as well as its exact snapshot.
+    #[serde(default)]
+    personal_project_id: Option<String>,
 }
 
 /// Safe to print: contains no queued payload or private diagnostic text.
@@ -71,7 +74,7 @@ fn receipt_matches(
     let Some(ack) = raw.and_then(|raw| serde_json::from_str::<TeamDeliveryAck>(&raw).ok()) else {
         return Ok(false);
     };
-    Ok(ack.version == 1
+    Ok(matches!(ack.version, 1 | 2)
         && !team_id.is_empty()
         && !project_id.is_empty()
         && ack.queue_id == item.id
@@ -82,7 +85,15 @@ fn receipt_matches(
         && item.operation == SyncOperation::Upsert
         && ack.team_id == team_id
         && ack.project_id == project_id
-        && item.project_id.is_none()
+        && (if ack.version == 1 {
+            item.project_id.is_none()
+        } else {
+            ack.personal_project_id == item.project_id
+                && item
+                    .project_id
+                    .as_deref()
+                    .is_none_or(|route| route == project_id)
+        })
         && item.payload.as_deref().and_then(payload_digest).as_deref() == Some(&ack.payload_sha256))
 }
 
@@ -146,7 +157,10 @@ impl SyncQueue {
                 if personal.entity_type != item.entity_type
                     || personal.entity_id != item.entity_id
                     || personal.operation != item.operation
-                    || personal.project_id.is_some()
+                    || personal
+                        .project_id
+                        .as_deref()
+                        .is_some_and(|route| route != project_id)
                     || personal
                         .payload
                         .as_deref()
@@ -156,17 +170,26 @@ impl SyncQueue {
                 {
                     continue;
                 }
-                let unchanged: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sync_queue
+                let unchanged: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sync_queue
                     WHERE id = ?1 AND team_id = '' AND entity_type = ?2 AND entity_id = ?3
-                    AND operation = ?4 AND payload IS ?5 AND created_at = ?6 AND project_id IS NULL)",
-                    params![personal.id, personal.entity_type.as_str(), personal.entity_id,
-                        personal.operation.as_str(), personal.payload, personal.created_at.to_rfc3339()],
-                    |row| row.get(0))?;
+                    AND operation = ?4 AND payload IS ?5 AND created_at = ?6 AND project_id IS ?7)",
+                    params![
+                        personal.id,
+                        personal.entity_type.as_str(),
+                        personal.entity_id,
+                        personal.operation.as_str(),
+                        personal.payload,
+                        personal.created_at.to_rfc3339(),
+                        personal.project_id
+                    ],
+                    |row| row.get(0),
+                )?;
                 if !unchanged {
                     continue;
                 }
                 let ack = TeamDeliveryAck {
-                    version: 1,
+                    version: 2,
                     queue_id: personal.id,
                     created_at: personal.created_at,
                     entity_type: personal.entity_type,
@@ -175,6 +198,7 @@ impl SyncQueue {
                     team_id: team_id.to_owned(),
                     project_id: project_id.to_owned(),
                     payload_sha256: transmitted_digest.clone(),
+                    personal_project_id: personal.project_id.clone(),
                 };
                 let raw =
                     serde_json::to_string(&ack).map_err(|e| CasError::Other(e.to_string()))?;

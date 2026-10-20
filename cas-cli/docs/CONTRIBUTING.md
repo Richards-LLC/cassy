@@ -253,6 +253,35 @@ The personal push API requires a project identity, so global and private rows
 from a team-only root remain queued rather than re-registering its retired
 personal project. `cas cloud status` and `cas doctor` show the held count.
 
+For a team-linked project with legacy personal transport, `cas cloud sync
+--json` reports `push.held_personal_pending`, `push.held_personal_failed`,
+`push.held_personal_rejected` and the team backlog in one final JSON document.
+Doctor and factory preflight explain that team-linked sync drains the team
+queue only. Retained conflict snapshots are history, not delivery failures.
+
+After the operator declares the project team-only, recover eligible legacy
+transport explicitly:
+
+```sh
+cas config set cloud.team_only true
+cas --json cloud queue migrate-to-team
+# Review every row and its decision before applying.
+cas --json cloud queue migrate-to-team --apply
+cas cloud sync
+```
+
+`migrate-to-team` defaults to a read-only preview, makes no HTTP calls and
+prints every queue identifier and decision. Apply requires `team_only=true`.
+It copies owned, project-scoped, shared upsert snapshots into the active team
+queue without replacing existing team intents. Deletes, private/global rows,
+foreign or unknown origins, foreign project routes and unsupported types stay
+untouched. Dependencies require both locally owned, shared endpoints and a
+current local edge. Canonical local routes are supported; receipts bind the personal route.
+Snapshot JSON is preserved so the existing exact itemized
+ACK can retire the personal copy after delivery; enqueue alone retires nothing.
+Missing/changed provenance or sharing policy fails closed. Reopen long-running
+writers after changing team_only so their cached policy uses the new setting.
+
 Standalone push/pull, the daemon cycle, and MCP startup use the same team-only
 scope policy. A `team_owned_project` rejection establishes project policy, not
 remote entity presence or payload equivalence. Keep legacy or mixed rejection

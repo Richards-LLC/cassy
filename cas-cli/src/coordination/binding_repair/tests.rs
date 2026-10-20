@@ -198,7 +198,7 @@ fn cas_9021_old_or_unknown_actual_runtime_preflight_sends_zero_post() {
     let unknown = client.repair(&root, &scope).unwrap();
     assert!(matches!(unknown.outcome, RepairOutcome::Blocked));
     assert!(unknown.error.unwrap().contains("build"));
-    metadata.daemon_build_hash = Some(option_env!("CAS_GIT_HASH").unwrap().into());
+    metadata.daemon_build_hash = Some(option_env!("CAS_GIT_HASH").unwrap_or("unknown").into());
     metadata.daemon_pid_starttime = metadata.daemon_pid_starttime.map(|value| value + 1);
     crate::ui::factory::SessionManager::new()
         .save_metadata(&metadata)
